@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "loopty"
+version = "0.0.1"
+description = "loopy, with types. A typed polyhedral layer over loopy."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+authors = [{ name = "Xiaoyu Wei" }]
+keywords = [
+    "loopy",
+    "polyhedral",
+    "isl",
+    "code-generation",
+    "types",
+    "lanky",
+]
+classifiers = [
+    "Development Status :: 1 - Planning",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Software Development :: Code Generators",
+    "Topic :: Software Development :: Compilers",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[project.optional-dependencies]
+# pyopencl will go here once the loopy-backed executor lands.
+opencl = []
+
+[project.urls]
+Homepage = "https://github.com/xywei/loopty"
+Repository = "https://github.com/xywei/loopty"
+
+[project.scripts]
+loopty = "loopty.cli:main"
+
+[dependency-groups]
+dev = ["pytest", "ruff"]
+
+[tool.ruff]
+line-length = 88
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
