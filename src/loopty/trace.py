@@ -236,6 +236,18 @@ class Tracer:
             reflections=self.reflections,
         )
 
+    def loop_domain(self) -> Any:
+        """The isl set of the enclosing loop nest with no guard applied.
+
+        A ``when`` masks the write; it does not skip the block, and Python
+        evaluates the whole condition at every point of the nest before the
+        mask exists (``&`` is eager). So the reads a guard performs happen over
+        this set and not over :meth:`domain`, which the guard has narrowed: a
+        guard ``(i + 1 < n) & (flag[i + 1] != 0)`` still reads ``flag[n]`` at
+        ``i = n - 1``.
+        """
+        return domain_set(self.inames, self.bounds, reflections=self.reflections)
+
     def record(self, assignee: Access, expr: Any, kind: str, where: str) -> Stmt:
         """Append one statement instance family to the term being built."""
         stmt = Stmt(
@@ -248,6 +260,7 @@ class Tracer:
             guard=self.guard(),
             where=where,
             order=(*self._path, self._position()),
+            loop_domain=self.loop_domain() if self.guards else None,
         )
         self.stmts.append(stmt)
         return stmt

@@ -524,6 +524,14 @@ def statement_accesses(
       statement that writes ``flag``, so a reordering could let the predicate
       observe the old value, and leaves the guard's own access unbounded.
 
+    The guard's reads are stated over the statement's ``loop_domain``, the loop
+    nest before the guard narrowed it, and not over ``domain``. A ``when``
+    evaluates its whole condition at every point and only masks the write, so
+    ``when((i + 1 < n) & (flag[i + 1] != 0))`` reads ``flag[n]`` at
+    ``i = n - 1`` natively even though no write happens there; stating that
+    read over the narrowed domain would prove it in bounds by the very
+    condition that does not protect it.
+
     This is the one collector: :mod:`loopty.typing` states its in-bounds
     obligations from it, :func:`footprints` builds the dependence relation from
     it, :func:`loopty.schedule._accesses` checks casts against it and
@@ -541,7 +549,12 @@ def statement_accesses(
     out.append((written.array, written.indices, kind, stmt.inames, stmt.domain))
     # The right-hand side first, so that the order the rules see is the order
     # the source reads in; then the assignee's own subscripts and the guard.
-    for source in (stmt.expr, tuple(written.indices), stmt.guard):
+    guard_domain = stmt.loop_domain if stmt.loop_domain is not None else stmt.domain
+    for source, domain in (
+        (stmt.expr, stmt.domain),
+        (tuple(written.indices), stmt.domain),
+        (stmt.guard, guard_domain),
+    ):
         if source is None:
             continue
         for access in accesses_in(source, into_reductions=False):
@@ -554,9 +567,7 @@ def statement_accesses(
                 and structurally_equal(access.indices, written.indices)
             ):
                 continue
-            out.append(
-                (access.array, access.indices, "read", stmt.inames, stmt.domain)
-            )
+            out.append((access.array, access.indices, "read", stmt.inames, domain))
         for reduction in reductions_in(source):
             inames = (*stmt.inames, *reduction.inames)
             for access in accesses_in(reduction.body, into_reductions=False):

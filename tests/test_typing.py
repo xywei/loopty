@@ -220,3 +220,47 @@ def test_the_command_exits_one_when_a_fact_is_refuted(capsys) -> None:
 
     assert main(["check", str(KERNELS / "out_of_bounds.py")]) == 1
     assert "refuted" in capsys.readouterr().out
+
+
+# {{{ a guard's reads happen over the loop nest, not the narrowed domain
+
+
+def gated_by_a_conjunction(
+    flag: Arr[Fin[n], Nat],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    row = y.dom
+    for i in row:
+        with when((i + 1 < row.size) & (flag[i + 1] != 0)):
+            y[i] = 2.0
+
+
+def test_a_guard_read_is_stated_over_the_loop_nest_not_the_narrowed_domain() -> None:
+    # ``when`` evaluates its whole condition at every point and only masks the
+    # write, so ``flag[i + 1]`` is read at ``i = n - 1`` however the affine
+    # conjunct narrows the write's domain. Stating the read over the narrowed
+    # domain would prove it in bounds by the very condition that does not
+    # protect it.
+    facts = in_bounds_of(gated_by_a_conjunction)
+    assert facts["flag[i + 1]"].status is Status.REFUTED
+    assert facts["flag[i + 1]"].provenance["witness"] is not None
+    assert facts["y[i]"].status is Status.DECIDED
+
+
+def guarded_shift(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):  # noqa: F821
+    row = u.dom
+    for i in row:
+        with when(i + 1 < row.size):
+            v[i] = u[i + 1]
+
+
+def test_the_body_of_a_guarded_statement_still_enjoys_the_narrowing() -> None:
+    # The write and the right-hand side happen only where the guard holds, so
+    # the narrowed domain is the right one for them; only the guard's own reads
+    # are different.
+    facts = in_bounds_of(guarded_shift)
+    assert facts["u[i + 1]"].status is Status.DECIDED
+    assert {fact.status for fact in facts.values()} == {Status.DECIDED}
+
+
+# }}}

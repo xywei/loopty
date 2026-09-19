@@ -1120,23 +1120,30 @@ def _scalar_assumptions(term: Term, declared: set[str]) -> isl.BasicSet | None:
         base = getattr(sort, "base", None)  # a lanky refinement T & prop
         if base is not None and base is not sort:
             sort = base
-        limits = sort_bound(typ, {})
         bound = getattr(sort, "bound", None)
+        if bound is not None and not isinstance(bound, int | np.integer):
+            # ``Fin[n]`` or ``Fin[n + 1]`` with a symbolic bound: sort_bound
+            # cannot resolve the sizes without the call's arguments, but loopy
+            # has every size the bound names as a parameter, so the bound is
+            # stated as an affine constraint over them.
+            from lanky.terms import free_variables
+
+            from loopty import idx
+
+            free = set(free_variables(bound))
+            if not idx.is_affine(bound) or not free <= declared:
+                continue
+            pieces.append(f"{name} >= 0")
+            pieces.append(f"{name} < {idx.isl_expr(bound)}")
+            names |= {name, *free}
+            continue
+        limits = sort_bound(typ, {})
         if limits is not None:
             low, high = limits
             pieces.append(f"{name} >= {low}")
             if high is not None:
                 pieces.append(f"{name} < {high}")
             names.add(name)
-            continue
-        if bound is not None and isinstance(bound, prim.Variable):
-            # ``Fin[n]`` with a symbolic bound: sort_bound cannot resolve ``n``
-            # without the call's sizes, but loopy has it as a parameter.
-            if bound.name not in declared:
-                continue
-            pieces.append(f"{name} >= 0")
-            pieces.append(f"{name} < {bound.name}")
-            names |= {name, bound.name}
     if not pieces:
         return None
     # A set rather than the text ``lp.assume`` also accepts: that path wraps the
@@ -1321,6 +1328,29 @@ def _arguments(
     that case, and its offsets argument is what gives its rows back.
     """
     used = _used_names(domains, insns)
+    # An array the generated code never mentions cannot be passed: loopy's C
+    # target lists only the arrays the body touches in the device function's
+    # signature and passes every argument from the host wrapper, so such a
+    # parameter shifts every later argument into the wrong register (observed
+    # as zeros and a corrupted heap). Refuse the term instead; see
+    # docs/loopy-notes.md, note 1.
+    untouched = [
+        name
+        for name, typ in term.params
+        if isinstance(typ, ArrType) and name not in used
+    ]
+    if untouched:
+        plural = "s" if len(untouched) > 1 else ""
+        raise LoweringError(
+            f"the array parameter{plural} {', '.join(untouched)} of {term.name} "
+            f"{'are' if plural else 'is'} never read or written by the body, and "
+            "loopy's C target cannot pass such an argument: the device function's "
+            "signature lists only the arrays the body touches while the host "
+            "wrapper passes every argument, so every later argument would land in "
+            "the wrong register. Read the array somewhere, or drop the parameter "
+            "and take the size it determines from an array that is used "
+            "(docs/loopy-notes.md, note 1)"
+        )
     provided = {arg.name for arg in builder.extra_args} | set(builder.ragged.values())
     known_inames = {iname for stmt in term.stmts for iname in stmt.inames}
     for stmt in term.stmts:

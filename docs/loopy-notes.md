@@ -30,6 +30,17 @@ loopty does not check it either, so a wrongly sized array is undefined
 behaviour rather than an error. The ragged flat buffers and `x` in the spmv demo
 are in that position. Checking shapes at the executor boundary would close it.
 
+**The other instance (2026-09-19).** An *array* parameter the body never reads
+or writes has the same effect: it is in the host wrapper's call and not in the
+device function's signature, so every argument after it lands one register
+early. Observed as `y[i] = 1.0` with an unused `x` returning all zeros and the
+process dying with `double free or corruption` at exit. Value arguments could be
+dodged by declaring only the used ones; an unused array cannot be dropped the
+same way without also changing how the sizes it determines reach the kernel, so
+`lower.py` refuses such a term with a `LoweringError` naming the parameter. A
+parameter that only exists to determine a size has to be read somewhere, or
+the size has to come from an array that is.
+
 ## 2. `pow` without `math.h` on the C target
 
 **Symptom.** `r2 ** -0.5` in a kernel body produces C that calls `pow` without

@@ -89,6 +89,13 @@ class Stmt:
     schedule. It is what tells two statements in the same loop nest apart from
     two statements in sequence; see :mod:`loopty.flow`. Defaulted, because a
     term written by hand in a test does not have to care.
+
+    ``loop_domain`` is the enclosing loop nest *before* any guard narrowed it:
+    the set over which the guard's own reads happen, because a ``when``
+    evaluates its whole condition at every point of the nest (Python's ``&`` is
+    eager) and masks the write rather than skipping the block. ``None`` means
+    "the same as ``domain``", which is right for a statement without a guard
+    and for a term written by hand.
     """
 
     id: str
@@ -100,6 +107,7 @@ class Stmt:
     guard: Expression | None
     where: str
     order: tuple[int, ...] = ()
+    loop_domain: isl.Set | None = None
 
 
 @dataclass(frozen=True)

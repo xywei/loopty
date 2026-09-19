@@ -103,6 +103,29 @@ with a pair of statement instances.
 
 ### Fixed
 
+- A guard's reads are stated over the loop nest *before* the guard narrowed it
+  (`Stmt.loop_domain`), because `when` evaluates its whole condition at every
+  point and only masks the write: `when((i + 1 < n) & (flag[i + 1] != 0))`
+  reads `flag[n]` at `i = n - 1`, and stating that read over the narrowed
+  domain used to prove it in bounds by the very condition that does not
+  protect it.
+- A boolean or a non-number passed for a scalar of a refined sort (`i: Fin[n]`)
+  is refused instead of silently skipping the check; a zero-dimensional numeric
+  array counts as a number.
+- An expression-valued `Fin` bound on a scalar (`i: Fin[n + 1]`) is evaluated
+  against the resolved sizes; when a size is unknown the value is still
+  required to be non-negative.
+- A complex array declared with an integral element sort is checked for finite,
+  whole, real entries before the cast into the compiled kernel's integer dtype.
+- The lowering states `0 <= i < n + 1` for a scalar declared `Fin[n + 1]`, not
+  only for a bare `Fin[n]`, so such a kernel lowers.
+- A term with an array parameter the body never reads or writes is refused by
+  the lowering with a `LoweringError`. loopy's C target lists only the arrays
+  the body touches in the device signature and passes every argument from the
+  host wrapper, so such a parameter shifted every later argument into the wrong
+  register: the compiled run returned zeros and corrupted the heap. See
+  `docs/loopy-notes.md`, note 1.
+
 - The generated C function is renamed when the kernel's name is a C or OpenCL C
   keyword, or collides with an argument name (`def double(...)` used to emit
   `void double(...)`, which no compiler accepts). A *parameter* with such a name

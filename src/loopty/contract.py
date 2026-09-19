@@ -324,10 +324,32 @@ def sort_bound(
             return (0, int(bound))
         if isinstance(bound, prim.Variable) and bound.name in sizes:
             return (0, int(sizes[bound.name]))
-        return None
+        # ``Fin[n + 1]``: an affine bound is evaluated under the resolved sizes.
+        # When a size is missing the upper end is unknown, not absent: a point
+        # of *some* ``Fin`` is still never negative, so the floor stays.
+        return (0, _evaluate_bound(bound, sizes))
     if getattr(sort, "name", None) == "Nat":
         return (0, None)
     return None
+
+
+def _evaluate_bound(bound: Any, sizes: Mapping[str, int]) -> int | None:
+    """``bound`` as an integer under ``sizes``, or ``None`` when a name is missing."""
+    from lanky.terms import evaluate, free_variables
+
+    try:
+        free = free_variables(bound)
+    except Exception:
+        return None
+    if not free or not free <= set(sizes):
+        return None
+    try:
+        value = evaluate(bound, {name: int(sizes[name]) for name in free})
+    except Exception:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | np.integer):
+        return None
+    return int(value)
 
 
 def element_bound(
@@ -385,8 +407,27 @@ def element_types(
             continue
         value = supplied.get(name)
         flat = _values(value)
-        if flat is None or not flat.size or flat.dtype.kind not in "biuf":
+        if flat is None or not flat.size or flat.dtype.kind not in "biufc":
             continue
+        if flat.dtype.kind == "c":
+            # A complex entry is a whole number only when its imaginary part is
+            # zero; anything else would be truncated by the cast into the
+            # compiled kernel's integer dtype while the native run refused it.
+            if not integral_sort(typ.dtype):
+                continue
+            whole = (
+                np.isfinite(flat) & (flat.imag == 0) & (flat.real == np.rint(flat.real))
+            )
+            offenders = np.flatnonzero(~whole)
+            if offenders.size:
+                position = int(offenders[0])
+                raise ValueError(
+                    f"{_cell_label(name, value, position)} is {flat[position]}, "
+                    f"which is not a value of {typ.dtype}: an element of {name} "
+                    "has to be a finite whole number, and a complex entry is one "
+                    "only when its imaginary part is zero"
+                )
+            flat = flat.real
         if integral_sort(typ.dtype):
             position = _not_an_integer(flat)
             if position is not None:
@@ -442,6 +483,8 @@ def _scalar(value: Any) -> float | None:
         return None
     if isinstance(value, int | float | np.integer | np.floating):
         return float(value)
+    if isinstance(value, np.ndarray) and value.ndim == 0 and value.dtype.kind in "iuf":
+        return float(value)
     return None
 
 
@@ -471,9 +514,21 @@ def scalar_parameters(
             continue
         if name not in supplied:
             continue
-        number = _scalar(supplied[name])
+        value = supplied[name]
+        if isinstance(value, bool | np.bool_):
+            raise ValueError(
+                f"the argument {name} is {value!r}, a boolean, which is not a "
+                f"value of {sort}: a point of {sort} is a whole number, and a "
+                "boolean would reach the compiled code as 0 or 1 without anybody "
+                "having declared that index"
+            )
+        number = _scalar(value)
         if number is None:
-            continue
+            raise ValueError(
+                f"the argument {name} is {value!r} of type "
+                f"{type(value).__name__}, which is not a number and so not a "
+                f"value of {sort}"
+            )
         if not np.isfinite(number) or number != np.rint(number):
             raise ValueError(
                 f"the argument {name} is {supplied[name]}, which is not a value "
