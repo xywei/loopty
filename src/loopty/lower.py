@@ -74,6 +74,11 @@ COUNT_PARAM = "{counts}_{iname}"
 #: The same bound as the tracer spells it when it reflects the non-affine term
 #: ``cnt[r]`` into a fresh isl parameter (see ``loopty.idx``). Both spellings are
 #: recognized, so that a hand-written term and a traced one lower the same way.
+#:
+#: It is a spelling and not the definition. A traced term records what it
+#: actually allocated on :attr:`loopty.term.Term.reflected`, which is where a
+#: parameter that had to be suffixed to dodge a collision is found; this pattern
+#: is the fallback for a term written by hand, which records nothing.
 COUNT_PARAM_REFLECTED = "nl_{counts}_{iname}"
 
 #: Candidate names for the offsets array of a ragged axis, most specific first.
@@ -104,6 +109,26 @@ def count_param_names(counts: str, iname: str) -> tuple[str, ...]:
         COUNT_PARAM.format(counts=counts, iname=iname),
         COUNT_PARAM_REFLECTED.format(counts=counts, iname=iname),
     )
+
+
+def _counts_subscript(
+    expr: Any, families: set[str], inames: set[str]
+) -> tuple[str, str] | None:
+    """``(counts, iname)`` if ``expr`` is ``cnt[r]`` for a counts array and iname."""
+    if not isinstance(expr, prim.Subscript):
+        return None
+    if not isinstance(expr.aggregate, prim.Variable):
+        return None
+    if expr.aggregate.name not in families:
+        return None
+    index = expr.index
+    if isinstance(index, tuple):
+        if len(index) != 1:
+            return None
+        index = index[0]
+    if not isinstance(index, prim.Variable) or index.name not in inames:
+        return None
+    return (expr.aggregate.name, index.name)
 
 
 # {{{ dtypes and targets
@@ -254,9 +279,25 @@ class ExpressionLowerer(Mapper):
         )
 
     def map_term_reduction(self, expr: Reduction) -> prim.Expression:
-        """``Reduction`` becomes ``lp.Reduction``; its domain is collected."""
-        self.lowering.add_reduction_domain(expr)
-        return LoopyReduction(expr.op, tuple(expr.inames), self.rec(expr.body))
+        """``Reduction`` becomes ``lp.Reduction``; its domain is collected.
+
+        The binders may have been renamed so that this reduction keeps its own
+        domain; see :meth:`_Builder.plan_reductions`. The renaming is pushed
+        while the body is walked, so every occurrence of the binder inside it
+        follows, and popped afterwards, so a sibling reduction with the same
+        written name is unaffected.
+        """
+        renaming = self.lowering.reduction_rename(expr)
+        inames = tuple(renaming.get(name, name) for name in expr.inames)
+        self.lowering.add_reduction_domain(expr, inames)
+        if not renaming:
+            return LoopyReduction(expr.op, inames, self.rec(expr.body))
+        self.lowering.push_renaming(renaming)
+        try:
+            body = self.rec(expr.body)
+        finally:
+            self.lowering.pop_renaming()
+        return LoopyReduction(expr.op, inames, body)
 
     def map_lanky_sum(self, expr: Any) -> prim.Expression:
         """A lanky ``Sum`` the tracer left in place becomes a loopy reduction.
@@ -273,7 +314,7 @@ class ExpressionLowerer(Mapper):
         return expr
 
     def map_variable(self, expr: Any) -> prim.Variable:
-        return prim.Variable(expr.name)
+        return prim.Variable(self.lowering.rename(expr.name))
 
     def map_subscript(self, expr: Any) -> prim.Expression:
         if not isinstance(expr.aggregate, prim.Variable):
@@ -479,6 +520,12 @@ class _Builder:
         self.extra_domains: list[isl.Set] = []
         self.extra_args: list[Any] = []
         self.value_args: list[str] = []
+        self._ragged_bounds: dict[str, tuple[str, str]] | None = None
+        #: Per reduction (by identity), the binders it had to rename, and the
+        #: inames those renames introduce; see :meth:`plan_reductions`.
+        self.reduction_renames: dict[int, dict[str, str]] = {}
+        self.extra_inames: set[str] = set()
+        self._renames: list[dict[str, str]] = []
         self.expr = ExpressionLowerer(self)
 
     # {{{ ragged storage
@@ -494,18 +541,56 @@ class _Builder:
         return None
 
     @property
-    def ragged_params(self) -> tuple[str, ...]:
-        """Every name a ragged bound could go by; see :data:`COUNT_PARAM`."""
+    def counts_families(self) -> tuple[str, ...]:
+        """The counts array of every ragged parameter, in signature order."""
         names: list[str] = []
         for name in self.arr_types:
             if self.ragged_axis(name) is None:
                 continue
             counts = self.counts_name(name)
+            if counts not in names:
+                names.append(counts)
+        return tuple(names)
+
+    @property
+    def ragged_bound_params(self) -> dict[str, tuple[str, str]]:
+        """Domain parameters standing for a ragged bound: name -> counts, iname.
+
+        Two sources, because a term reaches here two ways. A term written by
+        hand spells the parameter, ``cnt_r`` or ``nl_cnt_r``, and is recognized
+        by :func:`count_param_names`. A traced term records what it allocated on
+        :attr:`loopty.term.Term.reflected`, and a parameter there is a ragged
+        bound when the term it stands for is a counts array subscripted by an
+        iname. The second source is what keeps a parameter that had to be
+        suffixed (because the readable spelling was taken) recognizable as the
+        row length it is, instead of being declared as a size argument nobody
+        passes.
+        """
+        if self._ragged_bounds is None:
+            self._ragged_bounds = self._compute_ragged_bounds()
+        return self._ragged_bounds
+
+    def _compute_ragged_bounds(self) -> dict[str, tuple[str, str]]:
+        families = self.counts_families
+        out: dict[str, tuple[str, str]] = {}
+        for counts in families:
             for stmt in self.term.stmts:
                 for iname in stmt.inames:
                     for param in count_param_names(counts, iname):
-                        if param not in names:
-                            names.append(param)
+                        out.setdefault(param, (counts, iname))
+        inames = {iname for stmt in self.term.stmts for iname in stmt.inames}
+        for symbol, expr in self.term.reflected:
+            pair = _counts_subscript(expr, set(families), inames)
+            if pair is not None:
+                out.setdefault(symbol, pair)
+        return out
+
+    def count_param_spellings(self, counts: str, iname: str) -> tuple[str, ...]:
+        """Every name this one ragged bound could go by, most direct first."""
+        names = list(count_param_names(counts, iname))
+        for symbol, pair in self.ragged_bound_params.items():
+            if pair == (counts, iname) and symbol not in names:
+                names.append(symbol)
         return tuple(names)
 
     def counts_name(self, name: str) -> str:
@@ -571,9 +656,93 @@ class _Builder:
 
     # }}}
 
-    def add_reduction_domain(self, reduction: Reduction) -> None:
+    # {{{ reduction binders
+
+    def plan_reductions(self) -> None:
+        """Give every reduction a binder whose domain is its own.
+
+        loopy defines an iname once, with one domain, and :func:`_merge_domains`
+        unions two domains over the same iname. For two *statements* that is
+        right and :func:`_restore_narrower_domains` cuts each back with a
+        predicate. For two reductions it is not: a reduction is one instruction's
+        expression and cannot carry a predicate of its own, so a reduction over
+        ``0 <= j < 2`` beside one over ``0 <= j < 4`` would silently become a sum
+        over four points, reading two cells past the end of its input.
+
+        So a reduction keeps the name the kernel wrote whenever the domain under
+        that name is the one it already has, and gets a fresh iname when it is
+        not. Keeping the name in the common case matters: ``Schedule.split("j",
+        ...)``, the demos and the messages all name reduction inames as the
+        source does, and renaming unconditionally would rename them all.
+        """
+        taken = set(self.term.sizes) | set(dict(self.term.params))
+        taken |= {iname for stmt in self.term.stmts for iname in stmt.inames}
+        taken |= {symbol for symbol, _ in self.term.reflected}
+        for stmt in self.term.stmts:
+            for reduction in reductions_of(stmt.expr):
+                taken |= set(reduction.inames)
+        seen: dict[tuple[str, ...], list[tuple[isl.Set, tuple[str, ...]]]] = {}
+        for stmt in self.term.stmts:
+            for reduction in reductions_of(stmt.expr):
+                names = tuple(reduction.inames)
+                domain = _domain_over(reduction.domain, names)
+                known = seen.setdefault(names, [])
+                chosen: tuple[str, ...] | None = None
+                for other, allocated in known:
+                    if _same_set(domain, other):
+                        chosen = allocated
+                        break
+                if chosen is None:
+                    chosen = names if not known else self._fresh_inames(names, taken)
+                    known.append((domain, chosen))
+                self.reduction_renames[id(reduction)] = {
+                    old: new
+                    for old, new in zip(names, chosen, strict=True)
+                    if old != new
+                }
+                self.extra_inames.update(chosen)
+
+    @staticmethod
+    def _fresh_inames(names: Sequence[str], taken: set[str]) -> tuple[str, ...]:
+        """Fresh loopy inames for a reduction whose binders are already spoken for."""
+        out: list[str] = []
+        for stem in names:
+            suffix = 0
+            candidate = f"{stem}_{suffix}"
+            while candidate in taken:
+                suffix += 1
+                candidate = f"{stem}_{suffix}"
+            taken.add(candidate)
+            out.append(candidate)
+        return tuple(out)
+
+    def reduction_rename(self, reduction: Reduction) -> dict[str, str]:
+        """How this reduction's binders were renamed, if they were."""
+        return self.reduction_renames.get(id(reduction), {})
+
+    def push_renaming(self, renaming: Mapping[str, str]) -> None:
+        """Rename these variables while the reduction's body is lowered."""
+        self._renames.append(dict(renaming))
+
+    def pop_renaming(self) -> None:
+        """Close the innermost renaming."""
+        self._renames.pop()
+
+    def rename(self, name: str) -> str:
+        """The loopy name of a variable, innermost renaming first."""
+        for renaming in reversed(self._renames):
+            if name in renaming:
+                return renaming[name]
+        return name
+
+    # }}}
+
+    def add_reduction_domain(
+        self, reduction: Reduction, inames: Sequence[str] | None = None
+    ) -> None:
         """Record a reduction's iteration domain as a domain of the kernel."""
-        self.extra_domains.append(_domain_over(reduction.domain, reduction.inames))
+        names = tuple(reduction.inames) if inames is None else tuple(inames)
+        self.extra_domains.append(_domain_over(reduction.domain, names))
 
     def add_binder_domains(self, binders: Sequence[Any]) -> None:
         """Record domains for a lanky ``Sum`` the tracer did not convert."""
@@ -610,7 +779,15 @@ class _NullBuilder:
         variable = prim.Variable(name)
         return prim.Subscript(variable, indices) if indices else variable
 
-    def add_reduction_domain(self, reduction: Reduction) -> None:
+    def rename(self, name: str) -> str:
+        return name
+
+    def reduction_rename(self, reduction: Reduction) -> dict[str, str]:
+        return {}
+
+    def add_reduction_domain(
+        self, reduction: Reduction, inames: Sequence[str] | None = None
+    ) -> None:
         raise LoweringError("a size expression may not contain a reduction")
 
     def add_binder_domains(self, binders: Sequence[Any]) -> None:
@@ -645,6 +822,16 @@ def _domain_params(domain: isl.Set) -> tuple[str, ...]:
     return tuple(domain.get_var_names(isl.dim_type.param))
 
 
+def _same_set(left: isl.Set, right: isl.Set) -> bool:
+    """Are two domains the same set, once their parameters are aligned?"""
+    try:
+        first = left.align_params(right.get_space())
+        second = right.align_params(first.get_space())
+    except Exception:  # pragma: no cover - isl declines to align
+        return False
+    return bool(first.is_equal(second))
+
+
 def _forget_params(domain: isl.Set, params: Sequence[str]) -> isl.Set:
     """Drop ``params`` from a set, existentially, then remove the dimensions.
 
@@ -662,7 +849,9 @@ def _forget_params(domain: isl.Set, params: Sequence[str]) -> isl.Set:
     return domain
 
 
-def _statement_domains(stmt: Stmt, ragged_params: Sequence[str]) -> list[isl.Set]:
+def _statement_domains(
+    stmt: Stmt, ragged_bounds: Mapping[str, tuple[str, str]]
+) -> list[isl.Set]:
     """The domains a statement contributes, split at a ragged bound.
 
     loopy refuses a domain whose parameter is written inside a loop the same
@@ -673,13 +862,14 @@ def _statement_domains(stmt: Stmt, ragged_params: Sequence[str]) -> list[isl.Set
     ``[r, cnt_r] -> { [j] : 0 <= j < cnt_r }`` inside it. A dense statement has
     no such parameter and keeps its single domain.
     """
-    present = [p for p in ragged_params if p in _domain_params(stmt.domain)]
+    params = set(_domain_params(stmt.domain))
+    present = [p for p in ragged_bounds if p in params]
     if not present:
         return [_domain_over(stmt.domain, stmt.inames)]
 
     cut = -1
     for position, iname in enumerate(stmt.inames):
-        if any(param.endswith(f"_{iname}") for param in present):
+        if any(ragged_bounds[param][1] == iname for param in present):
             cut = max(cut, position)
     if cut < 0 or cut + 1 >= len(stmt.inames):
         return [_domain_over(stmt.domain, stmt.inames)]
@@ -721,7 +911,9 @@ def _count_inits(
         for stmt in term.stmts:
             for iname in stmt.inames:
                 candidates = [
-                    name for name in count_param_names(counts, iname) if name in wanted
+                    name
+                    for name in builder.count_param_spellings(counts, iname)
+                    if name in wanted
                 ]
                 if not candidates or candidates[0] in ids:
                     continue
@@ -769,8 +961,9 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
             "rename them in the kernel's signature."
         )
     builder = _Builder(term, target)
+    builder.plan_reductions()
     expr = builder.expr
-    ragged_params = builder.ragged_params
+    ragged_bounds = builder.ragged_bound_params
 
     domains: list[isl.Set] = []
     insns: list[Any] = []
@@ -786,7 +979,7 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
     for stmt in term.stmts:
         if not isinstance(stmt, Stmt):  # pragma: no cover - defensive
             raise LoweringError(f"not a statement: {stmt!r}")
-        mine = _statement_domains(stmt, ragged_params)
+        mine = _statement_domains(stmt, ragged_bounds)
         own_domains[_sanitize(stmt.id)] = list(mine)
         domains.extend(mine)
 
@@ -1079,6 +1272,9 @@ def _arguments(
     for stmt in term.stmts:
         for reduction in reductions_of(stmt.expr):
             known_inames.update(reduction.inames)
+    # A reduction binder that had to be renamed is an iname of the generated
+    # kernel and not a size the caller passes; see _Builder.plan_reductions.
+    known_inames |= builder.extra_inames
     sizes = [
         name
         for name in used

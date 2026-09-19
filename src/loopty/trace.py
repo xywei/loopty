@@ -54,6 +54,7 @@ from lanky.terms import (
 
 from loopty.arr import Arr, ArrSpec
 from loopty.flow import domain_set, expr_text
+from loopty.idx import Reflections
 from loopty.term import Access, ArrType, Reduction, Stmt, Term
 
 __all__ = [
@@ -133,6 +134,10 @@ class Tracer:
         #: :func:`trace` as the proxies are built. A reduction needs them to
         #: read off the exactness class of what it accumulates.
         self.array_types: dict[str, ArrType] = {}
+        #: The isl parameters this trace reflects its non-affine bounds into,
+        #: allocated once for the whole term so that ``cnt[r]`` is one parameter
+        #: in every domain and cannot collide with a size the kernel declares.
+        self.reflections = Reflections(params)
         self.loops: list[_Loop] = []
         self.guards: list[Any] = []
         self.stmts: list[Stmt] = []
@@ -149,10 +154,13 @@ class Tracer:
         stem = hint or f"i{len(self._inames)}"
         name = stem
         suffix = 0
-        while name in self._inames:
+        while name in self._inames or name in self.reflections:
             name = f"{stem}_{suffix}"
             suffix += 1
         self._inames.add(name)
+        # An iname and a reflected parameter share one isl space, so neither may
+        # take a name the other has.
+        self.reflections.reserve((name,))
         return name
 
     def enter_loop(self, bound: Any, hint: str | None, owner: Any = None) -> Var:
@@ -222,7 +230,10 @@ class Tracer:
     def domain(self) -> Any:
         """The isl set of the enclosing loop nest, narrowed by affine guards."""
         return domain_set(
-            self.inames, self.bounds, constraints=constraints_of(self.guard())
+            self.inames,
+            self.bounds,
+            constraints=constraints_of(self.guard()),
+            reflections=self.reflections,
         )
 
     def record(self, assignee: Access, expr: Any, kind: str, where: str) -> Stmt:
@@ -629,6 +640,7 @@ def lower_reductions(expr: Any, tracer: Tracer) -> Any:
                 *constraints_of(tracer.guard()),
                 *constraints_of(expr.guard),
             ),
+            reflections=tracer.reflections,
         )
         return Reduction(
             "sum", tuple(inames), domain, body, reduction_exactness(body, tracer)
@@ -905,6 +917,9 @@ def trace(kernel: Any, arg_types: Any) -> Term:
             arrtype = array_type(annotation, types, parameter)
             params.append((parameter, arrtype))
             tracer.array_types[parameter] = arrtype
+            # A size a shape mentions is a name the isl spaces already use, so
+            # no reflected parameter may be called that; see Reflections.
+            tracer.reflections.reserve(_free_size_names(arrtype.axes))
             arguments.append(SymArr(parameter, arrtype, tracer))
         else:
             params.append((parameter, annotation))
@@ -938,6 +953,7 @@ def trace(kernel: Any, arg_types: Any) -> Term:
         sizes=tuple(sorted(sizes - set(types))),
         stmts=tuple(tracer.stmts),
         post=_proposition_of(post_annotation),
+        reflected=tracer.reflections.items(),
     )
 
 

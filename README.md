@@ -87,7 +87,10 @@ message states, because which violating pair isl picks depends on them.
 - **An indirection can be in bounds by type.** `col: Arr[..., Fin[m]]` makes
   `x[col[r, j]]` sound with no proof obligation at all. This is where the
   polyhedral model normally gives up and inserts a runtime check or a
-  "trust me".
+  "trust me". The type is what discharges it, so the executor is what enforces
+  the type: every argument is checked against its declared element sort on the
+  way in, and a `col` entry of `-1` or of `m` is a `ValueError` naming the cell
+  rather than an address outside `x`.
 - **Transformations are casts with witnesses.** Every `split`, `tile`,
   `interchange`, `skew` and `realize` states its reindexing as an isl map, is
   checked for bijectivity on statement instances, and is checked for monotonicity
@@ -140,6 +143,17 @@ end to end; the edges are sharp.
   something asks for code.
 - Lowering to loopy, including a ragged axis as a flat buffer plus offsets, and
   running on `lp.ExecutableCTarget`.
+- The argument contract, enforced at every entry point that runs a kernel
+  (compiled, differential and native): two distinct array parameters may not
+  share storage, a ragged argument has to agree with the counts array its type
+  names and with any offsets passed alongside it, and an element of a refined
+  sort such as `Fin[m]` has to be one. These are the assumptions the typing
+  rules make about a *call* rather than about the term, and a violation is a
+  `ValueError` naming the argument. Distinct parameters being disjoint storage
+  is the load-bearing one: dependences are computed per array name, so a kernel
+  reading `x[i - 1]` and writing `y[i]` may legally run `i` in parallel, and
+  the same kernel called with `x is y` is a race that the differential test
+  cannot see, because it copies each argument separately.
 - `loopty run FILE [--target c|opencl] [--emit-code] [--json OUT]`,
   `loopty check FILE`, and `lanky run FILE` through the entry point.
   `--target` retargets every schedule in the file, re-checking its casts, and
@@ -148,8 +162,10 @@ end to end; the edges are sharp.
 
 **Partial.**
 
-- Ragged bounds are reflected into isl as one parameter per occurrence, so
-  `cnt[r]` and `cnt[r + 1]` are unrelated to isl. Nothing knows that counts are
+- Ragged bounds are reflected into isl as one parameter per distinct bound term
+  (allocated once per kernel, so the same `cnt[r]` is one parameter everywhere
+  and two different bounds are never given one name), so `cnt[r]` and
+  `cnt[r + 1]` are unrelated to isl. Nothing knows that counts are
   non-negative, that they sum to the offsets, or that `off` is monotone, so the
   scan's recurrence is not usable by the decision procedure. The visible
   consequence: an access against flat storage, `val[off[r] + j]`, is reported
@@ -177,9 +193,15 @@ end to end; the edges are sharp.
   the workaround that rescues the empty flat buffer of a ragged axis cannot be
   applied to an argument loopy reads a size from. A matrix whose rows are all
   empty does run. See `docs/loopy-notes.md`.
-- Array *shapes* are not checked at the executor boundary. Lowering has to
-  declare some arrays with `shape=None` (see `docs/loopy-notes.md`), so a
-  wrongly sized array is undefined behaviour rather than an error.
+- Array *shapes* are not checked at the executor boundary, though element types,
+  ragged layouts and aliasing now are. Lowering has to declare some arrays with
+  `shape=None` (see `docs/loopy-notes.md`), so a wrongly sized array is
+  undefined behaviour rather than an error.
+- Two reductions that bind the same name over different domains cannot both
+  keep that name: loopy gives an iname one domain and a reduction cannot carry
+  a predicate, so the second one is lowered under a fresh iname (`j_0`). The
+  name in the term is unchanged, and so is every message, but a `Schedule` step
+  naming `j` reaches only the first of them.
 
 **Not yet.**
 

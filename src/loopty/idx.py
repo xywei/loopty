@@ -41,6 +41,7 @@ __all__ = [
     "Layout",
     "NonAffineLayout",
     "RaggedLayout",
+    "Reflections",
     "axis_size",
     "delinearize",
     "is_affine",
@@ -178,14 +179,102 @@ def isl_expr(expr: Any) -> str:
 
 
 def _reflected_name(expr: Any) -> str:
-    """Name the fresh parameter standing for a non-affine term.
+    """The *preferred spelling* of the parameter standing for a non-affine term.
 
-    The name is derived from the term so that the same term reflects to the same
-    parameter within one set, which keeps ``n*m`` a single unknown rather than a
-    family of unrelated ones.
+    Readable, and deliberately not unique: every non-word run becomes one
+    underscore, so ``cnt[r]`` and ``cnt*r`` both spell ``nl_cnt_r``, and a user
+    size may already be called that. Allocation is :class:`Reflections`'s job;
+    this only says what the parameter would like to be called.
     """
     stem = re.sub(r"\W+", "_", str(expr)).strip("_") or "x"
     return f"nl_{stem}"
+
+
+def _structural_key(expr: Any) -> str:
+    """The identity of a reflected term: two terms share a parameter iff equal.
+
+    ``str`` is the structural form pymbolic prints, so ``cnt[r]`` and
+    ``cnt[r + 1]`` are different keys and the same ``cnt[r]`` built in two
+    places is one key. It is *not* the name: the name is derived from this and
+    then made unique, which is the difference this table exists to keep.
+    """
+    return str(expr)
+
+
+class Reflections:
+    """The non-affine terms of one term, and the isl parameter each stands for.
+
+    isl's constraints are quasi-affine, so an array read such as ``cnt[r]`` or a
+    product of two unknowns has to become a fresh parameter before it can appear
+    in a set. Two properties make that sound and readable, and both need a table
+    rather than a function of the term alone:
+
+    *The same term is the same parameter, everywhere.* A statement's domain, a
+    reduction's domain and the cell set an in-bounds obligation compares it
+    against are three separately built isl objects, and the obligation is
+    meaningless unless ``cnt[r]`` is one parameter across all three. Keyed by
+    :func:`_structural_key`, which is the term and not its spelling.
+
+    *Different terms are different parameters.* The readable spelling is not
+    injective (``cnt[r]`` and ``cnt*r`` both read ``nl_cnt_r``) and may already
+    be a size the kernel declares. A name that is taken gets a numeric suffix,
+    so two distinct terms are never silently asserted equal and a user's
+    ``nl_cnt_r`` keeps its meaning.
+
+    ``reserved`` is every name the parameter must avoid: sizes, parameters,
+    inames, and anything else already in the space.
+    """
+
+    __slots__ = ("_by_key", "_exprs", "_reserved")
+
+    def __init__(self, reserved: Iterable[str] = ()) -> None:
+        self._reserved: set[str] = set(reserved)
+        self._by_key: dict[str, str] = {}
+        self._exprs: dict[str, Any] = {}
+
+    def reserve(self, names: Iterable[str]) -> None:
+        """Forbid these names to future allocations."""
+        self._reserved.update(names)
+
+    def adopt(self, name: str, expr: Any) -> str:
+        """Record a name that was already allocated for ``expr``."""
+        self._by_key[_structural_key(expr)] = name
+        self._exprs[name] = expr
+        return name
+
+    def symbol(self, expr: Any) -> str:
+        """The parameter standing for ``expr``, allocating one if it has none."""
+        key = _structural_key(expr)
+        existing = self._by_key.get(key)
+        if existing is not None:
+            return existing
+        base = _reflected_name(expr)
+        name = base
+        suffix = 2
+        while name in self._reserved or name in self._exprs:
+            name = f"{base}_{suffix}"
+            suffix += 1
+        return self.adopt(name, expr)
+
+    def items(self) -> tuple[tuple[str, Any], ...]:
+        """Every allocated parameter with the term it stands for."""
+        return tuple(self._exprs.items())
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        """Every allocated parameter name, in allocation order."""
+        return tuple(self._exprs)
+
+    def get(self, name: str) -> Any:
+        """The term parameter ``name`` stands for, or ``None``."""
+        return self._exprs.get(name)
+
+    def __contains__(self, name: object) -> bool:
+        return name in self._exprs
+
+    def __repr__(self) -> str:
+        inner = ", ".join(f"{name}={expr}" for name, expr in self._exprs.items())
+        return f"Reflections({inner})"
 
 
 def size_params(sizes: Iterable[Any]) -> tuple[str, ...]:
@@ -201,11 +290,13 @@ def size_params(sizes: Iterable[Any]) -> tuple[str, ...]:
     return tuple(sorted(names))
 
 
-def _bound_string(size: Any, reflected: dict[str, Any]) -> str:
+def _bound_string(
+    size: Any, reflected: dict[str, Any], table: Reflections
+) -> str:
     """isl text for an axis bound, reflecting it as a parameter if non-affine."""
     if is_affine(size):
         return isl_expr(size)
-    name = _reflected_name(size)
+    name = table.symbol(size)
     reflected[name] = size
     return name
 
@@ -214,6 +305,7 @@ def to_set(
     shape: Sequence[Axis],
     params: Sequence[str] = (),
     names: Sequence[str] | None = None,
+    reflections: Reflections | None = None,
 ) -> isl.Set:
     """The isl set of index tuples of ``shape``.
 
@@ -227,6 +319,11 @@ def to_set(
     every instantiation, so an in-bounds proof against the widened set still
     proves in-bounds. Call :func:`normalize` first when the product is a genuine
     reshape and the two factors should become two axes.
+
+    ``reflections`` is the term's :class:`Reflections` table, which is what
+    makes the fresh parameter the *same* one another set built for the same
+    term uses, and what keeps it clear of the names already in play. Omit it and
+    the set gets a table of its own, reserved against the names it can see.
     """
     sizes = [axis_size(axis) for axis in shape]
     if names is None:
@@ -234,8 +331,11 @@ def to_set(
     if len(names) != len(sizes):
         raise ValueError(f"{len(names)} names for {len(sizes)} axes")
 
+    table = reflections
+    if table is None:
+        table = Reflections([*size_params(sizes), *params, *names])
     reflected: dict[str, Any] = {}
-    bounds = [_bound_string(size, reflected) for size in sizes]
+    bounds = [_bound_string(size, reflected, table) for size in sizes]
     # Only the sizes that survived as affine text contribute their free names;
     # a reflected size hides its own names behind the fresh parameter.
     affine_sizes = [size for size in sizes if is_affine(size)]

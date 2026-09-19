@@ -18,6 +18,33 @@ guards = ModuleType("guards")
 guards.mask = when
 
 
+def shift_guarded(v, i, u, size) -> None:
+    """Write ``u[i + 1]`` into ``v[i]``, under a guard the *caller* never names."""
+    with when(i + 1 < size):
+        v[i] = u[i + 1]
+
+
+class _Shifter:
+    """A helper reached as a method rather than as a plain global function."""
+
+    def shift(self, v, i, u, size) -> None:
+        """The same guarded write, as a method."""
+        shift_guarded(v, i, u, size)
+
+
+shifter = _Shifter()
+
+#: The same helper as a *bound method* sitting in a global, which is a shape the
+#: static walk does follow.
+bound_shift = shifter.shift
+
+
+def fill(x, value) -> None:
+    """A helper that asks an argument for its domain: the body never says ``dom``."""
+    for i in x.dom:
+        x[i] = value
+
+
 @kernel
 def scale(a: Real, x: Arr[Fin[n], Real]):  # noqa: F821
     """Multiply every entry of ``x`` by ``a``."""
@@ -150,19 +177,87 @@ def test_a_guard_is_found_through_a_renamed_module_attribute() -> None:
     assert list(out.numpy()) == [2.0, 3.0, 0.0]
 
 
-def test_a_kernel_without_a_when_block_gets_its_arguments_untouched() -> None:
-    assert not scale.guards_writes
-    given = Arr.zeros(2)
+def test_every_native_run_sees_a_masking_view_that_shares_the_buffer() -> None:
+    # The contract used to be "an unguarded kernel is called with exactly the
+    # objects it was given", which made masking depend on a static guess about
+    # the body. It is now "every array argument is a masking view", because no
+    # inspection can decide whether a helper opens a guard. The view shares the
+    # buffer, so the results are still written in place.
+    given = Arr.from_numpy(np.array([3.0, 4.0]))
     seen = []
 
     @kernel
     def peek(x: Arr[Fin[n], Real]):  # noqa: F821
         seen.append(x)
         for i in x.dom:
-            x[i] = 0.0
+            x[i] = 2.0 * x[i]
 
     peek(given)
-    assert seen[0] is given
+    assert not scale.guards_writes
+    assert seen[0] is not given
+    assert isinstance(seen[0], Arr)
+    assert seen[0].numpy() is given.numpy()
+    assert list(given.numpy()) == [6.0, 8.0]
+
+
+def test_a_guard_opened_by_a_global_helper_masks_the_native_write() -> None:
+    # The body names no guard at all: ``shift_guarded`` opens it. The guard
+    # detection used to compare the helper with ``when`` and never look inside
+    # it, so the native run performed the guarded write unmasked and computed
+    # something the lowered kernel does not.
+    @kernel
+    def via_helper(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):  # noqa: F821
+        for i in u.dom:
+            shift_guarded(v, i, u, u.dom.size)
+
+    assert "when" not in via_helper.fn.__code__.co_names
+    assert via_helper.guards_writes
+    out = Arr.zeros(3)
+    via_helper(Arr.from_numpy(np.array([1.0, 2.0, 3.0])), out)
+    assert list(out.numpy()) == [2.0, 3.0, 0.0]
+
+
+def test_a_guard_opened_through_a_bound_method_masks_the_native_write() -> None:
+    @kernel
+    def via_method(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):  # noqa: F821
+        for i in u.dom:
+            bound_shift(v, i, u, u.dom.size)
+
+    assert via_method.guards_writes
+    out = Arr.zeros(3)
+    via_method(Arr.from_numpy(np.array([1.0, 2.0, 3.0])), out)
+    assert list(out.numpy()) == [2.0, 3.0, 0.0]
+
+
+def test_a_guard_no_static_walk_can_see_still_masks_the_native_write() -> None:
+    # The helper is reached as an attribute of an ordinary object, which
+    # ``opens_a_guard`` deliberately does not follow (reading attributes off an
+    # arbitrary object can run a property). The flag is therefore False and the
+    # write is masked anyway, which is the point of masking every run.
+    @kernel
+    def via_attribute(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):  # noqa: F821
+        for i in u.dom:
+            shifter.shift(v, i, u, u.dom.size)
+
+    assert not via_attribute.guards_writes
+    out = Arr.zeros(3)
+    via_attribute(Arr.from_numpy(np.array([1.0, 2.0, 3.0])), out)
+    assert list(out.numpy()) == [2.0, 3.0, 0.0]
+
+
+def test_a_helper_that_iterates_dom_accepts_a_bare_numpy_argument() -> None:
+    # The ``.dom`` a body needs may be asked for by a helper, and the top-level
+    # ``co_names`` check did not see it, so a kernel called with a bare ndarray
+    # failed with "'ndarray' object has no attribute 'dom'". Every argument is
+    # wrapped now, so the question does not arise.
+    @kernel
+    def fill_all(x: Arr[Fin[n], Real]):  # noqa: F821
+        fill(x, 7.0)
+
+    assert "dom" not in fill_all.fn.__code__.co_names
+    given = np.zeros(3)
+    fill_all(given)
+    assert list(given) == [7.0, 7.0, 7.0]
 
 
 def test_the_kernel_keeps_the_function_name_docstring_and_source_line() -> None:

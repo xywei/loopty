@@ -36,6 +36,16 @@ its questions for *every* value of a parameter, so a subset or emptiness verdict
 proved this way is a proof schema over all counts, which is exactly the
 per-generic-row statement wanted, and it is sound because it can only widen.
 
+The allocation of those names is a table and not a function of the term, because
+the readable spelling is not injective: ``cnt[r]`` and ``cnt*r`` both read
+``nl_cnt_r``, and a kernel is free to declare a size of that name. One
+:class:`loopty.idx.Reflections` per term keys the parameter on the *term* and
+suffixes the name when it is taken, so two different bounds are never silently
+asserted equal, and it is shared by every set built about that term, so the
+statement domain, the reduction domain and the cell set of an in-bounds
+obligation all call ``cnt[r]`` by the same parameter. The table travels on
+:attr:`loopty.term.Term.reflected`.
+
 The limit of that choice is worth stating, and is stated again in the README's
 status list, because it is the one place where loopty knows less than a reader
 might assume. Because the parameter is named after the *term*, ``cnt[r]`` and
@@ -58,6 +68,21 @@ The alternative formulation, ``off[r] <= a < off[r + 1]`` with the offsets
 constrained by the scan recurrence, keeps those relations and is the natural
 next step. It is not implemented, and it is not needed for in-bounds or
 disjointness on the ragged form, which is all the MVP's typing rules ask for.
+
+*Distinct parameters are distinct storage.* :func:`dependences` compares
+footprints array by array and reports nothing between two differently named
+arrays, so the whole dependence relation, and every legality verdict derived
+from it, rests on the assumption that two parameters never name overlapping
+memory. That is an assumption about the *call*, not about the term: a kernel
+reading ``x[i - 1]`` and writing ``y[i]`` carries no dependence and may tag
+``i`` parallel, and the same kernel called with ``x is y`` is a race. The
+assumption is therefore enforced where calls happen rather than left implicit:
+:mod:`loopty.contract` detects overlapping storage among distinct array
+arguments with ``numpy.shares_memory`` and raises ``ValueError`` naming both,
+and :class:`loopty.executor.LoopyExecutor` and
+:meth:`loopty.kernel.Kernel.__call__` both ask it before running anything.
+Without that check the condition is invisible: the differential test copies each
+argument on its own, which destroys the alias and makes the two runs agree.
 """
 
 from __future__ import annotations
@@ -71,7 +96,7 @@ import islpy as isl
 import pymbolic.primitives as prim
 from lanky.terms import init_args
 
-from loopty.idx import _reflected_name as reflected_name
+from loopty.idx import Reflections
 from loopty.term import ArrType, Stmt, Term
 
 __all__ = [
@@ -100,16 +125,24 @@ def expr_text(
     expr: Any,
     rename: Mapping[str, str] | None = None,
     reflected: dict[str, Any] | None = None,
+    table: Reflections | None = None,
 ) -> str:
     """Render ``expr`` in isl's input syntax, reflecting what is not affine.
 
     ``rename`` maps variable names to isl dimension names, which is how an
     iname ``r`` becomes the dimension ``d0`` of the padded instance space.
-    ``reflected`` collects the fresh parameters invented for non-affine terms
-    (an array read such as ``cnt[r]``, a product of two unknowns); the name is
-    derived from the term *before* renaming, so the same term always reflects to
-    the same parameter. Passing ``reflected=None`` refuses to widen and raises
-    :class:`NonAffine` instead.
+    ``reflected`` collects the parameters this rendering used for non-affine
+    terms (an array read such as ``cnt[r]``, a product of two unknowns); the
+    parameter is looked up by the term *before* renaming, so the same term
+    always reflects to the same parameter. Passing ``reflected=None`` refuses to
+    widen and raises :class:`NonAffine` instead.
+
+    ``table`` is the :class:`~loopty.idx.Reflections` that allocates those
+    parameters. It is what makes the allocation collision-free and shared across
+    every set built for one term; callers that hold a term pass its table.
+    Without one, each rendering allocates in a table of its own, which is right
+    for a single set standing alone and wrong for a set that has to be compared
+    with another.
     """
     rename = rename or {}
     if isinstance(expr, bool):  # pragma: no cover - a bool is not an index
@@ -119,26 +152,26 @@ def expr_text(
     if isinstance(expr, prim.Variable):
         return rename.get(expr.name, expr.name)
     if isinstance(expr, prim.Sum):
-        parts = [expr_text(c, rename, reflected) for c in expr.children]
+        parts = [expr_text(c, rename, reflected, table) for c in expr.children]
         return "(" + " + ".join(parts) + ")"
     if isinstance(expr, prim.Product):
         constants = [c for c in expr.children if isinstance(c, int)]
         others = [c for c in expr.children if not isinstance(c, int)]
         if len(others) <= 1:
             parts = [str(c) for c in constants] + [
-                expr_text(c, rename, reflected) for c in others
+                expr_text(c, rename, reflected, table) for c in others
             ]
             return "(" + " * ".join(parts) + ")"
     elif isinstance(expr, prim.FloorDiv | prim.Remainder):
         denominator = expr.denominator
         if isinstance(denominator, int) and denominator > 0:
-            numerator = expr_text(expr.numerator, rename, reflected)
+            numerator = expr_text(expr.numerator, rename, reflected, table)
             if isinstance(expr, prim.FloorDiv):
                 return f"floord({numerator}, {denominator})"
             return f"(({numerator}) % {denominator})"
     if reflected is None:
         raise NonAffine(f"{expr!r} is not quasi-affine and may not be reflected here")
-    name = reflected_name(expr)
+    name = (table if table is not None else Reflections()).symbol(expr)
     reflected[name] = expr
     return name
 
@@ -275,6 +308,7 @@ def domain_set(
     params: Sequence[str] = (),
     constraints: Sequence[str] = (),
     names: Sequence[str] | None = None,
+    reflections: Reflections | None = None,
 ) -> isl.Set:
     """The isl set ``{ [i0, ...] : 0 <= i0 < b0 and ... }`` of a loop nest.
 
@@ -289,14 +323,27 @@ def domain_set(
     a guard, and a guard may perfectly well be ``a < 0`` on a signed scalar;
     assuming that name non-negative would empty the domain. See
     :func:`_assemble`.
+
+    ``reflections`` is the term's parameter table for non-affine bounds; see
+    :func:`expr_text`. A caller that builds more than one set about the same
+    term has to pass one, or two sets will call two different things by the same
+    name, or one thing by two names.
     """
     if names is None:
         names = tuple(inames)
     rename = dict(zip(inames, names, strict=True))
+    table = reflections
+    if table is None:
+        reserved = {*inames, *names, *params, *_names_in(list(bounds))}
+        for piece in constraints:
+            reserved |= free_names(piece)
+        table = Reflections(reserved)
     reflected: dict[str, Any] = {}
     bound_pieces: list[str] = []
     for name, bound in zip(names, bounds, strict=True):
-        bound_pieces.append(f"0 <= {name} < {expr_text(bound, rename, reflected)}")
+        bound_pieces.append(
+            f"0 <= {name} < {expr_text(bound, rename, reflected, table)}"
+        )
     pieces = [*constraints, *bound_pieces]
     free: set[str] = set()
     for piece in pieces:
@@ -314,6 +361,7 @@ def cell_set(
     arrtype: ArrType,
     indices: Sequence[Any] | None = None,
     names: Sequence[str] | None = None,
+    reflections: Reflections | None = None,
 ) -> isl.Set:
     """The isl set of cells an array has.
 
@@ -324,6 +372,11 @@ def cell_set(
     omitted the row index is the cell coordinate itself, which is not affine and
     reflects to one parameter for the whole array: a coarser set, used where a
     footprint only has to be sound.
+
+    ``reflections`` has to be the term's table whenever the result is going to
+    be compared with something else isl built (an in-bounds obligation compares
+    it with the range of an access map). Both sides must call ``cnt[r]`` by the
+    same parameter, or the comparison is between two unrelated unknowns.
     """
     if names is None:
         names = tuple(f"a{k}" for k in range(len(arrtype.axes)))
@@ -341,7 +394,9 @@ def cell_set(
         else:
             row = prim.Variable(names[axis - 1]) if axis >= 1 else 0
         bounds.append(prim.Subscript(prim.Variable(str(counts)), row))
-    return domain_set(tuple(names), bounds, names=tuple(names))
+    return domain_set(
+        tuple(names), bounds, names=tuple(names), reflections=reflections
+    )
 
 
 # {{{ the padded instance space
@@ -569,6 +624,11 @@ def dependences(term: Term) -> isl.Map:
     against anything), and the source order runs the first before the second.
     The relation is a plain map in the padded instance space, so the oracle can
     ask whether a proposed schedule is monotone on it without further surgery.
+
+    "The same array" is by name. Two differently named parameters are taken to
+    be disjoint storage, which is an assumption about how the kernel is called;
+    :mod:`loopty.contract` enforces it at every executor and native entry point,
+    and the module docstring says why it cannot be left implicit.
     """
     prints = footprints(term)
     before = program_order(term)

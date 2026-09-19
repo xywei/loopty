@@ -10,8 +10,13 @@ two waves are written at the same time.
 
 from __future__ import annotations
 
+import islpy as isl
 import numpy as np
 import pytest
+from lanky.prelude import Nat, Real
+
+from loopty import Arr, Fin, kernel
+from loopty import sum as reduce_sum
 
 pytest.importorskip("loopy")
 
@@ -125,3 +130,106 @@ def test_the_traced_stencil_refuses_a_tiling_and_accepts_a_skewed_one() -> None:
             want[t + 1, i] = (want[t, i - 1] + want[t, i + 1]) / 2
     out = run(tiled, u=u.copy())
     assert np.allclose(out["u"], want)
+
+
+# {{{ two reductions that reuse one binder name
+
+
+@kernel
+def two_sums(
+    a: Arr[Fin[2], Real],  # noqa: F821
+    b: Arr[Fin[4], Real],  # noqa: F821
+    y: Arr[Fin[2], Real],  # noqa: F821
+):
+    """Two reductions, both written over ``j``, over rows of different length."""
+    y[0] = reduce_sum(a[j] for j in a.dom)
+    y[1] = reduce_sum(b[j] for j in b.dom)
+
+
+def test_two_reductions_over_one_binder_keep_their_own_domains() -> None:
+    # loopy gives an iname one domain, and lowering used to hand both
+    # reductions the union of theirs: the sum over ``a`` became a sum over four
+    # points, reading two cells past the end of a two-cell array. A statement in
+    # that position gets its own domain back as a predicate, which a reduction
+    # cannot carry, so the second binder becomes an iname of its own instead.
+    from loopty.lower import lower_generic
+
+    term = two_sums.trace()
+    lowering = lower_generic(term, "c")
+    inames = set(lowering.kernel.default_entrypoint.inames)
+    assert "j" in inames, inames
+    assert len(inames) == 2, inames
+    extents = {
+        tuple(domain.get_var_names(isl.dim_type.set)): domain.to_set()
+        .count_val()
+        .to_python()
+        for domain in lowering.kernel.default_entrypoint.domains
+    }
+    assert extents[("j",)] == 2, extents
+    assert 4 in extents.values(), extents
+
+    a = np.array([1.0, 2.0])
+    b = np.array([10.0, 20.0, 30.0, 40.0])
+    out = run(term, a=a, b=b, y=np.zeros(2))
+    assert np.allclose(out["y"], [a.sum(), b.sum()])
+
+
+def test_a_reduction_whose_binder_is_unambiguous_keeps_the_name() -> None:
+    # Renaming unconditionally would rename the inames the demos and
+    # ``Schedule.split("j", ...)`` refer to. A binder is renamed only when the
+    # same name is already bound to a different domain.
+    spmv = traced("spmv", "spmv_min")
+    lowering = __import__(
+        "loopty.lower", fromlist=["lower_generic"]
+    ).lower_generic(spmv.trace(), "c")
+    assert "j" in lowering.kernel.default_entrypoint.inames
+
+
+# }}}
+
+
+# {{{ a size spelled like the parameter a ragged bound reflects to
+
+
+@kernel
+def shadowed_bound(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    w: Arr[Fin[nl_cnt_r], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A ragged row sum, in a kernel whose vector size is called ``nl_cnt_r``."""
+    for r in y.dom:
+        y[r] = reduce_sum(val[r, j] * w[0] for j in val.dom[r])
+
+
+def test_a_shadowed_reflected_bound_still_lowers_as_a_ragged_bound() -> None:
+    # The bound ``cnt[r]`` cannot be called ``nl_cnt_r`` here, because a size
+    # already is. Lowering has to follow the name the trace actually allocated:
+    # recognizing ragged bounds by their spelling alone would declare this one
+    # as a size argument nobody passes.
+    from loopty.arr import Arr as RuntimeArr
+
+    term = shadowed_bound.trace()
+    (name,) = [symbol for symbol, _ in term.reflected]
+    assert name != "nl_cnt_r"
+
+    lowering = __import__(
+        "loopty.lower", fromlist=["lower_generic"]
+    ).lower_generic(term, "c")
+    assert name not in lowering.value_args, lowering.value_args
+    assert lowering.ragged == {"val": "off_cnt"}
+
+    counts = [2, 0, 3]
+    values = [1.0, 2.0, 3.0, 4.0, 5.0]
+    out = run(
+        term,
+        cnt=RuntimeArr.from_numpy(np.array(counts, dtype=np.int64)),
+        val=RuntimeArr.ragged(counts, values=values),
+        w=np.array([3.0, 0.0]),
+        y=np.zeros(3),
+    )
+    assert np.allclose(out["y"], [3.0 * 3.0, 0.0, 3.0 * 12.0])
+
+
+# }}}

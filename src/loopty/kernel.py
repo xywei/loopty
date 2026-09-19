@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import functools
 import os
-from types import ModuleType
+from types import FunctionType, MethodType, ModuleType
 from typing import Any
 
 import numpy as np
@@ -36,9 +36,10 @@ from lanky.plugins import registry
 from lanky.terms import evaluate_annotations
 
 from loopty import typing as rules
-from loopty.arr import Arr
+from loopty.arr import Arr, ArrSpec
+from loopty.contract import check_arguments
 from loopty.term import Term
-from loopty.trace import mask_writes, trace, when
+from loopty.trace import array_type, mask_writes, trace, when
 
 __all__ = [
     "Kernel",
@@ -93,13 +94,44 @@ def _code_objects(code: Any) -> list[Any]:
     return out
 
 
-def opens_a_guard(fn: Any) -> bool:
-    """Does ``fn``'s body open a :class:`loopty.trace.when` block?
+#: How many levels of helper call :func:`opens_a_guard` follows before it gives
+#: up. Deep enough for the helpers a kernel body actually calls, and finite
+#: because the walk is over a graph that may well have a cycle.
+_GUARD_SEARCH_DEPTH = 8
 
-    The question decides whether the native run wraps its arrays in the masking
-    views, so getting it wrong makes ``python file.py`` compute something the
-    lowered kernel does not: a write under a false guard is performed instead of
-    dropped.
+
+def _reachable_functions(fn: Any, names: set[str]) -> list[Any]:
+    """Functions the body could be calling: its globals and its closure cells.
+
+    Only plain functions and bound methods are followed. An arbitrary callable
+    is not: reading attributes off one can run a property, and this is a
+    question about what the body says rather than an invitation to execute part
+    of it.
+    """
+    out: list[Any] = []
+    globals_ = getattr(fn, "__globals__", None) or {}
+    for name in names:
+        value = globals_.get(name)
+        if isinstance(value, FunctionType | MethodType):
+            out.append(value)
+    for cell in getattr(fn, "__closure__", None) or ():
+        try:
+            value = cell.cell_contents
+        except ValueError:  # pragma: no cover - a cell not yet filled in
+            continue
+        if isinstance(value, FunctionType | MethodType):
+            out.append(value)
+    return out
+
+
+def opens_a_guard(fn: Any) -> bool:
+    """Does ``fn``, or a helper it calls, open a :class:`loopty.trace.when` block?
+
+    Reported rather than relied on. The native run wraps its arrays in the
+    masking views unconditionally (see :meth:`Kernel.__call__`), so an answer of
+    ``False`` here no longer means a body's writes go unmasked; this says
+    whether the guard is visible from the source, which is what a reader and a
+    diagnostic want to know.
 
     It used to be asked as ``"when" in fn.__code__.co_names``, which is a
     question about spelling rather than about the object. ``from loopty import
@@ -108,39 +140,54 @@ def opens_a_guard(fn: Any) -> bool:
     looked for *by identity*: in the constants, the globals and the closure of
     every code object of the body, and as an attribute of any module those
     reach. The old name test is kept as well, because a body that gets hold of
-    ``when`` in a way no static walk can follow still says ``when`` somewhere,
-    and over-reporting only costs a wrapper.
+    ``when`` in a way no static walk can follow still says ``when`` somewhere.
+
+    The search follows function-valued globals and closure cells, to
+    :data:`_GUARD_SEARCH_DEPTH` levels, because a body that calls a helper which
+    opens the guard opens it too. Bounded and cycle-safe, since two mutually
+    recursive helpers are an ordinary thing to write. Plain functions and bound
+    methods only; anything else reached through a name is left alone.
     """
-    codes = _code_objects(fn.__code__)
-    names: set[str] = set()
-    for code in codes:
-        names |= set(code.co_names)
-        for const in code.co_consts:
-            if const is when:
-                return True
-    if "when" in names:
-        return True
-    reachable: list[Any] = []
-    globals_ = getattr(fn, "__globals__", None) or {}
-    for name in names:
-        if name in globals_:
-            reachable.append(globals_[name])
-    for cell in getattr(fn, "__closure__", None) or ():
-        try:
-            reachable.append(cell.cell_contents)
-        except ValueError:  # pragma: no cover - a cell not yet filled in
+    pending = [(fn, 0)]
+    seen: set[int] = set()
+    while pending:
+        current, depth = pending.pop()
+        code = getattr(current, "__code__", None)
+        if code is None or id(current) in seen:
             continue
-    for value in reachable:
-        if value is when:
+        seen.add(id(current))
+        names: set[str] = set()
+        for nested in _code_objects(code):
+            names |= set(nested.co_names)
+            for const in nested.co_consts:
+                if const is when:
+                    return True
+        if "when" in names:
             return True
+        globals_ = getattr(current, "__globals__", None) or {}
+        for name in names:
+            if globals_.get(name) is when:
+                return True
+        for cell in getattr(current, "__closure__", None) or ():
+            try:
+                if cell.cell_contents is when:
+                    return True
+            except ValueError:  # pragma: no cover - a cell not yet filled in
+                continue
         # ``loopty.when(...)`` reaches the guard through a module. Attributes
         # are read off modules only: asking an arbitrary object for an
         # attribute can run a property, and this is a question about the body,
         # not an invitation to execute part of it.
-        if isinstance(value, ModuleType):
-            for name in names:
-                if getattr(value, name, None) is when:
-                    return True
+        for name in names:
+            value = globals_.get(name)
+            if isinstance(value, ModuleType) and any(
+                getattr(value, attribute, None) is when for attribute in names
+            ):
+                return True
+        if depth < _GUARD_SEARCH_DEPTH:
+            pending.extend(
+                (helper, depth + 1) for helper in _reachable_functions(current, names)
+            )
     return False
 
 
@@ -156,47 +203,87 @@ class Kernel(_Decorated):
         super().__init__(fn)
         self._term: Term | None = None
         self._facts: tuple[Fact, ...] | None = None
-        #: Whether the body opens a ``when`` block, and so needs masked writes.
+        self._arg_types: dict[str, Any] | None = None
+        #: Whether a ``when`` block is visible from the body, following the
+        #: helpers it calls. Reported, not relied on: :meth:`__call__` masks
+        #: every run. See :func:`opens_a_guard`.
         self.guards_writes = opens_a_guard(fn)
-        #: Whether the body iterates an array's ``.dom``, and so needs its
-        #: arguments to be :class:`~loopty.arr.Arr` rather than bare ndarrays.
-        self.iterates_domains = "dom" in fn.__code__.co_names
 
     # {{{ running
+
+    @property
+    def arg_types(self) -> dict[str, Any]:
+        """Each parameter's type, read off the annotations without tracing.
+
+        The same types :func:`loopty.trace.trace` gives the term, built here so
+        that a native call can check its arguments against them without paying
+        for a trace, and without loopty's native path depending on loopy.
+        """
+        if self._arg_types is None:
+            annotations = dict(self.annotations)
+            annotations.pop("return", None)
+            out: dict[str, Any] = {}
+            for name, annotation in annotations.items():
+                if isinstance(annotation, ArrSpec):
+                    out[name] = array_type(annotation, annotations, name)
+                else:
+                    out[name] = annotation
+            self._arg_types = out
+        return self._arg_types
+
+    def _bound(self, args: tuple, kwargs: dict) -> dict[str, Any]:
+        """The arguments of one call, by parameter name."""
+        code = self.fn.__code__
+        names = code.co_varnames[: code.co_argcount]
+        bound = dict(zip(names, args, strict=False))
+        bound.update(kwargs)
+        return bound
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """Run the body on real arrays: the reference implementation.
 
-        Arrays are handed through as they are, with two exceptions, both of
-        which share the caller's buffers so that every write still lands where
-        the caller is looking.
+        The arguments are checked against the kernel's declared types first, by
+        :mod:`loopty.contract`: two array parameters may not share storage, a
+        ragged argument has to agree with the counts array its type names, and
+        an element of a refined sort such as ``Fin[m]`` has to be one. These are
+        the assumptions the typing rules make about a *call*, and the native run
+        is a call, so it makes the same promise the compiled run does rather
+        than a weaker one.
 
-        A plain ``ndarray`` is wrapped in :class:`~loopty.arr.Arr` when the body
-        iterates a ``.dom``. Sizes come from the arrays, so such a body asks its
-        arguments for their domains, and a bare ndarray has none; without this
-        the reference run failed with ``AttributeError: 'ndarray' object has no
-        attribute 'dom'``, which names neither the cause nor the fix. Wrapping
-        reads a bare ndarray as the dense array it is; a ragged argument still
-        has to be built with :meth:`~loopty.arr.Arr.ragged`, because nothing in
-        an ndarray says where its rows end.
+        Every array argument is then wrapped in the masking view of
+        :func:`loopty.trace.mask_writes`, which shares the caller's buffer, so
+        the writes still land where the caller is looking. Two things follow
+        from doing it unconditionally.
 
-        A body that uses ``when`` has its arrays wrapped again, so that a write
-        under a false guard is dropped rather than performed.
+        *A write under a false ``when`` is dropped, whoever opened the block.*
+        It used to be wrapped only when the guard was visible in the body's own
+        code, so a body calling a helper that opens ``with when(cond):``
+        performed the guarded write and ``python file.py`` computed something
+        the lowered kernel does not. No inspection of the body can decide that
+        question in general; wrapping always removes it.
+
+        *A bare ``ndarray`` has a ``.dom``.* Sizes come from the arrays, so a
+        body asks its arguments for their domains, and an ndarray has none; the
+        view is an :class:`~loopty.arr.Arr` over the same buffer, so a caller
+        may pass either. A ragged argument still has to be built with
+        :meth:`~loopty.arr.Arr.ragged`, because nothing in an ndarray says where
+        its rows end.
+
+        The cost is one Python-level ``__getitem__`` per element access on the
+        reference run, which is the slow path by construction; the demos are
+        unchanged to the tenth of a second.
         """
+        check_arguments(self.arg_types, self._bound(args, kwargs))
         return self.fn(
             *(self._prepare(arg) for arg in args),
             **{name: self._prepare(value) for name, value in kwargs.items()},
         )
 
     def _prepare(self, value: Any) -> Any:
-        """One argument, as the body needs to see it."""
-        if (
-            self.iterates_domains
-            and isinstance(value, np.ndarray)
-            and not isinstance(value, Arr)
-        ):
+        """One argument, as the body needs to see it: a masking view of it."""
+        if isinstance(value, np.ndarray) and not isinstance(value, Arr):
             value = Arr(value)
-        return mask_writes(value) if self.guards_writes else value
+        return mask_writes(value)
 
     # }}}
 

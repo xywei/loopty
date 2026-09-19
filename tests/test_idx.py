@@ -11,6 +11,7 @@ from loopty.idx import (
     Layout,
     NonAffineLayout,
     RaggedLayout,
+    Reflections,
     axis_size,
     delinearize,
     is_affine,
@@ -23,6 +24,44 @@ from loopty.idx import (
 
 n = prim.Variable("n")
 m = prim.Variable("m")
+
+
+def test_the_same_term_always_reflects_to_the_same_parameter() -> None:
+    table = Reflections()
+    first = table.symbol(prim.Subscript(prim.Variable("cnt"), prim.Variable("r")))
+    again = table.symbol(prim.Subscript(prim.Variable("cnt"), prim.Variable("r")))
+    assert first == "nl_cnt_r"
+    assert again == first
+    assert table.get(first) is not None
+
+
+def test_two_terms_that_spell_the_same_get_two_parameters() -> None:
+    # ``cnt[r]`` and ``cnt*r`` both read ``nl_cnt_r`` once every non-word run
+    # has become an underscore. Giving them one parameter asserts they are
+    # equal, which is a thing isl would then happily reason from.
+    table = Reflections()
+    subscript = table.symbol(
+        prim.Subscript(prim.Variable("cnt"), prim.Variable("r"))
+    )
+    product = table.symbol(prim.Product((prim.Variable("cnt"), prim.Variable("r"))))
+    assert subscript == "nl_cnt_r"
+    assert product != subscript
+    assert product.startswith("nl_cnt_r")
+
+
+def test_a_reflected_parameter_keeps_clear_of_a_name_already_in_use() -> None:
+    table = Reflections(["nl_cnt_r"])
+    name = table.symbol(prim.Subscript(prim.Variable("cnt"), prim.Variable("r")))
+    assert name != "nl_cnt_r"
+    assert "nl_cnt_r" not in table
+
+
+def test_a_set_reflects_through_the_table_it_is_given() -> None:
+    table = Reflections(["nl_n_m"])
+    domain = to_set((Fin[n * m],), reflections=table)
+    (param,) = domain.get_var_names(isl.dim_type.param)
+    assert param != "nl_n_m"
+    assert param in table
 
 
 def test_axis_size_accepts_fin_int_and_term() -> None:

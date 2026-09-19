@@ -155,6 +155,10 @@ def in_bounds_facts(term: Term, owner: str) -> list[Fact]:
     """One fact per array access: the cells it reaches are cells the array has."""
     types = dict(term.params)
     sizes = flow.size_names(term)
+    # One table for the whole term: the cells an array has and the cells an
+    # access reaches are two isl sets that get compared, so both have to call
+    # ``cnt[r]`` by the parameter the statement domains already use.
+    reflections = term.reflections
     facts: list[Fact] = []
     for stmt in term.stmts:
         for array, indices, kind, inames, domain in flow.statement_accesses(stmt):
@@ -182,7 +186,7 @@ def in_bounds_facts(term: Term, owner: str) -> list[Fact]:
             try:
                 relation = flow.access_relation(inames, domain, indices)
                 reached = relation.range()
-                cells = flow.cell_set(arrtype, indices)
+                cells = flow.cell_set(arrtype, indices, reflections=reflections)
                 reached, cells = _align_both(reached, cells)
                 reached = flow.assume_sizes(reached, sizes)
                 cells = flow.assume_sizes(cells, sizes)

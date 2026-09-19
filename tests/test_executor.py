@@ -13,8 +13,11 @@ import sys
 
 import numpy as np
 import pytest
+from lanky.prelude import Nat, Real
 
 import hand_terms as ht
+from loopty import Arr, Fin, kernel
+from loopty import sum as reduce_sum
 from loopty.executor import (
     TOLERANCE,
     TOLERANCE_FLOOR,
@@ -229,3 +232,200 @@ def test_a_schedule_is_run_on_the_target_it_was_built_for() -> None:
     schedule = Schedule(ht.axpy_term())
     with pytest.raises(ValueError, match="was built for target"):
         executor().run(schedule, target="opencl")
+
+
+# {{{ the contract an argument list has to satisfy
+
+
+@kernel
+def csr_product(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    col: Arr[Fin[n], Fin[cnt], Fin[m]],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    x: Arr[Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The demo's product, so that a ragged type and a refined element are here."""
+    for r in y.dom:
+        y[r] = reduce_sum(val[r, j] * x[col[r, j]] for j in val.dom[r])
+
+
+#: Three rows of two, zero and three entries into a vector of four.
+CSR_COUNTS = [2, 0, 3]
+CSR_COLUMNS = [0, 1, 0, 2, 3]
+CSR_VALUES = [1.0, 2.0, 3.0, 4.0, 5.0]
+
+
+def csr_arguments(counts=None, columns=None, val_counts=None) -> dict:
+    """A consistent CSR call, with one piece of it replaceable per test."""
+    counts = CSR_COUNTS if counts is None else counts
+    return {
+        "cnt": Arr.from_numpy(np.array(counts, dtype=np.int64)),
+        "col": Arr.ragged(
+            counts,
+            values=CSR_COLUMNS if columns is None else columns,
+            dtype=np.int64,
+        ),
+        "val": Arr.ragged(
+            counts if val_counts is None else val_counts, values=CSR_VALUES
+        ),
+        "x": Arr.from_numpy(np.array([1.0, 10.0, 100.0, 1000.0])),
+        "y": Arr.zeros(len(counts)),
+    }
+
+
+def csr_want(arguments: dict) -> np.ndarray:
+    """The product, by hand, from the arguments a test built."""
+    offsets = arguments["val"].offsets
+    columns = arguments["col"].numpy()
+    values = arguments["val"].numpy()
+    vector = arguments["x"].numpy()
+    out = np.zeros(len(offsets) - 1)
+    for row in range(len(offsets) - 1):
+        for a in range(offsets[row], offsets[row + 1]):
+            out[row] += values[a] * vector[columns[a]]
+    return out
+
+
+def test_a_consistent_ragged_call_runs_and_matches_numpy() -> None:
+    arguments = csr_arguments()
+    out = executor().run(csr_product.trace(), **arguments)
+    assert np.allclose(out["y"], csr_want(arguments))
+
+
+def test_a_ragged_argument_must_agree_with_its_counts_family() -> None:
+    # ``val`` is laid out over [2, 1, 2] while its type says its rows are
+    # ``cnt[r]`` long, and ``cnt`` is [2, 0, 3]. The generated loop is bounded
+    # by ``cnt[r]`` and the access is flattened through the offsets, so row 1
+    # would run twice into cells row 0 does not own.
+    arguments = csr_arguments(val_counts=[2, 1, 2])
+    with pytest.raises(ValueError, match=r"ragged argument val"):
+        executor().run(csr_product.trace(), **arguments)
+
+
+def test_two_ragged_arguments_over_one_family_must_share_their_offsets() -> None:
+    # The term has no ``cnt`` parameter, so nothing decides between the two
+    # layouts; they are flattened through one offsets argument and have to be
+    # the same layout.
+    col = Arr.ragged([2, 0, 3], values=[0, 1, 0, 2, 3], dtype=np.int64)
+    val = Arr.ragged([3, 0, 2], values=[1.0, 2.0, 3.0, 4.0, 5.0])
+    with pytest.raises(ValueError, match="col and val"):
+        executor().run(
+            ht.spmv_term(),
+            off=np.array([0, 2, 2, 5], dtype=np.int32),
+            col=col,
+            val=val,
+            x=np.array([1.0, 10.0, 100.0, 1000.0]),
+            y=np.zeros(3),
+        )
+
+
+def test_explicit_offsets_must_agree_with_the_ragged_arguments_they_flatten() -> None:
+    arrays = {
+        "off": np.array([0, 1, 2, 5], dtype=np.int32),
+        "col": Arr.ragged([2, 0, 3], values=[0, 1, 0, 2, 3], dtype=np.int64),
+        "val": Arr.ragged([2, 0, 3], values=[1.0, 2.0, 3.0, 4.0, 5.0]),
+        "x": np.array([1.0, 10.0, 100.0, 1000.0]),
+        "y": np.zeros(3),
+    }
+    with pytest.raises(ValueError, match="offsets argument off"):
+        executor().run(ht.spmv_term(), **arrays)
+
+
+def test_an_element_outside_its_index_type_is_refused_at_the_upper_end() -> None:
+    # ``col: Arr[..., Fin[m]]`` is what discharges ``x[col[r, j]]`` in bounds
+    # *by type*: no isl call, no check in the generated code. A column equal to
+    # ``m`` reaches the compiled code as an address past the end of ``x``.
+    arguments = csr_arguments(columns=[0, 4, 0, 2, 3])
+    with pytest.raises(ValueError, match=r"col\[0, 1\] is 4"):
+        executor().run(csr_product.trace(), **arguments)
+
+
+def test_an_element_outside_its_index_type_is_refused_at_the_lower_end() -> None:
+    arguments = csr_arguments(columns=[0, 1, -1, 2, 3])
+    with pytest.raises(ValueError, match=r"col\[2, 0\] is -1"):
+        executor().run(csr_product.trace(), **arguments)
+
+
+def test_a_valid_index_array_is_not_refused() -> None:
+    # The boundary values, 0 and m - 1, are points of Fin[m] and have to pass.
+    arguments = csr_arguments(columns=[0, 3, 0, 2, 3])
+    out = executor().run(csr_product.trace(), **arguments)
+    assert np.allclose(out["y"], csr_want(arguments))
+
+
+def test_two_array_arguments_that_are_the_same_array_are_refused() -> None:
+    # Dependences are computed per array name, so nothing is ever reported
+    # between ``x`` and ``z`` and a schedule may run them in parallel. Called
+    # with one array for both, that schedule is a race.
+    shared = np.arange(4, dtype=np.float64)
+    with pytest.raises(ValueError, match="share storage"):
+        executor().run(
+            ht.axpy_term(), a=2.0, x=shared, y=np.ones(4), z=shared
+        )
+
+
+def test_two_array_arguments_that_overlap_are_refused() -> None:
+    buffer = np.arange(8, dtype=np.float64)
+    with pytest.raises(ValueError, match="share storage"):
+        executor().run(
+            ht.axpy_term(), a=2.0, x=buffer[:4], y=np.ones(4), z=buffer[2:6]
+        )
+
+
+def test_the_differential_test_refuses_an_alias_instead_of_copying_it_away() -> None:
+    # ``_copy`` gives every argument a buffer of its own, which destroys the
+    # alias, so without this check the two runs agree about a program that
+    # races. The check has to happen before the copies.
+    shared = np.arange(4, dtype=np.float64)
+    with pytest.raises(ValueError, match="share storage"):
+        executor().differential(
+            axpy_reference,
+            Schedule(ht.axpy_term()),
+            {"a": 2.0, "x": shared, "y": np.ones(4), "z": shared},
+        )
+
+
+def test_the_native_run_holds_its_arguments_to_the_same_contract() -> None:
+    # The native run is a call too, and the typing rules' assumptions about a
+    # call do not weaken because loopy is not involved.
+    with pytest.raises(ValueError, match=r"col\[0, 1\] is 4"):
+        csr_product(**csr_arguments(columns=[0, 4, 0, 2, 3]))
+    with pytest.raises(ValueError, match=r"ragged argument val"):
+        csr_product(**csr_arguments(val_counts=[2, 1, 2]))
+
+    shared = Arr.from_numpy(np.zeros(3))
+    with pytest.raises(ValueError, match="share storage"):
+        shift_into(shared, shared)
+
+    arguments = csr_arguments()
+    csr_product(**arguments)
+    assert np.allclose(arguments["y"].numpy(), csr_want(arguments))
+
+
+@kernel
+def shift_into(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):  # noqa: F821
+    """``v[i] = u[i]``: legal for disjoint arrays, a race for one array twice."""
+    for i in v.dom:
+        v[i] = u[i]
+
+
+@kernel
+def scale_counts(c: Arr[Fin[n], Nat], y: Arr[Fin[n], Real]):  # noqa: F821
+    """A ``Nat`` array that is not a counts family, so the Nat rule is alone."""
+    for i in y.dom:
+        y[i] = 2.0 * c[i]
+
+
+def test_a_negative_entry_of_a_nat_array_is_refused() -> None:
+    # ``Nat`` is the other element sort that constrains a value, and a negative
+    # count is what a ragged layout is least able to survive.
+    with pytest.raises(ValueError, match=r"c\[1\] is -1"):
+        executor().run(
+            scale_counts.trace(),
+            c=np.array([2, -1, 3], dtype=np.int64),
+            y=np.zeros(3),
+        )
+
+
+# }}}

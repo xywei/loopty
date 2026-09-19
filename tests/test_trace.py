@@ -213,3 +213,66 @@ def test_an_augmented_assignment_is_an_accumulation() -> None:
     stmt = term_of(add_into).stmts[0]
     assert stmt.kind == "accumulate"
     assert render(stmt.expr) == "y[i] + x[i]"
+
+
+# {{{ the parameters a trace reflects its non-affine bounds into
+
+
+def test_the_reflected_bound_is_recorded_on_the_term() -> None:
+    term = term_of(spmv)
+    reflected = dict(term.reflected)
+    assert list(reflected) == ["nl_cnt_r"]
+    assert render(reflected["nl_cnt_r"]) == "cnt[r]"
+
+
+def test_the_same_bound_in_two_statements_is_one_parameter() -> None:
+    # Both statements run over the same fiber, so both domains are bounded by
+    # ``cnt[r]``. One term, one parameter: two would be two unrelated unknowns
+    # and nothing would relate the loop the statements share.
+    def two_writes(
+        cnt: Arr[Fin[n], Nat],  # noqa: F821
+        val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+        y: Arr[Fin[n], Real],  # noqa: F821
+        z: Arr[Fin[n], Real],  # noqa: F821
+    ):
+        for r in y.dom:
+            for j in val.dom[r]:
+                y[r] = y[r] + val[r, j]
+                z[r] = z[r] + 2.0 * val[r, j]
+
+    term = term_of(two_writes)
+    assert [name for name, _ in term.reflected] == ["nl_cnt_r"]
+    assert len(term.stmts) == 2
+    for stmt in term.stmts:
+        assert "nl_cnt_r" in stmt.domain.get_var_names(isl.dim_type.param)
+
+
+def test_a_size_spelled_like_a_reflected_bound_keeps_its_own_parameter() -> None:
+    # ``nl_cnt_r`` is the name the bound ``cnt[r]`` would like. Here a size is
+    # already called that, and giving the bound the same name would assert that
+    # the length of a row equals the length of ``w``.
+    def shadowed(
+        cnt: Arr[Fin[n], Nat],  # noqa: F821
+        val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+        w: Arr[Fin[nl_cnt_r], Real],  # noqa: F821
+        y: Arr[Fin[n], Real],  # noqa: F821
+    ):
+        for r in y.dom:
+            y[r] = reduce_sum(val[r, j] * w[0] for j in val.dom[r])
+
+    term = term_of(shadowed)
+    assert "nl_cnt_r" in term.sizes
+    reflected = dict(term.reflected)
+    assert "nl_cnt_r" not in reflected
+    (name,) = reflected
+    assert name.startswith("nl_cnt_r")
+    assert render(reflected[name]) == "cnt[r]"
+
+    (stmt,) = term.stmts
+    (reduction,) = reductions_in(stmt.expr)
+    params = reduction.domain.get_var_names(isl.dim_type.param)
+    assert name in params
+    assert "nl_cnt_r" not in params
+
+
+# }}}

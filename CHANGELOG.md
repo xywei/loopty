@@ -90,6 +90,13 @@ with a pair of statement instances.
   transcripts under `docs/device-runs/`, and `docs/loopy-notes.md`: the loopy
   and islpy interactions that cost debugging time, each with its local
   workaround and the reason it is local.
+- **The argument contract** (`loopty.contract`). What a call owes a term, in one
+  place and asked by every entry point that runs a kernel: distinct array
+  parameters are distinct storage, a ragged argument agrees with its counts
+  family, and an element of a refined sort is one. Each is an assumption a
+  typing rule makes about the call rather than about the term, so none of them
+  can be established inside the type system, and a violation raises `ValueError`
+  naming the argument.
 - **Plugin surface** (`loopty.plugin`). `KernelTheory`, `IslOracle`,
   `LoopyExecutor` and `RunVerb`, exported through the four `lanky.*` entry-point
   groups. lanky never imports loopty; it finds these and asks each what it can do.
@@ -141,6 +148,49 @@ with a pair of statement instances.
   iname belongs to, not the first reduction found writing that output; with two
   reductions into one array the wrong contract used to be read. `realize` joins
   all of them and takes the strictest.
+- A ragged argument is checked against the counts array its type names, ragged
+  arguments sharing a counts family against each other, and explicit offsets
+  against both. The generated loop is bounded by `cnt[r]` while the flattened
+  access goes through the offsets, so a disagreement made compiled C read past
+  a row while the native run followed the `Arr`'s own counts.
+- Distinct array parameters may not share storage, and the executor and the
+  native run both refuse a call in which two of them do. Dependences are
+  computed per array name, so a kernel reading `x[i - 1]` and writing `y[i]`
+  may tag `i` parallel and then race when called with `x is y`; `differential`
+  copied each argument separately and destroyed the alias before either run
+  could see it.
+- An argument whose element sort is `Fin[m]` is checked to hold points of
+  `Fin[m]` at the executor boundary and on the native run. The typing rule marks
+  `x[col[r, j]]` decided *by type* from that declaration, so a `col` entry of
+  `-1` or of `m` used to reach generated C as an address outside `x`; it is now
+  a `ValueError` naming the first offending cell and its value.
+- Each reduction keeps its own iteration domain. Reduction domains were merged
+  by iname like statement domains, but a reduction cannot carry the narrowing
+  predicate that gives a statement its domain back, so two reductions over `j`
+  with bounds 2 and 4 both summed over four points. A binder is renamed to a
+  fresh iname only when the same name is already bound to a different domain, so
+  the name the source wrote survives wherever it is unambiguous.
+- Reflected parameter names are allocated rather than derived. `nl_cnt_r` was
+  spelled from the term by replacing non-word runs with underscores, which is
+  not injective (`cnt[r]` and `cnt*r` spell the same) and can collide with a
+  size the kernel declares, silently asserting two unknowns equal. One
+  `Reflections` table per term keys the parameter on the term, keeps the
+  readable spelling when it is free and suffixes it when it is not, and is
+  shared by every isl set built about that term; what it allocated travels on
+  `Term.reflected`, which is how lowering recognizes a ragged bound whose name
+  had to move.
+- Every native run wraps its array arguments in the masking views, so the
+  contract is now "a body sees a view sharing the caller's buffer" rather than
+  "an unguarded kernel sees the objects it was given". Whether a body opens a
+  `when` block used to be decided by inspecting that body, so a kernel calling a
+  helper that opens the guard performed the guarded write and `python file.py`
+  computed something the lowered kernel does not; the same inspection missed a
+  helper that asks an argument for its `.dom`, which failed with
+  `AttributeError: 'ndarray' object has no attribute 'dom'`. No inspection can
+  decide either question, so neither is asked; `opens_a_guard` still answers it
+  as well as a static walk can, following function-valued globals and closure
+  cells, but it reports rather than decides. The demos' native runs are within
+  a few percent of what they were.
 
 ### Changed
 
@@ -181,8 +231,8 @@ with a pair of statement instances.
   an ordinary uniform size.
 - The OpenCL target is written but never exercised on a development machine.
   Device runs happen elsewhere and are reported in `docs/device-runs.md`.
-- Ragged bounds are reflected into isl as one parameter per occurrence, so
-  `cnt[r]` and `cnt[r + 1]` are unrelated. An access against flat storage,
+- Ragged bounds are reflected into isl as one parameter per distinct bound term,
+  so `cnt[r]` and `cnt[r + 1]` are unrelated. An access against flat storage,
   `val[off[r] + j]`, is therefore reported `assumed` with the reason in its
   provenance, never `decided`; the ragged spelling `val[r, j]` is decided. See
   the module docstring of `loopty/flow.py`.

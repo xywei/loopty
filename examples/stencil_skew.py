@@ -76,9 +76,9 @@ def spike(nt: int = NT, nx: int = NX) -> np.ndarray:
 def initial(nt: int = NT, nx: int = NX) -> Arr:
     """The same data as a loopty runtime array.
 
-    The kernel iterates ``u.dom``, so the array it is handed natively has to be
-    an :class:`~loopty.arr.Arr` and not a bare numpy array: a domain is what an
-    ``Arr`` has and ndarray does not. The compiled run takes either.
+    The kernel iterates ``u.dom``, and a domain is what an
+    :class:`~loopty.arr.Arr` has. A bare numpy array works as well, natively and
+    compiled: a native run wraps every argument in a view sharing its buffer.
     """
     return Arr.from_numpy(spike(nt, nx))
 

@@ -38,6 +38,7 @@ from typing import Any
 
 import numpy as np
 
+from loopty.contract import check_arguments
 from loopty.lower import Lowering, lower_generic
 from loopty.term import ArrType, Term
 
@@ -208,13 +209,22 @@ class LoopyExecutor:
         name. The result is a dictionary of the arrays the kernel writes; the
         arrays passed in are also updated in place, so that a kernel whose output
         is a parameter behaves the same way compiled as it does in Python.
+
+        The arguments are checked against the term before anything is compiled
+        or run: distinct array parameters may not share storage, a ragged
+        argument has to agree with its counts family and with any offsets given
+        alongside it, and an element of a refined sort has to be one. All three
+        are properties of the call rather than of the term, and all three are
+        what a typing rule assumed when it decided something; see
+        :mod:`loopty.contract`.
         """
         target = kwargs.pop("target", None)
         term, kernel, lowering, target_name = _resolve(obj, target)
-        call = _call_arguments(term, lowering, args, kwargs)
-        call, empty = _pad_empty_arrays(call, lowering)
         names = [name for name, _ in term.params]
         supplied = {**dict(zip(names, args, strict=False)), **kwargs}
+        check_arguments(dict(term.params), supplied, lowering.ragged)
+        call = _call_arguments(term, lowering, args, kwargs)
+        call, empty = _pad_empty_arrays(call, lowering)
         if target_name == "opencl":
             out = self._run_opencl(kernel, lowering, call)
         else:
@@ -297,6 +307,11 @@ class LoopyExecutor:
         any accumulation the schedule marked reassociated, so the claim the fact
         records is "these agree to the accuracy the types promise".
 
+        ``args`` is checked against the term before either run, for the reasons
+        :meth:`run` gives and for one more: the comparison copies each argument
+        separately, so an alias between two of them would be destroyed here and
+        the two runs would agree about a program that races.
+
         An explicit ``reference`` has to cover *every* output of the lowering,
         exactly. It replaces the native run, so an output it omits is compared
         against nothing at all and the resulting ``TESTED`` fact would claim
@@ -304,6 +319,10 @@ class LoopyExecutor:
         is a caller error worth saying out loud rather than ignoring.
         """
         term, _lowered, lowering, _target = _resolve(schedule)
+        # Before the copies: ``_copy`` gives every argument a buffer of its own,
+        # which is exactly what hides an alias between two of them, and the
+        # native run would otherwise be the first thing to meet a bad index.
+        check_arguments(dict(term.params), args, lowering.ragged)
         native = dict(reference or {})
         if native:
             missing = [name for name in lowering.outputs if name not in native]

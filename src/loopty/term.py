@@ -137,6 +137,16 @@ class Term:
     parameters of every statement domain. ``post`` is the return annotation, a
     proposition about the parameters, which becomes a fact to establish rather
     than an assertion to trust.
+
+    ``reflected`` names the isl parameters that stand for the term's non-affine
+    subexpressions, each with the subexpression it stands for: ``nl_cnt_r`` and
+    ``cnt[r]``. It travels with the term because the allocation is a table
+    rather than a rule (see :class:`loopty.idx.Reflections`), so anything that
+    builds another isl set about this term, or that has to read ``cnt[r]`` back
+    out of a domain parameter, has to be told what was allocated instead of
+    guessing from the spelling. A term written by hand leaves it empty and is
+    read by spelling, which is what :data:`loopty.lower.COUNT_PARAM_REFLECTED`
+    is for.
     """
 
     name: str
@@ -144,11 +154,32 @@ class Term:
     sizes: tuple[str, ...]
     stmts: tuple[Stmt, ...]
     post: Expression | None
+    reflected: tuple[tuple[str, Expression], ...] = ()
 
     @property
     def param_names(self) -> tuple[str, ...]:
         """Parameter names, in signature order."""
         return tuple(name for name, _ in self.params)
+
+    @property
+    def reflections(self) -> Any:
+        """This term's :class:`loopty.idx.Reflections`, rebuilt from the record.
+
+        Every parameter it already allocated is adopted, and every name the term
+        uses is reserved, so a set built later (the cell set of an in-bounds
+        obligation, say) reuses the parameter for a term it has already seen and
+        cannot collide with one it has not.
+        """
+        from loopty.idx import Reflections
+
+        table = Reflections()
+        table.reserve(self.param_names)
+        table.reserve(self.sizes)
+        for stmt in self.stmts:
+            table.reserve(stmt.inames)
+        for name, expr in self.reflected:
+            table.adopt(name, expr)
+        return table
 
     def stmt(self, stmt_id: str) -> Stmt:
         """The statement with the given id."""
