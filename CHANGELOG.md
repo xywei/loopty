@@ -151,6 +151,6 @@ with a pair of statement instances.
   `val[off[r] + j]`, is therefore reported `assumed` with the reason in its
   provenance, never `decided`; the ragged spelling `val[r, j]` is decided. See
   the module docstring of `loopty/flow.py`.
-- The test suite treats `DeprecationWarning` as an error. Two exemptions are
+- The test suite treats `DeprecationWarning` as an error. Three exemptions are
   loopy's own and are listed in `pyproject.toml` and `tests/conftest.py`, with
   the reasons in `docs/loopy-notes.md`.

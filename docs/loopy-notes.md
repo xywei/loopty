@@ -92,10 +92,10 @@ is 3.14 cannot install loopty at all. `.github/workflows/ci.yml` runs 3.12 and
 a uv-provisioned CPython 3.13 rather than the host's 3.14. If the pin moves, the
 interpreter matrix moves with it.
 
-## 5. Two deprecation warnings that are loopy's, not loopty's
+## 5. Three deprecation warnings that are loopy's, not loopty's
 
 The test suite turns `DeprecationWarning` into an error so that one of loopty's
-own cannot hide in the noise of a run that compiles C. Two exemptions are listed
+own cannot hide in the noise of a run that compiles C. Three exemptions are listed
 in `pyproject.toml` and again in `tests/conftest.py` (the second because a `-W`
 on the command line overrides the ini file):
 
@@ -108,6 +108,15 @@ on the command line overrides the ini file):
   anything else) and then asks that BasicMap whether it is bijective. There is
   no spelling of the call from loopty that avoids the warning. This is the same
   method as in note 4, so it disappears when the pin does.
+* `Aff.is_equal with implicit conversion of self to PwAff is deprecated`.
+  Raised from `simplify_pw_aff` while loopy generates code for a loop whose
+  bound is a piecewise affine expression, which a tiled or split loop always
+  has. The other method from note 4. It is the one that hides: loopy keeps a
+  persistent code-generation cache under the user cache directory, and on a
+  machine that has generated the kernel before, code generation is skipped and
+  the warning never fires. A fresh CI runner has no cache and fails eight tests
+  on it. To see what CI sees, run the suite with `XDG_CACHE_HOME` pointed at an
+  empty directory.
 
 ## 6. loopy's own loop-nest choice is not the term's
 
