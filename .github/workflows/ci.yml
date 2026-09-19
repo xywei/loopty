@@ -5,15 +5,55 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
+        # 3.13 is the ceiling, and it is the `islpy<2026` pin that sets it, not
+        # a preference: loopy 2025.2 needs islpy 2025.x, which publishes no
+        # cp314 wheels, so 3.14 cannot install loopty at all. The pin and this
+        # matrix move together; see docs/loopy-notes.md.
         python-version: ["3.12", "3.13"]
+    env:
+      # loopty depends on lanky, and lanky's Lean oracle is absent here by
+      # design: nothing installs the `lean` extra, and this makes the oracle a
+      # declared no-op even if a runner image ships `lean` on PATH. loopty's
+      # obligations are decided by isl and by the typing rules, so the ledger a
+      # check prints in CI is the same one it prints on a machine without Lean.
+      LANKY_LEAN_DISABLE: "1"
     steps:
-      - uses: actions/checkout@v5
+      # loopty resolves lanky from a sibling checkout:
+      #   [tool.uv.sources] lanky = { path = "../lanky", editable = true }
+      # so the two repositories are laid out side by side here, exactly as they
+      # are on a development machine.
+      - name: Check out loopty
+        uses: actions/checkout@v5
+        with:
+          path: loopty
+
+      - name: Clone lanky next to it
+        env:
+          # The PR's head branch on a pull request, the pushed branch otherwise.
+          LANKY_REF: ${{ github.head_ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+          remote=https://github.com/xywei/lanky.git
+          if [ -n "${LANKY_REF}" ] \
+             && git ls-remote --exit-code --heads "${remote}" "${LANKY_REF}" >/dev/null 2>&1
+          then
+            echo "lanky has a branch named ${LANKY_REF}; using it"
+            git clone --depth 1 --branch "${LANKY_REF}" "${remote}" lanky
+          else
+            echo "no lanky branch named '${LANKY_REF:-<none>}'; using main"
+            git clone --depth 1 --branch main "${remote}" lanky
+          fi
+          git -C lanky log -1 --format='lanky at %h on %D'
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -21,10 +61,24 @@ jobs:
           enable-cache: true
 
       - name: Sync dependencies
+        working-directory: loopty
         run: uv sync --group dev --python ${{ matrix.python-version }}
 
       - name: Ruff
+        working-directory: loopty
         run: uv run ruff check .
 
       - name: Pytest
+        working-directory: loopty
         run: uv run pytest -q
+
+      # The three commands the project promises, on the worked example, so
+      # that a change which keeps the unit tests green but breaks the ledger or
+      # the C-target run is still caught.
+      - name: Check the worked example
+        working-directory: loopty
+        run: uv run lanky check examples/spmv.py
+
+      - name: Run the worked example
+        working-directory: loopty
+        run: uv run loopty run examples/spmv.py

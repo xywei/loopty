@@ -1,0 +1,121 @@
+# Notes on loopy and islpy
+
+Six interactions with loopty's dependencies that cost real debugging time, each
+with the local workaround and the reason it is local. No upstream issues were
+filed: these are notes so that the next person meets the answer instead of the
+symptom.
+
+Versions these were observed against: loopy 2025.2, islpy 2025.2.5, codepy as
+pinned by loopy, on CPython 3.13.
+
+## 1. The C target's host wrapper and device signature disagree about arguments
+
+**Symptom.** A kernel with a value argument that occurs only in another
+argument's *shape* segfaults when it is called. No diagnostic, no Python
+traceback: the process dies inside the compiled code.
+
+**Cause.** loopy's C target generates the device function's signature from the
+names the kernel body actually needs, and the host wrapper's call from every
+argument the kernel has. A `ValueArg` that appears only in a shape is in the
+second list and not in the first, so the wrapper passes one more argument than
+the function takes and every subsequent argument lands in the wrong register.
+
+**Local fix.** `lower._used_names` collects the names the generated code
+mentions (domain parameters, and variables in instructions), and `_arguments`
+declares only those as value arguments. Arrays whose shape mentions an
+undeclared name are then declared with `shape=None`.
+
+**What that costs.** loopy no longer checks the shape of those arrays, and
+loopty does not check it either, so a wrongly sized array is undefined
+behaviour rather than an error. The ragged flat buffers and `x` in the spmv demo
+are in that position. Checking shapes at the executor boundary would close it.
+
+## 2. `pow` without `math.h` on the C target
+
+**Symptom.** `r2 ** -0.5` in a kernel body produces C that calls `pow` without
+including `math.h`, and gcc refuses the generated file.
+
+**Cause.** loopy emits the call but does not register `pow` as a target
+callable, so the header that declares it is never requested.
+
+**Local fix.** Do not write `x ** -0.5`. Build the call to the target's library
+function explicitly: `pymbolic.primitives.Call(Variable("sqrt"), (r2,))`, which
+loopy resolves against the target and which does pull in the header.
+`examples/p2p.py` has the dual-mode pattern (numpy on numbers, a `Call` on a
+term), and it is the pattern any elementary function needs until loopty grows a
+surface of its own for them.
+
+**Related.** The callee of a `prim.Call` must not be collected as a *used name*,
+or `sqrt` is declared as a value argument and loopy refuses the kernel with
+"value argument 'sqrt' was not given". `lower._used_names` subtracts callees for
+that reason.
+
+## 3. A zero-length array cannot be passed to the C target
+
+**Symptom.** A CSR matrix all of whose rows are empty fails with
+`TypeError: expected c_double instead of float`, raised from
+`loopy/target/c/c_execution.py`.
+
+**Cause.** The C invoker passes an array argument as a pointer and, for an empty
+one, tries to produce a null pointer by calling the pointer type on `0.0`:
+`arg_t(0.0) if arg.size == 0 else ...`. `POINTER(c_double)(0.0)` is not a thing.
+
+**Local fix.** `executor._pad_empty_arrays` gives a zero-length array argument
+one cell before the call and restores the original afterwards, so the pad is
+never mistaken for a result. It is sound exactly because the array is empty: no
+index into it is in bounds, so no generated loop can touch the added cell.
+
+**The limit of the fix.** Only arguments loopy declares *without* a shape are
+padded, which for a lowered term means the flat buffer of a ragged axis and
+nothing else. An argument that has a declared shape is how loopy infers the size
+parameters, and lengthening one would make it infer the wrong size (padding an
+empty `cnt` makes loopy believe `n == 1` and then complain that `off_cnt` should
+have two entries). So a CSR matrix whose rows are all empty runs, and a kernel
+called with *no rows at all* does not: every argument is empty then, including
+the shape-bearing ones, and the call reaches loopy's `TypeError`.
+`tests/test_adversarial.py` covers both, the second as a pinned failure.
+
+## 4. Why `islpy<2026`, and why CI stays on 3.12 and 3.13
+
+**The pin.** loopy 2025.2 calls two islpy methods that islpy 2026.2.2 removed:
+`Aff.is_equal`, in `simplify_pw_aff` during code generation for a tiled loop
+nest, and `BasicMap.is_bijective`, in `map_domain`, which is what the skew uses.
+With islpy 2026 installed the whole stencil demo fails with an `AttributeError`
+raised from inside loopy. `pyproject.toml` therefore carries `islpy<2026` with
+that reason beside it. Drop the ceiling when a loopy release supports islpy
+2026, not before.
+
+**The second consequence, which is easy to miss.** islpy 2025.x publishes no
+cp314 wheels, so the pin also pins the interpreter: a machine whose only Python
+is 3.14 cannot install loopty at all. `.github/workflows/ci.yml` runs 3.12 and
+3.13 for that reason, `requires-python` is `>=3.12`, and the device runs needed
+a uv-provisioned CPython 3.13 rather than the host's 3.14. If the pin moves, the
+interpreter matrix moves with it.
+
+## 5. Two deprecation warnings that are loopy's, not loopty's
+
+The test suite turns `DeprecationWarning` into an error so that one of loopty's
+own cannot hide in the noise of a run that compiles C. Two exemptions are listed
+in `pyproject.toml` and again in `tests/conftest.py` (the second because a `-W`
+on the command line overrides the ini file):
+
+* `'GCCToolchain.copy' is deprecated`. loopy builds its C toolchain with
+  codepy's deprecated `Toolchain.copy` inside `ExecutableCTarget.__init__`,
+  before loopty is handed anything. Unreachable from here.
+* `BasicMap.is_bijective with implicit conversion of self to Map is
+  deprecated`. `lp.map_domain`, which the skew uses, requires an
+  `isl.BasicMap` (its `_find_aff_subst_from_map` raises `RuntimeError` for
+  anything else) and then asks that BasicMap whether it is bijective. There is
+  no spelling of the call from loopty that avoids the warning. This is the same
+  method as in note 4, so it disappears when the pin does.
+
+## 6. loopy's own loop-nest choice is not the term's
+
+Not a bug, but the reason `lower_generic` ends by calling `prioritize_loops`.
+Given the Jacobi stencil, loopy's scheduler puts the space loop outside the time
+loop, which reverses a dependence relative to the body as written. The order the
+body was written in is the order the term means, so lowering pins it; any
+departure is a schedule, hence a cast, hence checked. `schedule._with_priority`
+then *replaces* the priority at each accepted step rather than adding to it,
+because `lp.prioritize_loops` accumulates and an interchange would otherwise
+contradict the priority set before it.
