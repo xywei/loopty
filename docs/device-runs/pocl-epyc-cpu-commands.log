@@ -1,0 +1,195 @@
+# loopty demo commands, PYOPENCL_CTX=0:0
+
+### python examples/reshape_layouts.py
+normalize(Fin[n * m]) = (Fin(n), Fin(m))
+row-major layout    { [i0, i1] -> [4i0 + i1] : 0 <= i0 <= 2 and 0 <= i1 <= 3 }
+column-major layout { [i0, i1] -> [i0 + 3i1] : 0 <= i0 <= 2 and 0 <= i1 <= 3 }
+
+STATUS   BY   WHERE                   OWNER    STATEMENT                                                       
+-------  ---  ----------------------  -------  ----------------------------------------------------------------
+decided  isl  reshape_layouts.py:3x4  layouts  the row-major layout addresses each cell of the matrix exactl...
+decided  isl  reshape_layouts.py:3x4  layouts  the column-major layout addresses each cell exactly once
+decided  isl  reshape_layouts.py:3x4  layouts  delinearizing a flat address lands inside the matrix
+decided  isl  reshape_layouts.py:3x4  layouts  delinearization undoes the row-major layout
+
+4 facts: 4 decided
+
+one flat vector: [ 0.  1.  2.  3.  4.  5.  6.  7.  8.  9. 10. 11.]
+read row-major:
+[[ 0.  1.  2.  3.]
+ [ 4.  5.  6.  7.]
+ [ 8.  9. 10. 11.]]
+read column-major:
+[[ 0.  3.  6.  9.]
+ [ 1.  4.  7. 10.]
+ [ 2.  5.  8. 11.]]
+
+schedule: Schedule(transpose, target='c').split(i, 2).interchange(i_out, j, i_in)
+  loop nest: i_out j i_in
+  decided  isl  split(i, 2) renames the instances of transpose one for one
+  decided  isl  the order after split(i, 2) runs every dependence of transpose forward
+  decided  isl  interchange(i_out, j, i_in) renames the instances of transpose one for one
+  decided  isl  the order after interchange(i_out, j, i_in) runs every dependence of transpose forward
+
+transposed natively:
+[[ 0.  4.  8.]
+ [ 1.  5.  9.]
+ [ 2.  6. 10.]
+ [ 3.  7. 11.]]
+  b: difference 0 within 6.6e-05 (approx) -> tested
+### exit=0
+
+### lanky check examples/reshape_layouts.py
+STATUS   BY   WHERE                  OWNER      STATEMENT                                             
+-------  ---  ---------------------  ---------  ------------------------------------------------------
+decided  isl  reshape_layouts.py:66  rows_of    mat[i, j] is in bounds for every instance of S0
+decided  isl  reshape_layouts.py:66  rows_of    flat[4*i + j] is in bounds for every instance of S0
+decided  isl  reshape_layouts.py:66  rows_of    distinct instances of S0 write distinct cells of mat
+decided  isl  reshape_layouts.py:56  rows_of    the source order runs every dependence forward in time
+decided  isl  reshape_layouts.py:78  cols_of    mat[i, j] is in bounds for every instance of S0
+decided  isl  reshape_layouts.py:78  cols_of    flat[i + 3*j] is in bounds for every instance of S0
+decided  isl  reshape_layouts.py:78  cols_of    distinct instances of S0 write distinct cells of mat
+decided  isl  reshape_layouts.py:69  cols_of    the source order runs every dependence forward in time
+decided  isl  reshape_layouts.py:90  transpose  b[j, i] is in bounds for every instance of S0
+decided  isl  reshape_layouts.py:90  transpose  a[i, j] is in bounds for every instance of S0
+decided  isl  reshape_layouts.py:90  transpose  distinct instances of S0 write distinct cells of b
+decided  isl  reshape_layouts.py:81  transpose  the source order runs every dependence forward in time
+
+12 facts: 12 decided
+### exit=0
+
+### loopty run examples/reshape_layouts.py --target opencl
+transpose: Schedule(transpose, target='c').split(i, 2).interchange(i_out, j, i_in)
+  b: difference 0 within 6.6e-05 (approx) -> tested
+rows_of: Schedule(rows_of, target='opencl')
+  mat: difference 0 within 6.6e-05 (approx) -> tested
+cols_of: Schedule(cols_of, target='opencl')
+  mat: difference 0 within 6.6e-05 (approx) -> tested
+
+STATUS   BY     WHERE                  OWNER      STATEMENT                                                               
+-------  -----  ---------------------  ---------  ------------------------------------------------------------------------
+decided  isl    reshape_layouts.py:90  transpose  split(i, 2) renames the instances of transpose one for one
+decided  isl    reshape_layouts.py:90  transpose  the order after split(i, 2) runs every dependence of transpose forward
+decided  isl    reshape_layouts.py:90  transpose  interchange(i_out, j, i_in) renames the instances of transpose one fo...
+decided  isl    reshape_layouts.py:90  transpose  the order after interchange(i_out, j, i_in) runs every dependence of ...
+tested   loopy  reshape_layouts.py:90  transpose  the scheduled run of transpose agrees with the native run to the accu...
+tested   loopy  reshape_layouts.py:66  rows_of    the scheduled run of rows_of agrees with the native run to the accura...
+tested   loopy  reshape_layouts.py:78  cols_of    the scheduled run of cols_of agrees with the native run to the accura...
+
+7 facts: 4 decided, 3 tested
+### exit=0
+
+### python examples/spmv.py
+counts  = [3 2 2 1 1 0]
+offsets = [0 3 5 7 8 9 9]
+y       = [ 0.4821 -0.8792 -0.0973 -0.5674  0.4291  0.    ]
+dense   = [ 0.4821 -0.8792 -0.0973 -0.5674  0.4291  0.    ]
+
+scan_monotone: n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat] | off(0) == 0, forall r in Fin(n). off(r + 1) == off(r) + cnt(r) |- forall a in Fin(n + 1), b in Fin(n + 1) where a <= b. off(a) <= off(b)
+  ok after 50 valid draws of 50
+
+schedule: Schedule(spmv, target='c').split(j, 2).realize('y', tree=True)
+  decided  isl  split(j, 2) renames the instances of spmv one for one
+  decided  isl  the order after split(j, 2) runs every dependence of spmv forward
+  decided  isl  realize('y', tree=True) renames the instances of spmv one for one
+  decided  isl  the order after realize('y', tree=True) runs every dependence of spmv forward
+  decided  isl  the accumulation into y is reassociated by realize('y', tree=True), so its result is compared at 'reassoc'
+device schedule: Schedule(spmv, target='c').tag(r='g.0').split(j, 32).tag(j_in='l.0').realize('y', tree=True) (checked here, run on a device)
+
+  y: difference 5.55e-17 within 2.46e-06 (approx) -> tested
+### exit=0
+
+### lanky check examples/spmv.py
+STATUS   BY             WHERE        OWNER          STATEMENT                                                               
+-------  -------------  -----------  -------------  ------------------------------------------------------------------------
+decided  isl            spmv.py:74   scan           off[0] is in bounds for every instance of S0
+decided  isl            spmv.py:76   scan           off[r + 1] is in bounds for every instance of S1
+decided  isl            spmv.py:76   scan           off[r] is in bounds for every instance of S1
+decided  isl            spmv.py:76   scan           cnt[r] is in bounds for every instance of S1
+decided  isl            spmv.py:74   scan           distinct instances of S0 write distinct cells of off
+decided  isl            spmv.py:76   scan           distinct instances of S1 write distinct cells of off
+decided  isl            spmv.py:64   scan           the source order runs every dependence forward in time
+assumed  -              spmv.py:64   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+tested   property-test  spmv.py:79   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat] | off(0) ==...
+decided  isl            spmv.py:107  spmv           y[r] is in bounds for every instance of S0
+decided  isl            spmv.py:107  spmv           val[r, j] is in bounds for every instance of S0
+decided  type           spmv.py:107  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
+decided  isl            spmv.py:107  spmv           col[r, j] is in bounds for every instance of S0
+decided  isl            spmv.py:107  spmv           distinct instances of S0 write distinct cells of y
+decided  isl            spmv.py:97   spmv           the source order runs every dependence forward in time
+decided  type           spmv.py:107  spmv           the accumulation into y[r] over j is reassoc
+assumed  -              spmv.py:110  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
+
+17 facts: 2 assumed, 14 decided, 1 tested
+### exit=0
+
+### loopty run examples/spmv.py --target opencl
+spmv: Schedule(spmv, target='c').split(j, 2).realize('y', tree=True)
+  y: difference 5.55e-17 within 2.46e-06 (approx) -> tested
+scan: Schedule(scan, target='opencl')
+  off: difference 0 within 0 (exact) -> tested
+
+STATUS   BY     WHERE        OWNER  STATEMENT                                                               
+-------  -----  -----------  -----  ------------------------------------------------------------------------
+decided  isl    spmv.py:107  spmv   split(j, 2) renames the instances of spmv one for one
+decided  isl    spmv.py:107  spmv   the order after split(j, 2) runs every dependence of spmv forward
+decided  isl    spmv.py:107  spmv   realize('y', tree=True) renames the instances of spmv one for one
+decided  isl    spmv.py:107  spmv   the order after realize('y', tree=True) runs every dependence of spmv...
+decided  isl    spmv.py:107  spmv   the accumulation into y is reassociated by realize('y', tree=True), s...
+tested   loopy  spmv.py:107  spmv   the scheduled run of spmv agrees with the native run to the accuracy ...
+tested   loopy  spmv.py:74   scan   the scheduled run of scan agrees with the native run to the accuracy ...
+
+7 facts: 5 decided, 2 tested
+### exit=0
+
+### python examples/stencil_skew.py
+native, the 16 by 16 array (first six levels around the spike):
+[[0.    0.    0.    1.    0.    0.    0.   ]
+ [0.    0.    0.5   0.    0.5   0.    0.   ]
+ [0.    0.25  0.    0.5   0.    0.25  0.   ]
+ [0.125 0.    0.375 0.    0.375 0.    0.125]
+ [0.    0.25  0.    0.375 0.    0.25  0.   ]
+ [0.156 0.    0.312 0.    0.312 0.    0.156]]
+
+Schedule(jacobi).tile('t', 'i', 8, 8) ->
+  IllegalCast: tile(t,i,8,8) illegal: instance S0[t=0, i=8] writes u[1, 8] read by S0[t=1, i=7] scheduled earlier
+  witness: S0{'t': 0, 'i': 8} runs before S0{'t': 1, 'i': 7} at {'nt': 16, 'nx': 16}
+
+accepted: Schedule(jacobi, target='c').skew(i, by='t').tile(t,i,8,8)
+  loop nest: t_outer i_outer t_inner i_inner
+  decided  isl  skew(i, by='t') renames the instances of jacobi one for one
+  decided  isl  the order after skew(i, by='t') runs every dependence of jacobi forward
+  decided  isl  tile(t,i,8,8) renames the instances of jacobi one for one
+  decided  isl  the order after tile(t,i,8,8) runs every dependence of jacobi forward
+
+  u: difference 0 within 1.55e-05 (approx) -> tested
+  the native run matches the hand-written sweep: True
+### exit=0
+
+### lanky check examples/stencil_skew.py
+STATUS   BY   WHERE               OWNER   STATEMENT                                             
+-------  ---  ------------------  ------  ------------------------------------------------------
+decided  isl  stencil_skew.py:62  jacobi  u[t + 1, i] is in bounds for every instance of S0
+decided  isl  stencil_skew.py:62  jacobi  u[t, i - 1] is in bounds for every instance of S0
+decided  isl  stencil_skew.py:62  jacobi  u[t, i + 1] is in bounds for every instance of S0
+decided  isl  stencil_skew.py:62  jacobi  distinct instances of S0 write distinct cells of u
+decided  isl  stencil_skew.py:54  jacobi  the source order runs every dependence forward in time
+
+5 facts: 5 decided
+### exit=0
+
+### loopty run examples/stencil_skew.py --target opencl
+jacobi: Schedule(jacobi, target='c').skew(i, by='t').tile(t,i,8,8)
+  u: difference 0 within 1.55e-05 (approx) -> tested
+
+STATUS   BY     WHERE               OWNER   STATEMENT                                                               
+-------  -----  ------------------  ------  ------------------------------------------------------------------------
+decided  isl    stencil_skew.py:62  jacobi  skew(i, by='t') renames the instances of jacobi one for one
+decided  isl    stencil_skew.py:62  jacobi  the order after skew(i, by='t') runs every dependence of jacobi forward
+decided  isl    stencil_skew.py:62  jacobi  tile(t,i,8,8) renames the instances of jacobi one for one
+decided  isl    stencil_skew.py:62  jacobi  the order after tile(t,i,8,8) runs every dependence of jacobi forward
+tested   loopy  stencil_skew.py:62  jacobi  the scheduled run of jacobi agrees with the native run to the accurac...
+
+5 facts: 4 decided, 1 tested
+### exit=0
+

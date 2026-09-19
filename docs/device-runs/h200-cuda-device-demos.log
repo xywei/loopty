@@ -1,0 +1,148 @@
+Traceback (most recent call last):
+  File "<run>/.venv/lib/python3.13/site-packages/pytools/persistent_dict.py", line 755, in fetch
+    stored_key, value = self._fetch(keyhash)
+                        ~~~~~~~~~~~^^^^^^^^^
+  File "<run>/.venv/lib/python3.13/site-packages/pytools/persistent_dict.py", line 745, in _fetch_uncached
+    raise KeyError
+KeyError
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "<run>/.venv/lib/python3.13/site-packages/loopy/tools.py", line 946, in wrapper
+    result = transform_cache[cache_key]
+             ~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "<run>/.venv/lib/python3.13/site-packages/pytools/persistent_dict.py", line 588, in __getitem__
+    return self.fetch(key)
+           ~~~~~~~~~~^^^^^
+pytools.persistent_dict.NoSuchEntryError: ('preprocess_program', 'preprocess_program', (TranslationUnit(callables_table=constantdict({'spmv': CallableKernel(arg_id_to_dtype=None, arg_id_to_descr=None, subkernel=LoopKernel(domains=[BasicSet("[n] -> { [r] : n >= 0 and 0 <= r < n }"), BasicSet("[r, n, nl_cnt_r] -> { [j_out, j_in] : r >= 0 and n > r and j_in >= 0 and -32j_out <= j_in <= 31 and j_in < nl_cnt_r - 32j_out }")], instructions=[Assignment(assignee=Variable('nl_cnt_r'), atomicity=(), conflicts_with_groups=frozenset(), depends_on_is_final=False, expression=Subscript(Variable('cnt'), (Variable('r'),)), groups=frozenset(), happens_after=constantdict({}), id='nl_cnt_r_init', no_sync_with=frozenset(), predicates=frozenset(), priority=0, tags=frozenset(), temp_var_type=Optional(), within_inames=frozenset({'r'}), within_inames_is_final=False), Assignment(assignee=Subscript(Variable('y'), (Variable('r'),)), atomicity=(), conflicts_with_groups=frozenset(), depends_on_is_final=False, expression=Reduction(SumReductionOperation, ('j_out', 'j_in'), Product((Subscript(Variable('val'), (Sum((..., ...)),)), Subscript(Variable('x'), (Subscript(..., (...,)),)))), False), groups=frozenset(), happens_after=constantdict({'nl_cnt_r_init': HappensAfter(variable_name=None, instances_rel=None)}), id='S0', no_sync_with=frozenset(), predicates=frozenset(), priority=0, tags=frozenset(), temp_var_type=Optional(), within_inames=frozenset({'r'}), within_inames_is_final=False)], args=[<n: ValueArg, type: np:dtype('int32')>, <cnt: type: np:dtype('int32'), shape: (n), dim_tags: (N0:stride:1) in aspace: global>, <col: ArrayArg, type: np:dtype('int32'), shape: unknown in aspace: global>, <val: ArrayArg, type: np:dtype('float64'), shape: unknown in aspace: global>, <x: ArrayArg, type: np:dtype('float64'), shape: unknown in aspace: global>, <y: type: np:dtype('float64'), shape: (n), dim_tags: (N0:stride:1) in/out aspace: global>, <off_cnt: type: np:dtype('int32'), shape: (n + 1), dim_tags: (N0:stride:1) in aspace: global>], assumptions=BasicSet("[n, nl_cnt_r] -> {  :  }"), temporary_variables={'nl_cnt_r': <nl_cnt_r: type: np:dtype('int32'), shape: () aspace: auto>}, inames={'r': Iname(name='r', tags=frozenset({GroupInameTag(axis=0)})), 'j_out': Iname(name='j_out', tags=frozenset()), 'j_in': Iname(name='j_in', tags=frozenset({LocalInameTag(axis=0)}))}, substitutions={}, options=Options(allow_fp_reordering=True, allow_terminal_colors=True, annotate_inames=False, build_options=[], check_dep_resolution=True, cl_exec_manage_array_events=True, disable_global_barriers=False, edit_code=False, enforce_array_accesses_within_bounds=True, enforce_variable_access_ordered=True, insert_gbarriers=False, no_numpy=False, return_dict=False, skip_arg_checks=False, trace_assignment_values=False, trace_assignments=False, write_code=False, write_wrapper=False), target=<loopy.target.pyopencl.PyOpenCLTarget object at 0x7fbf2ff64f50>, tags=frozenset(), state=<KernelState.INITIAL: 0>, name='spmv', preambles=(), preamble_generators=(), symbol_manglers=(), linearization=None, iname_slab_increments=constantdict({'j_out': (0, 0)}), loop_priority=frozenset(), applied_iname_rewrites=({Variable('j'): Sum((Variable('j_in'), Product((Variable('j_out'), 32))))},), index_dtype=np:dtype('int32'), silenced_warnings=frozenset(), overridden_get_grid_sizes_for_insn_ids=None))}), target=<loopy.target.pyopencl.PyOpenCLTarget object at 0x7fbf2ff64f50>, entrypoints=frozenset({'spmv'})),), {})
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "<run>/device_demos.py", line 80, in case
+    fn()
+    ~~^^
+  File "<run>/device_demos.py", line 152, in spmv_device_schedule
+    fact = ex.differential(spmv_mod.spmv, sched, inputs)
+loopy.diagnostic.LoopyError: Reduction over 'j_out, j_in' contains both parallel and sequential inames. It must be split (using split_reduction_{in,out}ward) before code generation.
+<run>/.venv/lib/python3.13/site-packages/pyopencl/__init__.py:570: CompilerWarning: Non-empty compiler output encountered. Set the environment variable PYOPENCL_COMPILER_OUTPUT=1 to see more.
+  lambda: self._prg.build(options_bytes, devices),
+PYOPENCL_CTX  = 1:0
+platform      = NVIDIA CUDA
+platform ver  = OpenCL 3.0 CUDA 13.3.44
+device        = NVIDIA H200 NVL
+device type   = ALL | GPU
+driver        = 610.43.02
+fp64          = True
+compute units = 132
+pyopencl      = 2026.1.4
+loopy         = ?
+islpy         = 2025.2.5
+
+========================================================================
+spmv: split(j,2).realize(y) on the device
+========================================================================
+schedule: Schedule(spmv, target='opencl').split(j, 2).realize('y', tree=True)
+  decided  isl  split(j, 2) renames the instances of spmv one for one
+  decided  isl  the order after split(j, 2) runs every dependence of spmv forward
+  decided  isl  realize('y', tree=True) renames the instances of spmv one for one
+  decided  isl  the order after realize('y', tree=True) runs every dependence of spmv forward
+  decided  isl  the accumulation into y is reassociated by realize('y', tree=True), so its result is compared at 'reassoc'
+  y: difference 5.55e-17 within 2.46e-06 (approx) -> tested
+  agreement fact: tested
+  device y   = [ 0.482074 -0.879172 -0.097257 -0.567397  0.42913   0.      ]
+  dense ref  = [ 0.482074 -0.879172 -0.097257 -0.567397  0.42913   0.      ]
+  max |diff| = 5.551115123125783e-17
+
+========================================================================
+spmv: scan on the device
+========================================================================
+schedule: Schedule(scan, target='opencl')
+  off: difference 0 within 0 (exact) -> tested
+  agreement fact: tested
+
+========================================================================
+spmv: tag(r=g.0).split(j,32).tag(j_in=l.0).realize(y) on the device
+========================================================================
+schedule: Schedule(spmv, target='opencl').tag(r='g.0').split(j, 32).tag(j_in='l.0').realize('y', tree=True)
+  decided  isl  tag(r='g.0') renames the instances of spmv one for one
+  decided  isl  the order after tag(r='g.0') runs every dependence of spmv forward
+  decided  isl  split(j, 32) renames the instances of spmv one for one
+  decided  isl  the order after split(j, 32) runs every dependence of spmv forward
+  decided  isl  tag(j_in='l.0') renames the instances of spmv one for one
+  decided  isl  the order after tag(j_in='l.0') runs every dependence of spmv forward
+  decided  isl  the accumulation into y is reassociated by tag(j_in='l.0'), so its result is compared at 'reassoc'
+  decided  isl  realize('y', tree=True) renames the instances of spmv one for one
+  decided  isl  the order after realize('y', tree=True) runs every dependence of spmv forward
+FAILED: LoopyError
+Reduction over 'j_out, j_in' contains both parallel and sequential inames. It must be split (using split_reduction_{in,out}ward) before code generation.
+--- traceback (last frames) ---
+
+========================================================================
+spmv: tag(r=g.0), rows across work groups, on the device
+========================================================================
+schedule: Schedule(spmv, target='opencl').tag(r='g.0')
+  decided  isl  tag(r='g.0') renames the instances of spmv one for one
+  decided  isl  the order after tag(r='g.0') runs every dependence of spmv forward
+  y: difference 2.78e-17 within 2.46e-06 (approx) -> tested
+  agreement fact: tested
+
+========================================================================
+stencil: tile(t,i,8,8) must be refused (device target)
+========================================================================
+refused as expected:
+  tile(t,i,8,8) illegal: instance S0[t=6, i=8] writes u[7, 8] read by S0[t=7, i=7] scheduled earlier
+  witness: (('S0', {'t': 6, 'i': 8}), ('S0', {'t': 7, 'i': 7}), {'nt': 16, 'nx': 16})
+
+========================================================================
+stencil: skew(i, by=t).tile(t,i,8,8) on the device
+========================================================================
+schedule: Schedule(jacobi, target='opencl').skew(i, by='t').tile(t,i,8,8)
+loop nest: t_outer i_outer t_inner i_inner
+  decided  isl  skew(i, by='t') renames the instances of jacobi one for one
+  decided  isl  the order after skew(i, by='t') runs every dependence of jacobi forward
+  decided  isl  tile(t,i,8,8) renames the instances of jacobi one for one
+  decided  isl  the order after tile(t,i,8,8) runs every dependence of jacobi forward
+  u: difference 0 within 1.55e-05 (approx) -> tested
+  agreement fact: tested
+  device u[:3, :7] =
+[[0.   0.   0.   0.   0.   0.   0.  ]
+ [0.   0.   0.   0.   0.   0.   0.  ]
+ [0.   0.   0.   0.   0.   0.   0.25]]
+
+========================================================================
+reshape: transpose split(i,2).interchange(i_out,j,i_in) on the device
+========================================================================
+schedule: Schedule(transpose, target='opencl').split(i, 2).interchange(i_out, j, i_in)
+loop nest: i_out j i_in
+  decided  isl  split(i, 2) renames the instances of transpose one for one
+  decided  isl  the order after split(i, 2) runs every dependence of transpose forward
+  decided  isl  interchange(i_out, j, i_in) renames the instances of transpose one for one
+  decided  isl  the order after interchange(i_out, j, i_in) runs every dependence of transpose forward
+  b: difference 0 within 6.6e-05 (approx) -> tested
+  agreement fact: tested
+  device b == a.T : True
+
+========================================================================
+reshape: rows_of and cols_of on the device
+========================================================================
+schedule: Schedule(rows_of, target='opencl')
+  mat: difference 0 within 6.6e-05 (approx) -> tested
+  agreement fact: tested
+schedule: Schedule(cols_of, target='opencl')
+  mat: difference 0 within 6.6e-05 (approx) -> tested
+  agreement fact: tested
+
+========================================================================
+summary
+========================================================================
+  OK      spmv split+realize
+  OK      scan
+  FAILED  spmv g.0/l.0 (design note)
+  OK      spmv rows parallel g.0
+  OK      stencil illegal tile refused
+  OK      stencil skew+tile
+  OK      reshape transpose split+interchange
+  OK      reshape row/column views
+device_demos exit=1

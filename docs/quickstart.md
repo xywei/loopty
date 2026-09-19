@@ -1,0 +1,371 @@
+# Quickstart
+
+Two files, six commands, and the output each one prints. Everything below was
+run in this repository on 2026-09-18 with `uv run`; the numbers are copied from
+the terminal, not written from memory.
+
+```sh
+git clone https://github.com/xywei/lanky.git       # next to this checkout
+git clone https://github.com/xywei/loopty.git
+cd loopty
+uv sync --group dev
+```
+
+loopty resolves lanky from `../lanky`, so the two checkouts have to be
+siblings. That is also what CI does.
+
+## The sparse product
+
+`examples/spmv.py` holds two kernels, one theorem and one program. The kernel
+worth reading is four lines:
+
+```python
+@kernel
+def spmv(
+    cnt: Arr[Fin[n], Nat],
+    col: Arr[Fin[n], Fin[cnt], Fin[m]],
+    val: Arr[Fin[n], Fin[cnt], Real],
+    x: Arr[Fin[m], Real],
+    y: Arr[Fin[n], Real],
+):
+    for r in y.dom:
+        y[r] = reduce_sum(val[r, j] * x[col[r, j]] for j in val.dom[r])
+```
+
+Three things are being said in the signature. The output `y` is a parameter, not
+a return value, because that is how a kernel writes. The sizes come from the
+arrays, so the loop iterates `y.dom` and the inner loop iterates `val.dom[r]`,
+the fiber over row `r`, whose extent is `cnt[r]`. And `col` has element type
+`Fin[m]`, the index type of `x`, which is what makes the indirection safe.
+
+### Run it natively
+
+```console
+$ uv run python examples/spmv.py
+counts  = [3 2 2 1 1 0]
+offsets = [0 3 5 7 8 9 9]
+y       = [ 0.4821 -0.8792 -0.0973 -0.5674  0.4291  0.    ]
+dense   = [ 0.4821 -0.8792 -0.0973 -0.5674  0.4291  0.    ]
+
+scan_monotone: n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat] | off(0) == 0, forall r in Fin(n). off(r + 1) == off(r) + cnt(r) |- forall a in Fin(n + 1), b in Fin(n + 1) where a <= b. off(a) <= off(b)
+  ok after 50 valid draws of 50
+
+schedule: Schedule(spmv, target='c').split(j, 2).realize('y', tree=True)
+  decided  isl  split(j, 2) renames the instances of spmv one for one
+  decided  isl  the order after split(j, 2) runs every dependence of spmv forward
+  decided  isl  realize('y', tree=True) renames the instances of spmv one for one
+  decided  isl  the order after realize('y', tree=True) runs every dependence of spmv forward
+  decided  isl  the accumulation into y is reassociated by realize('y', tree=True), so its result is compared at 'reassoc'
+device schedule: Schedule(spmv, target='c').tag(r='g.0').split(j, 32).tag(j_in='l.0').realize('y', tree=True)
+  decided  isl  tag(r='g.0') renames the instances of spmv one for one
+  decided  isl  the order after tag(r='g.0') runs every dependence of spmv forward
+  decided  isl  split(j, 32) renames the instances of spmv one for one
+  decided  isl  the order after split(j, 32) runs every dependence of spmv forward
+  decided  isl  tag(j_in='l.0') renames the instances of spmv one for one
+  decided  isl  the order after tag(j_in='l.0') runs every dependence of spmv forward
+  refuted  loopy-target c code can be generated for spmv after tag(j_in='l.0')
+  decided  isl  the accumulation into y is reassociated by tag(j_in='l.0'), so its result is compared at 'reassoc'
+  decided  isl  realize('y', tree=True) renames the instances of spmv one for one
+  decided  isl  the order after realize('y', tree=True) runs every dependence of spmv forward
+  reason: the parallel tag on j_in sits inside a loop whose bound comes from an array (a ragged fiber), and loopy will not put a hardware axis in a domain with a data-dependent parameter. Parallelize an enclosing loop with a size known at launch instead, such as the rows of a CSR product
+
+  y: difference 5.55e-17 within 1.48e-06 (approx) -> tested
+```
+
+No loopy is involved in the first four lines: `@kernel` is inert, so the body
+runs on numpy and the product matches the dense one. `50 valid draws of 50` is
+the property tester: it satisfied the scan recurrence by construction rather
+than rejecting samples until one happened to fit, which is why the count is 50
+and not 3.
+
+The schedule at the bottom of the file is built at import time, and building it
+is what checks it. `split(j, 2)` cuts a row's entries into pieces and
+`realize("y", tree=True)` sums the pieces separately, which reassociates a
+floating-point accumulation. That is why the last line compares at `1.48e-06`
+rather than at zero: the tolerance comes from the `reassoc` fact, not from a
+number somebody picked. It is a per-element tolerance,
+`eps_class * (|expected| + 1)`, so it is the accuracy claimed for *that* cell of
+`y` and does not grow when the matrix does; the printed pair names the element
+that came closest to its own allowance.
+
+The second schedule printed is the design's device schedule, and it is the
+interesting failure. Every cast is `decided`: putting the rows on work groups
+and the entries on lanes reorders nothing that carries a dependence. What it
+cannot survive is code generation, on a device as much as on C, because loopy
+will not put a hardware axis inside a loop whose bound comes from an array, and
+a CSR row is exactly such a loop. The schedule says so itself, as a `refuted`
+fact of kind `buildable` decided by `loopy-target` with the limit in words, and
+raises `UnbuildableSchedule` if anything asks it for code. `docs/device-runs.md`
+is where that was measured; `spmv.rows_parallel()`, one row per work group, is
+the schedule for this shape that does build and did run.
+
+### Check it
+
+```console
+$ uv run lanky check examples/spmv.py
+STATUS   BY             WHERE        OWNER          STATEMENT
+-------  -------------  -----------  -------------  ------------------------------------------------------------------------
+decided  isl            spmv.py:80   scan           off[0] is in bounds for every instance of S0
+decided  isl            spmv.py:82   scan           off[r + 1] is in bounds for every instance of S1
+decided  isl            spmv.py:82   scan           off[r] is in bounds for every instance of S1
+decided  isl            spmv.py:82   scan           cnt[r] is in bounds for every instance of S1
+decided  isl            spmv.py:80   scan           distinct instances of S0 write distinct cells of off
+decided  isl            spmv.py:82   scan           distinct instances of S1 write distinct cells of off
+decided  isl            spmv.py:70   scan           the source order runs every dependence forward in time
+assumed  -              spmv.py:70   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+tested   property-test  spmv.py:85   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat] | off(0) ==...
+decided  isl            spmv.py:113  spmv           y[r] is in bounds for every instance of S0
+decided  isl            spmv.py:113  spmv           val[r, j] is in bounds for every instance of S0
+decided  type           spmv.py:113  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
+decided  isl            spmv.py:113  spmv           col[r, j] is in bounds for every instance of S0
+decided  isl            spmv.py:113  spmv           distinct instances of S0 write distinct cells of y
+decided  isl            spmv.py:103  spmv           the source order runs every dependence forward in time
+decided  type           spmv.py:113  spmv           the accumulation into y[r] over j is approx
+assumed  -              spmv.py:116  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
+
+17 facts: 2 assumed, 14 decided, 1 tested
+```
+
+Read the `BY` column.
+
+- `isl` decided the ordinary in-bounds and disjointness obligations, including
+  the ragged ones: the bound of the fiber is a parameter and isl answers for
+  every value of it.
+- `type` decided two. `x[col[r, j]] is in bounds by type` is the indirection:
+  the typing rule never called the oracle, because the element type of `col` is
+  the index type of `x`. `the accumulation into y[r] over j is approx` is the
+  exactness class of the reduction, read off what it sums; `realize` is what
+  lowers it to `reassoc`, and that lowering is the fact that later licenses the
+  tolerance in the differential run.
+- `property-test` established the theorem. In a checkout with `lanky[lean]`
+  installed this row reads `proved lean` instead. loopty does not pull the Lean
+  extra, so a plain `uv sync --group dev` here gives the tested row.
+- Two facts are `assumed`: `scan`'s postcondition, which needs the recurrence,
+  and the restatement of it inside `solve`. Nothing established them and nothing
+  pretends otherwise. `lanky check` still exits 0, because `ASSUMED` is not a
+  failure; only `REFUTED` is.
+
+`lanky check --verbose` prints each oracle and whether it is available first.
+
+### Compile and run it
+
+```console
+$ uv run loopty run examples/spmv.py
+spmv: Schedule(spmv, target='c').split(j, 2).realize('y', tree=True)
+  y: difference 5.55e-17 within 1.48e-06 (approx) -> tested
+scan: Schedule(scan, target='c')
+  off: difference 0 within 0 (exact) -> tested
+
+STATUS   BY     WHERE        OWNER  STATEMENT
+-------  -----  -----------  -----  ------------------------------------------------------------------------
+decided  isl    spmv.py:113  spmv   split(j, 2) renames the instances of spmv one for one
+decided  isl    spmv.py:113  spmv   the order after split(j, 2) runs every dependence of spmv forward
+decided  isl    spmv.py:113  spmv   realize('y', tree=True) renames the instances of spmv one for one
+decided  isl    spmv.py:113  spmv   the order after realize('y', tree=True) runs every dependence of spmv...
+decided  isl    spmv.py:113  spmv   the accumulation into y is reassociated by realize('y', tree=True), s...
+tested   loopy  spmv.py:113  spmv   the scheduled run of spmv agrees with the native run to the accuracy ...
+tested   loopy  spmv.py:80   scan   the scheduled run of scan agrees with the native run to the accuracy ...
+
+7 facts: 5 decided, 2 tested
+```
+
+The ragged loop became a genuine CSR loop: a flat buffer, an offsets argument,
+and `off[r] + j` as the index. `--emit-code` prints it:
+
+```console
+$ uv run loopty run examples/spmv.py --emit-code
+...
+void spmv(int32_t const n, int32_t const *__restrict__ cnt, int32_t const *__restrict__ col, double const *__restrict__ val, double const *__restrict__ x, double *__restrict__ y, int32_t const *__restrict__ off_cnt)
+{
+  double acc_j_out_j_in;
+  int32_t nl_cnt_r;
+
+  for (int32_t r = 0; r <= -1 + n; ++r)
+  {
+    acc_j_out_j_in = (double) (0.0);
+    nl_cnt_r = cnt[r];
+    for (int32_t j_in = 0; j_in <= ((-1 + nl_cnt_r == 0) ? 0 : 1); ++j_in)
+      if (-1 + -1 * j_in + nl_cnt_r >= 0)
+        for (int32_t j_out = 0; j_out <= -1 + -1 * j_in + (1 + nl_cnt_r + j_in) / 2; ++j_out)
+          acc_j_out_j_in = acc_j_out_j_in + val[off_cnt[r] + j_in + j_out * 2] * x[col[off_cnt[r] + j_in + j_out * 2]];
+    y[r] = acc_j_out_j_in;
+  }
+}
+```
+
+`nl_cnt_r` is the row's count, read once per row; `off_cnt` is the offsets
+argument lowering added; `j_in` and `j_out` are the two halves of the split. The
+kernel never mentioned any of them.
+
+`scan` agrees exactly, because its output is `Nat` and integer arithmetic is
+exact. `spmv` agrees to `5.55e-17`, comfortably inside the reassociation
+tolerance. The two `loopy` rows are facts like any other: an executor is an
+oracle of trust class `test`.
+
+## The stencil, and a transformation that is refused
+
+`examples/stencil_skew.py` is one-dimensional Jacobi in time:
+
+```python
+@kernel
+def jacobi(u: Arr[Fin[nt], Fin[nx], Real]):
+    steps = u.dom
+    for t in steps:
+        row = u.dom[t]
+        for i in row:
+            with when((t + 1 < steps.size) & (i > 0) & (i + 1 < row.size)):
+                u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
+```
+
+The guard is a `when` block and not an `if`, because tracing an `if` on a value
+the kernel computes would have to choose a branch. `when` records the condition,
+intersects it into the statement's isl domain when it is affine, and under plain
+`python` masks the writes of the block. The narrowed domain is what makes
+`u[t + 1, i]` in bounds: it is only ever written where `t + 1 < nt`.
+
+The dependences are the classic pair, `(1, 1)` and `(1, -1)`. A rectangular tile
+of the `(t, i)` nest cuts both.
+
+```console
+$ uv run python examples/stencil_skew.py
+native, the 16 by 16 array (first six levels around the spike):
+[[0.    0.    0.    1.    0.    0.    0.   ]
+ [0.    0.    0.5   0.    0.5   0.    0.   ]
+ [0.    0.25  0.    0.5   0.    0.25  0.   ]
+ [0.125 0.    0.375 0.    0.375 0.    0.125]
+ [0.    0.25  0.    0.375 0.    0.25  0.   ]
+ [0.156 0.    0.312 0.    0.312 0.    0.156]]
+
+Schedule(jacobi).tile('t', 'i', 8, 8) ->
+  IllegalCast: tile(t,i,8,8) illegal: instance S0[t=0, i=8] writes u[1, 8] read by S0[t=1, i=7] scheduled earlier (at nt=16, nx=16, as hinted)
+  witness: S0{'t': 0, 'i': 8} runs before S0{'t': 1, 'i': 7} at {'nt': 16, 'nx': 16}
+
+accepted: Schedule(jacobi, target='c').skew(i, by='t').tile(t,i,8,8)
+  loop nest: t_outer i_outer t_inner i_inner
+  decided  isl  skew(i, by='t') renames the instances of jacobi one for one
+  decided  isl  the order after skew(i, by='t') runs every dependence of jacobi forward
+  decided  isl  tile(t,i,8,8) renames the instances of jacobi one for one
+  decided  isl  the order after tile(t,i,8,8) runs every dependence of jacobi forward
+
+  u: difference 0 within 1e-06 (approx) -> tested
+  the native run matches the hand-written sweep: True
+```
+
+The witness is the whole point. `S0[t=0, i=8]` writes `u[1, 8]`, and
+`S0[t=1, i=7]` reads it; the tiling runs the second one first, because
+`i = 7` is in the first tile column and `i = 8` is in the second. That is a pair
+of real instances of this kernel at these sizes, produced by pulling an isl
+solution back from time space into instance space. No code was generated, and
+the schedule the cast was asked of is unchanged, so the demo can go on and ask
+for a legal one.
+
+Skewing first turns both dependence vectors non-negative, and then the same tile
+is accepted. Four cast facts, all `decided isl`, and the tiled code computes what
+the untiled code computes.
+
+Checking and running the file behave the same way as the sparse product:
+
+```console
+$ uv run lanky check examples/stencil_skew.py
+STATUS   BY   WHERE               OWNER   STATEMENT
+-------  ---  ------------------  ------  ------------------------------------------------------
+decided  isl  stencil_skew.py:62  jacobi  u[t + 1, i] is in bounds for every instance of S0
+decided  isl  stencil_skew.py:62  jacobi  u[t, i - 1] is in bounds for every instance of S0
+decided  isl  stencil_skew.py:62  jacobi  u[t, i + 1] is in bounds for every instance of S0
+decided  isl  stencil_skew.py:62  jacobi  distinct instances of S0 write distinct cells of u
+decided  isl  stencil_skew.py:54  jacobi  the source order runs every dependence forward in time
+
+5 facts: 5 decided
+
+$ uv run loopty run examples/stencil_skew.py
+jacobi: Schedule(jacobi, target='c').skew(i, by='t').tile(t,i,8,8)
+  u: difference 0 within 1e-06 (approx) -> tested
+...
+5 facts: 4 decided, 1 tested
+```
+
+## Layouts, as a third file
+
+`examples/reshape_layouts.py` is the smaller idea underneath both of the above:
+an index type can be *reshaped*, and the reshape is a fact.
+
+```console
+$ uv run python examples/reshape_layouts.py
+normalize(Fin[n * m]) = (Fin(n), Fin(m))
+row-major layout    { [i0, i1] -> [4i0 + i1] : 0 <= i0 <= 2 and 0 <= i1 <= 3 }
+column-major layout { [i0, i1] -> [i0 + 3i1] : 0 <= i0 <= 2 and 0 <= i1 <= 3 }
+
+STATUS   BY   WHERE                   OWNER    STATEMENT
+-------  ---  ----------------------  -------  ----------------------------------------------------------------
+decided  isl  reshape_layouts.py:3x4  layouts  the row-major layout addresses each cell of the matrix exactl...
+decided  isl  reshape_layouts.py:3x4  layouts  the column-major layout addresses each cell exactly once
+decided  isl  reshape_layouts.py:3x4  layouts  delinearizing a flat address lands inside the matrix
+decided  isl  reshape_layouts.py:3x4  layouts  delinearization undoes the row-major layout
+
+4 facts: 4 decided
+...
+schedule: Schedule(transpose, target='c').split(i, 2).interchange(i_out, j, i_in)
+  loop nest: i_out j i_in
+  decided  isl  split(i, 2) renames the instances of transpose one for one
+  decided  isl  the order after split(i, 2) runs every dependence of transpose forward
+  decided  isl  interchange(i_out, j, i_in) renames the instances of transpose one for one
+  decided  isl  the order after interchange(i_out, j, i_in) runs every dependence of transpose forward
+...
+  b: difference 0 within 1e-06 (approx) -> tested
+```
+
+`Fin[n*m]` normalizes to `Fin[n] x Fin[m]`, a layout is an isl map from index
+space to a flat address, and "addresses each cell exactly once" is bijectivity,
+which is the same question the schedule checker asks of a reindexing. The
+transpose at the bottom is split and interchanged, and both steps are cast facts.
+
+## What to try next
+
+- Break something. Change the stencil's guard from `i > 0` to `i >= 0` and
+  re-check. The in-bounds fact for `u[t, i - 1]` turns `refuted`, `lanky check`
+  prints `5 facts: 4 decided, 1 refuted` and then
+  `REFUTED jacobi at ...: u[t, i - 1] is in bounds for every instance of S0`,
+  and it exits 1. The witness in the JSON is the cell that escapes,
+  `"witness_text": "[a0=0, a1=-1]"`, with the isl question beside it.
+- Ask for a tiling before the skew in your own kernel and read the witness.
+- Add `--json out.json` to `lanky check` and read the provenance: the witness,
+  the isl question, and the rendered explanation are all in there.
+- `uv run loopty run examples/spmv.py --emit-code` to see the C.
+- `uv run loopty run examples/spmv.py --target opencl` on a machine without
+  pyopencl. `--target` *retargets* every schedule in the file, re-checking each
+  cast against the new target, and says by name which ones it could not; it
+  does not quietly run a C-pinned schedule on C and call it a device run.
+- Write a theorem for an obligation that came back `assumed`, and install
+  `lanky[lean]` to try to prove it.
+
+## Where things are
+
+| what | where |
+|---|---|
+| index types, layouts, isl sets | `src/loopty/idx.py` |
+| runtime arrays, dense and ragged | `src/loopty/arr.py` |
+| the Term IR | `src/loopty/term.py` |
+| tracing a body | `src/loopty/trace.py` |
+| footprints and dependences | `src/loopty/flow.py` |
+| typing rules, the facts | `src/loopty/typing.py` |
+| the isl oracle and its witnesses | `src/loopty/oracle.py` |
+| lowering to loopy | `src/loopty/lower.py` |
+| transformations as casts | `src/loopty/schedule.py` |
+| running and differential testing | `src/loopty/executor.py` |
+
+Everything above runs on the C target, which is what a laptop has. The same
+kernels and the same schedules on real OpenCL devices, with the commands and the
+transcripts, are in [device-runs.md](device-runs.md) and under
+[device-runs/](device-runs/). The loopy and islpy interactions that cost
+debugging time, and the local workarounds for them, are in
+[loopy-notes.md](loopy-notes.md).
+
+All four demos, with every console block regenerated mechanically by
+`scripts/refresh_example_outputs.py`, are in
+[../examples/README.md](../examples/README.md). The blocks in *this* file are
+snapshots too, some of them elided where marked with `...`; run the commands if
+you want the whole thing.
+
+The ledger, the statuses and the oracle protocol belong to
+[lanky](https://github.com/xywei/lanky); its own quickstart walks through a file
+of theorems.

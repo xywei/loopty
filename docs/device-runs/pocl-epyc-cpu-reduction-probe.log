@@ -1,0 +1,182 @@
+device: cpu-znver5-AMD EPYC 9335 32-Core Processor | Portable Computing Language
+
+------------------------------------------------------------------------
+1. rows across work groups only: tag(r='g.0')
+------------------------------------------------------------------------
+schedule: Schedule(spmv, target='opencl').tag(r='g.0')
+  y: difference 2.78e-17 within 2.46e-06 (approx)
+  RESULT: ran, fact = tested
+
+------------------------------------------------------------------------
+2. the whole ragged reduction across lanes: tag(r='g.0').tag(j='l.0')
+------------------------------------------------------------------------
+schedule: Schedule(spmv, target='opencl').tag(r='g.0').tag(j='l.0')
+  RESULT: refused by StaticValueFindingError
+  a numeric maximum was not found for PwAff '[n, nl_cnt_r] -> { [(nl_cnt_r)] : n > 0 and nl_cnt_r > 0 }'
+
+------------------------------------------------------------------------
+3. the design note's schedule, unmodified
+------------------------------------------------------------------------
+schedule: Schedule(spmv, target='opencl').tag(r='g.0').split(j, 32).tag(j_in='l.0').realize('y', tree=True)
+  RESULT: refused by LoopyError
+  Reduction over 'j_out, j_in' contains both parallel and sequential inames. It must be split (using split_reduction_{in,out}ward) before code generation.
+
+------------------------------------------------------------------------
+4. the same, with loopy's own remedy: split_reduction_outward('j_out')
+------------------------------------------------------------------------
+schedule: Schedule(spmv, target='opencl').tag(r='g.0').split(j, 32).tag(j_in='l.0').realize('y', tree=True)
+===========================================================================
+failing translation unit during pre-schedule check:
+===========================================================================
+---------------------------------------------------------------------------
+KERNEL: spmv
+---------------------------------------------------------------------------
+ARGUMENTS:
+n: ValueArg, type: np:dtype('int32')
+cnt: type: np:dtype('int32'), shape: (n), dim_tags: (N0:stride:1) in aspace: global
+col: ArrayArg, type: np:dtype('int32'), shape: unknown in aspace: global
+val: ArrayArg, type: np:dtype('float64'), shape: unknown in aspace: global
+x: ArrayArg, type: np:dtype('float64'), shape: unknown in aspace: global
+y: type: np:dtype('float64'), shape: (n), dim_tags: (N0:stride:1) in/out aspace: global
+off_cnt: type: np:dtype('int32'), shape: (n + 1), dim_tags: (N0:stride:1) in aspace: global
+---------------------------------------------------------------------------
+DOMAINS:
+[n] -> { [r] : n >= 0 and 0 <= r < n }
+  [r, n, nl_cnt_r] -> { [j_out, j_in] : r >= 0 and n > r and j_out >= 0 and 0 <= j_in <= 31 and j_in < nl_cnt_r - 32j_out }
+{ [red_j_in] : 0 <= red_j_in <= 31 }
+{ [red_j_in_s0] : 0 <= red_j_in_s0 <= 15 }
+{ [red_j_in_s1] : 0 <= red_j_in_s1 <= 7 }
+{ [red_j_in_s2] : 0 <= red_j_in_s2 <= 3 }
+{ [red_j_in_s3] : 0 <= red_j_in_s3 <= 1 }
+{ [red_j_in_s4] : red_j_in_s4 = 0 }
+---------------------------------------------------------------------------
+INAME TAGS:
+j_in: l.0
+j_out: None
+r: g.0
+red_j_in: l.0
+red_j_in_s0: l.0
+red_j_in_s1: l.0
+red_j_in_s2: l.0
+red_j_in_s3: l.0
+red_j_in_s4: l.0
+---------------------------------------------------------------------------
+TEMPORARIES:
+acc_j_in: type: np:dtype('float64'), shape: (32), dim_tags: (N0:stride:1) aspace: local
+acc_j_out: type: np:dtype('float64'), shape: () aspace: private
+neutral_j_in: type: np:dtype('float64'), shape: () aspace: private
+nl_cnt_r: type: np:dtype('int32'), shape: () aspace: private
+---------------------------------------------------------------------------
+INSTRUCTIONS:
+      for r
+↱       [36mnl_cnt_r[0m = [35mcnt[r][0m  {id=[32mnl_cnt_r_init[0m}
+│↱      [36macc_j_out[0m = [35m0.0[0m  {id=[32mS0_j_out_init[0m}
+││      for j_out, red_j_in
+││↱         [36macc_j_in[red_j_in][0m = [35m0.0[0m  {id=[32mS0_j_in_init[0m}
+│││↱        [36mneutral_j_in[0m = [35m0.0[0m  {id=[32mS0_j_in_init_neutral[0m}
+││││      end red_j_in
+││││      for j_in
+├├└└↱       [36macc_j_in[j_in][0m = [35mneutral_j_in + val[off_cnt[r] + j_in + j_out*32]*x[col[off_cnt[r] + j_in + j_out*32]][0m  {id=[32mS0_j_in_transfer[0m, no_sync_with=S0_j_in_init@any}
+││  │     end j_in
+││  │     for red_j_in_s0
+││↱ └       [36macc_j_in[red_j_in_s0][0m = [35macc_j_in[red_j_in_s0] + acc_j_in[red_j_in_s0 + 16][0m  {id=[32mred_j_in_stage_0[0m}
+│││       end red_j_in_s0
+│││       for red_j_in_s1
+││└↱        [36macc_j_in[red_j_in_s1][0m = [35macc_j_in[red_j_in_s1] + acc_j_in[red_j_in_s1 + 8][0m  {id=[32mred_j_in_stage_1[0m}
+││ │      end red_j_in_s1
+││ │      for red_j_in_s2
+││↱└        [36macc_j_in[red_j_in_s2][0m = [35macc_j_in[red_j_in_s2] + acc_j_in[red_j_in_s2 + 4][0m  {id=[32mred_j_in_stage_2[0m}
+│││       end red_j_in_s2
+│││       for red_j_in_s3
+││└↱        [36macc_j_in[red_j_in_s3][0m = [35macc_j_in[red_j_in_s3] + acc_j_in[red_j_in_s3 + 2][0m  {id=[32mred_j_in_stage_3[0m}
+││ │      end red_j_in_s3
+││ │      for red_j_in_s4
+││↱└        [36macc_j_in[red_j_in_s4][0m = [35macc_j_in[red_j_in_s4] + acc_j_in[red_j_in_s4 + 1][0m  {id=[32mred_j_in_stage_4[0m}
+├└└↱        [36macc_j_out[0m = [35macc_j_out + acc_j_in[0][0m  {id=[32mS0_j_out_update[0m, no_sync_with=red_j_in_stage_4@any}
+│  │    end j_out, red_j_in_s4
+└  └    [36my[r][0m = [35macc_j_out[0m  {id=[32mS0[0m}
+      end r
+---------------------------------------------------------------------------
+===========================================================================
+  RESULT: refused by LoopyError
+  Domain number 1 has a data-dependent parameter 'nl_cnt_r' and contains parallel inames 'j_in'. This is not allowed (for now).
+
+------------------------------------------------------------------------
+5. the same, with split_reduction_inward('j_in')
+------------------------------------------------------------------------
+schedule: Schedule(spmv, target='opencl').tag(r='g.0').split(j, 32).tag(j_in='l.0').realize('y', tree=True)
+===========================================================================
+failing translation unit during pre-schedule check:
+===========================================================================
+---------------------------------------------------------------------------
+KERNEL: spmv
+---------------------------------------------------------------------------
+ARGUMENTS:
+n: ValueArg, type: np:dtype('int32')
+cnt: type: np:dtype('int32'), shape: (n), dim_tags: (N0:stride:1) in aspace: global
+col: ArrayArg, type: np:dtype('int32'), shape: unknown in aspace: global
+val: ArrayArg, type: np:dtype('float64'), shape: unknown in aspace: global
+x: ArrayArg, type: np:dtype('float64'), shape: unknown in aspace: global
+y: type: np:dtype('float64'), shape: (n), dim_tags: (N0:stride:1) in/out aspace: global
+off_cnt: type: np:dtype('int32'), shape: (n + 1), dim_tags: (N0:stride:1) in aspace: global
+---------------------------------------------------------------------------
+DOMAINS:
+[n] -> { [r] : n >= 0 and 0 <= r < n }
+  [r, n, nl_cnt_r] -> { [j_out, j_in] : r >= 0 and n > r and j_out >= 0 and 0 <= j_in <= 31 and j_in < nl_cnt_r - 32j_out }
+{ [red_j_in] : 0 <= red_j_in <= 31 }
+{ [red_j_in_s0] : 0 <= red_j_in_s0 <= 15 }
+{ [red_j_in_s1] : 0 <= red_j_in_s1 <= 7 }
+{ [red_j_in_s2] : 0 <= red_j_in_s2 <= 3 }
+{ [red_j_in_s3] : 0 <= red_j_in_s3 <= 1 }
+{ [red_j_in_s4] : red_j_in_s4 = 0 }
+---------------------------------------------------------------------------
+INAME TAGS:
+j_in: l.0
+j_out: None
+r: g.0
+red_j_in: l.0
+red_j_in_s0: l.0
+red_j_in_s1: l.0
+red_j_in_s2: l.0
+red_j_in_s3: l.0
+red_j_in_s4: l.0
+---------------------------------------------------------------------------
+TEMPORARIES:
+acc_j_in: type: np:dtype('float64'), shape: (32), dim_tags: (N0:stride:1) aspace: local
+acc_j_out: type: np:dtype('float64'), shape: () aspace: private
+neutral_j_in: type: np:dtype('float64'), shape: () aspace: private
+nl_cnt_r: type: np:dtype('int32'), shape: () aspace: private
+---------------------------------------------------------------------------
+INSTRUCTIONS:
+      for r
+↱       [36mnl_cnt_r[0m = [35mcnt[r][0m  {id=[32mnl_cnt_r_init[0m}
+│↱      [36macc_j_out[0m = [35m0.0[0m  {id=[32mS0_j_out_init[0m}
+││      for j_out, red_j_in
+││↱         [36macc_j_in[red_j_in][0m = [35m0.0[0m  {id=[32mS0_j_in_init[0m}
+│││↱        [36mneutral_j_in[0m = [35m0.0[0m  {id=[32mS0_j_in_init_neutral[0m}
+││││      end red_j_in
+││││      for j_in
+├├└└↱       [36macc_j_in[j_in][0m = [35mneutral_j_in + val[off_cnt[r] + j_in + j_out*32]*x[col[off_cnt[r] + j_in + j_out*32]][0m  {id=[32mS0_j_in_transfer[0m, no_sync_with=S0_j_in_init@any}
+││  │     end j_in
+││  │     for red_j_in_s0
+││↱ └       [36macc_j_in[red_j_in_s0][0m = [35macc_j_in[red_j_in_s0] + acc_j_in[red_j_in_s0 + 16][0m  {id=[32mred_j_in_stage_0[0m}
+│││       end red_j_in_s0
+│││       for red_j_in_s1
+││└↱        [36macc_j_in[red_j_in_s1][0m = [35macc_j_in[red_j_in_s1] + acc_j_in[red_j_in_s1 + 8][0m  {id=[32mred_j_in_stage_1[0m}
+││ │      end red_j_in_s1
+││ │      for red_j_in_s2
+││↱└        [36macc_j_in[red_j_in_s2][0m = [35macc_j_in[red_j_in_s2] + acc_j_in[red_j_in_s2 + 4][0m  {id=[32mred_j_in_stage_2[0m}
+│││       end red_j_in_s2
+│││       for red_j_in_s3
+││└↱        [36macc_j_in[red_j_in_s3][0m = [35macc_j_in[red_j_in_s3] + acc_j_in[red_j_in_s3 + 2][0m  {id=[32mred_j_in_stage_3[0m}
+││ │      end red_j_in_s3
+││ │      for red_j_in_s4
+││↱└        [36macc_j_in[red_j_in_s4][0m = [35macc_j_in[red_j_in_s4] + acc_j_in[red_j_in_s4 + 1][0m  {id=[32mred_j_in_stage_4[0m}
+├└└↱        [36macc_j_out[0m = [35macc_j_out + acc_j_in[0][0m  {id=[32mS0_j_out_update[0m, no_sync_with=red_j_in_stage_4@any}
+│  │    end j_out, red_j_in_s4
+└  └    [36my[r][0m = [35macc_j_out[0m  {id=[32mS0[0m}
+      end r
+---------------------------------------------------------------------------
+===========================================================================
+  RESULT: refused by LoopyError
+  Domain number 1 has a data-dependent parameter 'nl_cnt_r' and contains parallel inames 'j_in'. This is not allowed (for now).
