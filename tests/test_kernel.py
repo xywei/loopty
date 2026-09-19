@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+from types import ModuleType
+
 import numpy as np
 from lanky.ledger import Status
 from lanky.plugins import registry
 from lanky.prelude import Nat, Real
 
-from loopty import Arr, Fin, kernel, program
+from loopty import Arr, Fin, kernel, program, when
 from loopty.kernel import Kernel, KernelTheory, Program
+
+#: A module that re-exports the guard under another name, so that a body can
+#: reach it as an attribute without the identifier ``when`` appearing anywhere.
+guards = ModuleType("guards")
+guards.mask = when
 
 
 @kernel
@@ -91,6 +98,56 @@ def test_a_program_runs_natively_and_records_its_callees_claims() -> None:
     assert [fact.kind for fact in facts] == ["postcondition-in-scope"]
     assert facts[0].status is Status.ASSUMED
     assert facts[0].owner.endswith("both")
+
+
+def test_a_guard_is_found_under_an_aliased_import() -> None:
+    # ``guards_writes`` used to be ``"when" in co_names``, so importing the
+    # guard under another name ran the native body unmasked: the write under a
+    # false condition was performed, and ``python file.py`` computed something
+    # the lowered kernel does not.
+    from loopty import when as guard
+
+    @kernel
+    def aliased(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):  # noqa: F821
+        for i in u.dom:
+            with guard(i + 1 < u.dom.size):
+                v[i] = u[i + 1]
+
+    assert aliased.guards_writes
+    out = Arr.zeros(3)
+    aliased(Arr.from_numpy(np.array([1.0, 2.0, 3.0])), out)
+    assert list(out.numpy()) == [2.0, 3.0, 0.0]
+
+
+def test_a_guard_is_found_through_a_module_attribute() -> None:
+    import loopty
+
+    @kernel
+    def qualified(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):  # noqa: F821
+        for i in u.dom:
+            with loopty.when(i + 1 < u.dom.size):
+                v[i] = u[i + 1]
+
+    assert qualified.guards_writes
+    out = Arr.zeros(3)
+    qualified(Arr.from_numpy(np.array([1.0, 2.0, 3.0])), out)
+    assert list(out.numpy()) == [2.0, 3.0, 0.0]
+
+
+def test_a_guard_is_found_through_a_renamed_module_attribute() -> None:
+    # Neither the name ``when`` nor a global bound to it appears: the body
+    # reaches the guard as ``guards.mask``. Identity is what finds it.
+    @kernel
+    def renamed(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):  # noqa: F821
+        for i in u.dom:
+            with guards.mask(i + 1 < u.dom.size):
+                v[i] = u[i + 1]
+
+    assert "when" not in renamed.fn.__code__.co_names
+    assert renamed.guards_writes
+    out = Arr.zeros(3)
+    renamed(Arr.from_numpy(np.array([1.0, 2.0, 3.0])), out)
+    assert list(out.numpy()) == [2.0, 3.0, 0.0]
 
 
 def test_a_kernel_without_a_when_block_gets_its_arguments_untouched() -> None:

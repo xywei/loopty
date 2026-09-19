@@ -73,12 +73,28 @@ __all__ = [
 ]
 
 
+def _abandoned_message(inames: Sequence[str]) -> str:
+    """What to say about a loop the body left early."""
+    names = ", ".join(repr(name) for name in inames)
+    plural = "loops" if len(inames) > 1 else "loop"
+    return (
+        f"the {plural} over {names} was left early. Tracing runs the body once "
+        "with every loop taking one generic point, and a 'break' or a 'return' "
+        "inside a traced loop skips the point at which the loop level is "
+        "closed, so every statement after it is recorded under a loop variable "
+        "the body has already left. Write 'with when(condition):' around the "
+        "part that should not run instead: it records the condition, narrows "
+        "the statement's domain, and masks the writes under plain python."
+    )
+
+
 class TraceError(RuntimeError):
     """A body did something tracing cannot follow, with the fix in the message.
 
     The archetype is a Python ``if`` on a symbolic value: the message names the
-    ``with when(...)`` replacement. Data-dependent ``while``, ``break`` and
-    Python's builtin ``sum`` over a symbolic domain are the other cases.
+    ``with when(...)`` replacement. Data-dependent ``while``, ``break``,
+    ``return`` out of a loop, and Python's builtin ``sum`` over a symbolic
+    domain are the other cases.
     """
 
 
@@ -87,11 +103,18 @@ class TraceError(RuntimeError):
 
 @dataclass
 class _Loop:
-    """One open loop level: its iname, the variable, and its exclusive bound."""
+    """One open loop level: its iname, the variable, and its exclusive bound.
+
+    ``owner`` is the iterator that opened the level. A level is closed when
+    *that* iterator is asked for its second point, so an iterator closing a
+    level it did not open means a loop was abandoned; see
+    :meth:`Tracer.leave_loop`.
+    """
 
     iname: str
     var: Var
     bound: Any
+    owner: Any = None
 
 
 class Tracer:
@@ -132,17 +155,28 @@ class Tracer:
         self._inames.add(name)
         return name
 
-    def enter_loop(self, bound: Any, hint: str | None) -> Var:
+    def enter_loop(self, bound: Any, hint: str | None, owner: Any = None) -> Var:
         """Open a loop level over ``0 <= i < bound`` and return its variable."""
         name = self.fresh_iname(hint)
         var = Var(name)
-        self.loops.append(_Loop(name, var, bound))
+        self.loops.append(_Loop(name, var, bound, owner))
         self._path.append(self._position())
         self._counters.append(0)
         return var
 
-    def leave_loop(self) -> None:
-        """Close the innermost loop level."""
+    def leave_loop(self, owner: Any = None) -> None:
+        """Close the innermost loop level, refusing to close somebody else's.
+
+        A level is popped when its iterator is asked for a second point and
+        raises ``StopIteration``. A ``break`` or a ``return`` inside the loop
+        means that never happens, and the level stays open: the next statement
+        would then be recorded under a loop variable the body has left, and the
+        enclosing loop's own ``StopIteration`` would pop the abandoned level
+        instead of its own. That mismatch is what is caught here, at the point
+        where it happens, so the message can name the loop.
+        """
+        if owner is not None and self.loops and self.loops[-1].owner is not owner:
+            raise TraceError(_abandoned_message([self.loops[-1].iname]))
         self.loops.pop()
         self._path.pop()
         self._counters.pop()
@@ -383,7 +417,7 @@ class _DomIterator:
             if self.loop:
                 tracer = current_tracer()
                 if tracer is not None:
-                    tracer.leave_loop()
+                    tracer.leave_loop(self)
             raise StopIteration
         self.done = True
         binder_trace = current_trace()
@@ -406,7 +440,7 @@ class _DomIterator:
                 "its domain are recorded"
             )
         self.loop = True
-        return tracer.enter_loop(self.dom.bound, _loop_target_name())
+        return tracer.enter_loop(self.dom.bound, _loop_target_name(), self)
 
 
 class SymArr:
@@ -726,9 +760,10 @@ def mask_writes(value: Any) -> Any:
 
     The wrapper shares the buffers of what it wraps, so a masked run still
     writes through to the caller's array everywhere the guard holds. Only
-    arrays are wrapped, and only when the body mentions ``when`` at all:
-    :class:`~loopty.kernel.Kernel` decides that by looking at the code object,
-    so an unguarded kernel is called with exactly the objects it was given.
+    arrays are wrapped, and only when the body opens a guard at all:
+    :func:`loopty.kernel.opens_a_guard` decides that by looking for this very
+    object in the code, whatever name it was imported under, so an unguarded
+    kernel is called with exactly the objects it was given.
 
     Masking covers reads too, in one direction only: inside a false guard, a
     read that would go out of range answers zero rather than raising, because
@@ -886,6 +921,12 @@ def trace(kernel: Any, arg_types: Any) -> Term:
         ) from exc
     finally:
         _TRACERS.pop()
+
+    if tracer.loops:
+        # Every loop level is closed by its own iterator raising StopIteration.
+        # A level still open once the body has returned means that iterator was
+        # abandoned, which only a 'break' or a 'return' inside the loop does.
+        raise TraceError(_abandoned_message([loop.iname for loop in tracer.loops]))
 
     sizes: set[str] = set()
     for _, arrtype in params:

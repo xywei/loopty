@@ -93,6 +93,18 @@ def test_ragged_rejects_a_mismatched_value_buffer() -> None:
         Arr.ragged([2, 3], values=[1.0, 2.0])
 
 
+def test_offsets_that_do_not_start_at_zero_are_refused() -> None:
+    # Monotone and ending at the right place was not enough: [-1, 2] passed
+    # both of those and gave row 0 the flat slice values[-1:2], which numpy
+    # wraps round to the end of the buffer and generated C reads in front of it.
+    with pytest.raises(ValueError, match="must start at 0"):
+        Arr(np.zeros(3), offsets=np.array([-1, 2]))
+    with pytest.raises(ValueError, match="must start at 0"):
+        Arr(np.zeros(3), offsets=np.array([1, 1, 3]))
+    # The CSR spelling, which is what Arr.ragged builds, is still accepted.
+    assert Arr(np.zeros(3), offsets=np.array([0, 1, 3])).counts.tolist() == [1, 2]
+
+
 def test_dense_type_is_an_arrtype_with_concrete_axes() -> None:
     a = Arr.zeros((Fin[2], Fin[3]), dtype=np.int64)
     t = a.type

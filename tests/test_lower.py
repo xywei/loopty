@@ -138,6 +138,42 @@ def test_an_accumulation_whose_expression_is_complete_is_not_doubled() -> None:
     assert np.allclose(out["y"], 1.0)
 
 
+def test_two_statements_over_one_iname_keep_their_own_domains() -> None:
+    # loopy gives an iname one domain, so the two statements share the union of
+    # theirs. Sharing it silently ran the narrower statement over the wider
+    # domain: every cell was scaled, including the one the term leaves alone.
+    term = ht.narrowed_second_statement_term()
+    code = code_for(term)
+    assert "if (" in code
+    a = np.arange(1.0, 9.0)
+    out = run(term, a=a, b=np.zeros(8))
+    assert np.array_equal(out["b"], ht.narrowed_reference(a))
+
+
+def test_a_statement_that_was_not_widened_gets_no_predicate() -> None:
+    # The predicate is the gist of the statement's own domain against the
+    # merged one, so an unwidened statement is generated exactly as before.
+    assert "if (" not in code_for(ht.axpy_term())
+
+
+def test_a_statement_with_an_empty_domain_never_runs() -> None:
+    # A domain that is affinely contradictory has no instances at all. The
+    # instruction still exists, because loopy builds the loop from the merged
+    # domain, so it gets a condition nothing satisfies.
+    import dataclasses
+
+    import islpy as isl
+
+    term = ht.narrowed_second_statement_term()
+    nowhere = dataclasses.replace(
+        term.stmts[1], domain=isl.Set("[n] -> { [i] : 0 <= i < n and i < 0 }")
+    )
+    term = dataclasses.replace(term, stmts=(term.stmts[0], nowhere))
+    a = np.arange(1.0, 5.0)
+    out = run(term, a=a, b=np.zeros(4))
+    assert np.array_equal(out["b"], a)
+
+
 def test_lower_generic_records_the_statement_to_instruction_map() -> None:
     lowering = lower_generic(ht.spmv_term())
     assert lowering.insn_ids == {"S0": "S0"}

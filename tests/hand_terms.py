@@ -209,6 +209,153 @@ def spmv_accumulate_term() -> Term:
     )
 
 
+def two_output_term() -> Term:
+    """``y[i] = 2 * x[i]`` and ``z[i] = x[i] + 1``: two statements, two outputs.
+
+    The shape a differential test needs when it is handed an explicit
+    ``reference``: covering one output and leaving the other unchecked has to be
+    an error rather than a ``TESTED`` fact about half a kernel.
+    """
+    domain = isl.Set("[n] -> { [i] : 0 <= i < n }")
+    first = Stmt(
+        id="S0",
+        inames=("i",),
+        domain=domain,
+        assignee=Access("y", (V("i"),)),
+        expr=2 * S("x", V("i")),
+        kind="assign",
+        guard=None,
+        where="hand_terms.py:two_output",
+    )
+    second = Stmt(
+        id="S1",
+        inames=("i",),
+        domain=domain,
+        assignee=Access("z", (V("i"),)),
+        expr=S("x", V("i")) + 1,
+        kind="assign",
+        guard=None,
+        where="hand_terms.py:two_output",
+    )
+    return Term(
+        name="two_outputs",
+        params=(("x", dense(V("n"))), ("y", dense(V("n"))), ("z", dense(V("n")))),
+        sizes=("n",),
+        stmts=(first, second),
+        post=None,
+    )
+
+
+def narrowed_second_statement_term() -> Term:
+    """Two statements over one iname with different, unguarded bounds.
+
+    ``b[i] = a[i]`` over ``0 <= i < n`` and then ``b[i] = 10 * b[i]`` over
+    ``0 <= i < n - 1``. loopy gives an iname a single domain, so lowering has to
+    run the shared loop over the union and cut the narrower statement back to its
+    own domain; running the second statement over all ``n`` points scales the
+    last cell that the term says it leaves alone. Every index stays in bounds, so
+    nothing but the numbers gives the widening away.
+    """
+    wide = isl.Set("[n] -> { [i] : 0 <= i < n }")
+    narrow = isl.Set("[n] -> { [i] : 0 <= i < n - 1 }")
+    copy = Stmt(
+        id="S0",
+        inames=("i",),
+        domain=wide,
+        assignee=Access("b", (V("i"),)),
+        expr=S("a", V("i")),
+        kind="assign",
+        guard=None,
+        where="hand_terms.py:narrowed",
+    )
+    scale = Stmt(
+        id="S1",
+        inames=("i",),
+        domain=narrow,
+        assignee=Access("b", (V("i"),)),
+        expr=S("b", V("i")) * 10,
+        kind="accumulate",
+        guard=None,
+        where="hand_terms.py:narrowed",
+    )
+    return Term(
+        name="narrowed",
+        params=(("a", dense(V("n"))), ("b", dense(V("n")))),
+        sizes=("n",),
+        stmts=(copy, scale),
+        post=None,
+    )
+
+
+def narrowed_reference(a: np.ndarray) -> np.ndarray:
+    """The numpy reference for :func:`narrowed_second_statement_term`."""
+    out = a.copy()
+    out[:-1] *= 10
+    return out
+
+
+def two_reductions_term() -> Term:
+    """Two reductions into one array, with different exactness classes.
+
+    ``y[r] = sum_j c[r, j]`` is ``exact`` (``c`` holds integers) and
+    ``y[r] += sum_k v[r, k]`` is ``approx``. Asking "what is the exactness of the
+    accumulation into ``y``" has two answers here, and a transformation of one
+    reduction has to be judged by *its* answer rather than by whichever one comes
+    first.
+    """
+    rows = isl.Set("[n] -> { [r] : 0 <= r < n }")
+    exact_domain = isl.Set("[n, m] -> { [r, j] : 0 <= r < n and 0 <= j < m }")
+    approx_domain = isl.Set("[n, p] -> { [r, k] : 0 <= r < n and 0 <= k < p }")
+    exact = Stmt(
+        id="S0",
+        inames=("r",),
+        domain=rows,
+        assignee=Access("y", (V("r"),)),
+        expr=Reduction(
+            op="sum",
+            inames=("j",),
+            domain=exact_domain,
+            body=S("c", V("r"), V("j")),
+            exactness="exact",
+        ),
+        kind="assign",
+        guard=None,
+        where="hand_terms.py:two_reductions",
+    )
+    approx = Stmt(
+        id="S1",
+        inames=("r",),
+        domain=rows,
+        assignee=Access("y", (V("r"),)),
+        expr=prim.Sum(
+            (
+                S("y", V("r")),
+                Reduction(
+                    op="sum",
+                    inames=("k",),
+                    domain=approx_domain,
+                    body=S("v", V("r"), V("k")),
+                    exactness="approx",
+                ),
+            )
+        ),
+        kind="accumulate",
+        guard=None,
+        where="hand_terms.py:two_reductions",
+    )
+    return Term(
+        name="two_reductions",
+        params=(
+            ("c", dense(V("n"), V("m"), dtype=INT)),
+            ("v", dense(V("n"), V("p"))),
+            ("y", dense(V("n"))),
+        ),
+        sizes=("n", "m", "p"),
+        stmts=(exact, approx),
+        post=None,
+    )
+
+
 def csr_example() -> dict:
     """A tiny CSR matrix and a vector, as numpy arrays keyed by parameter name.
 

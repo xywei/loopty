@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import dataclasses
 import re
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -44,6 +44,7 @@ import loopy as lp
 import numpy as np
 import pymbolic.primitives as prim
 from loopy.symbolic import Reduction as LoopyReduction
+from loopy.symbolic import set_to_cond_expr
 from pymbolic.mapper import Mapper
 
 from loopty.term import Access, ArrType, Reduction, Stmt, Term
@@ -777,10 +778,17 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
     writes_before: dict[str, list[str]] = {}
     reads_before: dict[str, list[str]] = {}
 
+    #: The domains each statement contributed, kept so that a statement whose
+    #: domain is widened by :func:`_merge_domains` can get it back as a
+    #: predicate; see :func:`_restore_narrower_domains`.
+    own_domains: dict[str, list[isl.Set]] = {}
+
     for stmt in term.stmts:
         if not isinstance(stmt, Stmt):  # pragma: no cover - defensive
             raise LoweringError(f"not a statement: {stmt!r}")
-        domains.extend(_statement_domains(stmt, ragged_params))
+        mine = _statement_domains(stmt, ragged_params)
+        own_domains[_sanitize(stmt.id)] = list(mine)
+        domains.extend(mine)
 
         if stmt.kind not in ("assign", "accumulate"):
             raise LoweringError(
@@ -856,13 +864,15 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
         insns = [by_id[insn.id] for insn in insns]
         insns = count_insns + insns
 
+    merged = _merge_domains(domains)
+    insns = _restore_narrower_domains(insns, own_domains, merged)
+
     args, array_args, value_args, outputs = _arguments(
         term, builder, domains, count_ids, insns
     )
-    domains = _merge_domains(domains)
 
     kernel = lp.make_kernel(
-        domains,
+        merged,
         insns,
         args,
         target=target_for(target),
@@ -900,10 +910,13 @@ def _merge_domains(domains: Sequence[isl.Set]) -> list[isl.Set]:
 
     Two domains over the same inames that are genuinely different sets are
     merged by union, which is what a ``when`` guard produces: the guarded
-    statement's domain is narrower, it keeps its predicate, and the loop has to
-    run over the wider of the two. A union that is not convex is a nest loopy
-    cannot express with one iname, and saying so here names the domains rather
-    than letting loopy fail later about a generated instruction.
+    statement's domain is narrower and the loop has to run over the wider of the
+    two. The narrower statement does not simply inherit the union;
+    :func:`_restore_narrower_domains` gives it back its own domain as an
+    instruction predicate, so the loop is the union and the statement is not. A
+    union that is not convex is a nest loopy cannot express with one iname, and
+    saying so here names the domains rather than letting loopy fail later about
+    a generated instruction.
     """
     merged: list[isl.Set] = []
     for domain in domains:
@@ -931,6 +944,82 @@ def _merge_domains(domains: Sequence[isl.Set]) -> list[isl.Set]:
         else:
             merged.append(domain)
     return merged
+
+
+def _restore_narrower_domains(
+    insns: Sequence[Any],
+    own_domains: Mapping[str, Sequence[isl.Set]],
+    merged: Sequence[isl.Set],
+) -> list[Any]:
+    """Predicate every instruction whose domain :func:`_merge_domains` widened.
+
+    loopy gives an iname one domain, so two statements over the same iname with
+    different bounds have to share the union of the two. Sharing it silently is
+    wrong: a statement written over ``0 <= i < 2`` would then execute over the
+    four points of ``0 <= i < 4``, writing cells the term says it does not
+    write. The union is still the loop, and each statement gets back its own
+    domain as an instruction predicate, which loopy emits as an ``if`` around
+    the statement inside the wider loop.
+
+    The predicate is the *gist* of the statement's domain relative to the merged
+    one, so a statement that was not widened gets nothing and the generated code
+    is unchanged. A gist isl cannot render as a condition (an existentially
+    quantified constraint, say) is refused rather than dropped: dropping it is
+    exactly the silent widening this exists to prevent.
+    """
+    by_names: dict[tuple[str, ...], isl.Set] = {}
+    for domain in merged:
+        by_names[tuple(domain.get_var_names(isl.dim_type.set))] = domain
+    out: list[Any] = []
+    for insn in insns:
+        own = own_domains.get(insn.id)
+        if not own:
+            out.append(insn)
+            continue
+        extra = _narrowing_predicates(insn.id, own, by_names)
+        out.append(insn.copy(predicates=insn.predicates | extra) if extra else insn)
+    return out
+
+
+def _narrowing_predicates(
+    insn_id: str,
+    own: Sequence[isl.Set],
+    by_names: Mapping[tuple[str, ...], isl.Set],
+) -> frozenset[Any]:
+    """The conditions that cut a merged domain back to ``own``."""
+    out: list[Any] = []
+    for domain in own:
+        names = tuple(domain.get_var_names(isl.dim_type.set))
+        wider = by_names.get(names)
+        if wider is None:  # pragma: no cover - every domain was merged
+            continue
+        narrow = domain.align_params(wider.get_space())
+        wide = wider.align_params(narrow.get_space())
+        if narrow.is_equal(wide):
+            continue
+        if narrow.is_empty():
+            # The term says this statement has no instances at all (a guard
+            # that is affine and contradictory). It still has to be an
+            # instruction, because loopy builds the loop from the merged
+            # domain, so it gets a condition nothing satisfies rather than
+            # running everywhere the wider domain does.
+            out.append(prim.Comparison(0, ">", 0))
+            continue
+        extra = narrow.gist(wide)
+        if extra.plain_is_universe():  # pragma: no cover - is_equal caught this
+            continue
+        try:
+            out.append(set_to_cond_expr(extra))
+        except Exception as exc:
+            raise LoweringError(
+                f"the domain of {insn_id}, {domain}, is narrower than the "
+                f"domain its inames {names} end up with, {wider}, and the "
+                f"difference cannot be written as a condition on the loop "
+                f"variables ({exc}). Running the statement over the wider "
+                "domain would execute instances the term does not contain, so "
+                "the two loops need different inames."
+            ) from exc
+    return frozenset(out)
 
 
 def _used_names(domains: Sequence[isl.Set], insns: Sequence[Any]) -> set[str]:

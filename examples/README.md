@@ -88,7 +88,7 @@ device schedule: Schedule(spmv, target='c').tag(r='g.0').split(j, 32).tag(j_in='
   decided  isl  the order after realize('y', tree=True) runs every dependence of spmv forward
   reason: the parallel tag on j_in sits inside a loop whose bound comes from an array (a ragged fiber), and loopy will not put a hardware axis in a domain with a data-dependent parameter. Parallelize an enclosing loop with a size known at launch instead, such as the rows of a CSR product
 
-  y: difference 5.55e-17 within 2.46e-06 (approx) -> tested
+  y: difference 5.55e-17 within 1.48e-06 (approx) -> tested
 ```
 
 ### lanky check examples/spmv.py
@@ -132,7 +132,7 @@ zero; `y` is compared at the accuracy its exactness class states.
 ```console
 $ uv run loopty run examples/spmv.py
 spmv: Schedule(spmv, target='c').split(j, 2).realize('y', tree=True)
-  y: difference 5.55e-17 within 2.46e-06 (approx) -> tested
+  y: difference 5.55e-17 within 1.48e-06 (approx) -> tested
 scan: Schedule(scan, target='c')
   off: difference 0 within 0 (exact) -> tested
 
@@ -179,7 +179,7 @@ accepted: Schedule(jacobi, target='c').skew(i, by='t').tile(t,i,8,8)
   decided  isl  tile(t,i,8,8) renames the instances of jacobi one for one
   decided  isl  the order after tile(t,i,8,8) runs every dependence of jacobi forward
 
-  u: difference 0 within 1.55e-05 (approx) -> tested
+  u: difference 0 within 1e-06 (approx) -> tested
   the native run matches the hand-written sweep: True
 ```
 
@@ -207,7 +207,7 @@ decided  isl  stencil_skew.py:54  jacobi  the source order runs every dependence
 ```console
 $ uv run loopty run examples/stencil_skew.py
 jacobi: Schedule(jacobi, target='c').skew(i, by='t').tile(t,i,8,8)
-  u: difference 0 within 1.55e-05 (approx) -> tested
+  u: difference 0 within 1e-06 (approx) -> tested
 
 STATUS   BY     WHERE               OWNER   STATEMENT
 -------  -----  ------------------  ------  ------------------------------------------------------------------------

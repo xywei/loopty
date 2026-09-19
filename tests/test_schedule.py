@@ -183,6 +183,33 @@ def test_tagging_a_piece_of_an_exact_reduction_in_parallel_is_rejected() -> None
     assert "reassociates an exact reduction" in str(caught.value)
 
 
+def test_exactness_is_read_off_the_reduction_being_transformed() -> None:
+    # Two reductions write ``y``: one exact, one approx. Asking the array what
+    # its exactness is has two answers, and the one that matters is the one
+    # belonging to the iname being tagged.
+    schedule = Schedule(ht.two_reductions_term())
+
+    with pytest.raises(IllegalCast) as caught:
+        schedule.tag(j="l.0")
+    assert "reassociates an exact reduction" in str(caught.value)
+    assert "into y" in str(caught.value)
+
+    # ``k`` belongs to the approx reduction, so tagging it is a reassociation
+    # the type permits. It used to be refused, because the first reduction
+    # found for ``y`` was the exact one.
+    tagged = schedule.tag(k="l.0")
+    assert tagged.reassociated == frozenset({"y"})
+
+
+def test_realize_answers_for_every_reduction_writing_the_array() -> None:
+    # ``realize`` is a claim about the whole accumulation into ``y``, and one
+    # exact reduction among them forbids a tree.
+    schedule = Schedule(ht.two_reductions_term())
+    with pytest.raises(IllegalCast) as caught:
+        schedule.realize("y", tree=True)
+    assert "is exact" in caught.value.fact.provenance["detail"]
+
+
 # }}}
 
 

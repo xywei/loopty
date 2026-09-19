@@ -61,6 +61,15 @@ Each case compares the compiled device run against the demo's own Python body on
 the same inputs, at the tolerance the exactness class states. Seven of eight
 cases pass on both devices; the numbers below are byte-identical between the two.
 
+One caveat about the tolerance column, and about the transcripts under
+[device-runs/](device-runs/): these runs predate the change that made the
+tolerance per element, `eps_class * (|expected| + 1)`, rather than one number
+scaled by the 1-norm of the whole output. The differences are what they were;
+the tolerances a rerun would print are smaller, and every verdict here is
+unchanged, because each difference is at least six orders of magnitude inside
+even the new allowance. The logs are kept as they were written rather than
+retouched.
+
 | case | schedule | output | difference | tolerance | verdict |
 |---|---|---|---|---|---|
 | spmv, split and realize | `split("j", 2).realize("y", tree=True)` | `y` | 5.55e-17 | 2.46e-06 (`approx`) | agrees |

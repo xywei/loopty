@@ -154,6 +154,7 @@ def _justified_by_type(
 def in_bounds_facts(term: Term, owner: str) -> list[Fact]:
     """One fact per array access: the cells it reaches are cells the array has."""
     types = dict(term.params)
+    sizes = flow.size_names(term)
     facts: list[Fact] = []
     for stmt in term.stmts:
         for array, indices, kind, inames, domain in flow.statement_accesses(stmt):
@@ -183,8 +184,8 @@ def in_bounds_facts(term: Term, owner: str) -> list[Fact]:
                 reached = relation.range()
                 cells = flow.cell_set(arrtype, indices)
                 reached, cells = _align_both(reached, cells)
-                reached = flow.assume_sizes(reached)
-                cells = flow.assume_sizes(cells)
+                reached = flow.assume_sizes(reached, sizes)
+                cells = flow.assume_sizes(cells, sizes)
             except Exception as exc:  # noqa: BLE001 - an unstatable rule is ASSUMED
                 facts.append(
                     Fact(
@@ -263,6 +264,7 @@ def _is_widened(relation: isl.Map, indices: Sequence[Any]) -> bool:
 def write_disjointness_facts(term: Term, owner: str) -> list[Fact]:
     """One fact per writing statement: distinct instances write distinct cells."""
     labels = instance_labels(term)
+    sizes = flow.size_names(term)
     by_statement = {stmt.id: stmt for stmt in term.stmts}
     facts: list[Fact] = []
     for footprint in flow.footprints(term):
@@ -274,7 +276,8 @@ def write_disjointness_facts(term: Term, owner: str) -> list[Fact]:
         collisions = flow.assume_sizes(
             relation.apply_range(relation.reverse()).subtract(
                 identity.align_params(relation.get_space())
-            )
+            ),
+            sizes,
         )
         facts.append(
             Fact(
@@ -313,8 +316,9 @@ def ordering_facts(term: Term, owner: str, where: str) -> list[Fact]:
     if not term.stmts:
         return []
     try:
-        schedule = flow.assume_sizes(flow.schedule_of(term))
-        deps = flow.assume_sizes(flow.dependences(term))
+        sizes = flow.size_names(term)
+        schedule = flow.assume_sizes(flow.schedule_of(term), sizes)
+        deps = flow.assume_sizes(flow.dependences(term), sizes)
     except Exception as exc:  # noqa: BLE001 - a term we cannot analyse is ASSUMED
         return [
             Fact(

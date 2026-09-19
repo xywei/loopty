@@ -69,7 +69,7 @@ device schedule: Schedule(spmv, target='c').tag(r='g.0').split(j, 32).tag(j_in='
   decided  isl  the order after realize('y', tree=True) runs every dependence of spmv forward
   reason: the parallel tag on j_in sits inside a loop whose bound comes from an array (a ragged fiber), and loopy will not put a hardware axis in a domain with a data-dependent parameter. Parallelize an enclosing loop with a size known at launch instead, such as the rows of a CSR product
 
-  y: difference 5.55e-17 within 2.46e-06 (approx) -> tested
+  y: difference 5.55e-17 within 1.48e-06 (approx) -> tested
 ```
 
 No loopy is involved in the first four lines: `@kernel` is inert, so the body
@@ -81,9 +81,12 @@ and not 3.
 The schedule at the bottom of the file is built at import time, and building it
 is what checks it. `split(j, 2)` cuts a row's entries into pieces and
 `realize("y", tree=True)` sums the pieces separately, which reassociates a
-floating-point accumulation. That is why the last line compares at `2.46e-06`
+floating-point accumulation. That is why the last line compares at `1.48e-06`
 rather than at zero: the tolerance comes from the `reassoc` fact, not from a
-number somebody picked.
+number somebody picked. It is a per-element tolerance,
+`eps_class * (|expected| + 1)`, so it is the accuracy claimed for *that* cell of
+`y` and does not grow when the matrix does; the printed pair names the element
+that came closest to its own allowance.
 
 The second schedule printed is the design's device schedule, and it is the
 interesting failure. Every cast is `decided`: putting the rows on work groups
@@ -149,7 +152,7 @@ Read the `BY` column.
 ```console
 $ uv run loopty run examples/spmv.py
 spmv: Schedule(spmv, target='c').split(j, 2).realize('y', tree=True)
-  y: difference 5.55e-17 within 2.46e-06 (approx) -> tested
+  y: difference 5.55e-17 within 1.48e-06 (approx) -> tested
 scan: Schedule(scan, target='c')
   off: difference 0 within 0 (exact) -> tested
 
@@ -244,7 +247,7 @@ accepted: Schedule(jacobi, target='c').skew(i, by='t').tile(t,i,8,8)
   decided  isl  tile(t,i,8,8) renames the instances of jacobi one for one
   decided  isl  the order after tile(t,i,8,8) runs every dependence of jacobi forward
 
-  u: difference 0 within 1.55e-05 (approx) -> tested
+  u: difference 0 within 1e-06 (approx) -> tested
   the native run matches the hand-written sweep: True
 ```
 
@@ -276,7 +279,7 @@ decided  isl  stencil_skew.py:54  jacobi  the source order runs every dependence
 
 $ uv run loopty run examples/stencil_skew.py
 jacobi: Schedule(jacobi, target='c').skew(i, by='t').tile(t,i,8,8)
-  u: difference 0 within 1.55e-05 (approx) -> tested
+  u: difference 0 within 1e-06 (approx) -> tested
 ...
 5 facts: 4 decided, 1 tested
 ```
@@ -308,7 +311,7 @@ schedule: Schedule(transpose, target='c').split(i, 2).interchange(i_out, j, i_in
   decided  isl  interchange(i_out, j, i_in) renames the instances of transpose one for one
   decided  isl  the order after interchange(i_out, j, i_in) runs every dependence of transpose forward
 ...
-  b: difference 0 within 6.6e-05 (approx) -> tested
+  b: difference 0 within 1e-06 (approx) -> tested
 ```
 
 `Fin[n*m]` normalizes to `Fin[n] x Fin[m]`, a layout is an isl map from index

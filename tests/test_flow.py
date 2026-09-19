@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import islpy as isl
-from lanky.prelude import Nat, Real
+from lanky.prelude import Int, Nat, Real
 from lanky.terms import evaluate_annotations
 
 from loopty import Arr, Fin, flow, when
 from loopty.trace import trace
+from loopty.typing import facts_for
 
 
 def term_of(fn):
@@ -83,6 +84,59 @@ def rolling(u: Arr[Fin[n], Real]):  # noqa: F821
     for i in u.dom:
         with when(i + 1 < u.dom.size):
             u[i] = u[i] + u[i + 1]
+
+
+def signed_guard(a: Int, u: Arr[Fin[n], Real]):  # noqa: F821
+    for i in u.dom:
+        with when(a < 0):
+            u[i] = 1.0
+
+
+def test_a_guard_on_a_signed_scalar_does_not_empty_the_domain() -> None:
+    # Every parameter of a domain used to be assumed non-negative, which is
+    # right for an extent and wrong for a signed scalar a guard mentions:
+    # ``a < 0`` and ``a >= 0`` together make the domain empty, and an empty
+    # domain discharges every obligation over it vacuously.
+    term = term_of(signed_guard)
+    domain = term.stmts[0].domain
+    assert not domain.is_empty()
+    assert "a >= 0" not in str(domain)
+    # The extent is still assumed non-negative; only the scalar is not.
+    assert domain.is_subset(
+        isl.Set("[a, n] -> { [i] : a < 0 and n >= 0 and 0 <= i < n }")
+    )
+
+
+def test_the_facts_of_a_kernel_guarded_on_a_signed_scalar_are_not_vacuous() -> None:
+    term = term_of(signed_guard)
+    facts = facts_for(term, owner="signed_guard")
+    (in_bounds,) = [fact for fact in facts if fact.kind == "in-bounds"]
+    # The cells the write reaches is the thing isl is asked about. Empty would
+    # mean the obligation holds because the statement never runs.
+    assert not flow.assume_sizes(
+        in_bounds.term.small, flow.size_names(term)
+    ).is_empty()
+    (disjoint,) = [fact for fact in facts if fact.kind == "disjoint-writes"]
+    assert not flow.footprints(term)[0].relation.is_empty()
+    assert disjoint.term is not None
+
+
+def test_the_schedule_checker_sees_the_same_non_empty_instances() -> None:
+    # ``loopty.schedule`` computes its own dependence relation, over the same
+    # statement domains, so the assumption has to be the same one there. It is,
+    # because the domains are the term's: nothing in schedule.py adds a
+    # non-negativity constraint of its own.
+    from loopty.schedule import Schedule
+
+    schedule = Schedule(term_of(signed_guard))
+    assert not schedule._instances.is_empty()  # noqa: SLF001 - the point of the test
+
+
+def test_size_names_keeps_extents_and_drops_scalars() -> None:
+    term = term_of(signed_guard)
+    names = flow.size_names(term)
+    assert "n" in names
+    assert "a" not in names
 
 
 def test_an_accumulation_still_records_reads_of_its_other_cells() -> None:

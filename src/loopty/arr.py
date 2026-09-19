@@ -125,6 +125,20 @@ class Arr:
                 raise ValueError("offsets must be a 1-D array with at least one entry")
             if np.any(np.diff(offsets) < 0):
                 raise ValueError("offsets must be non-decreasing")
+            if int(offsets[0]) != 0:
+                # Only differences and the last entry were checked once, so a
+                # monotone but shifted family such as [-1, 2] was accepted. It
+                # cannot be: native indexing computes offsets[r] + column, and a
+                # negative flat index wraps round to the end of the buffer under
+                # numpy while the generated C reads in front of it. The CSR
+                # convention is the fix and the contract, so it is enforced.
+                raise ValueError(
+                    f"offsets must start at 0, not {int(offsets[0])}: row r "
+                    "occupies values[offsets[r]:offsets[r + 1]] of the flat "
+                    "buffer, so the first row starts at its beginning"
+                )
+            if np.any(offsets < 0):  # pragma: no cover - implied by the two above
+                raise ValueError("offsets must be non-negative")
             if int(offsets[-1]) != values.size:
                 raise ValueError(
                     f"offsets end at {int(offsets[-1])} but there are "

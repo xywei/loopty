@@ -113,6 +113,34 @@ with a pair of statement instances.
 - `KernelTheory` is registered once rather than twice. Importing
   `loopty.kernel` no longer registers it, because lanky's entry point already
   does; registration happens on demand instead.
+- `Arr` refuses ragged offsets that do not start at zero. Only the differences
+  and the last entry were checked, so `[-1, 2]` was accepted and gave row 0 a
+  flat slice numpy wraps round to the end of the buffer and generated C reads in
+  front of.
+- A `when` guard is found by the identity of the guard object rather than by the
+  name `when` appearing in the body. `from loopty import when as guard` and a
+  renamed module attribute used to run the native body unmasked, so `python
+  file.py` computed something the lowered kernel does not.
+- A `break` or a `return` inside a traced loop raises `TraceError` naming `when`
+  as the fix. The loop level is closed when the iterator raises `StopIteration`,
+  which an early exit skips, so every statement after it used to be recorded
+  under a loop variable the body had already left.
+- `differential()` requires an explicit `reference` to cover exactly the outputs
+  of the lowering. A reference naming one of several outputs used to bypass the
+  native run and leave the rest unchecked under a `tested` fact.
+- Two statements over the same iname with different, unguarded domains keep
+  their own domains. loopy gives an iname one domain, so the two share the
+  union; each statement now carries the gist of its own domain as an instruction
+  predicate, instead of a statement written over `0 <= i < 2` executing over
+  four points. A statement whose domain is empty gets a condition nothing
+  satisfies rather than running over the whole union.
+- Only size and count parameters are assumed non-negative in a statement domain.
+  A guard on a signed scalar (`with when(a < 0)` with `a : Int`) used to make the
+  domain empty and discharge every obligation over it vacuously.
+- The exactness class consulted by `tag` is that of the reduction the tagged
+  iname belongs to, not the first reduction found writing that output; with two
+  reductions into one array the wrong contract used to be read. `realize` joins
+  all of them and takes the strictest.
 
 ### Changed
 
@@ -122,6 +150,13 @@ with a pair of statement instances.
   `Stmt(assignee=y[r], expr=y[r] + t)`. Lowering checks the invariant and
   refuses a term that breaks it, in place of a heuristic that inspected the
   expression and guessed.
+- **The differential tolerance is per element.** `exact` is bitwise; `reassoc`
+  and `approx` ask that `|got - want| <= eps_class * (|want| + 1)` at every cell.
+  It used to be one tolerance for the whole output, scaled by that output's
+  1-norm, so a large output bought a large allowance for each of its cells (a
+  million ones gave a tolerance of 1.0). The `difference ... within ...` line
+  now names the element that came closest to its own allowance, so the numbers
+  printed by the demos are smaller than they were.
 - **A reduction's exactness class is derived rather than fixed.** It comes from
   the element sorts of what the reduction sums, joined so that the weakest wins:
   a sum of `Nat` is `exact`, a sum of `Real` is `approx`. `reassoc` is no longer

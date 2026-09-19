@@ -589,10 +589,11 @@ def _unbuildable_reason(draft: _Draft) -> str | None:
             "enclosing loop with a size known at launch instead, such as the "
             "rows of a CSR product"
         )
-    by_accumulation: dict[str, list[str]] = {}
-    for iname, accumulated in draft.reductions.items():
-        by_accumulation.setdefault(accumulated, []).append(iname)
-    for accumulated, inames in sorted(by_accumulation.items()):
+    by_reduction: dict[str, list[str]] = {}
+    for iname, key in draft.reductions.items():
+        by_reduction.setdefault(key, []).append(iname)
+    for key, inames in sorted(by_reduction.items()):
+        accumulated = draft.reduction_info.get(key, (key, ""))[0]
         tagged = sorted(name for name in inames if name in parallel)
         untagged = sorted(name for name in inames if name not in parallel)
         if tagged and untagged:
@@ -641,7 +642,12 @@ class _Draft:
     order: list[str]
     tags: dict[str, str]
     kernel: Any
+    #: Reduction iname -> the key of the reduction it belongs to. A term may
+    #: have two reductions writing the same array with different exactness, so
+    #: an iname has to name *which* one, not merely what it accumulates into.
     reductions: dict[str, str] = field(default_factory=dict)
+    #: Reduction key -> ``(accumulated array, exactness class)``.
+    reduction_info: dict[str, tuple[str, str]] = field(default_factory=dict)
     constraints: dict[str, list[str]] = field(default_factory=dict)
     overridden: dict[str, set[str]] = field(default_factory=dict)
     reassoc: set[str] = field(default_factory=set)
@@ -699,10 +705,16 @@ class Schedule:
         # changes is the order of the accumulation, which is a question about
         # exactness rather than about dependences.
         self._reductions: dict[str, str] = {}
+        self._reduction_info: dict[str, tuple[str, str]] = {}
         for stmt in self._term.stmts:
-            for reduction in reductions_of(stmt.expr):
+            for position, reduction in enumerate(reductions_of(stmt.expr)):
+                key = f"{stmt.id}:{position}"
+                self._reduction_info[key] = (
+                    stmt.assignee.array,
+                    reduction.exactness,
+                )
                 for iname in reduction.inames:
-                    self._reductions[iname] = stmt.assignee.array
+                    self._reductions[iname] = key
         self._reassoc: frozenset[str] = frozenset()
         self._data_dependent = data_dependent_inames(self._term)
         self._history: tuple[str, ...] = ()
@@ -751,6 +763,7 @@ class Schedule:
             tags=dict(self._tags),
             kernel=self._kernel,
             reductions=dict(self._reductions),
+            reduction_info=dict(self._reduction_info),
             reassoc=set(self._reassoc),
             data_dependent=set(self._data_dependent),
         )
@@ -890,9 +903,12 @@ class Schedule:
                 continue
             # Running the pieces of a reduction at the same time sums them in an
             # order the source did not write, which is a reassociation and needs
-            # the accumulation's permission.
-            accumulated = draft.reductions[name]
-            if self._exactness_of(accumulated) == "exact":
+            # the accumulation's permission. The permission belongs to the
+            # reduction this iname is an iname *of*: two reductions can write
+            # one array with different exactness, and consulting the first one
+            # found would read the wrong contract.
+            accumulated, exactness = draft.reduction_info[draft.reductions[name]]
+            if exactness == "exact":
                 raise IllegalCast(
                     f"tag({name}={tag!r}) illegal: it would run the pieces of "
                     f"the accumulation into {accumulated} at the same time, "
@@ -987,9 +1003,9 @@ class Schedule:
         reassociates, and that is checked in :meth:`tag`.
         """
         draft = self._draft()
-        accumulated = draft.reductions.pop(iname)
-        draft.reductions[inner] = accumulated
-        draft.reductions[outer] = accumulated
+        key = draft.reductions.pop(iname)
+        draft.reductions[inner] = key
+        draft.reductions[outer] = key
         if iname in draft.data_dependent:
             draft.data_dependent.discard(iname)
             draft.data_dependent.update((inner, outer))
@@ -1129,16 +1145,28 @@ class Schedule:
         return self._commit(draft, text, ("realize", (var,), {"tree": tree}))
 
     def _exactness_of(self, var: str) -> str | None:
-        """The exactness class of the accumulation into ``var``, if there is one."""
+        """The strictest exactness class of any accumulation into ``var``.
+
+        ``realize`` is a statement about the whole accumulation into an array,
+        so when several reductions write one array it has to answer for all of
+        them. Taking the strictest is the conservative join: one ``exact``
+        reduction among a dozen ``approx`` ones still forbids a reduction tree,
+        which is the direction a refusal has to err in. :meth:`tag` asks a
+        narrower question and gets a narrower answer, through
+        ``_Draft.reduction_info``.
+        """
+        classes: list[str] = []
         for stmt in self._term.stmts:
             if stmt.assignee.array != var:
                 continue
             reductions = reductions_of(stmt.expr)
-            if reductions:
-                return reductions[0].exactness
-            if stmt.kind == "accumulate":
-                return _element_exactness(self._term, var)
-        return None
+            classes.extend(reduction.exactness for reduction in reductions)
+            if not reductions and stmt.kind == "accumulate":
+                classes.append(_element_exactness(self._term, var))
+        known = [name for name in classes if name in _EXACTNESS_ORDER]
+        if not known:
+            return classes[0] if classes else None
+        return min(known, key=_EXACTNESS_ORDER.index)
 
     # }}}
 
@@ -1229,6 +1257,7 @@ class Schedule:
         )
         other._reassoc = frozenset(draft.reassoc)
         other._reductions = dict(draft.reductions)
+        other._reduction_info = dict(draft.reduction_info)
         other._data_dependent = frozenset(draft.data_dependent)
         # The cast is legal; whether the target can build it is a separate
         # question, asked once per step and recorded either way.
@@ -1449,6 +1478,11 @@ def _set_over(stmt: Stmt) -> isl.Set:
     for k, iname in enumerate(stmt.inames):
         domain = domain.set_dim_name(isl.dim_type.set, k, iname)
     return domain
+
+
+#: Exactness classes, strictest first. ``exact`` is a request for the bits;
+#: ``approx`` promises only a few digits.
+_EXACTNESS_ORDER = ("exact", "reassoc", "approx")
 
 
 def _element_exactness(term: Term, name: str) -> str:

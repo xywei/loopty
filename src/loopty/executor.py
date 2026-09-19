@@ -15,6 +15,21 @@ epsilon for ``approx``. The comparison returns a fact, so "the compiled code
 agrees with Python" lands in the ledger with the tolerance it was judged by, and
 a schedule that reassociated an accumulation is judged by the wider tolerance it
 asked for rather than being quietly forgiven.
+
+The tolerance is per element, and depends on nothing but that element:
+
+    exact                      a_k == b_k, bit for bit
+    reassoc, approx            |a_k - b_k| <= eps_class * (|b_k| + FLOOR)
+
+with ``b`` the expected output, ``eps_class`` from :data:`TOLERANCE` and
+``FLOOR`` the absolute floor that keeps a value near zero from demanding a
+tolerance of zero. Every element has to pass. The scale is deliberately local:
+an earlier version scaled one tolerance by the 1-norm of the whole expected
+output, which made a big output easy to agree with (a million ones bought a
+tolerance of 1.0) and tied the verdict for one cell to values it has nothing to
+do with. The ``difference ... within ...`` line a run prints reports the element
+that came closest to its own allowance, so the two numbers beside each other are
+a claim about one cell rather than about an average.
 """
 
 from __future__ import annotations
@@ -34,12 +49,19 @@ __all__ = [
     "exactness_of_output",
 ]
 
-#: The relative tolerance each exactness class allows. ``exact`` means the bits:
-#: no tolerance at all. ``reassoc`` is the room a different summation order
-#: needs, and is scaled by the sum of the magnitudes involved, because that is
-#: what bounds the error a reassociated sum can accumulate. ``approx`` is the
-#: class of a type that never promised more than a few digits.
+#: The relative tolerance each exactness class allows, per element. ``exact``
+#: means the bits: no tolerance at all. ``reassoc`` is the room a different
+#: summation order needs. ``approx`` is the class of a type that never promised
+#: more than a few digits.
 TOLERANCE = {"exact": 0.0, "reassoc": 1e-12, "approx": 1e-6}
+
+#: The absolute floor added to an element's own magnitude before scaling by the
+#: class epsilon. Without it an expected value of exactly zero would demand a
+#: difference of exactly zero from a class that never promised one; with it, the
+#: allowance for such a value is ``eps_class`` itself. It is not a free
+#: parameter to tune away a failure: it sets the scale at which "near zero"
+#: starts, and 1.0 is the scale of a normalized quantity.
+TOLERANCE_FLOOR = 1.0
 
 
 def _resolve(obj: Any, target: str | None = None) -> tuple[Term, Any, Lowering, str]:
@@ -274,9 +296,30 @@ class LoopyExecutor:
         parameter: it is read from the exactness class of each output, widened by
         any accumulation the schedule marked reassociated, so the claim the fact
         records is "these agree to the accuracy the types promise".
+
+        An explicit ``reference`` has to cover *every* output of the lowering,
+        exactly. It replaces the native run, so an output it omits is compared
+        against nothing at all and the resulting ``TESTED`` fact would claim
+        more than was tested; an output it names that the kernel does not write
+        is a caller error worth saying out loud rather than ignoring.
         """
         term, _lowered, lowering, _target = _resolve(schedule)
         native = dict(reference or {})
+        if native:
+            missing = [name for name in lowering.outputs if name not in native]
+            extra = [name for name in native if name not in lowering.outputs]
+            if missing or extra:
+                parts = []
+                if missing:
+                    parts.append(f"does not cover {', '.join(missing)}")
+                if extra:
+                    parts.append(f"names {', '.join(extra)}, which is not an output")
+                raise ValueError(
+                    f"the reference given for {term.name} " + " and ".join(parts)
+                    + f"; {term.name} writes {', '.join(lowering.outputs)}, and "
+                    "every one of them has to be compared or the agreement fact "
+                    "would claim more than was tested"
+                )
         if not native:
             native_args = {name: _copy(value) for name, value in args.items()}
             if callable(kernel):
@@ -347,7 +390,15 @@ def exactness_of_output(term: Term, schedule: Any, name: str) -> str:
 def _compare(
     got: np.ndarray, want: np.ndarray, exactness: str
 ) -> tuple[bool, float, float]:
-    """``(agree, largest difference, tolerance)`` under one exactness class."""
+    """``(agree, difference, tolerance)`` under one exactness class.
+
+    Agreement is decided element by element, each against an allowance that
+    depends on that element's own expected magnitude and on nothing else:
+    ``|a_k - b_k| <= eps_class * (|b_k| + FLOOR)``, with ``exact`` asking for the
+    bits. The two numbers returned describe the element that came closest to
+    failing, ties going to the one with the smaller allowance, so a run that
+    prints them names the tightest case rather than an average.
+    """
     got = np.asarray(got)
     want = np.asarray(want)
     if got.shape != want.shape:
@@ -356,11 +407,27 @@ def _compare(
         return bool(np.array_equal(got, want)), float(
             np.max(np.abs(got - want)) if got.size else 0.0
         ), 0.0
+    if not want.size:
+        return True, 0.0, 0.0
     epsilon = TOLERANCE[exactness]
-    magnitude = float(np.abs(want).sum()) if want.size else 0.0
-    tolerance = epsilon * max(1.0, magnitude)
-    difference = float(np.max(np.abs(got - want))) if got.size else 0.0
-    return difference <= tolerance, difference, tolerance
+    difference = np.abs(got - want)
+    allowed = epsilon * (np.abs(want) + TOLERANCE_FLOOR)
+    agree = bool(np.all(difference <= allowed))
+    ratio = np.divide(
+        difference,
+        allowed,
+        out=np.where(difference > 0, np.inf, 0.0).astype(float),
+        where=allowed > 0,
+    )
+    flat_ratio = np.asarray(ratio).reshape(-1)
+    flat_allowed = np.asarray(allowed).reshape(-1)
+    worst = np.flatnonzero(flat_ratio == flat_ratio.max())
+    k = int(worst[int(np.argmin(flat_allowed[worst]))])
+    return (
+        agree,
+        float(np.asarray(difference).reshape(-1)[k]),
+        float(flat_allowed[k]),
+    )
 
 
 def agreement(term: Term, schedule: Any, got: dict, want: dict) -> Any:

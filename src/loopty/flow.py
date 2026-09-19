@@ -63,12 +63,13 @@ disjointness on the ragged form, which is all the MVP's typing rules ask for.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import islpy as isl
 import pymbolic.primitives as prim
+from lanky.terms import init_args
 
 from loopty.idx import _reflected_name as reflected_name
 from loopty.term import ArrType, Stmt, Term
@@ -87,6 +88,7 @@ __all__ = [
     "instance_space_depth",
     "pad_map",
     "schedule_of",
+    "size_names",
 ]
 
 
@@ -165,38 +167,105 @@ def _assemble(
     dims: Sequence[str],
     constraints: Sequence[str],
     params: Sequence[str],
+    nonneg: Collection[str],
 ) -> str:
     """The isl text of a set, given its dimensions, constraints and parameters.
 
-    Every parameter of a domain or a cell set is an extent or a count, so it is
-    non-negative, and isl has to be told: a parameter otherwise ranges over all
-    the integers, and an obligation as ordinary as ``off[0]`` being in bounds
-    would be refuted at a negative size. Nothing else about the parameters is
-    assumed, in particular no relation between two of them.
+    A parameter that stands for an extent or a count is non-negative, and isl
+    has to be told: a parameter otherwise ranges over all the integers, and an
+    obligation as ordinary as ``off[0]`` being in bounds would be refuted at a
+    negative size. ``nonneg`` names exactly those parameters. Nothing else about
+    them is assumed, in particular no relation between two of them.
+
+    Not every parameter qualifies. A guard brings its own names into a domain,
+    and a signed scalar is a perfectly ordinary thing to guard on:
+    ``with when(a < 0)`` with ``a : Int`` would make the domain empty if ``a``
+    were assumed non-negative here, and an empty domain discharges every
+    obligation over it vacuously. Which is why the caller says which names are
+    sizes rather than this function assuming all of them are.
     """
     unique = list(dict.fromkeys(params))
     head = f"[{', '.join(unique)}] -> " if unique else ""
     body = ", ".join(dims)
-    pieces = [*constraints, *[f"{name} >= 0" for name in unique]]
+    pieces = [*constraints, *[f"{name} >= 0" for name in unique if name in nonneg]]
     if not pieces:
         return f"{head}{{ [{body}] }}"
     return f"{head}{{ [{body}] : {' and '.join(pieces)} }}"
 
 
-def assume_sizes(obj: Any) -> Any:
-    """Constrain every parameter of ``obj`` to be non-negative.
+def size_names(term: Term) -> frozenset[str]:
+    """The parameter names of ``term`` that stand for an extent or a count.
+
+    An array axis extent (``n`` in ``Arr[Fin[n], Real]``), the free sizes the
+    term records, and the parameter a ragged bound reflects to (``nl_cnt_r``,
+    which stands for ``cnt[r]`` and is therefore a number of cells) are all
+    non-negative, and :func:`assume_sizes` may say so.
+
+    A scalar the kernel takes as a parameter is not one of those. ``a : Int`` is
+    signed, and a guard ``with when(a < 0)`` puts it among the parameters of a
+    statement's domain; assuming it non-negative would make that domain empty
+    and turn every obligation over it into a vacuous truth. Scalar parameters
+    are therefore excluded by name, whatever a derived object's parameter list
+    happens to contain.
+    """
+    scalars = {name for name, typ in term.params if not isinstance(typ, ArrType)}
+    out: set[str] = set(term.sizes)
+    for _, typ in term.params:
+        if isinstance(typ, ArrType):
+            out |= _names_in(typ.axes)
+    for stmt in term.stmts:
+        out |= set(stmt.domain.get_var_names(isl.dim_type.param))
+        for reduction in _reductions_in(stmt.expr):
+            out |= set(reduction.domain.get_var_names(isl.dim_type.param))
+    return frozenset(out - scalars)
+
+
+def _names_in(expr: Any) -> set[str]:
+    """Every variable name occurring in a size term, or a tuple of them."""
+    if isinstance(expr, prim.Variable):
+        return {expr.name}
+    if isinstance(expr, prim.ExpressionNode):
+        out: set[str] = set()
+        for arg in init_args(expr):
+            out |= _names_in(arg)
+        return out
+    if isinstance(expr, tuple | list):
+        out = set()
+        for item in expr:
+            out |= _names_in(item)
+        return out
+    return set()
+
+
+def _reductions_in(expr: Any) -> tuple[Any, ...]:
+    """The reductions of an expression. Imported late: trace imports this module."""
+    from loopty.trace import reductions_in  # noqa: PLC0415
+
+    return reductions_in(expr)
+
+
+def assume_sizes(obj: Any, names: Collection[str] | None = None) -> Any:
+    """Constrain the size parameters of ``obj`` to be non-negative.
 
     The same assumption :func:`_assemble` builds into a set it writes, applied
     to a set or map that isl derived (the range of an access map, say), whose
     parameters arrived by alignment and carry no constraints of their own.
     Without it a question is answered for negative array sizes too, and
     ``off[0]`` is "refuted" at ``n = -1``.
+
+    ``names`` says which parameters are sizes; :func:`size_names` computes it
+    from a term. With ``names`` omitted every parameter is taken to be one,
+    which is right for an object whose parameters all came from array shapes and
+    wrong for one that a guard contributed to, so a caller holding a term should
+    pass it.
     """
-    names = obj.get_var_names(isl.dim_type.param)
-    if not names:
+    present = list(obj.get_var_names(isl.dim_type.param))
+    if names is not None:
+        present = [name for name in present if name in names]
+    if not present:
         return obj
-    head = "[" + ", ".join(names) + "] -> "
-    body = " and ".join(f"{name} >= 0" for name in names)
+    head = "[" + ", ".join(present) + "] -> "
+    body = " and ".join(f"{name} >= 0" for name in present)
     return obj.intersect_params(isl.Set(f"{head}{{ : {body} }}"))
 
 
@@ -213,19 +282,32 @@ def domain_set(
     mention the enclosing inames (a triangular loop) or reflect a ragged count.
     ``names`` overrides the isl dimension names, which the padded instance space
     needs; the terms are renamed to match.
+
+    Only the names a *bound* contributes are assumed non-negative, along with
+    the parameters a ragged bound reflects to and any ``params`` the caller
+    names. A name that reaches the set through ``constraints`` alone comes from
+    a guard, and a guard may perfectly well be ``a < 0`` on a signed scalar;
+    assuming that name non-negative would empty the domain. See
+    :func:`_assemble`.
     """
     if names is None:
         names = tuple(inames)
     rename = dict(zip(inames, names, strict=True))
     reflected: dict[str, Any] = {}
-    pieces = list(constraints)
+    bound_pieces: list[str] = []
     for name, bound in zip(names, bounds, strict=True):
-        pieces.append(f"0 <= {name} < {expr_text(bound, rename, reflected)}")
+        bound_pieces.append(f"0 <= {name} < {expr_text(bound, rename, reflected)}")
+    pieces = [*constraints, *bound_pieces]
     free: set[str] = set()
     for piece in pieces:
         free |= free_names(piece)
     parameters = [*sorted(free - set(names)), *params]
-    return isl.Set(_assemble(list(names), pieces, parameters))
+    sized: set[str] = set(params) | set(reflected)
+    for piece in bound_pieces:
+        sized |= free_names(piece)
+    return isl.Set(
+        _assemble(list(names), pieces, parameters, sized - set(names))
+    )
 
 
 def cell_set(

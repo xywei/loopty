@@ -97,8 +97,11 @@ message states, because which violating pair isl picks depends on them.
   the pieces is not free on floating point. A trace reads the accumulation's
   class off what it sums, `realize("y", tree=True)` is what lowers it to
   `reassoc`, and the differential comparison against the native run widens its
-  tolerance because of that fact and not because someone chose a number. Over an
-  `exact` accumulation the same cast is refused.
+  tolerance because of that fact and not because someone chose a number. The
+  tolerance is per element and local: `exact` is bitwise, and `reassoc` and
+  `approx` ask that `|got - want| <= eps_class * (|want| + 1)` at every cell, so
+  it is the accuracy claimed for that cell and does not grow with the size of
+  the output. Over an `exact` accumulation the same cast is refused.
 - **Legal and buildable are different questions, and both are answered.** A
   transformation can preserve the meaning of a program and still be one the
   backend cannot generate. Every accepted step is asked whether the target can

@@ -110,6 +110,60 @@ def test_an_if_on_a_symbolic_value_names_when_as_the_fix() -> None:
         term_of(branchy)
 
 
+def test_a_break_out_of_a_traced_loop_is_refused() -> None:
+    # The loop level is popped when the iterator raises StopIteration, which a
+    # break skips. Every statement after the loop would then be recorded under a
+    # loop variable the body has left.
+    def early(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):  # noqa: F821
+        for i in u.dom:
+            v[i] = u[i]
+            break
+
+    with pytest.raises(TraceError, match="left early"):
+        term_of(early)
+
+
+def test_a_return_from_inside_a_traced_loop_is_refused() -> None:
+    def returns(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):  # noqa: F821
+        for i in u.dom:
+            v[i] = u[i]
+            return
+
+    with pytest.raises(TraceError, match="left early"):
+        term_of(returns)
+
+
+def test_a_break_out_of_an_inner_loop_is_refused_by_name() -> None:
+    # The nested case is the one that used to go quietly wrong: the outer
+    # loop's own StopIteration popped the abandoned inner level, so the
+    # statement after the inner loop carried a stale iname.
+    def nested(u: Arr[Fin[n], Fin[m], Real], v: Arr[Fin[n], Real]):  # noqa: F821
+        for i in v.dom:
+            for j in u.dom[i]:
+                v[i] = u[i, j]
+                break
+            v[i] = v[i] + 1.0
+
+    with pytest.raises(TraceError, match="left early"):
+        term_of(nested)
+
+
+def test_the_message_names_when_as_the_fix() -> None:
+    def early(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):  # noqa: F821
+        for i in u.dom:
+            v[i] = u[i]
+            break
+
+    with pytest.raises(TraceError, match="with when"):
+        term_of(early)
+
+
+def test_a_loop_that_runs_to_the_end_still_traces() -> None:
+    # The guard against early exits must not fire on an ordinary nest.
+    term = term_of(spmv)
+    assert [stmt.inames for stmt in term.stmts] == [("r",)]
+
+
 def test_asking_a_symbolic_domain_for_its_length_is_an_error() -> None:
     def sized(u: Arr[Fin[n], Real]):  # noqa: F821
         for i in u.dom:

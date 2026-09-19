@@ -17,6 +17,7 @@ import pytest
 import hand_terms as ht
 from loopty.executor import (
     TOLERANCE,
+    TOLERANCE_FLOOR,
     LoopyExecutor,
     agreement,
     emit_code,
@@ -131,6 +132,80 @@ def test_the_exactness_class_of_an_output_is_the_weakest_of_three() -> None:
 def test_tolerances_are_stated_once_and_ordered() -> None:
     assert TOLERANCE["exact"] == 0.0
     assert TOLERANCE["exact"] < TOLERANCE["reassoc"] < TOLERANCE["approx"]
+
+
+def test_one_wrong_element_of_a_large_output_is_a_refutation() -> None:
+    # The tolerance used to be scaled by the 1-norm of the whole expected
+    # output, so a big output bought a big allowance for every one of its
+    # cells: 2000 entries of 1000.0 gave a tolerance of 2.0, and an error of
+    # 0.5 in one cell "agreed". The scale is now that cell's own magnitude.
+    term = ht.axpy_term()
+    want = np.full(2000, 1000.0)
+    got = want.copy()
+    got[7] += 0.5
+    fact = agreement(term, Schedule(term), {"z": got}, {"z": want})
+    assert fact.status.value == "refuted"
+    detail = fact.provenance["outputs"]["z"]
+    assert detail["difference"] == pytest.approx(0.5)
+    assert detail["tolerance"] == pytest.approx(
+        TOLERANCE["approx"] * (1000.0 + TOLERANCE_FLOOR)
+    )
+
+
+def test_the_tolerance_of_an_output_does_not_grow_with_its_size() -> None:
+    term = ht.axpy_term()
+
+    def tolerance_for(size: int) -> float:
+        want = np.full(size, 3.0)
+        fact = agreement(term, Schedule(term), {"z": want.copy()}, {"z": want})
+        return fact.provenance["outputs"]["z"]["tolerance"]
+
+    assert tolerance_for(4) == pytest.approx(tolerance_for(4000))
+    assert tolerance_for(4) == pytest.approx(
+        TOLERANCE["approx"] * (3.0 + TOLERANCE_FLOOR)
+    )
+
+
+def test_an_element_sized_error_is_still_forgiven_at_its_own_scale() -> None:
+    # The relative half of the formula: a rounding-sized difference on a large
+    # value agrees, which is what a reassociated sum needs.
+    term = ht.axpy_term()
+    want = np.full(16, 1e6)
+    got = want.copy()
+    got[3] += 0.5
+    fact = agreement(term, Schedule(term), {"z": got}, {"z": want})
+    assert fact.status.value == "tested"
+
+
+def test_a_reference_has_to_cover_every_output() -> None:
+    term = ht.two_output_term()
+    schedule = Schedule(term)
+    arrays = {
+        "x": np.arange(4, dtype=np.float64),
+        "y": np.zeros(4),
+        "z": np.zeros(4),
+    }
+    with pytest.raises(ValueError, match="does not cover z"):
+        executor().differential(None, schedule, arrays, reference={"y": np.zeros(4)})
+    with pytest.raises(ValueError, match="not an output"):
+        executor().differential(
+            None,
+            schedule,
+            arrays,
+            reference={"y": np.zeros(4), "z": np.zeros(4), "x": np.zeros(4)},
+        )
+
+
+def test_a_reference_covering_every_output_is_accepted() -> None:
+    term = ht.two_output_term()
+    x = np.arange(4, dtype=np.float64)
+    fact = executor().differential(
+        None,
+        Schedule(term),
+        {"x": x, "y": np.zeros(4), "z": np.zeros(4)},
+        reference={"y": 2 * x, "z": x + 1},
+    )
+    assert fact.status.value == "tested"
 
 
 def test_agreement_on_arrays_of_different_shapes_is_a_refutation() -> None:

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import functools
 import os
+from types import ModuleType
 from typing import Any
 
 import numpy as np
@@ -37,7 +38,7 @@ from lanky.terms import evaluate_annotations
 from loopty import typing as rules
 from loopty.arr import Arr
 from loopty.term import Term
-from loopty.trace import mask_writes, trace
+from loopty.trace import mask_writes, trace, when
 
 __all__ = [
     "Kernel",
@@ -45,6 +46,7 @@ __all__ = [
     "Program",
     "ensure_registered",
     "kernel",
+    "opens_a_guard",
     "program",
 ]
 
@@ -72,6 +74,76 @@ class _Decorated:
         return evaluate_annotations(self.fn)
 
 
+def _code_objects(code: Any) -> list[Any]:
+    """``code`` and every code object nested in it.
+
+    A ``with when(...)`` inside a comprehension, a nested ``def`` or a lambda
+    lives in its own code object, and the outer one mentions only the constant
+    that holds it. Guard detection has to look at all of them.
+    """
+    out = [code]
+    seen = {id(code)}
+    index = 0
+    while index < len(out):
+        for const in out[index].co_consts:
+            if isinstance(const, type(code)) and id(const) not in seen:
+                seen.add(id(const))
+                out.append(const)
+        index += 1
+    return out
+
+
+def opens_a_guard(fn: Any) -> bool:
+    """Does ``fn``'s body open a :class:`loopty.trace.when` block?
+
+    The question decides whether the native run wraps its arrays in the masking
+    views, so getting it wrong makes ``python file.py`` compute something the
+    lowered kernel does not: a write under a false guard is performed instead of
+    dropped.
+
+    It used to be asked as ``"when" in fn.__code__.co_names``, which is a
+    question about spelling rather than about the object. ``from loopty import
+    when as guard`` and ``loopty.when(...)`` both open a guard and neither
+    mentions the bare name in the frame that uses it. So the guard object is
+    looked for *by identity*: in the constants, the globals and the closure of
+    every code object of the body, and as an attribute of any module those
+    reach. The old name test is kept as well, because a body that gets hold of
+    ``when`` in a way no static walk can follow still says ``when`` somewhere,
+    and over-reporting only costs a wrapper.
+    """
+    codes = _code_objects(fn.__code__)
+    names: set[str] = set()
+    for code in codes:
+        names |= set(code.co_names)
+        for const in code.co_consts:
+            if const is when:
+                return True
+    if "when" in names:
+        return True
+    reachable: list[Any] = []
+    globals_ = getattr(fn, "__globals__", None) or {}
+    for name in names:
+        if name in globals_:
+            reachable.append(globals_[name])
+    for cell in getattr(fn, "__closure__", None) or ():
+        try:
+            reachable.append(cell.cell_contents)
+        except ValueError:  # pragma: no cover - a cell not yet filled in
+            continue
+    for value in reachable:
+        if value is when:
+            return True
+        # ``loopty.when(...)`` reaches the guard through a module. Attributes
+        # are read off modules only: asking an arbitrary object for an
+        # attribute can run a property, and this is a question about the body,
+        # not an invitation to execute part of it.
+        if isinstance(value, ModuleType):
+            for name in names:
+                if getattr(value, name, None) is when:
+                    return True
+    return False
+
+
 class Kernel(_Decorated):
     """A decorated kernel: callable natively, traceable, registered.
 
@@ -85,7 +157,7 @@ class Kernel(_Decorated):
         self._term: Term | None = None
         self._facts: tuple[Fact, ...] | None = None
         #: Whether the body opens a ``when`` block, and so needs masked writes.
-        self.guards_writes = "when" in fn.__code__.co_names
+        self.guards_writes = opens_a_guard(fn)
         #: Whether the body iterates an array's ``.dom``, and so needs its
         #: arguments to be :class:`~loopty.arr.Arr` rather than bare ndarrays.
         self.iterates_domains = "dom" in fn.__code__.co_names
