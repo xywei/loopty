@@ -117,6 +117,12 @@ with a pair of statement instances.
   required to be non-negative.
 - A complex array declared with an integral element sort is checked for finite,
   whole, real entries before the cast into the compiled kernel's integer dtype.
+- `resolve_sizes` solves an axis written as an affine expression in one name
+  (`Fin[n + 1]`) for that name when no bare axis determines it, so a scalar
+  `i: Fin[n + 1]` is range-checked even when `n` occurs nowhere else.
+- A guard's read of the cell an accumulation writes keeps its own in-bounds
+  fact: the `acc` footprint covers the right-hand side's read over the narrowed
+  domain, not the guard's eager read over the loop nest.
 - The lowering states `0 <= i < n + 1` for a scalar declared `Fin[n + 1]`, not
   only for a bare `Fin[n]`, so such a kernel lowers.
 - A term with an array parameter the body never reads or writes is refused by

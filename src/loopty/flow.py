@@ -558,11 +558,14 @@ def statement_accesses(
         if source is None:
             continue
         for access in accesses_in(source, into_reductions=False):
-            # The read of the accumulated cell is already covered by the "acc"
-            # footprint; a read of another cell of the same array is not, and
-            # dropping it would lose a dependence.
+            # The right-hand side's read of the accumulated cell is already
+            # covered by the "acc" footprint; a read of another cell of the same
+            # array is not, and dropping it would lose a dependence. The guard's
+            # read of that same cell is kept even so: it happens over the
+            # un-narrowed loop domain, which the "acc" footprint does not cover.
             if (
-                stmt.kind == "accumulate"
+                source is stmt.expr
+                and stmt.kind == "accumulate"
                 and access.array == written.array
                 and structurally_equal(access.indices, written.indices)
             ):

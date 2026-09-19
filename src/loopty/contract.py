@@ -236,10 +236,16 @@ def resolve_sizes(
 
     Sizes are not parameters: they come from the data, so ``m`` in
     ``x: Arr[Fin[m], Real]`` is ``len(x)``. A ragged axis determines nothing (its
-    extent is per row) and a size written as an expression, ``Fin[n + 1]``, is
-    left alone rather than solved for.
+    extent is per row). An axis written as an affine expression in one name,
+    ``Fin[n + 1]``, is solved for that name when no bare axis determines it: a
+    kernel whose only arrays have extents ``n + 1`` still has an ``n``, and a
+    scalar ``i: Fin[n + 1]`` has to be measured against it. An expression in
+    several names is left alone.
     """
+    from lanky.terms import evaluate, free_variables
+
     sizes: dict[str, int] = {}
+    deferred: list[tuple[Any, int]] = []
     for name, typ in types.items():
         value = supplied.get(name)
         if value is None:
@@ -258,6 +264,31 @@ def resolve_sizes(
                 continue
             if isinstance(size, prim.Variable):
                 sizes.setdefault(size.name, int(shape[axis]))
+            elif not isinstance(size, int | np.integer):
+                deferred.append((size, int(shape[axis])))
+    # Second pass, so that a bare axis always wins over a solved one.
+    for size, extent in deferred:
+        try:
+            free = free_variables(size)
+        except Exception:
+            continue
+        if len(free) != 1:
+            continue
+        (name,) = free
+        if name in sizes:
+            continue
+        try:
+            offset = evaluate(size, {name: 0})
+            slope = evaluate(size, {name: 1}) - offset
+        except Exception:
+            continue
+        if not isinstance(slope, int | np.integer) or slope == 0:
+            continue
+        if (extent - offset) % slope:
+            continue
+        solved = (extent - offset) // slope
+        if solved >= 0:
+            sizes[name] = int(solved)
     return sizes
 
 

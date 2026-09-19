@@ -264,3 +264,27 @@ def test_the_body_of_a_guarded_statement_still_enjoys_the_narrowing() -> None:
 
 
 # }}}
+
+
+def accumulates_where_the_guard_reads(
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    row = y.dom
+    for i in row:
+        with when((i + 1 < row.size) & (y[i + 1] != 0)):
+            y[i + 1] = y[i + 1] + 1.0
+
+
+def test_a_guard_read_of_the_accumulated_cell_is_still_an_obligation() -> None:
+    # The right-hand side's read of ``y[i + 1]`` is covered by the ``acc``
+    # footprint over the narrowed domain; the guard's read of the same cell is
+    # not, because the guard is evaluated at ``i = n - 1`` too, so it keeps its
+    # own in-bounds fact and that fact is refuted.
+    _, facts = facts_of(accumulates_where_the_guard_reads)
+    refuted = [
+        f
+        for f in settled(facts)
+        if f.kind == "in-bounds" and f.status is Status.REFUTED
+    ]
+    assert refuted
+    assert {f.provenance["access"] for f in refuted} == {"y[i + 1]"}
