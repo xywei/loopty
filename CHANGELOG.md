@@ -93,10 +93,10 @@ with a pair of statement instances.
 - **The argument contract** (`loopty.contract`). What a call owes a term, in one
   place and asked by every entry point that runs a kernel: distinct array
   parameters are distinct storage, a ragged argument agrees with its counts
-  family, and an element of a refined sort is one. Each is an assumption a
-  typing rule makes about the call rather than about the term, so none of them
-  can be established inside the type system, and a violation raises `ValueError`
-  naming the argument.
+  family, and a value of a refined sort is one, array element and scalar
+  argument alike. Each is an assumption a typing rule makes about the call
+  rather than about the term, so none of them can be established inside the type
+  system, and a violation raises `ValueError` naming the argument.
 - **Plugin surface** (`loopty.plugin`). `KernelTheory`, `IslOracle`,
   `LoopyExecutor` and `RunVerb`, exported through the four `lanky.*` entry-point
   groups. lanky never imports loopty; it finds these and asks each what it can do.
@@ -179,6 +179,43 @@ with a pair of statement instances.
   shared by every isl set built about that term; what it allocated travels on
   `Term.reflected`, which is how lowering recognizes a ragged bound whose name
   had to move.
+- A scalar parameter of a refined sort is checked at the call boundary. A
+  kernel taking `i: Fin[n]` and writing `x[i]` has that access decided *by
+  type*, exactly as an indirection through a column array is, but the contract
+  skipped every non-array parameter, so `run(..., i=-1)` reached generated C as
+  an address in front of `x`. `Fin[b]` is checked against the sizes the call's
+  arrays determine, `Nat` for non-negativity and `Int` for being whole, at the
+  executor and on the native run.
+- A value of a refined integer sort has to be a finite whole number, which is a
+  separate question from being in range and is asked first. A range test is two
+  comparisons, and `nan` fails both, so it used to pass; `1.5` passed honestly
+  and was then truncated to the index `1` by the cast into the compiled
+  kernel's integer dtype while the native run kept the float. An integer dtype
+  passes without a test and an *integer-valued* float array is accepted, because
+  being a point of `Fin[m]` is a property of the value and not of its storage
+  and that cast is exact on it; `1.5`, `inf` and `nan` are refused, naming the
+  cell.
+- An array read inside an assignee's subscripts is an access. For
+  `y[col[i + 1]] = v` the write was recorded and `col[i + 1]` was not, so the
+  write was discharged in bounds by `col`'s element type while nothing asked
+  whether the kernel read past the end of `col` to find the cell.
+- An array read inside a `when` guard is an access. `with when(flag[i] != 0)`
+  reads `flag[i]`, and the reference lives only in `stmt.guard`: no in-bounds
+  obligation was stated for it, and no dependence was seen on an earlier
+  statement writing `flag`, so a parallel tag that lets the predicate observe
+  the overwritten value was accepted.
+- Those accesses are collected in one place. `flow.statement_accesses` now
+  returns everything a statement touches — assignee, right-hand side, reduction
+  bodies, assignee subscripts and guard — and `loopty.typing`,
+  `loopty.flow.footprints`, `loopty.schedule` and `loopty.lower` all read it
+  instead of walking the statement again themselves. The four had drifted apart,
+  which is how one omission could be three different bugs.
+- A kernel with an integral scalar parameter lowers. `i: Fin[n]` *declares*
+  `0 <= i < n`, which loopy has no way to learn about a value argument, so
+  `x[i]` failed its bounds check ("could not establish ... is a subset of ...")
+  for the legal call as readily as for the illegal one. The declaration is
+  passed to loopy as an assumption, which is sound because the contract now
+  refuses any argument it is false of.
 - Every native run wraps its array arguments in the masking views, so the
   contract is now "a body sees a view sharing the caller's buffer" rather than
   "an unguarded kernel sees the objects it was given". Whether a body opens a

@@ -664,6 +664,10 @@ def accesses_in(expr: Any, into_reductions: bool = True) -> tuple[Access, ...]:
     footprint or an in-bounds obligation about an access inside a reduction is
     stated over the *reduction's* domain, so the caller that needs that domain
     walks the reduction itself; see :func:`loopty.flow.statement_accesses`.
+
+    An explicit :class:`~loopty.term.Access` inside an expression is recognized
+    too. The tracer never builds one there, but a term written by hand may, and
+    this is the collector every rule now goes through.
     """
     out: list[Access] = []
 
@@ -672,6 +676,10 @@ def accesses_in(expr: Any, into_reductions: bool = True) -> tuple[Access, ...]:
             if isinstance(node.aggregate, prim.Variable):
                 out.append(Access(node.aggregate.name, _index_tuple(node.index)))
             walk(node.index)
+            return
+        if isinstance(node, Access):
+            out.append(node)
+            walk(node.indices)
             return
         if isinstance(node, Reduction):
             if into_reductions:

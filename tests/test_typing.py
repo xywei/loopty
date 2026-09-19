@@ -6,10 +6,10 @@ from pathlib import Path
 
 from lanky.check import check_path
 from lanky.ledger import Status
-from lanky.prelude import Real
+from lanky.prelude import Nat, Real
 from lanky.terms import evaluate_annotations
 
-from loopty import Arr, Fin
+from loopty import Arr, Fin, when
 from loopty import typing as rules
 from loopty.oracle import IslOracle, Monotone, Subset
 from loopty.trace import trace
@@ -73,6 +73,80 @@ def test_an_out_of_bounds_read_is_refuted_with_a_witness() -> None:
     witness = fact.provenance["witness"]
     assert witness is not None and len(witness) == 1
     assert fact.provenance["witness_text"].startswith("[a0=")
+
+
+# {{{ the reads that are not in the right-hand side
+
+
+def scatter_past_end(
+    col: Arr[Fin[n], Fin[m]],  # noqa: F821
+    x: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[m], Real],  # noqa: F821
+):
+    for i in x.dom:
+        y[col[i + 1]] = x[i]
+
+
+def scatter(
+    col: Arr[Fin[n], Fin[m]],  # noqa: F821
+    x: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[m], Real],  # noqa: F821
+):
+    for i in x.dom:
+        y[col[i]] = x[i]
+
+
+def gated_past_the_end(
+    flag: Arr[Fin[n], Nat],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    for i in y.dom:
+        with when(flag[i + 1] != 0):
+            y[i] = 2.0
+
+
+def in_bounds_of(fn) -> dict[str, object]:
+    """The in-bounds facts of a traced function, by the access they are about."""
+    _, facts = facts_of(fn)
+    return {
+        fact.statement.split(" is ")[0]: fact
+        for fact in settled(facts)
+        if fact.kind == "in-bounds"
+    }
+
+
+def test_a_read_in_an_assignee_index_is_an_obligation_of_its_own() -> None:
+    # The write is in bounds *by type*, from ``col``'s element sort, and that
+    # is exactly why the read of ``col`` had to be stated: it is the premise of
+    # the write's own discharge, and ``col[i + 1]`` runs off the end.
+    facts = in_bounds_of(scatter_past_end)
+    assert facts["y[col[i + 1]]"].status is Status.DECIDED
+    assert facts["y[col[i + 1]]"].decided_by == "type"
+
+    refuted = facts["col[i + 1]"]
+    assert refuted.status is Status.REFUTED
+    assert refuted.decided_by == "isl"
+    assert refuted.provenance["witness"] is not None
+    assert refuted.provenance["witness_text"].startswith("[a0=")
+
+
+def test_the_same_scatter_with_an_index_in_range_is_decided() -> None:
+    facts = in_bounds_of(scatter)
+    assert facts["col[i]"].status is Status.DECIDED
+    assert {fact.status for fact in facts.values()} == {Status.DECIDED}
+
+
+def test_an_array_read_in_a_guard_is_refuted_with_a_witness() -> None:
+    # The guard is evaluated for every instance, so its accesses are in bounds
+    # obligations like any other; ``flag[i + 1]`` at ``i = n - 1`` is not.
+    refuted = in_bounds_of(gated_past_the_end)["flag[i + 1]"]
+    assert refuted.status is Status.REFUTED
+    assert refuted.decided_by == "isl"
+    assert refuted.provenance["witness"] is not None
+    assert refuted.provenance["witness_text"].startswith("[a0=")
+
+
+# }}}
 
 
 def test_the_ordering_obligation_is_a_monotonicity_question() -> None:

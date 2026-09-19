@@ -16,8 +16,10 @@ import dataclasses
 import islpy as isl
 import numpy as np
 import pytest
+from lanky.prelude import Nat, Real
 
 import hand_terms as ht
+from loopty import Arr, Fin, when
 from loopty.lower import reductions_of
 from loopty.schedule import IllegalCast, Schedule, parallel_tag
 
@@ -99,6 +101,41 @@ def test_a_parallel_tag_is_what_makes_an_iname_unordered() -> None:
     assert parallel_tag("g.0")
     assert parallel_tag("l.1")
     assert not parallel_tag("unr")
+
+
+def gated_by_the_next(
+    flag: Arr[Fin[n + 1], Nat],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """``S0`` writes ``flag[i]``; ``S1`` is guarded on ``flag[i + 1]``.
+
+    The only reference to ``flag`` in ``S1`` is in its guard, so the whole
+    dependence between the two statements rests on the guard being collected as
+    a read.
+    """
+    for i in y.dom:
+        flag[i] = 1
+        with when(flag[i + 1] != 0):
+            y[i] = 2.0
+
+
+def test_a_parallel_tag_that_would_reorder_a_guard_read_is_rejected() -> None:
+    # ``S1[i]`` reads the cell ``S0[i + 1]`` overwrites, which the sequential
+    # loop runs in that order and a parallel loop does not. The access lives
+    # only in ``stmt.guard``, so before the collectors were unified the schedule
+    # checker saw no dependence here at all and accepted the tag.
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(gated_by_the_next, evaluate_annotations(gated_by_the_next))
+    schedule = Schedule(term)
+    with pytest.raises(IllegalCast) as caught:
+        schedule.tag(i="g.0")
+    message = str(caught.value)
+    assert "reads flag[" in message
+    assert caught.value.fact.kind == "monotone"
+    assert caught.value.fact.status.value == "refuted"
 
 
 # }}}

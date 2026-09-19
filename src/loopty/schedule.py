@@ -79,9 +79,8 @@ from loopty.lower import (
     _plain,
     lower_generic,
     reductions_of,
-    walk,
 )
-from loopty.term import Access, Stmt, Term
+from loopty.term import Stmt, Term
 
 __all__ = [
     "IllegalCast",
@@ -327,28 +326,28 @@ class _Dep:
 def _accesses(stmt: Stmt) -> list[tuple[str, str, tuple[Any, ...]]]:
     """Every array reference of a statement, as ``(kind, array, indices)``.
 
-    The assignee is a write, and also a read when the statement accumulates.
-    References inside the assignee's own subscripts are reads, as is everything
-    in the right-hand side, including a reduction body: a reduction is part of
-    one statement instance, so its accesses belong to that instance.
+    The list comes from :func:`loopty.flow.statement_accesses`, which is the one
+    place the question "what does this statement touch?" is answered: the
+    assignee, everything in the right-hand side including a reduction body, the
+    reads inside the assignee's own subscripts, and the reads inside the guard.
+    A legality verdict is only as good as that list, and it used to be written
+    out a second time here, which is how the guard came to be missing from it.
+
+    The shared collector records an accumulation once, as ``acc``; the
+    dependence computation below wants the write and the read separately, so
+    that is the one thing unpacked here. The domains it reports are dropped: a
+    schedule's coordinates are the layout's, not the term's, and an index that
+    does not fit them is widened by :func:`_index_text`.
     """
+    from loopty.flow import statement_accesses
+
     out: list[tuple[str, str, tuple[Any, ...]]] = []
-    out.append(("write", stmt.assignee.array, tuple(stmt.assignee.indices)))
-    if stmt.kind == "accumulate":
-        out.append(("read", stmt.assignee.array, tuple(stmt.assignee.indices)))
-    sources: list[Any] = [stmt.expr, *stmt.assignee.indices]
-    for reduction in reductions_of(stmt.expr):
-        sources.append(reduction.body)
-    for source in sources:
-        for node in walk(source):
-            if isinstance(node, Access):
-                out.append(("read", node.array, tuple(node.indices)))
-            elif isinstance(node, prim.Subscript) and isinstance(
-                node.aggregate, prim.Variable
-            ):
-                index = node.index
-                indices = index if isinstance(index, tuple) else (index,)
-                out.append(("read", node.aggregate.name, tuple(indices)))
+    for array, indices, kind, _inames, _domain in statement_accesses(stmt):
+        if kind == "acc":
+            out.append(("write", array, tuple(indices)))
+            out.append(("read", array, tuple(indices)))
+        else:
+            out.append((kind, array, tuple(indices)))
     return out
 
 

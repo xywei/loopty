@@ -510,6 +510,26 @@ def statement_accesses(
     enclosing inames as its outer dimensions and the reduction's binders as its
     inner ones. Keeping the two apart is what makes ``val[r, j]`` an obligation
     about ``j`` in the row's count rather than about an unconstrained ``j``.
+
+    A statement evaluates three expressions, and all three are read: the
+    right-hand side, the *subscripts of the assignee*, and the guard.
+
+    * ``y[col[i + 1]] = v`` reads ``col[i + 1]`` to find the cell of ``y`` it
+      writes. Recording only the write leaves that read with no in-bounds
+      obligation, while the write itself is discharged *by type* from ``col``'s
+      element sort, so a kernel reading past the end of ``col`` would be
+      reported clean.
+    * ``with when(flag[i] != 0)`` reads ``flag[i]`` to decide whether the write
+      happens. Recording only the write loses the RAW dependence on an earlier
+      statement that writes ``flag``, so a reordering could let the predicate
+      observe the old value, and leaves the guard's own access unbounded.
+
+    This is the one collector: :mod:`loopty.typing` states its in-bounds
+    obligations from it, :func:`footprints` builds the dependence relation from
+    it, :func:`loopty.schedule._accesses` checks casts against it and
+    :mod:`loopty.lower` derives an instruction's dependencies from it. An
+    omission here is an omission everywhere, which is the point: it used to be
+    possible for four collectors to disagree about what a statement reads.
     """
     from lanky.terms import structurally_equal
 
@@ -519,21 +539,30 @@ def statement_accesses(
     written = stmt.assignee
     kind = "acc" if stmt.kind == "accumulate" else "write"
     out.append((written.array, written.indices, kind, stmt.inames, stmt.domain))
-    for access in accesses_in(stmt.expr, into_reductions=False):
-        # The read of the accumulated cell is already covered by the "acc"
-        # footprint; a read of another cell of the same array is not, and
-        # dropping it would lose a dependence.
-        if (
-            stmt.kind == "accumulate"
-            and access.array == written.array
-            and structurally_equal(access.indices, written.indices)
-        ):
+    # The right-hand side first, so that the order the rules see is the order
+    # the source reads in; then the assignee's own subscripts and the guard.
+    for source in (stmt.expr, tuple(written.indices), stmt.guard):
+        if source is None:
             continue
-        out.append((access.array, access.indices, "read", stmt.inames, stmt.domain))
-    for reduction in reductions_in(stmt.expr):
-        inames = (*stmt.inames, *reduction.inames)
-        for access in accesses_in(reduction.body, into_reductions=False):
-            out.append((access.array, access.indices, "read", inames, reduction.domain))
+        for access in accesses_in(source, into_reductions=False):
+            # The read of the accumulated cell is already covered by the "acc"
+            # footprint; a read of another cell of the same array is not, and
+            # dropping it would lose a dependence.
+            if (
+                stmt.kind == "accumulate"
+                and access.array == written.array
+                and structurally_equal(access.indices, written.indices)
+            ):
+                continue
+            out.append(
+                (access.array, access.indices, "read", stmt.inames, stmt.domain)
+            )
+        for reduction in reductions_in(source):
+            inames = (*stmt.inames, *reduction.inames)
+            for access in accesses_in(reduction.body, into_reductions=False):
+                out.append(
+                    (access.array, access.indices, "read", inames, reduction.domain)
+                )
     return tuple(out)
 
 

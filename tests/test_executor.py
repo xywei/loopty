@@ -256,15 +256,19 @@ CSR_COLUMNS = [0, 1, 0, 2, 3]
 CSR_VALUES = [1.0, 2.0, 3.0, 4.0, 5.0]
 
 
-def csr_arguments(counts=None, columns=None, val_counts=None) -> dict:
-    """A consistent CSR call, with one piece of it replaceable per test."""
+def csr_arguments(counts=None, columns=None, val_counts=None, dtype=np.int64) -> dict:
+    """A consistent CSR call, with one piece of it replaceable per test.
+
+    ``dtype`` is the storage of the column array, which a test about what an
+    element *is* has to be able to vary independently of its value.
+    """
     counts = CSR_COUNTS if counts is None else counts
     return {
         "cnt": Arr.from_numpy(np.array(counts, dtype=np.int64)),
         "col": Arr.ragged(
             counts,
             values=CSR_COLUMNS if columns is None else columns,
-            dtype=np.int64,
+            dtype=dtype,
         ),
         "val": Arr.ragged(
             counts if val_counts is None else val_counts, values=CSR_VALUES
@@ -426,6 +430,84 @@ def test_a_negative_entry_of_a_nat_array_is_refused() -> None:
             c=np.array([2, -1, 3], dtype=np.int64),
             y=np.zeros(3),
         )
+
+
+def test_a_fractional_entry_of_an_index_array_is_refused() -> None:
+    # A range test is two comparisons, and 1.5 passes both of them while being
+    # no point of ``Fin[m]`` at all: the cast into the compiled kernel's integer
+    # dtype would make it the point 1, and the native run would keep the float.
+    arguments = csr_arguments(columns=[0.0, 1.5, 0.0, 2.0, 3.0], dtype=np.float64)
+    with pytest.raises(ValueError, match=r"col\[0, 1\] is 1.5"):
+        executor().run(csr_product.trace(), **arguments)
+
+
+def test_a_nan_entry_of_an_index_array_is_refused() -> None:
+    # The one a range test cannot catch: ``nan`` is neither ``< 0`` nor
+    # ``>= m``, so both comparisons are false and the old check passed it.
+    arguments = csr_arguments(
+        columns=[0.0, float("nan"), 0.0, 2.0, 3.0], dtype=np.float64
+    )
+    with pytest.raises(ValueError, match=r"col\[0, 1\] is nan"):
+        executor().run(csr_product.trace(), **arguments)
+
+
+def test_an_integer_valued_float_index_array_is_accepted() -> None:
+    # The documented rule: being a point of ``Fin[m]`` is a property of the
+    # value and not of the storage. 1.0 is the point 1, the cast the executor
+    # makes on the way in is exact on it, and the product is the same product.
+    arguments = csr_arguments(columns=[0.0, 1.0, 0.0, 2.0, 3.0], dtype=np.float64)
+    out = executor().run(csr_product.trace(), **arguments)
+    assert np.allclose(out["y"], csr_want(csr_arguments()))
+
+
+@kernel
+def broadcast_at(i: Fin[n], x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """``y[k] = x[i]``: a *scalar* whose index type is what puts ``x[i]`` in bounds."""
+    for k in y.dom:
+        y[k] = x[i]
+
+
+def broadcast_arguments(index) -> dict:
+    return {
+        "i": index,
+        "x": np.array([1.0, 10.0, 100.0, 1000.0]),
+        "y": np.zeros(4),
+    }
+
+
+def test_a_scalar_parameter_outside_its_index_type_is_refused() -> None:
+    # ``i: Fin[n]`` makes ``x[i]`` in bounds *by type*, exactly as a column
+    # array's element sort does for an indirection: there is no test in the
+    # generated code, so ``i = -1`` was an address in front of ``x``.
+    term = broadcast_at.trace()
+    with pytest.raises(ValueError, match=r"the argument i is -1"):
+        executor().run(term, **broadcast_arguments(-1))
+    with pytest.raises(ValueError, match=r"the argument i is 4"):
+        executor().run(term, **broadcast_arguments(4))
+
+
+def test_a_scalar_parameter_at_either_end_of_its_index_type_is_accepted() -> None:
+    # 0 and n - 1 are points of Fin[n] and have to run.
+    term = broadcast_at.trace()
+    assert np.allclose(executor().run(term, **broadcast_arguments(0))["y"], 1.0)
+    assert np.allclose(executor().run(term, **broadcast_arguments(3))["y"], 1000.0)
+
+
+def test_a_fractional_scalar_parameter_is_refused() -> None:
+    term = broadcast_at.trace()
+    with pytest.raises(ValueError, match=r"the argument i is 1.5"):
+        executor().run(term, **broadcast_arguments(1.5))
+    with pytest.raises(ValueError, match=r"the argument i is nan"):
+        executor().run(term, **broadcast_arguments(float("nan")))
+
+
+def test_the_native_run_checks_scalar_parameters_too() -> None:
+    # The native run is a call, and the same claim about the call is made there.
+    with pytest.raises(ValueError, match=r"the argument i is -1"):
+        broadcast_at(-1, np.array([1.0, 10.0, 100.0, 1000.0]), np.zeros(4))
+    out = np.zeros(4)
+    broadcast_at(3, np.array([1.0, 10.0, 100.0, 1000.0]), out)
+    assert np.allclose(out, 1000.0)
 
 
 # }}}
