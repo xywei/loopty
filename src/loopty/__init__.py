@@ -35,15 +35,11 @@ machine.
 
 from __future__ import annotations
 
-# The reduction term is lanky's: ``loopty.sum`` is ``lanky.sum``, which builds a
-# term over a symbolic domain and adds numbers over a concrete one, and loopty
-# only says how to lower it.
-from lanky import sum  # noqa: A004 - loopty.sum is lanky's reduction
-
 from loopty.arr import Arr
 from loopty.idx import Fin
 from loopty.kernel import Kernel, Program, kernel, program
 from loopty.oracle import IslOracle
+from loopty.reduction import reduce_sum
 from loopty.schedule import IllegalCast, Schedule, UnbuildableSchedule
 from loopty.term import Access, ArrType, Reduction, Stmt, Term
 from loopty.trace import TraceError, trace, when
@@ -70,7 +66,12 @@ __all__ = [
     "facts_for",
     "kernel",
     "program",
+    "reduce_sum",
     "sum",
     "trace",
     "when",
 ]
+
+# Compatibility alias for the development API. New kernel code should use
+# ``reduce_sum``, which makes the operation's Loopty ownership explicit.
+sum = reduce_sum
