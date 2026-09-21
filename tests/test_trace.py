@@ -7,8 +7,7 @@ import pytest
 from lanky.prelude import Nat, Real
 from lanky.terms import evaluate_annotations, render
 
-from loopty import Arr, Fin, when
-from loopty import sum as reduce_sum
+from loopty import Arr, Fin, reduce_sum, when
 from loopty.term import Reduction
 from loopty.trace import TraceError, accesses_in, reductions_in, trace
 
@@ -201,7 +200,7 @@ def test_the_builtin_sum_over_a_symbolic_domain_names_the_replacement() -> None:
         for i in y.dom:
             y[i] = sum(x[j] for j in x.dom)
 
-    with pytest.raises(TraceError, match="loopty.sum"):
+    with pytest.raises(TraceError, match="loopty.reduce_sum"):
         term_of(naive)
 
 
