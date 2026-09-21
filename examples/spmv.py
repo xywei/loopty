@@ -61,7 +61,8 @@ import numpy as np
 from lanky import theorem
 from lanky.prelude import Fn, Nat, Real
 
-from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum
+from loopty import Arr, Fin, Schedule, kernel, program
+from loopty import reduce_sum
 
 # {{{ the kernels and the theorem
 
