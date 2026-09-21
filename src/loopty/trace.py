@@ -22,10 +22,11 @@ guarded access is in bounds exactly where it is executed. Under plain
 ``python`` it masks the writes of the block rather than skipping them, which is
 what keeps one body serving as both the specification and the reference run.
 
-``lanky.sum`` is the reduction, so that the reduced domain is known rather than
-guessed from an accumulator loop. It is an ordinary generator expression, so
-lanky's binder tracing supplies the bound variable and its name, and this module
-only has to say what a symbolic ``.dom`` yields when lanky asks it for a point.
+``loopty.reduce_sum`` marks the reduction explicitly, so that the reduced domain
+is known rather than guessed from an accumulator loop. It takes an ordinary
+generator expression; internally Lanky's binder tracing supplies the bound
+variable and its name, and this module only has to say what a symbolic ``.dom``
+yields when the binder tracer asks it for a point.
 
 What the tracer produces is a :class:`~loopty.term.Term`: parameters with their
 array types, the free size parameters, the statements with their isl domains,
@@ -319,7 +320,8 @@ class SymDom:
     ``arr.dom`` is the outer axis and ``arr.dom[r]`` the fiber over ``r``, whose
     extent for a ragged array is ``cnt[r]``: the bound of the fiber is the bound
     of that row, which is where the dependent sum enters the type. Iterating in
-    a ``for`` loop opens a loop level; iterating inside a ``loopty.reduce_sum`` generator
+    a ``for`` loop opens a loop level; iterating inside a ``loopty.reduce_sum``
+    generator
     binds a reduction variable instead, because lanky is driving the generator
     and asks for the point itself.
     """
