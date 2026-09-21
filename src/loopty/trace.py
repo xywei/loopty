@@ -5,7 +5,7 @@ indexing a proxy builds a pymbolic subscript, assigning to one records a
 :class:`~loopty.term.Stmt` tagged with the calling frame's file and line,
 iterating a proxy's ``.dom`` yields a single fresh iname and pushes its bound
 onto the enclosing domain, and ``loopty.reduce_sum`` over such a domain becomes
- a :class:`~loopty.term.Reduction`. Source maps are frame line numbers, so there is
+a :class:`~loopty.term.Reduction`. Source maps are frame line numbers, so there is
 no AST pass and no span bookkeeping. The body that traces is the body that runs:
 the same source, given real arrays, is the reference implementation.
 
