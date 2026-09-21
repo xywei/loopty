@@ -4,8 +4,8 @@ Kernel bodies are not parsed. They are executed once against symbolic arrays:
 indexing a proxy builds a pymbolic subscript, assigning to one records a
 :class:`~loopty.term.Stmt` tagged with the calling frame's file and line,
 iterating a proxy's ``.dom`` yields a single fresh iname and pushes its bound
-onto the enclosing domain, and ``loopty.reduce_sum`` over such a domain becomes a
-:class:`~loopty.term.Reduction`. Source maps are frame line numbers, so there is
+onto the enclosing domain, and ``loopty.reduce_sum`` over such a domain becomes
+ a :class:`~loopty.term.Reduction`. Source maps are frame line numbers, so there is
 no AST pass and no span bookkeeping. The body that traces is the body that runs:
 the same source, given real arrays, is the reference implementation.
 
@@ -320,9 +320,8 @@ class SymDom:
     ``arr.dom`` is the outer axis and ``arr.dom[r]`` the fiber over ``r``, whose
     extent for a ragged array is ``cnt[r]``: the bound of the fiber is the bound
     of that row, which is where the dependent sum enters the type. Iterating in
-    a ``for`` loop opens a loop level; iterating inside a ``loopty.reduce_sum``
-    generator
-    binds a reduction variable instead, because lanky is driving the generator
+    a ``for`` loop opens a loop level; inside a ``loopty.reduce_sum`` generator,
+    iteration binds a reduction variable instead, because Lanky is driving it
     and asks for the point itself.
     """
 
@@ -410,8 +409,8 @@ class _DomIterator:
 
     Binding happens on the first ``__next__`` and not in ``__iter__``, because
     Python evaluates and calls ``iter`` on a generator expression's outermost
-    iterable before ``reduce_sum`` enters binder tracing; binding early would put the binder
-    outside the trace that wants it.
+    iterable before ``reduce_sum`` enters binder tracing; binding early would
+    put the binder outside the trace that wants it.
     """
 
     __slots__ = ("dom", "done", "loop")
@@ -450,8 +449,8 @@ class _DomIterator:
             raise TraceError(
                 f"a comprehension over {self.dom!r} is being driven by Python "
                 "itself, which cannot see the reduced domain; write "
-                "loopty.reduce_sum(... for j in arr.dom[r]) so that the reduction and "
-                "its domain are recorded"
+                "loopty.reduce_sum(... for j in arr.dom[r]) so that the "
+                "reduction and its domain are recorded"
             )
         self.loop = True
         return tracer.enter_loop(self.dom.bound, _loop_target_name(), self)
@@ -614,8 +613,8 @@ def _sort_exactness(dtype: Any) -> str:
 def lower_reductions(expr: Any, tracer: Tracer) -> Any:
     """Replace every lanky ``Sum`` in ``expr`` by a :class:`~loopty.term.Reduction`.
 
-    Lanky builds the temporary binder node used by ``reduce_sum``; Loopty gives it a
-    domain. The domain's dimensions are the enclosing inames followed by the
+    Lanky builds the temporary binder node used by ``reduce_sum``; Loopty gives
+    it a domain. The domain's dimensions are the enclosing inames followed by the
     reduction's own, so a ragged reduction bound may mention the row it belongs
     to, and the set is directly comparable with the statement's domain.
 
