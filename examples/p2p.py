@@ -52,7 +52,7 @@ from lanky.prelude import Nat, Real
 from pymbolic.primitives import Call, Variable
 
 from loopty import Arr, Fin, Schedule, kernel, when
-from loopty import sum as reduce_sum
+from loopty import reduce_sum
 
 #: A four by four grid of boxes over the unit square, and this many points in
 #: it. Tiny, and still ragged: the lists run from a handful to a few dozen.

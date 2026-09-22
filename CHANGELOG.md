@@ -30,7 +30,7 @@ with a pair of statement instances.
 - **Tracing** (`loopty.trace`). The body runs once against symbolic arrays.
   Subscripting builds an access, assignment records a statement, iterating a
   symbolic `.dom` opens a loop level whose iname is the name the `for` statement
-  wrote, `loopty.sum` becomes a reduction, and `with when(cond):` records a guard
+  wrote, `loopty.reduce_sum` becomes a reduction, and `with when(cond):` records a guard
   that is also intersected into the statement's domain when it is affine. A
   Python `if` on a computed value raises `TraceError` naming `when` as the fix.
 - **Footprints and dependences** (`loopty.flow`). Every statement instance is a
@@ -260,6 +260,11 @@ with a pair of statement instances.
 
 ### Changed
 
+- **Reductions have a Loopty-owned frontend.** `loopty.reduce_sum` is the public
+  kernel API; Lanky still supplies generator binder capture internally, while
+  tracing immediately converts the captured node into an ISL-backed
+  `loopty.term.Reduction`. `loopty.sum` remains as a compatibility alias for
+  the development API, but examples and documentation use `reduce_sum`.
 - **The accumulate convention is part of the Term IR.** `Stmt.kind ==
   "accumulate"` now *means* that `expr` is the complete right-hand side and
   reads the assignee cell, so `y[r] += t` is

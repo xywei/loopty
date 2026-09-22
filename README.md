@@ -19,6 +19,9 @@ def spmv(
         y[r] = reduce_sum(val[r, j] * x[col[r, j]] for j in val.dom[r])
 ```
 
+`reduce_sum` is Loopty's reduction frontend: it binds `j` over the symbolic
+fiber and traces the operation as an ISL-backed `loopty.term.Reduction`.
+
 `val: Arr[Fin[n], Fin[cnt], Real]` is a ragged shape: for each of the `n` rows,
 `cnt[r]` entries. The second axis names the counts array, which is what makes it
 a dependent sum rather than a rectangle, and `val.dom[r]` is the fiber over that

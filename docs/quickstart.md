@@ -32,6 +32,11 @@ def spmv(
         y[r] = reduce_sum(val[r, j] * x[col[r, j]] for j in val.dom[r])
 ```
 
+`reduce_sum` is a reduction: it eliminates the bound iname `j` over its symbolic
+domain. The `scan` kernel in the same example is deliberately different: a
+prefix sum is a recurrence with loop-carried dependences, not a reduction
+expression.
+
 Three things are being said in the signature. The output `y` is a parameter, not
 a return value, because that is how a kernel writes. The sizes come from the
 arrays, so the loop iterates `y.dom` and the inner loop iterates `val.dom[r]`,

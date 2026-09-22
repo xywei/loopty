@@ -4,12 +4,13 @@ Kernel bodies are not parsed. They are executed once against symbolic arrays:
 indexing a proxy builds a pymbolic subscript, assigning to one records a
 :class:`~loopty.term.Stmt` tagged with the calling frame's file and line,
 iterating a proxy's ``.dom`` yields a single fresh iname and pushes its bound
-onto the enclosing domain, and ``lanky.sum`` over such a domain becomes a
-:class:`~loopty.term.Reduction`. Source maps are frame line numbers, so there is
+onto the enclosing domain, and ``loopty.reduce_sum`` over such a domain becomes
+a :class:`~loopty.term.Reduction`. Source maps are frame line numbers, so there is
 no AST pass and no span bookkeeping. The body that traces is the body that runs:
 the same source, given real arrays, is the reference implementation.
 
-Two constructs are the price of tracing instead of parsing.
+Execution-based tracing needs two explicit symbolic constructs where ordinary
+Python syntax would otherwise force a concrete decision.
 
 ``with when(cond):`` is the guard, because a Python ``if`` on a symbolic value
 cannot be traced: tracing would have to pick a branch, and the value is not
@@ -21,10 +22,11 @@ guarded access is in bounds exactly where it is executed. Under plain
 ``python`` it masks the writes of the block rather than skipping them, which is
 what keeps one body serving as both the specification and the reference run.
 
-``lanky.sum`` is the reduction, so that the reduced domain is known rather than
-guessed from an accumulator loop. It is an ordinary generator expression, so
-lanky's binder tracing supplies the bound variable and its name, and this module
-only has to say what a symbolic ``.dom`` yields when lanky asks it for a point.
+``loopty.reduce_sum`` marks the reduction explicitly, so that the reduced domain
+is known rather than guessed from an accumulator loop. It takes an ordinary
+generator expression; internally Lanky's binder tracing supplies the bound
+variable and its name, and this module only has to say what a symbolic ``.dom``
+yields when the binder tracer asks it for a point.
 
 What the tracer produces is a :class:`~loopty.term.Term`: parameters with their
 array types, the free size parameters, the statements with their isl domains,
@@ -331,8 +333,8 @@ class SymDom:
     ``arr.dom`` is the outer axis and ``arr.dom[r]`` the fiber over ``r``, whose
     extent for a ragged array is ``cnt[r]``: the bound of the fiber is the bound
     of that row, which is where the dependent sum enters the type. Iterating in
-    a ``for`` loop opens a loop level; iterating inside a ``lanky.sum`` generator
-    binds a reduction variable instead, because lanky is driving the generator
+    a ``for`` loop opens a loop level; inside a ``loopty.reduce_sum`` generator,
+    iteration binds a reduction variable instead, because Lanky is driving it
     and asks for the point itself.
     """
 
@@ -420,8 +422,8 @@ class _DomIterator:
 
     Binding happens on the first ``__next__`` and not in ``__iter__``, because
     Python evaluates and calls ``iter`` on a generator expression's outermost
-    iterable before ``lanky.sum`` is entered; binding early would put the binder
-    outside the trace that wants it.
+    iterable before ``reduce_sum`` enters binder tracing; binding early would
+    put the binder outside the trace that wants it.
     """
 
     __slots__ = ("dom", "done", "loop")
@@ -460,8 +462,8 @@ class _DomIterator:
             raise TraceError(
                 f"a comprehension over {self.dom!r} is being driven by Python "
                 "itself, which cannot see the reduced domain; write "
-                "loopty.sum(... for j in arr.dom[r]) so that the reduction and "
-                "its domain are recorded"
+                "loopty.reduce_sum(... for j in arr.dom[r]) so that the "
+                "reduction and its domain are recorded"
             )
         self.loop = True
         return tracer.enter_loop(self.dom.bound, _loop_target_name(), self)
@@ -624,8 +626,8 @@ def _sort_exactness(dtype: Any) -> str:
 def lower_reductions(expr: Any, tracer: Tracer) -> Any:
     """Replace every lanky ``Sum`` in ``expr`` by a :class:`~loopty.term.Reduction`.
 
-    lanky builds the reduction node (it owns ``lanky.sum``); loopty gives it a
-    domain. The domain's dimensions are the enclosing inames followed by the
+    Lanky builds the temporary binder node used by ``reduce_sum``; Loopty gives
+    it a domain. The domain's dimensions are the enclosing inames followed by the
     reduction's own, so a ragged reduction bound may mention the row it belongs
     to, and the set is directly comparable with the statement's domain.
 
