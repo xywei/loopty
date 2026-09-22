@@ -1,6 +1,6 @@
 # The loopty demos
 
-Four files, each of which runs three ways. Every console block below is a
+Six files, each of which runs three ways. Every console block below is a
 snapshot of real output, not prose about it, and it is produced mechanically:
 
 ```console
@@ -17,7 +17,7 @@ here quietly stop being true.
 | file | what it shows |
 |---|---|
 | `spmv.py` | a ragged sparse product: an indirection in bounds by type, a scan with a postcondition, the theorem that postcondition needs, and a schedule whose reassociation is recorded |
-| `stencil_skew.py` | a rectangular tiling of a Jacobi stencil refused with a witness pair, and the skew that makes the same tiling legal |
+| `stencil_skew.py` | a rectangular tiling of a Jacobi stencil refused with a witness pair, and the skew that makes the same tiling legal |\n| `wavefront_acoustic.py` | two interdependent instructions in one acoustic-wave kernel, a cross-statement time dependence, its illegal rectangular tile, and the legal skewed wavefront block |\n| `composition_fusion.py` | an `@program` made from two typed kernels, Loopy fusion across their data-flow edge, and `assignment_to_subst` eliminating the intermediate array |
 | `reshape_layouts.py` | `Fin[n * m]` as `Fin[n] x Fin[m]`, one buffer read in two layouts, and a transpose split and interchanged |
 | `p2p.py` | the near field of a fast multipole method: a two-level interaction list flattened into one ragged level, with the self-interaction guarded by `when` |
 
@@ -219,6 +219,45 @@ tested   loopy  stencil_skew.py:62  jacobi  the scheduled run of jacobi agrees w
 
 5 facts: 4 decided, 1 tested
 ```
+
+## wavefront_acoustic.py
+
+This example moves beyond a one-statement Jacobi recurrence. A velocity update
+and a pressure update live in the same `(t, i)` loop nest. The pressure
+instruction consumes the velocity instruction in the same time step, while the
+next time step's velocity instruction consumes pressure produced by the other
+instruction. The dependence that crosses an i-tile boundary is therefore
+**S1 -> S0**, not S0 -> itself.
+
+The ordinary rectangular tile is rejected with that cross-statement witness.
+`skew("i", by="t").tile(...)` is accepted and executed. Geometrically this is a
+wavefront/parallelogram temporal block: rectangular in `(t, i+t)`. The module
+also has an optional `--bench` mode so the locality effect can be measured on a
+real machine without turning a speedup into a CI invariant.
+
+A full 1-D diamond is the next useful pressure test rather than something this
+demo pretends to have already: it wants the two characteristic coordinates
+`i+t` and `i-t`. That points at a multi-axis affine schedule primitive whose
+checker reasons about the parity-constrained image of that map.
+
+## composition_fusion.py
+
+The application is `flux(u, f); divergence(f, rhs)`. It is already natural to
+write natively as an `@program`, but `Program` does not lower yet. The example
+therefore lowers the two kernels independently and uses Loopy's existing
+composition machinery as an experiment:
+
+1. `fuse_kernels(..., data_flow=[("f", 0, 1)])` coalesces domains and
+   instructions and makes the producer/consumer edge explicit.
+2. `assignment_to_subst(..., "f")` turns the pointwise producer into a
+   substitution rule and removes the materialized intermediate.
+
+The one local adapter in the example is the important API finding: independent
+lowerings describe `f` differently because it is an output of the producer and
+an input of the consumer, while Loopy fusion requires matching argument
+declarations. A first-class `Program.lower()` / composition primitive should
+own that interface reconciliation, make internal data-flow values temporaries,
+and then choose fusion/substitution/inlining as lowering decisions.
 
 ## reshape_layouts.py and p2p.py
 
