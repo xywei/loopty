@@ -47,6 +47,7 @@ from loopy.symbolic import Reduction as LoopyReduction
 from loopy.symbolic import set_to_cond_expr
 from pymbolic.mapper import Mapper
 
+from loopty.flow import statement_accesses
 from loopty.term import Access, ArrType, Reduction, Stmt, Term
 
 __all__ = [
@@ -218,20 +219,11 @@ def walk(expr: Any) -> Iterator[Any]:
         yield from walk(child)
 
 
-def arrays_of(expr: Any) -> tuple[str, ...]:
-    """Names of the arrays referenced anywhere in ``expr``, in first-seen order."""
-    names: list[str] = []
-    for node in walk(expr):
-        name = None
-        if isinstance(node, Access):
-            name = node.array
-        elif isinstance(node, prim.Subscript) and isinstance(
-            node.aggregate, prim.Variable
-        ):
-            name = node.aggregate.name
-        if name is not None and name not in names:
-            names.append(name)
-    return tuple(names)
+# ``arrays_of`` used to live here, walking one expression for the array names in
+# it. It was a second answer to "what does this statement touch?", and it was
+# the wrong one: it was given ``stmt.expr`` and the assignee's subscripts and
+# never the guard. :func:`loopty.flow.statement_accesses` is the only answer
+# now, and the instruction dependencies below read it.
 
 
 def reductions_of(expr: Any) -> tuple[Reduction, ...]:
@@ -1000,11 +992,15 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
         assignee = expr(stmt.assignee)
         body = expr(stmt.expr)
 
-        read_arrays = set(arrays_of(stmt.expr)) | set(
-            arrays_of(tuple(stmt.assignee.indices))
-        )
-        if stmt.kind == "accumulate":
-            read_arrays.add(stmt.assignee.array)
+        # What this statement reads, from the one collector every rule uses:
+        # the right-hand side, the subscripts of the assignee, the guard, and
+        # the accumulated cell. A name missing here is a dependence edge that
+        # is never drawn, so the list is not written out a second time.
+        read_arrays = {
+            array
+            for array, _indices, kind, _inames, _domain in statement_accesses(stmt)
+            if kind in ("read", "acc")
+        }
         written = stmt.assignee.array
 
         # Order the statements by their data: a statement runs after every
@@ -1072,6 +1068,11 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
         lang_version=_LANG_VERSION,
         name=_kernel_name(term.name, [arg.name for arg in args]),
     )
+    assumptions = _scalar_assumptions(term, {arg.name for arg in args})
+    if assumptions is not None:
+        # Not ``if assumptions:``: truthiness on an isl set is ``__len__``,
+        # which islpy deprecates for a BasicSet.
+        kernel = lp.assume(kernel, assumptions)
     # Pin the loop nest to the order the body was written in. loopy is free to
     # choose an order otherwise, and its choice is not checked against the term:
     # for the Jacobi stencil it puts the space loop outside the time loop, which
@@ -1090,6 +1091,66 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
         ragged=dict(builder.ragged),
         target=target,
     )
+
+
+def _scalar_assumptions(term: Term, declared: set[str]) -> isl.BasicSet | None:
+    """What the sorts of the scalar parameters say about them, for loopy.
+
+    ``i: Fin[n]`` is a *declaration* that ``0 <= i < n``, and loopy has no other
+    way to learn it: a scalar is a plain value argument, so a kernel writing
+    ``x[i]`` fails loopy's own bounds check ("could not establish ... is a
+    subset of ...") for the legal call as readily as for the illegal one, which
+    is a blanket refusal rather than a safety net.
+
+    Telling loopy is sound because the declaration is enforced where it can be:
+    :func:`loopty.contract.scalar_parameters` refuses an argument outside its
+    sort at both entry points that run a kernel, so no run reaches here with an
+    ``i`` the assumption is false of. ``Nat`` contributes non-negativity and
+    ``Int`` nothing. A constraint naming something loopy does not have as a
+    parameter is dropped rather than guessed at.
+    """
+    from loopty.contract import sort_bound
+
+    pieces: list[str] = []
+    names: set[str] = set()
+    for name, typ in term.params:
+        if isinstance(typ, ArrType) or name not in declared:
+            continue
+        sort = typ
+        base = getattr(sort, "base", None)  # a lanky refinement T & prop
+        if base is not None and base is not sort:
+            sort = base
+        bound = getattr(sort, "bound", None)
+        if bound is not None and not isinstance(bound, int | np.integer):
+            # ``Fin[n]`` or ``Fin[n + 1]`` with a symbolic bound: sort_bound
+            # cannot resolve the sizes without the call's arguments, but loopy
+            # has every size the bound names as a parameter, so the bound is
+            # stated as an affine constraint over them.
+            from lanky.terms import free_variables
+
+            from loopty import idx
+
+            free = set(free_variables(bound))
+            if not idx.is_affine(bound) or not free <= declared:
+                continue
+            pieces.append(f"{name} >= 0")
+            pieces.append(f"{name} < {idx.isl_expr(bound)}")
+            names |= {name, *free}
+            continue
+        limits = sort_bound(typ, {})
+        if limits is not None:
+            low, high = limits
+            pieces.append(f"{name} >= {low}")
+            if high is not None:
+                pieces.append(f"{name} < {high}")
+            names.add(name)
+    if not pieces:
+        return None
+    # A set rather than the text ``lp.assume`` also accepts: that path wraps the
+    # constraint in the kernel's own outer parameters, and a scalar argument is
+    # not one of them until this assumption introduces it.
+    params = ", ".join(sorted(names))
+    return isl.BasicSet(f"[{params}] -> {{ : {' and '.join(pieces)} }}")
 
 
 def _merge_domains(domains: Sequence[isl.Set]) -> list[isl.Set]:
@@ -1267,6 +1328,29 @@ def _arguments(
     that case, and its offsets argument is what gives its rows back.
     """
     used = _used_names(domains, insns)
+    # An array the generated code never mentions cannot be passed: loopy's C
+    # target lists only the arrays the body touches in the device function's
+    # signature and passes every argument from the host wrapper, so such a
+    # parameter shifts every later argument into the wrong register (observed
+    # as zeros and a corrupted heap). Refuse the term instead; see
+    # docs/loopy-notes.md, note 1.
+    untouched = [
+        name
+        for name, typ in term.params
+        if isinstance(typ, ArrType) and name not in used
+    ]
+    if untouched:
+        plural = "s" if len(untouched) > 1 else ""
+        raise LoweringError(
+            f"the array parameter{plural} {', '.join(untouched)} of {term.name} "
+            f"{'are' if plural else 'is'} never read or written by the body, and "
+            "loopy's C target cannot pass such an argument: the device function's "
+            "signature lists only the arrays the body touches while the host "
+            "wrapper passes every argument, so every later argument would land in "
+            "the wrong register. Read the array somewhere, or drop the parameter "
+            "and take the size it determines from an array that is used "
+            "(docs/loopy-notes.md, note 1)"
+        )
     provided = {arg.name for arg in builder.extra_args} | set(builder.ragged.values())
     known_inames = {iname for stmt in term.stmts for iname in stmt.inames}
     for stmt in term.stmts:

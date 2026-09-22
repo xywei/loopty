@@ -139,6 +139,102 @@ def test_size_names_keeps_extents_and_drops_scalars() -> None:
     assert "a" not in names
 
 
+# {{{ the one collector: assignee indices and guards are reads too
+
+
+def scatter_past_end(
+    col: Arr[Fin[n], Fin[m]],  # noqa: F821
+    x: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[m], Real],  # noqa: F821
+):
+    """``y[col[i + 1]] = x[i]``: the write's own index is a read of ``col``."""
+    for i in x.dom:
+        y[col[i + 1]] = x[i]
+
+
+def gated(flag: Arr[Fin[n], Nat], y: Arr[Fin[n], Real]):  # noqa: F821
+    """S0 writes the flag S1 is guarded on, so the guard read is a dependence."""
+    for i in y.dom:
+        flag[i] = 1
+        with when(flag[i] != 0):
+            y[i] = 2.0
+
+
+def rendered(accesses) -> set[tuple[str, str, str]]:
+    """``(kind, array, "i + 1")`` for the schedule checker's own access list.
+
+    Rendered rather than compared as terms: ``==`` on a lanky variable builds a
+    proposition instead of answering a bool.
+    """
+    from lanky.terms import render
+
+    return {
+        (kind, array, ", ".join(render(i) for i in indices))
+        for kind, array, indices in accesses
+    }
+
+
+def touched(stmt) -> set[tuple[str, str]]:
+    """``(kind, "array[index, ...]")`` for every access the collector reports."""
+    from lanky.terms import render
+
+    return {
+        (kind, f"{array}[{', '.join(render(i) for i in indices)}]")
+        for array, indices, kind, _inames, _domain in flow.statement_accesses(stmt)
+    }
+
+
+def test_an_array_read_inside_an_assignee_index_is_collected_as_a_read() -> None:
+    # The write to ``y`` is discharged in bounds *by type* from ``col``'s
+    # element sort, so with the read of ``col`` itself missing nothing ever
+    # asked whether the kernel reads past the end of ``col``.
+    (stmt,) = term_of(scatter_past_end).stmts
+    assert ("write", "y[col[i + 1]]") in touched(stmt)
+    assert ("read", "col[i + 1]") in touched(stmt)
+
+
+def test_an_array_read_inside_a_guard_is_collected_as_a_read() -> None:
+    term = term_of(gated)
+    assert touched(term.stmts[0]) == {("write", "flag[i]")}
+    assert touched(term.stmts[1]) == {("write", "y[i]"), ("read", "flag[i]")}
+
+
+def test_a_guard_read_carries_a_dependence_from_the_statement_that_writes_it() -> None:
+    # Without the guard among the accesses there is no dependence at all here,
+    # and a reordering could let the predicate observe the old value.
+    deps = flow.dependences(term_of(gated))
+    expected = isl.Map("[n] -> { [s = 0, d0] -> [s' = 1, d0' = d0] : 0 <= d0 < n }")
+    assert deps.is_equal(expected.align_params(deps.get_space()))
+
+
+def test_the_schedule_and_the_lowering_see_the_guard_read_as_well() -> None:
+    # The four collectors are one function now; this is the check that the
+    # other three really route through it.
+    from loopty.lower import lower_generic
+    from loopty.schedule import _accesses
+
+    term = term_of(gated)
+    assert ("read", "flag", "i") in rendered(_accesses(term.stmts[1]))
+
+    lowering = lower_generic(term)
+    insns = {
+        insn.id: insn for insn in lowering.kernel.default_entrypoint.instructions
+    }
+    assert insns["S1"].depends_on == frozenset({"S0"})
+
+
+def test_an_assignee_index_read_reaches_the_schedule_checker_too() -> None:
+    from loopty.schedule import _accesses
+
+    (stmt,) = term_of(scatter_past_end).stmts
+    kinds = rendered(_accesses(stmt))
+    assert ("write", "y", "col[i + 1]") in kinds
+    assert ("read", "col", "i + 1") in kinds
+
+
+# }}}
+
+
 def test_an_accumulation_still_records_reads_of_its_other_cells() -> None:
     term = term_of(rolling)
     assert term.stmts[0].kind == "accumulate"
