@@ -30,7 +30,8 @@ The tolerance is per element, and depends on nothing but that element:
 
 with ``b`` the expected output, ``eps_class`` from :data:`TOLERANCE` and
 ``FLOOR`` the absolute floor that keeps a value near zero from demanding a
-tolerance of zero. Every element has to pass. The scale is deliberately local:
+tolerance of zero. Both live in :mod:`loopty.tolerance`, which the faithfulness
+fact reads as well. Every element has to pass. The scale is deliberately local:
 an earlier version scaled one tolerance by the 1-norm of the whole expected
 output, which made a big output easy to agree with (a million ones bought a
 tolerance of 1.0) and tied the verdict for one cell to values it has nothing to
@@ -47,7 +48,8 @@ import numpy as np
 
 from loopty.contract import check_arguments
 from loopty.lower import Lowering, lower_generic
-from loopty.term import ArrType, Term
+from loopty.term import Term
+from loopty.tolerance import TOLERANCE, TOLERANCE_FLOOR, output_class
 
 __all__ = [
     "TOLERANCE",
@@ -56,21 +58,6 @@ __all__ = [
     "emit_code",
     "exactness_of_output",
 ]
-
-#: The relative tolerance each exactness class allows, per element. ``exact``
-#: means the bits: no tolerance at all. ``reassoc`` is the room a different
-#: summation order needs. ``approx`` is the class of a type that never promised
-#: more than a few digits.
-TOLERANCE = {"exact": 0.0, "reassoc": 1e-12, "approx": 1e-6}
-
-#: The absolute floor added to an element's own magnitude before scaling by the
-#: class epsilon. Without it an expected value of exactly zero would demand a
-#: difference of exactly zero from a class that never promised one; with it, the
-#: allowance for such a value is ``eps_class`` itself. It is not a free
-#: parameter to tune away a failure: it sets the scale at which "near zero"
-#: starts, and 1.0 is the scale of a normalized quantity.
-TOLERANCE_FLOOR = 1.0
-
 
 def _resolve(obj: Any, target: str | None = None) -> tuple[Term, Any, Lowering, str]:
     """The term, the loopy kernel, the lowering and the target of ``obj``."""
@@ -402,49 +389,16 @@ class LoopyExecutor:
         return agreement(term, schedule, got, native)
 
 
-def _element_class(dtype: Any) -> str:
-    """The exactness class of an element type.
-
-    A lanky sort states it (``Real`` is ``approx``, ``Nat`` and ``Int`` are
-    ``exact``). A bare numpy dtype does not, so floating point is read as
-    ``approx`` and everything else as ``exact``: a term whose element type is a
-    plain ``float64`` has promised nothing about the last bits, and pretending
-    otherwise would make a differential test that passes say more than it knows.
-    """
-    exactness = getattr(dtype, "exactness", None)
-    if isinstance(exactness, str):
-        return exactness
-    try:
-        kind = np.dtype(dtype).kind
-    except TypeError:
-        return "exact"
-    return "approx" if kind in "fc" else "exact"
-
-
 def exactness_of_output(term: Term, schedule: Any, name: str) -> str:
     """The exactness class the comparison of one output is judged by.
 
     The weakest of three: the class of the element sort, the class of the
     accumulation that writes it, and ``reassoc`` if the schedule realized that
-    accumulation as a tree. Weakest wins because error does not cancel.
+    accumulation as a tree. Weakest wins because error does not cancel. See
+    :func:`loopty.tolerance.output_class`, which the faithfulness fact asks
+    too.
     """
-    order = ["exact", "reassoc", "approx"]
-    classes = ["exact"]
-    reassociated = getattr(schedule, "reassociated", frozenset())
-    if name in reassociated:
-        classes.append("reassoc")
-    for param, typ in term.params:
-        if param != name or not isinstance(typ, ArrType):
-            continue
-        classes.append(_element_class(typ.dtype))
-    from loopty.lower import reductions_of
-
-    for stmt in term.stmts:
-        if stmt.assignee.array != name:
-            continue
-        for reduction in reductions_of(stmt.expr):
-            classes.append(reduction.exactness)
-    return max(classes, key=order.index)
+    return output_class(term, name, getattr(schedule, "reassociated", frozenset()))
 
 
 def _compare(
