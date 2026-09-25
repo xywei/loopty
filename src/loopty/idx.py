@@ -236,6 +236,15 @@ class Reflections:
         """Forbid these names to future allocations."""
         self._reserved.update(names)
 
+    def taken(self, name: str) -> bool:
+        """Whether ``name`` is reserved or already stands for a term.
+
+        An iname shares the isl space with the parameters and has to avoid
+        both kinds of name, while ``in`` answers for the allocated parameters
+        only.
+        """
+        return name in self._reserved or name in self._exprs
+
     def adopt(self, name: str, expr: Any) -> str:
         """Record a name that was already allocated for ``expr``."""
         self._by_key[_structural_key(expr)] = name

@@ -384,12 +384,20 @@ class Kernel(_Decorated):
         A body that cannot be traced is itself reported as a fact rather than as
         a crash, so that ``lanky check`` on a file with one broken kernel still
         prints the ledger of the others.
+
+        The error is also the fact's ``reason``, next to an empty
+        ``counterexample``. That is lanky's form for a closed claim refuted at
+        no assignment in particular, and lanky prints the reason of such a fact
+        under its ``REFUTED`` line; the error of a :class:`~loopty.trace.TraceError`
+        names the fix, and it belongs on the screen rather than only in the
+        JSON ledger.
         """
         if self._facts is not None:
             return self._facts
         try:
             term = self.term
         except Exception as exc:  # noqa: BLE001 - reported as a fact, not raised
+            error = f"{type(exc).__name__}: {exc}"
             self._facts = (
                 Fact(
                     id=f"kernel:{self.qualname}:traced",
@@ -398,7 +406,7 @@ class Kernel(_Decorated):
                     term=None,
                     status=Status.REFUTED,
                     decided_by="trace",
-                    provenance={"error": f"{type(exc).__name__}: {exc}"},
+                    provenance={"error": error, "counterexample": {}, "reason": error},
                     where=self.where,
                     owner=self.qualname,
                 ),

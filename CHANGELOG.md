@@ -375,6 +375,65 @@ with a pair of statement instances.
   which has no numpy dtype, is not an integral sort, and was called an `exact`
   index type in the ledger. A hand-built term with such a sort is refused by
   the lowering. The native run needs no sort and still runs.
+- State that a Python name carries from one loop iteration to the next is
+  refused with a `TraceError` naming the name and the two fixes, instead of
+  tracing to a wrong term. `s = 0.0; for i in x.dom: s = s + x[i]` followed by
+  `y[0] = s` used to trace to one statement, `y[0] = 0.0 + x[i]`, with no loop
+  around it and `i` free, while the native run summed the array. Two checks
+  catch the idiom. A statement whose right-hand side, guard, assignee indices,
+  loop bounds or reduction bounds mention the variable of a loop it is not
+  inside is refused where it is recorded. And the locals of the frame running
+  a `for` (the kernel body or a helper it calls) are compared when the loop
+  opens and when it closes: a name bound before the loop and bound to a
+  different value after one iteration is loop-carried, whether the value is a
+  term or a plain Python number (a counter `k = k + 1` used as an index), and
+  `s += x[i]`, tuple unpacking and `del s` count. The loop's own target, a
+  per-iteration temporary first bound inside the loop, a rebinding to the same
+  object or an equal value, and a name whose old value already mentions a
+  closed loop's variable (a `for` target reused by a later loop) are left
+  alone. State kept outside a plain name is compared the same way. A global
+  the frame's code rebinds with `global G` counts like a local, with the same
+  exemptions (a `for` target stored as a global is not state). So does a list,
+  dict or set reachable from the frame's locals, or held by a global its code
+  names, whose contents change across one iteration: `state = [0]` followed
+  by `state[0] += 1` and `y[i] = state[0]` in the loop used to trace to
+  `y[i] = 1`. Elements are compared by identity or structurally, never with
+  `==`, and the message names the container and the cell that changed. A
+  container first created inside the loop is scratch and is left alone; one
+  created before the loop and reused as scratch is refused, with a message
+  that says to create it inside the loop. A name first bound inside the loop
+  is a temporary only while every iteration binds it, so code running a traced
+  loop may not ask which names are bound: the builtins `locals()`,
+  `globals()` and `vars()`, and an `except` clause naming `NameError` or
+  `UnboundLocalError`, are refused when the loop opens (`if "s" not in
+  locals(): s = 0` used to trace to one iteration's value). A local or global
+  of the same name, and an attribute, are left alone. The fixes are
+  `reduce_sum(...)` for an accumulation and an indexed cell
+  (`s[i + 1] = s[i] + x[i]`, as `scan` in `examples/spmv.py` does) otherwise,
+  spelled with the loop's own target and domain. A message names a loop by its
+  `for` target and line, and adds the iname when a reused target made the two
+  differ. Both checks are trace-time only; plain `python` runs the body as
+  written. A change nested below a container's own elements
+  (`state[0][0] += 1`), an attribute, and a global that only a helper defined
+  outside the body rebinds or changes are not seen yet.
+- A loop whose target is spelled like a size or a parameter of the kernel gets
+  an iname of its own. `for k in x.dom` over `x: Arr[Fin[k], Real]` used to make
+  the size and the iname one isl dimension, so the loop's domain was
+  `0 <= k < k`, which is empty, and every statement in it was checked over no
+  points at all. The iname is now `k_0`, as for a target reused by a second
+  loop.
+- A loop written on one line keeps its source name under Python 3.13, which
+  fuses the store of the `for` target with the load after it
+  (`STORE_FAST_LOAD_FAST`). The target was read as unknown, so
+  `for i in x.dom: y[i] = x[i]` traced over an iname `i0` on 3.13 and `i` on
+  3.12.
+- `lanky check` prints the error of a kernel that cannot be traced under its
+  `REFUTED` line: the `trace` fact carries it as its `reason`, next to an empty
+  `counterexample`, which is lanky's form for a closed claim refuted at no
+  assignment in particular. The fix a `TraceError` names used to reach only the
+  JSON ledger. `loopty run` reports such a kernel as one it cannot schedule,
+  naming the error, and exits 1, where it used to stop with a traceback from
+  the search for kernels.
 
 ### Changed
 
