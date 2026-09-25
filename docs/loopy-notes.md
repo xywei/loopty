@@ -160,13 +160,17 @@ across iterations is the loop's, so the added edge is not a dependence at all.
 `depends_on_is_final=True`. `lower_generic` already orders a statement after
 every earlier one it could read from, write over, or overwrite the input of,
 which is the whole of the order within an iteration, so there is nothing left
-for the heuristic to add. One read is not among the term's accesses: the flat
-index of a ragged access goes through the offsets argument. A kernel that writes
-those offsets and reads through them (a scan fused with the product that uses
-it) relied on the heuristic for that edge, and without it loopy refuses the
-kernel with `VariableAccessNotOrdered`; `lower_generic` counts the offsets as
-read by every statement that touches a ragged array, so the edge is drawn, and
-in the direction the body gives it. The instructions that assign ragged bounds
+for the heuristic to add. One read is the layout's rather than the body's: the
+flat index of a ragged access goes through the offsets argument. A kernel that
+writes those offsets and reads through them (a scan fused with the product that
+uses it) relied on the heuristic for that edge, and without it loopy refuses
+the kernel with `VariableAccessNotOrdered`. The access collector every rule
+reads, `flow.statement_accesses`, lists `off[r]` and `off[r + 1]` after every
+ragged access, read or written, whenever the kernel declares the offsets, so the
+edge is drawn, in the direction the body gives it, and the schedule checker and
+the typing rules see the same read. Offsets the kernel does not declare are the
+argument lowering adds, which nothing in the body can write, so there is no
+edge to draw for them. The instructions that assign ragged bounds
 (`cnt_r_init`) are final too. One reads the counts, or the offsets when the
 counts are not a parameter, and it is ordered where the first statement that
 needs it is: after every earlier writer of that array and before every later
