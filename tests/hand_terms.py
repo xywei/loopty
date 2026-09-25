@@ -251,15 +251,29 @@ def spmv_accumulate_term() -> Term:
     )
 
 
-def spmv_and_shift_term(shift_first: bool = False) -> Term:
-    """:func:`spmv_accumulate_term` and ``off[s] = off[s] - 1``, in either order.
+def spmv_and_shift_term(order: str = "ps") -> Term:
+    """:func:`spmv_accumulate_term` and a shift of ``off`` by one, in any order.
 
-    The counts family ``cnt`` is not a parameter, so the row length ``cnt_r`` is
-    computed from ``off``, which the other statement rewrites. Which offsets the
-    product reads through, and which ones bound its rows, is decided by the
-    order of the two statements.
+    ``order`` spells the body, one letter per statement:
+
+    * ``p``, the product over ``(r, j)``, and ``q``, the same over ``(r, k)``;
+    * ``s``, ``off[s] = off[s] - 1`` in a loop of its own, and ``r``,
+      ``off[r + 1] = off[r + 1] - 1`` inside the row loop.
+
+    So ``"sp"`` shifts first, and ``"psp"`` runs the product on both sides of
+    the shift. The counts family ``cnt`` is not a parameter, so the row length
+    ``cnt_r`` is computed from ``off``, which the shift rewrites. Which offsets
+    the product reads through, and which ones bound its rows, is decided by the
+    order of the statements.
     """
     product = spmv_accumulate_term().stmts[0]
+    k = V("k")
+    other_product = dataclasses.replace(
+        product,
+        inames=("r", "k"),
+        domain=isl.Set("[n, cnt_r] -> { [r, k] : 0 <= r < n and 0 <= k < cnt_r }"),
+        expr=S("y", V("r")) + S("val", V("r"), k) * S("x", S("col", V("r"), k)),
+    )
     shift = Stmt(
         id="S0",
         inames=("s",),
@@ -270,10 +284,18 @@ def spmv_and_shift_term(shift_first: bool = False) -> Term:
         guard=None,
         where="hand_terms.py:spmv_and_shift",
     )
-    if shift_first:
-        stmts = (shift, dataclasses.replace(product, id="S1"))
-    else:
-        stmts = (product, dataclasses.replace(shift, id="S1"))
+    row_shift = dataclasses.replace(
+        shift,
+        inames=("r",),
+        domain=isl.Set("[n] -> { [r] : 0 <= r < n }"),
+        assignee=Access("off", (V("r") + 1,)),
+        expr=S("off", V("r") + 1) - 1,
+    )
+    pieces = {"p": product, "q": other_product, "s": shift, "r": row_shift}
+    stmts = tuple(
+        dataclasses.replace(pieces[letter], id=f"S{position}")
+        for position, letter in enumerate(order)
+    )
     return dataclasses.replace(
         spmv_accumulate_term(), name="spmv_and_shift", stmts=stmts
     )

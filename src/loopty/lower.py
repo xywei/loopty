@@ -1073,8 +1073,15 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
         # wherever it was in the body, and when the writer came later (a
         # statement that rewrites the offsets after a ragged loop has read
         # through them) the three instructions made a cycle.
+        #
+        # A bound is computed once, so a statement that needs it after its array
+        # has been rewritten would see the old row length, and through the new
+        # offsets when those are what was rewritten. That order is refused.
         by_id = {insn.id: insn for insn in insns}
+        count_params = {count_id: param for param, count_id in count_ids.items()}
         count_depends: dict[str, frozenset[str]] = {}
+        first_use: dict[str, str] = {}
+        rewritten: dict[str, str] = {}
         writers: dict[str, list[str]] = {}
         for stmt in term.stmts:
             insn = by_id[insn_ids[stmt.id]]
@@ -1089,16 +1096,33 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
                     for param in _domain_params(reduction.domain)
                     if param in count_ids
                 }
+            stale = sorted(needed & rewritten.keys())
+            if stale:
+                count_id = stale[0]
+                source = count_reads[count_id]
+                raise LoweringError(
+                    f"statement {stmt.id} is bounded by the row length "
+                    f"{count_params[count_id]}, which is computed from {source} "
+                    f"once, where {first_use[count_id]} first needs it; "
+                    f"{rewritten[count_id]} rewrites {source} before {stmt.id} "
+                    f"runs, so {stmt.id} would see the old length. Rewrite "
+                    f"{source} after the last statement bounded by it, or in a "
+                    "kernel of its own."
+                )
             for count_id in needed - count_depends.keys():
                 count_depends[count_id] = frozenset(
                     writers.get(count_reads[count_id], ())
                 )
+                first_use[count_id] = stmt.id
             written = stmt.assignee.array
-            needed |= {
+            overwrites = {
                 count_id
                 for count_id in count_depends
                 if count_reads[count_id] == written
             }
+            for count_id in overwrites:
+                rewritten.setdefault(count_id, stmt.id)
+            needed |= overwrites
             if needed:
                 by_id[insn.id] = insn.copy(depends_on=insn.depends_on | needed)
             writers.setdefault(written, []).append(insn.id)

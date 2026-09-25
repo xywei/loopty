@@ -287,7 +287,10 @@ with a pair of statement instances.
   The instruction that computes a ragged row's length is ordered the same way,
   where the first statement that needs it runs. Left to the heuristic, it
   waited for a statement that rewrites the offsets even when that statement
-  came after the ragged loop, and the three made a cycle.
+  came after the ragged loop, and the three made a cycle. The length is
+  computed once, so a statement that needs it after the offsets (or counts) it
+  was computed from have been rewritten is refused with a `LoweringError`,
+  instead of running over the old row length.
 
 ### Changed
 

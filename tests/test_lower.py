@@ -111,16 +111,15 @@ def test_a_ragged_reduction_becomes_a_csr_loop() -> None:
     assert np.allclose(out["y"], want)
 
 
-@pytest.mark.parametrize("shift_first", [False, True], ids=["product", "shift"])
-def test_a_ragged_bound_is_ordered_against_the_offsets_it_reads(
-    shift_first: bool,
-) -> None:
+@pytest.mark.parametrize("order", ["ps", "sp"])
+def test_a_ragged_bound_is_ordered_against_the_offsets_it_reads(order: str) -> None:
     # The row length cnt_r is computed from off, which the other statement
     # rewrites. Its instruction used to be left to loopy's single-writer
     # heuristic, which made it wait for the shift wherever the shift was. With
     # the product first, the shift waits for the product, which reads through
     # off, the product waits for cnt_r, and cnt_r waited for the shift: a cycle.
-    term = ht.spmv_and_shift_term(shift_first)
+    shift_first = order == "sp"
+    term = ht.spmv_and_shift_term(order)
     insns = {insn.id: insn for insn in lower(term).default_entrypoint.instructions}
     shift, product = ("S0", "S1") if shift_first else ("S1", "S0")
     before = {shift} if shift_first else set()
@@ -136,6 +135,19 @@ def test_a_ragged_bound_is_ordered_against_the_offsets_it_reads(
     seen = off - 1 if shift_first else off
     assert np.allclose(out["y"], ht.csr_reference(seen, col, val, x))
     assert np.array_equal(out["off"], off - 1)
+
+
+@pytest.mark.parametrize("order", ["psp", "prq"])
+def test_a_ragged_bound_is_not_reused_after_its_offsets_are_rewritten(
+    order: str,
+) -> None:
+    # cnt_r is computed once, where the first product needs it. The second
+    # product would read through the shifted offsets with the old row lengths.
+    # With the shift in a loop of its own, loopy could not schedule the two
+    # products around it. With the shift inside the row loop and the second
+    # product over an inner loop of its own, the kernel ran and misread rows.
+    with pytest.raises(LoweringError, match=r"S2 is bounded by the row length cnt_r"):
+        lower(ht.spmv_and_shift_term(order))
 
 
 def test_an_accumulation_runs_over_the_ragged_nest() -> None:

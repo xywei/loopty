@@ -172,4 +172,6 @@ counts are not a parameter, and it is ordered where the first statement that
 needs it is: after every earlier writer of that array and before every later
 one. Left to the heuristic, it waited for a later writer as well, and a ragged
 loop followed by a statement that rewrites its offsets became a cycle through
-the loop, the bound and the rewrite.
+the loop, the bound and the rewrite. Because the bound is computed once, a
+statement that needs it after that array has been rewritten would see the old
+row length, so `lower_generic` refuses that order with a `LoweringError`.
