@@ -61,11 +61,14 @@ from loopty.term import (
 __all__ = [
     "COUNT_PARAM",
     "COUNT_PARAM_REFLECTED",
+    "NO_CONTRACTION_FLAG",
+    "NO_CONTRACTION_PRAGMAS",
     "RESERVED_PREFIX",
     "RESERVED_WORDS",
     "ExpressionLowerer",
     "LoweringError",
     "Lowering",
+    "allows_contraction",
     "count_param_name",
     "count_param_names",
     "is_reserved",
@@ -98,6 +101,26 @@ COUNT_PARAM_REFLECTED = "nl_{counts}_{iname}"
 OFFSETS_CANDIDATES = ("off_{counts}", "{counts}_off", "off")
 
 _LANG_VERSION = (2018, 2)
+
+#: The C compiler flag that keeps ``a * b + c`` two roundings, set on a kernel
+#: with an ``exact`` output (see :func:`allows_contraction`). GCC and clang both
+#: take it, and GCC takes nothing else: it ignores the standard pragma below.
+#: loopy compiles with ``-std=c99``, in which GCC does not contract anyway, but
+#: clang does, and the flag says so rather than leaving it to the compiler.
+NO_CONTRACTION_FLAG = "-ffp-contract=off"
+
+#: The pragma that asks the same in the source, per target. C99's is honoured by
+#: clang and ignored by GCC, which the flag covers. OpenCL C may contract by
+#: default and has no build option to stop it, so there the pragma is the way.
+NO_CONTRACTION_PRAGMAS = {
+    "c": "#pragma STDC FP_CONTRACT OFF",
+    "c-source": "#pragma STDC FP_CONTRACT OFF",
+    "opencl": "#pragma OPENCL FP_CONTRACT OFF",
+}
+
+#: Where the pragma sorts among loopy's own preambles: after OpenCL's extension
+#: pragmas (``00_``) and before the includes (``10_``).
+_NO_CONTRACTION_TAG = "05_loopty_fp_contract"
 
 
 class LoweringError(TypeError):
@@ -398,7 +421,9 @@ class Lowering:
     kernel, keyed ``"S0:0"`` by its statement and its position in
     :func:`reductions_of`. They are its binders unless
     :meth:`_Builder.plan_reductions` had to rename them, and a schedule names a
-    reduction's loops by them.
+    reduction's loops by them. ``contraction`` says whether the compiler may
+    fuse ``a * b + c`` into one multiply-add; it is ``False`` when an output is
+    compared bit for bit, see :func:`allows_contraction`.
     """
 
     term: Term
@@ -410,6 +435,7 @@ class Lowering:
     ragged: dict[str, str]
     target: str = "c"
     reduction_inames: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    contraction: bool = True
 
     @property
     def name(self) -> str:
@@ -1385,6 +1411,7 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
         term, builder, domains, count_ids, insns
     )
 
+    contraction = allows_contraction(term)
     kernel = lp.make_kernel(
         merged,
         insns,
@@ -1392,7 +1419,10 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
         target=target_for(target),
         lang_version=_LANG_VERSION,
         name=_kernel_name(term.name, [arg.name for arg in args]),
+        preambles=() if contraction else _no_contraction_preambles(target),
     )
+    if not contraction and target in ("c", None):
+        kernel = lp.set_options(kernel, build_options=[NO_CONTRACTION_FLAG])
     assumptions = _scalar_assumptions(term, {arg.name for arg in args})
     if assumptions is not None:
         # Not ``if assumptions:``: truthiness on an isl set is ``__len__``,
@@ -1416,6 +1446,7 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
         ragged=dict(builder.ragged),
         target=target,
         reduction_inames=_reduction_inames(term, builder),
+        contraction=contraction,
     )
 
 
@@ -1429,6 +1460,34 @@ def _reduction_inames(term: Term, builder: _Builder) -> dict[str, tuple[str, ...
                 renaming.get(name, name) for name in reduction.inames
             )
     return out
+
+
+def allows_contraction(term: Term) -> bool:
+    """Whether the compiled code may fuse ``a * b + c`` into one multiply-add.
+
+    Not when any output is ``exact``. A fused multiply-add rounds once where
+    the native run, which is Python and numpy arithmetic, rounds after the
+    multiplication and again after the addition, so the two can differ in the
+    last bit, and an ``exact`` output is compared bit for bit. The class is the
+    one the differential test judges the output by
+    (:func:`loopty.executor.exactness_of_output`): the element sort joined with
+    the accumulations that write it, so ``Real.exact`` pins contraction off and
+    ``Real`` leaves it to the compiler. The pin covers the whole kernel, since
+    a compiler flag and a file-scope pragma cannot pick out one output. Which
+    compilers contract when is note 9 in ``docs/loopy-notes.md``.
+    """
+    from loopty.executor import exactness_of_output
+
+    return not any(
+        exactness_of_output(term, None, name) == "exact"
+        for name in _written_arrays(term)
+    )
+
+
+def _no_contraction_preambles(target: str | None) -> tuple[tuple[str, str], ...]:
+    """The preamble that asks the target's compiler not to contract, if any."""
+    pragma = NO_CONTRACTION_PRAGMAS.get(target or "c")
+    return () if pragma is None else ((_NO_CONTRACTION_TAG, pragma),)
 
 
 def _scalar_assumptions(term: Term, declared: set[str]) -> isl.BasicSet | None:

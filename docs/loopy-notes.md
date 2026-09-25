@@ -1,6 +1,6 @@
 # Notes on loopy and islpy
 
-Eight interactions with loopty's dependencies that cost real debugging time, each
+Nine interactions with loopty's dependencies that cost real debugging time, each
 with the local workaround and the reason it is local. No upstream issues were
 filed: these are notes so that the next person meets the answer instead of the
 symptom.
@@ -204,4 +204,37 @@ there too, or the inner loop would hang from the other statement's outer one
 ("Loop 'i' cannot be nested outside 'j_0'"). `Lowering.reduction_inames`
 records the names each reduction ends up with, and `Schedule` addresses a
 reduction by them.
+
+## 9. Which flags the C target compiles with, and FMA contraction
+
+**What loopy does.** `lp.ExecutableCTarget()` builds a `CCompiler`, which
+guesses a codepy toolchain from Python's build configuration and then replaces
+its compiler and flags with its own defaults: `gcc -std=c99 -O3 -fPIC`, plus the
+kernel's `options.build_options`, appended in that order. So the compiler is
+whatever `gcc` is on the path: GCC on Linux, clang on macOS.
+
+**Whether `a * b + c` becomes one fused multiply-add.** GCC's default is
+`-ffp-contract=fast` in the GNU dialects and `off` in a standard one such as
+`-std=c99`, and on x86-64 it can contract only when told the instruction exists
+(`-march` or `-mfma`), which loopy's flags do not. So a stock build on Linux
+x86-64 contracts nothing. clang contracts within an expression by default (`-ffp-contract=on`),
+and arm64 has FMA in its baseline, so the same kernel built there does fuse.
+OpenCL C permits contraction by default and has no build option to forbid it;
+`#pragma OPENCL FP_CONTRACT OFF` in the source is the way.
+
+**Why it matters.** A fused multiply-add rounds once, and the native run of a
+kernel body rounds after the multiplication and again after the addition, so
+the two can differ in the last bit. An `exact` output is compared bit for bit.
+With `a = 1 + 2**-30`, `b = 1 - 2**-30`, `c = -1` the native value is 0.0 and
+the fused one `-2**-60`, which is what `tests/test_contraction.py` shows on a
+machine with FMA by building the kernel with `-march=native -ffp-contract=fast`.
+
+**Local fix.** A kernel with an `exact` output (`lower.allows_contraction`) is
+lowered with `-ffp-contract=off` in its build options on the C target, which
+both GCC and clang honour and which comes after any flag of the toolchain's, and
+with the target's pragma in the source: `#pragma STDC FP_CONTRACT OFF` for C,
+which clang honours and GCC ignores, and the OpenCL one for OpenCL. A kernel
+whose outputs are all `approx` or `reassoc` is left to the compiler. C emitted
+with `--emit-code` for an exact kernel carries the pragma; compiling it with GCC
+in a GNU dialect still needs the flag.
 

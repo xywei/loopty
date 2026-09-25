@@ -107,7 +107,9 @@ message states, because which violating pair isl picks depends on them.
   tolerance is per element and local: `exact` is bitwise, and `reassoc` and
   `approx` ask that `|got - want| <= eps_class * (|want| + 1)` at every cell, so
   it is the accuracy claimed for that cell and does not grow with the size of
-  the output. Over an `exact` accumulation the same cast is refused.
+  the output. Over an `exact` accumulation the same cast is refused, and a
+  kernel with an `exact` output is compiled with floating-point contraction
+  off, so a fused multiply-add cannot change its last bit.
 - **Legal and buildable are different questions, and both are answered.** A
   transformation can preserve the meaning of a program and still be one the
   backend cannot generate. Every accepted step is asked whether the target can

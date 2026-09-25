@@ -456,6 +456,17 @@ with a pair of statement instances.
   domain of axis 1 whatever its length, so a loop over the third axis of a
   three-axis array ran over the second, and a native run refused the tuple.
   `a.dom[()]` is refused in both.
+- A kernel with an `exact` output is compiled with floating-point contraction
+  off: `-ffp-contract=off` in its build options on the C target, and
+  `#pragma STDC FP_CONTRACT OFF` (or the OpenCL pragma) in the source. A fused
+  multiply-add rounds `a * b + c` once where the native run rounds twice, and
+  an `exact` output is compared bit for bit, so a compiler that contracts
+  (clang by default, on arm64 where FMA is in the baseline) could refute a
+  correct kernel. loopy's own `gcc -std=c99 -O3 -fPIC` does not contract on
+  x86-64, which is why nothing had shown it; `tests/test_contraction.py` makes
+  a compiler contract on hardware with FMA and shows the pin keeping the bits.
+  `Lowering.contraction` records the choice, and note 9 in
+  `docs/loopy-notes.md` has the flags.
 
 ### Changed
 
