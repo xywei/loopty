@@ -204,6 +204,17 @@ def _escaped_message(loops: Sequence[_Loop], cell: str, where: str) -> str:
     )
 
 
+class _Unbound:
+    """What a name deleted inside a loop holds after one iteration: nothing."""
+
+    def __repr__(self) -> str:
+        return "unbound"
+
+
+#: The value :meth:`Tracer._carried` compares a name the iteration deleted by.
+_UNBOUND = _Unbound()
+
+
 @dataclass(frozen=True)
 class _Carried:
     """One piece of state a loop carries from one iteration into the next.
@@ -474,10 +485,11 @@ class Tracer:
         A name counts when it was bound before the loop opened and is bound to
         a different value after one iteration, whatever the value is: a term,
         or a plain Python number such as a counter ``k = k + 1`` that ends up
-        in an index. So does a global the code of the frame rebinds with
-        ``global G``. Rebinding to the identical object or to an equal value
-        carries nothing (see :func:`_same_value`), and a name first bound
-        inside the loop is a per-iteration temporary.
+        in an index. A name the iteration deleted counts too, since the next
+        iteration starts without it. So does a global the code of the frame
+        rebinds with ``global G``. Rebinding to the identical object or to an
+        equal value carries nothing (see :func:`_same_value`), and a name
+        first bound inside the loop is a per-iteration temporary.
 
         A list, dict or set counts when it was reachable before the loop opened
         and its contents are different after one iteration (see
@@ -514,9 +526,9 @@ class Tracer:
         )
         for values, now, kind in scopes:
             for name, before in values.items():
-                if name == loop.target or name not in now:
+                if name == loop.target:
                     continue
-                value = now[name]
+                value = now[name] if name in now else _UNBOUND
                 if loop.target is None and value is loop.var:
                     # The target could not be read off the bytecode; the name
                     # still holding the loop's own variable is that target.

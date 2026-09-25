@@ -864,6 +864,43 @@ def test_a_global_loop_target_is_not_state(monkeypatch) -> None:
     assert stmt.inames == ("point",)
 
 
+def test_a_name_or_global_deleted_inside_the_loop_is_carried_state(
+    monkeypatch,
+) -> None:
+    # Natively only the first iteration finds ``scale`` (or ``_COUNT``) bound
+    # and every later one takes the other branch; the one point the trace
+    # runs is a first iteration, so it recorded the first branch for all.
+    monkeypatch.setitem(globals(), "_COUNT", 0)
+
+    def scaled_once(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        scale = 2.0
+        for i in x.dom:
+            if "scale" in locals():
+                y[i] = scale * x[i]
+                del scale
+            else:
+                y[i] = x[i]
+
+    def counted_once(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        global _COUNT
+        for i in x.dom:
+            if "_COUNT" in globals():
+                y[i] = 2.0 * x[i]
+                del _COUNT
+            else:
+                y[i] = x[i]
+
+    with pytest.raises(
+        TraceError, match="'scale' is 2.0 before the loop and unbound after"
+    ):
+        term_of(scaled_once)
+    with pytest.raises(
+        TraceError,
+        match="carries the global '_COUNT'.*'_COUNT' is 0 before the loop and unbound",
+    ):
+        term_of(counted_once)
+
+
 def test_a_list_created_inside_the_loop_is_scratch() -> None:
     # First bound inside the loop, like a per-iteration temporary name.
     def paired(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
