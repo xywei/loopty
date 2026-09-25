@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import islpy as isl
+import numpy as np
 import pytest
 from lanky.prelude import Nat, Real
 from lanky.terms import evaluate_annotations, render
@@ -1223,6 +1224,8 @@ class _Counter:
 _BOX = _Counter()
 _SEEN: list[object] = []
 _LAST = 0.0
+_COUNTS = np.zeros(2)
+_WEIGHTS = np.array([0.5, 2.0])
 
 
 def _note(value: object) -> None:
@@ -1299,6 +1302,45 @@ def test_a_global_only_a_helper_changes_is_refused(monkeypatch) -> None:
 
     with pytest.raises(TraceError, match="changed the global list '_SEEN'"):
         term_of(noted)
+
+
+def test_a_write_into_a_global_numpy_array_is_refused(monkeypatch) -> None:
+    # The write changes no output, so comparing outputs could never see it;
+    # the compiled kernel never makes it.
+    monkeypatch.setitem(globals(), "_COUNTS", np.zeros(2))
+
+    def counting(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        _COUNTS[1] += 1.0
+        for i in y.dom:
+            y[i] = x[i]
+
+    with pytest.raises(TraceError) as caught:
+        term_of(counting)
+    message = str(caught.value)
+    assert "changed the global array '_COUNTS'" in message
+    assert "'_COUNTS[1]' is 0.0 before the trace and 1.0 after it" in message
+
+
+def test_a_write_into_an_array_an_attribute_holds_is_refused() -> None:
+    box = _Counter()
+    box.buffer = Arr.zeros(3)
+
+    def stashing(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        box.buffer[2] = 7.0
+        for i in y.dom:
+            y[i] = x[i]
+
+    with pytest.raises(TraceError, match="changed the array 'box.buffer'"):
+        term_of(stashing)
+
+
+def test_a_global_numpy_array_the_body_only_reads_is_not_state() -> None:
+    def weighted(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = _WEIGHTS[1] * x[i]
+
+    (stmt,) = term_of(weighted).stmts
+    assert render(stmt.expr) == "2.0*x[i]"
 
 
 def test_a_global_the_body_rebinds_outside_any_loop_is_refused(monkeypatch) -> None:

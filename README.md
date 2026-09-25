@@ -149,9 +149,9 @@ end to end; the edges are sharp.
   next, when an array is used whole (`y[:] = ...`, `x * 2`, a numpy function of
   it), when a reduction's `if` clause is not a bound isl can state, when the
   trace changes Python state outside the arrays (a global, a closure variable,
-  an object's attribute, a list, dict or set they hold, or the same in a helper
-  the body calls), and when the body prints, reads input, opens a file or draws
-  a random number.
+  an object's attribute, a list, dict, set or numpy array they hold, or the
+  same in a helper the body calls), and when the body prints, reads input,
+  opens a file or draws a random number.
 - The faithfulness fact. For each kernel, the traced term is run by an
   interpreter (`loopty.interpret`: statement by statement in source order over
   each statement's isl domain, expressions evaluated with numpy's arithmetic,

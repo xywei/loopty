@@ -479,8 +479,10 @@ with a pair of statement instances.
   state the body's code reaches by name (module globals it names, closure
   cells, default values, and the same for every helper of the kernel author's
   that it calls, eight levels deep) is copied before the trace, one level into
-  it as the loop snapshot is: a list, dict or set shallowly, and an object's
-  attributes together with the lists, dicts and sets they hold. A change is a
+  it as the loop snapshot is: a list, dict or set shallowly, a numpy array
+  cell by cell (a write into one changes no output, so comparing outputs could
+  not see it), and an object's attributes together with the lists, dicts, sets
+  and arrays they hold. A change is a
   `TraceError` naming the state and both values, so `obj.count += 1`,
   `self.s = self.s + x[i]`, `LOG.append(x[0])`, a global rebound outside any
   loop, and a global that only a helper defined outside the body changes are

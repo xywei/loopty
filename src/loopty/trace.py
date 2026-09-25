@@ -1136,12 +1136,14 @@ class _Outside:
 
     ``names`` are the globals and closure cells it names, ``held`` the lists,
     dicts and sets those hold (directly, through tuples, or as an attribute of
-    an object they hold), and ``objects`` the kernel author's objects they hold,
-    each with its attributes. See :func:`_outside`.
+    an object they hold), ``buffers`` the numpy arrays they hold in the same
+    places, each with a copy of its cells, and ``objects`` the kernel author's
+    objects they hold, each with its attributes. See :func:`_outside`.
     """
 
     names: list[_Name]
     held: list[_Held]
+    buffers: list[_Held]
     objects: list[_Attributes]
 
 
@@ -1177,13 +1179,21 @@ def _outside(function: Any, owned: Collection[int]) -> _Outside:
     function of the kernel author's that those hold, :data:`_HELPER_DEPTH`
     levels deep: a helper keeping a counter in its module is state too. Each
     value is copied one level deep, as the loop snapshot is: a list, dict or
-    set shallowly, looking through tuples, and an object of the kernel
-    author's (:func:`_user_object`) by its attributes, with a list, dict or set
-    an attribute holds copied as well. A container or object reached twice is
-    copied once, and one the tracer keeps for itself (``owned``) not at all.
+    set shallowly, looking through tuples, a numpy array (or the buffer of an
+    :class:`~loopty.arr.Arr`) cell by cell, and an object of the kernel
+    author's (:func:`_user_object`) by its attributes, with a list, dict, set
+    or array an attribute holds copied as well. A container or object reached
+    twice is copied once, and one the tracer keeps for itself (``owned``) not
+    at all.
+
+    A numpy array is copied whole, because a write into it is an effect the
+    compiled kernel never makes even when no output reads it back, which the
+    faithfulness fact, comparing outputs, cannot see. A body that only reads
+    a global array pays for one copy per trace.
     """
     names: list[_Name] = []
     held: list[_Held] = []
+    buffers: list[_Held] = []
     objects: list[_Attributes] = []
     seen: set[int] = set(owned)
     recorded: set[Any] = set()
@@ -1208,6 +1218,12 @@ def _outside(function: Any, owned: Collection[int]) -> _Outside:
                 seen.add(id(value))
                 held.append(_Held(label, root, scope, value, kind(value)))
                 return
+        buffer = value.numpy() if isinstance(value, Arr) else value
+        if isinstance(buffer, np.ndarray):
+            if id(buffer) not in seen:
+                seen.add(id(buffer))
+                buffers.append(_Held(label, root, scope, buffer, buffer.copy()))
+            return
         if isinstance(value, MethodType):
             value = value.__func__
         if isinstance(value, FunctionType):
@@ -1274,7 +1290,7 @@ def _outside(function: Any, owned: Collection[int]) -> _Outside:
         ]
         for name, value in pairs:
             visit(value, name, name, "default", 0, depth)
-    return _Outside(names, held, objects)
+    return _Outside(names, held, buffers, objects)
 
 
 def _outside_changes(outside: _Outside, tracer: Tracer) -> list[_Change]:
@@ -1319,6 +1335,13 @@ def _outside_changes(outside: _Outside, tracer: Tracer) -> list[_Change]:
         else:
             holder = f"the {kind} {held.label!r}"
         out.append(_Change(holder, cell, before, after))
+    for buffer in outside.buffers:
+        if (buffer.scope, buffer.root) in rebound:
+            continue
+        change = _buffer_change(buffer)
+        if change is not None:
+            where = f"{buffer.scope} " if buffer.label == buffer.root else ""
+            out.append(_Change(f"the {where}array {buffer.label!r}", *change))
     for entry in outside.objects:
         if (entry.scope, entry.root) in rebound:
             continue
@@ -1340,6 +1363,45 @@ def _outside_changes(outside: _Outside, tracer: Tracer) -> list[_Change]:
             )
             break
     return out
+
+
+def _buffer_change(buffer: _Held) -> tuple[str, Any, Any] | None:
+    """The first cell of a numpy array that changed since it was copied, if any.
+
+    Cells are compared by their bits, so ``-0.0`` over ``0.0`` is a change,
+    and the cells of an object array as the loop snapshot compares values
+    (:func:`_same_value`). An array resized in place is named whole.
+    """
+    old, new, label = buffer.copy, buffer.container, buffer.label
+    if old.shape != new.shape or old.dtype != new.dtype:
+        return label, old.tolist(), new.tolist()
+    flat_old = np.ascontiguousarray(old).reshape(-1)
+    flat_new = np.ascontiguousarray(new).reshape(-1)
+    if old.dtype.hasobject:
+        differ = np.array(
+            [not _same_value(a, b) for a, b in zip(flat_old, flat_new, strict=True)],
+            dtype=bool,
+        )
+    elif flat_old.tobytes() == flat_new.tobytes():
+        return None
+    else:
+        width = old.dtype.itemsize
+        differ = np.any(
+            flat_old.view(np.uint8).reshape(-1, width)
+            != flat_new.view(np.uint8).reshape(-1, width),
+            axis=-1,
+        )
+    if not differ.any():
+        return None
+    position = int(np.flatnonzero(differ)[0])
+    index = np.unravel_index(position, old.shape)
+    cell = f"{label}[{', '.join(str(int(k)) for k in index)}]"
+    return cell, _python_cell(flat_old[position]), _python_cell(flat_new[position])
+
+
+def _python_cell(value: Any) -> Any:
+    """One cell of a numpy array as the Python value a message shows."""
+    return value.item() if isinstance(value, np.generic) else value
 
 
 def _cached_property(obj: Any, attribute: str) -> bool:
