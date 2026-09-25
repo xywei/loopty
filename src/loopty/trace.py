@@ -32,25 +32,40 @@ What the tracer produces is a :class:`~loopty.term.Term`: parameters with their
 array types, the free size parameters, the statements with their isl domains,
 and the postcondition. Nothing here decides anything; the obligations are read
 off the term by :mod:`loopty.typing`.
+
+One generic point per loop has a blind spot: state a Python name carries from
+one iteration to the next. ``s = s + x[i]`` in a loop runs once, so the trace
+sees ``s = 0.0 + x[i]`` and never the sum, and the polyhedral model has no cell
+for such a name anyway. Two checks refuse the idiom, and the message names the
+fix, which is to give the state an index. :meth:`Tracer.record` refuses a
+statement that mentions the variable of a loop it is not inside, which is how
+a value carried *out* of a loop shows up. :meth:`Tracer.leave_loop` compares the
+locals of the frame running the ``for`` with those it had when the loop opened,
+which catches a carried value that mentions no loop variable at all, such as
+``s = s + 1.0``.
 """
 
 from __future__ import annotations
 
 import dis
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+import islpy as isl
 import numpy as np
 import pymbolic.primitives as prim
 from lanky.prelude import FinType, Refined
 from lanky.terms import (
+    Exists,
+    Forall,
     Subscript,
     Sum,
     SymbolicBoolError,
     Var,
     init_args,
+    render,
     structurally_equal,
 )
 
@@ -91,13 +106,86 @@ def _abandoned_message(inames: Sequence[str]) -> str:
     )
 
 
+#: The two ways to give loop-carried state an index, which is what both
+#: loop-carried refusals end with.
+_INDEX_THE_STATE = (
+    "Give the state an index: loopty.reduce_sum({reduction}) when it is an "
+    "accumulation, or an indexed cell that each iteration writes ({cell}, the "
+    "way a prefix scan is written) when it is not."
+)
+
+
+def _shown(value: Any) -> str:
+    """A value the way a message prints it: as the body spells it, where it can.
+
+    A term is rendered, a symbolic array is its name and a symbolic domain is
+    ``x.dom`` (a ping-pong ``a, b = b, a`` swaps two arrays), anything else is
+    its ``repr``.
+    """
+    if isinstance(value, SymArr):
+        return value.name
+    if isinstance(value, SymDom):
+        return _domain_text(value)
+    if isinstance(value, prim.ExpressionNode):
+        try:
+            return render(value)
+        except Exception:  # pragma: no cover - a node lanky cannot print
+            return str(value)
+    return repr(value)
+
+
+def _escaped_message(names: Collection[str], cell: str, where: str) -> str:
+    """What to say about a statement that mentions a loop it is not inside."""
+    listed = ", ".join(repr(name) for name in sorted(names))
+    many = len(names) > 1
+    return (
+        f"the write to {cell} at {where} mentions the loop "
+        f"variable{'s' if many else ''} {listed} outside the "
+        f"loop{'s' if many else ''} over {'them' if many else 'it'}. Tracing runs "
+        "the body once with every loop taking one generic point, so a value that "
+        "a Python name carries out of a loop, or from one iteration into the "
+        "next, is that point and not what the loop computes. "
+        + _INDEX_THE_STATE.format(
+            reduction="... for i in arr.dom", cell="s[i + 1] = s[i] + x[i]"
+        )
+    )
+
+
+def _carried_message(
+    loop: _Loop, carried: Sequence[tuple[str, Any, Any]], domain: str
+) -> str:
+    """What to say about names a loop carries from one iteration to the next."""
+    variable = loop.target or loop.iname
+    names = ", ".join(repr(name) for name, _, _ in carried)
+    values = "; ".join(
+        f"{name!r} is {_shown(before)} before the loop and {_shown(after)} "
+        "after one iteration"
+        for name, before, after in carried
+    )
+    first = carried[0][0]
+    return (
+        f"the loop over {variable!r} at {loop.where} carries {names} from one "
+        f"iteration to the next ({values}). Tracing runs the body once with the "
+        "loop taking one generic point, so it sees one iteration and not what "
+        "the loop computes, and the polyhedral model has no cell for a Python "
+        "name whose value changes across iterations. "
+        + _INDEX_THE_STATE.format(
+            reduction=f"... for {variable} in {domain}",
+            cell=f"{first}[{variable} + 1] = {first}[{variable}] + ...",
+        )
+        + f" If {first!r} is only a temporary that each iteration assigns before "
+        "it reads it, give it a name that is not bound before the loop."
+    )
+
+
 class TraceError(RuntimeError):
     """A body did something tracing cannot follow, with the fix in the message.
 
     The archetype is a Python ``if`` on a symbolic value: the message names the
     ``with when(...)`` replacement. Data-dependent ``while``, ``break``,
-    ``return`` out of a loop, and Python's builtin ``sum`` over a symbolic
-    domain are the other cases.
+    ``return`` out of a loop, Python's builtin ``sum`` over a symbolic domain,
+    and state a Python name carries from one loop iteration to the next are the
+    other cases.
     """
 
 
@@ -112,12 +200,21 @@ class _Loop:
     *that* iterator is asked for its second point, so an iterator closing a
     level it did not open means a loop was abandoned; see
     :meth:`Tracer.leave_loop`.
+
+    ``target`` is the name the ``for`` statement binds, when it could be read,
+    and ``where`` the line of the ``for``. ``names`` is a copy of the locals of
+    the frame running the ``for``, taken when the level opened and so before
+    the ``for`` bound its target: what the loop's first iteration started from,
+    which the locals at the close are compared with.
     """
 
     iname: str
     var: Var
     bound: Any
     owner: Any = None
+    target: str | None = None
+    where: str = ""
+    names: dict[str, Any] | None = None
 
 
 class Tracer:
@@ -165,16 +262,43 @@ class Tracer:
         self.reflections.reserve((name,))
         return name
 
-    def enter_loop(self, bound: Any, hint: str | None, owner: Any = None) -> Var:
-        """Open a loop level over ``0 <= i < bound`` and return its variable."""
+    def enter_loop(
+        self,
+        bound: Any,
+        hint: str | None,
+        owner: Any = None,
+        names: Mapping[str, Any] | None = None,
+        where: str = "",
+    ) -> Var:
+        """Open a loop level over ``0 <= i < bound`` and return its variable.
+
+        ``hint`` is the ``for`` target, and ``names`` the locals of the frame
+        running the ``for`` as they are now, before it binds that target. They
+        are copied, because what the caller has is ``frame.f_locals``: a live,
+        write-through view from Python 3.13 on (PEP 667), and before that a
+        dictionary the frame refreshes in place on the next access, so either
+        way the level would otherwise see the locals at its close twice.
+        """
         name = self.fresh_iname(hint)
         var = Var(name)
-        self.loops.append(_Loop(name, var, bound, owner))
+        self.loops.append(
+            _Loop(
+                name,
+                var,
+                bound,
+                owner,
+                target=hint,
+                where=where,
+                names=None if names is None else dict(names),
+            )
+        )
         self._path.append(self._position())
         self._counters.append(0)
         return var
 
-    def leave_loop(self, owner: Any = None) -> None:
+    def leave_loop(
+        self, owner: Any = None, names: Mapping[str, Any] | None = None
+    ) -> None:
         """Close the innermost loop level, refusing to close somebody else's.
 
         A level is popped when its iterator is asked for a second point and
@@ -184,12 +308,65 @@ class Tracer:
         enclosing loop's own ``StopIteration`` would pop the abandoned level
         instead of its own. That mismatch is what is caught here, at the point
         where it happens, so the message can name the loop.
+
+        ``names`` are the locals of the frame running the ``for`` now that the
+        body has run once. A name bound to a different value than it had when
+        the loop opened is state the second iteration would start from, which
+        the trace never runs; see :meth:`_carried`.
         """
         if owner is not None and self.loops and self.loops[-1].owner is not owner:
             raise TraceError(_abandoned_message([self.loops[-1].iname]))
-        self.loops.pop()
+        loop = self.loops.pop()
         self._path.pop()
         self._counters.pop()
+        if loop.names is None or names is None:
+            return
+        carried = self._carried(loop, names)
+        if carried:
+            dom = getattr(owner, "dom", None)
+            domain = _domain_text(dom) if isinstance(dom, SymDom) else "its domain"
+            raise TraceError(_carried_message(loop, carried, domain))
+
+    def _carried(
+        self, loop: _Loop, after: Mapping[str, Any]
+    ) -> list[tuple[str, Any, Any]]:
+        """The names ``loop`` carries into its next iteration, with both values.
+
+        A name counts when it was bound before the loop opened and is bound to
+        a different value after one iteration, whatever the value is: a term,
+        or a plain Python number such as a counter ``k = k + 1`` that ends up
+        in an index. Rebinding to the identical object or to an equal value
+        carries nothing (see :func:`_same_value`), and a name first bound
+        inside the loop is a per-iteration temporary. Three things are left
+        alone on purpose:
+
+        * the loop's own target, which the ``for`` rebinds before every
+          iteration, so no iteration can read the value the previous one left;
+        * a name bound to a :class:`when`, the object ``with when(...) as g``
+          binds, which carries no data: its condition is recorded on the
+          statements it guards;
+        * a name whose value before the loop already mentions the variable of
+          a loop that has closed, such as a ``for`` target reused by a later
+          loop. Anything that reads such a value is refused as an escaped loop
+          variable by :meth:`record`, wherever the read ends up, so there is
+          nothing the comparison here could add.
+        """
+        closed = self._inames.difference(self.inames)
+        out: list[tuple[str, Any, Any]] = []
+        for name, before in (loop.names or {}).items():
+            if name == loop.target or name not in after:
+                continue
+            value = after[name]
+            if loop.target is None and value is loop.var:
+                # The target could not be read off the bytecode; the name
+                # still holding the loop's own variable is that target.
+                continue
+            if _same_value(before, value) or isinstance(value, when):
+                continue
+            if _loop_variables(before, closed):
+                continue
+            out.append((name, before, value))
+        return out
 
     def _position(self) -> int:
         """The position of the next child of the innermost open block."""
@@ -251,7 +428,23 @@ class Tracer:
         return domain_set(self.inames, self.bounds, reflections=self.reflections)
 
     def record(self, assignee: Access, expr: Any, kind: str, where: str) -> Stmt:
-        """Append one statement instance family to the term being built."""
+        """Append one statement instance family to the term being built.
+
+        A statement that mentions the variable of a loop it is not inside is
+        refused. Every statement is a family over its own inames, so such a
+        variable would be free in the term, and the only way one gets there is
+        a Python name carrying the loop's generic point past the loop: out of
+        it, as in ``for i in x.dom: s = s + x[i]`` followed by ``y[0] = s``, or
+        into a later loop through a bound or a guard.
+        """
+        escaped = self._escaped(assignee, expr)
+        if escaped:
+            cell = (
+                _shown(_subscript(assignee.array, assignee.indices))
+                if assignee.indices
+                else assignee.array
+            )
+            raise TraceError(_escaped_message(escaped, cell, where))
         stmt = Stmt(
             id=f"S{len(self.stmts)}",
             inames=self.inames,
@@ -267,6 +460,21 @@ class Tracer:
         self.stmts.append(stmt)
         return stmt
 
+    def _escaped(self, assignee: Access, expr: Any) -> set[str]:
+        """Loop variables a statement mentions that no loop around it binds.
+
+        Everything the statement's instances depend on is looked at: the
+        assignee's indices, the right-hand side with its reductions, the guard,
+        and the bounds of the enclosing loops, since ``for j in val.dom[r]``
+        after the loop over ``r`` has closed puts ``r`` in the domain alone.
+        """
+        return _loop_variables(
+            (assignee, expr, self.guard(), self.bounds),
+            self._inames,
+            bound=self.inames,
+            reflections=self.reflections,
+        )
+
 
 _TRACERS: list[Tracer] = []
 
@@ -274,6 +482,100 @@ _TRACERS: list[Tracer] = []
 def current_tracer() -> Tracer | None:
     """The tracer of the innermost :func:`trace` call, or ``None``."""
     return _TRACERS[-1] if _TRACERS else None
+
+
+# }}}
+
+
+# {{{ loop-carried state
+
+
+def _loop_variables(
+    node: Any,
+    names: Collection[str],
+    bound: Collection[str] = (),
+    reflections: Reflections | None = None,
+) -> set[str]:
+    """The loop variables among ``names`` that ``node`` mentions free.
+
+    A reduction binds its own inames in its body, and so does a lanky binder
+    (``Sum``, ``Forall``, ``Exists``) that has not been lowered yet, as in a
+    guard. A lowered reduction keeps its bounds only in its isl domain, where a
+    loop variable shows up as a parameter: by name when the bound is affine,
+    inside the term a reflected parameter stands for when it is not, which is
+    what ``reflections`` is asked for.
+    """
+    out: set[str] = set()
+
+    def walk(node: Any, bound: frozenset[str]) -> None:
+        if isinstance(node, prim.Variable):
+            if node.name in names and node.name not in bound:
+                out.add(node.name)
+        elif isinstance(node, Reduction):
+            inner = bound | frozenset(node.inames)
+            walk(node.body, inner)
+            for param in node.domain.get_var_names(isl.dim_type.param):
+                if param in names and param not in inner:
+                    out.add(param)
+                if reflections is not None:
+                    walk(reflections.get(param), inner)
+        elif isinstance(node, Sum | Forall | Exists):
+            inner = bound | frozenset(var.name for var, _ in node.binders)
+            for _, domain in node.binders:
+                walk(getattr(domain, "bound", None), inner)
+            walk(node.body, inner)
+            walk(node.guard, inner)
+        elif isinstance(node, Access):
+            walk(node.indices, bound)
+        elif isinstance(node, prim.ExpressionNode):
+            for arg in init_args(node):
+                walk(arg, bound)
+        elif isinstance(node, tuple | list):
+            for item in node:
+                walk(item, bound)
+
+    walk(node, frozenset(bound))
+    return out
+
+
+def _same_value(before: Any, after: Any) -> bool:
+    """Whether rebinding a name from ``before`` to ``after`` changed nothing.
+
+    Identity first. Terms are compared as syntax trees, because ``==`` on a
+    lanky term builds a proposition rather than answering; tuples item by item;
+    a symbolic domain by its array and the indices of its fiber; numbers and
+    strings of one type by value, so ``f = f * 1.0`` is not state. Anything
+    else is the same value only when it is the same object.
+    """
+    if before is after:
+        return True
+    if isinstance(before, prim.ExpressionNode) or isinstance(
+        after, prim.ExpressionNode
+    ):
+        return structurally_equal(before, after)
+    if isinstance(before, tuple) and isinstance(after, tuple):
+        return len(before) == len(after) and all(map(_same_value, before, after))
+    if isinstance(before, SymDom) and isinstance(after, SymDom):
+        return before.array is after.array and _same_value(
+            before.prefix, after.prefix
+        )
+    if type(before) is type(after) and isinstance(
+        before, int | float | complex | str | np.generic
+    ):
+        return bool(before == after)
+    return False
+
+
+def _location(frame: Any) -> str:
+    """``file:line`` of what ``frame`` is executing, the tracer's source map."""
+    return f"{frame.f_code.co_filename.rsplit('/', 1)[-1]}:{frame.f_lineno}"
+
+
+def _domain_text(dom: SymDom) -> str:
+    """A symbolic domain the way the body spells it: ``x.dom`` or ``val.dom[r]``."""
+    return f"{dom.array.name}.dom" + "".join(
+        f"[{_shown(index)}]" for index in dom.prefix
+    )
 
 
 # }}}
@@ -424,6 +726,12 @@ class _DomIterator:
     Python evaluates and calls ``iter`` on a generator expression's outermost
     iterable before ``reduce_sum`` enters binder tracing; binding early would
     put the binder outside the trace that wants it.
+
+    The frame that calls ``__next__`` is the one running the ``for``, whether
+    that is the kernel body or a helper it calls, and both calls come from it:
+    the first before the target is bound, the second once the body has run.
+    Its locals at those two moments are what the tracer compares to find state
+    carried across iterations; see :meth:`Tracer.leave_loop`.
     """
 
     __slots__ = ("dom", "done", "loop")
@@ -443,7 +751,7 @@ class _DomIterator:
             if self.loop:
                 tracer = current_tracer()
                 if tracer is not None:
-                    tracer.leave_loop(self)
+                    tracer.leave_loop(self, sys._getframe(1).f_locals)
             raise StopIteration
         self.done = True
         binder_trace = current_trace()
@@ -457,7 +765,8 @@ class _DomIterator:
                 f"cannot iterate {self.dom!r} outside a trace; under plain "
                 "python a kernel iterates a real array's .dom"
             )
-        caller = sys._getframe(1).f_code.co_name
+        frame = sys._getframe(1)
+        caller = frame.f_code.co_name
         if caller in ("<genexpr>", "<listcomp>", "<setcomp>", "<dictcomp>"):
             raise TraceError(
                 f"a comprehension over {self.dom!r} is being driven by Python "
@@ -466,7 +775,13 @@ class _DomIterator:
                 "reduction and its domain are recorded"
             )
         self.loop = True
-        return tracer.enter_loop(self.dom.bound, _loop_target_name(), self)
+        return tracer.enter_loop(
+            self.dom.bound,
+            _loop_target_name(),
+            self,
+            names=frame.f_locals,
+            where=_location(frame),
+        )
 
 
 class SymArr:
@@ -516,8 +831,7 @@ class SymArr:
         """Write: record a statement at the caller's file and line."""
         indices = _index_tuple(key)
         tracer = self.tracer
-        frame = sys._getframe(1)
-        where = f"{frame.f_code.co_filename.rsplit('/', 1)[-1]}:{frame.f_lineno}"
+        where = _location(sys._getframe(1))
         expr = lower_reductions(value, tracer)
         assignee = Access(self.name, indices)
         kind = "accumulate" if _reads_assignee(expr, assignee) else "assign"
