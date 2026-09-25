@@ -106,6 +106,38 @@ with a pair of statement instances.
 - **Plugin surface** (`loopty.plugin`). `KernelTheory`, `IslOracle`,
   `LoopyExecutor` and `RunVerb`, exported through the four `lanky.*` entry-point
   groups. lanky never imports loopty; it finds these and asks each what it can do.
+- **The term interpreter** (`loopty.interpret`). `interpret(term, arguments)`
+  runs a traced term on concrete arguments, in place, without loopy: every
+  instance of every statement, over the points of its isl domain at the sizes
+  the arguments determine, in the order of the source schedule (statement by
+  statement in source order within each iteration), with a guard evaluated at
+  each instance. Expressions are evaluated node by node with Python's
+  operators on the numpy scalars read from the arrays, which is the arithmetic
+  the native run does, and a reduction is summed in the order `reduce_sum`
+  sums natively, lexicographically over its binders with Python's `sum`. A
+  ragged bound is read from its counts array once the loop variables it names
+  have values. What it has no meaning for is an `InterpretError` naming it, not
+  a guess: a call with no numpy counterpart, a domain it cannot enumerate, and
+  a loop bound reading an array the same kernel writes.
+- **The faithfulness fact** (`loopty.faithful`). Every kernel's ledger ends
+  with a fact of kind `trace-faithful`, "the traced term computes what the body
+  computes". The native body and the interpreted term run on copies of the
+  same inputs, and every array argument is compared afterwards, bit for bit
+  when its exactness class is `exact` and within the class's tolerance
+  otherwise. The inputs are the module's `example_inputs()`, the ones
+  `loopty run` reads, and three drawn from the declared types from a fixed
+  seed, with every size at least 2 so that a loop runs more than one iteration,
+  a ragged axis laid out by the counts array it names, and a point of `Fin[m]`
+  below `m`. The fact is `tested` by `interpreter` when the runs agree,
+  `refuted` at the first input that disagrees with a counterexample naming the
+  input, the first differing cell and both values (the drawn arguments are in
+  the provenance), and `assumed` with the reason when no input runs natively or
+  the interpreter cannot read the term. It is what catches state a body keeps
+  where tracing does not look: a change nested below a container's elements
+  (`acc[0][0] += 1`), an attribute of an object an attribute holds, a `deque`,
+  a loop over a generator that wraps a domain, and a `dir()` or frame probe
+  all trace to one iteration's value and are refuted. The demos' ledgers carry
+  one more row per kernel, and their transcripts are regenerated.
 
 ### Fixed
 
@@ -416,6 +448,47 @@ with a pair of statement instances.
   written. A change nested below a container's own elements
   (`state[0][0] += 1`), an attribute, and a global that only a helper defined
   outside the body rebinds or changes are not seen yet.
+- An operation on a whole symbolic array is refused with the loop nest that
+  does it one cell at a time (`for i in y.dom: y[i] = ...`). `y[:] = 0.0` used
+  to be recorded as one statement whose index was a slice, `u[t] = ...` of a
+  two-axis `u` as a statement on a row, `x * 2` failed with "unsupported
+  operand", `np.sum(x)` handed the symbolic array back, and `for v in x`
+  walked it forever through Python's old sequence protocol, since a symbolic
+  array answers any index. A slice, an `...`, a list or an array of indices,
+  fewer indices than the array has axes, arithmetic and comparison operators,
+  iteration, `.numpy()`, and numpy's ufuncs and functions of a symbolic array
+  are each a `TraceError` now, and so is a fiber over a slice (`u.dom[1:]`).
+- A reduction's `if` clause that isl cannot state is refused rather than
+  dropped. The clause is a constraint of the reduction's domain, and a
+  reduction keeps its condition nowhere else, so
+  `reduce_sum(x[j] for j in x.dom if x[j] > 0)` traced to the sum of every
+  `x[j]`, and `if j != i` to a sum that included the diagonal. The message
+  says to split a `!=` in two (`<` and `>`), and otherwise to write each term
+  to an indexed cell under `with when(condition):` and sum the cells, as the
+  near-field demo does. An affine clause (`if j < i`) is a constraint as
+  before.
+- An equality in a guard or a reduction condition (`with when(i == 0):`,
+  `if j == i`) is handed to isl as `=`, which is how isl spells it. It was
+  handed over as `==`, and tracing stopped on isl's syntax error.
+- A body's effects outside its array parameters are refused once it has been
+  traced. Tracing runs the body once, so such an effect happens once in the
+  trace and once per call natively, and the compiled kernel never has it. The
+  state the body's code reaches by name (module globals it names, closure
+  cells, default values, and the same for every helper of the kernel author's
+  that it calls, eight levels deep) is copied before the trace, one level into
+  it as the loop snapshot is: a list, dict or set shallowly, and an object's
+  attributes together with the lists, dicts and sets they hold. A change is a
+  `TraceError` naming the state and both values, so `obj.count += 1`,
+  `self.s = self.s + x[i]`, `LOG.append(x[0])`, a global rebound outside any
+  loop, and a global that only a helper defined outside the body changes are
+  all refused now. State the body creates for itself is scratch, and a `for`
+  target stored as a global is left alone, as it is across an iteration. A
+  call that prints, reads input, opens a file, or draws a random number from
+  `random` or from a numpy generator is refused too, with its line: the calls
+  a body makes are seen through `sys.monitoring` while it is traced, and a
+  call from library code (loopty, lanky, numpy, pymbolic, islpy, loopy, the
+  standard library, site-packages) is never counted as the body's. Plain
+  `python` runs the body as written.
 - A loop whose target is spelled like a size or a parameter of the kernel gets
   an iname of its own. `for k in x.dom` over `x: Arr[Fin[k], Real]` used to make
   the size and the iname one isl dimension, so the loop's domain was
@@ -469,6 +542,10 @@ with a pair of statement instances.
   something a trace assumes; it is what a schedule lowers an accumulation to
   when it reorders one, and `realize(var, tree=True)` over an `exact`
   accumulation is refused.
+- The per-class tolerances (`TOLERANCE`, `TOLERANCE_FLOOR`) and the class an
+  output is compared at live in `loopty.tolerance`, which the differential
+  test and the faithfulness fact both read, so that the fact needs no loopy.
+  `loopty.executor` still exports `TOLERANCE`, and `exactness_of_output`.
 - `islpy` is pinned below 2026. loopy 2025.2 calls `Aff.is_equal` during code
   generation for a tiled loop nest and `BasicMap.is_bijective` in `map_domain`,
   and islpy 2026 removed both. Drop the ceiling once a loopy release supports

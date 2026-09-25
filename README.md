@@ -36,7 +36,7 @@ $ lanky check examples/spmv.py       # the ledger: every obligation and who deci
 $ loopty run examples/spmv.py        # lowers through loopy, compiles, runs, compares
 ```
 
-and the ledger `lanky check` prints (abridged: nine of its seventeen rows,
+and the ledger `lanky check` prints (abridged: ten of its nineteen rows,
 each row verbatim):
 
 ```text
@@ -51,8 +51,9 @@ decided  isl            spmv.py:112  spmv           y[r] is in bounds for every 
 decided  type           spmv.py:112  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
 decided  isl            spmv.py:112  spmv           distinct instances of S0 write distinct cells of y
 decided  type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
+tested   interpreter    spmv.py:102  spmv           the traced term computes what the body computes
 ...
-17 facts: 2 assumed, 14 decided, 1 tested
+19 facts: 2 assumed, 14 decided, 3 tested
 ```
 
 Look at the `x[col[r, j]]` row, and at what decided it. That indirection is the
@@ -60,6 +61,14 @@ one obligation in a sparse product a polyhedral checker cannot settle on its own
 and here it was settled by the *type*: the entries of `col` are points of
 `Fin[m]` and `x` has `m` cells, so the shape of the data discharges it and isl
 is never called.
+
+And look at the last row, the one fact that is about the trace rather than
+about the term. Every other row is a claim about what tracing recorded; this
+one checks that the record is the body. The term is run by an interpreter of
+its own, with numpy semantics, and compared with the body run natively, on the
+file's example inputs and on inputs drawn from the declared types. A body that
+kept state where tracing does not look would be refuted here, with the input
+and the first cell that differs.
 
 And a transformation is a cast, checked before it is applied:
 
@@ -117,6 +126,9 @@ message states, because which violating pair isl picks depends on them.
 - **The reference implementation is the kernel.** The same body runs on numpy
   under plain `python` and traces to the term loopy compiles, so the differential
   test compares a program with itself rather than with a second implementation.
+  That the trace *is* the body is checked too, not assumed: every kernel's
+  ledger has a `trace-faithful` fact, the traced term interpreted and compared
+  with the native run, bit for bit when the output is `exact`.
 - **It plugs into a proof host.** loopty registers a theory, an isl oracle, an
   executor and a `run` verb with [lanky](https://github.com/xywei/lanky), so a
   residual obligation an oracle cannot decide is an ordinary theorem a person can
@@ -132,9 +144,22 @@ end to end; the edges are sharp.
 - `@kernel` and `@program`: inert, registering, running natively on numpy.
 - Tracing a body to a typed term: accesses, statements, reductions, ragged
   fibers, `when` guards, source locations, and a `TraceError` that names the fix
-  when a Python `if` is used on a computed value or when a Python name, a
+  when a Python `if` is used on a computed value, when a Python name, a
   global, or a list, dict or set carries state from one loop iteration to the
-  next.
+  next, when an array is used whole (`y[:] = ...`, `x * 2`, a numpy function of
+  it), when a reduction's `if` clause is not a bound isl can state, when the
+  trace changes Python state outside the arrays (a global, a closure variable,
+  an object's attribute, a list, dict or set they hold, or the same in a helper
+  the body calls), and when the body prints, reads input, opens a file or draws
+  a random number.
+- The faithfulness fact. For each kernel, the traced term is run by an
+  interpreter (`loopty.interpret`: statement by statement in source order over
+  each statement's isl domain, expressions evaluated with numpy's arithmetic,
+  reductions summed in the order `reduce_sum` sums natively) and compared with
+  the native run, on the file's `example_inputs()` and on three inputs drawn
+  from the declared types. It is a `trace-faithful` fact, `tested` on
+  agreement and `refuted` with the input and the first differing cell, which
+  is where state hidden past every check above shows up.
 - Typing rules and the ledger: in-bounds by isl or by type, write disjointness,
   ordering, reduction exactness, postconditions.
 - `IslOracle`: `Empty`, `Subset`, `Bijective`, `Monotone`, each refutation with a
@@ -221,6 +246,16 @@ end to end; the edges are sharp.
   a predicate, so the second one is lowered under a fresh iname (`j_0`). The
   name in the term is unchanged, and so is every message, but a `Schedule` step
   naming `j` reaches only the first of them.
+- The trace-time refusals of hidden state look one level below a name: into
+  the containers and the objects it holds, and the containers those objects
+  hold. `acc[0][0] += 1`, `holder.inner.s = ...`, a `deque`, a loop over a
+  generator that wraps a domain, and a `dir()` probe trace without an error,
+  and the `trace-faithful` fact is what refutes them. That fact is a test, not
+  a proof: it compares the runs on the inputs it tries, so hidden state no such
+  input exercises goes unseen. It stays `assumed`, with the reason, when no
+  input runs natively, when the term calls a function the interpreter has no
+  numpy counterpart for, or when a loop bound reads an array the same kernel
+  writes.
 
 **Not yet.**
 
@@ -286,7 +321,9 @@ storage.
 **Evaluate annotations, trace bodies.** No Python parser and no AST pass.
 Annotations are evaluated with lanky's scope, and the body is run once against
 symbolic arrays. That is why the native run and the compiled run are the same
-program.
+program. Tracing is the only thing that gives a body its meaning, and whether
+the trace kept that meaning is a checked fact rather than an assumption: the
+term is interpreted on its own and compared with the native run.
 
 **Transformations are casts.** Each states a reindexing map, which isl checks for
 bijectivity, and a new execution order, which isl checks for monotonicity on the
