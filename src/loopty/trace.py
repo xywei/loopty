@@ -361,15 +361,18 @@ class _Held:
 class _Snapshot:
     """What the frame running a ``for`` held when the loop level opened.
 
-    ``names`` is a copy of its locals. ``namespace`` is its module's globals,
-    the live dictionary, and ``globals`` the values then of the names its code
-    rebinds there with ``global G``. ``held`` is every list, dict and set
+    ``names`` is a copy of its locals, and ``local`` every name its code keeps
+    as a local, cell or free variable rather than as a global. ``namespace``
+    is its module's globals, the live dictionary, and ``globals`` the values
+    then of the names its code rebinds there with ``global G``. ``held`` is
+    every list, dict and set
     reachable from a local or from a global the code names: a container
     mutated in place is the same object after the iteration, so comparing the
     names cannot see what changed in it. See :func:`_snapshot`.
     """
 
     names: dict[str, Any]
+    local: frozenset[str]
     namespace: Mapping[str, Any]
     globals: dict[str, Any]
     held: list[_Held]
@@ -541,14 +544,18 @@ class Tracer:
         closed = self._inames.difference(self.inames)
         out: list[_Carried] = []
         # A global is a name like a local, down to the loop's own target:
-        # ``global i`` before ``for i in x.dom`` stores the target there.
+        # ``global i`` before ``for i in x.dom`` stores the target there. The
+        # ``for`` stores it in one scope only, so a global that a helper
+        # defined in the body rebinds under the name of a local target is
+        # still state.
+        stored = "name" if loop.target in state.local else "global"
         scopes = (
             (state.names, after, "name"),
             (state.globals, state.namespace, "global"),
         )
         for values, now, kind in scopes:
             for name, before in values.items():
-                if name == loop.target:
+                if name == loop.target and kind == stored:
                     continue
                 value = now[name] if name in now else _UNBOUND
                 if loop.target is None and value is loop.var:
@@ -840,8 +847,10 @@ def _snapshot(frame: Any, owned: Collection[int]) -> _Snapshot:
     for name in sorted(rebound | read):
         if name in namespace:
             visit(name, name, "global", namespace[name])
+    code = frame.f_code
     return _Snapshot(
         names=names,
+        local=frozenset((*code.co_varnames, *code.co_cellvars, *code.co_freevars)),
         namespace=namespace,
         globals={name: namespace[name] for name in rebound if name in namespace},
         held=held,

@@ -864,6 +864,29 @@ def test_a_global_loop_target_is_not_state(monkeypatch) -> None:
     assert stmt.inames == ("point",)
 
 
+def test_a_global_named_like_a_local_loop_target_is_still_state(
+    monkeypatch,
+) -> None:
+    # The ``for`` binds a local ``point``; the helper rebinds the module's
+    # ``point``, a different name that only shares the spelling. The trace
+    # recorded ``y[point] = 1*x[point]`` while the native run scales by 1, 2, 3.
+    monkeypatch.setitem(globals(), "point", 0)
+
+    def shadowing(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        def bump():
+            global point
+            point += 1
+            return point
+
+        for point in x.dom:
+            y[point] = bump() * x[point]
+
+    with pytest.raises(
+        TraceError, match="carries the global 'point'.*'point' is 0 before the loop"
+    ):
+        term_of(shadowing)
+
+
 def test_a_name_or_global_deleted_inside_the_loop_is_carried_state(
     monkeypatch,
 ) -> None:
