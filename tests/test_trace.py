@@ -1328,6 +1328,68 @@ def test_state_created_by_the_body_is_scratch() -> None:
     assert render(stmt.expr) == "1.0*x[i]"
 
 
+def test_a_cached_property_the_body_reads_first_is_not_state() -> None:
+    # The first read stores the value in the object's __dict__, which the
+    # trace-wide snapshot sees as a new attribute. It is what every later read,
+    # native or traced, gets, so it is not state; an assignment to the same
+    # attribute once it is there still is.
+    import functools
+
+    class Mesh:
+        @functools.cached_property
+        def h(self) -> float:
+            return 1.0 / 16
+
+    mesh = Mesh()
+
+    def scaled(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = x[i] * mesh.h
+
+    (stmt,) = term_of(scaled).stmts
+    assert render(stmt.expr) == "x[i]*0.0625"
+
+    def rescaled(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        mesh.h = mesh.h / 2
+        for i in y.dom:
+            y[i] = x[i] * mesh.h
+
+    with pytest.raises(TraceError, match="changed the attribute 'h' of 'mesh'"):
+        term_of(rescaled)
+
+
+def test_the_attributes_of_a_library_object_are_the_librarys() -> None:
+    # A logger fills a level cache, one of its attributes, on its first debug
+    # call. That is the logging module's bookkeeping, not the body's state.
+    import logging
+
+    logger = logging.getLogger("loopty.tests.trace")
+    logger._cache.clear()
+
+    def logged(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            logger.debug("step")
+            y[i] = x[i]
+
+    (stmt,) = term_of(logged).stmts
+    assert render(stmt.expr) == "x[i]"
+    assert logger._cache
+
+
+def test_a_simple_namespace_is_the_kernel_authors_object() -> None:
+    # A bag of attributes and nothing else: a store into it is the body's.
+    from types import SimpleNamespace
+
+    state = SimpleNamespace(count=0.0)
+
+    def counted(y: Arr[Fin[1], Real]):  # noqa: F821
+        state.count = state.count + 1.0
+        y[0] = state.count
+
+    with pytest.raises(TraceError, match="changed the attribute 'count' of 'state'"):
+        term_of(counted)
+
+
 def test_a_print_in_the_body_is_refused() -> None:
     def chatty(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:

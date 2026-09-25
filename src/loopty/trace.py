@@ -65,6 +65,7 @@ import builtins
 import dis
 import functools
 import importlib.util
+import inspect
 import itertools
 import os
 import random
@@ -73,7 +74,14 @@ import sysconfig
 import threading
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from types import BuiltinFunctionType, CodeType, FunctionType, MethodType, ModuleType
+from types import (
+    BuiltinFunctionType,
+    CodeType,
+    FunctionType,
+    MethodType,
+    ModuleType,
+    SimpleNamespace,
+)
 from typing import Any
 
 import islpy as isl
@@ -1067,16 +1075,26 @@ def _user_object(value: Any) -> bool:
     """Whether ``value`` is an object of the kernel author's, with attributes.
 
     Modules, classes, functions and code are not, and neither is an object of
-    a library's type (a lanky sort, a numpy array): its attributes are the
-    library's business, and may change while a body is traced without the body
-    having done anything.
+    a library's type (a lanky sort, a numpy array, a ``logging.Logger``, an
+    object from site-packages): its attributes are the library's business, and
+    may change while a body is traced without the body having done anything,
+    as a logger's level cache does on its first ``debug`` call. A type is a
+    library's when the module defining it is in :data:`_LIBRARIES` or its file
+    is under :func:`_library_roots`. A :class:`types.SimpleNamespace` is the
+    exception: a bag of attributes with no machinery of its own, so what it
+    holds is exactly what the kernel author put there.
     """
     if isinstance(
         value, ModuleType | type | FunctionType | MethodType | BuiltinFunctionType
     ):
         return False
+    if type(value) is SimpleNamespace:
+        return True
     module = getattr(type(value), "__module__", None) or ""
     if module == "builtins" or module.split(".")[0] in _LIBRARIES:
+        return False
+    defined_in = getattr(sys.modules.get(module), "__file__", None)
+    if isinstance(defined_in, str) and _library_file(defined_in):
         return False
     try:
         vars(value)
@@ -1267,8 +1285,10 @@ def _outside_changes(outside: _Outside, tracer: Tracer) -> list[_Change]:
     across a loop iteration: a name now bound to a :class:`when`, and a name now
     bound to a loop's own variable, which is what a ``for`` whose target is a
     global stores there; anything that reads it is refused as an escaped loop
-    variable. A container whose name was rebound is reported as that
-    rebinding.
+    variable. So is an attribute a :class:`functools.cached_property` stored
+    the first time the body read it: the property computes it from the object,
+    once, whoever asks first, and a native call reads the same value. A
+    container whose name was rebound is reported as that rebinding.
     """
     loops = tracer._inames
 
@@ -1308,6 +1328,8 @@ def _outside_changes(outside: _Outside, tracer: Tracer) -> list[_Change]:
             after = now.get(attribute, _UNBOUND)
             if _same_value(before, after) or exempt(after):
                 continue
+            if before is _UNBOUND and _cached_property(entry.obj, attribute):
+                continue
             out.append(
                 _Change(
                     f"the attribute {attribute!r} of {entry.label!r}",
@@ -1318,6 +1340,15 @@ def _outside_changes(outside: _Outside, tracer: Tracer) -> list[_Change]:
             )
             break
     return out
+
+
+def _cached_property(obj: Any, attribute: str) -> bool:
+    """Whether ``attribute`` of ``obj`` holds the value of a ``cached_property``."""
+    try:
+        descriptor = inspect.getattr_static(type(obj), attribute)
+    except AttributeError:
+        return False
+    return isinstance(descriptor, functools.cached_property)
 
 
 def _outside_message(name: str, changes: Sequence[_Change]) -> str:
