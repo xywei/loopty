@@ -467,6 +467,14 @@ with a pair of statement instances.
   a compiler contract on hardware with FMA and shows the pin keeping the bits.
   `Lowering.contraction` records the choice, and note 9 in
   `docs/loopy-notes.md` has the flags.
+- The transcripts in `README.md` and `docs/quickstart.md` are regenerated and
+  checked by `scripts/refresh_example_outputs.py`, as those in
+  `examples/README.md` were, and CI runs it with `--check`. A console block
+  with a `...` line is an excerpt: the lines it keeps have to be lines of the
+  output, in order, verbatim, and a refresh follows a moved line number or a
+  wider column by the shape of the line and fails on a line that is gone. The
+  abridged ledger in `README.md`, whose rows say they are verbatim, was kept
+  so by hand, and its rule of dashes was not.
 
 ### Changed
 

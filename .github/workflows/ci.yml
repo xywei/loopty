@@ -82,3 +82,12 @@ jobs:
       - name: Run the worked example
         working-directory: loopty
         run: uv run loopty run examples/spmv.py
+
+      # Every console block in the documentation that shows one command is that
+      # command's output, and an excerpt marked with `...` keeps only lines of
+      # it, verbatim. A change that moves a line number, a fact count or a
+      # tolerance fails here until the script is rerun without --check and the
+      # documents are committed.
+      - name: Check the transcripts in the documentation
+        working-directory: loopty
+        run: uv run python scripts/refresh_example_outputs.py --check

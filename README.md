@@ -36,12 +36,13 @@ $ lanky check examples/spmv.py       # the ledger: every obligation and who deci
 $ loopty run examples/spmv.py        # lowers through loopy, compiles, runs, compares
 ```
 
-and the ledger `lanky check` prints (abridged: nine of its seventeen rows,
-each row verbatim):
+and the ledger `lanky check` prints, abridged to the rows discussed here (each
+row verbatim, and checked by `scripts/refresh_example_outputs.py`):
 
-```text
+```console
+$ lanky check examples/spmv.py
 STATUS   BY             WHERE        OWNER          STATEMENT
--------  -------------  -----------  -------------  ---------------------------------------------
+-------  -------------  -----------  -------------  ------------------------------------------------------------------------
 decided  isl            spmv.py:79   scan           off[0] is in bounds for every instance of S0
 decided  isl            spmv.py:81   scan           off[r + 1] is in bounds for every instance of S1
 decided  isl            spmv.py:79   scan           distinct instances of S0 write distinct cells of off
@@ -65,15 +66,17 @@ And a transformation is a cast, checked before it is applied:
 
 ```console
 $ python examples/stencil_skew.py
+...
 Schedule(jacobi).tile('t', 'i', 8, 8) ->
   IllegalCast: tile(t,i,8,8) illegal: instance S0[t=0, i=8] writes u[1, 8] read by S0[t=1, i=7] scheduled earlier (at nt=16, nx=16, as hinted)
-
+...
 accepted: Schedule(jacobi, target='c').skew(i, by='t').tile(t,i,8,8)
   loop nest: t_outer i_outer t_inner i_inner
   decided  isl  skew(i, by='t') renames the instances of jacobi one for one
   decided  isl  the order after skew(i, by='t') runs every dependence of jacobi forward
   decided  isl  tile(t,i,8,8) renames the instances of jacobi one for one
   decided  isl  the order after tile(t,i,8,8) runs every dependence of jacobi forward
+...
 ```
 
 The rejection names two real instances of the kernel, not an empty set or a
