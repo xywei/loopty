@@ -49,10 +49,11 @@ leaves ``acc`` bound to the same list.
 
 from __future__ import annotations
 
+import builtins
 import dis
 import itertools
 import sys
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from types import CodeType
 from typing import Any
@@ -254,6 +255,26 @@ _SCRATCH = {
 }
 
 
+def _probe_message(loop: _Loop, probes: Sequence[str]) -> str:
+    """What to say about a loop whose code can ask whether a name is bound."""
+    variable = _loop_variable(loop)
+    listed = " and ".join(f"{name}()" if name.islower() else name for name in probes)
+    return (
+        f"the code running the loop over {variable!r} at {loop.where} uses "
+        f"{listed}, and a kernel body may not inspect which names are bound. "
+        "Tracing runs the body once with the loop taking one generic point, so "
+        "a name that one iteration binds or deletes for the next is seen only "
+        "as the first iteration finds it, and a test on it takes one branch in "
+        "the trace and another natively. "
+        + _INDEX_THE_STATE.format(
+            reduction=f"... for {variable} in {_loop_domain(loop)}",
+            cell=f"s[{variable} + 1] = s[{variable}] + ...",
+        )
+        + " If the name is only a temporary, bind it in every iteration instead "
+        "of testing for it."
+    )
+
+
 def _carried_message(loop: _Loop, carried: Sequence[_Carried]) -> str:
     """What to say about the state a loop carries from one iteration to the next."""
     variable = _loop_variable(loop)
@@ -285,8 +306,9 @@ class TraceError(RuntimeError):
     The archetype is a Python ``if`` on a symbolic value: the message names the
     ``with when(...)`` replacement. Data-dependent ``while``, ``break``,
     ``return`` out of a loop, Python's builtin ``sum`` over a symbolic domain,
-    and state that a Python name, a global, or a list, dict or set carries from
-    one loop iteration to the next are the other cases.
+    state that a Python name, a global, or a list, dict or set carries from one
+    loop iteration to the next, and a loop whose code can ask which names are
+    bound are the other cases.
     """
 
 
@@ -423,20 +445,20 @@ class Tracer:
         write-through view from Python 3.13 on (PEP 667), and before that a
         dictionary the frame refreshes in place on the next access, so either
         way the level would otherwise see the locals at its close twice.
+
+        A frame whose code can ask whether a name is bound is refused here,
+        before anything is copied; see :func:`_binding_probes`.
         """
         name = self.fresh_iname(hint)
         var = Var(name)
-        self.loops.append(
-            _Loop(
-                name,
-                var,
-                bound,
-                owner,
-                target=hint,
-                where="" if frame is None else _location(frame),
-                state=None if frame is None else _snapshot(frame, self._owned()),
-            )
-        )
+        loop = _Loop(name, var, bound, owner, target=hint)
+        if frame is not None:
+            loop.where = _location(frame)
+            probes = _binding_probes(frame)
+            if probes:
+                raise TraceError(_probe_message(loop, probes))
+            loop.state = _snapshot(frame, self._owned())
+        self.loops.append(loop)
         self._path.append(self._position())
         self._counters.append(0)
         return var
@@ -836,16 +858,75 @@ def _global_names(code: CodeType) -> tuple[set[str], set[str]]:
     """
     rebound: set[str] = set()
     read: set[str] = set()
-    pending = [code]
-    while pending:
-        current = pending.pop()
+    for current in _codes(code):
         for instruction in dis.get_instructions(current):
             if instruction.opname in ("STORE_GLOBAL", "DELETE_GLOBAL"):
                 rebound.add(instruction.argval)
             elif instruction.opname == "LOAD_GLOBAL":
                 read.add(instruction.argval)
-        pending.extend(c for c in current.co_consts if isinstance(c, CodeType))
     return rebound, read
+
+
+def _codes(code: CodeType) -> Iterator[CodeType]:
+    """``code`` and every code object defined inside it, at any depth."""
+    pending = [code]
+    while pending:
+        current = pending.pop()
+        yield current
+        pending.extend(c for c in current.co_consts if isinstance(c, CodeType))
+
+
+#: The builtins a body can ask whether a name is bound with: the namespaces
+#: themselves, and the exceptions that reading an unbound name raises.
+_BINDING_PROBES = ("locals", "globals", "vars", "NameError", "UnboundLocalError")
+
+
+def _binding_probes(frame: Any) -> list[str]:
+    """The builtins in ``frame``'s code that can ask whether a name is bound.
+
+    The snapshot compares the names bound before a loop, and a name first bound
+    inside it is taken for a per-iteration temporary. That holds only while
+    each iteration binds the name before reading it, and ``if "s" not in
+    locals(): s = 0`` or ``try: s except NameError: s = 0`` binds it in the
+    first iteration only: the one the trace runs. A body that can see which
+    names are bound can always choose a branch by what an earlier iteration
+    left, so it is refused rather than analysed.
+
+    The code object's names are read first, with those of the functions
+    defined inside it: a name the code reads as a global or a builtin is in
+    ``co_names`` however a CPython version compiles the call or the ``except``
+    clause. A local never is, so a local ``locals`` is left alone, and so is a
+    name the frame's locals or its module's globals bind, which is somebody
+    else's function by the time the call runs. An attribute is in
+    ``co_names`` too, and pytest's assertion rewriting puts one there in every
+    body with an ``assert`` (``@py_builtins.locals()``), so a name that every
+    instruction mentioning it reads as an attribute is left alone as well.
+    Any other instruction, one a later CPython may add included, counts as a
+    probe, so an instruction this does not know makes it refuse, not miss.
+    """
+    uses: dict[str, set[str]] = {}
+    for code in _codes(frame.f_code):
+        named = [name for name in _BINDING_PROBES if name in code.co_names]
+        if not named:
+            continue
+        for name in named:
+            uses.setdefault(name, set())
+        for instruction in dis.get_instructions(code):
+            if isinstance(instruction.argval, str) and instruction.argval in named:
+                uses[instruction.argval].add(instruction.opname)
+    shadows = (frame.f_locals, frame.f_globals)
+    return [
+        name
+        for name, opnames in uses.items()
+        if not (opnames and all(_reads_an_attribute(op) for op in opnames))
+        and not any(name in scope for scope in shadows)
+        and frame.f_builtins.get(name) is getattr(builtins, name)
+    ]
+
+
+def _reads_an_attribute(opname: str) -> bool:
+    """Whether an instruction named ``opname`` looks its name up on an object."""
+    return "ATTR" in opname or "METHOD" in opname
 
 
 def _changed(held: _Held, closed: Collection[str]) -> tuple[str, Any, Any] | None:

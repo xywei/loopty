@@ -401,8 +401,14 @@ with a pair of statement instances.
   `==`, and the message names the container and the cell that changed. A
   container first created inside the loop is scratch and is left alone; one
   created before the loop and reused as scratch is refused, with a message
-  that says to create it inside the loop. The fixes are `reduce_sum(...)` for
-  an accumulation and an indexed cell
+  that says to create it inside the loop. A name first bound inside the loop
+  is a temporary only while every iteration binds it, so code running a traced
+  loop may not ask which names are bound: the builtins `locals()`,
+  `globals()` and `vars()`, and an `except` clause naming `NameError` or
+  `UnboundLocalError`, are refused when the loop opens (`if "s" not in
+  locals(): s = 0` used to trace to one iteration's value). A local or global
+  of the same name, and an attribute, are left alone. The fixes are
+  `reduce_sum(...)` for an accumulation and an indexed cell
   (`s[i + 1] = s[i] + x[i]`, as `scan` in `examples/spmv.py` does) otherwise,
   spelled with the loop's own target and domain. A message names a loop by its
   `for` target and line, and adds the iname when a reused target made the two

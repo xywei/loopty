@@ -867,28 +867,22 @@ def test_a_global_loop_target_is_not_state(monkeypatch) -> None:
 def test_a_name_or_global_deleted_inside_the_loop_is_carried_state(
     monkeypatch,
 ) -> None:
-    # Natively only the first iteration finds ``scale`` (or ``_COUNT``) bound
-    # and every later one takes the other branch; the one point the trace
-    # runs is a first iteration, so it recorded the first branch for all.
-    monkeypatch.setitem(globals(), "_COUNT", 0)
+    # Natively the second iteration fails on the name the first one deleted;
+    # the one point the trace runs is a first iteration, which finds it bound,
+    # so the trace recorded ``y[i] = 2.0*x[i]`` for every ``i``.
+    monkeypatch.setitem(globals(), "_COUNT", 2)
 
     def scaled_once(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
         scale = 2.0
         for i in x.dom:
-            if "scale" in locals():
-                y[i] = scale * x[i]
-                del scale
-            else:
-                y[i] = x[i]
+            y[i] = scale * x[i]
+            del scale
 
     def counted_once(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
         global _COUNT
         for i in x.dom:
-            if "_COUNT" in globals():
-                y[i] = 2.0 * x[i]
-                del _COUNT
-            else:
-                y[i] = x[i]
+            y[i] = _COUNT * x[i]
+            del _COUNT
 
     with pytest.raises(
         TraceError, match="'scale' is 2.0 before the loop and unbound after"
@@ -896,9 +890,90 @@ def test_a_name_or_global_deleted_inside_the_loop_is_carried_state(
         term_of(scaled_once)
     with pytest.raises(
         TraceError,
-        match="carries the global '_COUNT'.*'_COUNT' is 0 before the loop and unbound",
+        match="carries the global '_COUNT'.*'_COUNT' is 2 before the loop and unbound",
     ):
         term_of(counted_once)
+
+
+def test_a_name_first_bound_by_a_test_on_locals_is_refused() -> None:
+    # ``s`` is first bound inside the loop, which reads as a temporary, but only
+    # the first iteration binds it: the trace recorded ``y[i] = 1`` while the
+    # native run writes 1, 2, 3, ...
+    def counted(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in x.dom:
+            if "s" not in locals():
+                s = 0
+            s += 1
+            y[i] = s
+
+    with pytest.raises(TraceError) as caught:
+        term_of(counted)
+    message = str(caught.value)
+    assert "the code running the loop over 'i' at test_trace.py:" in message
+    assert "uses locals()" in message
+    assert "a kernel body may not inspect which names are bound" in message
+    assert "reduce_sum(... for i in x.dom)" in message
+    assert "s[i + 1] = s[i] + ..." in message
+    assert "bind it in every iteration instead of testing for it" in message
+
+
+def test_a_name_first_bound_under_except_name_error_is_refused() -> None:
+    def counted(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in x.dom:
+            try:
+                s += 1
+            except (NameError, UnboundLocalError):
+                s = 1
+            y[i] = s
+
+    with pytest.raises(
+        TraceError, match="uses NameError and UnboundLocalError, and a kernel body"
+    ):
+        term_of(counted)
+
+
+def test_a_name_first_bound_by_a_test_on_vars_is_refused() -> None:
+    # ``vars()`` with no argument is ``locals()`` by another name.
+    def counted(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in x.dom:
+            if "s" not in vars():
+                s = 0
+            s += 1
+            y[i] = s
+
+    with pytest.raises(TraceError, match=r"uses vars\(\), and a kernel body"):
+        term_of(counted)
+
+
+def test_a_local_named_like_a_probe_is_not_a_probe() -> None:
+    # ``locals`` here is the body's own function; nothing asks what is bound.
+    def shadowed(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        def locals():
+            return (2.0,)
+
+        for i in x.dom:
+            y[i] = locals()[0] * x[i]
+
+    (stmt,) = term_of(shadowed).stmts
+    assert stmt.inames == ("i",)
+    assert render(stmt.expr) == "2.0*x[i]"
+
+
+def test_an_attribute_named_like_a_probe_is_not_a_probe() -> None:
+    # pytest rewrites the ``assert`` into code that calls
+    # ``@py_builtins.locals()``, which puts ``locals`` among the body's names
+    # as an attribute; ``cfg.vars`` is an attribute too.
+    from types import SimpleNamespace
+
+    cfg = SimpleNamespace(vars=2.0)
+
+    def configured(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in x.dom:
+            y[i] = cfg.vars * x[i]
+        assert cfg.vars > 0
+
+    (stmt,) = term_of(configured).stmts
+    assert render(stmt.expr) == "2.0*x[i]"
 
 
 def test_a_list_created_inside_the_loop_is_scratch() -> None:
