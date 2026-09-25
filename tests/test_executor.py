@@ -62,6 +62,26 @@ def test_positional_arguments_follow_the_term_signature() -> None:
     assert np.allclose(out["z"], 3.0 * x + y)
 
 
+def test_a_strided_or_differently_typed_output_is_updated_in_place() -> None:
+    # ``_as_numpy`` copies an output that is not contiguous, or not of the
+    # lowered dtype, on the way into loopy. The results have to come back out
+    # of that copy, or ``run`` returns the right values and leaves the caller's
+    # array as it was.
+    x = np.arange(4, dtype=np.float64)
+    y = np.ones(4)
+    storage = np.zeros((4, 2))
+    z = storage[:, 0]
+    out = executor().run(ht.axpy_term(), a=3.0, x=x, y=y, z=z)
+    assert np.allclose(out["z"], 3.0 * x + y)
+    assert np.allclose(z, 3.0 * x + y)
+    assert np.all(storage[:, 1] == 0.0)
+
+    single = np.zeros(4, dtype=np.float32)
+    executor().run(ht.axpy_term(), a=3.0, x=x, y=y, z=single)
+    assert single.dtype == np.float32
+    assert np.allclose(single, 3.0 * x + y)
+
+
 def test_a_ragged_array_supplies_its_own_offsets() -> None:
     from loopty.arr import Arr
 

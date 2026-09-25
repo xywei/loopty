@@ -267,6 +267,14 @@ class LoopyExecutor:
         was passed to it. The compiled code writes into loopy's own buffers, and
         this puts the values where the caller is looking for them, including
         into a runtime :class:`~loopty.arr.Arr`.
+
+        A plain ``ndarray`` needs this as much as an ``Arr`` does. It reaches
+        loopy through :func:`_as_numpy`, which hands over the caller's own array
+        only when it is already contiguous and of the lowered dtype; a strided
+        view (``z[:, 0]``) or a ``float32`` output for a ``Real`` parameter is
+        copied on the way in, and the results used to stay in that copy. Such
+        an output is written back here, cast to the caller's dtype the way any
+        assignment into it would be.
         """
         from loopty.arr import Arr
 
@@ -274,6 +282,10 @@ class LoopyExecutor:
             given = supplied.get(name)
             if isinstance(given, Arr):
                 given.numpy()[...] = np.asarray(value).reshape(given.numpy().shape)
+            elif isinstance(given, np.ndarray) and given is not value:
+                result = np.asarray(value)
+                if result.size == given.size:
+                    given[...] = result.reshape(given.shape)
 
     def _run_opencl(
         self, kernel: Any, lowering: Lowering, call: dict
