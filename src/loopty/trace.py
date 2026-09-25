@@ -45,17 +45,43 @@ opened, which catches a carried value that mentions no loop variable at all,
 such as ``s = s + 1.0``: its locals, the globals its code rebinds, and the
 contents of the lists, dicts and sets it can reach, since ``acc[0] += 1.0``
 leaves ``acc`` bound to the same list.
+
+A body also has effects that are not array writes, and one trace records none
+of them. So a symbolic array refuses to be used whole (``y[:] = ...``,
+``x * 2``, ``for v in x``, a numpy function of it), with the loop nest that
+does the same one cell at a time as the fix. And :func:`trace` copies the state
+the body's code reaches by name outside itself (module globals, closure cells,
+defaults, one level into the containers and objects they hold, and the same
+for the helpers it calls) and compares it once the body has run; a change is
+refused, and so is a call that prints, reads input, opens a file or draws a
+random number, which :class:`_CallWatch` sees through ``sys.monitoring``.
+State hidden deeper than that is what the faithfulness fact is for; see
+:mod:`loopty.faithful`.
 """
 
 from __future__ import annotations
 
 import builtins
 import dis
+import functools
+import importlib.util
+import inspect
 import itertools
+import os
+import random
 import sys
-from collections.abc import Collection, Iterator, Mapping, Sequence
+import sysconfig
+import threading
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from types import CodeType
+from types import (
+    BuiltinFunctionType,
+    CodeType,
+    FunctionType,
+    MethodType,
+    ModuleType,
+    SimpleNamespace,
+)
 from typing import Any
 
 import islpy as isl
@@ -307,8 +333,10 @@ class TraceError(RuntimeError):
     ``with when(...)`` replacement. Data-dependent ``while``, ``break``,
     ``return`` out of a loop, Python's builtin ``sum`` over a symbolic domain,
     state that a Python name, a global, or a list, dict or set carries from one
-    loop iteration to the next, and a loop whose code can ask which names are
-    bound are the other cases.
+    loop iteration to the next, a loop whose code can ask which names are
+    bound, an operation on a whole array, a reduction condition its domain
+    cannot state, a change to Python state outside the arrays, and a call that
+    prints, reads, opens a file or draws a random number are the other cases.
     """
 
 
@@ -409,6 +437,12 @@ class Tracer:
         self._path: list[int] = []
         #: How many children each open block has produced so far.
         self._counters: list[int] = [0]
+        #: The calls with an effect outside the arrays that the body made, as
+        #: ``(call, file:line)``, recorded by :class:`_CallWatch` and refused
+        #: once the body has run.
+        self.effects: list[tuple[str, str]] = []
+        #: The thread running the body; calls on any other are not its effects.
+        self.thread = threading.get_ident()
 
     # {{{ loops
 
@@ -988,6 +1022,548 @@ def _domain_text(dom: SymDom) -> str:
 # }}}
 
 
+# {{{ state and effects outside the trace
+
+
+#: The top-level packages that are the machinery rather than the kernel. Their
+#: objects are not snapshotted, their functions are not followed, and a call
+#: made from their code is not the body's effect.
+_LIBRARIES = ("loopty", "lanky", "numpy", "pymbolic", "islpy", "loopy", "pytools")
+
+#: How many levels of helper call the snapshot follows, as guard detection does
+#: (:data:`loopty.kernel._GUARD_SEARCH_DEPTH`).
+_HELPER_DEPTH = 8
+
+
+@functools.cache
+def _library_roots() -> tuple[str, ...]:
+    """The directories whose code belongs to a library and not to a kernel.
+
+    The packages of :data:`_LIBRARIES`, found without importing them, and the
+    standard library and site-packages directories. A kernel's own file, and
+    a helper next to it, are in none of them.
+    """
+    roots: list[str] = []
+    for name in _LIBRARIES:
+        try:
+            spec = importlib.util.find_spec(name)
+        except (ImportError, ValueError):  # pragma: no cover - a broken install
+            spec = None
+        for location in getattr(spec, "submodule_search_locations", None) or ():
+            roots.append(os.path.realpath(location))
+    paths = sysconfig.get_paths()
+    for key in ("stdlib", "platstdlib", "purelib", "platlib"):
+        if key in paths:
+            roots.append(os.path.realpath(paths[key]))
+    return tuple(dict.fromkeys(roots))
+
+
+@functools.lru_cache(maxsize=4096)
+def _library_file(filename: str) -> bool:
+    """Whether code from ``filename`` is a library's rather than the kernel's."""
+    if filename.startswith("<frozen"):
+        return True
+    if filename.startswith("<"):
+        return False
+    path = os.path.realpath(filename)
+    return any(
+        path == root or path.startswith(root + os.sep) for root in _library_roots()
+    )
+
+
+def _user_object(value: Any) -> bool:
+    """Whether ``value`` is an object of the kernel author's, with attributes.
+
+    Modules, classes, functions and code are not, and neither is an object of
+    a library's type (a lanky sort, a numpy array, a ``logging.Logger``, an
+    object from site-packages): its attributes are the library's business, and
+    may change while a body is traced without the body having done anything,
+    as a logger's level cache does on its first ``debug`` call. A type is a
+    library's when the module defining it is in :data:`_LIBRARIES` or its file
+    is under :func:`_library_roots`. A :class:`types.SimpleNamespace` is the
+    exception: a bag of attributes with no machinery of its own, so what it
+    holds is exactly what the kernel author put there.
+    """
+    if isinstance(
+        value, ModuleType | type | FunctionType | MethodType | BuiltinFunctionType
+    ):
+        return False
+    if type(value) is SimpleNamespace:
+        return True
+    module = getattr(type(value), "__module__", None) or ""
+    if module == "builtins" or module.split(".")[0] in _LIBRARIES:
+        return False
+    defined_in = getattr(sys.modules.get(module), "__file__", None)
+    if isinstance(defined_in, str) and _library_file(defined_in):
+        return False
+    try:
+        vars(value)
+    except TypeError:
+        return False
+    return True
+
+
+@dataclass
+class _Name:
+    """A name the traced code reaches outside itself, and its value then.
+
+    ``holder`` is how a message names it (``the global 'G'``), ``scope`` is
+    ``"global"``, ``"closure"`` or ``"default"``, and ``read`` gives its value
+    now.
+    """
+
+    holder: str
+    name: str
+    scope: str
+    read: Callable[[], Any]
+    before: Any
+
+
+@dataclass
+class _Attributes:
+    """An object a name holds, with a copy of its attributes then."""
+
+    label: str
+    root: str
+    scope: str
+    obj: Any
+    copy: dict[str, Any]
+
+
+@dataclass
+class _Outside:
+    """What the body's code reached outside the trace when it started.
+
+    ``names`` are the globals and closure cells it names, ``held`` the lists,
+    dicts and sets those hold (directly, through tuples, or as an attribute of
+    an object they hold), ``buffers`` the numpy arrays they hold in the same
+    places, each with a copy of its cells, and ``objects`` the kernel author's
+    objects they hold, each with its attributes. See :func:`_outside`.
+    """
+
+    names: list[_Name]
+    held: list[_Held]
+    buffers: list[_Held]
+    objects: list[_Attributes]
+
+
+@dataclass(frozen=True)
+class _Change:
+    """One piece of outside state the trace changed, with both values."""
+
+    holder: str
+    cell: str
+    before: Any
+    after: Any
+
+
+def _read_global(namespace: Mapping[str, Any], name: str) -> Any:
+    """A module global's value now, or :data:`_UNBOUND`."""
+    return namespace[name] if name in namespace else _UNBOUND
+
+
+def _read_cell(cell: Any) -> Any:
+    """A closure cell's value now, or :data:`_UNBOUND`."""
+    try:
+        return cell.cell_contents
+    except ValueError:
+        return _UNBOUND
+
+
+def _outside(function: Any, owned: Collection[int]) -> _Outside:
+    """Copy the state the body's code reaches by name outside the trace.
+
+    The roots are the globals the code of ``function`` names (with the code of
+    the functions defined inside it, and whether the module binds them yet or
+    not), its closure cells and its default values, and the same for every
+    function of the kernel author's that those hold, :data:`_HELPER_DEPTH`
+    levels deep: a helper keeping a counter in its module is state too. Each
+    value is copied one level deep, as the loop snapshot is: a list, dict or
+    set shallowly, looking through tuples, a numpy array (or the buffer of an
+    :class:`~loopty.arr.Arr`) cell by cell, and an object of the kernel
+    author's (:func:`_user_object`) by its attributes, with a list, dict, set
+    or array an attribute holds copied as well. A container or object reached
+    twice is copied once, and one the tracer keeps for itself (``owned``) not
+    at all.
+
+    A numpy array is copied whole, because a write into it is an effect the
+    compiled kernel never makes even when no output reads it back, which the
+    faithfulness fact, comparing outputs, cannot see. A body that only reads
+    a global array pays for one copy per trace.
+    """
+    names: list[_Name] = []
+    held: list[_Held] = []
+    buffers: list[_Held] = []
+    objects: list[_Attributes] = []
+    seen: set[int] = set(owned)
+    recorded: set[Any] = set()
+    walked: set[int] = set()
+    if isinstance(function, MethodType):
+        function = function.__func__
+    pending: list[tuple[Any, int]] = (
+        [(function, 0)] if isinstance(function, FunctionType) else []
+    )
+
+    def visit(
+        value: Any, label: str, root: str, scope: str, level: int, depth: int
+    ) -> None:
+        if id(value) in seen:
+            return
+        if isinstance(value, tuple):
+            for position, item in enumerate(value):
+                visit(item, f"{label}[{position}]", root, scope, level, depth)
+            return
+        for kind in (list, dict, set):
+            if isinstance(value, kind):
+                seen.add(id(value))
+                held.append(_Held(label, root, scope, value, kind(value)))
+                return
+        buffer = value.numpy() if isinstance(value, Arr) else value
+        if isinstance(buffer, np.ndarray):
+            if id(buffer) not in seen:
+                seen.add(id(buffer))
+                buffers.append(_Held(label, root, scope, buffer, buffer.copy()))
+            return
+        if isinstance(value, MethodType):
+            value = value.__func__
+        if isinstance(value, FunctionType):
+            if depth < _HELPER_DEPTH and not _library_file(value.__code__.co_filename):
+                pending.append((value, depth + 1))
+            return
+        if level == 0 and _user_object(value):
+            seen.add(id(value))
+            attributes = dict(vars(value))
+            objects.append(_Attributes(label, root, scope, value, attributes))
+            for attribute, item in attributes.items():
+                visit(item, f"{label}.{attribute}", root, scope, 1, depth)
+
+    while pending:
+        current, depth = pending.pop()
+        if id(current) in walked:
+            continue
+        walked.add(id(current))
+        code = current.__code__
+        namespace = current.__globals__
+        used: set[str] = set()
+        for nested in _codes(code):
+            used.update(nested.co_names)
+        for name in sorted(used):
+            # A name the module does not bind yet is recorded as unbound: a
+            # body that creates a global with ``global G`` changes it too.
+            if (id(namespace), name) in recorded:
+                continue
+            recorded.add((id(namespace), name))
+            value = _read_global(namespace, name)
+            names.append(
+                _Name(
+                    f"the global {name!r}",
+                    name,
+                    "global",
+                    functools.partial(_read_global, namespace, name),
+                    value,
+                )
+            )
+            if value is not _UNBOUND:
+                visit(value, name, name, "global", 0, depth)
+        cells = current.__closure__ or ()
+        for name, cell in zip(code.co_freevars, cells, strict=False):
+            if id(cell) in recorded:
+                continue
+            recorded.add(id(cell))
+            value = _read_cell(cell)
+            names.append(
+                _Name(
+                    f"the closure variable {name!r}",
+                    name,
+                    "closure",
+                    functools.partial(_read_cell, cell),
+                    value,
+                )
+            )
+            if value is not _UNBOUND:
+                visit(value, name, name, "closure", 0, depth)
+        positional = code.co_varnames[: code.co_argcount]
+        defaults = current.__defaults__ or ()
+        pairs = [
+            *zip(positional[len(positional) - len(defaults) :], defaults, strict=True),
+            *(current.__kwdefaults__ or {}).items(),
+        ]
+        for name, value in pairs:
+            visit(value, name, name, "default", 0, depth)
+    return _Outside(names, held, buffers, objects)
+
+
+def _outside_changes(outside: _Outside, tracer: Tracer) -> list[_Change]:
+    """What the trace changed of the state :func:`_outside` copied.
+
+    Values are compared as the loop snapshot compares them
+    (:func:`_same_value`, never ``==``). Two things are left alone, as they are
+    across a loop iteration: a name now bound to a :class:`when`, and a name now
+    bound to a loop's own variable, which is what a ``for`` whose target is a
+    global stores there; anything that reads it is refused as an escaped loop
+    variable. So is an attribute a :class:`functools.cached_property` stored
+    the first time the body read it: the property computes it from the object,
+    once, whoever asks first, and a native call reads the same value. A
+    container whose name was rebound is reported as that rebinding.
+    """
+    loops = tracer._inames
+
+    def exempt(after: Any) -> bool:
+        if isinstance(after, when):
+            return True
+        return isinstance(after, prim.Variable) and after.name in loops
+
+    out: list[_Change] = []
+    rebound: set[tuple[str, str]] = set()
+    for entry in outside.names:
+        after = entry.read()
+        if _same_value(entry.before, after) or exempt(after):
+            continue
+        rebound.add((entry.scope, entry.name))
+        out.append(_Change(entry.holder, entry.name, entry.before, after))
+    for held in outside.held:
+        if (held.scope, held.root) in rebound:
+            continue
+        change = _changed(held, ())
+        if change is None:
+            continue
+        cell, before, after = change
+        kind = type(held.container).__name__
+        if held.label == held.root:
+            where = "closure " if held.scope == "closure" else f"{held.scope} "
+            holder = f"the {where}{kind} {held.label!r}"
+        else:
+            holder = f"the {kind} {held.label!r}"
+        out.append(_Change(holder, cell, before, after))
+    for buffer in outside.buffers:
+        if (buffer.scope, buffer.root) in rebound:
+            continue
+        change = _buffer_change(buffer)
+        if change is not None:
+            where = f"{buffer.scope} " if buffer.label == buffer.root else ""
+            out.append(_Change(f"the {where}array {buffer.label!r}", *change))
+    for entry in outside.objects:
+        if (entry.scope, entry.root) in rebound:
+            continue
+        now = vars(entry.obj)
+        for attribute in dict.fromkeys([*entry.copy, *now]):
+            before = entry.copy.get(attribute, _UNBOUND)
+            after = now.get(attribute, _UNBOUND)
+            if _same_value(before, after) or exempt(after):
+                continue
+            if before is _UNBOUND and _cached_property(entry.obj, attribute):
+                continue
+            out.append(
+                _Change(
+                    f"the attribute {attribute!r} of {entry.label!r}",
+                    f"{entry.label}.{attribute}",
+                    before,
+                    after,
+                )
+            )
+            break
+    return out
+
+
+def _buffer_change(buffer: _Held) -> tuple[str, Any, Any] | None:
+    """The first cell of a numpy array that changed since it was copied, if any.
+
+    Cells are compared by their bits, so ``-0.0`` over ``0.0`` is a change,
+    and the cells of an object array as the loop snapshot compares values
+    (:func:`_same_value`). An array resized in place is named whole.
+    """
+    old, new, label = buffer.copy, buffer.container, buffer.label
+    if old.shape != new.shape or old.dtype != new.dtype:
+        return label, old.tolist(), new.tolist()
+    flat_old = np.ascontiguousarray(old).reshape(-1)
+    flat_new = np.ascontiguousarray(new).reshape(-1)
+    if old.dtype.hasobject:
+        differ = np.array(
+            [not _same_value(a, b) for a, b in zip(flat_old, flat_new, strict=True)],
+            dtype=bool,
+        )
+    elif flat_old.tobytes() == flat_new.tobytes():
+        return None
+    else:
+        width = old.dtype.itemsize
+        differ = np.any(
+            flat_old.view(np.uint8).reshape(-1, width)
+            != flat_new.view(np.uint8).reshape(-1, width),
+            axis=-1,
+        )
+    if not differ.any():
+        return None
+    position = int(np.flatnonzero(differ)[0])
+    index = np.unravel_index(position, old.shape)
+    cell = f"{label}[{', '.join(str(int(k)) for k in index)}]"
+    return cell, _python_cell(flat_old[position]), _python_cell(flat_new[position])
+
+
+def _python_cell(value: Any) -> Any:
+    """One cell of a numpy array as the Python value a message shows."""
+    return value.item() if isinstance(value, np.generic) else value
+
+
+def _cached_property(obj: Any, attribute: str) -> bool:
+    """Whether ``attribute`` of ``obj`` holds the value of a ``cached_property``."""
+    try:
+        descriptor = inspect.getattr_static(type(obj), attribute)
+    except AttributeError:
+        return False
+    return isinstance(descriptor, functools.cached_property)
+
+
+def _outside_message(name: str, changes: Sequence[_Change]) -> str:
+    """What to say about Python state outside the arrays that a trace changed."""
+    holders = ", ".join(change.holder for change in changes)
+    values = "; ".join(
+        f"{change.cell!r} is {_shown(change.before)} before the trace and "
+        f"{_shown(change.after)} after it"
+        for change in changes
+    )
+    return (
+        f"tracing {name} changed {holders} ({values}), Python state outside the "
+        "kernel's array parameters. Tracing runs the body once, at one generic "
+        "point, so such a change happens once in the trace and once per call "
+        "natively, and the compiled kernel never makes it. Keep the state in an "
+        "array parameter and write it at an index, or change it outside the "
+        "kernel."
+    )
+
+
+def _effect_of(function: Any, first: Any) -> str | None:
+    """The effect outside the arrays that calling ``function`` has, if known.
+
+    Printing, reading input and opening a file, and drawing a random number
+    from :mod:`random` or from numpy's generators, which changes a generator's
+    hidden state and bakes one draw into the term as a constant. ``first`` is
+    the call's first argument, which is the object an unbound method is
+    called on.
+    """
+    if function is builtins.print or function is builtins.input:
+        return f"{function.__name__}()"
+    if function is builtins.open:
+        return "open()"
+    name = getattr(function, "__name__", None)
+    if not isinstance(name, str):
+        return None
+    owner = getattr(function, "__self__", None)
+    if (owner is None or isinstance(owner, ModuleType)) and not isinstance(
+        function, FunctionType
+    ):
+        # ``rng.normal()`` calls the unbound method with the generator first.
+        prefix = type(first).__qualname__ + "."
+        if getattr(function, "__qualname__", "").startswith(prefix):
+            owner = first
+    if isinstance(owner, random.Random):
+        return f"random.{name}()"
+    generators = sys.modules.get("numpy.random")
+    kinds = tuple(
+        getattr(generators, kind, None)
+        for kind in ("RandomState", "Generator", "BitGenerator")
+    )
+    kinds = tuple(kind for kind in kinds if isinstance(kind, type))
+    if kinds and isinstance(owner, kinds):
+        return f"numpy.random.{type(owner).__name__}.{name}()"
+    return None
+
+
+def _call_location(code: CodeType, offset: int) -> str:
+    """``file:line`` of the instruction at ``offset``, from ``co_positions``."""
+    line = None
+    for index, position in enumerate(code.co_positions()):
+        if index == offset // 2:
+            line = position[0]
+            break
+    return f"{os.path.basename(code.co_filename)}:{line or code.co_firstlineno}"
+
+
+class _CallWatch:
+    """The body's calls, seen through ``sys.monitoring`` while it is traced.
+
+    One tool id is taken, the first of :data:`IDS` that nothing holds, the
+    first time a body is traced, and kept. Its ``CALL`` events are on only
+    while a trace runs. A call made from a library's code (see
+    :func:`_library_file`) is never the body's, and its location is disabled
+    for good, so that the tracer's own calls cost nothing after the first
+    trace. A call from the kernel author's code that has an effect
+    (:func:`_effect_of`) is recorded on the tracer, and :func:`trace` refuses
+    it once the body has run.
+
+    Without a free tool id nothing is watched, and the faithfulness fact is
+    what remains.
+    """
+
+    NAME = "loopty-trace"
+    IDS = (4, 3)
+    tool: int | None = None
+    tried = False
+    depth = 0
+
+    @classmethod
+    def start(cls) -> bool:
+        """Turn the events on; whether they are on."""
+        monitoring = getattr(sys, "monitoring", None)
+        if monitoring is None:  # pragma: no cover - Python 3.11 and older
+            return False
+        if not cls.tried:
+            cls.tried = True
+            for tool in cls.IDS:
+                if monitoring.get_tool(tool) is None:
+                    monitoring.use_tool_id(tool, cls.NAME)
+                    monitoring.register_callback(
+                        tool, monitoring.events.CALL, cls.on_call
+                    )
+                    cls.tool = tool
+                    break
+        if cls.tool is None:
+            return False
+        if cls.depth == 0:
+            monitoring.set_events(cls.tool, monitoring.events.CALL)
+        cls.depth += 1
+        return True
+
+    @classmethod
+    def stop(cls) -> None:
+        """Turn the events off again when the outermost trace ends."""
+        cls.depth -= 1
+        if cls.depth == 0 and cls.tool is not None:
+            sys.monitoring.set_events(cls.tool, sys.monitoring.events.NO_EVENTS)
+
+    @staticmethod
+    def on_call(code: CodeType, offset: int, function: Any, first: Any) -> Any:
+        """The ``CALL`` callback: record an effect of the body's own code."""
+        try:
+            tracer = current_tracer()
+            if tracer is None or tracer.thread != threading.get_ident():
+                return None
+            if _library_file(code.co_filename):
+                return sys.monitoring.DISABLE
+            effect = _effect_of(function, first)
+            if effect is not None:
+                tracer.effects.append((effect, _call_location(code, offset)))
+        except Exception:  # noqa: BLE001 - a watcher never breaks the body
+            return None
+        return None
+
+
+def _effects_message(name: str, effects: Sequence[tuple[str, str]]) -> str:
+    """What to say about calls with an effect outside the arrays."""
+    listed = ", ".join(f"{call} at {where}" for call, where in dict.fromkeys(effects))
+    return (
+        f"tracing {name} calls {listed}, an effect outside the kernel's array "
+        "parameters. Tracing runs the body once, at one generic point, so the "
+        "call happens once in the trace and once per iteration natively, and "
+        "the compiled kernel never makes it: a print shows one symbolic value, "
+        "and a random draw becomes a constant of the term. Print from the code "
+        "that calls the kernel, read and write files there, and draw random "
+        "numbers there and pass them in an array parameter."
+    )
+
+
+# }}}
+
+
 # {{{ guards as isl constraints
 
 
@@ -1015,6 +1591,9 @@ def constraints_of(condition: Any) -> tuple[str, ...]:
         operator = condition.operator
         if operator == "!=":
             return ()
+        # isl spells equality with one '='; its parser refuses Python's '=='.
+        if operator == "==":
+            operator = "="
         return (f"{left} {operator} {right}",)
     return ()
 
@@ -1082,6 +1661,15 @@ class SymDom:
         one index, the tuple, and gave the domain of axis 1 whatever the length
         of the tuple.
         """
+        if _whole_key(index):
+            raise TraceError(
+                f"{_domain_text(self)}[{_key_text(index)}] at "
+                f"{_location(sys._getframe(1))} takes a fiber over more than "
+                "one point. A fiber is taken at one index, "
+                f"{_domain_text(self)}[i]; to leave points of a domain out, "
+                "iterate all of it and put the statements under "
+                "'with when(condition):'"
+            )
         if isinstance(index, tuple):
             if not index:
                 raise TraceError(
@@ -1250,17 +1838,90 @@ class SymArr:
 
     def __getitem__(self, key: Any) -> Subscript:
         """Read: build the index expression ``name[...]``."""
+        self._refuse_whole(key, _location(sys._getframe(1)), write=False)
         return _subscript(self.name, _index_tuple(key))
 
     def __setitem__(self, key: Any, value: Any) -> None:
         """Write: record a statement at the caller's file and line."""
+        where = _location(sys._getframe(1))
+        self._refuse_whole(key, where, write=True)
         indices = _index_tuple(key)
         tracer = self.tracer
-        where = _location(sys._getframe(1))
-        expr = lower_reductions(value, tracer)
+        expr = lower_reductions(value, tracer, where=where)
         assignee = Access(self.name, indices)
         kind = "accumulate" if _reads_assignee(expr, assignee) else "assign"
         tracer.record(assignee, expr, kind, where, source=value)
+
+    def _refuse_whole(self, key: Any, where: str, write: bool) -> None:
+        """Refuse a subscript that names more than one cell.
+
+        A slice, an ``...``, a list or an array of indices, or fewer indices
+        than the array has axes (``u[t]`` of a two-axis ``u`` is a row) name
+        many cells at once, and a statement is one cell per instance. Natively
+        numpy would do the operation on all of them; the trace would record one
+        statement with a slice for an index, which nothing downstream reads as
+        a loop.
+        """
+        spelled = f"{self.name}[{_key_text(key)}]" + (" = ..." if write else "")
+        if _whole_key(key):
+            raise TraceError(_whole_array_message(self, spelled, where, write))
+        given = len(_index_tuple(key))
+        if given < self.ndim:
+            raise TraceError(
+                _whole_array_message(
+                    self,
+                    spelled,
+                    where,
+                    write,
+                    why=(
+                        f"gives {given} of the {self.ndim} indices of "
+                        f"{self.name}, so it names every cell that has them"
+                    ),
+                )
+            )
+
+    def __iter__(self) -> Any:
+        """Refuse: iterating an array walks its cells, a whole-array operation."""
+        raise TraceError(
+            _whole_array_message(
+                self,
+                f"iterating {self.name} itself",
+                _location(sys._getframe(1)),
+                write=False,
+            )
+        )
+
+    def numpy(self) -> Any:
+        """Refuse: a symbolic array has no storage to hand over."""
+        raise TraceError(
+            _whole_array_message(
+                self,
+                f"{self.name}.numpy()",
+                _location(sys._getframe(1)),
+                write=False,
+                why="asks for the storage of the array, and a traced array has none",
+            )
+        )
+
+    def __array__(self, *args: Any, **kwargs: Any) -> Any:
+        """Refuse: numpy cannot hold a symbolic array."""
+        raise TraceError(
+            _whole_array_message(self, f"converting {self.name} to numpy", "", False)
+        )
+
+    def __array_ufunc__(self, ufunc: Any, method: str, *inputs: Any, **kwargs: Any):
+        """Refuse: a numpy ufunc of an array is an operation on all its cells."""
+        name = getattr(ufunc, "__name__", "a ufunc")
+        raise TraceError(
+            _whole_array_message(self, f"numpy.{name} of {self.name}", "", False)
+        )
+
+    def __array_function__(self, func: Any, types: Any, args: Any, kwargs: Any):
+        """Refuse: a numpy function of an array is an operation on all its cells."""
+        name = getattr(func, "__name__", "a function")
+        raise TraceError(
+            _whole_array_message(self, f"numpy.{name} of {self.name}", "", False)
+        )
 
     def __len__(self) -> int:
         """Refuse: the size is symbolic; iterate ``.dom``."""
@@ -1276,6 +1937,95 @@ class SymArr:
 
     def __repr__(self) -> str:
         return f"SymArr({self.name}: {self.type})"
+
+
+#: The index names a message spells a loop nest with, one per axis.
+_INDEX_NAMES = ("i", "j", "k", "l")
+
+
+def _whole_key(key: Any) -> bool:
+    """Whether a subscript key names more than one cell per index."""
+    parts = key if isinstance(key, tuple) else (key,)
+    many = slice | list | np.ndarray | SymArr | SymDom
+    return any(part is Ellipsis or isinstance(part, many) for part in parts)
+
+
+def _key_text(key: Any) -> str:
+    """A subscript key the way the body spells it: ``:``, ``1:``, ``i, ...``."""
+
+    def text(part: Any) -> str:
+        if part is Ellipsis:
+            return "..."
+        if isinstance(part, slice):
+            ends = [
+                "" if end is None else _shown(end) for end in (part.start, part.stop)
+            ]
+            step = "" if part.step is None else f":{_shown(part.step)}"
+            return f"{ends[0]}:{ends[1]}{step}"
+        if isinstance(part, np.ndarray):
+            return "<array>"
+        return _shown(part)
+
+    parts = key if isinstance(key, tuple) else (key,)
+    return ", ".join(text(part) for part in parts)
+
+
+def _whole_array_message(
+    array: SymArr, spelled: str, where: str, write: bool, why: str = ""
+) -> str:
+    """What to say about an operation on a whole array, with the loop nest."""
+    indices: list[str] = []
+    loops: list[str] = []
+    for axis in range(array.ndim):
+        index = _INDEX_NAMES[axis] if axis < len(_INDEX_NAMES) else f"i{axis}"
+        domain = f"{array.name}.dom" + "".join(f"[{name}]" for name in indices)
+        loops.append(f"for {index} in {domain}:")
+        indices.append(index)
+    cell = f"{array.name}[{', '.join(indices)}]"
+    use = f"{cell} = ..." if write else f"... {cell} ..."
+    at = f" at {where}" if where else ""
+    because = f", and {why}" if why else ""
+    return (
+        f"{spelled}{at} is an operation on the whole array {array.name}{because}. "
+        "A traced kernel records one statement per family of cells, each cell "
+        "named by its indices, so an operation on many cells at once has no "
+        "statement to be. Write the loop nest and index the array: "
+        f"{' '.join(loops)} {use}"
+    )
+
+
+def _refused_operator(symbol: str, side: str) -> Any:
+    """A dunder of :class:`SymArr` that refuses the operator ``symbol``."""
+
+    def operation(self: SymArr, *_other: Any) -> Any:
+        spelled = {
+            "left": f"{self.name} {symbol} ...",
+            "right": f"... {symbol} {self.name}",
+            "unary": f"{symbol}{self.name}",
+            "call": f"{symbol}({self.name})",
+        }[side]
+        raise TraceError(
+            _whole_array_message(
+                self, spelled, _location(sys._getframe(1)), write=False
+            )
+        )
+
+    return operation
+
+
+for _name, _symbol in (
+    ("add", "+"), ("sub", "-"), ("mul", "*"), ("truediv", "/"),
+    ("floordiv", "//"), ("mod", "%"), ("pow", "**"), ("matmul", "@"),
+    ("and", "&"), ("or", "|"), ("xor", "^"), ("lshift", "<<"), ("rshift", ">>"),
+):  # fmt: skip
+    setattr(SymArr, f"__{_name}__", _refused_operator(_symbol, "left"))
+    setattr(SymArr, f"__r{_name}__", _refused_operator(_symbol, "right"))
+for _name, _symbol in (("lt", "<"), ("le", "<="), ("gt", ">"), ("ge", ">=")):
+    setattr(SymArr, f"__{_name}__", _refused_operator(_symbol, "left"))
+for _name, _symbol in (("neg", "-"), ("pos", "+"), ("invert", "~")):
+    setattr(SymArr, f"__{_name}__", _refused_operator(_symbol, "unary"))
+SymArr.__abs__ = _refused_operator("abs", "call")  # type: ignore[method-assign]
+del _name, _symbol
 
 
 def _reads_assignee(expr: Any, assignee: Access) -> bool:
@@ -1442,6 +2192,7 @@ def lower_reductions(
     tracer: Tracer,
     enclosing: Sequence[tuple[str, Any]] = (),
     outer_guards: Sequence[Any] = (),
+    where: str = "",
 ) -> Any:
     """Replace every lanky ``Sum`` in ``expr`` by a :class:`~loopty.term.Reduction`.
 
@@ -1465,8 +2216,18 @@ def lower_reductions(
     fixed; see :func:`reduction_exactness`. It is the tolerance a later
     differential test judges the compiled run by, and the permission a schedule
     needs before it may build a reduction tree.
+
+    A generator's ``if`` clause is a constraint of the domain, and a reduction
+    has nowhere else to keep it. So a condition isl cannot state (one that
+    reads an array, or compares with ``!=``) is refused here, with ``where``
+    the statement's location, rather than dropped: the term would sum over
+    every point while the body skips the ones the condition excludes.
     """
     if isinstance(expr, Sum):
+        unstated = _unstated(expr.guard)
+        if unstated:
+            names = [var.name for var, _domain in expr.binders]
+            raise TraceError(_reduction_condition_message(unstated, names, where))
         inames: list[str] = []
         bounds: list[Any] = []
         for var, domain in expr.binders:
@@ -1484,7 +2245,7 @@ def lower_reductions(
             bounds.append(_binder_bound(domain))
         inner = (*enclosing, *zip(inames, bounds, strict=True))
         guards = (*outer_guards, expr.guard)
-        body = lower_reductions(expr.body, tracer, inner, guards)
+        body = lower_reductions(expr.body, tracer, inner, guards, where)
         domain = domain_set(
             (*tracer.inames, *inames),
             (*tracer.bounds, *bounds),
@@ -1502,15 +2263,58 @@ def lower_reductions(
     if isinstance(expr, prim.ExpressionNode):
         return type(expr)(
             *(
-                lower_reductions(arg, tracer, enclosing, outer_guards)
+                lower_reductions(arg, tracer, enclosing, outer_guards, where)
                 for arg in init_args(expr)
             )
         )
     if isinstance(expr, tuple):
         return tuple(
-            lower_reductions(item, tracer, enclosing, outer_guards) for item in expr
+            lower_reductions(item, tracer, enclosing, outer_guards, where)
+            for item in expr
         )
     return expr
+
+
+def _unstated(condition: Any) -> list[Any]:
+    """The conjuncts of a condition that :func:`constraints_of` has to drop."""
+    if condition is None:
+        return []
+    if isinstance(condition, prim.LogicalAnd):
+        return [part for child in condition.children for part in _unstated(child)]
+    if constraints_of(condition):
+        return []
+    return [condition]
+
+
+def _reduction_condition_message(
+    parts: Sequence[Any], binders: Sequence[str], where: str
+) -> str:
+    """What to say about a reduction condition its domain cannot state."""
+    listed = " and ".join(repr(_shown(part)) for part in parts)
+    at = f" at {where}" if where else ""
+    unequal = any(
+        isinstance(part, prim.Comparison) and part.operator == "!=" for part in parts
+    )
+    why = (
+        "compares with '!=', which is not a convex set of points"
+        if unequal
+        else "reads an array or is not affine"
+    )
+    split = (
+        " For '!=', split the sum in two, one over '<' and one over '>'."
+        if unequal
+        else ""
+    )
+    return (
+        f"the condition {listed} of the reduction over {', '.join(binders)}{at} "
+        "cannot be a constraint of the reduction's domain, which is the only "
+        "place a reduction keeps its condition: the term would sum over every "
+        "point, while the body skips the points the condition excludes. isl "
+        "states an affine comparison of loop variables and sizes, and this "
+        f"condition {why}.{split} Otherwise write each term to an indexed cell, "
+        "0.0 where the condition is false and the term under "
+        "'with when(condition):', and sum the cells."
+    )
 
 
 def _binder_constraints(
@@ -1788,6 +2592,10 @@ def trace(kernel: Any, arg_types: Any) -> Term:
     optionally ``"return"`` for the postcondition. It is what the proxies are
     built from, and it is the only thing tracing needs to know that the body
     does not already say, because sizes come from ``.dom``.
+
+    The body's effects outside its array parameters are refused once it has
+    run: a call :class:`_CallWatch` recognizes, and a change to the state
+    :func:`_outside` copied before it started.
     """
     function = getattr(kernel, "fn", kernel)
     name = getattr(kernel, "__name__", getattr(function, "__name__", "kernel"))
@@ -1795,6 +2603,7 @@ def trace(kernel: Any, arg_types: Any) -> Term:
     post_annotation = types.pop("return", None)
 
     tracer = Tracer(name, types)
+    outside = _outside(function, tracer._owned())
     arguments: list[Any] = []
     params: list[tuple[str, Any]] = []
     for parameter, annotation in types.items():
@@ -1811,6 +2620,7 @@ def trace(kernel: Any, arg_types: Any) -> Term:
             arguments.append(Var(parameter))
 
     _TRACERS.append(tracer)
+    watching = _CallWatch.start()
     try:
         function(*arguments)
     except SymbolicBoolError as exc:
@@ -1820,6 +2630,8 @@ def trace(kernel: Any, arg_types: Any) -> Term:
             "masks the writes of the block rather than choosing a branch."
         ) from exc
     finally:
+        if watching:
+            _CallWatch.stop()
         _TRACERS.pop()
 
     if tracer.loops:
@@ -1827,6 +2639,11 @@ def trace(kernel: Any, arg_types: Any) -> Term:
         # A level still open once the body has returned means that iterator was
         # abandoned, which only a 'break' or a 'return' inside the loop does.
         raise TraceError(_abandoned_message([loop.iname for loop in tracer.loops]))
+    if tracer.effects:
+        raise TraceError(_effects_message(name, tracer.effects))
+    changes = _outside_changes(outside, tracer)
+    if changes:
+        raise TraceError(_outside_message(name, changes))
 
     sizes: set[str] = set()
     for _, arrtype in params:

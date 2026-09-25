@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import islpy as isl
+import numpy as np
 import pytest
 from lanky.prelude import Nat, Real
 from lanky.terms import evaluate_annotations, render
@@ -1101,3 +1102,455 @@ def test_plain_python_runs_the_list_counter_as_written() -> None:
 
 
 # }}}
+
+
+# {{{ operations on a whole array
+
+
+def test_a_slice_assignment_is_refused_with_the_loop_that_does_it() -> None:
+    # ``y[:] = 0.0`` used to be recorded as one statement whose index was a
+    # slice, which nothing downstream reads as a loop.
+    def zeroed(y: Arr[Fin[n], Real]):  # noqa: F821
+        y[:] = 0.0
+
+    with pytest.raises(TraceError) as caught:
+        term_of(zeroed)
+    message = str(caught.value)
+    assert "y[:] = ... at test_trace.py:" in message
+    assert "an operation on the whole array y" in message
+    assert "for i in y.dom: y[i] = ..." in message
+
+
+def test_arithmetic_on_a_whole_array_is_refused() -> None:
+    # ``x * 2`` used to fail with numpy-free Python's "unsupported operand".
+    def doubled(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        z = x * 2
+        for i in y.dom:
+            y[i] = z[i]
+
+    with pytest.raises(TraceError, match=r"x \* \.\.\. at test_trace.py:\d+ is an"):
+        term_of(doubled)
+
+
+def test_fewer_indices_than_axes_name_a_row_and_are_refused() -> None:
+    # ``u[t]`` of a two-axis array is a whole row, natively as in numpy.
+    def rows(u: Arr[Fin[nt], Fin[nx], Real]):  # noqa: F821
+        for t in u.dom:
+            u[t] = 0.0
+
+    with pytest.raises(TraceError) as caught:
+        term_of(rows)
+    message = str(caught.value)
+    assert "u[t] = ... at test_trace.py:" in message
+    assert "gives 1 of the 2 indices of u" in message
+    assert "for i in u.dom: for j in u.dom[i]: u[i, j] = ..." in message
+
+
+def test_iterating_an_array_itself_is_refused() -> None:
+    # A symbolic array answers any index, so ``for v in x`` used to walk it
+    # forever through the old sequence protocol; the ``break`` keeps this test
+    # finite on a tracer without the refusal.
+    def first(x: Arr[Fin[n], Real], y: Arr[Fin[1], Real]):  # noqa: F821
+        for v in x:
+            y[0] = v
+            break
+
+    with pytest.raises(TraceError, match="iterating x itself at test_trace.py"):
+        term_of(first)
+
+
+def test_numpy_functions_of_a_whole_array_are_refused() -> None:
+    import numpy as np
+
+    def total(x: Arr[Fin[n], Real], y: Arr[Fin[1], Real]):  # noqa: F821
+        y[0] = np.sum(x)
+
+    def roots(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        z = np.sqrt(x)
+        for i in y.dom:
+            y[i] = z[i]
+
+    def storage(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        z = x.numpy()
+        for i in y.dom:
+            y[i] = z[i]
+
+    with pytest.raises(TraceError, match="numpy.sum of x is an operation"):
+        term_of(total)
+    with pytest.raises(TraceError, match="numpy.sqrt of x is an operation"):
+        term_of(roots)
+    with pytest.raises(TraceError, match="asks for the storage of the array"):
+        term_of(storage)
+
+
+def test_a_fiber_over_a_slice_is_refused() -> None:
+    def tail(u: Arr[Fin[nt], Fin[nx], Real]):  # noqa: F821
+        for t in u.dom:
+            for i in u.dom[1:]:
+                u[t, i] = 0.0
+
+    with pytest.raises(TraceError, match=r"u.dom\[1:\] at .* over more than one"):
+        term_of(tail)
+
+
+# }}}
+
+
+# {{{ a reduction's condition
+
+
+def test_a_reduction_condition_that_reads_data_is_refused() -> None:
+    # The condition used to be dropped from the domain without a word, and the
+    # term summed every x[j] where the body sums the positive ones.
+    def positive(x: Arr[Fin[n], Real], y: Arr[Fin[1], Real]):  # noqa: F821
+        y[0] = reduce_sum(x[j] for j in x.dom if x[j] > 0)
+
+    with pytest.raises(TraceError) as caught:
+        term_of(positive)
+    message = str(caught.value)
+    assert "the condition 'x[j] > 0' of the reduction over j at test_trace.py:" in (
+        message
+    )
+    assert "reads an array or is not affine" in message
+    assert "'with when(condition):'" in message
+
+
+def test_a_reduction_condition_with_not_equal_is_refused() -> None:
+    def off_diagonal(a: Arr[Fin[n], Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = reduce_sum(a[i, j] for j in a.dom[i] if j != i)
+
+    with pytest.raises(TraceError) as caught:
+        term_of(off_diagonal)
+    message = str(caught.value)
+    assert "compares with '!='" in message
+    assert "split the sum in two, one over '<' and one over '>'" in message
+
+
+def test_an_affine_reduction_condition_is_a_constraint_of_the_domain() -> None:
+    def lower(a: Arr[Fin[n], Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = reduce_sum(a[i, j] for j in a.dom[i] if j < i)
+
+    (reduction,) = reductions_in(term_of(lower).stmts[0].expr)
+    assert reduction.domain.is_equal(
+        isl.Set("[n] -> { [i, j] : 0 <= j < i < n }")
+    )
+
+
+def test_an_equality_condition_is_spelled_the_way_isl_reads_it() -> None:
+    # isl's equality is '='; handed '==', it stopped the trace on a syntax error.
+    def diagonal(a: Arr[Fin[n], Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = reduce_sum(a[i, j] for j in a.dom[i] if j == i)
+
+    (reduction,) = reductions_in(term_of(diagonal).stmts[0].expr)
+    assert reduction.domain.is_equal(isl.Set("[n] -> { [i, i] : 0 <= i < n }"))
+
+
+# }}}
+
+
+# {{{ state and effects outside the arrays
+
+
+class _Counter:
+    """An object of the kernel author's, with an attribute to keep state in."""
+
+    def __init__(self) -> None:
+        self.count = 0.0
+        self.cache: dict[str, object] = {}
+
+
+#: Module state for the kernels below. Each test replaces what it uses through
+#: ``monkeypatch``, so a trace that changes one leaves nothing for the next.
+_BOX = _Counter()
+_SEEN: list[object] = []
+_LAST = 0.0
+_COUNTS = np.zeros(2)
+_WEIGHTS = np.array([0.5, 2.0])
+
+
+def _note(value: object) -> None:
+    """A helper defined outside the body that keeps what it is given."""
+    _SEEN.append(value)
+
+
+def test_an_attribute_the_body_stores_is_refused(monkeypatch) -> None:
+    # Natively the count is 1 after a call; the trace recorded y[0] = 1.0, and
+    # a second call adds 1 again, which no term says.
+    monkeypatch.setitem(globals(), "_BOX", _Counter())
+
+    def counted(y: Arr[Fin[1], Real]):  # noqa: F821
+        _BOX.count = _BOX.count + 1.0
+        y[0] = _BOX.count
+
+    with pytest.raises(TraceError) as caught:
+        term_of(counted)
+    message = str(caught.value)
+    assert "tracing counted changed the attribute 'count' of '_BOX'" in message
+    assert "'_BOX.count' is 0.0 before the trace and 1.0 after it" in message
+    assert "Keep the state in an array parameter" in message
+
+
+def test_an_attribute_carried_across_a_loop_is_refused() -> None:
+    # The loop snapshot does not look at attributes; the trace-wide one does.
+    box = _Counter()
+
+    def running(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in x.dom:
+            box.count = box.count + x[i]
+            y[i] = x[i]
+
+    with pytest.raises(TraceError, match="changed the attribute 'count' of 'box'"):
+        term_of(running)
+
+
+def test_a_dict_an_attribute_holds_is_compared_too() -> None:
+    box = _Counter()
+
+    def cached(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        box.cache["x"] = x[0]
+        for i in y.dom:
+            y[i] = x[i]
+
+    with pytest.raises(TraceError, match=r"changed the dict 'box.cache'"):
+        term_of(cached)
+
+
+def test_a_global_list_the_body_appends_to_is_refused(monkeypatch) -> None:
+    monkeypatch.setitem(globals(), "_SEEN", [])
+
+    def logged(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        _SEEN.append(x[0])
+        for i in y.dom:
+            y[i] = x[i]
+
+    with pytest.raises(TraceError) as caught:
+        term_of(logged)
+    message = str(caught.value)
+    assert "changed the global list '_SEEN'" in message
+    assert "'_SEEN' is [] before the trace and [x[0]] after it" in message
+
+
+def test_a_global_only_a_helper_changes_is_refused(monkeypatch) -> None:
+    # The helper is defined outside the body, so the body's code never names
+    # ``_SEEN``; the loop snapshot missed it, inside a loop or not.
+    monkeypatch.setitem(globals(), "_SEEN", [])
+
+    def noted(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in x.dom:
+            _note(1)
+            y[i] = x[i]
+
+    with pytest.raises(TraceError, match="changed the global list '_SEEN'"):
+        term_of(noted)
+
+
+def test_a_write_into_a_global_numpy_array_is_refused(monkeypatch) -> None:
+    # The write changes no output, so comparing outputs could never see it;
+    # the compiled kernel never makes it.
+    monkeypatch.setitem(globals(), "_COUNTS", np.zeros(2))
+
+    def counting(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        _COUNTS[1] += 1.0
+        for i in y.dom:
+            y[i] = x[i]
+
+    with pytest.raises(TraceError) as caught:
+        term_of(counting)
+    message = str(caught.value)
+    assert "changed the global array '_COUNTS'" in message
+    assert "'_COUNTS[1]' is 0.0 before the trace and 1.0 after it" in message
+
+
+def test_a_write_into_an_array_an_attribute_holds_is_refused() -> None:
+    box = _Counter()
+    box.buffer = Arr.zeros(3)
+
+    def stashing(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        box.buffer[2] = 7.0
+        for i in y.dom:
+            y[i] = x[i]
+
+    with pytest.raises(TraceError, match="changed the array 'box.buffer'"):
+        term_of(stashing)
+
+
+def test_a_global_numpy_array_the_body_only_reads_is_not_state() -> None:
+    def weighted(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = _WEIGHTS[1] * x[i]
+
+    (stmt,) = term_of(weighted).stmts
+    assert render(stmt.expr) == "2.0*x[i]"
+
+
+def test_a_global_the_body_rebinds_outside_any_loop_is_refused(monkeypatch) -> None:
+    monkeypatch.setitem(globals(), "_LAST", 0.0)
+
+    def remembered(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        global _LAST
+        _LAST = x[0]
+        for i in y.dom:
+            y[i] = x[i]
+
+    with pytest.raises(TraceError, match="changed the global '_LAST'"):
+        term_of(remembered)
+
+
+def test_state_created_by_the_body_is_scratch() -> None:
+    # A list or an object the body makes itself is gone when it returns.
+    def scratch(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        weights = []
+        weights.append(0.5)
+        holder = _Counter()
+        holder.count = 2.0
+        for i in y.dom:
+            y[i] = weights[0] * holder.count * x[i]
+
+    (stmt,) = term_of(scratch).stmts
+    assert render(stmt.expr) == "1.0*x[i]"
+
+
+def test_a_cached_property_the_body_reads_first_is_not_state() -> None:
+    # The first read stores the value in the object's __dict__, which the
+    # trace-wide snapshot sees as a new attribute. It is what every later read,
+    # native or traced, gets, so it is not state; an assignment to the same
+    # attribute once it is there still is.
+    import functools
+
+    class Mesh:
+        @functools.cached_property
+        def h(self) -> float:
+            return 1.0 / 16
+
+    mesh = Mesh()
+
+    def scaled(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = x[i] * mesh.h
+
+    (stmt,) = term_of(scaled).stmts
+    assert render(stmt.expr) == "x[i]*0.0625"
+
+    def rescaled(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        mesh.h = mesh.h / 2
+        for i in y.dom:
+            y[i] = x[i] * mesh.h
+
+    with pytest.raises(TraceError, match="changed the attribute 'h' of 'mesh'"):
+        term_of(rescaled)
+
+
+def test_the_attributes_of_a_library_object_are_the_librarys() -> None:
+    # A logger fills a level cache, one of its attributes, on its first debug
+    # call. That is the logging module's bookkeeping, not the body's state.
+    import logging
+
+    logger = logging.getLogger("loopty.tests.trace")
+    logger._cache.clear()
+
+    def logged(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            logger.debug("step")
+            y[i] = x[i]
+
+    (stmt,) = term_of(logged).stmts
+    assert render(stmt.expr) == "x[i]"
+    assert logger._cache
+
+
+def test_a_simple_namespace_is_the_kernel_authors_object() -> None:
+    # A bag of attributes and nothing else: a store into it is the body's.
+    from types import SimpleNamespace
+
+    state = SimpleNamespace(count=0.0)
+
+    def counted(y: Arr[Fin[1], Real]):  # noqa: F821
+        state.count = state.count + 1.0
+        y[0] = state.count
+
+    with pytest.raises(TraceError, match="changed the attribute 'count' of 'state'"):
+        term_of(counted)
+
+
+def test_a_print_in_the_body_is_refused() -> None:
+    def chatty(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            print("at", i)
+            y[i] = x[i]
+
+    with pytest.raises(TraceError) as caught:
+        term_of(chatty)
+    message = str(caught.value)
+    assert "tracing chatty calls print() at test_trace.py:" in message
+    assert "Print from the code that calls the kernel" in message
+
+
+def test_a_print_in_a_helper_is_refused() -> None:
+    def shout(value):
+        print(value)
+        return value
+
+    def chatty(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = shout(x[i])
+
+    with pytest.raises(TraceError, match="calls print"):
+        term_of(chatty)
+
+
+def test_a_random_draw_is_refused() -> None:
+    import random
+
+    import numpy as np
+
+    generator = np.random.default_rng(0)
+
+    def jittered(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = x[i] + random.random()
+
+    def noisy(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = x[i] + generator.normal()
+
+    with pytest.raises(TraceError, match=r"calls random\.random\(\) at"):
+        term_of(jittered)
+    with pytest.raises(TraceError, match=r"numpy\.random\.Generator\.normal\(\)"):
+        term_of(noisy)
+
+
+def test_the_call_watch_is_off_once_a_trace_ends() -> None:
+    import sys
+
+    from loopty.trace import _CallWatch
+
+    term_of(axpy)
+    if _CallWatch.tool is not None:
+        assert sys.monitoring.get_events(_CallWatch.tool) == 0
+    assert _CallWatch.depth == 0
+
+
+def test_a_global_the_body_creates_is_refused(monkeypatch) -> None:
+    # Absent before the trace, bound to a term after it.
+    monkeypatch.delitem(globals(), "_CREATED", raising=False)
+
+    def creating(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        global _CREATED
+        _CREATED = x[0]
+        for i in y.dom:
+            y[i] = x[i]
+
+    try:
+        with pytest.raises(
+            TraceError, match="'_CREATED' is unbound before the trace and x"
+        ):
+            term_of(creating)
+    finally:
+        globals().pop("_CREATED", None)
+
+
+# }}}
+

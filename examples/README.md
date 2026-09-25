@@ -99,7 +99,10 @@ device schedule: Schedule(spmv, target='c').tag(r='g.0').split(j, 32).tag(j_in='
 The two `assumed` rows are the honest ones: nothing in the term decides the
 scan's recurrence, and `lanky` says so rather than passing over it. The theorem
 beside it is `tested` here, and `proved` on a machine with the Lean extra
-installed.
+installed. The last row of each kernel, `tested` by `interpreter`, is the one
+fact about the trace itself: the traced term, run by loopty's interpreter,
+agrees with the body run natively, on this file's `example_inputs()` and on
+three inputs drawn from the declared types.
 
 ```console
 $ uv run lanky check examples/spmv.py
@@ -113,6 +116,7 @@ decided  isl            spmv.py:79   scan           distinct instances of S0 wri
 decided  isl            spmv.py:81   scan           distinct instances of S1 write distinct cells of off
 decided  isl            spmv.py:69   scan           the source order runs every dependence forward in time
 assumed  -              spmv.py:69   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+tested   interpreter    spmv.py:69   scan           the traced term computes what the body computes
 tested   property-test  spmv.py:84   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat] | off(0) ==...
 decided  isl            spmv.py:112  spmv           y[r] is in bounds for every instance of S0
 decided  isl            spmv.py:112  spmv           val[r, j] is in bounds for every instance of S0
@@ -121,9 +125,10 @@ decided  isl            spmv.py:112  spmv           col[r, j] is in bounds for e
 decided  isl            spmv.py:112  spmv           distinct instances of S0 write distinct cells of y
 decided  isl            spmv.py:102  spmv           the source order runs every dependence forward in time
 decided  type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
+tested   interpreter    spmv.py:102  spmv           the traced term computes what the body computes
 assumed  -              spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
 
-17 facts: 2 assumed, 14 decided, 1 tested
+19 facts: 2 assumed, 14 decided, 3 tested
 ```
 
 ### loopty run examples/spmv.py
@@ -194,15 +199,16 @@ the narrowed domain rather than the whole loop nest.
 
 ```console
 $ uv run lanky check examples/stencil_skew.py
-STATUS   BY   WHERE               OWNER   STATEMENT
--------  ---  ------------------  ------  ------------------------------------------------------
-decided  isl  stencil_skew.py:62  jacobi  u[t + 1, i] is in bounds for every instance of S0
-decided  isl  stencil_skew.py:62  jacobi  u[t, i - 1] is in bounds for every instance of S0
-decided  isl  stencil_skew.py:62  jacobi  u[t, i + 1] is in bounds for every instance of S0
-decided  isl  stencil_skew.py:62  jacobi  distinct instances of S0 write distinct cells of u
-decided  isl  stencil_skew.py:54  jacobi  the source order runs every dependence forward in time
+STATUS   BY           WHERE               OWNER   STATEMENT
+-------  -----------  ------------------  ------  ------------------------------------------------------
+decided  isl          stencil_skew.py:62  jacobi  u[t + 1, i] is in bounds for every instance of S0
+decided  isl          stencil_skew.py:62  jacobi  u[t, i - 1] is in bounds for every instance of S0
+decided  isl          stencil_skew.py:62  jacobi  u[t, i + 1] is in bounds for every instance of S0
+decided  isl          stencil_skew.py:62  jacobi  distinct instances of S0 write distinct cells of u
+decided  isl          stencil_skew.py:54  jacobi  the source order runs every dependence forward in time
+tested   interpreter  stencil_skew.py:54  jacobi  the traced term computes what the body computes
 
-5 facts: 5 decided
+6 facts: 5 decided, 1 tested
 ```
 
 ### loopty run examples/stencil_skew.py
@@ -285,21 +291,22 @@ and both writes at `t + 1` because it keeps `t + 1 < nt`.
 
 ```console
 $ uv run lanky check examples/wavefront_acoustic.py
-STATUS   BY   WHERE                     OWNER     STATEMENT
--------  ---  ------------------------  --------  ------------------------------------------------------------
-decided  isl  wavefront_acoustic.py:82  acoustic  velocity[t + 1, i] is in bounds for every instance of S0
-decided  isl  wavefront_acoustic.py:82  acoustic  velocity[t, i] is in bounds for every instance of S0
-decided  isl  wavefront_acoustic.py:82  acoustic  pressure[t, i + 1] is in bounds for every instance of S0
-decided  isl  wavefront_acoustic.py:82  acoustic  pressure[t, i] is in bounds for every instance of S0
-decided  isl  wavefront_acoustic.py:85  acoustic  pressure[t + 1, i] is in bounds for every instance of S1
-decided  isl  wavefront_acoustic.py:85  acoustic  pressure[t, i] is in bounds for every instance of S1
-decided  isl  wavefront_acoustic.py:85  acoustic  velocity[t + 1, i] is in bounds for every instance of S1
-decided  isl  wavefront_acoustic.py:85  acoustic  velocity[t + 1, i - 1] is in bounds for every instance of S1
-decided  isl  wavefront_acoustic.py:82  acoustic  distinct instances of S0 write distinct cells of velocity
-decided  isl  wavefront_acoustic.py:85  acoustic  distinct instances of S1 write distinct cells of pressure
-decided  isl  wavefront_acoustic.py:70  acoustic  the source order runs every dependence forward in time
+STATUS   BY           WHERE                     OWNER     STATEMENT
+-------  -----------  ------------------------  --------  ------------------------------------------------------------
+decided  isl          wavefront_acoustic.py:82  acoustic  velocity[t + 1, i] is in bounds for every instance of S0
+decided  isl          wavefront_acoustic.py:82  acoustic  velocity[t, i] is in bounds for every instance of S0
+decided  isl          wavefront_acoustic.py:82  acoustic  pressure[t, i + 1] is in bounds for every instance of S0
+decided  isl          wavefront_acoustic.py:82  acoustic  pressure[t, i] is in bounds for every instance of S0
+decided  isl          wavefront_acoustic.py:85  acoustic  pressure[t + 1, i] is in bounds for every instance of S1
+decided  isl          wavefront_acoustic.py:85  acoustic  pressure[t, i] is in bounds for every instance of S1
+decided  isl          wavefront_acoustic.py:85  acoustic  velocity[t + 1, i] is in bounds for every instance of S1
+decided  isl          wavefront_acoustic.py:85  acoustic  velocity[t + 1, i - 1] is in bounds for every instance of S1
+decided  isl          wavefront_acoustic.py:82  acoustic  distinct instances of S0 write distinct cells of velocity
+decided  isl          wavefront_acoustic.py:85  acoustic  distinct instances of S1 write distinct cells of pressure
+decided  isl          wavefront_acoustic.py:70  acoustic  the source order runs every dependence forward in time
+tested   interpreter  wavefront_acoustic.py:70  acoustic  the traced term computes what the body computes
 
-11 facts: 11 decided
+12 facts: 11 decided, 1 tested
 ```
 
 ### loopty run examples/wavefront_acoustic.py

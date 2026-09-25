@@ -123,6 +123,7 @@ decided  isl            spmv.py:79   scan           distinct instances of S0 wri
 decided  isl            spmv.py:81   scan           distinct instances of S1 write distinct cells of off
 decided  isl            spmv.py:69   scan           the source order runs every dependence forward in time
 assumed  -              spmv.py:69   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+tested   interpreter    spmv.py:69   scan           the traced term computes what the body computes
 tested   property-test  spmv.py:84   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat] | off(0) ==...
 decided  isl            spmv.py:112  spmv           y[r] is in bounds for every instance of S0
 decided  isl            spmv.py:112  spmv           val[r, j] is in bounds for every instance of S0
@@ -131,9 +132,10 @@ decided  isl            spmv.py:112  spmv           col[r, j] is in bounds for e
 decided  isl            spmv.py:112  spmv           distinct instances of S0 write distinct cells of y
 decided  isl            spmv.py:102  spmv           the source order runs every dependence forward in time
 decided  type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
+tested   interpreter    spmv.py:102  spmv           the traced term computes what the body computes
 assumed  -              spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
 
-17 facts: 2 assumed, 14 decided, 1 tested
+19 facts: 2 assumed, 14 decided, 3 tested
 ```
 
 Read the `BY` column.
@@ -150,6 +152,14 @@ Read the `BY` column.
 - `property-test` established the theorem. In a checkout with `lanky[lean]`
   installed this row reads `proved lean` instead. loopty does not pull the Lean
   extra, so a plain `uv sync --group dev` here gives the tested row.
+- `interpreter` tested the last fact of each kernel, the only one about the
+  trace itself: every other row is about the term tracing recorded, and this
+  one asks whether that term is the body. The term is run by loopty's own
+  interpreter, statement by statement over each statement's isl domain, and
+  compared with the body run natively, on the file's `example_inputs()` and on
+  three inputs drawn from the declared types. `--json` lists the inputs; a
+  body that kept state where tracing does not look would make this row
+  `refuted`, with the input and the first cell that differs.
 - Two facts are `assumed`: `scan`'s postcondition, which needs the recurrence,
   and the restatement of it inside `solve`. Nothing established them and nothing
   pretends otherwise. `lanky check` still exits 0, because `ASSUMED` is not a
@@ -277,15 +287,16 @@ Checking and running the file behave the same way as the sparse product:
 
 ```console
 $ uv run lanky check examples/stencil_skew.py
-STATUS   BY   WHERE               OWNER   STATEMENT
--------  ---  ------------------  ------  ------------------------------------------------------
-decided  isl  stencil_skew.py:62  jacobi  u[t + 1, i] is in bounds for every instance of S0
-decided  isl  stencil_skew.py:62  jacobi  u[t, i - 1] is in bounds for every instance of S0
-decided  isl  stencil_skew.py:62  jacobi  u[t, i + 1] is in bounds for every instance of S0
-decided  isl  stencil_skew.py:62  jacobi  distinct instances of S0 write distinct cells of u
-decided  isl  stencil_skew.py:54  jacobi  the source order runs every dependence forward in time
+STATUS   BY           WHERE               OWNER   STATEMENT
+-------  -----------  ------------------  ------  ------------------------------------------------------
+decided  isl          stencil_skew.py:62  jacobi  u[t + 1, i] is in bounds for every instance of S0
+decided  isl          stencil_skew.py:62  jacobi  u[t, i - 1] is in bounds for every instance of S0
+decided  isl          stencil_skew.py:62  jacobi  u[t, i + 1] is in bounds for every instance of S0
+decided  isl          stencil_skew.py:62  jacobi  distinct instances of S0 write distinct cells of u
+decided  isl          stencil_skew.py:54  jacobi  the source order runs every dependence forward in time
+tested   interpreter  stencil_skew.py:54  jacobi  the traced term computes what the body computes
 
-5 facts: 5 decided
+6 facts: 5 decided, 1 tested
 ```
 
 ```console
@@ -335,10 +346,20 @@ transpose at the bottom is split and interchanged, and both steps are cast facts
 
 - Break something. Change the stencil's guard from `i > 0` to `i >= 0` and
   re-check. The in-bounds fact for `u[t, i - 1]` turns `refuted`, `lanky check`
-  prints `5 facts: 4 decided, 1 refuted` and then
+  prints `6 facts: 1 assumed, 4 decided, 1 refuted` and then
   `REFUTED jacobi at ...: u[t, i - 1] is in bounds for every instance of S0`,
   and it exits 1. The witness in the JSON is the cell that escapes,
-  `"witness_text": "[a0=0, a1=-1]"`, with the isl question beside it.
+  `"witness_text": "[a0=0, a1=-1]"`, with the isl question beside it. The
+  faithfulness fact turns `assumed`: the body now reads in front of `u` on
+  every input, natively as well, so there was nothing to compare, and its
+  reason says so.
+- Hide some state from the tracer. In the stencil, keep a count in a list of
+  lists: `acc = [[0.0]]` before the loops, `acc[0][0] += 1.0` at the top of
+  the inner loop, and divide by `acc[0][0]` instead of by 2. Tracing looks one
+  level into a container and sees no change, so the term divides by 1.0. The
+  `trace-faithful` fact is `refuted` on the example input, and lanky prints
+  the input, the first cell that differs and both values:
+  `counterexample: {'input': 'example_inputs()', 'cell': 'u[1, 7]', 'body': 0.125, 'term': 1.0}`.
 - Ask for a tiling before the skew in your own kernel and read the witness.
 - Add `--json out.json` to `lanky check` and read the provenance: the witness,
   the isl question, and the rendered explanation are all in there.

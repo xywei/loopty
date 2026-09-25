@@ -56,7 +56,15 @@ from typing import Any
 
 from loopty import __version__
 
-__all__ = ["RunVerb", "build_parser", "check", "collect", "example_inputs", "main"]
+__all__ = [
+    "RunVerb",
+    "build_parser",
+    "check",
+    "collect",
+    "example_inputs",
+    "main",
+    "select_inputs",
+]
 
 REPO_URL = "https://github.com/xywei/loopty"
 
@@ -120,6 +128,17 @@ def example_inputs(module: Any, name: str) -> dict[str, Any] | None:
     inputs = factory()
     if not isinstance(inputs, dict):
         raise TypeError(f"{EXAMPLE_FUNCTION}() must return a dictionary")
+    return select_inputs(inputs, name)
+
+
+def select_inputs(inputs: dict[str, Any], name: str) -> dict[str, Any] | None:
+    """The part of what ``example_inputs()`` returned that is for ``name``.
+
+    A dictionary keyed by kernel name gives each kernel its own entry, and a
+    kernel it does not name gets nothing; a flat one is for every kernel. The
+    faithfulness fact (:mod:`loopty.faithful`) reads a module's inputs the same
+    way.
+    """
     chosen = inputs.get(name)
     if isinstance(chosen, dict):
         return dict(chosen)
