@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 from lanky.prelude import Nat, Real
 
-from loopty import Arr, Fin, kernel
+from loopty import Arr, Fin, kernel, when
 from loopty import sum as reduce_sum
 
 pytest.importorskip("loopy")
@@ -615,3 +615,35 @@ def test_a_sort_that_is_a_free_name_is_refused_with_the_sort_to_write() -> None:
 
 
 # }}}
+
+
+def test_an_equality_guard_and_an_equality_condition_lower_and_run() -> None:
+    # isl spells equality with one '='. The guard used to be handed to it as
+    # 'i == 0' and tracing stopped on isl's syntax error, for a statement guard
+    # and a reduction condition alike.
+    from loopty.executor import LoopyExecutor
+    from loopty.schedule import Schedule
+
+    @kernel
+    def first(y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(i == 0):
+                y[i] = 1.0
+
+    @kernel
+    def diagonal(a: Arr[Fin[n], Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = reduce_sum(a[i, j] for j in a.dom[i] if j == i)
+
+    (stmt,) = first.term.stmts
+    assert stmt.domain.is_equal(isl.Set("[n] -> { [i = 0] : n > 0 }"))
+    square = Arr.from_numpy(np.arange(16.0).reshape(4, 4))
+    for k, arguments in (
+        (first, {"y": Arr.zeros(4)}),
+        (diagonal, {"a": square, "y": Arr.zeros(4)}),
+    ):
+        fact = LoopyExecutor().differential(k, Schedule(k, target="c"), arguments)
+        assert fact.status.value == "tested", fact.provenance
+    y = Arr.zeros(4)
+    run(diagonal, a=square, y=y)
+    assert list(y.numpy()) == [0.0, 5.0, 10.0, 15.0]

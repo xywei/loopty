@@ -1015,6 +1015,9 @@ def constraints_of(condition: Any) -> tuple[str, ...]:
         operator = condition.operator
         if operator == "!=":
             return ()
+        # isl spells equality with one '='; its parser refuses Python's '=='.
+        if operator == "==":
+            operator = "="
         return (f"{left} {operator} {right}",)
     return ()
 
@@ -1240,7 +1243,7 @@ class SymArr:
         indices = _index_tuple(key)
         tracer = self.tracer
         where = _location(sys._getframe(1))
-        expr = lower_reductions(value, tracer)
+        expr = lower_reductions(value, tracer, where=where)
         assignee = Access(self.name, indices)
         kind = "accumulate" if _reads_assignee(expr, assignee) else "assign"
         tracer.record(assignee, expr, kind, where, source=value)
@@ -1425,6 +1428,7 @@ def lower_reductions(
     tracer: Tracer,
     enclosing: Sequence[tuple[str, Any]] = (),
     outer_guards: Sequence[Any] = (),
+    where: str = "",
 ) -> Any:
     """Replace every lanky ``Sum`` in ``expr`` by a :class:`~loopty.term.Reduction`.
 
@@ -1448,8 +1452,18 @@ def lower_reductions(
     fixed; see :func:`reduction_exactness`. It is the tolerance a later
     differential test judges the compiled run by, and the permission a schedule
     needs before it may build a reduction tree.
+
+    A generator's ``if`` clause is a constraint of the domain, and a reduction
+    has nowhere else to keep it. So a condition isl cannot state (one that
+    reads an array, or compares with ``!=``) is refused here, with ``where``
+    the statement's location, rather than dropped: the term would sum over
+    every point while the body skips the ones the condition excludes.
     """
     if isinstance(expr, Sum):
+        unstated = _unstated(expr.guard)
+        if unstated:
+            names = [var.name for var, _domain in expr.binders]
+            raise TraceError(_reduction_condition_message(unstated, names, where))
         inames: list[str] = []
         bounds: list[Any] = []
         for var, domain in expr.binders:
@@ -1467,7 +1481,7 @@ def lower_reductions(
             bounds.append(_binder_bound(domain))
         inner = (*enclosing, *zip(inames, bounds, strict=True))
         guards = (*outer_guards, expr.guard)
-        body = lower_reductions(expr.body, tracer, inner, guards)
+        body = lower_reductions(expr.body, tracer, inner, guards, where)
         domain = domain_set(
             (*tracer.inames, *inames),
             (*tracer.bounds, *bounds),
@@ -1485,15 +1499,58 @@ def lower_reductions(
     if isinstance(expr, prim.ExpressionNode):
         return type(expr)(
             *(
-                lower_reductions(arg, tracer, enclosing, outer_guards)
+                lower_reductions(arg, tracer, enclosing, outer_guards, where)
                 for arg in init_args(expr)
             )
         )
     if isinstance(expr, tuple):
         return tuple(
-            lower_reductions(item, tracer, enclosing, outer_guards) for item in expr
+            lower_reductions(item, tracer, enclosing, outer_guards, where)
+            for item in expr
         )
     return expr
+
+
+def _unstated(condition: Any) -> list[Any]:
+    """The conjuncts of a condition that :func:`constraints_of` has to drop."""
+    if condition is None:
+        return []
+    if isinstance(condition, prim.LogicalAnd):
+        return [part for child in condition.children for part in _unstated(child)]
+    if constraints_of(condition):
+        return []
+    return [condition]
+
+
+def _reduction_condition_message(
+    parts: Sequence[Any], binders: Sequence[str], where: str
+) -> str:
+    """What to say about a reduction condition its domain cannot state."""
+    listed = " and ".join(repr(_shown(part)) for part in parts)
+    at = f" at {where}" if where else ""
+    unequal = any(
+        isinstance(part, prim.Comparison) and part.operator == "!=" for part in parts
+    )
+    why = (
+        "compares with '!=', which is not a convex set of points"
+        if unequal
+        else "reads an array or is not affine"
+    )
+    split = (
+        " For '!=', split the sum in two, one over '<' and one over '>'."
+        if unequal
+        else ""
+    )
+    return (
+        f"the condition {listed} of the reduction over {', '.join(binders)}{at} "
+        "cannot be a constraint of the reduction's domain, which is the only "
+        "place a reduction keeps its condition: the term would sum over every "
+        "point, while the body skips the points the condition excludes. isl "
+        "states an affine comparison of loop variables and sizes, and this "
+        f"condition {why}.{split} Otherwise write each term to an indexed cell, "
+        "0.0 where the condition is false and the term under "
+        "'with when(condition):', and sum the cells."
+    )
 
 
 def _binder_constraints(

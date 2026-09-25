@@ -1058,3 +1058,58 @@ def test_plain_python_runs_the_list_counter_as_written() -> None:
 
 
 # }}}
+
+
+# {{{ a reduction's condition
+
+
+def test_a_reduction_condition_that_reads_data_is_refused() -> None:
+    # The condition used to be dropped from the domain without a word, and the
+    # term summed every x[j] where the body sums the positive ones.
+    def positive(x: Arr[Fin[n], Real], y: Arr[Fin[1], Real]):  # noqa: F821
+        y[0] = reduce_sum(x[j] for j in x.dom if x[j] > 0)
+
+    with pytest.raises(TraceError) as caught:
+        term_of(positive)
+    message = str(caught.value)
+    assert "the condition 'x[j] > 0' of the reduction over j at test_trace.py:" in (
+        message
+    )
+    assert "reads an array or is not affine" in message
+    assert "'with when(condition):'" in message
+
+
+def test_a_reduction_condition_with_not_equal_is_refused() -> None:
+    def off_diagonal(a: Arr[Fin[n], Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = reduce_sum(a[i, j] for j in a.dom[i] if j != i)
+
+    with pytest.raises(TraceError) as caught:
+        term_of(off_diagonal)
+    message = str(caught.value)
+    assert "compares with '!='" in message
+    assert "split the sum in two, one over '<' and one over '>'" in message
+
+
+def test_an_affine_reduction_condition_is_a_constraint_of_the_domain() -> None:
+    def lower(a: Arr[Fin[n], Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = reduce_sum(a[i, j] for j in a.dom[i] if j < i)
+
+    (reduction,) = reductions_in(term_of(lower).stmts[0].expr)
+    assert reduction.domain.is_equal(
+        isl.Set("[n] -> { [i, j] : 0 <= j < i < n }")
+    )
+
+
+def test_an_equality_condition_is_spelled_the_way_isl_reads_it() -> None:
+    # isl's equality is '='; handed '==', it stopped the trace on a syntax error.
+    def diagonal(a: Arr[Fin[n], Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = reduce_sum(a[i, j] for j in a.dom[i] if j == i)
+
+    (reduction,) = reductions_in(term_of(diagonal).stmts[0].expr)
+    assert reduction.domain.is_equal(isl.Set("[n] -> { [i, i] : 0 <= i < n }"))
+
+
+# }}}
