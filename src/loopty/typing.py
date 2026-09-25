@@ -152,7 +152,18 @@ def _justified_by_type(
 
 
 def in_bounds_facts(term: Term, owner: str) -> list[Fact]:
-    """One fact per array access: the cells it reaches are cells the array has."""
+    """One fact per array access: the cells it reaches are cells the array has.
+
+    The fact's id names the access, ``S1:read:x[r - 1]``, and not the domain it
+    runs over, while the collector can list one access over several: the body's
+    and the guard's, a reduction's, and the offsets every ragged access reads
+    through. The ledger keeps one fact per id, so two facts for one access
+    would leave the later in place of the earlier, whatever the earlier said:
+    ``x[r - 1]`` read directly and again in a sum over ``q < r`` would be
+    reported in bounds from the sum, where ``r >= 1``, with the direct read of
+    ``x[-1]`` gone from the ledger. The domains of one access are therefore
+    gathered into one obligation, about the union of the cells they reach.
+    """
     types = dict(term.params)
     sizes = flow.size_names(term)
     # One table for the whole term: the cells an array has and the cells an
@@ -161,13 +172,27 @@ def in_bounds_facts(term: Term, owner: str) -> list[Fact]:
     reflections = term.reflections
     facts: list[Fact] = []
     for stmt in term.stmts:
-        for array, indices, kind, inames, domain in flow.statement_accesses(stmt):
-            arrtype = types.get(array)
-            if not isinstance(arrtype, ArrType):
+        listed: dict[
+            tuple[str, str, str],
+            list[tuple[tuple[Any, ...], tuple[str, ...], isl.Set]],
+        ] = {}
+        for array, indices, kind, inames, domain in flow.statement_accesses(
+            stmt, term
+        ):
+            if not isinstance(types.get(array), ArrType):
                 continue
             text = f"{array}[{', '.join(render(i) for i in indices)}]"
+            listed.setdefault((array, kind, text), []).append(
+                (tuple(indices), inames, domain)
+            )
+        for (array, kind, text), places in listed.items():
+            arrtype = types[array]
+            indices = places[0][0]
             identifier = f"{owner}:in-bounds:{stmt.id}:{kind}:{text}"
-            reason = _justified_by_type(indices, arrtype, types)
+            reasons = [
+                _justified_by_type(place[0], arrtype, types) for place in places
+            ]
+            reason = reasons[0] if None not in reasons else None
             if reason is not None:
                 facts.append(
                     Fact(
@@ -184,8 +209,16 @@ def in_bounds_facts(term: Term, owner: str) -> list[Fact]:
                 )
                 continue
             try:
-                relation = flow.access_relation(inames, domain, indices)
-                reached = relation.range()
+                widened = False
+                reached = None
+                for place_indices, inames, domain in places:
+                    relation = flow.access_relation(inames, domain, place_indices)
+                    widened = widened or _is_widened(relation, place_indices)
+                    part = relation.range()
+                    if reached is not None:
+                        reached, part = _align_both(reached, part)
+                        part = reached.union(part).coalesce()
+                    reached = part
                 cells = flow.cell_set(arrtype, indices, reflections=reflections)
                 reached, cells = _align_both(reached, cells)
                 reached = flow.assume_sizes(reached, sizes)
@@ -204,7 +237,7 @@ def in_bounds_facts(term: Term, owner: str) -> list[Fact]:
                     )
                 )
                 continue
-            if _is_widened(relation, indices):
+            if widened:
                 facts.append(
                     Fact(
                         id=identifier,

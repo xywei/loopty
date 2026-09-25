@@ -97,7 +97,7 @@ import pymbolic.primitives as prim
 from lanky.terms import init_args
 
 from loopty.idx import Reflections
-from loopty.term import ArrType, Stmt, Term
+from loopty.term import ArrType, Stmt, Term, declared_offsets
 
 __all__ = [
     "Footprint",
@@ -499,9 +499,11 @@ def access_relation(
     return relation.intersect_domain(_align(domain, relation.get_space()))
 
 
-def statement_accesses(
-    stmt: Stmt,
-) -> tuple[tuple[str, tuple[Any, ...], str, tuple[str, ...], isl.Set], ...]:
+#: One entry of :func:`statement_accesses`: array, indices, kind, inames, domain.
+_Access = tuple[str, tuple[Any, ...], str, tuple[str, ...], isl.Set]
+
+
+def statement_accesses(stmt: Stmt, term: Term) -> tuple[_Access, ...]:
     """Every cell family a statement touches, with the domain it touches it over.
 
     Each entry is ``(array, indices, kind, inames, domain)``. An access written
@@ -532,18 +534,26 @@ def statement_accesses(
     read over the narrowed domain would prove it in bounds by the very
     condition that does not protect it.
 
+    One more read belongs to none of the three expressions: the layout's, which
+    is why ``term`` is needed at all. A ragged ``val: Arr[Fin[n], Fin[cnt],
+    Real]`` is stored flat, so ``val[r, j]`` is ``val[off[r] + j]`` once
+    lowered, and the row it indexes is the flat range ``off[r] <= a <
+    off[r + 1]``. See :func:`_offsets_reads` for when those two reads are
+    listed and why.
+
     This is the one collector: :mod:`loopty.typing` states its in-bounds
     obligations from it, :func:`footprints` builds the dependence relation from
     it, :func:`loopty.schedule._accesses` checks casts against it and
     :mod:`loopty.lower` derives an instruction's dependencies from it. An
     omission here is an omission everywhere, which is the point: it used to be
-    possible for four collectors to disagree about what a statement reads.
+    possible for four collectors to disagree about what a statement reads, and
+    the offsets read was, for a while, known to the lowering alone.
     """
     from lanky.terms import structurally_equal
 
     from loopty.trace import accesses_in, reductions_in
 
-    out: list[tuple[str, tuple[Any, ...], str, tuple[str, ...], isl.Set]] = []
+    out: list[_Access] = []
     written = stmt.assignee
     kind = "acc" if stmt.kind == "accumulate" else "write"
     out.append((written.array, written.indices, kind, stmt.inames, stmt.domain))
@@ -577,7 +587,88 @@ def statement_accesses(
                 out.append(
                     (access.array, access.indices, "read", inames, reduction.domain)
                 )
-    return tuple(out)
+    return tuple(_with_offsets_reads(out, term))
+
+
+def _offsets_reads(
+    term: Term,
+    array: str,
+    indices: Sequence[Any],
+    inames: tuple[str, ...],
+    domain: isl.Set,
+) -> tuple[_Access, ...]:
+    """The reads of the offsets that one access to ``array`` makes.
+
+    For ``val[r, j]`` of a ragged ``val`` flattened through ``off``, that is
+    ``off[r]``, which the flat index ``off[r] + j`` reads, and ``off[r + 1]``,
+    where row ``r`` ends. The flat index reads only the first. The second is
+    what lowering computes the row's length from when the counts are not an
+    argument, and is otherwise tied to them by the layout (``off[r + 1] -
+    off[r]`` is ``cnt[r]``); listing it states the row as the flat range
+    between the two, and for a dependence it can only add pairs, never lose
+    one. Both are reads over the domain of the access, whatever its kind: a
+    write to ``val[r, j]`` goes through ``off[r]`` just as a read does. This is
+    the read :func:`loopty.lower.lower_generic` indexes through, listed here so
+    that every rule sees it and not only the lowering:
+
+    * a statement that writes ``off`` is ordered against one that indexes
+      through it, in the dependence relation and so in every cast's legality
+      check, and not only among the lowered kernel's instructions;
+    * the two reads are in-bounds obligations of their own, which is where an
+      offsets array declared one cell short of ``n + 1`` is caught.
+
+    Nothing is listed when the kernel declares no offsets parameter
+    (:func:`loopty.term.declared_offsets`). Lowering then adds the offsets as
+    an argument of ``n + 1`` cells that nothing in the body can name, so there
+    is no writer to order against, and ``r`` being in bounds of ``val``'s first
+    axis, which ``val[r, j]``'s own obligation already states, keeps both reads
+    in bounds. Nor is anything listed for a ragged axis that is not bounded by
+    a counts name, which lowering refuses on its own.
+    """
+    typ = dict(term.params).get(array)
+    if not isinstance(typ, ArrType):
+        return ()
+    axis = next((k for k, flag in enumerate(typ.ragged) if flag), None)
+    if axis is None or axis == 0 or axis > len(indices):
+        return ()
+    counts = typ.axes[axis]
+    if not isinstance(counts, prim.Variable):
+        return ()
+    offsets = declared_offsets(term.params, counts.name)
+    if offsets is None:
+        return ()
+    row = indices[axis - 1]
+    return (
+        (offsets, (row,), "read", inames, domain),
+        (offsets, (row + 1,), "read", inames, domain),
+    )
+
+
+def _with_offsets_reads(accesses: Sequence[_Access], term: Term) -> list[_Access]:
+    """``accesses`` with each ragged access followed by its offsets reads.
+
+    A read already listed over the same domain is not listed twice: ``val[r,
+    j]`` and ``col[r, j]`` in one reduction share their offsets, and a statement
+    may read ``off[r]`` itself. Over a different domain it is kept, because
+    that is a different set of instances reading it.
+    """
+    from lanky.terms import structurally_equal
+
+    out: list[_Access] = []
+    for access in accesses:
+        out.append(access)
+        array, indices, _kind, inames, domain = access
+        for read in _offsets_reads(term, array, indices, inames, domain):
+            if not any(
+                seen[0] == read[0]
+                and seen[2] == read[2]
+                and seen[3] == read[3]
+                and seen[4] is read[4]
+                and structurally_equal(seen[1], read[1])
+                for seen in out
+            ):
+                out.append(read)
+    return out
 
 
 def footprints(term: Term) -> tuple[Footprint, ...]:
@@ -595,7 +686,7 @@ def footprints(term: Term) -> tuple[Footprint, ...]:
     for index, stmt in enumerate(term.stmts):
         pad = _align(pad_map(len(stmt.inames), index, depth), stmt.domain.get_space())
         into_instances = pad.reverse()
-        for array, indices, kind, inames, domain in statement_accesses(stmt):
+        for array, indices, kind, inames, domain in statement_accesses(stmt, term):
             relation = access_relation(inames, domain, indices)
             extra = len(inames) - len(stmt.inames)
             if extra:

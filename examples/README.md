@@ -12,7 +12,9 @@ The script re-runs the command at the top of each block and replaces the rest of
 the block with what it printed (standard output only; loopy's warnings go to
 standard error and would change with the toolchain rather than with loopty).
 Run it after changing a demo, or the line numbers, fact counts and tolerances
-here quietly stop being true.
+here quietly stop being true; CI runs it with `--check`. It keeps the
+transcripts in `../README.md` and `../docs/quickstart.md` too, where a block
+marked with `...` is an excerpt and the lines it keeps are checked verbatim.
 
 | file | what it shows |
 |---|---|

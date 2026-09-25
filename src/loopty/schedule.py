@@ -63,7 +63,7 @@ is the moment the claim actually matters.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -323,15 +323,16 @@ class _Dep:
         }[self.kind]
 
 
-def _accesses(stmt: Stmt) -> list[tuple[str, str, tuple[Any, ...]]]:
+def _accesses(stmt: Stmt, term: Term) -> list[tuple[str, str, tuple[Any, ...]]]:
     """Every array reference of a statement, as ``(kind, array, indices)``.
 
     The list comes from :func:`loopty.flow.statement_accesses`, which is the one
     place the question "what does this statement touch?" is answered: the
     assignee, everything in the right-hand side including a reduction body, the
-    reads inside the assignee's own subscripts, and the reads inside the guard.
-    A legality verdict is only as good as that list, and it used to be written
-    out a second time here, which is how the guard came to be missing from it.
+    reads inside the assignee's own subscripts, the reads inside the guard, and
+    the reads of a ragged array's offsets that its flat index makes. A legality
+    verdict is only as good as that list, and it used to be written out a
+    second time here, which is how the guard came to be missing from it.
 
     The shared collector records an accumulation once, as ``acc``; the
     dependence computation below wants the write and the read separately, so
@@ -342,7 +343,7 @@ def _accesses(stmt: Stmt) -> list[tuple[str, str, tuple[Any, ...]]]:
     from loopty.flow import statement_accesses
 
     out: list[tuple[str, str, tuple[Any, ...]]] = []
-    for array, indices, kind, _inames, _domain in statement_accesses(stmt):
+    for array, indices, kind, _inames, _domain in statement_accesses(stmt, term):
         if kind == "acc":
             out.append(("write", array, tuple(indices)))
             out.append(("read", array, tuple(indices)))
@@ -403,8 +404,8 @@ def _dependences(
                 for k, iname in enumerate(layout.coords[b.id])
             }
             allowed_b = {f"y{k}" for k in range(len(layout.coords[b.id]))} | params
-            for a_kind, a_array, a_indices in _accesses(a):
-                for b_kind, b_array, b_indices in _accesses(b):
+            for a_kind, a_array, a_indices in _accesses(a, term):
+                for b_kind, b_array, b_indices in _accesses(b, term):
                     if a_array != b_array:
                         continue
                     if a_kind == "read" and b_kind == "read":
@@ -549,7 +550,9 @@ def _data_dependent_in(
     return out
 
 
-def data_dependent_inames(term: Term) -> frozenset[str]:
+def data_dependent_inames(
+    term: Term, reduction_inames: Mapping[str, Sequence[str]] | None = None
+) -> frozenset[str]:
     """Loop variables whose extent is read out of an array.
 
     A ragged fiber is the case that matters: the bound of ``j`` in
@@ -558,14 +561,19 @@ def data_dependent_inames(term: Term) -> frozenset[str]:
     ordinary loop to isl and to C, and an impossible one to put on a hardware
     axis, because the number of work items is not known when the kernel is
     launched.
+
+    ``reduction_inames`` is :attr:`loopty.lower.Lowering.reduction_inames`, so
+    that a reduction the lowering gave fresh inames is reported under them.
     """
     sizes = set(term.sizes)
+    renamed = reduction_inames or {}
     out: set[str] = set()
     for stmt in term.stmts:
         out |= _data_dependent_in(stmt.domain, stmt.inames, sizes)
-        for reduction in reductions_of(stmt.expr):
+        for position, reduction in enumerate(reductions_of(stmt.expr)):
+            names = renamed.get(f"{stmt.id}:{position}", reduction.inames)
             out |= _data_dependent_in(
-                reduction.domain, (*stmt.inames, *reduction.inames), sizes
+                reduction.domain, (*stmt.inames, *names), sizes
             )
     return frozenset(out)
 
@@ -702,9 +710,13 @@ class Schedule:
         # reduction happens inside one statement instance. Splitting or tagging
         # one therefore renames no instance and reorders no dependence; what it
         # changes is the order of the accumulation, which is a question about
-        # exactness rather than about dependences.
+        # exactness rather than about dependences. A reduction is named by the
+        # inames it has in the kernel, which are its binders unless the
+        # lowering had to give it fresh ones (see Lowering.reduction_inames),
+        # so that a step names the loop it acts on.
         self._reductions: dict[str, str] = {}
         self._reduction_info: dict[str, tuple[str, str]] = {}
+        reduction_inames = self._lowering.reduction_inames
         for stmt in self._term.stmts:
             for position, reduction in enumerate(reductions_of(stmt.expr)):
                 key = f"{stmt.id}:{position}"
@@ -712,10 +724,10 @@ class Schedule:
                     stmt.assignee.array,
                     reduction.exactness,
                 )
-                for iname in reduction.inames:
+                for iname in reduction_inames.get(key, reduction.inames):
                     self._reductions[iname] = key
         self._reassoc: frozenset[str] = frozenset()
-        self._data_dependent = data_dependent_inames(self._term)
+        self._data_dependent = data_dependent_inames(self._term, reduction_inames)
         self._history: tuple[str, ...] = ()
         #: Each step as ``(method, args, kwargs)``, so that :meth:`retarget` can
         #: replay it against another target and have every cast checked again.

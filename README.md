@@ -36,12 +36,13 @@ $ lanky check examples/spmv.py       # the ledger: every obligation and who deci
 $ loopty run examples/spmv.py        # lowers through loopy, compiles, runs, compares
 ```
 
-and the ledger `lanky check` prints (abridged: ten of its nineteen rows,
-each row verbatim):
+and the ledger `lanky check` prints, abridged to the rows discussed here (each
+row verbatim, and checked by `scripts/refresh_example_outputs.py`):
 
-```text
+```console
+$ lanky check examples/spmv.py
 STATUS   BY             WHERE        OWNER          STATEMENT
--------  -------------  -----------  -------------  ---------------------------------------------
+-------  -------------  -----------  -------------  ------------------------------------------------------------------------
 decided  isl            spmv.py:79   scan           off[0] is in bounds for every instance of S0
 decided  isl            spmv.py:81   scan           off[r + 1] is in bounds for every instance of S1
 decided  isl            spmv.py:79   scan           distinct instances of S0 write distinct cells of off
@@ -74,15 +75,17 @@ And a transformation is a cast, checked before it is applied:
 
 ```console
 $ python examples/stencil_skew.py
+...
 Schedule(jacobi).tile('t', 'i', 8, 8) ->
   IllegalCast: tile(t,i,8,8) illegal: instance S0[t=0, i=8] writes u[1, 8] read by S0[t=1, i=7] scheduled earlier (at nt=16, nx=16, as hinted)
-
+...
 accepted: Schedule(jacobi, target='c').skew(i, by='t').tile(t,i,8,8)
   loop nest: t_outer i_outer t_inner i_inner
   decided  isl  skew(i, by='t') renames the instances of jacobi one for one
   decided  isl  the order after skew(i, by='t') runs every dependence of jacobi forward
   decided  isl  tile(t,i,8,8) renames the instances of jacobi one for one
   decided  isl  the order after tile(t,i,8,8) runs every dependence of jacobi forward
+...
 ```
 
 The rejection names two real instances of the kernel, not an empty set or a
@@ -116,7 +119,9 @@ message states, because which violating pair isl picks depends on them.
   tolerance is per element and local: `exact` is bitwise, and `reassoc` and
   `approx` ask that `|got - want| <= eps_class * (|want| + 1)` at every cell, so
   it is the accuracy claimed for that cell and does not grow with the size of
-  the output. Over an `exact` accumulation the same cast is refused.
+  the output. Over an `exact` accumulation the same cast is refused, and a
+  kernel with an `exact` output is compiled with floating-point contraction
+  off, so a fused multiply-add cannot change its last bit.
 - **Legal and buildable are different questions, and both are answered.** A
   transformation can preserve the meaning of a program and still be one the
   backend cannot generate. Every accepted step is asked whether the target can
@@ -161,7 +166,10 @@ end to end; the edges are sharp.
   agreement and `refuted` with the input and the first differing cell, which
   is where state hidden past every check above shows up.
 - Typing rules and the ledger: in-bounds by isl or by type, write disjointness,
-  ordering, reduction exactness, postconditions.
+  ordering, reduction exactness, postconditions. A ragged access's reads of the
+  offsets it is flattened through, when the kernel declares them, are accesses
+  like any other: in-bounds obligations, and dependences every cast is checked
+  against.
 - `IslOracle`: `Empty`, `Subset`, `Bijective`, `Monotone`, each refutation with a
   witness.
 - `Schedule`: `tag`, `split`, `interchange`, `prioritize`, `tile`, `skew`,
@@ -241,11 +249,15 @@ end to end; the edges are sharp.
   ragged layouts and aliasing now are. Lowering has to declare some arrays with
   `shape=None` (see `docs/loopy-notes.md`), so a wrongly sized array is
   undefined behaviour rather than an error.
-- Two reductions that bind the same name over different domains cannot both
-  keep that name: loopy gives an iname one domain and a reduction cannot carry
-  a predicate, so the second one is lowered under a fresh iname (`j_0`). The
-  name in the term is unchanged, and so is every message, but a `Schedule` step
-  naming `j` reaches only the first of them.
+- A reduction binder keeps its name in the generated kernel only where nothing
+  else has it. loopy gives an iname one domain, a reduction cannot carry a
+  predicate, and two statements cannot share a reduction's loop, so a reduction
+  whose binder another statement already uses (as a loop variable or a binder),
+  or that its own statement binds over another domain, is lowered under a
+  fresh iname (`j_0`), and the binders nested in it follow. The name in the
+  term is unchanged, and so is every message, but a `Schedule` step names such
+  a reduction by its iname in the kernel (`split("j_0", 2)`), which
+  `Lowering.reduction_inames` lists.
 - The trace-time refusals of hidden state look one level below a name: into
   the containers and the objects it holds, and the containers those objects
   hold. `acc[0][0] += 1`, `holder.inner.s = ...`, a `deque`, a loop over a

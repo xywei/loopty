@@ -1,6 +1,6 @@
 # Notes on loopy and islpy
 
-Seven interactions with loopty's dependencies that cost real debugging time, each
+Nine interactions with loopty's dependencies that cost real debugging time, each
 with the local workaround and the reason it is local. No upstream issues were
 filed: these are notes so that the next person meets the answer instead of the
 symptom.
@@ -160,13 +160,17 @@ across iterations is the loop's, so the added edge is not a dependence at all.
 `depends_on_is_final=True`. `lower_generic` already orders a statement after
 every earlier one it could read from, write over, or overwrite the input of,
 which is the whole of the order within an iteration, so there is nothing left
-for the heuristic to add. One read is not among the term's accesses: the flat
-index of a ragged access goes through the offsets argument. A kernel that writes
-those offsets and reads through them (a scan fused with the product that uses
-it) relied on the heuristic for that edge, and without it loopy refuses the
-kernel with `VariableAccessNotOrdered`; `lower_generic` counts the offsets as
-read by every statement that touches a ragged array, so the edge is drawn, and
-in the direction the body gives it. The instructions that assign ragged bounds
+for the heuristic to add. One read is the layout's rather than the body's: the
+flat index of a ragged access goes through the offsets argument. A kernel that
+writes those offsets and reads through them (a scan fused with the product that
+uses it) relied on the heuristic for that edge, and without it loopy refuses
+the kernel with `VariableAccessNotOrdered`. The access collector every rule
+reads, `flow.statement_accesses`, lists `off[r]` and `off[r + 1]` after every
+ragged access, read or written, whenever the kernel declares the offsets, so the
+edge is drawn, in the direction the body gives it, and the schedule checker and
+the typing rules see the same read. Offsets the kernel does not declare are the
+argument lowering adds, which nothing in the body can write, so there is no
+edge to draw for them. The instructions that assign ragged bounds
 (`cnt_r_init`) are final too. One reads the counts, or the offsets when the
 counts are not a parameter, and it is ordered where the first statement that
 needs it is: after every earlier writer of that array and before every later
@@ -175,3 +179,66 @@ loop followed by a statement that rewrites its offsets became a cycle through
 the loop, the bound and the rewrite. Because the bound is computed once, a
 statement that needs it after that array has been rewritten would see the old
 row length, so `lower_generic` refuses that order with a `LoweringError`.
+
+## 8. Two instructions cannot share a reduction iname
+
+**Symptom.** Two statements that sum over the same binder with the same domain,
+`s[0] = reduce_sum(a[j] for j in a.dom)` and then `s[1] = reduce_sum(b[j] ...)`,
+lower without complaint and fail at the first run with
+`pytools.graph.CycleError: EnterLoop(iname='j')`. So does a sum over `j`
+followed by a loop over `j` that reads it, and two statements whose nested sums
+bind `i` and `j` at the same two levels. One statement with two sums over `j`
+is fine.
+
+**Cause.** loopy realizes a reduction as an accumulator loop inside its
+instruction, and an iname is one loop however many instructions use it. When
+the second statement depends on the first (it writes the same array, or reads
+what the first wrote), its reduction has to run inside a loop that has to
+finish before the second statement may start. When the statements are
+independent loopy fuses the two loops, which is why the collision stayed
+hidden.
+
+**Local fix.** `_Builder.plan_reductions` lets a reduction keep its binders
+only when no other statement has them, as loop variables anywhere in the kernel
+or as the binders of an earlier reduction, and gives it fresh inames (`j_0`)
+otherwise; within one statement a name is shared only by reductions over the
+same domain. A nested reduction's domain
+names its enclosing binders as parameters, so a renamed outer binder is renamed
+there too, or the inner loop would hang from the other statement's outer one
+("Loop 'i' cannot be nested outside 'j_0'"). `Lowering.reduction_inames`
+records the names each reduction ends up with, and `Schedule` addresses a
+reduction by them.
+
+## 9. Which flags the C target compiles with, and FMA contraction
+
+**What loopy does.** `lp.ExecutableCTarget()` builds a `CCompiler`, which
+guesses a codepy toolchain from Python's build configuration and then replaces
+its compiler and flags with its own defaults: `gcc -std=c99 -O3 -fPIC`, plus the
+kernel's `options.build_options`, appended in that order. So the compiler is
+whatever `gcc` is on the path: GCC on Linux, clang on macOS.
+
+**Whether `a * b + c` becomes one fused multiply-add.** GCC's default is
+`-ffp-contract=fast` in the GNU dialects and `off` in a standard one such as
+`-std=c99`, and on x86-64 it can contract only when told the instruction exists
+(`-march` or `-mfma`), which loopy's flags do not. So a stock build on Linux
+x86-64 contracts nothing. clang contracts within an expression by default (`-ffp-contract=on`),
+and arm64 has FMA in its baseline, so the same kernel built there does fuse.
+OpenCL C permits contraction by default and has no build option to forbid it;
+`#pragma OPENCL FP_CONTRACT OFF` in the source is the way.
+
+**Why it matters.** A fused multiply-add rounds once, and the native run of a
+kernel body rounds after the multiplication and again after the addition, so
+the two can differ in the last bit. An `exact` output is compared bit for bit.
+With `a = 1 + 2**-30`, `b = 1 - 2**-30`, `c = -1` the native value is 0.0 and
+the fused one `-2**-60`, which is what `tests/test_contraction.py` shows on a
+machine with FMA by building the kernel with `-march=native -ffp-contract=fast`.
+
+**Local fix.** A kernel with an `exact` output (`lower.allows_contraction`) is
+lowered with `-ffp-contract=off` in its build options on the C target, which
+both GCC and clang honour and which comes after any flag of the toolchain's, and
+with the target's pragma in the source: `#pragma STDC FP_CONTRACT OFF` for C,
+which clang honours and GCC ignores, and the OpenCL one for OpenCL. A kernel
+whose outputs are all `approx` or `reassoc` is left to the compiler. C emitted
+with `--emit-code` for an exact kernel carries the pragma; compiling it with GCC
+in a GNU dialect still needs the flag.
+

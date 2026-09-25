@@ -24,12 +24,14 @@ import islpy as isl
 import pymbolic.primitives as prim
 
 __all__ = [
+    "OFFSETS_CANDIDATES",
     "Access",
     "ArrType",
     "Expression",
     "Reduction",
     "Stmt",
     "Term",
+    "declared_offsets",
     "free_name_sorts",
     "free_name_sorts_message",
 ]
@@ -37,6 +39,29 @@ __all__ = [
 #: A pymbolic expression. Kept loose on purpose: lanky's term classes (``Sum``,
 #: ``Forall``, ``Abs``) and pymbolic's primitives both appear here.
 Expression = Any
+
+#: Candidate names for the offsets array of a ragged axis, most specific first.
+#: The first one that is a parameter of the term is the array a ragged access is
+#: flattened through; if none is, lowering adds an argument named
+#: ``off_<counts>``. The rule lives here rather than in :mod:`loopty.lower`
+#: because two modules read it: lowering, which indexes through the offsets, and
+#: :func:`loopty.flow.statement_accesses`, which lists that index as a read.
+OFFSETS_CANDIDATES = ("off_{counts}", "{counts}_off", "off")
+
+
+def declared_offsets(params: Iterable[tuple[str, Any]], counts: str) -> str | None:
+    """The parameter holding the offsets of a ragged axis over ``counts``.
+
+    The first of :data:`OFFSETS_CANDIDATES` that names a parameter, or ``None``
+    when the kernel declares none of them, in which case the offsets are an
+    argument lowering adds and nothing in the body can name, let alone write.
+    """
+    names = {name for name, _ in params}
+    for pattern in OFFSETS_CANDIDATES:
+        candidate = pattern.format(counts=counts)
+        if candidate in names:
+            return candidate
+    return None
 
 
 @dataclass(frozen=True)
