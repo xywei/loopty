@@ -53,12 +53,14 @@ from loopty.term import Access, ArrType, Reduction, Stmt, Term
 __all__ = [
     "COUNT_PARAM",
     "COUNT_PARAM_REFLECTED",
+    "RESERVED_PREFIX",
     "RESERVED_WORDS",
     "ExpressionLowerer",
     "LoweringError",
     "Lowering",
     "count_param_name",
     "count_param_names",
+    "is_reserved",
     "lower",
     "lower_generic",
     "numpy_dtype",
@@ -454,6 +456,26 @@ RESERVED_WORDS = frozenset(
     """.split()
 )
 
+#: The identifiers C reserves by their spelling rather than by a list: every
+#: name that starts with an underscore and a capital letter, or with two
+#: underscores. That is where C puts its own later keywords (``_Bool``,
+#: ``_Complex``, ``_Generic``, ``_Static_assert``, ``_Thread_local`` and the
+#: rest, which C23 still accepts beside the new spellings), and where OpenCL C
+#: puts its address-space and access qualifiers (``__global``, ``__kernel``,
+#: ``__read_only``). A name of either shape is a keyword or a name the
+#: implementation may define, so none of them can be declared by generated
+#: code.
+RESERVED_PREFIX = re.compile(r"_[A-Z_]")
+
+
+def is_reserved(name: str) -> bool:
+    """Whether generated C or OpenCL C code cannot declare ``name``.
+
+    A word of :data:`RESERVED_WORDS`, or a name that starts the way
+    :data:`RESERVED_PREFIX` says C reserves.
+    """
+    return name in RESERVED_WORDS or RESERVED_PREFIX.match(name) is not None
+
 
 def _sanitize(name: str) -> str:
     """A loopy-safe identifier: every non-word character becomes an underscore."""
@@ -469,19 +491,24 @@ def _kernel_name(name: str, taken: Sequence[str]) -> str:
     produces a function whose own name is shadowed by a parameter. Neither is
     diagnosed anywhere downstream: the first is a compiler error about generated
     code the user never wrote, and the second is undefined behaviour. The name
-    is therefore renamed here, deterministically, with an ``_knl`` suffix.
-    Renaming rather than refusing keeps a legal Python name legal: nothing
+    is therefore renamed here, deterministically, with an ``_knl`` suffix, or
+    with a ``k`` prefix for a name C reserves by its first two characters
+    (:data:`RESERVED_PREFIX`), which no suffix can make legal. Renaming rather
+    than refusing keeps a legal Python name legal: nothing
     outside the generated source refers to the kernel by this name, because
     callers hold the :class:`Lowering` and address arguments by name.
     """
     base = _sanitize(name)
     if not base or base[0].isdigit():
         base = f"k_{base}"
-    reserved = set(taken) | RESERVED_WORDS
-    if base not in reserved:
+    elif RESERVED_PREFIX.match(base):
+        # ``_Generic`` stays reserved with any suffix, so it gets a prefix.
+        base = f"k{base}"
+    taken = set(taken)
+    if base not in taken and not is_reserved(base):
         return base
     candidate = f"{base}_knl"
-    while candidate in reserved:
+    while candidate in taken or is_reserved(candidate):
         candidate = f"{candidate}_"
     return candidate
 
@@ -504,6 +531,10 @@ def _refuse_reserved_names(term: Term) -> None:
     change. The names loopty generates itself (``off_cnt``, ``nl_cnt_r``, a
     suffixed reduction binder) carry a prefix or a suffix and cannot be a
     keyword.
+
+    A keyword is a word of :data:`RESERVED_WORDS` or a name of the shape C
+    reserves, :data:`RESERVED_PREFIX`: ``for _Bool in x.dom`` fails in the
+    compiler exactly as ``for double in x.dom`` does.
     """
     roles: dict[str, list[str]] = {
         "parameters": [name for name, _ in term.params],
@@ -517,15 +548,17 @@ def _refuse_reserved_names(term: Term) -> None:
             roles["reduction variables"].extend(reduction.inames)
     found = []
     for role, names in roles.items():
-        reserved = sorted({name for name in names if _sanitize(name) in RESERVED_WORDS})
-        if reserved:
-            found.append(f"{role} {', '.join(reserved)}")
+        refused = sorted({name for name in names if is_reserved(_sanitize(name))})
+        if refused:
+            found.append(f"{role} {', '.join(refused)}")
     if found:
         raise LoweringError(
             f"{term.name} has names the generated code cannot use: "
-            f"{'; '.join(found)}. These are reserved words in C or OpenCL C; "
-            "rename them in the kernel (a parameter in its signature, a size in "
-            "its annotations, a loop or reduction variable where it is bound)."
+            f"{'; '.join(found)}. These are reserved words in C or OpenCL C, "
+            "or start with an underscore and a capital letter or with two "
+            "underscores, which C reserves; rename them in the kernel (a "
+            "parameter in its signature, a size in its annotations, a loop or "
+            "reduction variable where it is bound)."
         )
 
 

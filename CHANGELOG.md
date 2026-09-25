@@ -291,7 +291,11 @@ with a pair of statement instances.
 - Sizes, loop variables and reduction variables spelled like a C or OpenCL C
   keyword are refused by the lowering, as parameters already were.
   `Arr[Fin[long], Real]` and `for double in x.dom` passed the check and then
-  failed in the C compiler, on generated code.
+  failed in the C compiler, on generated code. So are the names C reserves by
+  their spelling, those that start with an underscore and a capital letter or
+  with two underscores: `_Bool`, `_Complex`, `_Generic` and OpenCL C's
+  `__global` were not in the list. A kernel with such a name is renamed with a
+  `k` prefix, because no suffix takes a name out of that space.
 - The native run reads an integer-valued float array of an integral element
   sort as integers when the body only reads it. The contract accepts
   `col = [1.0, 0.0]` for `Fin[m]` and the compiled run casts it, but numpy

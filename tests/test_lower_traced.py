@@ -345,4 +345,46 @@ def test_a_parameter_spelled_like_a_keyword_is_still_refused() -> None:
         lower_generic(keyword_parameter.trace(), "c")
 
 
+@kernel
+def underscored_names(x: Arr[Fin[_Complex], Real]):  # noqa: F821
+    """A size and a loop variable spelled like C's own underscored keywords."""
+    for _Bool in x.dom:
+        x[_Bool] = 1.0
+
+
+@kernel
+def double_underscored(x: Arr[Fin[n], Real]):  # noqa: F821
+    """A loop variable spelled like an OpenCL C qualifier."""
+    for __global in x.dom:
+        x[__global] = 1.0
+
+
+def test_names_c_reserves_by_their_spelling_are_refused() -> None:
+    # C reserves every name that starts with an underscore and a capital letter
+    # or with two underscores, which is where ``_Bool``, ``_Complex`` and
+    # ``_Generic`` live, and OpenCL C's ``__global``. Only the unprefixed
+    # spellings were listed, so these passed the check and failed in the
+    # compiler.
+    from loopty.lower import LoweringError, is_reserved, lower_generic
+
+    refused = r"sizes _Complex\b.*loop variables _Bool\b"
+    with pytest.raises(LoweringError, match=refused):
+        lower_generic(underscored_names.trace(), "c")
+    with pytest.raises(LoweringError, match=r"loop variables __global\b"):
+        lower_generic(double_underscored.trace(), "c")
+    for name in ("_Generic", "_Static_assert", "_Thread_local", "__kernel", "__x"):
+        assert is_reserved(name)
+    for name in ("_", "_x", "_x1", "x_", "Bool", "generic_"):
+        assert not is_reserved(name)
+
+
+def test_a_kernel_named_like_an_underscored_keyword_is_renamed_with_a_prefix() -> None:
+    from loopty.lower import _kernel_name
+
+    # A suffix leaves ``_Generic_knl`` in the reserved space; a prefix does not.
+    assert _kernel_name("_Generic", []) == "k_Generic"
+    assert _kernel_name("double", []) == "double_knl"
+    assert _kernel_name("axpy", []) == "axpy"
+
+
 # }}}
