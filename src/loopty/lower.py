@@ -878,14 +878,18 @@ def _statement_domains(
 
 def _count_inits(
     term: Term, builder: _Builder, domains: Sequence[isl.Set]
-) -> tuple[list[Any], dict[str, str]]:
-    """Instructions assigning the ragged bound parameters, and their ids.
+) -> tuple[list[Any], dict[str, str], dict[str, str]]:
+    """Instructions assigning the ragged bound parameters, their ids, and reads.
 
     A domain parameter named ``cnt_r`` (see :data:`COUNT_PARAM`) is a ragged
     bound: the length of row ``r`` of whichever array has ``cnt`` as its counts
     family. It is emitted as a scalar temporary inside the ``r`` loop, computed
-    from the offsets when the offsets are a parameter and from the counts array
-    when it is one. loopy then generates ``for (j = 0; j < cnt_r; ++j)``.
+    from the counts array when that is a parameter and from the offsets when it
+    is not. loopy then generates ``for (j = 0; j < cnt_r; ++j)``.
+
+    The three results are the instructions, the id of each parameter's
+    instruction, and the array each instruction reads, which is what
+    :func:`lower_generic` orders it by.
     """
     wanted: dict[str, str] = {}
     for domain in domains:
@@ -895,6 +899,7 @@ def _count_inits(
     params = dict(term.params)
     insns: list[Any] = []
     ids: dict[str, str] = {}
+    reads: dict[str, str] = {}
     for name in builder.arr_types:
         axis = builder.ragged_axis(name)
         if axis is None:
@@ -911,14 +916,16 @@ def _count_inits(
                     continue
                 param = candidates[0]
                 row = prim.Variable(iname)
+                insn_id = f"{param}_init"
                 if counts in params:
                     value: Any = prim.Subscript(prim.Variable(counts), (row,))
+                    reads[insn_id] = counts
                 else:
                     offsets = builder.offsets_for(name)
                     value = prim.Subscript(
                         prim.Variable(offsets), (row + 1,)
                     ) - prim.Subscript(prim.Variable(offsets), (row,))
-                insn_id = f"{param}_init"
+                    reads[insn_id] = offsets
                 enclosing = stmt.inames[: stmt.inames.index(iname) + 1]
                 insns.append(
                     lp.Assignment(
@@ -930,7 +937,7 @@ def _count_inits(
                     )
                 )
                 ids[param] = insn_id
-    return insns, ids
+    return insns, ids, reads
 
 
 def lower_generic(term: Term, target: str = "c") -> Lowering:
@@ -996,15 +1003,30 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
         # the right-hand side, the subscripts of the assignee, the guard, and
         # the accumulated cell. A name missing here is a dependence edge that
         # is never drawn, so the list is not written out a second time.
+        accesses = statement_accesses(stmt)
         read_arrays = {
             array
-            for array, _indices, kind, _inames, _domain in statement_accesses(stmt)
+            for array, _indices, kind, _inames, _domain in accesses
             if kind in ("read", "acc")
+        }
+        # The flat index of a ragged access, read or written, also reads the
+        # offsets argument. That read is the layout's and not the term's, so
+        # the collector above does not list it, but a statement that writes
+        # the offsets has to be ordered against it all the same. loopy's
+        # single-writer heuristic used to supply the edge when that statement
+        # was the only writer; the dependences below are final, so it is drawn
+        # here, in the direction the body gives it.
+        read_arrays |= {
+            builder.offsets_for(array)
+            for array, _indices, _kind, _inames, _domain in accesses
+            if builder.ragged_axis(array) is not None
         }
         written = stmt.assignee.array
 
         # Order the statements by their data: a statement runs after every
         # earlier one it could read from, write over, or overwrite the input of.
+        # This is the whole of the order within one iteration, which is why the
+        # instruction's dependences can be final.
         depends: set[str] = set()
         for array in read_arrays:
             depends.update(writes_before.get(array, ()))
@@ -1023,6 +1045,16 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
                 id=insn_id,
                 within_inames=frozenset(stmt.inames),
                 depends_on=frozenset(depends),
+                # Final, so that loopy adds nothing to it. Its single-writer
+                # heuristic makes an instruction depend on the only writer of
+                # anything it reads, wherever that writer is in the body. When
+                # the writer comes later and feeds this statement only across
+                # an iteration of an enclosing loop, as the pressure a wave
+                # update reads from the previous time level does, the edge
+                # points against the one drawn here and loopy refuses the
+                # cycle. An instruction dependence orders two statements within
+                # one iteration; the order across iterations is the loop's.
+                depends_on_is_final=True,
                 predicates=predicates,
             )
         )
@@ -1032,9 +1064,25 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
 
     domains.extend(builder.extra_domains)
 
-    count_insns, count_ids = _count_inits(term, builder, domains)
+    count_insns, count_ids, count_reads = _count_inits(term, builder, domains)
     if count_insns:
+        # A bound's instruction is ordered by the same rule as the statements,
+        # at the place of the first statement that needs it: after every
+        # earlier writer of the array it reads, and before every later one.
+        # Left to loopy's single-writer heuristic, it waited for that writer
+        # wherever it was in the body, and when the writer came later (a
+        # statement that rewrites the offsets after a ragged loop has read
+        # through them) the three instructions made a cycle.
+        #
+        # A bound is computed once, so a statement that needs it after its array
+        # has been rewritten would see the old row length, and through the new
+        # offsets when those are what was rewritten. That order is refused.
         by_id = {insn.id: insn for insn in insns}
+        count_params = {count_id: param for param, count_id in count_ids.items()}
+        count_depends: dict[str, frozenset[str]] = {}
+        first_use: dict[str, str] = {}
+        rewritten: dict[str, str] = {}
+        writers: dict[str, list[str]] = {}
         for stmt in term.stmts:
             insn = by_id[insn_ids[stmt.id]]
             needed = {
@@ -1048,9 +1096,44 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
                     for param in _domain_params(reduction.domain)
                     if param in count_ids
                 }
+            stale = sorted(needed & rewritten.keys())
+            if stale:
+                count_id = stale[0]
+                source = count_reads[count_id]
+                raise LoweringError(
+                    f"statement {stmt.id} is bounded by the row length "
+                    f"{count_params[count_id]}, which is computed from {source} "
+                    f"once, where {first_use[count_id]} first needs it; "
+                    f"{rewritten[count_id]} rewrites {source} before {stmt.id} "
+                    f"runs, so {stmt.id} would see the old length. Rewrite "
+                    f"{source} after the last statement bounded by it, or in a "
+                    "kernel of its own."
+                )
+            for count_id in needed - count_depends.keys():
+                count_depends[count_id] = frozenset(
+                    writers.get(count_reads[count_id], ())
+                )
+                first_use[count_id] = stmt.id
+            written = stmt.assignee.array
+            overwrites = {
+                count_id
+                for count_id in count_depends
+                if count_reads[count_id] == written
+            }
+            for count_id in overwrites:
+                rewritten.setdefault(count_id, stmt.id)
+            needed |= overwrites
             if needed:
                 by_id[insn.id] = insn.copy(depends_on=insn.depends_on | needed)
+            writers.setdefault(written, []).append(insn.id)
         insns = [by_id[insn.id] for insn in insns]
+        # A bound no statement needs keeps the heuristic, as before.
+        count_insns = [
+            insn.copy(depends_on=count_depends[insn.id], depends_on_is_final=True)
+            if insn.id in count_depends
+            else insn
+            for insn in count_insns
+        ]
         insns = count_insns + insns
 
     merged = _merge_domains(domains)

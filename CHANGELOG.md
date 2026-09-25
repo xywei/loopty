@@ -86,6 +86,12 @@ with a pair of statement instances.
 - **Four demos** (`examples/`) and `scripts/refresh_example_outputs.py`, which
   re-runs the commands pasted into `examples/README.md` and rewrites their
   output, so the document cannot drift from the code in silence.
+- **A fifth demo**, `examples/wavefront_acoustic.py`: two coupled statements in
+  one acoustic-wave nest, whose rectangular tiling is refused with a witness
+  that crosses them (`S1` at `(t, i + 1)` before `S0` at `(t + 1, i)`), and the
+  skew that makes the same tiling a legal wavefront block. Its section in
+  `examples/README.md` has the three transcripts, generated like the others.
+  `--bench` times the untiled and blocked kernels; nothing runs it but a reader.
 - **Documentation.** `docs/quickstart.md`, `docs/device-runs.md` with the
   transcripts under `docs/device-runs/`, and `docs/loopy-notes.md`: the loopy
   and islpy interactions that cost debugging time, each with its local
@@ -267,6 +273,25 @@ with a pair of statement instances.
   the abridged one in `README.md` and the two in `docs/quickstart.md`,
   follows them: every `spmv.py` location moves up one line and nothing else
   changes.
+- Two statements that feed each other across an iteration of an enclosing loop
+  no longer lower to a dependency cycle. `lower_generic` marks each
+  instruction's `depends_on` final, so loopy's single-writer heuristic cannot
+  add an edge from a statement to a later one that writes what it reads: that
+  order is the loop's, and the edge made the first run fail with
+  `DependencyCycleFound`. The coupled wave demo was the first kernel to have the
+  shape; see note 7 in `docs/loopy-notes.md`. The heuristic had also been what
+  ordered a read through a ragged array's offsets against a statement that
+  writes them, when that statement was their only writer, and not always in the
+  body's direction. `lower_generic` now counts the offsets as read by every
+  statement that touches a ragged array, so a kernel that computes its offsets
+  and then reads through them is not refused with `VariableAccessNotOrdered`.
+  The instruction that computes a ragged row's length is ordered the same way,
+  where the first statement that needs it runs. Left to the heuristic, it
+  waited for a statement that rewrites the offsets even when that statement
+  came after the ragged loop, and the three made a cycle. The length is
+  computed once, so a statement that needs it after the offsets (or counts) it
+  was computed from have been rewritten is refused with a `LoweringError`,
+  instead of running over the old row length.
 
 ### Changed
 

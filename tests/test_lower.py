@@ -80,6 +80,24 @@ def test_the_stencil_runs_in_the_order_the_term_was_written() -> None:
     assert np.allclose(out["u"], ht.jacobi_reference(u))
 
 
+def test_statements_that_feed_each_other_across_the_loop_are_not_a_cycle() -> None:
+    # S0 reads what S1 wrote one iteration earlier. That order is the loop's;
+    # loopy's single-writer heuristic used to state it as an instruction
+    # dependence of S0 on S1, against S1's own on S0, and refused the cycle.
+    term = ht.coupled_pair_term()
+    insns = {insn.id: insn for insn in lower(term).default_entrypoint.instructions}
+    assert insns["S0"].depends_on == frozenset()
+    assert insns["S1"].depends_on == frozenset({"S0"})
+
+    x = np.zeros(8)
+    x[0] = 1.0
+    v = np.zeros(8)
+    out = run(term, x=x.copy(), v=v.copy())
+    want_x, want_v = ht.coupled_pair_reference(x, v)
+    assert np.allclose(out["x"], want_x)
+    assert np.allclose(out["v"], want_v)
+
+
 def test_a_ragged_reduction_becomes_a_csr_loop() -> None:
     code = code_for(ht.spmv_term())
     assert "off[r] + j" in code.replace("  ", " ")
@@ -91,6 +109,45 @@ def test_a_ragged_reduction_becomes_a_csr_loop() -> None:
         arrays["off"], arrays["col"], arrays["val"], arrays["x"]
     )
     assert np.allclose(out["y"], want)
+
+
+@pytest.mark.parametrize("order", ["ps", "sp"])
+def test_a_ragged_bound_is_ordered_against_the_offsets_it_reads(order: str) -> None:
+    # The row length cnt_r is computed from off, which the other statement
+    # rewrites. Its instruction used to be left to loopy's single-writer
+    # heuristic, which made it wait for the shift wherever the shift was. With
+    # the product first, the shift waits for the product, which reads through
+    # off, the product waits for cnt_r, and cnt_r waited for the shift: a cycle.
+    shift_first = order == "sp"
+    term = ht.spmv_and_shift_term(order)
+    insns = {insn.id: insn for insn in lower(term).default_entrypoint.instructions}
+    shift, product = ("S0", "S1") if shift_first else ("S1", "S0")
+    before = {shift} if shift_first else set()
+    assert insns["cnt_r_init"].depends_on == frozenset(before)
+    assert "cnt_r_init" in insns[product].depends_on
+
+    # Row 0 starts at 1; the entry at 0 is read only through shifted offsets.
+    off = np.array([1, 3, 3, 6], dtype=np.int32)
+    col = np.array([0, 0, 1, 0, 2, 3], dtype=np.int32)
+    val = np.array([7.0, 1.0, 2.0, 3.0, 4.0, 5.0])
+    x = np.array([1.0, 10.0, 100.0, 1000.0])
+    out = run(term, off=off.copy(), col=col, val=val, x=x, y=np.zeros(3))
+    seen = off - 1 if shift_first else off
+    assert np.allclose(out["y"], ht.csr_reference(seen, col, val, x))
+    assert np.array_equal(out["off"], off - 1)
+
+
+@pytest.mark.parametrize("order", ["psp", "prq"])
+def test_a_ragged_bound_is_not_reused_after_its_offsets_are_rewritten(
+    order: str,
+) -> None:
+    # cnt_r is computed once, where the first product needs it. The second
+    # product would read through the shifted offsets with the old row lengths.
+    # With the shift in a loop of its own, loopy could not schedule the two
+    # products around it. With the shift inside the row loop and the second
+    # product over an inner loop of its own, the kernel ran and misread rows.
+    with pytest.raises(LoweringError, match=r"S2 is bounded by the row length cnt_r"):
+        lower(ht.spmv_and_shift_term(order))
 
 
 def test_an_accumulation_runs_over_the_ragged_nest() -> None:
