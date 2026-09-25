@@ -84,6 +84,46 @@ def test_a_reduction_carries_its_own_domain_and_exactness() -> None:
     assert "nl_cnt_r" in str(reduction.domain)
 
 
+def scaled_counts(
+    a: Real,
+    x: Arr[Fin[n], Fin[m], Nat],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    for r in y.dom:
+        y[r] = reduce_sum(a * x[r, j] for j in x.dom[r])
+
+
+def tenths(x: Arr[Fin[n], Fin[m], Nat], y: Arr[Fin[n], Real]):  # noqa: F821
+    for r in y.dom:
+        y[r] = reduce_sum(0.1 * j for j in x.dom[r])
+
+
+def halves(x: Arr[Fin[n], Fin[m], Nat], y: Arr[Fin[n], Real]):  # noqa: F821
+    for r in y.dom:
+        y[r] = reduce_sum(x[r, j] / 2 for j in x.dom[r])
+
+
+def weighted_counts(x: Arr[Fin[n], Fin[m], Nat], y: Arr[Fin[n], Nat]):  # noqa: F821
+    for r in y.dom:
+        y[r] = reduce_sum(2 * x[r, j] + j // 2 for j in x.dom[r])
+
+
+def test_what_a_reduction_sums_decides_its_class_and_not_only_its_arrays() -> None:
+    # Only the element sorts of the arrays read used to be joined, so each of
+    # the first three was ``exact``: a ``Real`` scalar times an integer array, a
+    # float literal times the binder, and a true division of an integer array.
+    # A schedule then refused to reassociate sums that were never exact.
+    def exactness(fn) -> str:
+        (reduction,) = reductions_in(term_of(fn).stmts[0].expr)
+        return reduction.exactness
+
+    assert exactness(scaled_counts) == "approx"
+    assert exactness(tenths) == "approx"
+    assert exactness(halves) == "approx"
+    # Integers under ``+``, ``*`` and ``//`` stay integers.
+    assert exactness(weighted_counts) == "exact"
+
+
 def test_accesses_are_read_off_the_expression() -> None:
     stmt = term_of(spmv).stmts[0]
     outer = {access.array for access in accesses_in(stmt.expr, into_reductions=False)}

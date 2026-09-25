@@ -589,34 +589,105 @@ def join_exactness(*classes: str) -> str:
 def reduction_exactness(body: Any, tracer: Tracer) -> str:
     """The exactness class of a reduction, read off what it sums.
 
-    The class comes from the element sorts of the arrays the body reads, joined
-    so that the weakest wins: a sum of ``Nat`` is ``exact``, because adding
-    integers in any order gives the same integer and a caller asking for
-    ``exact`` is asking for exactly those bits; a sum of ``Real`` is ``approx``,
-    because floating-point addition is not associative and the result is only
-    ever right to a tolerance. ``reassoc`` sits between them and is what a
-    schedule *lowers* an accumulation to when it reorders one (see
+    The class is that of the *value* the body computes, joined so that the
+    weakest wins: a sum of ``Nat`` is ``exact``, because adding integers in any
+    order gives the same integer and a caller asking for ``exact`` is asking
+    for exactly those bits; a sum of ``Real`` is ``approx``, because
+    floating-point addition is not associative and the result is only ever
+    right to a tolerance. ``reassoc`` sits between them and is what a schedule
+    *lowers* an accumulation to when it reorders one (see
     :meth:`loopty.schedule.Schedule.realize`), which is why it is not a class a
     trace can invent: the source did not ask for it.
 
-    A body that reads no array at all (a sum of literals, or of an index
-    expression) is ``exact``.
+    Arrays are not the only thing a body reads. ``a * x[j]`` with ``a: Real``
+    sums floats over an integer ``x``, and so does ``0.1 * j``, which reads no
+    array at all; both used to be called ``exact`` because only the element
+    sorts of the arrays were joined, and a schedule then refused to reassociate
+    a sum that was never exact. :func:`_value_exactness` walks the whole
+    expression instead. A body built from integer literals, loop variables and
+    integral arrays with ``+``, ``*``, ``//`` and ``%`` is ``exact``.
     """
-    classes: list[str] = []
-    for access in accesses_in(body):
-        arrtype = tracer.array_types.get(access.array)
-        if arrtype is None:
-            continue
-        classes.append(_sort_exactness(arrtype.dtype))
-    return join_exactness(*classes)
+    return _value_exactness(body, tracer)
+
+
+def _value_exactness(node: Any, tracer: Tracer) -> str:
+    """The exactness class of the value of one expression.
+
+    Integers stay integers under ``+``, ``*``, ``//``, ``%`` and a power with a
+    non-negative literal exponent; anything else that can produce a float does
+    produce one. So a float or complex literal is ``approx``, and so is true
+    division, a power whose exponent could be negative, and a call, whose
+    result nothing here knows the sort of. A comparison or a logical connective
+    is a boolean and ``exact``. A name is a scalar parameter, which has its
+    sort, or a loop variable or a size, which is an integer. An array read is
+    its element sort; its index is an integer by construction and is not a
+    contribution. An expression this walk does not know is ``approx``, which
+    is the class that claims nothing.
+    """
+    if isinstance(node, bool | np.bool_ | int | np.integer):
+        return "exact"
+    if isinstance(node, float | complex | np.floating | np.complexfloating):
+        return "approx"
+    if isinstance(node, Reduction):
+        return node.exactness
+    if isinstance(node, Access):
+        arrtype = tracer.array_types.get(node.array)
+        return "approx" if arrtype is None else _sort_exactness(arrtype.dtype)
+    if isinstance(node, prim.Subscript):
+        name = getattr(node.aggregate, "name", None)
+        arrtype = tracer.array_types.get(name) if name is not None else None
+        return "approx" if arrtype is None else _sort_exactness(arrtype.dtype)
+    if isinstance(node, prim.Variable):
+        if node.name in tracer.array_types:
+            return _sort_exactness(tracer.array_types[node.name].dtype)
+        if node.name in tracer.params:
+            return _sort_exactness(tracer.params[node.name])
+        return "exact"
+    if isinstance(node, prim.Quotient | prim.Call):
+        return "approx"
+    if isinstance(node, prim.Power):
+        exponent = node.exponent
+        if not (isinstance(exponent, int | np.integer) and exponent >= 0):
+            return "approx"
+        return _value_exactness(node.base, tracer)
+    if isinstance(
+        node, prim.Comparison | prim.LogicalAnd | prim.LogicalOr | prim.LogicalNot
+    ):
+        return "exact"
+    if isinstance(node, prim.If):
+        return join_exactness(
+            _value_exactness(node.then, tracer), _value_exactness(node.else_, tracer)
+        )
+    if isinstance(node, prim.Sum | prim.Product | prim.Min | prim.Max):
+        return join_exactness(
+            *(_value_exactness(child, tracer) for child in node.children)
+        )
+    if isinstance(node, prim.FloorDiv | prim.Remainder):
+        return join_exactness(
+            _value_exactness(node.numerator, tracer),
+            _value_exactness(node.denominator, tracer),
+        )
+    return "approx"
 
 
 def _sort_exactness(dtype: Any) -> str:
-    """The exactness class of one element sort, defaulting to ``approx``."""
+    """The exactness class of one element sort, defaulting to ``approx``.
+
+    A Python or numpy scalar type is read by its kind, before lanky is asked:
+    lanky calls anything that is not one of its sorts an index type and so
+    ``exact``, which is the wrong answer for ``float``.
+    """
     from lanky.prelude import exactness_of
 
     if isinstance(dtype, np.dtype):
         return "exact" if dtype.kind in "biu" else "approx"
+    # By identity: a lanky sort may answer ``==`` with a proposition.
+    if dtype is bool or dtype is int:
+        return "exact"
+    if dtype is float or dtype is complex:
+        return "approx"
+    if isinstance(dtype, type) and issubclass(dtype, np.generic):
+        return "exact" if np.dtype(dtype).kind in "biu" else "approx"
     try:
         return exactness_of(dtype)
     except Exception:  # pragma: no cover - an exotic element type
