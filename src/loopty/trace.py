@@ -249,11 +249,18 @@ class Tracer:
     # {{{ loops
 
     def fresh_iname(self, hint: str | None) -> str:
-        """A loop variable name, from the ``for`` target when one can be read."""
+        """A loop variable name, from the ``for`` target when one can be read.
+
+        The name avoids every name the term already uses: earlier inames,
+        reflected parameters, and the sizes and parameters the signature
+        declares. A ``for k in x.dom`` over ``x: Arr[Fin[k], Real]`` would
+        otherwise make one isl dimension of the size and the iname, and the
+        loop's domain ``0 <= k < k`` would be empty.
+        """
         stem = hint or f"i{len(self._inames)}"
         name = stem
         suffix = 0
-        while name in self._inames or name in self.reflections:
+        while name in self._inames or self.reflections.taken(name):
             name = f"{stem}_{suffix}"
             suffix += 1
         self._inames.add(name)

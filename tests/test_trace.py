@@ -545,6 +545,23 @@ def test_a_target_reused_by_a_nested_loop_is_not_state() -> None:
     ]
 
 
+def test_a_loop_target_named_like_a_size_gets_its_own_iname() -> None:
+    # ``k`` is also the size of both arrays. The iname used to be ``k`` too,
+    # one isl dimension for the two, so the first loop's domain was
+    # ``0 <= k < k``, which is empty, and the second loop's bound ``k`` read as
+    # the first loop's variable escaping.
+    def sized(x: Arr[Fin[k], Real], y: Arr[Fin[k], Real]):  # noqa: F821
+        for k in x.dom:
+            x[k] = 0.0
+        for i in y.dom:
+            y[i] = 1.0
+
+    first, second = term_of(sized).stmts
+    assert first.inames == ("k_0",)
+    assert not first.domain.is_empty()
+    assert second.inames == ("i",)
+
+
 def test_what_guards_and_reductions_bind_is_not_state() -> None:
     # ``g`` is rebound to a new guard object each time (and read at the end, so
     # it is live across the loops); the reduction's ``j`` lives in the

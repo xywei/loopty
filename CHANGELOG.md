@@ -285,6 +285,12 @@ with a pair of statement instances.
   are `reduce_sum(...)` for an accumulation and an indexed cell
   (`s[i + 1] = s[i] + x[i]`, as `scan` in `examples/spmv.py` does) otherwise.
   Both checks are trace-time only; plain `python` runs the body as written.
+- A loop whose target is spelled like a size or a parameter of the kernel gets
+  an iname of its own. `for k in x.dom` over `x: Arr[Fin[k], Real]` used to make
+  the size and the iname one isl dimension, so the loop's domain was
+  `0 <= k < k`, which is empty, and every statement in it was checked over no
+  points at all. The iname is now `k_0`, as for a target reused by a second
+  loop.
 - `lanky check` prints the error of a kernel that cannot be traced under its
   `REFUTED` line: the `trace` fact carries it as its `reason`, next to an empty
   `counterexample`, which is lanky's form for a closed claim refuted at no
