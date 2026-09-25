@@ -42,15 +42,15 @@ each row verbatim):
 ```text
 STATUS   BY             WHERE        OWNER          STATEMENT
 -------  -------------  -----------  -------------  ---------------------------------------------
-decided  isl            spmv.py:80   scan           off[0] is in bounds for every instance of S0
-decided  isl            spmv.py:82   scan           off[r + 1] is in bounds for every instance of S1
-decided  isl            spmv.py:80   scan           distinct instances of S0 write distinct cells of off
-assumed  -              spmv.py:70   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
-tested   property-test  spmv.py:85   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat] | off(0) ==...
-decided  isl            spmv.py:113  spmv           y[r] is in bounds for every instance of S0
-decided  type           spmv.py:113  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
-decided  isl            spmv.py:113  spmv           distinct instances of S0 write distinct cells of y
-decided  type           spmv.py:113  spmv           the accumulation into y[r] over j is approx
+decided  isl            spmv.py:79   scan           off[0] is in bounds for every instance of S0
+decided  isl            spmv.py:81   scan           off[r + 1] is in bounds for every instance of S1
+decided  isl            spmv.py:79   scan           distinct instances of S0 write distinct cells of off
+assumed  -              spmv.py:69   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+tested   property-test  spmv.py:84   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat] | off(0) ==...
+decided  isl            spmv.py:112  spmv           y[r] is in bounds for every instance of S0
+decided  type           spmv.py:112  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
+decided  isl            spmv.py:112  spmv           distinct instances of S0 write distinct cells of y
+decided  type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
 ...
 17 facts: 2 assumed, 14 decided, 1 tested
 ```
