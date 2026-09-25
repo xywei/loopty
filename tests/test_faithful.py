@@ -331,6 +331,53 @@ def test_an_example_the_body_cannot_run_is_skipped(tmp_path) -> None:
     assert [entry["outcome"] for entry in samples] == ["agreed"] * 3
 
 
+def total(x: Arr[Fin[n], Real], y: Arr[Fin[1], Real]):  # noqa: F821
+    y[0] = reduce_sum(x[j] for j in x.dom)
+
+
+def test_an_input_too_large_to_interpret_is_not_run_natively_either(
+    monkeypatch,
+) -> None:
+    # The interpreter's work is bounded and the body's is not, so the bound is
+    # asked first: a benchmark-sized example costs neither run.
+    import loopty.faithful as faithful_module
+
+    monkeypatch.setattr(faithful_module, "MAX_INSTANCES", 5)
+    calls: list[dict] = []
+
+    def body(**arguments) -> None:
+        calls.append(arguments)
+
+    arguments = {"x": Arr.from_numpy(np.ones(10)), "y": Arr.zeros(1)}
+    outcome = faithful_module._compare(
+        body, Kernel(total).term, "example_inputs()", arguments
+    )
+    assert outcome == (
+        "skipped",
+        "too large to interpret: more than 5 statement instances and "
+        "reduction terms",
+    )
+    assert calls == []
+
+
+def test_an_input_the_body_refuses_is_skipped_whatever_the_term_raised() -> None:
+    # The term reads past the end of ``x`` on this input and so does the body:
+    # the input says nothing about whether the term is the body.
+    import loopty.faithful as faithful_module
+
+    def shift(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):  # noqa: F821
+        for i in u.dom:
+            v[i] = u[i + 1]
+
+    kernel = Kernel(shift)
+    outcome = faithful_module._compare(
+        kernel, kernel.term, "sample 1", {"u": Arr.zeros(3), "v": Arr.zeros(3)}
+    )
+    assert outcome is not None
+    assert outcome[0] == "skipped"
+    assert outcome[1].startswith("the body raised IndexError")
+
+
 def test_example_inputs_that_are_not_a_dictionary_are_reported(tmp_path) -> None:
     from lanky.check import check_path
 

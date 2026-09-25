@@ -74,9 +74,10 @@ SEED = 0
 #: iteration to the next shows.
 SIZES = (2, 5)
 
-#: How many statement instances one interpreted run may have. The interpreter
-#: runs in Python, one instance at a time, and an example input written for a
-#: benchmark is skipped rather than interpreted for minutes.
+#: How many statement instances and reduction terms, together, one interpreted
+#: run may have. The interpreter runs in Python, one instance at a time, and an
+#: example input written for a benchmark is skipped rather than interpreted, or
+#: run natively, for minutes.
 MAX_INSTANCES = 200_000
 
 #: What the statement of the fact says, for every kernel.
@@ -373,37 +374,48 @@ def _compare(
 ) -> tuple[str, Any] | None:
     """Run both meanings on one input; ``None`` when they agree.
 
-    Otherwise ``("skipped", why)`` when the body cannot run the input,
-    ``("unknown", why)`` when the term cannot be interpreted at all, and
-    ``("differ", (counterexample, reason))`` when the two disagree.
+    Otherwise ``("skipped", why)`` when the body cannot run the input or the
+    input is too large to interpret, ``("unknown", why)`` when the term cannot
+    be interpreted at all, and ``("differ", (counterexample, reason))`` when
+    the two disagree.
+
+    The interpreter runs first, because it is the one with a bound on its work
+    (:data:`MAX_INSTANCES`): an example input written for a benchmark is
+    skipped without running the body on it either. What it raised is judged
+    only once the body has run, since an input the body refuses says nothing
+    about the term.
     """
     native = {name: _copy(value) for name, value in arguments.items()}
     interpreted = {name: _copy(value) for name, value in arguments.items()}
     with np.errstate(all="ignore"), warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        try:
-            kernel(**native)
-        except Exception as exc:  # noqa: BLE001 - an input the body refuses
-            return "skipped", f"the body raised {type(exc).__name__}: {exc}"
+        failure: Exception | None = None
         try:
             interpret(term, interpreted, limit=MAX_INSTANCES)
         except TooLarge as exc:
             return "skipped", f"too large to interpret: {exc}"
-        except InterpretError as exc:
-            return "unknown", f"the term cannot be interpreted: {exc}"
-        except (IndexError, ArithmeticError) as exc:
-            # What a program raises: a cell that is not there, a division by
-            # zero. The body ran the same input without either.
-            error = f"{type(exc).__name__}: {exc}"
-            return "differ", (
-                {"input": label, "term raised": error},
-                f"on {label} the body runs and the traced term, interpreted, "
-                f"raises {error}, so the term is not what the body computes",
-            )
-        except Exception as exc:  # noqa: BLE001 - the interpreter's, not the term's
-            return "unknown", (
-                f"the interpreter failed on {label}: {type(exc).__name__}: {exc}"
-            )
+        except Exception as exc:  # noqa: BLE001 - judged below, after the body
+            failure = exc
+        try:
+            kernel(**native)
+        except Exception as exc:  # noqa: BLE001 - an input the body refuses
+            return "skipped", f"the body raised {type(exc).__name__}: {exc}"
+    if isinstance(failure, InterpretError):
+        return "unknown", f"the term cannot be interpreted: {failure}"
+    if isinstance(failure, IndexError | ArithmeticError):
+        # What a program raises: a cell that is not there, a division by zero.
+        # The body ran the same input without either.
+        error = f"{type(failure).__name__}: {failure}"
+        return "differ", (
+            {"input": label, "term raised": error},
+            f"on {label} the body runs and the traced term, interpreted, "
+            f"raises {error}, so the term is not what the body computes",
+        )
+    if failure is not None:
+        # The interpreter's own failure, not the term's.
+        return "unknown", (
+            f"the interpreter failed on {label}: {type(failure).__name__}: {failure}"
+        )
     for name, typ in term.params:
         if not isinstance(typ, ArrType):
             continue

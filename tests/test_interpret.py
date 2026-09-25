@@ -207,6 +207,18 @@ def test_more_instances_than_allowed_is_too_large() -> None:
         interpret(mysterious.term, arguments, limit=5)
 
 
+def test_the_terms_of_a_reduction_count_against_the_limit() -> None:
+    # One statement instance, which sums ten terms: a matrix-vector product
+    # with a benchmark's sizes is few instances and a great deal of work.
+    arguments = {"x": Arr.from_numpy(np.ones(10)), "y": Arr.zeros(1)}
+    with pytest.raises(
+        TooLarge, match="more than 5 statement instances and reduction terms"
+    ):
+        interpret(ordered.term, arguments, limit=5)
+    interpret(ordered.term, arguments, limit=11)
+    assert arguments["y"].numpy()[0] == 10.0
+
+
 @kernel
 def recount(cnt: Arr[Fin[n], Nat], val: Arr[Fin[n], Fin[cnt], Real]):  # noqa: F821
     for r in cnt.dom:

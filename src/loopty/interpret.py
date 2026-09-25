@@ -121,8 +121,11 @@ def interpret(
     in place, as the native run writes them, and the result maps each array the
     term writes to its buffer.
 
-    ``limit`` bounds the number of statement instances; more is a
-    :class:`TooLarge`, raised before anything runs. An array of an integral
+    ``limit`` bounds the work: the statement instances and the terms of the
+    reductions they evaluate, counted together, since one instance can sum a
+    whole row. More is a :class:`TooLarge`, raised before anything runs when
+    the statement instances alone are over, and otherwise at the reduction term
+    that goes over, with the arrays partly written. An array of an integral
     sort stored as floats is read as integers when the term does not write it,
     which is what the native run does (see
     :meth:`loopty.kernel.Kernel.__call__`).
@@ -174,11 +177,23 @@ class _Run:
                     f"reads {', '.join(touched)}, which {term.name} also writes, "
                     "so which instances run depends on when the bound is read"
                 )
+        #: The work allowed (see :func:`interpret`) and the work done so far.
+        self.limit: int | None = None
+        self.spent = 0
 
     # {{{ running
 
+    def spend(self) -> None:
+        """Count one statement instance or one reduction term against the limit."""
+        self.spent += 1
+        if self.limit is not None and self.spent > self.limit:
+            raise TooLarge(
+                f"more than {self.limit} statement instances and reduction terms"
+            )
+
     def run(self, limit: int | None) -> dict[str, np.ndarray]:
         """Every instance of every statement, in the order of the source schedule."""
+        self.limit = limit
         stmts = self.term.stmts
         depth = max((len(stmt.inames) for stmt in stmts), default=0)
         known = self._known()
@@ -194,8 +209,7 @@ class _Run:
                     )
                 time.append(order[depth] if depth < len(order) else 0)
                 instances.append((tuple(time), index, point))
-                if limit is not None and len(instances) > limit:
-                    raise TooLarge(f"more than {limit} statement instances")
+                self.spend()
         instances.sort(key=lambda item: item[0])
         for _time, index, point in instances:
             stmt = stmts[index]
@@ -431,10 +445,10 @@ class _Run:
         if node.op != "sum":
             raise InterpretError(f"no meaning for a reduction of kind {node.op!r}")
         known = {**self._known(), **env}
-        terms = [
-            self.value(node.body, {**env, **point})
-            for point in self.points(node.domain, known)
-        ]
+        terms = []
+        for point in self.points(node.domain, known):
+            self.spend()
+            terms.append(self.value(node.body, {**env, **point}))
         return builtins.sum(terms)
 
     # }}}
