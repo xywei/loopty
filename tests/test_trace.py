@@ -1205,3 +1205,205 @@ def test_an_equality_condition_is_spelled_the_way_isl_reads_it() -> None:
 
 
 # }}}
+
+
+# {{{ state and effects outside the arrays
+
+
+class _Counter:
+    """An object of the kernel author's, with an attribute to keep state in."""
+
+    def __init__(self) -> None:
+        self.count = 0.0
+        self.cache: dict[str, object] = {}
+
+
+#: Module state for the kernels below. Each test replaces what it uses through
+#: ``monkeypatch``, so a trace that changes one leaves nothing for the next.
+_BOX = _Counter()
+_SEEN: list[object] = []
+_LAST = 0.0
+
+
+def _note(value: object) -> None:
+    """A helper defined outside the body that keeps what it is given."""
+    _SEEN.append(value)
+
+
+def test_an_attribute_the_body_stores_is_refused(monkeypatch) -> None:
+    # Natively the count is 1 after a call; the trace recorded y[0] = 1.0, and
+    # a second call adds 1 again, which no term says.
+    monkeypatch.setitem(globals(), "_BOX", _Counter())
+
+    def counted(y: Arr[Fin[1], Real]):  # noqa: F821
+        _BOX.count = _BOX.count + 1.0
+        y[0] = _BOX.count
+
+    with pytest.raises(TraceError) as caught:
+        term_of(counted)
+    message = str(caught.value)
+    assert "tracing counted changed the attribute 'count' of '_BOX'" in message
+    assert "'_BOX.count' is 0.0 before the trace and 1.0 after it" in message
+    assert "Keep the state in an array parameter" in message
+
+
+def test_an_attribute_carried_across_a_loop_is_refused() -> None:
+    # The loop snapshot does not look at attributes; the trace-wide one does.
+    box = _Counter()
+
+    def running(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in x.dom:
+            box.count = box.count + x[i]
+            y[i] = x[i]
+
+    with pytest.raises(TraceError, match="changed the attribute 'count' of 'box'"):
+        term_of(running)
+
+
+def test_a_dict_an_attribute_holds_is_compared_too() -> None:
+    box = _Counter()
+
+    def cached(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        box.cache["x"] = x[0]
+        for i in y.dom:
+            y[i] = x[i]
+
+    with pytest.raises(TraceError, match=r"changed the dict 'box.cache'"):
+        term_of(cached)
+
+
+def test_a_global_list_the_body_appends_to_is_refused(monkeypatch) -> None:
+    monkeypatch.setitem(globals(), "_SEEN", [])
+
+    def logged(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        _SEEN.append(x[0])
+        for i in y.dom:
+            y[i] = x[i]
+
+    with pytest.raises(TraceError) as caught:
+        term_of(logged)
+    message = str(caught.value)
+    assert "changed the global list '_SEEN'" in message
+    assert "'_SEEN' is [] before the trace and [x[0]] after it" in message
+
+
+def test_a_global_only_a_helper_changes_is_refused(monkeypatch) -> None:
+    # The helper is defined outside the body, so the body's code never names
+    # ``_SEEN``; the loop snapshot missed it, inside a loop or not.
+    monkeypatch.setitem(globals(), "_SEEN", [])
+
+    def noted(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in x.dom:
+            _note(1)
+            y[i] = x[i]
+
+    with pytest.raises(TraceError, match="changed the global list '_SEEN'"):
+        term_of(noted)
+
+
+def test_a_global_the_body_rebinds_outside_any_loop_is_refused(monkeypatch) -> None:
+    monkeypatch.setitem(globals(), "_LAST", 0.0)
+
+    def remembered(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        global _LAST
+        _LAST = x[0]
+        for i in y.dom:
+            y[i] = x[i]
+
+    with pytest.raises(TraceError, match="changed the global '_LAST'"):
+        term_of(remembered)
+
+
+def test_state_created_by_the_body_is_scratch() -> None:
+    # A list or an object the body makes itself is gone when it returns.
+    def scratch(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        weights = []
+        weights.append(0.5)
+        holder = _Counter()
+        holder.count = 2.0
+        for i in y.dom:
+            y[i] = weights[0] * holder.count * x[i]
+
+    (stmt,) = term_of(scratch).stmts
+    assert render(stmt.expr) == "1.0*x[i]"
+
+
+def test_a_print_in_the_body_is_refused() -> None:
+    def chatty(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            print("at", i)
+            y[i] = x[i]
+
+    with pytest.raises(TraceError) as caught:
+        term_of(chatty)
+    message = str(caught.value)
+    assert "tracing chatty calls print() at test_trace.py:" in message
+    assert "Print from the code that calls the kernel" in message
+
+
+def test_a_print_in_a_helper_is_refused() -> None:
+    def shout(value):
+        print(value)
+        return value
+
+    def chatty(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = shout(x[i])
+
+    with pytest.raises(TraceError, match="calls print"):
+        term_of(chatty)
+
+
+def test_a_random_draw_is_refused() -> None:
+    import random
+
+    import numpy as np
+
+    generator = np.random.default_rng(0)
+
+    def jittered(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = x[i] + random.random()
+
+    def noisy(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = x[i] + generator.normal()
+
+    with pytest.raises(TraceError, match=r"calls random\.random\(\) at"):
+        term_of(jittered)
+    with pytest.raises(TraceError, match=r"numpy\.random\.Generator\.normal\(\)"):
+        term_of(noisy)
+
+
+def test_the_call_watch_is_off_once_a_trace_ends() -> None:
+    import sys
+
+    from loopty.trace import _CallWatch
+
+    term_of(axpy)
+    if _CallWatch.tool is not None:
+        assert sys.monitoring.get_events(_CallWatch.tool) == 0
+    assert _CallWatch.depth == 0
+
+
+def test_a_global_the_body_creates_is_refused(monkeypatch) -> None:
+    # Absent before the trace, bound to a term after it.
+    monkeypatch.delitem(globals(), "_CREATED", raising=False)
+
+    def creating(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        global _CREATED
+        _CREATED = x[0]
+        for i in y.dom:
+            y[i] = x[i]
+
+    try:
+        with pytest.raises(
+            TraceError, match="'_CREATED' is unbound before the trace and x"
+        ):
+            term_of(creating)
+    finally:
+        globals().pop("_CREATED", None)
+
+
+# }}}
+

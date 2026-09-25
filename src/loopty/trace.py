@@ -45,17 +45,35 @@ opened, which catches a carried value that mentions no loop variable at all,
 such as ``s = s + 1.0``: its locals, the globals its code rebinds, and the
 contents of the lists, dicts and sets it can reach, since ``acc[0] += 1.0``
 leaves ``acc`` bound to the same list.
+
+A body also has effects that are not array writes, and one trace records none
+of them. So a symbolic array refuses to be used whole (``y[:] = ...``,
+``x * 2``, ``for v in x``, a numpy function of it), with the loop nest that
+does the same one cell at a time as the fix. And :func:`trace` copies the state
+the body's code reaches by name outside itself (module globals, closure cells,
+defaults, one level into the containers and objects they hold, and the same
+for the helpers it calls) and compares it once the body has run; a change is
+refused, and so is a call that prints, reads input, opens a file or draws a
+random number, which :class:`_CallWatch` sees through ``sys.monitoring``.
+State hidden deeper than that is what the faithfulness fact is for; see
+:mod:`loopty.faithful`.
 """
 
 from __future__ import annotations
 
 import builtins
 import dis
+import functools
+import importlib.util
 import itertools
+import os
+import random
 import sys
-from collections.abc import Collection, Iterator, Mapping, Sequence
+import sysconfig
+import threading
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from types import CodeType
+from types import BuiltinFunctionType, CodeType, FunctionType, MethodType, ModuleType
 from typing import Any
 
 import islpy as isl
@@ -307,8 +325,10 @@ class TraceError(RuntimeError):
     ``with when(...)`` replacement. Data-dependent ``while``, ``break``,
     ``return`` out of a loop, Python's builtin ``sum`` over a symbolic domain,
     state that a Python name, a global, or a list, dict or set carries from one
-    loop iteration to the next, and a loop whose code can ask which names are
-    bound are the other cases.
+    loop iteration to the next, a loop whose code can ask which names are
+    bound, an operation on a whole array, a reduction condition its domain
+    cannot state, a change to Python state outside the arrays, and a call that
+    prints, reads, opens a file or draws a random number are the other cases.
     """
 
 
@@ -409,6 +429,12 @@ class Tracer:
         self._path: list[int] = []
         #: How many children each open block has produced so far.
         self._counters: list[int] = [0]
+        #: The calls with an effect outside the arrays that the body made, as
+        #: ``(call, file:line)``, recorded by :class:`_CallWatch` and refused
+        #: once the body has run.
+        self.effects: list[tuple[str, str]] = []
+        #: The thread running the body; calls on any other are not its effects.
+        self.thread = threading.get_ident()
 
     # {{{ loops
 
@@ -982,6 +1008,463 @@ def _domain_text(dom: SymDom) -> str:
     """A symbolic domain the way the body spells it: ``x.dom`` or ``val.dom[r]``."""
     return f"{dom.array.name}.dom" + "".join(
         f"[{_shown(index)}]" for index in dom.prefix
+    )
+
+
+# }}}
+
+
+# {{{ state and effects outside the trace
+
+
+#: The top-level packages that are the machinery rather than the kernel. Their
+#: objects are not snapshotted, their functions are not followed, and a call
+#: made from their code is not the body's effect.
+_LIBRARIES = ("loopty", "lanky", "numpy", "pymbolic", "islpy", "loopy", "pytools")
+
+#: How many levels of helper call the snapshot follows, as guard detection does
+#: (:data:`loopty.kernel._GUARD_SEARCH_DEPTH`).
+_HELPER_DEPTH = 8
+
+
+@functools.cache
+def _library_roots() -> tuple[str, ...]:
+    """The directories whose code belongs to a library and not to a kernel.
+
+    The packages of :data:`_LIBRARIES`, found without importing them, and the
+    standard library and site-packages directories. A kernel's own file, and
+    a helper next to it, are in none of them.
+    """
+    roots: list[str] = []
+    for name in _LIBRARIES:
+        try:
+            spec = importlib.util.find_spec(name)
+        except (ImportError, ValueError):  # pragma: no cover - a broken install
+            spec = None
+        for location in getattr(spec, "submodule_search_locations", None) or ():
+            roots.append(os.path.realpath(location))
+    paths = sysconfig.get_paths()
+    for key in ("stdlib", "platstdlib", "purelib", "platlib"):
+        if key in paths:
+            roots.append(os.path.realpath(paths[key]))
+    return tuple(dict.fromkeys(roots))
+
+
+@functools.lru_cache(maxsize=4096)
+def _library_file(filename: str) -> bool:
+    """Whether code from ``filename`` is a library's rather than the kernel's."""
+    if filename.startswith("<frozen"):
+        return True
+    if filename.startswith("<"):
+        return False
+    path = os.path.realpath(filename)
+    return any(
+        path == root or path.startswith(root + os.sep) for root in _library_roots()
+    )
+
+
+def _user_object(value: Any) -> bool:
+    """Whether ``value`` is an object of the kernel author's, with attributes.
+
+    Modules, classes, functions and code are not, and neither is an object of
+    a library's type (a lanky sort, a numpy array): its attributes are the
+    library's business, and may change while a body is traced without the body
+    having done anything.
+    """
+    if isinstance(
+        value, ModuleType | type | FunctionType | MethodType | BuiltinFunctionType
+    ):
+        return False
+    module = getattr(type(value), "__module__", None) or ""
+    if module == "builtins" or module.split(".")[0] in _LIBRARIES:
+        return False
+    try:
+        vars(value)
+    except TypeError:
+        return False
+    return True
+
+
+@dataclass
+class _Name:
+    """A name the traced code reaches outside itself, and its value then.
+
+    ``holder`` is how a message names it (``the global 'G'``), ``scope`` is
+    ``"global"``, ``"closure"`` or ``"default"``, and ``read`` gives its value
+    now.
+    """
+
+    holder: str
+    name: str
+    scope: str
+    read: Callable[[], Any]
+    before: Any
+
+
+@dataclass
+class _Attributes:
+    """An object a name holds, with a copy of its attributes then."""
+
+    label: str
+    root: str
+    scope: str
+    obj: Any
+    copy: dict[str, Any]
+
+
+@dataclass
+class _Outside:
+    """What the body's code reached outside the trace when it started.
+
+    ``names`` are the globals and closure cells it names, ``held`` the lists,
+    dicts and sets those hold (directly, through tuples, or as an attribute of
+    an object they hold), and ``objects`` the kernel author's objects they hold,
+    each with its attributes. See :func:`_outside`.
+    """
+
+    names: list[_Name]
+    held: list[_Held]
+    objects: list[_Attributes]
+
+
+@dataclass(frozen=True)
+class _Change:
+    """One piece of outside state the trace changed, with both values."""
+
+    holder: str
+    cell: str
+    before: Any
+    after: Any
+
+
+def _read_global(namespace: Mapping[str, Any], name: str) -> Any:
+    """A module global's value now, or :data:`_UNBOUND`."""
+    return namespace[name] if name in namespace else _UNBOUND
+
+
+def _read_cell(cell: Any) -> Any:
+    """A closure cell's value now, or :data:`_UNBOUND`."""
+    try:
+        return cell.cell_contents
+    except ValueError:
+        return _UNBOUND
+
+
+def _outside(function: Any, owned: Collection[int]) -> _Outside:
+    """Copy the state the body's code reaches by name outside the trace.
+
+    The roots are the globals the code of ``function`` names (with the code of
+    the functions defined inside it, and whether the module binds them yet or
+    not), its closure cells and its default values, and the same for every
+    function of the kernel author's that those hold, :data:`_HELPER_DEPTH`
+    levels deep: a helper keeping a counter in its module is state too. Each
+    value is copied one level deep, as the loop snapshot is: a list, dict or
+    set shallowly, looking through tuples, and an object of the kernel
+    author's (:func:`_user_object`) by its attributes, with a list, dict or set
+    an attribute holds copied as well. A container or object reached twice is
+    copied once, and one the tracer keeps for itself (``owned``) not at all.
+    """
+    names: list[_Name] = []
+    held: list[_Held] = []
+    objects: list[_Attributes] = []
+    seen: set[int] = set(owned)
+    recorded: set[Any] = set()
+    walked: set[int] = set()
+    if isinstance(function, MethodType):
+        function = function.__func__
+    pending: list[tuple[Any, int]] = (
+        [(function, 0)] if isinstance(function, FunctionType) else []
+    )
+
+    def visit(
+        value: Any, label: str, root: str, scope: str, level: int, depth: int
+    ) -> None:
+        if id(value) in seen:
+            return
+        if isinstance(value, tuple):
+            for position, item in enumerate(value):
+                visit(item, f"{label}[{position}]", root, scope, level, depth)
+            return
+        for kind in (list, dict, set):
+            if isinstance(value, kind):
+                seen.add(id(value))
+                held.append(_Held(label, root, scope, value, kind(value)))
+                return
+        if isinstance(value, MethodType):
+            value = value.__func__
+        if isinstance(value, FunctionType):
+            if depth < _HELPER_DEPTH and not _library_file(value.__code__.co_filename):
+                pending.append((value, depth + 1))
+            return
+        if level == 0 and _user_object(value):
+            seen.add(id(value))
+            attributes = dict(vars(value))
+            objects.append(_Attributes(label, root, scope, value, attributes))
+            for attribute, item in attributes.items():
+                visit(item, f"{label}.{attribute}", root, scope, 1, depth)
+
+    while pending:
+        current, depth = pending.pop()
+        if id(current) in walked:
+            continue
+        walked.add(id(current))
+        code = current.__code__
+        namespace = current.__globals__
+        used: set[str] = set()
+        for nested in _codes(code):
+            used.update(nested.co_names)
+        for name in sorted(used):
+            # A name the module does not bind yet is recorded as unbound: a
+            # body that creates a global with ``global G`` changes it too.
+            if (id(namespace), name) in recorded:
+                continue
+            recorded.add((id(namespace), name))
+            value = _read_global(namespace, name)
+            names.append(
+                _Name(
+                    f"the global {name!r}",
+                    name,
+                    "global",
+                    functools.partial(_read_global, namespace, name),
+                    value,
+                )
+            )
+            if value is not _UNBOUND:
+                visit(value, name, name, "global", 0, depth)
+        cells = current.__closure__ or ()
+        for name, cell in zip(code.co_freevars, cells, strict=False):
+            if id(cell) in recorded:
+                continue
+            recorded.add(id(cell))
+            value = _read_cell(cell)
+            names.append(
+                _Name(
+                    f"the closure variable {name!r}",
+                    name,
+                    "closure",
+                    functools.partial(_read_cell, cell),
+                    value,
+                )
+            )
+            if value is not _UNBOUND:
+                visit(value, name, name, "closure", 0, depth)
+        positional = code.co_varnames[: code.co_argcount]
+        defaults = current.__defaults__ or ()
+        pairs = [
+            *zip(positional[len(positional) - len(defaults) :], defaults, strict=True),
+            *(current.__kwdefaults__ or {}).items(),
+        ]
+        for name, value in pairs:
+            visit(value, name, name, "default", 0, depth)
+    return _Outside(names, held, objects)
+
+
+def _outside_changes(outside: _Outside, tracer: Tracer) -> list[_Change]:
+    """What the trace changed of the state :func:`_outside` copied.
+
+    Values are compared as the loop snapshot compares them
+    (:func:`_same_value`, never ``==``). Two things are left alone, as they are
+    across a loop iteration: a name now bound to a :class:`when`, and a name now
+    bound to a loop's own variable, which is what a ``for`` whose target is a
+    global stores there; anything that reads it is refused as an escaped loop
+    variable. A container whose name was rebound is reported as that
+    rebinding.
+    """
+    loops = tracer._inames
+
+    def exempt(after: Any) -> bool:
+        if isinstance(after, when):
+            return True
+        return isinstance(after, prim.Variable) and after.name in loops
+
+    out: list[_Change] = []
+    rebound: set[tuple[str, str]] = set()
+    for entry in outside.names:
+        after = entry.read()
+        if _same_value(entry.before, after) or exempt(after):
+            continue
+        rebound.add((entry.scope, entry.name))
+        out.append(_Change(entry.holder, entry.name, entry.before, after))
+    for held in outside.held:
+        if (held.scope, held.root) in rebound:
+            continue
+        change = _changed(held, ())
+        if change is None:
+            continue
+        cell, before, after = change
+        kind = type(held.container).__name__
+        if held.label == held.root:
+            where = "closure " if held.scope == "closure" else f"{held.scope} "
+            holder = f"the {where}{kind} {held.label!r}"
+        else:
+            holder = f"the {kind} {held.label!r}"
+        out.append(_Change(holder, cell, before, after))
+    for entry in outside.objects:
+        if (entry.scope, entry.root) in rebound:
+            continue
+        now = vars(entry.obj)
+        for attribute in dict.fromkeys([*entry.copy, *now]):
+            before = entry.copy.get(attribute, _UNBOUND)
+            after = now.get(attribute, _UNBOUND)
+            if _same_value(before, after) or exempt(after):
+                continue
+            out.append(
+                _Change(
+                    f"the attribute {attribute!r} of {entry.label!r}",
+                    f"{entry.label}.{attribute}",
+                    before,
+                    after,
+                )
+            )
+            break
+    return out
+
+
+def _outside_message(name: str, changes: Sequence[_Change]) -> str:
+    """What to say about Python state outside the arrays that a trace changed."""
+    holders = ", ".join(change.holder for change in changes)
+    values = "; ".join(
+        f"{change.cell!r} is {_shown(change.before)} before the trace and "
+        f"{_shown(change.after)} after it"
+        for change in changes
+    )
+    return (
+        f"tracing {name} changed {holders} ({values}), Python state outside the "
+        "kernel's array parameters. Tracing runs the body once, at one generic "
+        "point, so such a change happens once in the trace and once per call "
+        "natively, and the compiled kernel never makes it. Keep the state in an "
+        "array parameter and write it at an index, or change it outside the "
+        "kernel."
+    )
+
+
+def _effect_of(function: Any, first: Any) -> str | None:
+    """The effect outside the arrays that calling ``function`` has, if known.
+
+    Printing, reading input and opening a file, and drawing a random number
+    from :mod:`random` or from numpy's generators, which changes a generator's
+    hidden state and bakes one draw into the term as a constant. ``first`` is
+    the call's first argument, which is the object an unbound method is
+    called on.
+    """
+    if function is builtins.print or function is builtins.input:
+        return f"{function.__name__}()"
+    if function is builtins.open:
+        return "open()"
+    name = getattr(function, "__name__", None)
+    if not isinstance(name, str):
+        return None
+    owner = getattr(function, "__self__", None)
+    if (owner is None or isinstance(owner, ModuleType)) and not isinstance(
+        function, FunctionType
+    ):
+        # ``rng.normal()`` calls the unbound method with the generator first.
+        prefix = type(first).__qualname__ + "."
+        if getattr(function, "__qualname__", "").startswith(prefix):
+            owner = first
+    if isinstance(owner, random.Random):
+        return f"random.{name}()"
+    generators = sys.modules.get("numpy.random")
+    kinds = tuple(
+        getattr(generators, kind, None)
+        for kind in ("RandomState", "Generator", "BitGenerator")
+    )
+    kinds = tuple(kind for kind in kinds if isinstance(kind, type))
+    if kinds and isinstance(owner, kinds):
+        return f"numpy.random.{type(owner).__name__}.{name}()"
+    return None
+
+
+def _call_location(code: CodeType, offset: int) -> str:
+    """``file:line`` of the instruction at ``offset``, from ``co_positions``."""
+    line = None
+    for index, position in enumerate(code.co_positions()):
+        if index == offset // 2:
+            line = position[0]
+            break
+    return f"{os.path.basename(code.co_filename)}:{line or code.co_firstlineno}"
+
+
+class _CallWatch:
+    """The body's calls, seen through ``sys.monitoring`` while it is traced.
+
+    One tool id is taken, the first of :data:`IDS` that nothing holds, the
+    first time a body is traced, and kept. Its ``CALL`` events are on only
+    while a trace runs. A call made from a library's code (see
+    :func:`_library_file`) is never the body's, and its location is disabled
+    for good, so that the tracer's own calls cost nothing after the first
+    trace. A call from the kernel author's code that has an effect
+    (:func:`_effect_of`) is recorded on the tracer, and :func:`trace` refuses
+    it once the body has run.
+
+    Without a free tool id nothing is watched, and the faithfulness fact is
+    what remains.
+    """
+
+    NAME = "loopty-trace"
+    IDS = (4, 3)
+    tool: int | None = None
+    tried = False
+    depth = 0
+
+    @classmethod
+    def start(cls) -> bool:
+        """Turn the events on; whether they are on."""
+        monitoring = getattr(sys, "monitoring", None)
+        if monitoring is None:  # pragma: no cover - Python 3.11 and older
+            return False
+        if not cls.tried:
+            cls.tried = True
+            for tool in cls.IDS:
+                if monitoring.get_tool(tool) is None:
+                    monitoring.use_tool_id(tool, cls.NAME)
+                    monitoring.register_callback(
+                        tool, monitoring.events.CALL, cls.on_call
+                    )
+                    cls.tool = tool
+                    break
+        if cls.tool is None:
+            return False
+        if cls.depth == 0:
+            monitoring.set_events(cls.tool, monitoring.events.CALL)
+        cls.depth += 1
+        return True
+
+    @classmethod
+    def stop(cls) -> None:
+        """Turn the events off again when the outermost trace ends."""
+        cls.depth -= 1
+        if cls.depth == 0 and cls.tool is not None:
+            sys.monitoring.set_events(cls.tool, sys.monitoring.events.NO_EVENTS)
+
+    @staticmethod
+    def on_call(code: CodeType, offset: int, function: Any, first: Any) -> Any:
+        """The ``CALL`` callback: record an effect of the body's own code."""
+        try:
+            tracer = current_tracer()
+            if tracer is None or tracer.thread != threading.get_ident():
+                return None
+            if _library_file(code.co_filename):
+                return sys.monitoring.DISABLE
+            effect = _effect_of(function, first)
+            if effect is not None:
+                tracer.effects.append((effect, _call_location(code, offset)))
+        except Exception:  # noqa: BLE001 - a watcher never breaks the body
+            return None
+        return None
+
+
+def _effects_message(name: str, effects: Sequence[tuple[str, str]]) -> str:
+    """What to say about calls with an effect outside the arrays."""
+    listed = ", ".join(f"{call} at {where}" for call, where in dict.fromkeys(effects))
+    return (
+        f"tracing {name} calls {listed}, an effect outside the kernel's array "
+        "parameters. Tracing runs the body once, at one generic point, so the "
+        "call happens once in the trace and once per iteration natively, and "
+        "the compiled kernel never makes it: a print shows one symbolic value, "
+        "and a random draw becomes a constant of the term. Print from the code "
+        "that calls the kernel, read and write files there, and draw random "
+        "numbers there and pass them in an array parameter."
     )
 
 
@@ -1999,6 +2482,10 @@ def trace(kernel: Any, arg_types: Any) -> Term:
     optionally ``"return"`` for the postcondition. It is what the proxies are
     built from, and it is the only thing tracing needs to know that the body
     does not already say, because sizes come from ``.dom``.
+
+    The body's effects outside its array parameters are refused once it has
+    run: a call :class:`_CallWatch` recognizes, and a change to the state
+    :func:`_outside` copied before it started.
     """
     function = getattr(kernel, "fn", kernel)
     name = getattr(kernel, "__name__", getattr(function, "__name__", "kernel"))
@@ -2006,6 +2493,7 @@ def trace(kernel: Any, arg_types: Any) -> Term:
     post_annotation = types.pop("return", None)
 
     tracer = Tracer(name, types)
+    outside = _outside(function, tracer._owned())
     arguments: list[Any] = []
     params: list[tuple[str, Any]] = []
     for parameter, annotation in types.items():
@@ -2022,6 +2510,7 @@ def trace(kernel: Any, arg_types: Any) -> Term:
             arguments.append(Var(parameter))
 
     _TRACERS.append(tracer)
+    watching = _CallWatch.start()
     try:
         function(*arguments)
     except SymbolicBoolError as exc:
@@ -2031,6 +2520,8 @@ def trace(kernel: Any, arg_types: Any) -> Term:
             "masks the writes of the block rather than choosing a branch."
         ) from exc
     finally:
+        if watching:
+            _CallWatch.stop()
         _TRACERS.pop()
 
     if tracer.loops:
@@ -2038,6 +2529,11 @@ def trace(kernel: Any, arg_types: Any) -> Term:
         # A level still open once the body has returned means that iterator was
         # abandoned, which only a 'break' or a 'return' inside the loop does.
         raise TraceError(_abandoned_message([loop.iname for loop in tracer.loops]))
+    if tracer.effects:
+        raise TraceError(_effects_message(name, tracer.effects))
+    changes = _outside_changes(outside, tracer)
+    if changes:
+        raise TraceError(_outside_message(name, changes))
 
     sizes: set[str] = set()
     for _, arrtype in params:
