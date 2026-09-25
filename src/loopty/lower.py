@@ -996,15 +996,30 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
         # the right-hand side, the subscripts of the assignee, the guard, and
         # the accumulated cell. A name missing here is a dependence edge that
         # is never drawn, so the list is not written out a second time.
+        accesses = statement_accesses(stmt)
         read_arrays = {
             array
-            for array, _indices, kind, _inames, _domain in statement_accesses(stmt)
+            for array, _indices, kind, _inames, _domain in accesses
             if kind in ("read", "acc")
+        }
+        # The flat index of a ragged access, read or written, also reads the
+        # offsets argument. That read is the layout's and not the term's, so
+        # the collector above does not list it, but a statement that writes
+        # the offsets has to be ordered against it all the same. loopy's
+        # single-writer heuristic used to supply the edge when that statement
+        # was the only writer; the dependences below are final, so it is drawn
+        # here, in the direction the body gives it.
+        read_arrays |= {
+            builder.offsets_for(array)
+            for array, _indices, _kind, _inames, _domain in accesses
+            if builder.ragged_axis(array) is not None
         }
         written = stmt.assignee.array
 
         # Order the statements by their data: a statement runs after every
         # earlier one it could read from, write over, or overwrite the input of.
+        # This is the whole of the order within one iteration, which is why the
+        # instruction's dependences can be final.
         depends: set[str] = set()
         for array in read_arrays:
             depends.update(writes_before.get(array, ()))

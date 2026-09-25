@@ -278,7 +278,12 @@ with a pair of statement instances.
   add an edge from a statement to a later one that writes what it reads: that
   order is the loop's, and the edge made the first run fail with
   `DependencyCycleFound`. The coupled wave demo was the first kernel to have the
-  shape; see note 7 in `docs/loopy-notes.md`.
+  shape; see note 7 in `docs/loopy-notes.md`. The heuristic had also been what
+  ordered a read through a ragged array's offsets against a statement that
+  writes them, when that statement was their only writer, and not always in the
+  body's direction. `lower_generic` now counts the offsets as read by every
+  statement that touches a ragged array, so a kernel that computes its offsets
+  and then reads through them is not refused with `VariableAccessNotOrdered`.
 
 ### Changed
 

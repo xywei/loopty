@@ -160,5 +160,11 @@ across iterations is the loop's, so the added edge is not a dependence at all.
 `depends_on_is_final=True`. `lower_generic` already orders a statement after
 every earlier one it could read from, write over, or overwrite the input of,
 which is the whole of the order within an iteration, so there is nothing left
-for the heuristic to add. The instructions that assign ragged bounds
-(`cnt_r_init`) are left to it; they read only arguments, which nothing writes.
+for the heuristic to add. One read is not among the term's accesses: the flat
+index of a ragged access goes through the offsets argument. A kernel that writes
+those offsets and reads through them (a scan fused with the product that uses
+it) relied on the heuristic for that edge, and without it loopy refuses the
+kernel with `VariableAccessNotOrdered`; `lower_generic` counts the offsets as
+read by every statement that touches a ragged array, so the edge is drawn, and
+in the direction the body gives it. The instructions that assign ragged bounds
+(`cnt_r_init`) are left to the heuristic, as before.
