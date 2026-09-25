@@ -284,6 +284,33 @@ def test_inner_binders_under_different_outer_binders_get_their_own_inames() -> N
 
 
 @kernel
+def ragged_total(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    s: Arr[Fin[2], Real],
+):
+    """A double sum whose inner bound is the row length the outer binder selects.
+
+    The second statement reads ``cnt``, which the first one does only through
+    the row length it cannot compute; without it the lowering would refuse
+    ``cnt`` as a parameter the body never touches.
+    """
+    s[0] = reduce_sum(reduce_sum(val[q, j] for j in val.dom[q]) for q in val.dom)
+    s[1] = reduce_sum(cnt[r] for r in cnt.dom)
+
+
+@kernel
+def ragged_total_by_rows(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    s: Arr[Fin[1], Real],
+):
+    """The same sum with the outer reduction written as an accumulation loop."""
+    for q in val.dom:
+        s[0] += reduce_sum(val[q, j] for j in val.dom[q])
+
+
+@kernel
 def ragged_total_by_cells(
     cnt: Arr[Fin[n], Nat],  # noqa: F821
     val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
@@ -294,6 +321,45 @@ def ragged_total_by_cells(
     for q in val.dom:
         rows[q] = reduce_sum(val[q, j] for j in val.dom[q])
     s[0] = reduce_sum(rows[p] for p in rows.dom)
+
+
+def test_a_ragged_bound_over_an_outer_reduction_binder_is_refused_by_name() -> None:
+    # The analysis decides this term (``val[q, j]`` is in bounds). The lowering
+    # cannot build it: ``cnt[q]`` is computed inside the loop over ``q``, and a
+    # reduction binder has no loop another instruction can run in. It used to
+    # get as far as the run and fail there with loopy's "value argument
+    # 'nl_cnt_q' was not given".
+    from loopty.lower import LoweringError
+
+    counts = [2, 0, 3]
+    with pytest.raises(LoweringError, match=r"bounded by cnt\[q\].*binder of the"):
+        run(
+            ragged_total.trace(),
+            cnt=np.array(counts),
+            val=Arr.ragged(counts, values=[1.0, 2.0, 3.0, 4.0, 5.0]),
+            s=np.zeros(2),
+        )
+
+
+def test_the_nestings_the_refusal_suggests_lower_and_run() -> None:
+    counts = [2, 0, 3]
+    values = [1.0, 2.0, 3.0, 4.0, 5.0]
+    out = run(
+        ragged_total_by_rows.trace(),
+        cnt=np.array(counts),
+        val=Arr.ragged(counts, values=values),
+        s=np.zeros(1),
+    )
+    assert np.allclose(out["s"], [15.0])
+    out = run(
+        ragged_total_by_cells.trace(),
+        cnt=np.array(counts),
+        val=Arr.ragged(counts, values=values),
+        rows=np.zeros(3),
+        s=np.zeros(1),
+    )
+    assert np.allclose(out["rows"], [3.0, 0.0, 12.0])
+    assert np.allclose(out["s"], [15.0])
 
 
 def test_a_ragged_domain_follows_the_loop_it_is_nested_in() -> None:

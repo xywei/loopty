@@ -185,6 +185,15 @@ end to end; the edges are sharp.
   consumes postconditions as hypotheses yet, so "facts travel" is bookkeeping.
 - Only a two-axis (row, fiber) ragged array lowers. A deeper dependent sum
   raises.
+- A reduction nested in another one cannot take its bound from the outer
+  binder when that bound is not affine:
+  `reduce_sum(reduce_sum(val[q, j] for j in val.dom[q]) for q in val.dom)` is
+  decided by the analysis and refused by the lowering with a `LoweringError`,
+  because a row length is computed inside the loop over its row and a reduction
+  binder has no such loop. Writing the outer reduction as a loop that
+  accumulates into the output, or keeping each row's sum in a cell indexed by
+  the row, lowers and runs. An affine inner bound (`Fin[i + 1]`) lowers as it
+  is.
 - An index expression isl cannot express widens the footprint to the whole
   array. That is sound, but it can reject a legal schedule.
 - `realize(var, tree=True)` checks and marks the reassociation; the reduction

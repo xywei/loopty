@@ -583,6 +583,67 @@ def _refuse_free_name_sorts(term: Term) -> None:
         raise LoweringError(free_name_sorts_message(term.name, term.params, found))
 
 
+def _refuse_bounds_over_reduction_binders(term: Term, builder: _Builder) -> None:
+    """Refuse a nested reduction whose bound is read off an outer reduction's binder.
+
+    ``reduce_sum(reduce_sum(val[q, j] for j in val.dom[q]) for q in val.dom)``
+    is a term the analysis decides, and one loopy cannot be given. The inner
+    bound ``cnt[q]`` is not affine, so it reaches isl as a parameter
+    (``nl_cnt_q``), and the lowering computes such a parameter in a scalar
+    temporary assigned inside the loop over its row (see :func:`_count_inits`).
+    When the row is a statement's loop variable there is such a loop. When it is
+    the binder of an enclosing reduction there is none: a reduction is one
+    instruction's expression, and no other instruction can run inside its
+    loop. Nothing assigned the parameter, loopy declared it a value argument,
+    and the run failed with "value argument 'nl_cnt_q' was not given", which
+    names neither the reduction nor a way out.
+
+    An inner bound that is affine in the outer binder (``Fin[i + 1]``, the
+    lower triangle) needs no temporary and still lowers; only a bound that had
+    to be reflected, or that a hand-built term spells as a row length
+    (:data:`COUNT_PARAM`), over an outer binder is refused.
+    """
+    reflected = dict(term.reflected)
+    families = builder.counts_families
+    for stmt in term.stmts:
+        for outer in reductions_of(stmt.expr):
+            binders = set(outer.inames)
+            spelled = {
+                spelling: (f"{counts}[{binder}]", {binder})
+                for counts in families
+                for binder in binders
+                for spelling in count_param_names(counts, binder)
+            }
+            for inner in reductions_of(outer.body):
+                for param in _domain_params(inner.domain):
+                    if param in reflected:
+                        depends = _names_in(reflected[param]) & binders
+                        if not depends:
+                            continue
+                        bound = str(_plain(reflected[param]))
+                    elif param in spelled:
+                        bound, depends = spelled[param]
+                    else:
+                        continue
+                    over = ", ".join(sorted(depends))
+                    where = f" ({stmt.where})" if stmt.where else ""
+                    raise LoweringError(
+                        f"statement {stmt.id} of {term.name}{where} has a "
+                        f"reduction over {', '.join(inner.inames)} bounded by "
+                        f"{bound}, which depends on {over}, the binder of the "
+                        "reduction it is nested in. A bound that is not affine "
+                        "is computed inside the loop over the row it depends "
+                        "on, and a reduction's binder has no loop another "
+                        "instruction can run in, so this nesting cannot be "
+                        f"lowered. Write the reduction over {over} as a for "
+                        "loop that accumulates into the output "
+                        f"('for {over} in ...: out[...] += reduce_sum(...)'), "
+                        f"or keep each inner sum in a cell indexed by {over} "
+                        f"('rows[{over}] = reduce_sum(...)' in that loop) and "
+                        "reduce over those cells."
+                    )
+
+
 def _written_arrays(term: Term) -> tuple[str, ...]:
     """Arrays the term assigns to, in first-seen order."""
     names: list[str] = []
@@ -1041,6 +1102,7 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
     _refuse_reserved_names(term)
     _refuse_free_name_sorts(term)
     builder = _Builder(term, target)
+    _refuse_bounds_over_reduction_binders(term, builder)
     builder.plan_reductions()
     expr = builder.expr
     ragged_bounds = builder.ragged_bound_params

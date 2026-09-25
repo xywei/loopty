@@ -322,6 +322,15 @@ with a pair of statement instances.
   that cannot be evaluated is measured against an axis written the same way
   (`contract.axis_extents`), so `i : Fin[n * n]` is still bounded by the nine
   cells it indexes.
+- A reduction nested in another one whose bound is read off the outer binder
+  and is not affine, as in `reduce_sum(reduce_sum(val[q, j] for j in
+  val.dom[q]) for q in val.dom)`, is refused by the lowering with a
+  `LoweringError` that names the statement and the bound and says what to
+  write instead: the outer reduction as a loop that accumulates into the
+  output, or each inner sum kept in a cell indexed by the row. It used to fail
+  at run time with loopy's "value argument 'nl_cnt_q' was not given". A row
+  length is computed inside the loop over its row, and a reduction binder has
+  no loop another instruction can run in.
 - The domains of a lowered kernel are ordered so that each follows the domain
   whose loop variables it names. loopy reads the nesting off that order, and a
   ragged loop followed by a second loop put the row-length domain after the
