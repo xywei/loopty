@@ -339,8 +339,9 @@ class Arr:
             else:
                 continue
             if negative:
+                where = f" in {key!r}" if isinstance(key, tuple) else ""
                 raise IndexError(
-                    f"index {part} in {key!r} is negative: an index of a loopty "
+                    f"index {part}{where} is negative: an index of a loopty "
                     "array is a point of its index type, which starts at 0, and "
                     "is never counted from the end"
                 )

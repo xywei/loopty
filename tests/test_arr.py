@@ -109,9 +109,9 @@ def test_a_negative_index_into_a_dense_array_is_refused() -> None:
     # numpy would read x[-1] as the last cell; Fin[n] has no negative points and
     # generated C reads in front of the buffer, so the native run may not wrap.
     a = Arr.from_numpy(np.arange(6.0).reshape(2, 3))
-    with pytest.raises(IndexError, match="index -1 in -1 is negative"):
+    with pytest.raises(IndexError, match=r"^index -1 is negative"):
         a[-1]
-    with pytest.raises(IndexError, match="is negative"):
+    with pytest.raises(IndexError, match=r"^index -1 in \(0, -1\) is negative"):
         a[0, -1]
     with pytest.raises(IndexError, match="is negative"):
         a[np.int64(-2), 0]
