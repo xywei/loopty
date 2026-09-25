@@ -103,11 +103,11 @@ def disagreement(got: Any, want: Any, exactness: str) -> np.ndarray:
     bits. IEEE 754 leaves those unspecified for the result of an operation,
     and two spellings of one operation set them differently: pymbolic writes
     ``-x`` as ``-1*x``, and for a NaN ``x`` negation flips the sign bit where
-    the product keeps it. A complex cell is compared part by part. The other
-    classes allow each cell ``eps_class * (|want| + FLOOR)``; a cell whose two
-    values are equal, or are both NaN, agrees whatever its allowance, which is
-    what keeps an infinity both runs computed from reading as a difference of
-    NaN.
+    the product keeps it. The other classes allow each cell
+    ``eps_class * (|want| + FLOOR)``; a cell whose two values match (are
+    equal, or are both NaN) agrees whatever its allowance, which is what keeps
+    an infinity both runs computed from reading as a difference of NaN. A
+    complex cell matches part by part, so ``nan + 1j`` and ``nan + 2j`` do not.
 
     The two arrays have one shape and one dtype, as two runs of a kernel on
     copies of one argument do; anything else is a disagreement at every cell.
@@ -118,25 +118,24 @@ def disagreement(got: Any, want: Any, exactness: str) -> np.ndarray:
         return np.ones(want.shape, dtype=bool)
     if want.dtype.kind not in "fc":
         return np.asarray(got != want, dtype=bool)
+    # Each cell as its real parts: one for a float, two for a complex.
+    parts = [
+        np.stack([side.real, side.imag], axis=-1)
+        if side.dtype.kind == "c"
+        else side[..., np.newaxis]
+        for side in (got, want)
+    ]
+    both_nan = np.isnan(parts[0]) & np.isnan(parts[1])
     if exactness == "exact":
-        # Each cell as its real parts: one for a float, two for a complex.
-        sides = [
-            np.stack([side.real, side.imag], axis=-1)
-            if side.dtype.kind == "c"
-            else side[..., np.newaxis]
-            for side in (got, want)
-        ]
-        width = sides[1].dtype.itemsize
+        width = parts[1].dtype.itemsize
         bits = [
-            np.ascontiguousarray(side).view(np.uint8).reshape(*side.shape, width)
-            for side in sides
+            np.ascontiguousarray(part).view(np.uint8).reshape(*part.shape, width)
+            for part in parts
         ]
-        differ = np.any(bits[0] != bits[1], axis=-1)
-        differ &= ~(np.isnan(sides[0]) & np.isnan(sides[1]))
+        differ = np.any(bits[0] != bits[1], axis=-1) & ~both_nan
         return np.any(differ, axis=-1)
     epsilon = TOLERANCE[exactness]
     with np.errstate(invalid="ignore", over="ignore"):
-        same = got == want
-        both_nan = np.isnan(got) & np.isnan(want)
+        matched = np.all((parts[0] == parts[1]) | both_nan, axis=-1)
         near = np.abs(got - want) <= epsilon * (np.abs(want) + TOLERANCE_FLOOR)
-    return ~(same | both_nan | near)
+    return ~(matched | near)

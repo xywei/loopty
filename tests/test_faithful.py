@@ -475,6 +475,15 @@ def test_an_approx_output_is_compared_at_its_tolerance() -> None:
     assert disagreement(np.zeros(2), np.zeros(3), "approx").all()
 
 
+def test_a_complex_cell_with_a_nan_part_matches_part_by_part() -> None:
+    # np.isnan of a complex is true when either part is, which used to let a
+    # NaN real part excuse any imaginary part.
+    want = np.array([complex(np.nan, 1.0), complex(np.nan, 1.0), complex(1.0, 2.0)])
+    got = np.array([complex(np.nan, 1.0), complex(np.nan, 2.0), complex(1.0, 2.0)])
+    for exactness in ("approx", "reassoc"):
+        assert list(disagreement(got, want, exactness)) == [False, True, False]
+
+
 # }}}
 
 
