@@ -54,7 +54,8 @@ class Dom:
     """The iteration domain of one axis of an array.
 
     ``arr.dom`` is the outer axis; ``arr.dom[i]`` is the fiber over ``i``, which
-    for a ragged array has a different extent for each ``i``. Iterating yields
+    for a ragged array has a different extent for each ``i``, and
+    ``arr.dom[i, j]`` is ``arr.dom[i][j]``. Iterating yields
     the concrete indices; under tracing the symbolic counterpart yields a single
     generic point and pushes the bound onto the enclosing isl domain.
     """
@@ -81,8 +82,19 @@ class Dom:
     def __iter__(self) -> Iterator[int]:
         return iter(range(self.size))
 
-    def __getitem__(self, index: int) -> Dom:
-        """The fiber over ``index``: the domain of the next axis."""
+    def __getitem__(self, index: int | tuple[int, ...]) -> Dom:
+        """The fiber over ``index``: the domain of the next axis.
+
+        A tuple fixes one axis per entry, the way ``arr[r, j]`` indexes a cell,
+        so ``a.dom[r, i]`` is ``a.dom[r][i]``.
+        """
+        if isinstance(index, tuple):
+            if not index:
+                raise TypeError("a domain index needs at least one entry")
+            fiber = self
+            for part in index:
+                fiber = fiber[part]
+            return fiber
         size = self.size
         if not isinstance(index, int | np.integer):
             raise TypeError(f"domain index must be an integer, got {index!r}")

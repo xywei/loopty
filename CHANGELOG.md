@@ -451,6 +451,11 @@ with a pair of statement instances.
   `Schedule` addresses a reduction by them, so `split("j_0", 2)` reaches the
   second sum and a parallel tag on it is judged by that sum's exactness rather
   than by the last sum written over `j`. See note 8 in `docs/loopy-notes.md`.
+- `a.dom[r, i]` is `a.dom[r][i]`, while tracing and on a runtime array, as
+  `a[r, i]` is a cell. The tracer took the tuple for one index and gave the
+  domain of axis 1 whatever its length, so a loop over the third axis of a
+  three-axis array ran over the second, and a native run refused the tuple.
+  `a.dom[()]` is refused in both.
 
 ### Changed
 
