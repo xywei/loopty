@@ -2,14 +2,15 @@
 """Re-run the commands pasted into a Markdown file and update their output.
 
 ``examples/README.md`` claims, in so many words, that every console block in it
-is what the command really prints. That claim goes stale silently: a line number
-moves, a fact count changes, a tolerance is retuned, and the document keeps
-asserting the old numbers with no test to contradict it. This script is the
-test. It finds every fenced ``console`` block whose first line is a single
-shell prompt, runs that command, and replaces the rest of the block with what
-the command actually wrote.
+is what the command really prints, and ``README.md`` and ``docs/quickstart.md``
+show transcripts too. That claim goes stale silently: a line number moves, a
+fact count changes, a tolerance is retuned, and the document keeps asserting the
+old numbers with no test to contradict it. This script is the test. It finds
+every fenced ``console`` block whose first line is a single shell prompt, runs
+that command, and replaces the rest of the block with what the command actually
+wrote.
 
-Two conventions make that safe to automate.
+Three conventions make that safe to automate.
 
 *One command per block.* A block whose first line is not ``$ <command>``, or
 which has more than one prompt line, is left exactly as it is: those are the
@@ -20,6 +21,16 @@ intent is visible in the document rather than in a marker.
 ``ParameterFinderWarning`` about finding ``n`` from a flat array, for one), and
 those are noise that would change with the toolchain rather than with loopty.
 They are shown to whoever runs this script and kept out of the document.
+
+*An elided block keeps a checked excerpt.* A block with a line that is just
+``...`` shows part of what its command prints, such as a few rows of a ledger.
+Every other line of it has to be a line of the output, in order, and the block
+is current when each one is there verbatim. A refresh finds each line again,
+verbatim or else as the first later line of the same shape (the same text once
+numbers, column padding and rules of dashes are blurred, which is how a moved
+line number or a wider column shows up), and puts the new text in its place. A
+line that matches nothing fails the block, which is left as it was: which rows
+an excerpt keeps is a decision for whoever edits the document.
 
 A command that exits non-zero is a failure, in both modes. Its output is not
 pasted, because the partial output of a broken demo is not what the document
@@ -33,27 +44,30 @@ Usage, from anywhere::
     uv run python scripts/refresh_example_outputs.py            # rewrite
     uv run python scripts/refresh_example_outputs.py --check    # exit 1 if stale
 
-``--check`` is what a CI job or a pre-release hook would run: it rewrites
-nothing and fails if any block is out of date or any command fails, naming the
-block.
+``--check`` is what CI runs: it rewrites nothing and fails if any block is out
+of date or any command fails, naming the block.
 """
 
 from __future__ import annotations
 
 import argparse
+import re
 import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 #: The documents whose console blocks are regenerated, relative to the root.
-DOCUMENTS = ("examples/README.md",)
+DOCUMENTS = ("examples/README.md", "README.md", "docs/quickstart.md")
 
 #: How long any one demo is allowed to take. Generous: a cold run compiles C.
 TIMEOUT = 300
 
 PROMPT = "$ "
 FENCE = "```"
+
+#: A line of a console block that stands for output left out.
+ELISION = "..."
 
 
 @dataclass
@@ -63,6 +77,7 @@ class Block:
     command: str
     start: int  # index of the line after the prompt
     stop: int  # index of the closing fence
+    elided: bool = False  # it shows an excerpt; see excerpt()
 
 
 def repository_root() -> Path:
@@ -97,10 +112,59 @@ def blocks_of(lines: list[str]) -> list[Block]:
                     command=body[0][len(PROMPT) :].strip(),
                     start=opening + 2,
                     stop=closing,
+                    elided=any(line.strip() == ELISION for line in body[1:]),
                 )
             )
         index = closing + 1
     return out
+
+
+def shape(line: str) -> str:
+    """A line with what moves between runs blurred: numbers, padding and rules.
+
+    Two lines of the same shape are the same line of a transcript at another
+    location, count or column width: ``spmv.py:79`` and ``spmv.py:80``, or a
+    ledger's rule of dashes under a wider column.
+    """
+    text = " ".join(line.split())
+    text = re.sub(r"\d+", "#", text)
+    return re.sub(r"-{2,}", "-", text)
+
+
+def excerpt(kept: list[str], output: list[str]) -> tuple[list[str], list[str]]:
+    """An elided block's lines brought up to date against its command's output.
+
+    Every line but an elision is looked for after the line before it matched:
+    verbatim, or else as the first line of the same :func:`shape`, whose text
+    takes its place. Returns the updated lines and the lines that matched
+    nothing, which are kept as they were.
+    """
+    updated: list[str] = []
+    missing: list[str] = []
+    cursor = 0
+    for line in kept:
+        if line.strip() == ELISION:
+            updated.append(line)
+            continue
+        found = next(
+            (k for k in range(cursor, len(output)) if output[k] == line), None
+        )
+        if found is None:
+            found = next(
+                (
+                    k
+                    for k in range(cursor, len(output))
+                    if shape(output[k]) == shape(line)
+                ),
+                None,
+            )
+        if found is None:
+            missing.append(line)
+            updated.append(line)
+            continue
+        updated.append(output[found])
+        cursor = found + 1
+    return updated, missing
 
 
 class CommandFailed(RuntimeError):
@@ -145,9 +209,10 @@ def refresh(path: Path, root: Path, check: bool) -> tuple[bool, list[str]]:
     lines = path.read_text(encoding="utf-8").split("\n")
     changed = False
     failed: list[str] = []
+    label = path.relative_to(root) if path.is_relative_to(root) else path.name
     # Backwards, so that rewriting one block does not move the next one's bounds.
     for block in reversed(blocks_of(lines)):
-        print(f"{path.name}: {block.command}")
+        print(f"{label}: {block.command}")
         try:
             captured = run(block.command, root)
         except CommandFailed as exc:
@@ -156,6 +221,14 @@ def refresh(path: Path, root: Path, check: bool) -> tuple[bool, list[str]]:
                 print(f"    {line}")
             failed.append(block.command)
             continue
+        if block.elided:
+            captured, missing = excerpt(lines[block.start : block.stop], captured)
+            if missing:
+                print(f"  FAILED (lines not in the output): {block.command}")
+                for line in missing[:5]:
+                    print(f"    {line}")
+                failed.append(block.command)
+                continue
         if lines[block.start : block.stop] == captured:
             continue
         changed = True

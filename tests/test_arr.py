@@ -53,6 +53,22 @@ def test_dense_dom_rejects_an_out_of_range_fiber() -> None:
         a.dom[5]
 
 
+def test_a_tuple_domain_index_fixes_one_axis_per_entry() -> None:
+    # ``a.dom[r, i]`` reads the way ``a[r, i]`` indexes a cell, so it is
+    # ``a.dom[r][i]``, checked one axis at a time. It used to be refused here
+    # and taken for one index while tracing.
+    a = Arr.zeros((Fin[2], Fin[3], Fin[4]))
+    fiber = a.dom[1, 2]
+    assert (fiber.axis, fiber.prefix) == (2, (1, 2))
+    assert list(fiber) == [0, 1, 2, 3]
+    with pytest.raises(IndexError, match="out of range"):
+        a.dom[1, 3]
+    with pytest.raises(IndexError, match="no axis"):
+        a.dom[0, 0, 0]
+    with pytest.raises(TypeError, match="at least one entry"):
+        a.dom[()]
+
+
 def test_ragged_offsets_counts_and_values() -> None:
     a = Arr.ragged([2, 0, 3], values=[1.0, 2.0, 3.0, 4.0, 5.0])
     assert a.is_ragged

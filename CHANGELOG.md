@@ -464,6 +464,47 @@ with a pair of statement instances.
   read directly, and again through `val[r - 1, j]` inside such a sum, collided
   the same way. No example's ledger changes: where p2p lists a read twice, the
   two facts agreed.
+- Two statements whose sums bind the same name lower and run. loopy realizes a
+  reduction as a loop inside its instruction and an iname is one loop, so when
+  the second statement depends on the first, its sum had to run inside a loop
+  that must finish before it starts: two statements whose nested sums both bind
+  `i` and `j`, or a sum over `j` followed by a loop over `j` that reads it,
+  failed at the first run with a `CycleError`. A reduction now keeps its
+  binders only when no other statement has them, as loop variables or as the
+  binders of an earlier sum, and is lowered under fresh inames (`j_0`)
+  otherwise. In one statement a name is shared only by sums over the same
+  domain, so `j` bound as the second of a pair and then alone no longer makes
+  loopy refuse the kernel for defining `j` twice. A nested reduction's domain
+  follows its renamed outer binder, which it used to name by the written name,
+  tying the inner loop to the other statement's outer one.
+  `Lowering.reduction_inames` lists the inames each reduction ends up with, and
+  `Schedule` addresses a reduction by them, so `split("j_0", 2)` reaches the
+  second sum and a parallel tag on it is judged by that sum's exactness rather
+  than by the last sum written over `j`. See note 8 in `docs/loopy-notes.md`.
+- `a.dom[r, i]` is `a.dom[r][i]`, while tracing and on a runtime array, as
+  `a[r, i]` is a cell. The tracer took the tuple for one index and gave the
+  domain of axis 1 whatever its length, so a loop over the third axis of a
+  three-axis array ran over the second, and a native run refused the tuple.
+  `a.dom[()]` is refused in both.
+- A kernel with an `exact` output is compiled with floating-point contraction
+  off: `-ffp-contract=off` in its build options on the C target, and
+  `#pragma STDC FP_CONTRACT OFF` (or the OpenCL pragma) in the source. A fused
+  multiply-add rounds `a * b + c` once where the native run rounds twice, and
+  an `exact` output is compared bit for bit, so a compiler that contracts
+  (clang by default, on arm64 where FMA is in the baseline) could refute a
+  correct kernel. loopy's own `gcc -std=c99 -O3 -fPIC` does not contract on
+  x86-64, which is why nothing had shown it; `tests/test_contraction.py` makes
+  a compiler contract on hardware with FMA and shows the pin keeping the bits.
+  `Lowering.contraction` records the choice, and note 9 in
+  `docs/loopy-notes.md` has the flags.
+- The transcripts in `README.md` and `docs/quickstart.md` are regenerated and
+  checked by `scripts/refresh_example_outputs.py`, as those in
+  `examples/README.md` were, and CI runs it with `--check`. A console block
+  with a `...` line is an excerpt: the lines it keeps have to be lines of the
+  output, in order, verbatim, and a refresh follows a moved line number or a
+  wider column by the shape of the line and fails on a line that is gone. The
+  abridged ledger in `README.md`, whose rows say they are verbatim, was kept
+  so by hand, and its rule of dashes was not.
 
 ### Changed
 
@@ -499,6 +540,17 @@ with a pair of statement instances.
   something a trace assumes; it is what a schedule lowers an accumulation to
   when it reorders one, and `realize(var, tree=True)` over an `exact`
   accumulation is refused.
+- **`import loopty` imports neither loopy nor islpy.** Each top-level name is
+  imported from its module the first time it is used, and the executor imports
+  the lowering when it first lowers, so a file of kernels imports no loopy, and
+  neither does lanky's plugin discovery, which loads loopty's entry points for
+  every command. Measured once, `import loopty` went from about 160 ms to
+  about 1 ms, and importing the names a kernel file uses, or loading the
+  plugins, from about 160 ms to about 100 ms, which is numpy, pymbolic, lanky
+  and islpy. `kernel` and `trace` stay the functions after their submodules are
+  imported.
+- `loopty.sum` is no longer in `__all__`, so `from loopty import *` leaves the
+  builtin `sum` alone. The alias itself remains.
 - `islpy` is pinned below 2026. loopy 2025.2 calls `Aff.is_equal` during code
   generation for a tiled loop nest and `BasicMap.is_bijective` in `map_domain`,
   and islpy 2026 removed both. Drop the ceiling once a loopy release supports

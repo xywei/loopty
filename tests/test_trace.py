@@ -133,6 +133,49 @@ def test_a_nested_reduction_may_not_reuse_the_outer_binder() -> None:
         term_of(shadowing_binders)
 
 
+def fibers_by_tuple(u: Arr[Fin[nx], Fin[ny], Fin[nz], Real]):  # noqa: F821
+    for t in u.dom:
+        for i in u.dom[t]:
+            for k in u.dom[t, i]:
+                u[t, i, k] = 0.0
+
+
+def fibers_by_chain(u: Arr[Fin[nx], Fin[ny], Fin[nz], Real]):  # noqa: F821
+    for t in u.dom:
+        for i in u.dom[t]:
+            for k in u.dom[t][i]:
+                u[t, i, k] = 0.0
+
+
+def test_a_tuple_domain_index_is_one_index_per_axis() -> None:
+    # ``u.dom[t, i]`` used to be read as one index, the tuple, and gave the
+    # domain of axis 1 whatever its length: the loop over ``k`` ran over
+    # ``Fin[ny]`` rather than ``Fin[nz]``. It is ``u.dom[t][i]``, as it is on a
+    # runtime array.
+    (stmt,) = term_of(fibers_by_tuple).stmts
+    (want,) = term_of(fibers_by_chain).stmts
+    assert stmt.domain.is_subset(want.domain)
+    assert want.domain.is_subset(stmt.domain)
+    box = isl.Set(
+        "[nx, ny, nz] -> { [t, i, k] : 0 <= t < nx and 0 <= i < ny and 0 <= k < nz }"
+    )
+    assert stmt.domain.is_subset(box) and box.is_subset(stmt.domain)
+
+
+def fiber_past_the_last_axis(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+):
+    for r in val.dom:
+        for j in val.dom[r, 0]:
+            val[r, j] = 0.0
+
+
+def test_a_tuple_domain_index_past_the_last_axis_is_refused() -> None:
+    with pytest.raises(TraceError, match="no axis 2"):
+        term_of(fiber_past_the_last_axis)
+
+
 def test_accesses_are_read_off_the_expression() -> None:
     stmt = term_of(spmv).stmts[0]
     outer = {access.array for access in accesses_in(stmt.expr, into_reductions=False)}

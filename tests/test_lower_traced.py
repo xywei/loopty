@@ -354,6 +354,177 @@ def test_inner_binders_under_different_outer_binders_get_their_own_inames() -> N
 
 
 @kernel
+def two_totals_one_spelling(
+    a: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+    b: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+    s: Arr[Fin[2], Real],
+):
+    """Two double sums that bind ``i`` and ``j`` at the same two levels."""
+    s[0] = reduce_sum(reduce_sum(a[i, j] for j in a.dom[i]) for i in a.dom)
+    s[1] = reduce_sum(reduce_sum(b[i, j] for j in b.dom[i]) for i in b.dom)
+
+
+@kernel
+def sum_then_loop(
+    x: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    s: Arr[Fin[1], Real],
+):
+    """A sum over ``j``, then a loop over ``j`` that reads the sum."""
+    s[0] = reduce_sum(x[j] for j in x.dom)
+    for j in x.dom:
+        y[j] = x[j] + s[0]
+
+
+@kernel
+def pair_and_single(
+    a: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+    b: Arr[Fin[m], Real],  # noqa: F821
+    s: Arr[Fin[1], Real],
+):
+    """One statement with a sum over ``i, j`` and a sum over ``j`` alone."""
+    s[0] = reduce_sum(a[i, j] for i in a.dom for j in a.dom[i]) + reduce_sum(
+        b[j] for j in b.dom
+    )
+
+
+def test_two_statements_with_the_same_nested_binders_lower_and_run() -> None:
+    # loopy realizes a reduction as a loop inside its instruction, and two
+    # instructions that reduce over one iname share that loop. ``s[1]`` is
+    # ordered after ``s[0]``, so its sums had to run inside loops that must
+    # finish before it starts, and loopy stopped with a CycleError. The second
+    # statement's binders get inames of their own, and the inner domain names
+    # the renamed outer binder, not the first statement's ``i``.
+    from loopty.lower import lower_generic
+
+    a = np.arange(12.0).reshape(3, 4)
+    out = run(two_totals_one_spelling.trace(), a=a, b=2.0 * a, s=np.zeros(2))
+    assert np.allclose(out["s"], [a.sum(), 2.0 * a.sum()])
+
+    lowering = lower_generic(two_totals_one_spelling.trace(), "c")
+    assert lowering.reduction_inames == {
+        "S0:0": ("i",),
+        "S0:1": ("j",),
+        "S1:0": ("i_0",),
+        "S1:1": ("j_0",),
+    }
+    params = {
+        tuple(domain.get_var_names(isl.dim_type.set)): set(
+            domain.get_var_names(isl.dim_type.param)
+        )
+        for domain in lowering.kernel.default_entrypoint.domains
+    }
+    assert "i_0" in params[("j_0",)] and "i" not in params[("j_0",)], params
+
+
+def test_a_sum_and_a_later_loop_over_the_same_name_lower_and_run() -> None:
+    # The same collision between a reduction binder and another statement's
+    # loop variable: the loop over ``j`` reads the sum, and the sum's own loop
+    # was that loop.
+    x = np.arange(4.0)
+    out = run(sum_then_loop.trace(), x=x, y=np.zeros(4), s=np.zeros(1))
+    assert np.allclose(out["y"], x + x.sum())
+
+
+def test_a_binder_pair_and_a_single_binder_in_one_statement_lower_and_run() -> None:
+    # ``j`` bound as the second of a pair and then alone used to be kept for
+    # both, and loopy refused the second domain for redefining ``j``.
+    a = np.arange(12.0).reshape(3, 4)
+    b = np.arange(4.0)
+    out = run(pair_and_single.trace(), a=a, b=b, s=np.zeros(1))
+    assert np.allclose(out["s"], [a.sum() + b.sum()])
+
+
+@kernel
+def approx_then_exact(
+    a: Arr[Fin[n], Real],  # noqa: F821
+    c: Arr[Fin[n], Nat],  # noqa: F821
+    s: Arr[Fin[1], Real],
+    t: Arr[Fin[1], Nat],
+):
+    """Two sums over ``j``, the first ``approx`` and the second ``exact``."""
+    s[0] = reduce_sum(a[j] for j in a.dom)
+    t[0] = reduce_sum(c[j] for j in c.dom)
+
+
+def test_a_schedule_names_a_renamed_reduction_by_its_own_iname() -> None:
+    # The second sum is ``j_0`` in the kernel, and a schedule step reaches it
+    # under that name, with its own exactness: parallelizing it would
+    # reassociate an exact accumulation. ``j`` is the first sum's alone.
+    from loopty.schedule import IllegalCast, Schedule
+
+    schedule = Schedule(approx_then_exact)
+    with pytest.raises(IllegalCast, match="exact"):
+        schedule.split("j_0", 2, inner="k_in", outer="k_out").tag(k_in="l.0")
+    tagged = schedule.split("j", 2, inner="j_in", outer="j_out").tag(j_in="l.0")
+    assert tagged.reassociated == frozenset({"s"})
+
+
+@kernel
+def ragged_row_sums_twice(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+):
+    """Two ragged row sums over ``j``, in two loops one after the other."""
+    for q in val.dom:
+        y[q] = reduce_sum(val[q, j] for j in val.dom[q])
+    for p in val.dom:
+        z[p] = reduce_sum(val[p, j] * val[p, j] for j in val.dom[p])
+
+
+def test_a_renamed_ragged_reduction_nests_under_its_own_row_loop() -> None:
+    # The second sum is ``j_0``, and its row length is computed in the loop
+    # over ``p``; its domain has to follow that loop's, as the first one's
+    # follows ``q``'s, or loopy fixes the nesting up through a call islpy
+    # deprecates.
+    from loopty.lower import lower_generic
+
+    counts = [2, 0, 3]
+    values = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    out = run(
+        ragged_row_sums_twice.trace(),
+        cnt=np.array(counts),
+        val=Arr.ragged(counts, values=values),
+        y=np.zeros(3),
+        z=np.zeros(3),
+    )
+    assert np.allclose(out["y"], [3.0, 0.0, 12.0])
+    assert np.allclose(out["z"], [5.0, 0.0, 50.0])
+    names = [
+        tuple(domain.get_var_names(isl.dim_type.set))
+        for domain in lower_generic(
+            ragged_row_sums_twice.trace(), "c"
+        ).kernel.default_entrypoint.domains
+    ]
+    assert names.index(("j",)) == names.index(("q",)) + 1, names
+    assert names.index(("j_0",)) == names.index(("p",)) + 1, names
+
+
+def test_a_renamed_ragged_reduction_is_still_a_ragged_fiber() -> None:
+    # The second row sum is ``j_0`` in the kernel, and its bound is a row length
+    # just as the first one's is. A hardware axis on it is the ragged-fiber case
+    # under the name the step used; if the renamed sum were looked up under its
+    # written name, ``j_0`` would pass for a loop with a known extent.
+    from loopty.lower import lower_generic
+    from loopty.schedule import Schedule, data_dependent_inames
+
+    term = ragged_row_sums_twice.trace()
+    renamed = lower_generic(term, "c").reduction_inames
+    assert {"j", "j_0"} <= data_dependent_inames(term, renamed)
+
+    schedule = (
+        Schedule(ragged_row_sums_twice)
+        .split("j_0", 2, inner="k_in", outer="k_out")
+        .tag(k_in="l.0")
+    )
+    ok, reason = schedule.buildable
+    assert not ok
+    assert "ragged fiber" in reason and "k_in" in reason
+
+
+@kernel
 def ragged_total(
     cnt: Arr[Fin[n], Nat],  # noqa: F821
     val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821

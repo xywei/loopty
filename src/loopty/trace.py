@@ -1041,10 +1041,11 @@ class SymDom:
 
     ``arr.dom`` is the outer axis and ``arr.dom[r]`` the fiber over ``r``, whose
     extent for a ragged array is ``cnt[r]``: the bound of the fiber is the bound
-    of that row, which is where the dependent sum enters the type. Iterating in
-    a ``for`` loop opens a loop level; inside a ``loopty.reduce_sum`` generator,
-    iteration binds a reduction variable instead, because Lanky is driving it
-    and asks for the point itself.
+    of that row, which is where the dependent sum enters the type.
+    ``arr.dom[r, i]`` is ``arr.dom[r][i]``. Iterating in a ``for`` loop opens a
+    loop level; inside a ``loopty.reduce_sum`` generator, iteration binds a
+    reduction variable instead, because Lanky is driving it and asks for the
+    point itself.
     """
 
     __slots__ = ("array", "prefix")
@@ -1074,7 +1075,23 @@ class SymDom:
         return self.bound
 
     def __getitem__(self, index: Any) -> SymDom:
-        """The fiber over ``index``: the domain of the next axis."""
+        """The fiber over ``index``: the domain of the next axis.
+
+        A tuple fixes one axis per entry, so ``a.dom[r, i]`` is
+        ``a.dom[r][i]``, as it is on a runtime array. It used to be taken for
+        one index, the tuple, and gave the domain of axis 1 whatever the length
+        of the tuple.
+        """
+        if isinstance(index, tuple):
+            if not index:
+                raise TraceError(
+                    f"{self.array.name}.dom[()] fixes no axis; a domain index "
+                    "needs at least one entry"
+                )
+            fiber = self
+            for part in index:
+                fiber = fiber[part]
+            return fiber
         if self.axis + 1 >= self.array.ndim:
             raise TraceError(
                 f"{self.array.name} has {self.array.ndim} axes; there is no "

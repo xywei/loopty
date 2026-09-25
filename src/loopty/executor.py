@@ -5,7 +5,10 @@ numpy arguments and it runs them. Target ``c`` uses ``lp.ExecutableCTarget``,
 which compiles and runs locally and is what the test suite and the demos use at
 tiny sizes. Target ``opencl`` uses ``lp.PyOpenCLTarget`` and belongs on a machine
 with a device; pyopencl is an optional extra for that reason, is imported inside
-one branch of one function, and is never reached by importing loopty.
+one branch of one function, and is never reached by importing loopty. loopy
+itself is imported the first time something is lowered, not with this module:
+lanky loads the executor through its entry point for every command it runs,
+including a check of a file that has no kernels in it.
 
 Executor options and kernel arguments are kept apart. Every positional and
 keyword argument of :meth:`LoopyExecutor.run` is an argument of the kernel, so a
@@ -41,13 +44,15 @@ a claim about one cell rather than about an average.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from loopty.contract import check_arguments
-from loopty.lower import Lowering, lower_generic
 from loopty.term import ArrType, Term
+
+if TYPE_CHECKING:
+    from loopty.lower import Lowering
 
 __all__ = [
     "TOLERANCE",
@@ -92,6 +97,8 @@ def _resolve(obj: Any, target: str | None = None) -> tuple[Term, Any, Lowering, 
         term = obj.trace()
     if not isinstance(term, Term):
         raise TypeError(f"{obj!r} is neither a kernel, a schedule, nor a term")
+    from loopty.lower import lower_generic
+
     lowering = lower_generic(term, target or "c")
     return term, lowering.kernel, lowering, target or "c"
 

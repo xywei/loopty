@@ -36,7 +36,7 @@ from __future__ import annotations
 import dataclasses
 import re
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import islpy as isl
@@ -62,11 +62,14 @@ from loopty.term import (
 __all__ = [
     "COUNT_PARAM",
     "COUNT_PARAM_REFLECTED",
+    "NO_CONTRACTION_FLAG",
+    "NO_CONTRACTION_PRAGMAS",
     "RESERVED_PREFIX",
     "RESERVED_WORDS",
     "ExpressionLowerer",
     "LoweringError",
     "Lowering",
+    "allows_contraction",
     "count_param_name",
     "count_param_names",
     "is_reserved",
@@ -94,6 +97,26 @@ COUNT_PARAM = "{counts}_{iname}"
 COUNT_PARAM_REFLECTED = "nl_{counts}_{iname}"
 
 _LANG_VERSION = (2018, 2)
+
+#: The C compiler flag that keeps ``a * b + c`` two roundings, set on a kernel
+#: with an ``exact`` output (see :func:`allows_contraction`). GCC and clang both
+#: take it, and GCC takes nothing else: it ignores the standard pragma below.
+#: loopy compiles with ``-std=c99``, in which GCC does not contract anyway, but
+#: clang does, and the flag says so rather than leaving it to the compiler.
+NO_CONTRACTION_FLAG = "-ffp-contract=off"
+
+#: The pragma that asks the same in the source, per target. C99's is honoured by
+#: clang and ignored by GCC, which the flag covers. OpenCL C may contract by
+#: default and has no build option to stop it, so there the pragma is the way.
+NO_CONTRACTION_PRAGMAS = {
+    "c": "#pragma STDC FP_CONTRACT OFF",
+    "c-source": "#pragma STDC FP_CONTRACT OFF",
+    "opencl": "#pragma OPENCL FP_CONTRACT OFF",
+}
+
+#: Where the pragma sorts among loopy's own preambles: after OpenCL's extension
+#: pragmas (``00_``) and before the includes (``10_``).
+_NO_CONTRACTION_TAG = "05_loopty_fp_contract"
 
 
 class LoweringError(TypeError):
@@ -389,6 +412,14 @@ class Lowering:
     ``array_args`` name the arguments in call order, ``outputs`` those the kernel
     writes, and ``ragged`` records, per array, the offsets argument its flat
     storage is indexed through.
+
+    ``reduction_inames`` gives the inames each reduction has in the generated
+    kernel, keyed ``"S0:0"`` by its statement and its position in
+    :func:`reductions_of`. They are its binders unless
+    :meth:`_Builder.plan_reductions` had to rename them, and a schedule names a
+    reduction's loops by them. ``contraction`` says whether the compiler may
+    fuse ``a * b + c`` into one multiply-add; it is ``False`` when an output is
+    compared bit for bit, see :func:`allows_contraction`.
     """
 
     term: Term
@@ -399,6 +430,8 @@ class Lowering:
     outputs: tuple[str, ...]
     ragged: dict[str, str]
     target: str = "c"
+    reduction_inames: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    contraction: bool = True
 
     @property
     def name(self) -> str:
@@ -667,9 +700,11 @@ class _Builder:
         self.extra_args: list[Any] = []
         self.value_args: list[str] = []
         self._ragged_bounds: dict[str, tuple[str, str]] | None = None
-        #: Per reduction (by identity), the binders it had to rename, and the
-        #: inames those renames introduce; see :meth:`plan_reductions`.
+        #: Per reduction (by identity), the binders it had to rename, its domain
+        #: over the names it ends up with, and the inames those renames
+        #: introduce; see :meth:`plan_reductions`.
         self.reduction_renames: dict[int, dict[str, str]] = {}
+        self.reduction_domains: dict[int, isl.Set] = {}
         self.extra_inames: set[str] = set()
         self._renames: list[dict[str, str]] = []
         self.expr = ExpressionLowerer(self)
@@ -805,7 +840,7 @@ class _Builder:
     # {{{ reduction binders
 
     def plan_reductions(self) -> None:
-        """Give every reduction a binder whose domain is its own.
+        """Give every reduction binders that are its own in the generated kernel.
 
         loopy defines an iname once, with one domain, and :func:`_merge_domains`
         unions two domains over the same iname. For two *statements* that is
@@ -815,11 +850,28 @@ class _Builder:
         ``0 <= j < 2`` beside one over ``0 <= j < 4`` would silently become a sum
         over four points, reading two cells past the end of its input.
 
-        So a reduction keeps the name the kernel wrote whenever the domain under
-        that name is the one it already has, and gets a fresh iname when it is
-        not. Keeping the name in the common case matters: ``Schedule.split("j",
-        ...)``, the demos and the messages all name reduction inames as the
-        source does, and renaming unconditionally would rename them all.
+        Nor can two *instructions* share a reduction iname, even over one
+        domain. loopy realizes a reduction as a loop inside the instruction, and
+        a loop over an iname two instructions reduce over is one loop for both:
+        when the second statement depends on the first, as ``y[1]`` after
+        ``y[0]`` does, it has to run inside a loop that must finish before it
+        starts, and loopy stops with a ``CycleError``. The same goes for a name
+        another statement uses as a loop variable. So a reduction keeps its
+        binders only when no other statement has them, as loop variables
+        anywhere in the kernel or as the binders of an earlier reduction, and
+        gets fresh inames otherwise; see note 8 in ``docs/loopy-notes.md``.
+
+        Within one statement a reduction keeps the name the kernel wrote
+        whenever the domain under that name is the one it already has, and gets
+        a fresh iname when it is not. Keeping the name in the common case
+        matters: ``Schedule.split("j", ...)``, the demos and the messages all
+        name reduction inames as the source does, and renaming unconditionally
+        would rename them all.
+
+        A nested reduction's domain names its enclosing binders as parameters,
+        so when an outer binder is renamed, the parameter follows it: the domain
+        compared here and handed to loopy is stated over the names the kernel
+        will actually have (see :meth:`add_reduction_domain`).
         """
         taken = set(self.term.sizes) | set(dict(self.term.params))
         taken |= {iname for stmt in self.term.stmts for iname in stmt.inames}
@@ -827,26 +879,58 @@ class _Builder:
         for stmt in self.term.stmts:
             for reduction in reductions_of(stmt.expr):
                 taken |= set(reduction.inames)
-        seen: dict[tuple[str, ...], list[tuple[isl.Set, tuple[str, ...]]]] = {}
+        owner: dict[str, str] = {}
         for stmt in self.term.stmts:
-            for reduction in reductions_of(stmt.expr):
-                names = tuple(reduction.inames)
-                domain = _domain_over(reduction.domain, names)
-                known = seen.setdefault(names, [])
-                chosen: tuple[str, ...] | None = None
+            for iname in stmt.inames:
+                owner.setdefault(iname, stmt.id)
+        for stmt in self.term.stmts:
+            seen: dict[tuple[str, ...], list[tuple[isl.Set, tuple[str, ...]]]] = {}
+            self._plan_in(stmt.id, stmt.expr, {}, owner, seen, taken)
+
+    def _plan_in(
+        self,
+        stmt_id: str,
+        expr: Any,
+        renaming: Mapping[str, str],
+        owner: dict[str, str],
+        seen: dict[tuple[str, ...], list[tuple[isl.Set, tuple[str, ...]]]],
+        taken: set[str],
+    ) -> None:
+        """Plan the reductions of ``expr``, outermost first.
+
+        See :meth:`plan_reductions` for the rules.
+
+        ``renaming`` is what the enclosing reductions' binders became, ``owner``
+        the statement each name already belongs to, and ``seen`` the domains
+        the names of this statement's reductions stand for so far.
+        """
+        for reduction in _outermost_reductions(expr):
+            names = tuple(reduction.inames)
+            domain = _rename_params(_domain_over(reduction.domain, names), renaming)
+            known = seen.setdefault(names, [])
+            chosen: tuple[str, ...] | None = None
+            if all(owner.get(name, stmt_id) == stmt_id for name in names):
                 for other, allocated in known:
                     if _same_set(domain, other):
                         chosen = allocated
                         break
-                if chosen is None:
-                    chosen = names if not known else self._fresh_inames(names, taken)
-                    known.append((domain, chosen))
-                self.reduction_renames[id(reduction)] = {
-                    old: new
-                    for old, new in zip(names, chosen, strict=True)
-                    if old != new
-                }
-                self.extra_inames.update(chosen)
+                if chosen is None and not any(name in owner for name in names):
+                    chosen = names
+            if chosen is None:
+                chosen = self._fresh_inames(names, taken)
+            if not any(allocated == chosen for _other, allocated in known):
+                known.append((domain, chosen))
+            for name in chosen:
+                owner.setdefault(name, stmt_id)
+            rename = {
+                old: new for old, new in zip(names, chosen, strict=True) if old != new
+            }
+            self.reduction_renames[id(reduction)] = rename
+            self.reduction_domains[id(reduction)] = _domain_over(domain, chosen)
+            self.extra_inames.update(chosen)
+            self._plan_in(
+                stmt_id, reduction.body, {**renaming, **rename}, owner, seen, taken
+            )
 
     @staticmethod
     def _fresh_inames(names: Sequence[str], taken: set[str]) -> tuple[str, ...]:
@@ -886,7 +970,17 @@ class _Builder:
     def add_reduction_domain(
         self, reduction: Reduction, inames: Sequence[str] | None = None
     ) -> None:
-        """Record a reduction's iteration domain as a domain of the kernel."""
+        """Record a reduction's iteration domain as a domain of the kernel.
+
+        A planned reduction contributes the domain :meth:`plan_reductions`
+        stated over the kernel's names, in which a renamed enclosing binder is
+        renamed too; the domain under the written names would tie the inner
+        loop to the outer reduction of a different statement.
+        """
+        planned = self.reduction_domains.get(id(reduction))
+        if planned is not None:
+            self.extra_domains.append(planned)
+            return
         names = tuple(reduction.inames) if inames is None else tuple(inames)
         self.extra_domains.append(_domain_over(reduction.domain, names))
 
@@ -961,6 +1055,30 @@ def _domain_over(domain: isl.Set, inames: Sequence[str]) -> isl.Set:
     for k, iname in enumerate(inames):
         domain = domain.set_dim_name(isl.dim_type.set, k, iname)
     return domain
+
+
+def _rename_params(domain: isl.Set, renaming: Mapping[str, str]) -> isl.Set:
+    """``domain`` with each parameter ``renaming`` names renamed.
+
+    How a nested reduction's domain follows an enclosing binder that
+    :meth:`_Builder.plan_reductions` renamed: the binder is a parameter of the
+    inner domain, and it has to name the loop the renamed binder became.
+    """
+    for position, name in enumerate(_domain_params(domain)):
+        if name in renaming:
+            domain = domain.set_dim_name(isl.dim_type.param, position, renaming[name])
+    return domain
+
+
+def _outermost_reductions(expr: Any) -> tuple[Reduction, ...]:
+    """The reductions of ``expr`` that no other reduction in it encloses."""
+    if isinstance(expr, Reduction):
+        return (expr,)
+    return tuple(
+        reduction
+        for child in _children(expr)
+        for reduction in _outermost_reductions(child)
+    )
 
 
 def _domain_params(domain: isl.Set) -> tuple[str, ...]:
@@ -1282,6 +1400,7 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
         term, builder, domains, count_ids, insns
     )
 
+    contraction = allows_contraction(term)
     kernel = lp.make_kernel(
         merged,
         insns,
@@ -1289,7 +1408,10 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
         target=target_for(target),
         lang_version=_LANG_VERSION,
         name=_kernel_name(term.name, [arg.name for arg in args]),
+        preambles=() if contraction else _no_contraction_preambles(target),
     )
+    if not contraction and target in ("c", None):
+        kernel = lp.set_options(kernel, build_options=[NO_CONTRACTION_FLAG])
     assumptions = _scalar_assumptions(term, {arg.name for arg in args})
     if assumptions is not None:
         # Not ``if assumptions:``: truthiness on an isl set is ``__len__``,
@@ -1312,7 +1434,49 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
         outputs=outputs,
         ragged=dict(builder.ragged),
         target=target,
+        reduction_inames=_reduction_inames(term, builder),
+        contraction=contraction,
     )
+
+
+def _reduction_inames(term: Term, builder: _Builder) -> dict[str, tuple[str, ...]]:
+    """Each reduction's inames in the generated kernel; see :class:`Lowering`."""
+    out: dict[str, tuple[str, ...]] = {}
+    for stmt in term.stmts:
+        for position, reduction in enumerate(reductions_of(stmt.expr)):
+            renaming = builder.reduction_rename(reduction)
+            out[f"{stmt.id}:{position}"] = tuple(
+                renaming.get(name, name) for name in reduction.inames
+            )
+    return out
+
+
+def allows_contraction(term: Term) -> bool:
+    """Whether the compiled code may fuse ``a * b + c`` into one multiply-add.
+
+    Not when any output is ``exact``. A fused multiply-add rounds once where
+    the native run, which is Python and numpy arithmetic, rounds after the
+    multiplication and again after the addition, so the two can differ in the
+    last bit, and an ``exact`` output is compared bit for bit. The class is the
+    one the differential test judges the output by
+    (:func:`loopty.executor.exactness_of_output`): the element sort joined with
+    the accumulations that write it, so ``Real.exact`` pins contraction off and
+    ``Real`` leaves it to the compiler. The pin covers the whole kernel, since
+    a compiler flag and a file-scope pragma cannot pick out one output. Which
+    compilers contract when is note 9 in ``docs/loopy-notes.md``.
+    """
+    from loopty.executor import exactness_of_output
+
+    return not any(
+        exactness_of_output(term, None, name) == "exact"
+        for name in _written_arrays(term)
+    )
+
+
+def _no_contraction_preambles(target: str | None) -> tuple[tuple[str, str], ...]:
+    """The preamble that asks the target's compiler not to contract, if any."""
+    pragma = NO_CONTRACTION_PRAGMAS.get(target or "c")
+    return () if pragma is None else ((_NO_CONTRACTION_TAG, pragma),)
 
 
 def _scalar_assumptions(term: Term, declared: set[str]) -> isl.BasicSet | None:
