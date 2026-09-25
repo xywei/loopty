@@ -123,7 +123,8 @@ with a pair of statement instances.
   with a fact of kind `trace-faithful`, "the traced term computes what the body
   computes". The native body and the interpreted term run on copies of the
   same inputs, and every array argument is compared afterwards, bit for bit
-  when its exactness class is `exact` and within the class's tolerance
+  when its exactness class is `exact` (two NaNs agree whatever their sign and
+  payload, which IEEE 754 leaves open) and within the class's tolerance
   otherwise. The inputs are the module's `example_inputs()`, the ones
   `loopty run` reads, and three drawn from the declared types from a fixed
   seed, with every size at least 2 so that a loop runs more than one iteration,
@@ -132,11 +133,13 @@ with a pair of statement instances.
   `refuted` at the first input that disagrees with a counterexample naming the
   input, the first differing cell and both values (the drawn arguments are in
   the provenance), and `assumed` with the reason when no input runs natively or
-  the interpreter cannot read the term. It is what catches state a body keeps
-  where tracing does not look: a change nested below a container's elements
-  (`acc[0][0] += 1`), an attribute of an object an attribute holds, a `deque`,
-  a loop over a generator that wraps a domain, and a `dir()` or frame probe
-  all trace to one iteration's value and are refuted. The demos' ledgers carry
+  the interpreter cannot read the term. An input with more statement instances
+  and reduction terms than `MAX_INSTANCES` is skipped before either run. The
+  fact is what catches state a body keeps where tracing does not look: a change
+  nested below a container's elements (`acc[0][0] += 1`), an attribute of an
+  object an attribute holds, a `deque`, a loop over a generator that wraps a
+  domain, and a `dir()` or frame probe all trace to one iteration's value and
+  are refuted. The demos' ledgers carry
   one more row per kernel, and their transcripts are regenerated.
 
 ### Fixed
@@ -482,8 +485,11 @@ with a pair of statement instances.
   `self.s = self.s + x[i]`, `LOG.append(x[0])`, a global rebound outside any
   loop, and a global that only a helper defined outside the body changes are
   all refused now. State the body creates for itself is scratch, and a `for`
-  target stored as a global is left alone, as it is across an iteration. A
-  call that prints, reads input, opens a file, or draws a random number from
+  target stored as a global is left alone, as it is across an iteration. So are
+  the attributes of an object of a library's type (a logger fills a cache on
+  its first `debug` call; a `types.SimpleNamespace` is the author's), and the
+  value a `functools.cached_property` stores the first time the body reads it.
+  A call that prints, reads input, opens a file, or draws a random number from
   `random` or from a numpy generator is refused too, with its line: the calls
   a body makes are seen through `sys.monitoring` while it is traced, and a
   call from library code (loopty, lanky, numpy, pymbolic, islpy, loopy, the
