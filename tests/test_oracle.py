@@ -174,3 +174,43 @@ def test_a_refuted_fact_carries_a_labelled_witness() -> None:
     assert decided.status is Status.REFUTED
     assert decided.provenance["witness"] == (0, 4)
     assert decided.provenance["witness_text"] == "[s=0, d0=4]"
+
+
+def test_a_witness_and_its_sizes_come_from_one_sample(monkeypatch) -> None:
+    # The point and the parameter valuation of a refutation used to be read off
+    # two separate samples, which leaves isl free to answer with two different
+    # points: the reported cell need not be outside the array at the reported
+    # size. isl happens to answer the same way twice, so a stand-in that answers
+    # differently every time it is asked is what makes the difference visible.
+    import loopty.oracle as oracle
+    from loopty.oracle import Empty, decide
+
+    calls: list[int] = []
+
+    def drifting(a_set):
+        calls.append(1)
+        k = len(calls)
+        n_params = a_set.dim(isl.dim_type.param)
+        names = [a_set.get_dim_name(isl.dim_type.param, p) for p in range(n_params)]
+        return (k,) * a_set.dim(isl.dim_type.set), {name: k for name in names}
+
+    monkeypatch.setattr(oracle, "_sample_full", drifting)
+
+    def one_sample(verdict) -> bool:
+        witness = verdict.witness
+        if isinstance(witness[0], tuple):  # a pair of instances
+            witness = (*witness[0], *witness[1])
+        return set(witness) == set(verdict.parameters.values())
+
+    small = isl.Set("[n] -> { [i] : 0 <= i <= n }")
+    large = isl.Set("[n] -> { [i] : 0 <= i < n }")
+    assert one_sample(is_subset(small, large))
+    assert one_sample(is_bijective(isl.Map("[n] -> { [i] -> [0] : 0 <= i < n }")))
+    assert one_sample(is_bijective(isl.Map("[n] -> { [0] -> [i] : 0 <= i < n }")))
+    assert one_sample(
+        is_monotone(
+            isl.Map("[n] -> { [i] -> [-i] }"),
+            isl.Map("[n] -> { [i] -> [i + 1] : 0 <= i < n }"),
+        )
+    )
+    assert one_sample(decide(Empty(isl.Set("[n] -> { [i] : 0 <= i < n }"))))
