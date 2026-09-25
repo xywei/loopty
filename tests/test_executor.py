@@ -62,6 +62,26 @@ def test_positional_arguments_follow_the_term_signature() -> None:
     assert np.allclose(out["z"], 3.0 * x + y)
 
 
+def test_a_strided_or_differently_typed_output_is_updated_in_place() -> None:
+    # ``_as_numpy`` copies an output that is not contiguous, or not of the
+    # lowered dtype, on the way into loopy. The results have to come back out
+    # of that copy, or ``run`` returns the right values and leaves the caller's
+    # array as it was.
+    x = np.arange(4, dtype=np.float64)
+    y = np.ones(4)
+    storage = np.zeros((4, 2))
+    z = storage[:, 0]
+    out = executor().run(ht.axpy_term(), a=3.0, x=x, y=y, z=z)
+    assert np.allclose(out["z"], 3.0 * x + y)
+    assert np.allclose(z, 3.0 * x + y)
+    assert np.all(storage[:, 1] == 0.0)
+
+    single = np.zeros(4, dtype=np.float32)
+    executor().run(ht.axpy_term(), a=3.0, x=x, y=y, z=single)
+    assert single.dtype == np.float32
+    assert np.allclose(single, 3.0 * x + y)
+
+
 def test_a_ragged_array_supplies_its_own_offsets() -> None:
     from loopty.arr import Arr
 
@@ -231,7 +251,36 @@ def test_a_schedule_is_run_on_the_target_it_was_built_for() -> None:
     # checked against the kernel that target produced.
     schedule = Schedule(ht.axpy_term())
     with pytest.raises(ValueError, match="was built for target"):
-        executor().run(schedule, target="opencl")
+        LoopyExecutor(target="opencl").run(schedule)
+    with pytest.raises(ValueError, match="was built for target"):
+        LoopyExecutor(target="opencl").differential(None, schedule, {}, reference={})
+
+
+def test_every_keyword_of_a_run_is_a_kernel_argument() -> None:
+    # The backend used to be popped from the keywords as ``target=``, so a
+    # kernel parameter of that name could not be passed by keyword: its array
+    # was taken for the name of a target, and the run failed on numpy's "truth
+    # value of an array is ambiguous". The target is the executor's option now.
+    @kernel
+    def shift(source: Arr[Fin[n], Real], target: Arr[Fin[n], Real]):  # noqa: F821
+        for i in source.dom:
+            target[i] = source[i] + 1.0
+
+    source = np.array([1.0, 2.0, 3.0])
+    target = np.zeros(3)
+    out = executor().run(shift.trace(), source=source, target=target)
+    assert np.array_equal(out["target"], source + 1.0)
+    assert np.array_equal(target, source + 1.0)
+
+    target = np.zeros(3)
+    out = LoopyExecutor(target="c").run(shift.trace(), source=source, target=target)
+    assert np.array_equal(target, source + 1.0)
+
+    target = np.zeros(3)
+    fact = LoopyExecutor(target="c").differential(
+        shift, Schedule(shift), {"source": source, "target": target}
+    )
+    assert fact.status.value == "tested"
 
 
 # {{{ the contract an argument list has to satisfy
@@ -460,6 +509,37 @@ def test_an_integer_valued_float_index_array_is_accepted() -> None:
     assert np.allclose(out["y"], csr_want(csr_arguments()))
 
 
+def test_the_native_run_reads_an_integer_valued_float_index_array_too() -> None:
+    # The compiled run casts 1.0 to the index 1. The native run used to hand
+    # numpy the float, which refuses it as an index, so an input the contract
+    # accepts could not be run natively and so not tested differentially.
+    arguments = csr_arguments(columns=[0.0, 1.0, 0.0, 2.0, 3.0], dtype=np.float64)
+    csr_product(**arguments)
+    assert np.allclose(arguments["y"].numpy(), csr_want(csr_arguments()))
+    # The copy is the body's; the caller's array keeps its storage.
+    assert arguments["col"].numpy().dtype == np.float64
+
+    fact = executor().differential(
+        csr_product,
+        Schedule(csr_product),
+        csr_arguments(columns=[0.0, 1.0, 0.0, 2.0, 3.0], dtype=np.float64),
+    )
+    assert fact.status.value == "tested"
+
+
+def test_a_float_stored_integral_array_the_body_writes_is_not_copied() -> None:
+    # A write has to land in the caller's buffer, so an array the body writes is
+    # never swapped for a copy, whatever its storage.
+    @kernel
+    def count_up(c: Arr[Fin[n], Nat]):  # noqa: F821
+        for i in c.dom:
+            c[i] = c[i] + 1
+
+    counts = np.array([0.0, 2.0, 5.0])
+    count_up(counts)
+    assert counts.tolist() == [1.0, 3.0, 6.0]
+
+
 @kernel
 def broadcast_at(i: Fin[n], x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     """``y[k] = x[i]``: a *scalar* whose index type is what puts ``x[i]`` in bounds."""
@@ -499,6 +579,55 @@ def test_a_fractional_scalar_parameter_is_refused() -> None:
         executor().run(term, **broadcast_arguments(1.5))
     with pytest.raises(ValueError, match=r"the argument i is nan"):
         executor().run(term, **broadcast_arguments(float("nan")))
+
+
+def test_a_whole_float_for_an_integral_scalar_is_refused_on_both_runs() -> None:
+    # ``i = 1.0`` passed the contract as a finite whole number, and neither run
+    # could use it: numpy refuses a float index, and the compiled run cannot
+    # pass a float to a C integer argument.
+    term = broadcast_at.trace()
+    x = np.array([1.0, 10.0, 100.0, 1000.0])
+    with pytest.raises(ValueError, match=r"the argument i is 1\.0, a float.*int\(i\)"):
+        executor().run(term, **broadcast_arguments(1.0))
+    with pytest.raises(ValueError, match=r"the argument i is .*1\.0.*, a float"):
+        executor().run(term, **broadcast_arguments(np.float64(1.0)))
+    with pytest.raises(ValueError, match=r"the argument i is 1\.0, a float"):
+        broadcast_at(1.0, x, np.zeros(4))
+    # An integer runs, in either storage.
+    for index in (1, np.int64(1)):
+        out = executor().run(term, **broadcast_arguments(index))
+        assert np.allclose(out["y"], 10.0)
+        out = np.zeros(4)
+        broadcast_at(index, x, out)
+        assert np.allclose(out, 10.0)
+
+
+def test_a_float_stored_count_outside_the_int64_range_is_refused() -> None:
+    # The native run reads a float-stored array of an integral sort as int64.
+    # 1e20 is a whole float that no int64 holds, and ``Nat`` has no upper end
+    # to refuse it, so the conversion used to hand the body an unrelated
+    # integer and the reference run computed with it.
+    @kernel
+    def scale_counts(c: Arr[Fin[n], Nat], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = 2.0 * c[i]
+
+    counts = np.array([1.0, 1e20, 0.0])
+    with pytest.raises(ValueError, match=r"c\[1\] is 1e\+20.*64-bit integer"):
+        scale_counts(counts, np.zeros(3))
+    with pytest.raises(ValueError, match=r"c\[1\] is 1e\+20.*64-bit integer"):
+        executor().run(scale_counts.trace(), c=counts, y=np.zeros(3))
+    # Whole floats inside the range still convert, exactly, at both ends.
+    from loopty.contract import element_types
+
+    types = scale_counts.arg_types
+    edge = np.nextafter(2.0**63, 0.0)
+    element_types(types, {"c": np.array([edge, 0.0]), "y": np.zeros(2)})
+    with pytest.raises(ValueError, match=r"64-bit integer"):
+        element_types(types, {"c": np.array([2.0**63, 0.0]), "y": np.zeros(2)})
+    y = np.zeros(2)
+    scale_counts(np.array([edge, 3.0]), y)
+    assert y.tolist() == [2.0 * edge, 6.0]
 
 
 def test_the_native_run_checks_scalar_parameters_too() -> None:

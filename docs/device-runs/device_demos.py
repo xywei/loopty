@@ -130,7 +130,7 @@ def main() -> int:
     from loopty.executor import LoopyExecutor
     from loopty.schedule import Schedule
 
-    ex = LoopyExecutor()
+    ex = LoopyExecutor(target="opencl")
     spmv_mod = load("demo_spmv", "examples/spmv.py")
     sten_mod = load("demo_stencil", "examples/stencil_skew.py")
     resh_mod = (

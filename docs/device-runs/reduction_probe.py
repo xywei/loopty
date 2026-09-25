@@ -70,7 +70,7 @@ def main() -> int:
     print("device:", device.name.strip(), "|", device.platform.name.strip())
 
     spmv_mod = load("probe_spmv", "examples/spmv.py")
-    ex = LoopyExecutor()
+    ex = LoopyExecutor(target="opencl")
 
     def inputs() -> dict:
         data = spmv_mod.random_csr()

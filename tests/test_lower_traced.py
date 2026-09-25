@@ -303,3 +303,315 @@ def test_reading_through_offsets_is_ordered_against_writing_them(which) -> None:
 
 
 # }}}
+
+
+# {{{ a reduction nested in another one
+
+
+@kernel
+def nested_total(a: Arr[Fin[n], Fin[m], Real], s: Arr[Fin[1], Real]):  # noqa: F821
+    """A double sum over a dense matrix."""
+    s[0] = reduce_sum(reduce_sum(a[i, j] for j in a.dom[i]) for i in a.dom)
+
+
+@kernel
+def lower_total(a: Arr[Fin[n], Fin[n], Real], s: Arr[Fin[1], Real]):  # noqa: F821
+    """A double sum over the lower triangle, whose inner bound is the outer binder."""
+    s[0] = reduce_sum(reduce_sum(a[i, j] for j in Fin[i + 1]) for i in a.dom)
+
+
+@kernel
+def two_totals(
+    a: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+    b: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+    s: Arr[Fin[2], Real],
+):
+    """Two double sums whose inner binders share a name under different outer ones."""
+    s[0] = reduce_sum(reduce_sum(a[i, j] for j in a.dom[i]) for i in a.dom)
+    s[1] = reduce_sum(reduce_sum(b[k, j] for j in b.dom[k]) for k in b.dom)
+
+
+def test_a_nested_reduction_still_lowers_and_runs() -> None:
+    # The inner domain now names the outer binder and its bound as parameters.
+    # The lowering already treats a reduction domain's extra names that way, so
+    # the dense and the triangular double sum compute what they did before.
+    a = np.arange(12.0).reshape(3, 4)
+    out = run(nested_total.trace(), a=a, s=np.zeros(1))
+    assert np.allclose(out["s"], [a.sum()])
+    t = np.arange(9.0).reshape(3, 3)
+    out = run(lower_total.trace(), a=t, s=np.zeros(1))
+    assert np.allclose(out["s"], [np.tril(t).sum()])
+
+
+def test_inner_binders_under_different_outer_binders_get_their_own_inames() -> None:
+    # Without the outer binder the two inner domains were the same set, so both
+    # inner sums shared the iname ``j`` while nested in ``i`` and in ``k``, and
+    # loopy found no loop nest to schedule. With it they differ, and the second
+    # is given an iname of its own as any two different reduction domains are.
+    a = np.arange(12.0).reshape(3, 4)
+    out = run(two_totals.trace(), a=a, b=2.0 * a, s=np.zeros(2))
+    assert np.allclose(out["s"], [a.sum(), 2.0 * a.sum()])
+
+
+@kernel
+def ragged_total(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    s: Arr[Fin[2], Real],
+):
+    """A double sum whose inner bound is the row length the outer binder selects.
+
+    The second statement reads ``cnt``, which the first one does only through
+    the row length it cannot compute; without it the lowering would refuse
+    ``cnt`` as a parameter the body never touches.
+    """
+    s[0] = reduce_sum(reduce_sum(val[q, j] for j in val.dom[q]) for q in val.dom)
+    s[1] = reduce_sum(cnt[r] for r in cnt.dom)
+
+
+@kernel
+def ragged_total_by_rows(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    s: Arr[Fin[1], Real],
+):
+    """The same sum with the outer reduction written as an accumulation loop."""
+    for q in val.dom:
+        s[0] += reduce_sum(val[q, j] for j in val.dom[q])
+
+
+@kernel
+def ragged_total_by_cells(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    rows: Arr[Fin[n], Real],  # noqa: F821
+    s: Arr[Fin[1], Real],
+):
+    """A ragged double sum with each row's sum kept in a cell indexed by the row."""
+    for q in val.dom:
+        rows[q] = reduce_sum(val[q, j] for j in val.dom[q])
+    s[0] = reduce_sum(rows[p] for p in rows.dom)
+
+
+def test_a_ragged_bound_over_an_outer_reduction_binder_is_refused_by_name() -> None:
+    # The analysis decides this term (``val[q, j]`` is in bounds). The lowering
+    # cannot build it: ``cnt[q]`` is computed inside the loop over ``q``, and a
+    # reduction binder has no loop another instruction can run in. It used to
+    # get as far as the run and fail there with loopy's "value argument
+    # 'nl_cnt_q' was not given".
+    from loopty.lower import LoweringError
+
+    counts = [2, 0, 3]
+    with pytest.raises(LoweringError, match=r"bounded by cnt\[q\].*binder of the"):
+        run(
+            ragged_total.trace(),
+            cnt=np.array(counts),
+            val=Arr.ragged(counts, values=[1.0, 2.0, 3.0, 4.0, 5.0]),
+            s=np.zeros(2),
+        )
+
+
+def test_the_nestings_the_refusal_suggests_lower_and_run() -> None:
+    counts = [2, 0, 3]
+    values = [1.0, 2.0, 3.0, 4.0, 5.0]
+    out = run(
+        ragged_total_by_rows.trace(),
+        cnt=np.array(counts),
+        val=Arr.ragged(counts, values=values),
+        s=np.zeros(1),
+    )
+    assert np.allclose(out["s"], [15.0])
+    out = run(
+        ragged_total_by_cells.trace(),
+        cnt=np.array(counts),
+        val=Arr.ragged(counts, values=values),
+        rows=np.zeros(3),
+        s=np.zeros(1),
+    )
+    assert np.allclose(out["rows"], [3.0, 0.0, 12.0])
+    assert np.allclose(out["s"], [15.0])
+
+
+def test_a_ragged_domain_follows_the_loop_it_is_nested_in() -> None:
+    # loopy reads the nesting of domains off their order. The row-length domain
+    # of ``j`` used to come after the domain of the second loop, ``p``, so
+    # loopy made it a root and fixed the loop up through a call islpy
+    # deprecates, and the run failed on that DeprecationWarning.
+    from loopty.lower import lower_generic
+
+    counts = [2, 0, 3]
+    out = run(
+        ragged_total_by_cells.trace(),
+        cnt=np.array(counts),
+        val=Arr.ragged(counts, values=[1.0, 2.0, 3.0, 4.0, 5.0]),
+        rows=np.zeros(3),
+        s=np.zeros(1),
+    )
+    assert np.allclose(out["s"], [15.0])
+    lowered = lower_generic(ragged_total_by_cells.trace(), "c").kernel
+    names = [
+        tuple(domain.get_var_names(isl.dim_type.set))
+        for domain in lowered.default_entrypoint.domains
+    ]
+    assert names.index(("j",)) == names.index(("q",)) + 1
+
+
+# }}}
+
+
+# {{{ names the generated code cannot use
+
+
+@kernel
+def long_extent(x: Arr[Fin[long], Real]):  # noqa: F821
+    """A size spelled like a C type: loopy declares it ``int32_t const long``."""
+    for i in x.dom:
+        x[i] = 1.0
+
+
+@kernel
+def double_counter(x: Arr[Fin[n], Real]):  # noqa: F821
+    """A loop variable spelled like a C type: ``for (int32_t double = 0; ...)``."""
+    for double in x.dom:
+        x[double] = 1.0
+
+
+@kernel
+def int_binder(
+    x: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A reduction variable spelled like a C type."""
+    for r in y.dom:
+        y[r] = reduce_sum(x[r, int] for int in x.dom[r])
+
+
+@kernel
+def keyword_parameter(long: Arr[Fin[n], Real]):  # noqa: F821
+    """A parameter spelled like a C type, which was refused already."""
+    for i in long.dom:
+        long[i] = 1.0
+
+
+def test_a_size_spelled_like_a_keyword_is_refused() -> None:
+    # Only parameters used to be checked, so this reached the C compiler and
+    # failed there, about generated code the user never wrote.
+    from loopty.lower import LoweringError, lower_generic
+
+    with pytest.raises(LoweringError, match=r"sizes long\b"):
+        lower_generic(long_extent.trace(), "c")
+
+
+def test_a_loop_or_reduction_variable_spelled_like_a_keyword_is_refused() -> None:
+    from loopty.lower import LoweringError, lower_generic
+
+    with pytest.raises(LoweringError, match=r"loop variables double\b"):
+        lower_generic(double_counter.trace(), "c")
+    with pytest.raises(LoweringError, match=r"reduction variables int\b"):
+        lower_generic(int_binder.trace(), "c")
+
+
+def test_a_parameter_spelled_like_a_keyword_is_still_refused() -> None:
+    from loopty.lower import LoweringError, lower_generic
+
+    with pytest.raises(LoweringError, match=r"parameters long\b"):
+        lower_generic(keyword_parameter.trace(), "c")
+
+
+@kernel
+def underscored_names(x: Arr[Fin[_Complex], Real]):  # noqa: F821
+    """A size and a loop variable spelled like C's own underscored keywords."""
+    for _Bool in x.dom:
+        x[_Bool] = 1.0
+
+
+@kernel
+def double_underscored(x: Arr[Fin[n], Real]):  # noqa: F821
+    """A loop variable spelled like an OpenCL C qualifier."""
+    for __global in x.dom:
+        x[__global] = 1.0
+
+
+def test_names_c_reserves_by_their_spelling_are_refused() -> None:
+    # C reserves every name that starts with an underscore and a capital letter
+    # or with two underscores, which is where ``_Bool``, ``_Complex`` and
+    # ``_Generic`` live, and OpenCL C's ``__global``. Only the unprefixed
+    # spellings were listed, so these passed the check and failed in the
+    # compiler.
+    from loopty.lower import LoweringError, is_reserved, lower_generic
+
+    refused = r"sizes _Complex\b.*loop variables _Bool\b"
+    with pytest.raises(LoweringError, match=refused):
+        lower_generic(underscored_names.trace(), "c")
+    with pytest.raises(LoweringError, match=r"loop variables __global\b"):
+        lower_generic(double_underscored.trace(), "c")
+    for name in ("_Generic", "_Static_assert", "_Thread_local", "__kernel", "__x"):
+        assert is_reserved(name)
+    for name in ("_", "_x", "_x1", "x_", "Bool", "generic_"):
+        assert not is_reserved(name)
+
+
+def test_a_kernel_named_like_an_underscored_keyword_is_renamed_with_a_prefix() -> None:
+    from loopty.lower import _kernel_name
+
+    # A suffix leaves ``_Generic_knl`` in the reserved space; a prefix does not.
+    assert _kernel_name("_Generic", []) == "k_Generic"
+    assert _kernel_name("double", []) == "double_knl"
+    assert _kernel_name("axpy", []) == "axpy"
+
+
+# }}}
+
+
+# {{{ sorts that are free names
+
+
+@kernel
+def scaled_by_float(
+    a: float,
+    x: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """``a: float`` under postponed annotations: lanky gives ``Var("float")``."""
+    for i in y.dom:
+        y[i] = a * x[i]
+
+
+@kernel
+def int_elements(c: Arr[Fin[n], int], y: Arr[Fin[n], Real]):  # noqa: F821
+    """An element sort spelled with the builtin ``int``."""
+    for i in y.dom:
+        y[i] = 2.0 * c[i]
+
+
+def test_a_sort_that_is_a_free_name_is_refused_with_the_sort_to_write() -> None:
+    # The sort used to reach the lowering as ``Var("float")``: no numpy dtype,
+    # not an integral sort, and read as an ``exact`` index type by the ledger.
+    from loopty.lower import LoweringError, lower_generic
+    from loopty.trace import TraceError
+
+    with pytest.raises(TraceError, match=r"a: float.*write Real.*np\.float64"):
+        scaled_by_float.trace()
+    with pytest.raises(TraceError, match=r"the elements of c as int.*write Nat"):
+        int_elements.trace()
+    # ``lanky check`` reports the refusal as the kernel's one fact.
+    (fact,) = scaled_by_float.facts()
+    assert fact.status.value == "refuted"
+    assert "write Real" in fact.provenance["error"]
+    # A hand-built term with such a sort is refused by the lowering, by name.
+    from lanky.terms import Var
+
+    from loopty.term import Term
+
+    term = Term(
+        name="bad", params=(("a", Var("float")),), sizes=(), stmts=(), post=None
+    )
+    with pytest.raises(LoweringError, match=r"a: float.*free name"):
+        lower_generic(term, "c")
+    # The native run needs no sort, and still runs.
+    y = np.zeros(3)
+    scaled_by_float(2.0, np.array([1.0, 2.0, 3.0]), y)
+    assert np.array_equal(y, [2.0, 4.0, 6.0])
+
+
+# }}}

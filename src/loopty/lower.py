@@ -48,17 +48,27 @@ from loopy.symbolic import set_to_cond_expr
 from pymbolic.mapper import Mapper
 
 from loopty.flow import statement_accesses
-from loopty.term import Access, ArrType, Reduction, Stmt, Term
+from loopty.term import (
+    Access,
+    ArrType,
+    Reduction,
+    Stmt,
+    Term,
+    free_name_sorts,
+    free_name_sorts_message,
+)
 
 __all__ = [
     "COUNT_PARAM",
     "COUNT_PARAM_REFLECTED",
+    "RESERVED_PREFIX",
     "RESERVED_WORDS",
     "ExpressionLowerer",
     "LoweringError",
     "Lowering",
     "count_param_name",
     "count_param_names",
+    "is_reserved",
     "lower",
     "lower_generic",
     "numpy_dtype",
@@ -454,6 +464,26 @@ RESERVED_WORDS = frozenset(
     """.split()
 )
 
+#: The identifiers C reserves by their spelling rather than by a list: every
+#: name that starts with an underscore and a capital letter, or with two
+#: underscores. That is where C puts its own later keywords (``_Bool``,
+#: ``_Complex``, ``_Generic``, ``_Static_assert``, ``_Thread_local`` and the
+#: rest, which C23 still accepts beside the new spellings), and where OpenCL C
+#: puts its address-space and access qualifiers (``__global``, ``__kernel``,
+#: ``__read_only``). A name of either shape is a keyword or a name the
+#: implementation may define, so none of them can be declared by generated
+#: code.
+RESERVED_PREFIX = re.compile(r"_[A-Z_]")
+
+
+def is_reserved(name: str) -> bool:
+    """Whether generated C or OpenCL C code cannot declare ``name``.
+
+    A word of :data:`RESERVED_WORDS`, or a name that starts the way
+    :data:`RESERVED_PREFIX` says C reserves.
+    """
+    return name in RESERVED_WORDS or RESERVED_PREFIX.match(name) is not None
+
 
 def _sanitize(name: str) -> str:
     """A loopy-safe identifier: every non-word character becomes an underscore."""
@@ -469,21 +499,149 @@ def _kernel_name(name: str, taken: Sequence[str]) -> str:
     produces a function whose own name is shadowed by a parameter. Neither is
     diagnosed anywhere downstream: the first is a compiler error about generated
     code the user never wrote, and the second is undefined behaviour. The name
-    is therefore renamed here, deterministically, with an ``_knl`` suffix.
-    Renaming rather than refusing keeps a legal Python name legal: nothing
+    is therefore renamed here, deterministically, with an ``_knl`` suffix, or
+    with a ``k`` prefix for a name C reserves by its first two characters
+    (:data:`RESERVED_PREFIX`), which no suffix can make legal. Renaming rather
+    than refusing keeps a legal Python name legal: nothing
     outside the generated source refers to the kernel by this name, because
     callers hold the :class:`Lowering` and address arguments by name.
     """
     base = _sanitize(name)
     if not base or base[0].isdigit():
         base = f"k_{base}"
-    reserved = set(taken) | RESERVED_WORDS
-    if base not in reserved:
+    elif RESERVED_PREFIX.match(base):
+        # ``_Generic`` stays reserved with any suffix, so it gets a prefix.
+        base = f"k{base}"
+    taken = set(taken)
+    if base not in taken and not is_reserved(base):
         return base
     candidate = f"{base}_knl"
-    while candidate in reserved:
+    while candidate in taken or is_reserved(candidate):
         candidate = f"{candidate}_"
     return candidate
+
+
+def _refuse_reserved_names(term: Term) -> None:
+    """Refuse a term that would make the generated code use a keyword as a name.
+
+    Every name the term chooses reaches the generated source verbatim: a
+    parameter as an argument, a size as the value argument loopy infers from a
+    shape (``Arr[Fin[long], Real]`` gives ``int32_t const long``), and a loop or
+    reduction variable as the counter of a ``for`` (``for double in x.dom``
+    gives ``for (int32_t double = 0; ...)``). Each is a compiler error about
+    code the user never wrote, so all of them are checked, not only the
+    parameters.
+
+    None of them is renamed the way the kernel is (see :func:`_kernel_name`).
+    A caller passes a parameter by name, and may pass a size the same way; a
+    schedule names inames (``split("j", 2)``) and so do the ledger's messages.
+    A rename would break each of those silently, where a refusal says what to
+    change. The names loopty generates itself (``off_cnt``, ``nl_cnt_r``, a
+    suffixed reduction binder) carry a prefix or a suffix and cannot be a
+    keyword.
+
+    A keyword is a word of :data:`RESERVED_WORDS` or a name of the shape C
+    reserves, :data:`RESERVED_PREFIX`: ``for _Bool in x.dom`` fails in the
+    compiler exactly as ``for double in x.dom`` does.
+    """
+    roles: dict[str, list[str]] = {
+        "parameters": [name for name, _ in term.params],
+        "sizes": list(term.sizes),
+        "loop variables": [],
+        "reduction variables": [],
+    }
+    for stmt in term.stmts:
+        roles["loop variables"].extend(stmt.inames)
+        for reduction in reductions_of(stmt.expr):
+            roles["reduction variables"].extend(reduction.inames)
+    found = []
+    for role, names in roles.items():
+        refused = sorted({name for name in names if is_reserved(_sanitize(name))})
+        if refused:
+            found.append(f"{role} {', '.join(refused)}")
+    if found:
+        raise LoweringError(
+            f"{term.name} has names the generated code cannot use: "
+            f"{'; '.join(found)}. These are reserved words in C or OpenCL C, "
+            "or start with an underscore and a capital letter or with two "
+            "underscores, which C reserves; rename them in the kernel (a "
+            "parameter in its signature, a size in its annotations, a loop or "
+            "reduction variable where it is bound)."
+        )
+
+
+def _refuse_free_name_sorts(term: Term) -> None:
+    """Refuse a parameter whose sort is a free name, such as ``Var("float")``.
+
+    A traced kernel is refused before it gets here (see
+    :meth:`loopty.kernel.Kernel.trace`); a hand-built term is refused here,
+    rather than by :func:`numpy_dtype` with "no numpy dtype for float", which
+    does not say where the name came from or what to write instead.
+    """
+    found = free_name_sorts(term.params)
+    if found:
+        raise LoweringError(free_name_sorts_message(term.name, term.params, found))
+
+
+def _refuse_bounds_over_reduction_binders(term: Term, builder: _Builder) -> None:
+    """Refuse a nested reduction whose bound is read off an outer reduction's binder.
+
+    ``reduce_sum(reduce_sum(val[q, j] for j in val.dom[q]) for q in val.dom)``
+    is a term the analysis decides, and one loopy cannot be given. The inner
+    bound ``cnt[q]`` is not affine, so it reaches isl as a parameter
+    (``nl_cnt_q``), and the lowering computes such a parameter in a scalar
+    temporary assigned inside the loop over its row (see :func:`_count_inits`).
+    When the row is a statement's loop variable there is such a loop. When it is
+    the binder of an enclosing reduction there is none: a reduction is one
+    instruction's expression, and no other instruction can run inside its
+    loop. Nothing assigned the parameter, loopy declared it a value argument,
+    and the run failed with "value argument 'nl_cnt_q' was not given", which
+    names neither the reduction nor a way out.
+
+    An inner bound that is affine in the outer binder (``Fin[i + 1]``, the
+    lower triangle) needs no temporary and still lowers; only a bound that had
+    to be reflected, or that a hand-built term spells as a row length
+    (:data:`COUNT_PARAM`), over an outer binder is refused.
+    """
+    reflected = dict(term.reflected)
+    families = builder.counts_families
+    for stmt in term.stmts:
+        for outer in reductions_of(stmt.expr):
+            binders = set(outer.inames)
+            spelled = {
+                spelling: (f"{counts}[{binder}]", {binder})
+                for counts in families
+                for binder in binders
+                for spelling in count_param_names(counts, binder)
+            }
+            for inner in reductions_of(outer.body):
+                for param in _domain_params(inner.domain):
+                    if param in reflected:
+                        depends = _names_in(reflected[param]) & binders
+                        if not depends:
+                            continue
+                        bound = str(_plain(reflected[param]))
+                    elif param in spelled:
+                        bound, depends = spelled[param]
+                    else:
+                        continue
+                    over = ", ".join(sorted(depends))
+                    where = f" ({stmt.where})" if stmt.where else ""
+                    raise LoweringError(
+                        f"statement {stmt.id} of {term.name}{where} has a "
+                        f"reduction over {', '.join(inner.inames)} bounded by "
+                        f"{bound}, which depends on {over}, the binder of the "
+                        "reduction it is nested in. A bound that is not affine "
+                        "is computed inside the loop over the row it depends "
+                        "on, and a reduction's binder has no loop another "
+                        "instruction can run in, so this nesting cannot be "
+                        f"lowered. Write the reduction over {over} as a for "
+                        "loop that accumulates into the output "
+                        f"('for {over} in ...: out[...] += reduce_sum(...)'), "
+                        f"or keep each inner sum in a cell indexed by {over} "
+                        f"('rows[{over}] = reduce_sum(...)' in that loop) and "
+                        "reduce over those cells."
+                    )
 
 
 def _written_arrays(term: Term) -> tuple[str, ...]:
@@ -948,18 +1106,10 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
     the kernel writes; both are recorded here rather than recovered by matching
     names against generated code.
     """
-    reserved = sorted(
-        name for name, _ in term.params if _sanitize(name) in RESERVED_WORDS
-    )
-    if reserved:
-        # An argument cannot be renamed the way the kernel can: the caller
-        # passes it by name, so a rename here would silently break every call.
-        raise LoweringError(
-            f"{term.name} has parameters the generated code cannot name: "
-            f"{', '.join(reserved)}. These are reserved words in C or OpenCL C; "
-            "rename them in the kernel's signature."
-        )
+    _refuse_reserved_names(term)
+    _refuse_free_name_sorts(term)
     builder = _Builder(term, target)
+    _refuse_bounds_over_reduction_binders(term, builder)
     builder.plan_reductions()
     expr = builder.expr
     ragged_bounds = builder.ragged_bound_params
@@ -1136,7 +1286,7 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
         ]
         insns = count_insns + insns
 
-    merged = _merge_domains(domains)
+    merged = _nest_domains(_merge_domains(domains))
     insns = _restore_narrower_domains(insns, own_domains, merged)
 
     args, array_args, value_args, outputs = _arguments(
@@ -1281,6 +1431,64 @@ def _merge_domains(domains: Sequence[isl.Set]) -> list[isl.Set]:
         else:
             merged.append(domain)
     return merged
+
+
+def _nest_domains(domains: Sequence[isl.Set]) -> list[isl.Set]:
+    """The domains in the order loopy reads their nesting from.
+
+    loopy has no explicit tree of domains. It walks the list and nests a domain
+    inside the one before it when its parameters name that domain's inames,
+    and otherwise climbs out until it finds a domain it depends on or reaches
+    the top (``LoopKernel.parents_per_domain``). So the row-length domain
+    ``[q, nl_cnt_q] -> { [j] : ... }`` of a ragged loop has to come after the
+    domain of ``q`` with nothing unrelated in between. The domains are
+    collected statement by statement, with the reductions' domains after all
+    of them, and a kernel whose ragged loop is followed by a second loop gave
+    ``[{q}, {p}, {j over q}]``: loopy made the ``j`` domain a root, and only
+    got its loop right by moving ``q`` out of the parameters again inside
+    ``combine_domains``, through a call islpy deprecates.
+
+    Each domain is put right after the domain whose inames it names as
+    parameters, the deepest one when it names several, and the order is
+    otherwise the order the domains came in. A list that was already nested
+    is returned in the same order.
+    """
+    inames = [set(domain.get_var_names(isl.dim_type.set)) for domain in domains]
+    params = [set(domain.get_var_names(isl.dim_type.param)) for domain in domains]
+
+    def owners(k: int) -> list[int]:
+        return [i for i in range(len(domains)) if i != k and inames[i] & params[k]]
+
+    depth: dict[int, int] = {}
+
+    def depth_of(k: int, visiting: frozenset[int] = frozenset()) -> int:
+        if k not in depth:
+            above = [i for i in owners(k) if i not in visiting]
+            depth[k] = 1 + max(
+                (depth_of(i, visiting | {k}) for i in above), default=-1
+            )
+        return depth[k]
+
+    children: dict[int | None, list[int]] = {}
+    for k in range(len(domains)):
+        above = owners(k)
+        parent = max(above, key=lambda i: (depth_of(i), i)) if above else None
+        children.setdefault(parent, []).append(k)
+
+    order: list[int] = []
+
+    def place(k: int) -> None:
+        order.append(k)
+        for child in children.get(k, ()):
+            if child not in order:
+                place(child)
+
+    for root in children.get(None, ()):
+        place(root)
+    # A domain caught in a cycle of parameters has no root to hang from; it
+    # keeps its place at the end, and loopy says what it makes of it.
+    order.extend(k for k in range(len(domains)) if k not in order)
+    return [domains[k] for k in order]
 
 
 def _restore_narrower_domains(

@@ -315,9 +315,41 @@ class Arr:
             )
         return int(offsets[row]) + column
 
+    def _dense_key(self, key: Any) -> Any:
+        """``key``, once it is known to hold no negative integer index.
+
+        numpy reads ``x[-1]`` as the last cell, and a dense array would inherit
+        that for free if it handed the key straight on. It must not: ``Fin[n]``
+        has no negative points, the typing rules state every access over the
+        index type and not over numpy's wraparound, and the generated C reads
+        ``x[-1]`` as the cell in front of the buffer. A native run that wrapped
+        would therefore agree with nothing the ledger says, so the index is
+        refused with an ``IndexError``, the same exception numpy raises at the
+        other end, which is also what lets a masked read under a false ``when``
+        answer zero here as it does there.
+        """
+        parts = key if isinstance(key, tuple) else (key,)
+        for part in parts:
+            if isinstance(part, bool | np.bool_):
+                continue
+            if isinstance(part, int | np.integer):
+                negative = part < 0
+            elif isinstance(part, np.ndarray) and part.dtype.kind in "iu":
+                negative = bool(np.any(part < 0))
+            else:
+                continue
+            if negative:
+                where = f" in {key!r}" if isinstance(key, tuple) else ""
+                raise IndexError(
+                    f"index {part}{where} is negative: an index of a loopty "
+                    "array is a point of its index type, which starts at 0, and "
+                    "is never counted from the end"
+                )
+        return key
+
     def __getitem__(self, key: Any) -> Any:
         if self._offsets is None:
-            return self._values[key]
+            return self._values[self._dense_key(key)]
         if isinstance(key, tuple):
             if len(key) != 2:
                 raise IndexError("a ragged array is indexed [row, column]")
@@ -330,7 +362,7 @@ class Arr:
 
     def __setitem__(self, key: Any, value: Any) -> None:
         if self._offsets is None:
-            self._values[key] = value
+            self._values[self._dense_key(key)] = value
             return
         if isinstance(key, tuple):
             if len(key) != 2:

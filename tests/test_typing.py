@@ -9,7 +9,7 @@ from lanky.ledger import Status
 from lanky.prelude import Nat, Real
 from lanky.terms import evaluate_annotations
 
-from loopty import Arr, Fin, when
+from loopty import Arr, Fin, reduce_sum, when
 from loopty import typing as rules
 from loopty.oracle import IslOracle, Monotone, Subset
 from loopty.trace import trace
@@ -288,3 +288,60 @@ def test_a_guard_read_of_the_accumulated_cell_is_still_an_obligation() -> None:
     ]
     assert refuted
     assert {f.provenance["access"] for f in refuted} == {"y[i + 1]"}
+
+
+# {{{ a reduction nested in another one
+
+
+def nested_total(
+    a: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+    s: Arr[Fin[1], Real],
+):
+    s[0] = reduce_sum(reduce_sum(a[i, j] for j in a.dom[i]) for i in a.dom)
+
+
+def lower_triangle(
+    a: Arr[Fin[n], Fin[n], Real],  # noqa: F821
+    s: Arr[Fin[1], Real],
+):
+    s[0] = reduce_sum(reduce_sum(a[i, j] for j in Fin[i + 1]) for i in a.dom)
+
+
+def ragged_total(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    s: Arr[Fin[1], Real],
+):
+    s[0] = reduce_sum(reduce_sum(val[r, j] for j in val.dom[r]) for r in val.dom)
+
+
+def past_the_diagonal(
+    a: Arr[Fin[n], Fin[n], Real],  # noqa: F821
+    s: Arr[Fin[1], Real],
+):
+    s[0] = reduce_sum(reduce_sum(a[i, j] for j in Fin[i + 2]) for i in a.dom)
+
+
+def test_a_read_in_a_nested_reduction_is_bounded_by_the_outer_binder() -> None:
+    # The inner reduction runs inside the outer one's binder, and its domain did
+    # not say so: ``i`` was an unconstrained parameter there, and ``a[i, j]``
+    # was refuted at ``i = -1`` for a sum that never leaves the array. A ragged
+    # inner bound, ``cnt[r]`` of the outer binder, is the same case.
+    for fn, access in (
+        (nested_total, "a[i, j]"),
+        (lower_triangle, "a[i, j]"),
+        (ragged_total, "val[r, j]"),
+    ):
+        fact = in_bounds_of(fn)[access]
+        assert fact.status is Status.DECIDED, (fn.__name__, fact.provenance)
+
+
+def test_a_nested_reduction_that_leaves_the_array_is_still_refuted() -> None:
+    # ``j < i + 2`` reaches one column past the diagonal of the last row.
+    fact = in_bounds_of(past_the_diagonal)["a[i, j]"]
+    assert fact.status is Status.REFUTED
+    assert fact.provenance["witness"] is not None
+
+
+# }}}
+

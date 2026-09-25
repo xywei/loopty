@@ -21,13 +21,21 @@ intent is visible in the document rather than in a marker.
 those are noise that would change with the toolchain rather than with loopty.
 They are shown to whoever runs this script and kept out of the document.
 
+A command that exits non-zero is a failure, in both modes. Its output is not
+pasted, because the partial output of a broken demo is not what the document
+claims the demo prints, and ``--check`` does not report its block current just
+because the text still matches: a document whose command no longer runs is out
+of date whatever its blocks say. The block is left as it was and the script
+exits 1, naming the command.
+
 Usage, from anywhere::
 
     uv run python scripts/refresh_example_outputs.py            # rewrite
     uv run python scripts/refresh_example_outputs.py --check    # exit 1 if stale
 
 ``--check`` is what a CI job or a pre-release hook would run: it rewrites
-nothing and fails if any block is out of date, naming the block.
+nothing and fails if any block is out of date or any command fails, naming the
+block.
 """
 
 from __future__ import annotations
@@ -95,8 +103,23 @@ def blocks_of(lines: list[str]) -> list[Block]:
     return out
 
 
+class CommandFailed(RuntimeError):
+    """A documented command exited non-zero, so its output is not a transcript."""
+
+    def __init__(self, command: str, returncode: int, stderr: str) -> None:
+        self.command = command
+        self.returncode = returncode
+        self.stderr = stderr
+        super().__init__(f"{command!r} exited with status {returncode}")
+
+
 def run(command: str, root: Path) -> list[str]:
-    """Run one command in the checkout and return its standard output lines."""
+    """Run one command in the checkout and return its standard output lines.
+
+    Raises :class:`CommandFailed` when the command exits non-zero. The exit
+    status is checked here rather than by ``subprocess`` so that the standard
+    error of a failure can still be shown to whoever ran the script.
+    """
     text = command.split("#", 1)[0].strip()
     result = subprocess.run(  # noqa: S603 - the commands come from the document
         shlex.split(text),
@@ -106,19 +129,33 @@ def run(command: str, root: Path) -> list[str]:
         timeout=TIMEOUT,
         check=False,
     )
+    if result.returncode != 0:
+        raise CommandFailed(command, result.returncode, result.stderr)
     if result.stderr.strip():
         print(f"  (stderr, not pasted) {result.stderr.strip().splitlines()[0]}")
     return [line.rstrip() for line in result.stdout.rstrip("\n").split("\n")]
 
 
-def refresh(path: Path, root: Path, check: bool) -> bool:
-    """Refresh one document. Returns whether it was (or would be) changed."""
+def refresh(path: Path, root: Path, check: bool) -> tuple[bool, list[str]]:
+    """Refresh one document.
+
+    Returns whether it was (or would be) changed, and the commands that failed.
+    A failed command's block is left exactly as it was, in both modes.
+    """
     lines = path.read_text(encoding="utf-8").split("\n")
     changed = False
+    failed: list[str] = []
     # Backwards, so that rewriting one block does not move the next one's bounds.
     for block in reversed(blocks_of(lines)):
         print(f"{path.name}: {block.command}")
-        captured = run(block.command, root)
+        try:
+            captured = run(block.command, root)
+        except CommandFailed as exc:
+            print(f"  FAILED (exit status {exc.returncode}): {block.command}")
+            for line in exc.stderr.strip().splitlines()[-5:]:
+                print(f"    {line}")
+            failed.append(block.command)
+            continue
         if lines[block.start : block.stop] == captured:
             continue
         changed = True
@@ -128,7 +165,7 @@ def refresh(path: Path, root: Path, check: bool) -> bool:
         lines[block.start : block.stop] = captured
     if changed and not check:
         path.write_text("\n".join(lines), encoding="utf-8")
-    return changed
+    return changed, failed
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -149,12 +186,25 @@ def main(argv: list[str] | None = None) -> int:
 
     root = repository_root()
     names = args.documents or list(DOCUMENTS)
-    stale = [name for name in names if refresh(root / name, root, args.check)]
+    stale: list[str] = []
+    failed: list[str] = []
+    for name in names:
+        changed, failures = refresh(root / name, root, args.check)
+        if changed:
+            stale.append(name)
+        failed.extend(failures)
+    if stale:
+        verb = "are out of date" if args.check else "were rewritten"
+        print(f"{', '.join(stale)} {verb}")
+    if failed:
+        # A failure is never current and never a rewrite: the document still
+        # shows a command that does not run, in either mode.
+        count = f"{len(failed)} command" + ("s" if len(failed) > 1 else "")
+        print(f"{count} failed; the blocks were left as they were")
+        return 1
     if not stale:
         print("every console block is current")
         return 0
-    verb = "are out of date" if args.check else "were rewritten"
-    print(f"{', '.join(stale)} {verb}")
     return 1 if args.check else 0
 
 
