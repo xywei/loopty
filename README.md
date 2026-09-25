@@ -145,7 +145,10 @@ end to end; the edges are sharp.
   reported as a `refuted` `buildable` fact and raises `UnbuildableSchedule` when
   something asks for code.
 - Lowering to loopy, including a ragged axis as a flat buffer plus offsets, and
-  running on `lp.ExecutableCTarget`.
+  running on `lp.ExecutableCTarget`. Every argument of `LoopyExecutor.run` is
+  an argument of the kernel; the target is chosen by the schedule
+  (`Schedule(kernel, target="opencl")`) or by the executor
+  (`LoopyExecutor(target="opencl")`).
 - The argument contract, enforced at every entry point that runs a kernel
   (compiled, differential and native): two distinct array parameters may not
   share storage, a ragged argument has to agree with the counts array its type

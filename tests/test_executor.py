@@ -251,7 +251,36 @@ def test_a_schedule_is_run_on_the_target_it_was_built_for() -> None:
     # checked against the kernel that target produced.
     schedule = Schedule(ht.axpy_term())
     with pytest.raises(ValueError, match="was built for target"):
-        executor().run(schedule, target="opencl")
+        LoopyExecutor(target="opencl").run(schedule)
+    with pytest.raises(ValueError, match="was built for target"):
+        LoopyExecutor(target="opencl").differential(None, schedule, {}, reference={})
+
+
+def test_every_keyword_of_a_run_is_a_kernel_argument() -> None:
+    # The backend used to be popped from the keywords as ``target=``, so a
+    # kernel parameter of that name could not be passed by keyword: its array
+    # was taken for the name of a target, and the run failed on numpy's "truth
+    # value of an array is ambiguous". The target is the executor's option now.
+    @kernel
+    def shift(source: Arr[Fin[n], Real], target: Arr[Fin[n], Real]):  # noqa: F821
+        for i in source.dom:
+            target[i] = source[i] + 1.0
+
+    source = np.array([1.0, 2.0, 3.0])
+    target = np.zeros(3)
+    out = executor().run(shift.trace(), source=source, target=target)
+    assert np.array_equal(out["target"], source + 1.0)
+    assert np.array_equal(target, source + 1.0)
+
+    target = np.zeros(3)
+    out = LoopyExecutor(target="c").run(shift.trace(), source=source, target=target)
+    assert np.array_equal(target, source + 1.0)
+
+    target = np.zeros(3)
+    fact = LoopyExecutor(target="c").differential(
+        shift, Schedule(shift), {"source": source, "target": target}
+    )
+    assert fact.status.value == "tested"
 
 
 # {{{ the contract an argument list has to satisfy

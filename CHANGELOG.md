@@ -318,6 +318,14 @@ with a pair of statement instances.
 
 ### Changed
 
+- **Executor options are separate from kernel arguments.** Every argument of
+  `LoopyExecutor.run` is an argument of the kernel, and the target is chosen by
+  the schedule (`Schedule(kernel, target="opencl")`) or by the executor
+  (`LoopyExecutor(target="opencl")`). `run` used to pop `target=` from its
+  keywords as the backend, so a kernel parameter called `target` could not be
+  passed by keyword: the call failed on numpy's "truth value of an array ... is
+  ambiguous". `differential` no longer takes extra keywords either, which it
+  passed on to `run`.
 - **Reductions have a Loopty-owned frontend.** `loopty.reduce_sum` is the public
   kernel API; Lanky still supplies generator binder capture internally, while
   tracing immediately converts the captured node into an ISL-backed
