@@ -56,9 +56,11 @@ import numpy as np
 import pymbolic.primitives as prim
 
 from loopty.arr import Arr
+from loopty.idx import is_affine
 from loopty.term import ArrType
 
 __all__ = [
+    "axis_extents",
     "check_arguments",
     "counts_family",
     "disjoint_arguments",
@@ -241,11 +243,18 @@ def resolve_sizes(
     kernel whose only arrays have extents ``n + 1`` still has an ``n``, and a
     scalar ``i: Fin[n + 1]`` has to be measured against it. An expression in
     several names is left alone.
+
+    So is an expression that is not *linear* in its name (:func:`_linear`).
+    The solution is read off two evaluations, at ``0`` and at ``1``, which is
+    the slope and the offset of a line and nothing else: ``n * n`` evaluates to
+    ``0`` and ``1`` there, so an extent of 9 used to give ``n = 9`` rather than
+    3, and ``(n + 1) // 2`` an ``n`` of 3 whose axis has 2 cells. A size left
+    unresolved is not a size assumed: every check that needs it keeps what it
+    can without it.
     """
     from lanky.terms import evaluate, free_variables
 
     sizes: dict[str, int] = {}
-    deferred: list[tuple[Any, int]] = []
     for name, typ in types.items():
         value = supplied.get(name)
         if value is None:
@@ -254,20 +263,11 @@ def resolve_sizes(
             if isinstance(value, int | np.integer) and not isinstance(value, bool):
                 sizes.setdefault(name, int(value))
             continue
-        shape = _index_shape(value, typ)
-        if shape is None:
-            continue
-        for axis, (size, ragged) in enumerate(
-            zip(typ.axes, typ.ragged, strict=True)
-        ):
-            if ragged or axis >= len(shape):
-                continue
+        for size, extent in _axis_extents_of(value, typ):
             if isinstance(size, prim.Variable):
-                sizes.setdefault(size.name, int(shape[axis]))
-            elif not isinstance(size, int | np.integer):
-                deferred.append((size, int(shape[axis])))
+                sizes.setdefault(size.name, extent)
     # Second pass, so that a bare axis always wins over a solved one.
-    for size, extent in deferred:
+    for size, extent in axis_extents(types, supplied):
         try:
             free = free_variables(size)
         except Exception:
@@ -275,7 +275,7 @@ def resolve_sizes(
         if len(free) != 1:
             continue
         (name,) = free
-        if name in sizes:
+        if name in sizes or not _linear(size):
             continue
         try:
             offset = evaluate(size, {name: 0})
@@ -290,6 +290,55 @@ def resolve_sizes(
         if solved >= 0:
             sizes[name] = int(solved)
     return sizes
+
+
+def _axis_extents_of(value: Any, typ: ArrType) -> list[tuple[Any, int]]:
+    """Every dense axis of one array argument, with the extent it has."""
+    shape = _index_shape(value, typ)
+    if shape is None:
+        return []
+    return [
+        (size, int(shape[axis]))
+        for axis, (size, ragged) in enumerate(zip(typ.axes, typ.ragged, strict=True))
+        if not ragged and axis < len(shape)
+    ]
+
+
+def axis_extents(
+    types: Mapping[str, Any], supplied: Mapping[str, Any]
+) -> tuple[tuple[Any, int], ...]:
+    """Every axis written as an expression, with the extent the call gives it.
+
+    ``y: Arr[Fin[n * n], Real]`` of nine cells says that ``n * n`` is 9 in this
+    call, whether or not ``n`` itself can be recovered from it (it cannot be,
+    by :func:`resolve_sizes`, because the expression is not linear). A value of
+    ``Fin[n * n]`` is then measured against 9 directly; see :func:`sort_bound`.
+    The terms are kept as terms, in a tuple rather than as dictionary keys,
+    because a lanky term answers ``==`` with a proposition.
+    """
+    return tuple(
+        (size, extent)
+        for name, typ in types.items()
+        if isinstance(typ, ArrType) and supplied.get(name) is not None
+        for size, extent in _axis_extents_of(supplied[name], typ)
+        if not isinstance(size, prim.Variable | int | np.integer)
+    )
+
+
+def _linear(expr: Any) -> bool:
+    """Whether ``expr`` is an integer combination of names plus a constant.
+
+    :func:`loopty.idx.is_affine` without the quasi: floor division and
+    remainder are affine to isl, but they are not invertible, and a size is
+    solved for by inverting its axis. A product with more than one factor that
+    is not an integer literal is not linear either, which is what rules out
+    ``n * n``.
+    """
+    if isinstance(expr, prim.FloorDiv | prim.Remainder):
+        return False
+    if isinstance(expr, prim.Sum | prim.Product):
+        return is_affine(expr) and all(_linear(child) for child in expr.children)
+    return is_affine(expr)
 
 
 def _index_shape(value: Any, typ: ArrType) -> tuple[int, ...] | None:
@@ -336,7 +385,9 @@ def integral_sort(sort: Any) -> bool:
 
 
 def sort_bound(
-    sort: Any, sizes: Mapping[str, int]
+    sort: Any,
+    sizes: Mapping[str, int],
+    extents: tuple[tuple[Any, int], ...] = (),
 ) -> tuple[int, int | None] | None:
     """The half-open range a value of ``sort`` has to lie in, if the sort says.
 
@@ -345,6 +396,11 @@ def sort_bound(
     propositions are left to an oracle. ``Nat`` says ``0 <= v`` and nothing
     above, which is ``None`` for the upper end. Every other sort says nothing
     about the value at all, and the whole pair is ``None``.
+
+    A bound written as an expression is evaluated under the sizes and, when a
+    name in it is not resolved, looked up among ``extents``
+    (:func:`axis_extents`): ``Fin[n * n]`` is bounded by the extent of an axis
+    written ``Fin[n * n]`` even though ``n`` is not known.
     """
     from lanky.prelude import FinType
 
@@ -358,10 +414,28 @@ def sort_bound(
         # ``Fin[n + 1]``: an affine bound is evaluated under the resolved sizes.
         # When a size is missing the upper end is unknown, not absent: a point
         # of *some* ``Fin`` is still never negative, so the floor stays.
-        return (0, _evaluate_bound(bound, sizes))
+        high = _evaluate_bound(bound, sizes)
+        if high is None:
+            high = _matching_extent(bound, extents)
+        return (0, high)
     if getattr(sort, "name", None) == "Nat":
         return (0, None)
     return None
+
+
+def _matching_extent(bound: Any, extents: tuple[tuple[Any, int], ...]) -> int | None:
+    """The extent of an axis written exactly as ``bound``, or ``None``.
+
+    Two axes written the same way but given different extents by a call are a
+    shape mismatch, which is not this module's to diagnose; the smaller one is
+    the one every value of the sort has to fit, so it is the one returned.
+    """
+    from lanky.terms import structurally_equal
+
+    matches = [
+        extent for expr, extent in extents if structurally_equal(expr, bound)
+    ]
+    return min(matches) if matches else None
 
 
 def _evaluate_bound(bound: Any, sizes: Mapping[str, int]) -> int | None:
@@ -384,10 +458,12 @@ def _evaluate_bound(bound: Any, sizes: Mapping[str, int]) -> int | None:
 
 
 def element_bound(
-    typ: ArrType, sizes: Mapping[str, int]
+    typ: ArrType,
+    sizes: Mapping[str, int],
+    extents: tuple[tuple[Any, int], ...] = (),
 ) -> tuple[int, int | None] | None:
     """The range an element of ``typ`` has to lie in: :func:`sort_bound` of its sort."""
-    return sort_bound(typ.dtype, sizes)
+    return sort_bound(typ.dtype, sizes, extents)
 
 
 def _not_an_integer(flat: np.ndarray) -> int | None:
@@ -413,6 +489,7 @@ def element_types(
     types: Mapping[str, Any],
     supplied: Mapping[str, Any],
     sizes: Mapping[str, int] | None = None,
+    extents: tuple[tuple[Any, int], ...] | None = None,
 ) -> None:
     """Refuse an argument holding a value its declared element type excludes.
 
@@ -433,6 +510,7 @@ def element_types(
     float array is accepted.
     """
     sizes = resolve_sizes(types, supplied) if sizes is None else sizes
+    extents = axis_extents(types, supplied) if extents is None else extents
     for name, typ in types.items():
         if not isinstance(typ, ArrType):
             continue
@@ -470,7 +548,7 @@ def element_types(
                     "the compiled run reads the element as an integer, so a "
                     "fractional or non-finite entry is an index nobody declared"
                 )
-        limits = element_bound(typ, sizes)
+        limits = element_bound(typ, sizes, extents)
         if limits is None:
             continue
         low, high = limits
@@ -523,6 +601,7 @@ def scalar_parameters(
     types: Mapping[str, Any],
     supplied: Mapping[str, Any],
     sizes: Mapping[str, int] | None = None,
+    extents: tuple[tuple[Any, int], ...] | None = None,
 ) -> None:
     """Refuse a scalar argument that its declared sort excludes.
 
@@ -540,6 +619,7 @@ def scalar_parameters(
     without that the value is still required to be an integer.
     """
     sizes = resolve_sizes(types, supplied) if sizes is None else sizes
+    extents = axis_extents(types, supplied) if extents is None else extents
     for name, sort in types.items():
         if isinstance(sort, ArrType) or not integral_sort(sort):
             continue
@@ -567,7 +647,7 @@ def scalar_parameters(
                 f"discharges an access indexed by {name} as in bounds *by "
                 "type*, with no check in the generated code"
             )
-        limits = sort_bound(sort, sizes)
+        limits = sort_bound(sort, sizes, extents)
         if limits is None:
             continue
         low, high = limits
@@ -605,5 +685,6 @@ def check_arguments(
     disjoint_arguments(supplied)
     ragged_arguments(types, supplied, offsets_args)
     sizes = resolve_sizes(types, supplied)
-    element_types(types, supplied, sizes)
-    scalar_parameters(types, supplied, sizes)
+    extents = axis_extents(types, supplied)
+    element_types(types, supplied, sizes, extents)
+    scalar_parameters(types, supplied, sizes, extents)

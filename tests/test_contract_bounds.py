@@ -153,3 +153,38 @@ def test_a_bare_axis_wins_over_a_solved_one() -> None:
     types = pick_next.arg_types
     assert resolve_sizes(types, arguments(0))["n"] == 3
     assert resolve_sizes(types, {"i": 0, "x": np.zeros(3), "y": np.zeros(9)})["n"] == 3
+
+
+@kernel
+def square_pick(
+    i: Fin[n * n],  # noqa: F821
+    y: Arr[Fin[n * n], Real],  # noqa: F821
+):
+    """``n`` occurs only as ``n * n``, which is not linear in ``n``."""
+    y[i] = y[i] + 1.0
+
+
+def test_a_size_under_a_non_linear_axis_is_not_solved_for() -> None:
+    # Evaluated at 0 and at 1, ``n * n`` looks like the line ``n``, so nine cells
+    # used to resolve ``n`` to 9 and bound ``i: Fin[n * n]`` by 81: ``i = 9``
+    # was accepted and indexed past the end of ``y``.
+    types = square_pick.arg_types
+    assert "n" not in resolve_sizes(types, {"i": 0, "y": np.zeros(9)})
+    # The scalar is measured against the axis written the same way instead.
+    for index in (0, 8):
+        scalar_parameters(types, {"i": index, "y": np.zeros(9)})
+    with pytest.raises(ValueError, match=r"the argument i is 9"):
+        scalar_parameters(types, {"i": 9, "y": np.zeros(9)})
+
+
+def test_a_floor_divided_axis_is_not_solved_for() -> None:
+    # ``(n + 1) // 2`` is affine to isl, but three cells are ``n = 5`` or
+    # ``n = 6``; the two-point slope used to answer 3, whose axis has two.
+    from loopty.term import ArrType
+
+    halves = (Var("n") + 1) // 2
+    types = {"y": ArrType(axes=(halves,), dtype=Real, ragged=(False,))}
+    assert resolve_sizes(types, {"y": np.zeros(3)}) == {}
+    # A linear axis is still solved, as before.
+    types = {"y": ArrType(axes=(2 * Var("n") + 1,), dtype=Real, ragged=(False,))}
+    assert resolve_sizes(types, {"y": np.zeros(7)}) == {"n": 3}
