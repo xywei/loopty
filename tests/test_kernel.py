@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import ModuleType
 
 import numpy as np
+import pytest
 from lanky.ledger import Status
 from lanky.plugins import registry
 from lanky.prelude import Nat, Real
@@ -290,3 +291,32 @@ def test_wrapping_a_numpy_argument_does_not_copy_it() -> None:
     assert isinstance(seen[0], Arr)
     assert seen[0].numpy() is given
     assert list(given) == [0.0, 0.0, 0.0]
+
+
+def test_a_native_run_does_not_wrap_a_negative_index() -> None:
+    # ``x[i - 1]`` at ``i = 0`` is refuted by the typing rules and reads in front
+    # of the buffer in generated C. numpy would read the last cell instead, so
+    # the reference run computed a value that neither the ledger nor the
+    # compiled code agrees with.
+    @kernel
+    def lag(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = x[i - 1]
+
+    with pytest.raises(IndexError, match="is negative"):
+        lag(np.array([1.0, 2.0, 3.0]), np.zeros(3))
+
+
+def test_a_negative_read_under_a_false_guard_still_answers_zero() -> None:
+    # The boundary guard of a stencil evaluates ``x[i - 1]`` at ``i = 0`` too;
+    # the masked read answers zero there and the write is dropped, as it is for
+    # a read past the other end.
+    @kernel
+    def guarded_lag(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(i > 0):
+                y[i] = x[i - 1]
+
+    y = np.full(3, -1.0)
+    guarded_lag(np.array([1.0, 2.0, 3.0]), y)
+    assert list(y) == [-1.0, 1.0, 2.0]
