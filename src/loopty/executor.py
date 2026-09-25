@@ -7,6 +7,13 @@ tiny sizes. Target ``opencl`` uses ``lp.PyOpenCLTarget`` and belongs on a machin
 with a device; pyopencl is an optional extra for that reason, is imported inside
 one branch of one function, and is never reached by importing loopty.
 
+Executor options and kernel arguments are kept apart. Every positional and
+keyword argument of :meth:`LoopyExecutor.run` is an argument of the kernel, so a
+kernel whose parameter is called ``target`` receives it like any other. The
+target is chosen by the schedule, ``Schedule(kernel, target="opencl")``, or by
+the executor, ``LoopyExecutor(target="opencl")``, and never by a keyword of the
+call.
+
 ``differential`` is the point of having two ways to run the same body. It
 compares the transformed, compiled run against the native numpy run of the
 original Python, and decides agreement using the exactness class the types state:
@@ -194,9 +201,24 @@ def _pad_empty_arrays(
 
 
 class LoopyExecutor:
-    """The executor loopty registers under ``lanky.executors``."""
+    """The executor loopty registers under ``lanky.executors``.
+
+    ``target`` is the loopy target a kernel or a term is compiled for, ``"c"``
+    when it is ``None``. A :class:`~loopty.schedule.Schedule` carries its own
+    target, and an executor given a different one refuses to run it rather
+    than rebuild it silently; ``schedule.retarget(...)`` is how a schedule
+    changes target, with every cast checked again.
+
+    The target is an option of the executor and not of a call because every
+    keyword of :meth:`run` belongs to the kernel. It used to be popped from the
+    keywords as ``target=``, which made a kernel parameter of that name
+    unreachable by keyword: its value was taken for the name of a backend.
+    """
 
     name = "loopy"
+
+    def __init__(self, target: str | None = None) -> None:
+        self.target = target
 
     def trust_class(self) -> str:
         """Running is evidence, not proof: an execution is a test."""
@@ -206,9 +228,11 @@ class LoopyExecutor:
         """Lower ``obj``, compile it for its target, and run it.
 
         Arguments are given positionally in the term's parameter order or by
-        name. The result is a dictionary of the arrays the kernel writes; the
-        arrays passed in are also updated in place, so that a kernel whose output
-        is a parameter behaves the same way compiled as it does in Python.
+        name, and every one of them is an argument of the kernel: the target is
+        the executor's or the schedule's, never a keyword here. The result is a
+        dictionary of the arrays the kernel writes; the arrays passed in are
+        also updated in place, so that a kernel whose output is a parameter
+        behaves the same way compiled as it does in Python.
 
         The arguments are checked against the term before anything is compiled
         or run: distinct array parameters may not share storage, a ragged
@@ -218,8 +242,7 @@ class LoopyExecutor:
         what a typing rule assumed when it decided something; see
         :mod:`loopty.contract`.
         """
-        target = kwargs.pop("target", None)
-        term, kernel, lowering, target_name = _resolve(obj, target)
+        term, kernel, lowering, target_name = _resolve(obj, self.target)
         names = [name for name, _ in term.params]
         supplied = {**dict(zip(names, args, strict=False)), **kwargs}
         check_arguments(dict(term.params), supplied, lowering.ragged)
@@ -267,6 +290,14 @@ class LoopyExecutor:
         was passed to it. The compiled code writes into loopy's own buffers, and
         this puts the values where the caller is looking for them, including
         into a runtime :class:`~loopty.arr.Arr`.
+
+        A plain ``ndarray`` needs this as much as an ``Arr`` does. It reaches
+        loopy through :func:`_as_numpy`, which hands over the caller's own array
+        only when it is already contiguous and of the lowered dtype; a strided
+        view (``z[:, 0]``) or a ``float32`` output for a ``Real`` parameter is
+        copied on the way in, and the results used to stay in that copy. Such
+        an output is written back here, cast to the caller's dtype the way any
+        assignment into it would be.
         """
         from loopty.arr import Arr
 
@@ -274,6 +305,10 @@ class LoopyExecutor:
             given = supplied.get(name)
             if isinstance(given, Arr):
                 given.numpy()[...] = np.asarray(value).reshape(given.numpy().shape)
+            elif isinstance(given, np.ndarray) and given is not value:
+                result = np.asarray(value)
+                if result.size == given.size:
+                    given[...] = result.reshape(given.shape)
 
     def _run_opencl(
         self, kernel: Any, lowering: Lowering, call: dict
@@ -287,8 +322,11 @@ class LoopyExecutor:
         return self._collect(lowering, call, results)
 
     def emit_code(self, obj: Any, target: str | None = None) -> str:
-        """The code loopy generates, for ``--emit-code`` and for reading."""
-        return emit_code(obj, target)
+        """The code loopy generates, for ``--emit-code`` and for reading.
+
+        ``target`` defaults to the executor's own.
+        """
+        return emit_code(obj, self.target if target is None else target)
 
     def differential(
         self,
@@ -297,7 +335,6 @@ class LoopyExecutor:
         args: dict[str, Any],
         /,
         reference: dict[str, Any] | None = None,
-        **kwargs: Any,
     ) -> Any:
         """Compare a scheduled run with the native run; return the fact.
 
@@ -317,8 +354,12 @@ class LoopyExecutor:
         against nothing at all and the resulting ``TESTED`` fact would claim
         more than was tested; an output it names that the kernel does not write
         is a caller error worth saying out loud rather than ignoring.
+
+        The kernel's arguments are ``args`` and nothing else; the scheduled run
+        is on the schedule's target, which has to be the executor's when the
+        executor names one.
         """
-        term, _lowered, lowering, _target = _resolve(schedule)
+        term, _lowered, lowering, _target = _resolve(schedule, self.target)
         # Before the copies: ``_copy`` gives every argument a buffer of its own,
         # which is exactly what hides an alias between two of them, and the
         # native run would otherwise be the first thing to meet a bad index.
@@ -357,7 +398,7 @@ class LoopyExecutor:
                 )
             native = {name: native_args[name] for name in lowering.outputs}
         scheduled_args = {name: _copy(value) for name, value in args.items()}
-        got = self.run(schedule, **scheduled_args, **kwargs)
+        got = self.run(schedule, **scheduled_args)
         return agreement(term, schedule, got, native)
 
 

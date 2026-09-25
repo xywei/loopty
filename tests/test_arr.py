@@ -105,6 +105,28 @@ def test_offsets_that_do_not_start_at_zero_are_refused() -> None:
     assert Arr(np.zeros(3), offsets=np.array([0, 1, 3])).counts.tolist() == [1, 2]
 
 
+def test_a_negative_index_into_a_dense_array_is_refused() -> None:
+    # numpy would read x[-1] as the last cell; Fin[n] has no negative points and
+    # generated C reads in front of the buffer, so the native run may not wrap.
+    a = Arr.from_numpy(np.arange(6.0).reshape(2, 3))
+    with pytest.raises(IndexError, match=r"^index -1 is negative"):
+        a[-1]
+    with pytest.raises(IndexError, match=r"^index -1 in \(0, -1\) is negative"):
+        a[0, -1]
+    with pytest.raises(IndexError, match="is negative"):
+        a[np.int64(-2), 0]
+    with pytest.raises(IndexError, match="is negative"):
+        a[0, -1] = 7.0
+    assert a.numpy()[0, 2] == 2.0
+    # Every non-negative index, and a slice, still reaches numpy unchanged.
+    assert a[1, 2] == 5.0
+    assert a[np.int64(1), 0] == 3.0
+    assert a[0].tolist() == [0.0, 1.0, 2.0]
+    assert a[0, 1:].tolist() == [1.0, 2.0]
+    with pytest.raises(IndexError):
+        a[2, 0]
+
+
 def test_dense_type_is_an_arrtype_with_concrete_axes() -> None:
     a = Arr.zeros((Fin[2], Fin[3]), dtype=np.int64)
     t = a.type

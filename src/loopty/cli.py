@@ -254,7 +254,11 @@ class RunVerb:
             refused = 0
         failures = unscheduled + refused
 
-        executor = LoopyExecutor()
+        # The target is the executor's option, not a keyword of the run: every
+        # keyword of ``run`` is a kernel argument, and an input named
+        # ``target`` has to reach the kernel. Each schedule already carries the
+        # target it runs on, so this only makes the executor insist on it.
+        executor = LoopyExecutor(target=target)
         ledger = Ledger()
         for schedule in schedules:
             name = _name_of(schedule)

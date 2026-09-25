@@ -37,9 +37,9 @@ from lanky.terms import evaluate_annotations
 
 from loopty import typing as rules
 from loopty.arr import Arr, ArrSpec
-from loopty.contract import check_arguments
-from loopty.term import Term
-from loopty.trace import array_type, mask_writes, trace, when
+from loopty.contract import check_arguments, integral_sort
+from loopty.term import ArrType, Term, free_name_sorts, free_name_sorts_message
+from loopty.trace import TraceError, array_type, mask_writes, trace, when
 
 __all__ = [
     "Kernel",
@@ -272,12 +272,74 @@ class Kernel(_Decorated):
         The cost is one Python-level ``__getitem__`` per element access on the
         reference run, which is the slow path by construction; the demos are
         unchanged to the tenth of a second.
+
+        *An index array stored as floats is read as integers.* The contract
+        accepts ``col = [1.0, 0.0]`` for ``col: Arr[..., Fin[m]]``, because being
+        a point of ``Fin[m]`` is a property of the value, and the compiled run
+        casts it to an integer on the way in. numpy refuses a float as an index,
+        so the native run used to raise on the very input the contract had just
+        accepted, and the differential test could not compare the two. See
+        :meth:`_integer_copies` for which arrays are copied and why only those.
         """
-        check_arguments(self.arg_types, self._bound(args, kwargs))
+        bound = self._bound(args, kwargs)
+        check_arguments(self.arg_types, bound)
+        copies = self._integer_copies(bound)
+        code = self.fn.__code__
+        names = code.co_varnames[: code.co_argcount]
+        positional = [
+            copies.get(names[k], arg) if k < len(names) else arg
+            for k, arg in enumerate(args)
+        ]
+        keywords = {name: copies.get(name, value) for name, value in kwargs.items()}
         return self.fn(
-            *(self._prepare(arg) for arg in args),
-            **{name: self._prepare(value) for name, value in kwargs.items()},
+            *(self._prepare(arg) for arg in positional),
+            **{name: self._prepare(value) for name, value in keywords.items()},
         )
+
+    def _integer_copies(self, bound: dict[str, Any]) -> dict[str, Any]:
+        """Integer copies of the float-stored arrays of an integral sort.
+
+        Only arrays whose declared element sort is integral (``Fin``, ``Nat``,
+        ``Int``) and whose storage is floating or complex are candidates, and
+        :func:`loopty.contract.check_arguments` has already required every
+        entry of those to be a finite whole number inside
+        :data:`loopty.contract.INT64_RANGE`, so the copy is exact. The copy is
+        ``int64`` while the lowering stores an integral sort as ``int32``; a
+        value between the two ranges runs natively and is narrowed by the
+        compiled run's cast, as the same value stored as ``int64`` is.
+
+        An array the body *writes* is left as it is. A copy is a new buffer, and
+        the native run's promise is that writes land in the caller's array; an
+        array that is only read can be copied without anybody being able to
+        tell. Which arrays are written is a fact about the term, so it is asked
+        of the term, and only when there is a candidate at all: a call with no
+        float-stored index array never traces. A body that cannot be traced
+        still runs natively, with its arguments as given.
+        """
+        candidates: dict[str, Any] = {}
+        for name, typ in self.arg_types.items():
+            if not isinstance(typ, ArrType) or not integral_sort(typ.dtype):
+                continue
+            value = bound.get(name)
+            buffer = value.numpy() if isinstance(value, Arr) else value
+            if isinstance(buffer, np.ndarray) and buffer.dtype.kind in "fc":
+                candidates[name] = value
+        if not candidates:
+            return {}
+        try:
+            written = {stmt.assignee.array for stmt in self.term.stmts}
+        except Exception:  # noqa: BLE001 - reported by facts(), not by a native run
+            return {}
+        out: dict[str, Any] = {}
+        for name, value in candidates.items():
+            if name in written:
+                continue
+            if isinstance(value, Arr):
+                whole = np.real(value.numpy()).astype(np.int64)
+                out[name] = Arr(whole, value.offsets) if value.is_ragged else Arr(whole)
+            else:
+                out[name] = np.real(value).astype(np.int64)
+        return out
 
     def _prepare(self, value: Any) -> Any:
         """One argument, as the body needs to see it: a masking view of it."""
@@ -290,7 +352,18 @@ class Kernel(_Decorated):
     # {{{ the term
 
     def trace(self) -> Term:
-        """Trace the body against a generic point and return its term."""
+        """Trace the body against a generic point and return its term.
+
+        A signature with a sort that is a free name (``a: float`` under
+        postponed annotations gives ``Var("float")``) is refused first, with
+        a :class:`~loopty.trace.TraceError` naming the sort to write instead;
+        see :func:`loopty.term.free_name_sorts`. The native run does not need
+        a sort and is not refused.
+        """
+        params = tuple(self.arg_types.items())
+        found = free_name_sorts(params)
+        if found:
+            raise TraceError(free_name_sorts_message(self.qualname, params, found))
         self._term = trace(self, self.annotations)
         self._facts = None
         return self._term

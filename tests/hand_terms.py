@@ -13,6 +13,8 @@ supplies concrete values only when it runs the compiled code.
 
 from __future__ import annotations
 
+import dataclasses
+
 import islpy as isl
 import numpy as np
 import pymbolic.primitives as prim
@@ -117,6 +119,46 @@ def jacobi_term() -> Term:
     )
 
 
+def coupled_pair_term() -> Term:
+    """Two statements that feed each other, one of them across the time loop.
+
+    ``v[t+1] = v[t] - x[t] / 4`` and then ``x[t+1] = x[t] + v[t+1] / 4``, a
+    symplectic Euler step. The second statement reads what the first wrote in
+    the same iteration, and the first reads what the second wrote in the
+    iteration before. Only the first of those is an order between the two
+    instructions; the second is carried by the loop, and stating it as a
+    dependence of the first statement on the second makes a cycle.
+    """
+    domain = isl.Set("[n] -> { [t] : 0 <= t < n - 1 }")
+    kick = Stmt(
+        id="S0",
+        inames=("t",),
+        domain=domain,
+        assignee=Access("v", (V("t") + 1,)),
+        expr=S("v", V("t")) - S("x", V("t")) / 4,
+        kind="assign",
+        guard=None,
+        where="hand_terms.py:coupled_pair",
+    )
+    drift = Stmt(
+        id="S1",
+        inames=("t",),
+        domain=domain,
+        assignee=Access("x", (V("t") + 1,)),
+        expr=S("x", V("t")) + S("v", V("t") + 1) / 4,
+        kind="assign",
+        guard=None,
+        where="hand_terms.py:coupled_pair",
+    )
+    return Term(
+        name="coupled_pair",
+        params=(("x", dense(V("n"))), ("v", dense(V("n")))),
+        sizes=("n",),
+        stmts=(kick, drift),
+        post=None,
+    )
+
+
 def spmv_term(exactness: str = "reassoc") -> Term:
     """Ragged CSR product, the reduction form.
 
@@ -206,6 +248,56 @@ def spmv_accumulate_term() -> Term:
         sizes=("n", "m"),
         stmts=(stmt,),
         post=None,
+    )
+
+
+def spmv_and_shift_term(order: str = "ps") -> Term:
+    """:func:`spmv_accumulate_term` and a shift of ``off`` by one, in any order.
+
+    ``order`` spells the body, one letter per statement:
+
+    * ``p``, the product over ``(r, j)``, and ``q``, the same over ``(r, k)``;
+    * ``s``, ``off[s] = off[s] - 1`` in a loop of its own, and ``r``,
+      ``off[r + 1] = off[r + 1] - 1`` inside the row loop.
+
+    So ``"sp"`` shifts first, and ``"psp"`` runs the product on both sides of
+    the shift. The counts family ``cnt`` is not a parameter, so the row length
+    ``cnt_r`` is computed from ``off``, which the shift rewrites. Which offsets
+    the product reads through, and which ones bound its rows, is decided by the
+    order of the statements.
+    """
+    product = spmv_accumulate_term().stmts[0]
+    k = V("k")
+    other_product = dataclasses.replace(
+        product,
+        inames=("r", "k"),
+        domain=isl.Set("[n, cnt_r] -> { [r, k] : 0 <= r < n and 0 <= k < cnt_r }"),
+        expr=S("y", V("r")) + S("val", V("r"), k) * S("x", S("col", V("r"), k)),
+    )
+    shift = Stmt(
+        id="S0",
+        inames=("s",),
+        domain=isl.Set("[n] -> { [s] : 0 <= s < n + 1 }"),
+        assignee=Access("off", (V("s"),)),
+        expr=S("off", V("s")) - 1,
+        kind="assign",
+        guard=None,
+        where="hand_terms.py:spmv_and_shift",
+    )
+    row_shift = dataclasses.replace(
+        shift,
+        inames=("r",),
+        domain=isl.Set("[n] -> { [r] : 0 <= r < n }"),
+        assignee=Access("off", (V("r") + 1,)),
+        expr=S("off", V("r") + 1) - 1,
+    )
+    pieces = {"p": product, "q": other_product, "s": shift, "r": row_shift}
+    stmts = tuple(
+        dataclasses.replace(pieces[letter], id=f"S{position}")
+        for position, letter in enumerate(order)
+    )
+    return dataclasses.replace(
+        spmv_accumulate_term(), name="spmv_and_shift", stmts=stmts
     )
 
 
@@ -377,6 +469,17 @@ def csr_reference(off: np.ndarray, col: np.ndarray, val: np.ndarray, x: np.ndarr
         for a in range(off[r], off[r + 1]):
             out[r] += val[a] * x[col[a]]
     return out
+
+
+def coupled_pair_reference(
+    x: np.ndarray, v: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """The numpy reference for :func:`coupled_pair_term`, run on copies."""
+    x, v = x.copy(), v.copy()
+    for t in range(len(x) - 1):
+        v[t + 1] = v[t] - x[t] / 4
+        x[t + 1] = x[t] + v[t + 1] / 4
+    return x, v
 
 
 def jacobi_reference(u: np.ndarray) -> np.ndarray:

@@ -130,13 +130,40 @@ def sample_pair(a_map: isl.Map) -> tuple[tuple[int, ...], tuple[int, ...]] | Non
     domain dimension, which is how a dependence violation becomes a pair of
     statement instances.
     """
+    sampled = _sample_pair_full(a_map)
+    return None if sampled is None else sampled[0]
+
+
+def _sample_pair_full(
+    a_map: isl.Map,
+) -> tuple[tuple[tuple[int, ...], tuple[int, ...]], dict[str, int]] | None:
+    """:func:`sample_pair` and the parameters it holds at, from one sample."""
     if a_map.is_empty():
         return None
     n_in = a_map.dim(isl.dim_type.in_)
-    coordinates = sample_point(a_map.wrap())
-    if coordinates is None:  # pragma: no cover - is_empty already ruled this out
+    sampled = _sample_full(a_map.wrap())
+    if sampled is None:  # pragma: no cover - is_empty already ruled this out
         return None
-    return coordinates[:n_in], coordinates[n_in:]
+    coordinates, parameters = sampled
+    return (coordinates[:n_in], coordinates[n_in:]), parameters
+
+
+def _witness(obj: isl.Set | isl.Map) -> tuple[Any, dict[str, int]]:
+    """A counterexample and the parameter valuation it is one at, sampled once.
+
+    Every refutation below reports a point (or a pair of instances) together
+    with the sizes it was read off at, and the two only belong together if they
+    come from the same sample: asking isl twice leaves it free to answer with
+    two different points, and a cell reported outside an array at a size where
+    it is inside is a counterexample to nothing. A map is sampled as a pair.
+    """
+    if isinstance(obj, isl.Map):
+        sampled = _sample_pair_full(obj)
+    else:
+        sampled = _sample_full(obj)
+    if sampled is None:
+        return None, {}
+    return sampled
 
 
 def _at_text(parameters: dict[str, int] | None) -> str:
@@ -166,8 +193,7 @@ def is_subset(small: isl.Set, large: isl.Set) -> Verdict:
     outside = small.subtract(large)
     if outside.is_empty():
         return Verdict(True, None, "subset")
-    point = sample_point(outside)
-    parameters = sample_parameters(outside)
+    point, parameters = _witness(outside)
     at = _at_text(parameters)
     return Verdict(
         False,
@@ -190,8 +216,7 @@ def is_bijective(a_map: isl.Map) -> Verdict:
         return Verdict(True, None, "bijective")
     if not a_map.is_injective():
         collisions = a_map.apply_range(a_map.reverse()).subtract(_identity_like(a_map))
-        pair = sample_pair(collisions)
-        parameters = sample_parameters(collisions)
+        pair, parameters = _witness(collisions)
         return Verdict(
             False,
             pair,
@@ -203,8 +228,7 @@ def is_bijective(a_map: isl.Map) -> Verdict:
         )
     inverse = a_map.reverse()
     splits = inverse.apply_range(inverse.reverse()).subtract(_identity_like(inverse))
-    pair = sample_pair(splits)
-    parameters = sample_parameters(splits)
+    pair, parameters = _witness(splits)
     return Verdict(
         False,
         pair,
@@ -247,8 +271,7 @@ def is_monotone(schedule: isl.Map, deps: isl.Map) -> Verdict:
     inverse = schedule.reverse()
     bad = violating_times.apply_domain(inverse).apply_range(inverse).intersect(deps)
     sampled = bad if not bad.is_empty() else violating_times
-    pair = sample_pair(sampled)
-    parameters = sample_parameters(sampled)
+    pair, parameters = _witness(sampled)
     return Verdict(
         False,
         pair,
@@ -355,8 +378,7 @@ def decide(question: IslQuestion) -> Verdict:
         obj = question.obj
         if obj.is_empty():
             return Verdict(True, None, "empty")
-        witness = sample_pair(obj) if isinstance(obj, isl.Map) else sample_point(obj)
-        parameters = sample_parameters(obj)
+        witness, parameters = _witness(obj)
         text = label_witness(witness, question.labels)
         return Verdict(
             False,

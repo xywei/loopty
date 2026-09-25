@@ -16,12 +16,23 @@ comparing the two.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
 import islpy as isl
+import pymbolic.primitives as prim
 
-__all__ = ["Access", "ArrType", "Expression", "Reduction", "Stmt", "Term"]
+__all__ = [
+    "Access",
+    "ArrType",
+    "Expression",
+    "Reduction",
+    "Stmt",
+    "Term",
+    "free_name_sorts",
+    "free_name_sorts_message",
+]
 
 #: A pymbolic expression. Kept loose on purpose: lanky's term classes (``Sum``,
 #: ``Forall``, ``Abs``) and pymbolic's primitives both appear here.
@@ -195,3 +206,77 @@ class Term:
             if stmt.id == stmt_id:
                 return stmt
         raise KeyError(stmt_id)
+
+
+# {{{ sorts that are free names
+
+
+#: What to write instead of a builtin type name, by that name.
+_SORT_HINTS = {
+    "float": "Real (from lanky.prelude) or a numpy type such as np.float64",
+    "complex": "a numpy type such as np.complex128",
+    "int": (
+        "Nat or Int (from lanky.prelude), Fin[n] for an index, or a numpy "
+        "type such as np.int64"
+    ),
+}
+
+
+def free_name_sorts(params: Iterable[tuple[str, Any]]) -> tuple[tuple[str, str], ...]:
+    """Every parameter whose sort is a bare free name, with that name.
+
+    A kernel's annotations are evaluated by lanky in a scope that invents the
+    names it does not define, which is how a size such as ``n`` in
+    ``Arr[Fin[n], Real]`` comes to exist. Under ``from __future__ import
+    annotations`` the builtins are among those names, so ``a: float`` and
+    ``Arr[Fin[n], float]`` give the sort ``Var("float")``: a free variable,
+    not a type. It has no numpy dtype, it is not an integral sort, and lanky
+    reads anything that is not one of its sorts as an exact index type, so an
+    accumulation of it would be called ``exact``. A misspelled or unimported
+    sort (``Reel``) arrives the same way. The sort of a scalar parameter and the
+    element sort of an array are the places a sort is written; a free name in
+    an axis is a size, and is not asked about here.
+    """
+    out: list[tuple[str, str]] = []
+    for name, typ in params:
+        sort = typ.dtype if isinstance(typ, ArrType) else typ
+        if isinstance(sort, prim.Variable):
+            out.append((name, sort.name))
+    return tuple(out)
+
+
+def free_name_sorts_message(
+    owner: str, params: Iterable[tuple[str, Any]], found: Iterable[tuple[str, str]]
+) -> str:
+    """The refusal of a signature whose sorts include free names."""
+    arrays = {name for name, typ in params if isinstance(typ, ArrType)}
+    found = tuple(found)
+    items = [
+        f"the elements of {name} as {sort}" if name in arrays else f"{name}: {sort}"
+        for name, sort in found
+    ]
+    listing = items[-1]
+    if len(items) > 1:
+        listing = f"{', '.join(items[:-1])} and {listing}"
+    hints = []
+    for sort in dict.fromkeys(sort for _name, sort in found):
+        hint = _SORT_HINTS.get(sort)
+        if hint is None:
+            hint = (
+                "Real or a numpy type such as np.float64 for a floating-point "
+                "value, and Nat, Int or Fin[n] for a whole number, or import "
+                "the sort you meant"
+            )
+        hints.append(f"for {sort} write {hint}")
+    advice = "; ".join(hints)
+    return (
+        f"{owner} declares {listing}, and a sort written that way is a free "
+        "name, not a type. An annotation is evaluated in a scope that invents "
+        "every name it does not define, and under 'from __future__ import "
+        "annotations' that includes builtins such as float and int, so loopy "
+        "would get no dtype from it and the ledger would call it an exact index "
+        f"type. {advice[0].upper()}{advice[1:]}."
+    )
+
+
+# }}}
