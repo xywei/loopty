@@ -134,28 +134,53 @@ def _shown(value: Any) -> str:
     return repr(value)
 
 
-def _escaped_message(names: Collection[str], cell: str, where: str) -> str:
-    """What to say about a statement that mentions a loop it is not inside."""
-    listed = ", ".join(repr(name) for name in sorted(names))
-    many = len(names) > 1
+def _loop_variable(loop: _Loop) -> str:
+    """The name the body gives a loop's variable: its ``for`` target, if read."""
+    return loop.target or loop.iname
+
+
+def _loop_domain(loop: _Loop) -> str:
+    """The domain a loop runs over, the way the body spells it."""
+    dom = getattr(loop.owner, "dom", None)
+    return _domain_text(dom) if isinstance(dom, SymDom) else "its domain"
+
+
+def _escaped_message(loops: Sequence[_Loop], cell: str, where: str) -> str:
+    """What to say about a statement that mentions loops it is not inside.
+
+    Each loop is named by its ``for`` target and line rather than by its iname
+    alone, which differs from the target when the target is reused: after
+    ``for i in v.dom: for i in u.dom[i]: ...`` the ``i`` the outer body reads
+    is the inner loop's, which the trace calls ``i_0``.
+    """
+    many = len(loops) > 1
+    listed = " and ".join(
+        f"{_loop_variable(loop)!r} of the loop at {loop.where}"
+        + (
+            ""
+            if _loop_variable(loop) == loop.iname
+            else f" ({loop.iname} in the trace)"
+        )
+        for loop in loops
+    )
+    variable = _loop_variable(loops[0])
     return (
         f"the write to {cell} at {where} mentions the loop "
-        f"variable{'s' if many else ''} {listed} outside the "
-        f"loop{'s' if many else ''} over {'them' if many else 'it'}. Tracing runs "
-        "the body once with every loop taking one generic point, so a value that "
-        "a Python name carries out of a loop, or from one iteration into the "
-        "next, is that point and not what the loop computes. "
+        f"variable{'s' if many else ''} {listed}, outside "
+        f"{'those loops' if many else 'that loop'}. Tracing runs the body once "
+        "with every loop taking one generic point, so a value that a Python "
+        "name carries out of a loop, or from one iteration into the next, is "
+        "that point and not what the loop computes. "
         + _INDEX_THE_STATE.format(
-            reduction="... for i in arr.dom", cell="s[i + 1] = s[i] + x[i]"
+            reduction=f"... for {variable} in {_loop_domain(loops[0])}",
+            cell=f"s[{variable} + 1] = s[{variable}] + ...",
         )
     )
 
 
-def _carried_message(
-    loop: _Loop, carried: Sequence[tuple[str, Any, Any]], domain: str
-) -> str:
+def _carried_message(loop: _Loop, carried: Sequence[tuple[str, Any, Any]]) -> str:
     """What to say about names a loop carries from one iteration to the next."""
-    variable = loop.target or loop.iname
+    variable = _loop_variable(loop)
     names = ", ".join(repr(name) for name, _, _ in carried)
     values = "; ".join(
         f"{name!r} is {_shown(before)} before the loop and {_shown(after)} "
@@ -170,7 +195,7 @@ def _carried_message(
         "the loop computes, and the polyhedral model has no cell for a Python "
         "name whose value changes across iterations. "
         + _INDEX_THE_STATE.format(
-            reduction=f"... for {variable} in {domain}",
+            reduction=f"... for {variable} in {_loop_domain(loop)}",
             cell=f"{first}[{variable} + 1] = {first}[{variable}] + ...",
         )
         + f" If {first!r} is only a temporary that each iteration assigns before "
@@ -241,6 +266,9 @@ class Tracer:
         self.guards: list[Any] = []
         self.stmts: list[Stmt] = []
         self._inames: set[str] = set()
+        #: The loop levels that have closed, by iname, so that a statement
+        #: mentioning one of their variables can be told which loop it is.
+        self._closed: dict[str, _Loop] = {}
         #: Position of each open block in its parent, outermost first.
         self._path: list[int] = []
         #: How many children each open block has produced so far.
@@ -324,15 +352,14 @@ class Tracer:
         if owner is not None and self.loops and self.loops[-1].owner is not owner:
             raise TraceError(_abandoned_message([self.loops[-1].iname]))
         loop = self.loops.pop()
+        self._closed[loop.iname] = loop
         self._path.pop()
         self._counters.pop()
         if loop.names is None or names is None:
             return
         carried = self._carried(loop, names)
         if carried:
-            dom = getattr(owner, "dom", None)
-            domain = _domain_text(dom) if isinstance(dom, SymDom) else "its domain"
-            raise TraceError(_carried_message(loop, carried, domain))
+            raise TraceError(_carried_message(loop, carried))
 
     def _carried(
         self, loop: _Loop, after: Mapping[str, Any]
@@ -451,7 +478,8 @@ class Tracer:
                 if assignee.indices
                 else assignee.array
             )
-            raise TraceError(_escaped_message(escaped, cell, where))
+            loops = [self._closed[name] for name in sorted(escaped)]
+            raise TraceError(_escaped_message(loops, cell, where))
         stmt = Stmt(
             id=f"S{len(self.stmts)}",
             inames=self.inames,

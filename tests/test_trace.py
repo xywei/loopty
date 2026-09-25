@@ -362,6 +362,24 @@ def test_a_loop_in_a_helper_is_checked_in_the_helper_frame() -> None:
         term_of(calls_a_helper)
 
 
+def test_a_name_a_closure_rebinds_through_nonlocal_is_carried_state() -> None:
+    # ``s`` lives in a cell of the frame running the ``for``, and that frame's
+    # locals show a cell's contents, so the closure's rebinding is seen there.
+    def through_a_closure(x: Arr[Fin[n], Real], y: Arr[Fin[1], Real]):  # noqa: F821
+        s = 0.0
+
+        def add(value):
+            nonlocal s
+            s = s + value
+
+        for i in x.dom:
+            add(x[i])
+        y[0] = s
+
+    with pytest.raises(TraceError, match="carries 's'"):
+        term_of(through_a_closure)
+
+
 def test_swapping_two_arrays_between_time_steps_is_carried_state() -> None:
     # The trace would record every step as a copy from ``u`` into ``v``. The
     # arrays are named in the message as the body names them.
@@ -404,8 +422,29 @@ def test_a_value_carried_out_of_a_loop_is_an_escaped_loop_variable() -> None:
             t = x[i]
         y[0] = t
 
-    with pytest.raises(TraceError, match="write to y\\[0\\].*loop variable 'i'"):
+    with pytest.raises(
+        TraceError, match="write to y\\[0\\].*loop variable 'i' of the loop at"
+    ) as caught:
         term_of(last)
+    assert "reduce_sum(... for i in x.dom)" in str(caught.value)
+
+
+def test_an_escape_names_the_loop_as_the_body_wrote_it() -> None:
+    # The inner ``for`` rebinds the outer target, so the ``i`` the outer body
+    # reads after it is the inner loop's variable, which the trace calls
+    # ``i_0``. The message names the loop by its target and its line.
+    def shadowed(u: Arr[Fin[n], Fin[m], Real], v: Arr[Fin[n], Real]):  # noqa: F821
+        for i in v.dom:
+            for i in u.dom[i]:
+                u[0, i] = 1.0
+            v[i] = 2.0
+
+    with pytest.raises(TraceError) as caught:
+        term_of(shadowed)
+    message = str(caught.value)
+    assert "loop variable 'i' of the loop at test_trace.py:" in message
+    assert "(i_0 in the trace)" in message
+    assert "reduce_sum(... for i in u.dom[i])" in message
 
 
 def test_a_loop_variable_escaping_into_a_guard_is_refused() -> None:

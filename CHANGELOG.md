@@ -283,8 +283,11 @@ with a pair of statement instances.
   equal value, and a name whose old value already mentions a closed loop's
   variable (a `for` target reused by a later loop) are left alone. The fixes
   are `reduce_sum(...)` for an accumulation and an indexed cell
-  (`s[i + 1] = s[i] + x[i]`, as `scan` in `examples/spmv.py` does) otherwise.
-  Both checks are trace-time only; plain `python` runs the body as written.
+  (`s[i + 1] = s[i] + x[i]`, as `scan` in `examples/spmv.py` does) otherwise,
+  spelled with the loop's own target and domain. A message names a loop by its
+  `for` target and line, and adds the iname when a reused target made the two
+  differ. Both checks are trace-time only; plain `python` runs the body as
+  written.
 - A loop whose target is spelled like a size or a parameter of the kernel gets
   an iname of its own. `for k in x.dom` over `x: Arr[Fin[k], Real]` used to make
   the size and the iname one isl dimension, so the loop's domain was
