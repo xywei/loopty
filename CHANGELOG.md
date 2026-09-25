@@ -86,6 +86,12 @@ with a pair of statement instances.
 - **Four demos** (`examples/`) and `scripts/refresh_example_outputs.py`, which
   re-runs the commands pasted into `examples/README.md` and rewrites their
   output, so the document cannot drift from the code in silence.
+- **A fifth demo**, `examples/wavefront_acoustic.py`: two coupled statements in
+  one acoustic-wave nest, whose rectangular tiling is refused with a witness
+  that crosses them (`S1` at `(t, i + 1)` before `S0` at `(t + 1, i)`), and the
+  skew that makes the same tiling a legal wavefront block. Its section in
+  `examples/README.md` has the three transcripts, generated like the others.
+  `--bench` times the untiled and blocked kernels; nothing runs it but a reader.
 - **Documentation.** `docs/quickstart.md`, `docs/device-runs.md` with the
   transcripts under `docs/device-runs/`, and `docs/loopy-notes.md`: the loopy
   and islpy interactions that cost debugging time, each with its local
