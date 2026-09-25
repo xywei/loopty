@@ -712,6 +712,11 @@ def _loop_target_name() -> str | None:
     inames of the term equal to the names in the source, which is what makes a
     witness or a generated loop nest recognizable. Any surprise (a comprehension,
     a future bytecode layout) gives ``None`` and the tracer invents a name.
+
+    From Python 3.13 on the compiler fuses a store with the instruction after
+    it when both are on one line, so ``for i in x.dom: s = s + x[i]`` stores
+    its target with ``STORE_FAST_LOAD_FAST ('i', 's')``. The target is what is
+    stored first, which is the first name of the pair.
     """
     frame = sys._getframe(2)
     try:
@@ -720,6 +725,8 @@ def _loop_target_name() -> str | None:
                 "STORE_"
             ):
                 name = instruction.argval
+                if isinstance(name, tuple) and name:
+                    name = name[0]
                 return name if isinstance(name, str) and name.isidentifier() else None
     except Exception:  # pragma: no cover - bytecode reading is best effort
         return None

@@ -291,6 +291,11 @@ with a pair of statement instances.
   `0 <= k < k`, which is empty, and every statement in it was checked over no
   points at all. The iname is now `k_0`, as for a target reused by a second
   loop.
+- A loop written on one line keeps its source name under Python 3.13, which
+  fuses the store of the `for` target with the load after it
+  (`STORE_FAST_LOAD_FAST`). The target was read as unknown, so
+  `for i in x.dom: y[i] = x[i]` traced over an iname `i0` on 3.13 and `i` on
+  3.12.
 - `lanky check` prints the error of a kernel that cannot be traced under its
   `REFUTED` line: the `trace` fact carries it as its `reason`, next to an empty
   `counterexample`, which is lanky's form for a closed claim refuted at no

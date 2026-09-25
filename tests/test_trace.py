@@ -562,6 +562,25 @@ def test_a_loop_target_named_like_a_size_gets_its_own_iname() -> None:
     assert second.inames == ("i",)
 
 
+def test_a_loop_written_on_one_line_keeps_its_source_name() -> None:
+    # From Python 3.13 on the store of the ``for`` target is fused with the load
+    # after it when both are on one line, and the target used to go unread: the
+    # iname became ``i0``, and the message told the author to write
+    # ``for i0 in x.dom``.
+    def one_line(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in x.dom: y[i] = x[i]  # noqa: E701
+
+    def carried(x: Arr[Fin[n], Real], y: Arr[Fin[1], Real]):  # noqa: F821
+        s = 0.0
+        for i in x.dom: s = s + x[i]  # noqa: E701
+        y[0] = s
+
+    assert term_of(one_line).stmts[0].inames == ("i",)
+    with pytest.raises(TraceError) as caught:
+        term_of(carried)
+    assert "reduce_sum(... for i in x.dom)" in str(caught.value)
+
+
 def test_what_guards_and_reductions_bind_is_not_state() -> None:
     # ``g`` is rebound to a new guard object each time (and read at the end, so
     # it is live across the loops); the reduction's ``j`` lives in the
