@@ -67,8 +67,15 @@ def inputs() -> dict[str, np.ndarray]:
     }
 
 
-def compiled(kernel_: object, build_options: list[str]) -> np.ndarray:
-    """``y`` from the lowered kernel built with exactly these extra C flags."""
+def compiled(
+    kernel_: object, build_options: list[str], may_skip: bool = True
+) -> np.ndarray:
+    """``y`` from the lowered kernel built with exactly these extra C flags.
+
+    A toolchain that refuses the flags skips the test, unless ``may_skip`` is
+    false: once one build with them has succeeded, a second one that fails is a
+    failure, not a property of the machine.
+    """
     from loopty.lower import lower_generic
 
     translation_unit = lp.set_options(
@@ -80,6 +87,8 @@ def compiled(kernel_: object, build_options: list[str]) -> np.ndarray:
             a=arrays["a"], b=arrays["b"], c=arrays["c"], y=arrays["y"]
         )
     except Exception as exc:  # pragma: no cover - depends on the local toolchain
+        if not may_skip:
+            raise
         pytest.skip(f"the C toolchain cannot build this here: {exc}")
     return y
 
@@ -92,6 +101,15 @@ def test_an_exact_output_pins_contraction_off() -> None:
     entry = lowering.kernel.default_entrypoint
     assert NO_CONTRACTION_FLAG in entry.options.build_options
     code = lp.generate_code_v2(lowering.kernel).device_code()
+    assert "#pragma STDC FP_CONTRACT OFF" in code
+
+    # A schedule transforms that kernel, and the executor builds what the
+    # schedule holds: the pin has to survive the steps.
+    from loopty.schedule import Schedule
+
+    scheduled = Schedule(fused_exact).split("i", 2).kernel
+    assert NO_CONTRACTION_FLAG in scheduled.default_entrypoint.options.build_options
+    code = lp.generate_code_v2(scheduled).device_code()
     assert "#pragma STDC FP_CONTRACT OFF" in code
 
 
@@ -157,5 +175,5 @@ def test_on_hardware_with_fma_the_pin_is_what_keeps_the_bits() -> None:
 
     lowering = lower_generic(fused_exact.trace(), "c")
     own = list(lowering.kernel.default_entrypoint.options.build_options or ())
-    pinned = compiled(fused_exact, [*contracting, *own])
+    pinned = compiled(fused_exact, [*contracting, *own], may_skip=False)
     assert np.array_equal(pinned, native["y"])
