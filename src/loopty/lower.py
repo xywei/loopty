@@ -878,14 +878,18 @@ def _statement_domains(
 
 def _count_inits(
     term: Term, builder: _Builder, domains: Sequence[isl.Set]
-) -> tuple[list[Any], dict[str, str]]:
-    """Instructions assigning the ragged bound parameters, and their ids.
+) -> tuple[list[Any], dict[str, str], dict[str, str]]:
+    """Instructions assigning the ragged bound parameters, their ids, and reads.
 
     A domain parameter named ``cnt_r`` (see :data:`COUNT_PARAM`) is a ragged
     bound: the length of row ``r`` of whichever array has ``cnt`` as its counts
     family. It is emitted as a scalar temporary inside the ``r`` loop, computed
-    from the offsets when the offsets are a parameter and from the counts array
-    when it is one. loopy then generates ``for (j = 0; j < cnt_r; ++j)``.
+    from the counts array when that is a parameter and from the offsets when it
+    is not. loopy then generates ``for (j = 0; j < cnt_r; ++j)``.
+
+    The three results are the instructions, the id of each parameter's
+    instruction, and the array each instruction reads, which is what
+    :func:`lower_generic` orders it by.
     """
     wanted: dict[str, str] = {}
     for domain in domains:
@@ -895,6 +899,7 @@ def _count_inits(
     params = dict(term.params)
     insns: list[Any] = []
     ids: dict[str, str] = {}
+    reads: dict[str, str] = {}
     for name in builder.arr_types:
         axis = builder.ragged_axis(name)
         if axis is None:
@@ -911,14 +916,16 @@ def _count_inits(
                     continue
                 param = candidates[0]
                 row = prim.Variable(iname)
+                insn_id = f"{param}_init"
                 if counts in params:
                     value: Any = prim.Subscript(prim.Variable(counts), (row,))
+                    reads[insn_id] = counts
                 else:
                     offsets = builder.offsets_for(name)
                     value = prim.Subscript(
                         prim.Variable(offsets), (row + 1,)
                     ) - prim.Subscript(prim.Variable(offsets), (row,))
-                insn_id = f"{param}_init"
+                    reads[insn_id] = offsets
                 enclosing = stmt.inames[: stmt.inames.index(iname) + 1]
                 insns.append(
                     lp.Assignment(
@@ -930,7 +937,7 @@ def _count_inits(
                     )
                 )
                 ids[param] = insn_id
-    return insns, ids
+    return insns, ids, reads
 
 
 def lower_generic(term: Term, target: str = "c") -> Lowering:
@@ -1057,9 +1064,18 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
 
     domains.extend(builder.extra_domains)
 
-    count_insns, count_ids = _count_inits(term, builder, domains)
+    count_insns, count_ids, count_reads = _count_inits(term, builder, domains)
     if count_insns:
+        # A bound's instruction is ordered by the same rule as the statements,
+        # at the place of the first statement that needs it: after every
+        # earlier writer of the array it reads, and before every later one.
+        # Left to loopy's single-writer heuristic, it waited for that writer
+        # wherever it was in the body, and when the writer came later (a
+        # statement that rewrites the offsets after a ragged loop has read
+        # through them) the three instructions made a cycle.
         by_id = {insn.id: insn for insn in insns}
+        count_depends: dict[str, frozenset[str]] = {}
+        writers: dict[str, list[str]] = {}
         for stmt in term.stmts:
             insn = by_id[insn_ids[stmt.id]]
             needed = {
@@ -1073,9 +1089,27 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
                     for param in _domain_params(reduction.domain)
                     if param in count_ids
                 }
+            for count_id in needed - count_depends.keys():
+                count_depends[count_id] = frozenset(
+                    writers.get(count_reads[count_id], ())
+                )
+            written = stmt.assignee.array
+            needed |= {
+                count_id
+                for count_id in count_depends
+                if count_reads[count_id] == written
+            }
             if needed:
                 by_id[insn.id] = insn.copy(depends_on=insn.depends_on | needed)
+            writers.setdefault(written, []).append(insn.id)
         insns = [by_id[insn.id] for insn in insns]
+        # A bound no statement needs keeps the heuristic, as before.
+        count_insns = [
+            insn.copy(depends_on=count_depends[insn.id], depends_on_is_final=True)
+            if insn.id in count_depends
+            else insn
+            for insn in count_insns
+        ]
         insns = count_insns + insns
 
     merged = _merge_domains(domains)

@@ -111,6 +111,33 @@ def test_a_ragged_reduction_becomes_a_csr_loop() -> None:
     assert np.allclose(out["y"], want)
 
 
+@pytest.mark.parametrize("shift_first", [False, True], ids=["product", "shift"])
+def test_a_ragged_bound_is_ordered_against_the_offsets_it_reads(
+    shift_first: bool,
+) -> None:
+    # The row length cnt_r is computed from off, which the other statement
+    # rewrites. Its instruction used to be left to loopy's single-writer
+    # heuristic, which made it wait for the shift wherever the shift was. With
+    # the product first, the shift waits for the product, which reads through
+    # off, the product waits for cnt_r, and cnt_r waited for the shift: a cycle.
+    term = ht.spmv_and_shift_term(shift_first)
+    insns = {insn.id: insn for insn in lower(term).default_entrypoint.instructions}
+    shift, product = ("S0", "S1") if shift_first else ("S1", "S0")
+    before = {shift} if shift_first else set()
+    assert insns["cnt_r_init"].depends_on == frozenset(before)
+    assert "cnt_r_init" in insns[product].depends_on
+
+    # Row 0 starts at 1; the entry at 0 is read only through shifted offsets.
+    off = np.array([1, 3, 3, 6], dtype=np.int32)
+    col = np.array([0, 0, 1, 0, 2, 3], dtype=np.int32)
+    val = np.array([7.0, 1.0, 2.0, 3.0, 4.0, 5.0])
+    x = np.array([1.0, 10.0, 100.0, 1000.0])
+    out = run(term, off=off.copy(), col=col, val=val, x=x, y=np.zeros(3))
+    seen = off - 1 if shift_first else off
+    assert np.allclose(out["y"], ht.csr_reference(seen, col, val, x))
+    assert np.array_equal(out["off"], off - 1)
+
+
 def test_an_accumulation_runs_over_the_ragged_nest() -> None:
     arrays = ht.csr_example()
     out = run(ht.spmv_accumulate_term(), **arrays)

@@ -13,6 +13,8 @@ supplies concrete values only when it runs the compiled code.
 
 from __future__ import annotations
 
+import dataclasses
+
 import islpy as isl
 import numpy as np
 import pymbolic.primitives as prim
@@ -246,6 +248,34 @@ def spmv_accumulate_term() -> Term:
         sizes=("n", "m"),
         stmts=(stmt,),
         post=None,
+    )
+
+
+def spmv_and_shift_term(shift_first: bool = False) -> Term:
+    """:func:`spmv_accumulate_term` and ``off[s] = off[s] - 1``, in either order.
+
+    The counts family ``cnt`` is not a parameter, so the row length ``cnt_r`` is
+    computed from ``off``, which the other statement rewrites. Which offsets the
+    product reads through, and which ones bound its rows, is decided by the
+    order of the two statements.
+    """
+    product = spmv_accumulate_term().stmts[0]
+    shift = Stmt(
+        id="S0",
+        inames=("s",),
+        domain=isl.Set("[n] -> { [s] : 0 <= s < n + 1 }"),
+        assignee=Access("off", (V("s"),)),
+        expr=S("off", V("s")) - 1,
+        kind="assign",
+        guard=None,
+        where="hand_terms.py:spmv_and_shift",
+    )
+    if shift_first:
+        stmts = (shift, dataclasses.replace(product, id="S1"))
+    else:
+        stmts = (product, dataclasses.replace(shift, id="S1"))
+    return dataclasses.replace(
+        spmv_accumulate_term(), name="spmv_and_shift", stmts=stmts
     )
 
 

@@ -284,6 +284,10 @@ with a pair of statement instances.
   body's direction. `lower_generic` now counts the offsets as read by every
   statement that touches a ragged array, so a kernel that computes its offsets
   and then reads through them is not refused with `VariableAccessNotOrdered`.
+  The instruction that computes a ragged row's length is ordered the same way,
+  where the first statement that needs it runs. Left to the heuristic, it
+  waited for a statement that rewrites the offsets even when that statement
+  came after the ragged loop, and the three made a cycle.
 
 ### Changed
 

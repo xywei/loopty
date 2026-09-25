@@ -167,4 +167,9 @@ it) relied on the heuristic for that edge, and without it loopy refuses the
 kernel with `VariableAccessNotOrdered`; `lower_generic` counts the offsets as
 read by every statement that touches a ragged array, so the edge is drawn, and
 in the direction the body gives it. The instructions that assign ragged bounds
-(`cnt_r_init`) are left to the heuristic, as before.
+(`cnt_r_init`) are final too. One reads the counts, or the offsets when the
+counts are not a parameter, and it is ordered where the first statement that
+needs it is: after every earlier writer of that array and before every later
+one. Left to the heuristic, it waited for a later writer as well, and a ragged
+loop followed by a statement that rewrites its offsets became a cycle through
+the loop, the bound and the rewrite.
