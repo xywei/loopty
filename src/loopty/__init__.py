@@ -31,21 +31,52 @@ would reorder a dependence, and asked separately whether the target can build
 it at all. What is not here: a dependent sum deeper than two axes, the use of a
 postcondition as a hypothesis, and any execution on a device from a development
 machine.
+
+``import loopty`` imports nothing but this module. Each name below comes from its
+own module the first time it is used, so the import costs no loopy and no islpy,
+and a file that defines kernels and runs them natively never imports loopy.
+islpy arrives with the first name that needs the tracer, such as ``kernel``.
 """
 
 from __future__ import annotations
 
-from loopty.arr import Arr
-from loopty.idx import Fin
-from loopty.kernel import Kernel, Program, kernel, program
-from loopty.oracle import IslOracle
-from loopty.reduction import reduce_sum
-from loopty.schedule import IllegalCast, Schedule, UnbuildableSchedule
-from loopty.term import Access, ArrType, Reduction, Stmt, Term
-from loopty.trace import TraceError, trace, when
-from loopty.typing import facts_for
+import importlib
+import sys
+from types import ModuleType
+from typing import TYPE_CHECKING, Any
 
 __version__ = "0.1.0.dev0"
+
+#: The module each top-level name is defined in, imported on first use.
+_EXPORTS = {
+    "Access": "loopty.term",
+    "Arr": "loopty.arr",
+    "ArrType": "loopty.term",
+    "Fin": "loopty.idx",
+    "IllegalCast": "loopty.schedule",
+    "IslOracle": "loopty.oracle",
+    "Kernel": "loopty.kernel",
+    "Program": "loopty.kernel",
+    "Reduction": "loopty.term",
+    "Schedule": "loopty.schedule",
+    "Stmt": "loopty.term",
+    "Term": "loopty.term",
+    "TraceError": "loopty.trace",
+    "UnbuildableSchedule": "loopty.schedule",
+    "facts_for": "loopty.typing",
+    "kernel": "loopty.kernel",
+    "program": "loopty.kernel",
+    "reduce_sum": "loopty.reduction",
+    "trace": "loopty.trace",
+    "when": "loopty.trace",
+}
+
+#: Compatibility aliases, each to the exported name it stands for. ``sum`` is
+#: the development API's name for ``reduce_sum``; new kernel code should use
+#: ``reduce_sum``, which makes the operation's Loopty ownership explicit. It is
+#: not in ``__all__``, so that ``from loopty import *`` leaves the builtin
+#: ``sum`` alone.
+_ALIASES = {"sum": "reduce_sum"}
 
 __all__ = [
     "Access",
@@ -71,8 +102,55 @@ __all__ = [
     "when",
 ]
 
-# Compatibility alias for the development API. New kernel code should use
-# ``reduce_sum``, which makes the operation's Loopty ownership explicit. It is
-# not in ``__all__``, so that ``from loopty import *`` leaves the builtin
-# ``sum`` alone.
-sum = reduce_sum
+
+def __getattr__(name: str) -> Any:
+    """Import a top-level name from its module the first time it is asked for."""
+    exported = _ALIASES.get(name, name)
+    module = _EXPORTS.get(exported)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(importlib.import_module(module), exported)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted({*globals(), *_EXPORTS, *_ALIASES})
+
+
+class _Package(ModuleType):
+    """The ``loopty`` module, which keeps ``kernel`` and ``trace`` the functions.
+
+    Both names are also submodules, and importing a submodule binds it on its
+    package under its own name. That used to happen before this module bound
+    the functions, which it did eagerly. Now the submodule can be imported
+    first, and lanky's plugin discovery does exactly that before it imports a
+    kernel file, so ``from loopty import kernel`` would give the module and
+    ``@kernel`` would fail. That one binding is dropped here, and the name is
+    looked up through :func:`__getattr__` as every other one is.
+    """
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if (
+            name in _EXPORTS
+            and isinstance(value, ModuleType)
+            and value.__name__ == f"{__name__}.{name}"
+        ):
+            return
+        super().__setattr__(name, value)
+
+
+sys.modules[__name__].__class__ = _Package
+
+if TYPE_CHECKING:
+    from loopty.arr import Arr
+    from loopty.idx import Fin
+    from loopty.kernel import Kernel, Program, kernel, program
+    from loopty.oracle import IslOracle
+    from loopty.reduction import reduce_sum
+    from loopty.schedule import IllegalCast, Schedule, UnbuildableSchedule
+    from loopty.term import Access, ArrType, Reduction, Stmt, Term
+    from loopty.trace import TraceError, trace, when
+    from loopty.typing import facts_for
+
+    sum = reduce_sum

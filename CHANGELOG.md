@@ -502,6 +502,15 @@ with a pair of statement instances.
   something a trace assumes; it is what a schedule lowers an accumulation to
   when it reorders one, and `realize(var, tree=True)` over an `exact`
   accumulation is refused.
+- **`import loopty` imports neither loopy nor islpy.** Each top-level name is
+  imported from its module the first time it is used, and the executor imports
+  the lowering when it first lowers, so a file of kernels imports no loopy, and
+  neither does lanky's plugin discovery, which loads loopty's entry points for
+  every command. Measured once, `import loopty` went from about 160 ms to
+  about 1 ms, and importing the names a kernel file uses, or loading the
+  plugins, from about 160 ms to about 100 ms, which is numpy, pymbolic, lanky
+  and islpy. `kernel` and `trace` stay the functions after their submodules are
+  imported.
 - `loopty.sum` is no longer in `__all__`, so `from loopty import *` leaves the
   builtin `sum` alone. The alias itself remains.
 - `islpy` is pinned below 2026. loopy 2025.2 calls `Aff.is_equal` during code
