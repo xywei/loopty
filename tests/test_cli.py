@@ -232,3 +232,68 @@ def test_without_target_a_schedule_keeps_the_one_it_was_written_for(
     path = write_fixture(tmp_path)
     assert main(["run", str(path)]) == 0
     assert "target='c'" in capsys.readouterr().out
+
+
+CARRIED = '''
+"""A kernel that carries a running sum through a Python name."""
+
+from __future__ import annotations
+
+import numpy as np
+from lanky.prelude import Real
+
+from loopty import Arr, Fin, kernel
+
+
+@kernel
+def running_sum(x: Arr[Fin[n], Real], y: Arr[Fin[1], Real]):
+    s = 0.0
+    for i in x.dom:
+        s = s + x[i]
+    y[0] = s
+
+
+def example_inputs():
+    return {"x": Arr.from_numpy(np.arange(4.0)), "y": Arr.zeros(1)}
+'''
+
+
+def test_check_refuses_a_loop_carried_name_and_prints_the_fix(
+    tmp_path, capsys
+) -> None:
+    """``lanky check`` exits 1 with the message, not a ledger about a wrong term.
+
+    The body used to trace to ``y[0] = 0.0 + x[i]`` and the ledger decided
+    facts about that. Now tracing refuses it, the kernel's one fact is the
+    refuted ``trace`` fact, and the message that names the fix is printed under
+    it rather than left in the JSON.
+    """
+    from lanky.cli import main as lanky_main
+
+    path = write_fixture(tmp_path, CARRIED)
+    out_path = tmp_path / "ledger.json"
+    code = lanky_main(["check", str(path), "--json", str(out_path)])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "REFUTED running_sum" in out
+    assert "TraceError" in out
+    assert "carries 's'" in out
+    assert "reduce_sum" in out
+    assert "indexed cell" in out
+    facts = json.loads(out_path.read_text(encoding="utf-8"))
+    assert [(fact["kind"], fact["status"]) for fact in facts] == [
+        ("trace", "refuted")
+    ]
+
+
+def test_run_reports_a_loop_carried_name_instead_of_a_traceback(
+    tmp_path, capsys
+) -> None:
+    path = write_fixture(tmp_path, CARRIED)
+    code = main(["run", str(path)])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "cannot schedule running_sum" in out
+    assert "TraceError" in out
+    assert "reduce_sum" in out
+    assert "difference" not in out

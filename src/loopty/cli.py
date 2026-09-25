@@ -71,7 +71,13 @@ def collect(module: Any, new_objects: list) -> tuple[list, list]:
     import order, and the module namespace, where a schedule that was never
     decorated still lives. Duplicates are removed by identity, not equality,
     because a term's ``==`` builds a proposition rather than answering.
+
+    Whether an object has a ``term`` is asked without reading it:
+    ``Kernel.term`` traces the body on first use, and a body that cannot be
+    traced has to be reported by name where it is scheduled, not raise out of
+    the search for it.
     """
+    import inspect
     import types
 
     from loopty.schedule import Schedule
@@ -80,6 +86,7 @@ def collect(module: Any, new_objects: list) -> tuple[list, list]:
     schedules: list = []
     kernels: list = []
     seen: set[int] = set()
+    missing = object()
 
     def consider(obj: Any) -> None:
         if id(obj) in seen or isinstance(obj, type | types.ModuleType):
@@ -90,7 +97,8 @@ def collect(module: Any, new_objects: list) -> tuple[list, list]:
             seen.add(id(obj))
             schedules.append(obj)
         elif isinstance(obj, Term) or (
-            hasattr(obj, "trace") and hasattr(obj, "term")
+            hasattr(obj, "trace")
+            and inspect.getattr_static(obj, "term", missing) is not missing
         ):
             seen.add(id(obj))
             kernels.append(obj)
@@ -121,9 +129,17 @@ def example_inputs(module: Any, name: str) -> dict[str, Any] | None:
 
 
 def _name_of(obj: Any) -> str:
-    """A readable name for a kernel, a schedule, or a term."""
+    """A readable name for a kernel, a schedule, or a term.
+
+    A kernel's own ``__name__`` comes first, which is also the name its term
+    gets, because reading ``term`` traces the body: the name of a kernel that
+    cannot be traced is exactly what the message about it needs.
+    """
+    name = getattr(obj, "__name__", None)
+    if isinstance(name, str):
+        return name
     term = getattr(obj, "term", obj)
-    return getattr(term, "name", getattr(obj, "__name__", repr(obj)))
+    return getattr(term, "name", repr(obj))
 
 
 def _retargeted(schedules: list, target: str) -> tuple[list, int]:
@@ -203,6 +219,7 @@ class RunVerb:
 
         from loopty.executor import LoopyExecutor, emit_code
         from loopty.schedule import IllegalCast, Schedule
+        from loopty.trace import TraceError
 
         target = getattr(args, "target", None)
         before = len(registry.objects)
@@ -216,9 +233,11 @@ class RunVerb:
                 continue
             try:
                 schedules.append(Schedule(kernel, target=target or "c"))
-            except (TypeError, ValueError, ImportError) as exc:
+            except (TypeError, ValueError, ImportError, TraceError) as exc:
                 # ImportError is `--target opencl` with no pyopencl installed,
-                # which is a thing to say plainly rather than a traceback.
+                # which is a thing to say plainly rather than a traceback. So is
+                # a TraceError: a body that cannot be traced has no term to
+                # schedule, and its message names the fix.
                 print(
                     f"cannot schedule {_name_of(kernel)} for "
                     f"{target or 'c'}: {type(exc).__name__}: {exc}"
