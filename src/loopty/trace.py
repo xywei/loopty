@@ -506,28 +506,27 @@ class Tracer:
             return []
         closed = self._inames.difference(self.inames)
         out: list[_Carried] = []
-        for name, before in state.names.items():
-            if name == loop.target or name not in after:
-                continue
-            value = after[name]
-            if loop.target is None and value is loop.var:
-                # The target could not be read off the bytecode; the name
-                # still holding the loop's own variable is that target.
-                continue
-            if _same_value(before, value) or isinstance(value, when):
-                continue
-            if _loop_variables(before, closed):
-                continue
-            out.append(_Carried(repr(name), name, name, before, value, "name"))
-        for name, before in state.globals.items():
-            if name not in state.namespace:
-                continue
-            value = state.namespace[name]
-            if _same_value(before, value) or _loop_variables(before, closed):
-                continue
-            out.append(
-                _Carried(f"the global {name!r}", name, name, before, value, "global")
-            )
+        # A global is a name like a local, down to the loop's own target:
+        # ``global i`` before ``for i in x.dom`` stores the target there.
+        scopes = (
+            (state.names, after, "name"),
+            (state.globals, state.namespace, "global"),
+        )
+        for values, now, kind in scopes:
+            for name, before in values.items():
+                if name == loop.target or name not in now:
+                    continue
+                value = now[name]
+                if loop.target is None and value is loop.var:
+                    # The target could not be read off the bytecode; the name
+                    # still holding the loop's own variable is that target.
+                    continue
+                if _same_value(before, value) or isinstance(value, when):
+                    continue
+                if _loop_variables(before, closed):
+                    continue
+                holder = repr(name) if kind == "name" else f"the global {name!r}"
+                out.append(_Carried(holder, name, name, before, value, kind))
         # A container whose name was rebound is reported as that rebinding.
         reported = {entry.name for entry in out}
         for held in state.held:

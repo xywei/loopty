@@ -744,11 +744,12 @@ def test_plain_python_runs_the_carried_sum_as_written() -> None:
 # {{{ state a list, a dict, a set or a global carries
 
 
-#: Module globals for the kernels below to carry state in. Each test sets its
-#: own through ``monkeypatch``, so a trace that changes one leaves nothing
-#: behind for the next.
+#: Module globals for the kernels below to carry state in, or to bind as a loop
+#: target. Each test sets its own through ``monkeypatch``, so a trace that
+#: changes one leaves nothing behind for the next.
 _COUNT = 0
 _TOTALS = [0.0]
+point = 0
 
 
 def test_a_counter_kept_in_a_list_is_refused() -> None:
@@ -846,6 +847,21 @@ def test_a_global_list_the_body_mutates_is_refused(monkeypatch) -> None:
     message = str(caught.value)
     assert "carries the global list '_TOTALS'" in message
     assert "'_TOTALS[0]' is 0.0 before the loop and 1.0 after" in message
+
+
+def test_a_global_loop_target_is_not_state(monkeypatch) -> None:
+    # ``global point`` makes the ``for`` store its target with STORE_GLOBAL,
+    # and it rebinds that target before every iteration, as it does a local
+    # one; the module already binding ``point`` used to make this refused.
+    monkeypatch.setitem(globals(), "point", 0)
+
+    def global_target(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        global point
+        for point in x.dom:
+            y[point] = x[point]
+
+    (stmt,) = term_of(global_target).stmts
+    assert stmt.inames == ("point",)
 
 
 def test_a_list_created_inside_the_loop_is_scratch() -> None:
