@@ -387,15 +387,16 @@ with a pair of statement instances.
   opens and when it closes: a name bound before the loop and bound to a
   different value after one iteration is loop-carried, whether the value is a
   term or a plain Python number (a counter `k = k + 1` used as an index), and
-  `s += x[i]` and tuple unpacking count. The loop's own target, a per-iteration
-  temporary first bound inside the loop, a rebinding to the same object or an
-  equal value, and a name whose old value already mentions a closed loop's
-  variable (a `for` target reused by a later loop) are left alone. State kept
-  outside a plain name is compared the same way. A global the frame's code
-  rebinds with `global G` counts like a local. So does a list, dict or set
-  reachable from the frame's locals, or held by a global its code names, whose
-  contents change across one iteration: `state = [0]` followed by
-  `state[0] += 1` and `y[i] = state[0]` in the loop used to trace to
+  `s += x[i]`, tuple unpacking and `del s` count. The loop's own target, a
+  per-iteration temporary first bound inside the loop, a rebinding to the same
+  object or an equal value, and a name whose old value already mentions a
+  closed loop's variable (a `for` target reused by a later loop) are left
+  alone. State kept outside a plain name is compared the same way. A global
+  the frame's code rebinds with `global G` counts like a local, with the same
+  exemptions (a `for` target stored as a global is not state). So does a list,
+  dict or set reachable from the frame's locals, or held by a global its code
+  names, whose contents change across one iteration: `state = [0]` followed
+  by `state[0] += 1` and `y[i] = state[0]` in the loop used to trace to
   `y[i] = 1`. Elements are compared by identity or structurally, never with
   `==`, and the message names the container and the cell that changed. A
   container first created inside the loop is scratch and is left alone; one
