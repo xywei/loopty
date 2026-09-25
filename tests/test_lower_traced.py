@@ -283,6 +283,43 @@ def test_inner_binders_under_different_outer_binders_get_their_own_inames() -> N
     assert np.allclose(out["s"], [a.sum(), 2.0 * a.sum()])
 
 
+@kernel
+def ragged_total_by_cells(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    rows: Arr[Fin[n], Real],  # noqa: F821
+    s: Arr[Fin[1], Real],
+):
+    """A ragged double sum with each row's sum kept in a cell indexed by the row."""
+    for q in val.dom:
+        rows[q] = reduce_sum(val[q, j] for j in val.dom[q])
+    s[0] = reduce_sum(rows[p] for p in rows.dom)
+
+
+def test_a_ragged_domain_follows_the_loop_it_is_nested_in() -> None:
+    # loopy reads the nesting of domains off their order. The row-length domain
+    # of ``j`` used to come after the domain of the second loop, ``p``, so
+    # loopy made it a root and fixed the loop up through a call islpy
+    # deprecates, and the run failed on that DeprecationWarning.
+    from loopty.lower import lower_generic
+
+    counts = [2, 0, 3]
+    out = run(
+        ragged_total_by_cells.trace(),
+        cnt=np.array(counts),
+        val=Arr.ragged(counts, values=[1.0, 2.0, 3.0, 4.0, 5.0]),
+        rows=np.zeros(3),
+        s=np.zeros(1),
+    )
+    assert np.allclose(out["s"], [15.0])
+    lowered = lower_generic(ragged_total_by_cells.trace(), "c").kernel
+    names = [
+        tuple(domain.get_var_names(isl.dim_type.set))
+        for domain in lowered.default_entrypoint.domains
+    ]
+    assert names.index(("j",)) == names.index(("q",)) + 1
+
+
 # }}}
 
 

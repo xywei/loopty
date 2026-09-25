@@ -1141,7 +1141,7 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
         insns = [by_id[insn.id] for insn in insns]
         insns = count_insns + insns
 
-    merged = _merge_domains(domains)
+    merged = _nest_domains(_merge_domains(domains))
     insns = _restore_narrower_domains(insns, own_domains, merged)
 
     args, array_args, value_args, outputs = _arguments(
@@ -1286,6 +1286,64 @@ def _merge_domains(domains: Sequence[isl.Set]) -> list[isl.Set]:
         else:
             merged.append(domain)
     return merged
+
+
+def _nest_domains(domains: Sequence[isl.Set]) -> list[isl.Set]:
+    """The domains in the order loopy reads their nesting from.
+
+    loopy has no explicit tree of domains. It walks the list and nests a domain
+    inside the one before it when its parameters name that domain's inames,
+    and otherwise climbs out until it finds a domain it depends on or reaches
+    the top (``LoopKernel.parents_per_domain``). So the row-length domain
+    ``[q, nl_cnt_q] -> { [j] : ... }`` of a ragged loop has to come after the
+    domain of ``q`` with nothing unrelated in between. The domains are
+    collected statement by statement, with the reductions' domains after all
+    of them, and a kernel whose ragged loop is followed by a second loop gave
+    ``[{q}, {p}, {j over q}]``: loopy made the ``j`` domain a root, and only
+    got its loop right by moving ``q`` out of the parameters again inside
+    ``combine_domains``, through a call islpy deprecates.
+
+    Each domain is put right after the domain whose inames it names as
+    parameters, the deepest one when it names several, and the order is
+    otherwise the order the domains came in. A list that was already nested
+    is returned in the same order.
+    """
+    inames = [set(domain.get_var_names(isl.dim_type.set)) for domain in domains]
+    params = [set(domain.get_var_names(isl.dim_type.param)) for domain in domains]
+
+    def owners(k: int) -> list[int]:
+        return [i for i in range(len(domains)) if i != k and inames[i] & params[k]]
+
+    depth: dict[int, int] = {}
+
+    def depth_of(k: int, visiting: frozenset[int] = frozenset()) -> int:
+        if k not in depth:
+            above = [i for i in owners(k) if i not in visiting]
+            depth[k] = 1 + max(
+                (depth_of(i, visiting | {k}) for i in above), default=-1
+            )
+        return depth[k]
+
+    children: dict[int | None, list[int]] = {}
+    for k in range(len(domains)):
+        above = owners(k)
+        parent = max(above, key=lambda i: (depth_of(i), i)) if above else None
+        children.setdefault(parent, []).append(k)
+
+    order: list[int] = []
+
+    def place(k: int) -> None:
+        order.append(k)
+        for child in children.get(k, ()):
+            if child not in order:
+                place(child)
+
+    for root in children.get(None, ()):
+        place(root)
+    # A domain caught in a cycle of parameters has no root to hang from; it
+    # keeps its place at the end, and loopy says what it makes of it.
+    order.extend(k for k in range(len(domains)) if k not in order)
+    return [domains[k] for k in order]
 
 
 def _restore_narrower_domains(

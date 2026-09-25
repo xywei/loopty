@@ -322,6 +322,11 @@ with a pair of statement instances.
   that cannot be evaluated is measured against an axis written the same way
   (`contract.axis_extents`), so `i : Fin[n * n]` is still bounded by the nine
   cells it indexes.
+- The domains of a lowered kernel are ordered so that each follows the domain
+  whose loop variables it names. loopy reads the nesting off that order, and a
+  ragged loop followed by a second loop put the row-length domain after the
+  second loop's: loopy made it a top-level domain and got the loop right only
+  through a call islpy deprecates and says will stop working in 2026.
 - An integral scalar has to be passed as an integer. `i = 1.0` for `i: Fin[n]`
   passed the contract as a finite whole number, and neither run could use it:
   the native run raised numpy's "only integers ... are valid indices" and the
