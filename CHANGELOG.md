@@ -266,6 +266,13 @@ with a pair of statement instances.
   `scripts/refresh_example_outputs.py`, and the abridged ledger in `README.md`
   follows them: every `spmv.py` location moves up one line and nothing else
   changes.
+- Two statements that feed each other across an iteration of an enclosing loop
+  no longer lower to a dependency cycle. `lower_generic` marks each
+  instruction's `depends_on` final, so loopy's single-writer heuristic cannot
+  add an edge from a statement to a later one that writes what it reads: that
+  order is the loop's, and the edge made the first run fail with
+  `DependencyCycleFound`. The coupled wave demo was the first kernel to have the
+  shape; see note 7 in `docs/loopy-notes.md`.
 
 ### Changed
 

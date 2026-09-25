@@ -117,6 +117,46 @@ def jacobi_term() -> Term:
     )
 
 
+def coupled_pair_term() -> Term:
+    """Two statements that feed each other, one of them across the time loop.
+
+    ``v[t+1] = v[t] - x[t] / 4`` and then ``x[t+1] = x[t] + v[t+1] / 4``, a
+    symplectic Euler step. The second statement reads what the first wrote in
+    the same iteration, and the first reads what the second wrote in the
+    iteration before. Only the first of those is an order between the two
+    instructions; the second is carried by the loop, and stating it as a
+    dependence of the first statement on the second makes a cycle.
+    """
+    domain = isl.Set("[n] -> { [t] : 0 <= t < n - 1 }")
+    kick = Stmt(
+        id="S0",
+        inames=("t",),
+        domain=domain,
+        assignee=Access("v", (V("t") + 1,)),
+        expr=S("v", V("t")) - S("x", V("t")) / 4,
+        kind="assign",
+        guard=None,
+        where="hand_terms.py:coupled_pair",
+    )
+    drift = Stmt(
+        id="S1",
+        inames=("t",),
+        domain=domain,
+        assignee=Access("x", (V("t") + 1,)),
+        expr=S("x", V("t")) + S("v", V("t") + 1) / 4,
+        kind="assign",
+        guard=None,
+        where="hand_terms.py:coupled_pair",
+    )
+    return Term(
+        name="coupled_pair",
+        params=(("x", dense(V("n"))), ("v", dense(V("n")))),
+        sizes=("n",),
+        stmts=(kick, drift),
+        post=None,
+    )
+
+
 def spmv_term(exactness: str = "reassoc") -> Term:
     """Ragged CSR product, the reduction form.
 
@@ -377,6 +417,17 @@ def csr_reference(off: np.ndarray, col: np.ndarray, val: np.ndarray, x: np.ndarr
         for a in range(off[r], off[r + 1]):
             out[r] += val[a] * x[col[a]]
     return out
+
+
+def coupled_pair_reference(
+    x: np.ndarray, v: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """The numpy reference for :func:`coupled_pair_term`, run on copies."""
+    x, v = x.copy(), v.copy()
+    for t in range(len(x) - 1):
+        v[t + 1] = v[t] - x[t] / 4
+        x[t + 1] = x[t] + v[t + 1] / 4
+    return x, v
 
 
 def jacobi_reference(u: np.ndarray) -> np.ndarray:

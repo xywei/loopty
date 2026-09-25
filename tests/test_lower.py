@@ -80,6 +80,24 @@ def test_the_stencil_runs_in_the_order_the_term_was_written() -> None:
     assert np.allclose(out["u"], ht.jacobi_reference(u))
 
 
+def test_statements_that_feed_each_other_across_the_loop_are_not_a_cycle() -> None:
+    # S0 reads what S1 wrote one iteration earlier. That order is the loop's;
+    # loopy's single-writer heuristic used to state it as an instruction
+    # dependence of S0 on S1, against S1's own on S0, and refused the cycle.
+    term = ht.coupled_pair_term()
+    insns = {insn.id: insn for insn in lower(term).default_entrypoint.instructions}
+    assert insns["S0"].depends_on == frozenset()
+    assert insns["S1"].depends_on == frozenset({"S0"})
+
+    x = np.zeros(8)
+    x[0] = 1.0
+    v = np.zeros(8)
+    out = run(term, x=x.copy(), v=v.copy())
+    want_x, want_v = ht.coupled_pair_reference(x, v)
+    assert np.allclose(out["x"], want_x)
+    assert np.allclose(out["v"], want_v)
+
+
 def test_a_ragged_reduction_becomes_a_csr_loop() -> None:
     code = code_for(ht.spmv_term())
     assert "off[r] + j" in code.replace("  ", " ")

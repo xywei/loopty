@@ -1023,6 +1023,16 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
                 id=insn_id,
                 within_inames=frozenset(stmt.inames),
                 depends_on=frozenset(depends),
+                # Final, so that loopy adds nothing to it. Its single-writer
+                # heuristic makes an instruction depend on the only writer of
+                # anything it reads, wherever that writer is in the body. When
+                # the writer comes later and feeds this statement only across
+                # an iteration of an enclosing loop, as the pressure a wave
+                # update reads from the previous time level does, the edge
+                # points against the one drawn here and loopy refuses the
+                # cycle. An instruction dependence orders two statements within
+                # one iteration; the order across iterations is the loop's.
+                depends_on_is_final=True,
                 predicates=predicates,
             )
         )
