@@ -390,13 +390,25 @@ with a pair of statement instances.
   `s += x[i]` and tuple unpacking count. The loop's own target, a per-iteration
   temporary first bound inside the loop, a rebinding to the same object or an
   equal value, and a name whose old value already mentions a closed loop's
-  variable (a `for` target reused by a later loop) are left alone. The fixes
-  are `reduce_sum(...)` for an accumulation and an indexed cell
+  variable (a `for` target reused by a later loop) are left alone. State kept
+  outside a plain name is compared the same way. A global the frame's code
+  rebinds with `global G` counts like a local. So does a list, dict or set
+  reachable from the frame's locals, or held by a global its code names, whose
+  contents change across one iteration: `state = [0]` followed by
+  `state[0] += 1` and `y[i] = state[0]` in the loop used to trace to
+  `y[i] = 1`. Elements are compared by identity or structurally, never with
+  `==`, and the message names the container and the cell that changed. A
+  container first created inside the loop is scratch and is left alone; one
+  created before the loop and reused as scratch is refused, with a message
+  that says to create it inside the loop. The fixes are `reduce_sum(...)` for
+  an accumulation and an indexed cell
   (`s[i + 1] = s[i] + x[i]`, as `scan` in `examples/spmv.py` does) otherwise,
   spelled with the loop's own target and domain. A message names a loop by its
   `for` target and line, and adds the iname when a reused target made the two
   differ. Both checks are trace-time only; plain `python` runs the body as
-  written.
+  written. A change nested below a container's own elements
+  (`state[0][0] += 1`), an attribute, and a global that only a helper defined
+  outside the body rebinds or changes are not seen yet.
 - A loop whose target is spelled like a size or a parameter of the kernel gets
   an iname of its own. `for k in x.dom` over `x: Arr[Fin[k], Real]` used to make
   the size and the iname one isl dimension, so the loop's domain was

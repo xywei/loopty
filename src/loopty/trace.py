@@ -39,18 +39,22 @@ sees ``s = 0.0 + x[i]`` and never the sum, and the polyhedral model has no cell
 for such a name anyway. Two checks refuse the idiom, and the message names the
 fix, which is to give the state an index. :meth:`Tracer.record` refuses a
 statement that mentions the variable of a loop it is not inside, which is how
-a value carried *out* of a loop shows up. :meth:`Tracer.leave_loop` compares the
-locals of the frame running the ``for`` with those it had when the loop opened,
-which catches a carried value that mentions no loop variable at all, such as
-``s = s + 1.0``.
+a value carried *out* of a loop shows up. :meth:`Tracer.leave_loop` compares
+what the frame running the ``for`` holds with what it held when the loop
+opened, which catches a carried value that mentions no loop variable at all,
+such as ``s = s + 1.0``: its locals, the globals its code rebinds, and the
+contents of the lists, dicts and sets it can reach, since ``acc[0] += 1.0``
+leaves ``acc`` bound to the same list.
 """
 
 from __future__ import annotations
 
 import dis
+import itertools
 import sys
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
+from types import CodeType
 from typing import Any
 
 import islpy as isl
@@ -115,12 +119,17 @@ _INDEX_THE_STATE = (
 )
 
 
+#: How many items of a container a message prints before it writes ``...``.
+_SHOWN_ITEMS = 6
+
+
 def _shown(value: Any) -> str:
     """A value the way a message prints it: as the body spells it, where it can.
 
     A term is rendered, a symbolic array is its name and a symbolic domain is
-    ``x.dom`` (a ping-pong ``a, b = b, a`` swaps two arrays), anything else is
-    its ``repr``.
+    ``x.dom`` (a ping-pong ``a, b = b, a`` swaps two arrays). A list, tuple,
+    dict or set is written the way Python writes it, with its items shown the
+    same way and cut off after the first few; anything else is its ``repr``.
     """
     if isinstance(value, SymArr):
         return value.name
@@ -131,7 +140,24 @@ def _shown(value: Any) -> str:
             return render(value)
         except Exception:  # pragma: no cover - a node lanky cannot print
             return str(value)
+    if isinstance(value, dict):
+        items = itertools.islice(value.items(), _SHOWN_ITEMS)
+        shown = [f"{_shown(key)}: {_shown(item)}" for key, item in items]
+        return "{" + _items_text(shown, len(value)) + "}"
+    if isinstance(value, list | tuple | set):
+        shown = [_shown(item) for item in itertools.islice(value, _SHOWN_ITEMS)]
+        text = _items_text(shown, len(value))
+        if isinstance(value, list):
+            return f"[{text}]"
+        if isinstance(value, tuple):
+            return f"({text},)" if len(value) == 1 else f"({text})"
+        return f"{{{text}}}" if value else "set()"
     return repr(value)
+
+
+def _items_text(shown: Sequence[str], total: int) -> str:
+    """The items a message shows of a container of ``total``, comma separated."""
+    return ", ".join(shown) + (", ..." if total > len(shown) else "")
 
 
 def _loop_variable(loop: _Loop) -> str:
@@ -178,28 +204,67 @@ def _escaped_message(loops: Sequence[_Loop], cell: str, where: str) -> str:
     )
 
 
-def _carried_message(loop: _Loop, carried: Sequence[tuple[str, Any, Any]]) -> str:
-    """What to say about names a loop carries from one iteration to the next."""
+@dataclass(frozen=True)
+class _Carried:
+    """One piece of state a loop carries from one iteration into the next.
+
+    ``holder`` is how a message names it (``'s'``, ``the list 'acc'``, ``the
+    global 'G'``) and ``name`` the Python name the body reaches it by, which
+    the fixes are spelled with. ``cell`` is the name or the element whose value
+    changed (``acc[0]``, or ``acc`` itself when its length did), and ``before``
+    and ``after`` are that value when the loop opened and after one iteration.
+    ``kind`` is ``"name"``, ``"global"`` or ``"container"``, which decides
+    what the message suggests for a temporary.
+    """
+
+    holder: str
+    name: str
+    cell: str
+    before: Any
+    after: Any
+    kind: str
+
+
+#: What each kind of carried state should be when it is only per-iteration
+#: scratch, which is how a false positive is answered.
+_SCRATCH = {
+    "name": (
+        "If {name!r} is only a temporary that each iteration assigns before it "
+        "reads it, give it a name that is not bound before the loop."
+    ),
+    "global": (
+        "If {name!r} is only a temporary that each iteration assigns before it "
+        "reads it, make it a local name that is first bound inside the loop."
+    ),
+    "container": (
+        "If {name!r} is only scratch that each iteration fills before it reads "
+        "it, create it inside the loop instead."
+    ),
+}
+
+
+def _carried_message(loop: _Loop, carried: Sequence[_Carried]) -> str:
+    """What to say about the state a loop carries from one iteration to the next."""
     variable = _loop_variable(loop)
-    names = ", ".join(repr(name) for name, _, _ in carried)
+    holders = ", ".join(entry.holder for entry in carried)
     values = "; ".join(
-        f"{name!r} is {_shown(before)} before the loop and {_shown(after)} "
-        "after one iteration"
-        for name, before, after in carried
+        f"{entry.cell!r} is {_shown(entry.before)} before the loop and "
+        f"{_shown(entry.after)} after one iteration"
+        for entry in carried
     )
-    first = carried[0][0]
+    first = carried[0]
     return (
-        f"the loop over {variable!r} at {loop.where} carries {names} from one "
+        f"the loop over {variable!r} at {loop.where} carries {holders} from one "
         f"iteration to the next ({values}). Tracing runs the body once with the "
         "loop taking one generic point, so it sees one iteration and not what "
-        "the loop computes, and the polyhedral model has no cell for a Python "
-        "name whose value changes across iterations. "
+        "the loop computes, and the polyhedral model has no cell for state that "
+        "Python keeps outside the arrays. "
         + _INDEX_THE_STATE.format(
             reduction=f"... for {variable} in {_loop_domain(loop)}",
-            cell=f"{first}[{variable} + 1] = {first}[{variable}] + ...",
+            cell=f"{first.name}[{variable} + 1] = {first.name}[{variable}] + ...",
         )
-        + f" If {first!r} is only a temporary that each iteration assigns before "
-        "it reads it, give it a name that is not bound before the loop."
+        + " "
+        + _SCRATCH[first.kind].format(name=first.name)
     )
 
 
@@ -209,8 +274,8 @@ class TraceError(RuntimeError):
     The archetype is a Python ``if`` on a symbolic value: the message names the
     ``with when(...)`` replacement. Data-dependent ``while``, ``break``,
     ``return`` out of a loop, Python's builtin ``sum`` over a symbolic domain,
-    and state a Python name carries from one loop iteration to the next are the
-    other cases.
+    and state that a Python name, a global, or a list, dict or set carries from
+    one loop iteration to the next are the other cases.
     """
 
 
@@ -227,10 +292,10 @@ class _Loop:
     :meth:`Tracer.leave_loop`.
 
     ``target`` is the name the ``for`` statement binds, when it could be read,
-    and ``where`` the line of the ``for``. ``names`` is a copy of the locals of
-    the frame running the ``for``, taken when the level opened and so before
-    the ``for`` bound its target: what the loop's first iteration started from,
-    which the locals at the close are compared with.
+    and ``where`` the line of the ``for``. ``state`` is what the frame running
+    the ``for`` held when the level opened, and so before the ``for`` bound its
+    target: what the loop's first iteration started from, which the frame at
+    the close is compared with.
     """
 
     iname: str
@@ -239,7 +304,42 @@ class _Loop:
     owner: Any = None
     target: str | None = None
     where: str = ""
-    names: dict[str, Any] | None = None
+    state: _Snapshot | None = None
+
+
+@dataclass
+class _Held:
+    """A list, dict or set a loop could carry state in, copied at the loop's open.
+
+    ``label`` is how the body reaches it (``acc``, or ``pair[0]`` for a list
+    kept in a tuple), ``root`` the name the label starts with, and ``scope``
+    ``"local"`` or ``"global"``. ``copy`` is shallow: its elements are the very
+    objects the container held, so a change is seen one level deep.
+    """
+
+    label: str
+    root: str
+    scope: str
+    container: Any
+    copy: Any
+
+
+@dataclass
+class _Snapshot:
+    """What the frame running a ``for`` held when the loop level opened.
+
+    ``names`` is a copy of its locals. ``namespace`` is its module's globals,
+    the live dictionary, and ``globals`` the values then of the names its code
+    rebinds there with ``global G``. ``held`` is every list, dict and set
+    reachable from a local or from a global the code names: a container
+    mutated in place is the same object after the iteration, so comparing the
+    names cannot see what changed in it. See :func:`_snapshot`.
+    """
+
+    names: dict[str, Any]
+    namespace: Mapping[str, Any]
+    globals: dict[str, Any]
+    held: list[_Held]
 
 
 class Tracer:
@@ -302,14 +402,13 @@ class Tracer:
         bound: Any,
         hint: str | None,
         owner: Any = None,
-        names: Mapping[str, Any] | None = None,
-        where: str = "",
+        frame: Any = None,
     ) -> Var:
         """Open a loop level over ``0 <= i < bound`` and return its variable.
 
-        ``hint`` is the ``for`` target, and ``names`` the locals of the frame
-        running the ``for`` as they are now, before it binds that target. They
-        are copied, because what the caller has is ``frame.f_locals``: a live,
+        ``hint`` is the ``for`` target, and ``frame`` the frame running the
+        ``for``, as it is now, before it binds that target. What it holds is
+        copied (see :func:`_snapshot`), because ``frame.f_locals`` is a live,
         write-through view from Python 3.13 on (PEP 667), and before that a
         dictionary the frame refreshes in place on the next access, so either
         way the level would otherwise see the locals at its close twice.
@@ -323,17 +422,24 @@ class Tracer:
                 bound,
                 owner,
                 target=hint,
-                where=where,
-                names=None if names is None else dict(names),
+                where="" if frame is None else _location(frame),
+                state=None if frame is None else _snapshot(frame, self._owned()),
             )
         )
         self._path.append(self._position())
         self._counters.append(0)
         return var
 
-    def leave_loop(
-        self, owner: Any = None, names: Mapping[str, Any] | None = None
-    ) -> None:
+    def _owned(self) -> set[int]:
+        """The containers the tracer keeps for itself, by identity.
+
+        No body can carry state in them, and a helper frame that reaches one
+        would otherwise see it change as statements are recorded. The symbolic
+        arrays and domains need no entry: they are not containers.
+        """
+        return {id(value) for value in (*vars(self).values(), _TRACERS, _MASKS)}
+
+    def leave_loop(self, owner: Any = None, frame: Any = None) -> None:
         """Close the innermost loop level, refusing to close somebody else's.
 
         A level is popped when its iterator is asked for a second point and
@@ -344,10 +450,11 @@ class Tracer:
         instead of its own. That mismatch is what is caught here, at the point
         where it happens, so the message can name the loop.
 
-        ``names`` are the locals of the frame running the ``for`` now that the
-        body has run once. A name bound to a different value than it had when
-        the loop opened is state the second iteration would start from, which
-        the trace never runs; see :meth:`_carried`.
+        ``frame`` is the frame running the ``for``, now that the body has run
+        once. A name bound to a different value than it had when the loop
+        opened, or a container whose contents changed, is state the second
+        iteration would start from, which the trace never runs; see
+        :meth:`_carried`.
         """
         if owner is not None and self.loops and self.loops[-1].owner is not owner:
             raise TraceError(_abandoned_message([self.loops[-1].iname]))
@@ -355,24 +462,32 @@ class Tracer:
         self._closed[loop.iname] = loop
         self._path.pop()
         self._counters.pop()
-        if loop.names is None or names is None:
+        if loop.state is None or frame is None:
             return
-        carried = self._carried(loop, names)
+        carried = self._carried(loop, frame.f_locals)
         if carried:
             raise TraceError(_carried_message(loop, carried))
 
-    def _carried(
-        self, loop: _Loop, after: Mapping[str, Any]
-    ) -> list[tuple[str, Any, Any]]:
-        """The names ``loop`` carries into its next iteration, with both values.
+    def _carried(self, loop: _Loop, after: Mapping[str, Any]) -> list[_Carried]:
+        """The state ``loop`` carries into its next iteration, with both values.
 
         A name counts when it was bound before the loop opened and is bound to
         a different value after one iteration, whatever the value is: a term,
         or a plain Python number such as a counter ``k = k + 1`` that ends up
-        in an index. Rebinding to the identical object or to an equal value
+        in an index. So does a global the code of the frame rebinds with
+        ``global G``. Rebinding to the identical object or to an equal value
         carries nothing (see :func:`_same_value`), and a name first bound
-        inside the loop is a per-iteration temporary. Three things are left
-        alone on purpose:
+        inside the loop is a per-iteration temporary.
+
+        A list, dict or set counts when it was reachable before the loop opened
+        and its contents are different after one iteration (see
+        :func:`_changed`), which is how ``acc[0] = acc[0] + x[i]`` and
+        ``seen.add(i)`` show up; a container first created inside the loop is
+        per-iteration scratch, like a temporary name. A change nested deeper
+        than the container's own elements, such as ``acc[0][0] += 1``, is not
+        seen, and neither is an attribute an object holds.
+
+        Three things are left alone on purpose:
 
         * the loop's own target, which the ``for`` rebinds before every
           iteration, so no iteration can read the value the previous one left;
@@ -381,13 +496,17 @@ class Tracer:
           statements it guards;
         * a name whose value before the loop already mentions the variable of
           a loop that has closed, such as a ``for`` target reused by a later
-          loop. Anything that reads such a value is refused as an escaped loop
-          variable by :meth:`record`, wherever the read ends up, so there is
-          nothing the comparison here could add.
+          loop, and likewise a global, or an element of a container, whose
+          value does. Anything that reads such a value is refused as an escaped
+          loop variable by :meth:`record`, wherever the read ends up, so there
+          is nothing the comparison here could add.
         """
+        state = loop.state
+        if state is None:
+            return []
         closed = self._inames.difference(self.inames)
-        out: list[tuple[str, Any, Any]] = []
-        for name, before in (loop.names or {}).items():
+        out: list[_Carried] = []
+        for name, before in state.names.items():
             if name == loop.target or name not in after:
                 continue
             value = after[name]
@@ -399,7 +518,35 @@ class Tracer:
                 continue
             if _loop_variables(before, closed):
                 continue
-            out.append((name, before, value))
+            out.append(_Carried(repr(name), name, name, before, value, "name"))
+        for name, before in state.globals.items():
+            if name not in state.namespace:
+                continue
+            value = state.namespace[name]
+            if _same_value(before, value) or _loop_variables(before, closed):
+                continue
+            out.append(
+                _Carried(f"the global {name!r}", name, name, before, value, "global")
+            )
+        # A container whose name was rebound is reported as that rebinding.
+        reported = {entry.name for entry in out}
+        for held in state.held:
+            change = None if held.root in reported else _changed(held, closed)
+            if change is None:
+                continue
+            cell, before, value = change
+            scope = "global " if held.scope == "global" else ""
+            kind = type(held.container).__name__
+            out.append(
+                _Carried(
+                    f"the {scope}{kind} {held.label!r}",
+                    held.root,
+                    cell,
+                    before,
+                    value,
+                    "container",
+                )
+            )
         return out
 
     def _position(self) -> int:
@@ -626,6 +773,105 @@ def _same_value(before: Any, after: Any) -> bool:
     return False
 
 
+def _snapshot(frame: Any, owned: Collection[int]) -> _Snapshot:
+    """What ``frame``, which is running a ``for``, holds as the loop opens.
+
+    Its locals are copied, and so are the values of the globals its code
+    rebinds. Every list, dict and set that a local holds, or that a global its
+    code names holds, is copied shallowly, looking through tuples, which cannot
+    change themselves but can hold something that does. A container reached
+    twice is copied once, under the first name; one the tracer keeps for
+    itself (``owned``, by identity) is not copied at all.
+    """
+    names = dict(frame.f_locals)
+    namespace = frame.f_globals
+    rebound, read = _global_names(frame.f_code)
+    held: list[_Held] = []
+    seen = set(owned)
+
+    def visit(label: str, root: str, scope: str, value: Any) -> None:
+        if id(value) in seen:
+            return
+        if isinstance(value, tuple):
+            for position, item in enumerate(value):
+                visit(f"{label}[{position}]", root, scope, item)
+            return
+        for kind in (list, dict, set):
+            if isinstance(value, kind):
+                seen.add(id(value))
+                held.append(_Held(label, root, scope, value, kind(value)))
+                return
+
+    for name, value in names.items():
+        visit(name, name, "local", value)
+    for name in sorted(rebound | read):
+        if name in namespace:
+            visit(name, name, "global", namespace[name])
+    return _Snapshot(
+        names=names,
+        namespace=namespace,
+        globals={name: namespace[name] for name in rebound if name in namespace},
+        held=held,
+    )
+
+
+def _global_names(code: CodeType) -> tuple[set[str], set[str]]:
+    """The globals ``code`` rebinds and the globals it reads, by name.
+
+    Functions defined inside ``code`` count too: they share its module's
+    globals, so a helper written in the body with ``global G`` rebinds the
+    same ``G`` when the loop calls it. A builtin read by name is in neither
+    set's namespace and is skipped by the caller.
+    """
+    rebound: set[str] = set()
+    read: set[str] = set()
+    pending = [code]
+    while pending:
+        current = pending.pop()
+        for instruction in dis.get_instructions(current):
+            if instruction.opname in ("STORE_GLOBAL", "DELETE_GLOBAL"):
+                rebound.add(instruction.argval)
+            elif instruction.opname == "LOAD_GLOBAL":
+                read.add(instruction.argval)
+        pending.extend(c for c in current.co_consts if isinstance(c, CodeType))
+    return rebound, read
+
+
+def _changed(held: _Held, closed: Collection[str]) -> tuple[str, Any, Any] | None:
+    """The first change to a container since it was copied, or ``None``.
+
+    The change is named by the cell the body would read it back from, with that
+    cell's two values: ``acc[0]`` for a list of one length, ``d['k']`` for a
+    dict of the same keys in the same order. A container whose length, keys or
+    elements otherwise changed is named whole, with both of its contents. An
+    element is compared the way a name's value is (see :func:`_same_value`),
+    and one whose old value mentions the variable of a closed loop is left
+    alone, as a name holding such a value is; see :meth:`Tracer._carried`.
+    """
+    old, new, label = held.copy, held.container, held.label
+    if isinstance(old, list):
+        if len(old) != len(new):
+            return label, old, list(new)
+        cells = zip(range(len(old)), old, new)
+    elif isinstance(old, dict):
+        if len(old) != len(new) or not all(map(_same_value, old, new)):
+            return label, old, dict(new)
+        cells = zip(old, old.values(), new.values())
+    else:
+        # A set has no cells to name, and no order to compare in.
+        ids = {id(item) for item in new}
+        if len(old) == len(new) and all(
+            id(item) in ids or any(_same_value(item, other) for other in new)
+            for item in old
+        ):
+            return None
+        return label, old, set(new)
+    for key, before, after in cells:
+        if not _same_value(before, after) and not _loop_variables(before, closed):
+            return f"{label}[{_shown(key)}]", before, after
+    return None
+
+
 def _location(frame: Any) -> str:
     """``file:line`` of what ``frame`` is executing, the tracer's source map."""
     return f"{frame.f_code.co_filename.rsplit('/', 1)[-1]}:{frame.f_lineno}"
@@ -797,8 +1043,8 @@ class _DomIterator:
     The frame that calls ``__next__`` is the one running the ``for``, whether
     that is the kernel body or a helper it calls, and both calls come from it:
     the first before the target is bound, the second once the body has run.
-    Its locals at those two moments are what the tracer compares to find state
-    carried across iterations; see :meth:`Tracer.leave_loop`.
+    What it holds at those two moments is what the tracer compares to find
+    state carried across iterations; see :meth:`Tracer.leave_loop`.
     """
 
     __slots__ = ("dom", "done", "loop")
@@ -818,7 +1064,7 @@ class _DomIterator:
             if self.loop:
                 tracer = current_tracer()
                 if tracer is not None:
-                    tracer.leave_loop(self, sys._getframe(1).f_locals)
+                    tracer.leave_loop(self, sys._getframe(1))
             raise StopIteration
         self.done = True
         binder_trace = current_trace()
@@ -842,13 +1088,7 @@ class _DomIterator:
                 "reduction and its domain are recorded"
             )
         self.loop = True
-        return tracer.enter_loop(
-            self.dom.bound,
-            _loop_target_name(),
-            self,
-            names=frame.f_locals,
-            where=_location(frame),
-        )
+        return tracer.enter_loop(self.dom.bound, _loop_target_name(), self, frame)
 
 
 class SymArr:

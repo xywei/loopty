@@ -36,9 +36,10 @@ def spmv(
 domain. The `scan` kernel in the same example is deliberately different: a
 prefix sum is a recurrence with loop-carried dependences, not a reduction
 expression. Either way the state has an index. An accumulator kept in a Python
-name (`s = s + x[i]` inside the loop) is refused when the kernel is traced,
-with a `TraceError` naming `reduce_sum` and the indexed cell as the two ways to
-write it.
+name (`s = s + x[i]` inside the loop), in a global, or in a list, dict or set
+(`acc[0] = acc[0] + x[i]`) is refused when the kernel is traced, with a
+`TraceError` naming `reduce_sum` and the indexed cell as the two ways to write
+it.
 
 Three things are being said in the signature. The output `y` is a parameter, not
 a return value, because that is how a kernel writes. The sizes come from the

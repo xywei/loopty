@@ -739,3 +739,171 @@ def test_plain_python_runs_the_carried_sum_as_written() -> None:
 
 
 # }}}
+
+
+# {{{ state a list, a dict, a set or a global carries
+
+
+#: Module globals for the kernels below to carry state in. Each test sets its
+#: own through ``monkeypatch``, so a trace that changes one leaves nothing
+#: behind for the next.
+_COUNT = 0
+_TOTALS = [0.0]
+
+
+def test_a_counter_kept_in_a_list_is_refused() -> None:
+    # ``state`` is bound to the same list before and after the iteration, so
+    # comparing the names saw nothing, and the trace recorded ``y[i] = 1`` for
+    # every ``i`` while the native run writes 1, 2, 3, ...
+    def counted(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        state = [0]
+        for i in x.dom:
+            state[0] += 1
+            y[i] = state[0]
+
+    with pytest.raises(TraceError) as caught:
+        term_of(counted)
+    message = str(caught.value)
+    assert "loop over 'i' at test_trace.py:" in message
+    assert "carries the list 'state'" in message
+    assert "'state[0]' is 0 before the loop and 1 after one iteration" in message
+    assert "reduce_sum(... for i in x.dom)" in message
+    assert "state[i + 1] = state[i] + ..." in message
+    assert "If 'state' is only scratch" in message
+    assert "create it inside the loop" in message
+
+
+def test_an_accumulator_kept_in_a_dict_is_refused() -> None:
+    # A running sum through a dict entry: the trace saw ``y[i] = 0.0 + x[i]``.
+    def running(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        acc = {"total": 0.0}
+        for i in x.dom:
+            acc["total"] = acc["total"] + x[i]
+            y[i] = acc["total"]
+
+    with pytest.raises(TraceError) as caught:
+        term_of(running)
+    message = str(caught.value)
+    assert "carries the dict 'acc'" in message
+    assert "\"acc['total']\" is 0.0 before the loop and 0.0 + x[i]" in message
+
+
+def test_a_set_that_grows_across_iterations_is_refused() -> None:
+    # Natively only the first iteration doubles; the one point the trace runs
+    # is a first iteration, so every ``y[i]`` was recorded as ``2.0*x[i]``.
+    def first_doubled(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        done = set()
+        for i in x.dom:
+            y[i] = x[i] * (1.0 if "doubled" in done else 2.0)
+            done.add("doubled")
+
+    with pytest.raises(TraceError) as caught:
+        term_of(first_doubled)
+    message = str(caught.value)
+    assert "carries the set 'done'" in message
+    assert "'done' is set() before the loop and {'doubled'} after one" in message
+
+
+def test_a_list_kept_in_a_tuple_is_reached_through_it() -> None:
+    def through_a_tuple(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        counters = ([0], [0])
+        for i in x.dom:
+            counters[1][0] += 1
+            y[i] = counters[1][0] * x[i]
+
+    with pytest.raises(TraceError, match=r"carries the list 'counters\[1\]'"):
+        term_of(through_a_tuple)
+
+
+def test_a_global_the_body_rebinds_is_refused(monkeypatch) -> None:
+    monkeypatch.setitem(globals(), "_COUNT", 0)
+
+    def numbered(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        global _COUNT
+        for i in x.dom:
+            _COUNT = _COUNT + 1
+            y[i] = _COUNT * x[i]
+
+    with pytest.raises(TraceError) as caught:
+        term_of(numbered)
+    message = str(caught.value)
+    assert "carries the global '_COUNT'" in message
+    assert "'_COUNT' is 0 before the loop and 1 after one iteration" in message
+    assert "make it a local name that is first bound inside the loop" in message
+
+
+def test_a_global_list_the_body_mutates_is_refused(monkeypatch) -> None:
+    # No ``global`` statement: the list is read by name and changed in place.
+    monkeypatch.setitem(globals(), "_TOTALS", [0.0])
+
+    def totals(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in x.dom:
+            _TOTALS[0] = _TOTALS[0] + 1.0
+            y[i] = _TOTALS[0] * x[i]
+
+    with pytest.raises(TraceError) as caught:
+        term_of(totals)
+    message = str(caught.value)
+    assert "carries the global list '_TOTALS'" in message
+    assert "'_TOTALS[0]' is 0.0 before the loop and 1.0 after" in message
+
+
+def test_a_list_created_inside_the_loop_is_scratch() -> None:
+    # First bound inside the loop, like a per-iteration temporary name.
+    def paired(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in x.dom:
+            pair = [x[i], 2.0 * x[i]]
+            pair[0] = pair[0] + pair[1]
+            y[i] = pair[0]
+
+    (stmt,) = term_of(paired).stmts
+    assert stmt.inames == ("i",)
+    assert [access.array for access in accesses_in(stmt.expr)] == ["x", "x"]
+
+
+def test_a_list_the_loop_only_reads_still_traces() -> None:
+    def weighted(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        coeffs = [0.5, 2.0]
+        for i in x.dom:
+            y[i] = coeffs[0] * x[i] + coeffs[1]
+
+    (stmt,) = term_of(weighted).stmts
+    assert stmt.inames == ("i",)
+
+
+def test_a_list_holding_a_closed_loops_values_is_not_state() -> None:
+    # ``buf`` holds ``x[i]`` from the first loop, which the second overwrites
+    # as scratch; reading the old value would be refused as an escaped ``i``.
+    def reused(
+        x: Arr[Fin[n], Real],  # noqa: F821
+        y: Arr[Fin[n], Real],  # noqa: F821
+        z: Arr[Fin[n], Real],  # noqa: F821
+    ):
+        for i in x.dom:
+            buf = [x[i]]
+            y[i] = buf[0]
+        for j in x.dom:
+            buf[0] = 2.0 * x[j]
+            z[j] = buf[0]
+
+    term = term_of(reused)
+    assert [stmt.inames for stmt in term.stmts] == [("i",), ("j",)]
+
+
+def test_plain_python_runs_the_list_counter_as_written() -> None:
+    # The refusal is trace-time only; the native run is the reference.
+    from loopty.kernel import Kernel
+
+    def counted(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        state = [0]
+        for i in x.dom:
+            state[0] += 1
+            y[i] = state[0]
+
+    x = Arr.from_numpy([0.0, 0.0, 0.0])
+    y = Arr.zeros(3)
+    Kernel(counted)(x, y)
+    assert list(y.numpy()) == [1.0, 2.0, 3.0]
+
+
+# }}}
