@@ -6,7 +6,7 @@ import islpy as isl
 from lanky.prelude import Int, Nat, Real
 from lanky.terms import evaluate_annotations
 
-from loopty import Arr, Fin, flow, when
+from loopty import Arr, Fin, flow, reduce_sum, when
 from loopty.trace import trace
 from loopty.typing import facts_for
 
@@ -174,13 +174,15 @@ def rendered(accesses) -> set[tuple[str, str, str]]:
     }
 
 
-def touched(stmt) -> set[tuple[str, str]]:
+def touched(stmt, term) -> set[tuple[str, str]]:
     """``(kind, "array[index, ...]")`` for every access the collector reports."""
     from lanky.terms import render
 
     return {
         (kind, f"{array}[{', '.join(render(i) for i in indices)}]")
-        for array, indices, kind, _inames, _domain in flow.statement_accesses(stmt)
+        for array, indices, kind, _inames, _domain in flow.statement_accesses(
+            stmt, term
+        )
     }
 
 
@@ -188,15 +190,16 @@ def test_an_array_read_inside_an_assignee_index_is_collected_as_a_read() -> None
     # The write to ``y`` is discharged in bounds *by type* from ``col``'s
     # element sort, so with the read of ``col`` itself missing nothing ever
     # asked whether the kernel reads past the end of ``col``.
-    (stmt,) = term_of(scatter_past_end).stmts
-    assert ("write", "y[col[i + 1]]") in touched(stmt)
-    assert ("read", "col[i + 1]") in touched(stmt)
+    term = term_of(scatter_past_end)
+    (stmt,) = term.stmts
+    assert ("write", "y[col[i + 1]]") in touched(stmt, term)
+    assert ("read", "col[i + 1]") in touched(stmt, term)
 
 
 def test_an_array_read_inside_a_guard_is_collected_as_a_read() -> None:
     term = term_of(gated)
-    assert touched(term.stmts[0]) == {("write", "flag[i]")}
-    assert touched(term.stmts[1]) == {("write", "y[i]"), ("read", "flag[i]")}
+    assert touched(term.stmts[0], term) == {("write", "flag[i]")}
+    assert touched(term.stmts[1], term) == {("write", "y[i]"), ("read", "flag[i]")}
 
 
 def test_a_guard_read_carries_a_dependence_from_the_statement_that_writes_it() -> None:
@@ -214,7 +217,7 @@ def test_the_schedule_and_the_lowering_see_the_guard_read_as_well() -> None:
     from loopty.schedule import _accesses
 
     term = term_of(gated)
-    assert ("read", "flag", "i") in rendered(_accesses(term.stmts[1]))
+    assert ("read", "flag", "i") in rendered(_accesses(term.stmts[1], term))
 
     lowering = lower_generic(term)
     insns = {
@@ -226,8 +229,9 @@ def test_the_schedule_and_the_lowering_see_the_guard_read_as_well() -> None:
 def test_an_assignee_index_read_reaches_the_schedule_checker_too() -> None:
     from loopty.schedule import _accesses
 
-    (stmt,) = term_of(scatter_past_end).stmts
-    kinds = rendered(_accesses(stmt))
+    term = term_of(scatter_past_end)
+    (stmt,) = term.stmts
+    kinds = rendered(_accesses(stmt, term))
     assert ("write", "y", "col[i + 1]") in kinds
     assert ("read", "col", "i + 1") in kinds
 
@@ -244,3 +248,138 @@ def test_an_accumulation_still_records_reads_of_its_other_cells() -> None:
     deps = flow.dependences(term)
     assert not deps.is_empty()
     assert deps.deltas().is_subset(isl.Set("{ [ds = 0, di = 1] }"))
+
+
+# {{{ the reads a ragged access makes through its offsets
+
+
+def scan_then_spmv(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    off: Arr[Fin[n + 1], Nat],  # noqa: F821
+    col: Arr[Fin[n], Fin[cnt], Fin[m]],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    x: Arr[Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """``scan`` and ``spmv`` of ``examples/spmv.py``, fused into one kernel.
+
+    Lowered, ``val[i, j]`` and ``col[i, j]`` are ``val[off[i] + j]`` and
+    ``col[off[i] + j]``: ``S2`` reads the offsets ``S1`` writes, and nothing in
+    its source says so.
+    """
+    off[0] = 0
+    for r in cnt.dom:
+        off[r + 1] = off[r] + cnt[r]
+    for i in y.dom:
+        y[i] = reduce_sum(val[i, j] * x[col[i, j]] for j in val.dom[i])
+
+
+def scale_rows(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    off: Arr[Fin[n + 1], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+):
+    """A ragged array written in place, through the offsets it declares."""
+    for r in cnt.dom:
+        for j in val.dom[r]:
+            val[r, j] = 2.0 * val[r, j]
+
+
+def spmv_without_offsets(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    col: Arr[Fin[n], Fin[cnt], Fin[m]],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    x: Arr[Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """``spmv`` as the example writes it: the offsets are lowering's to add."""
+    for r in y.dom:
+        y[r] = reduce_sum(val[r, j] * x[col[r, j]] for j in val.dom[r])
+
+
+def offsets_entries(stmt, term) -> list[tuple[str, str]]:
+    """``(kind, "off[...]")`` for each offsets entry, in order, repeats kept."""
+    from lanky.terms import render
+
+    return [
+        (kind, f"{array}[{', '.join(render(i) for i in indices)}]")
+        for array, indices, kind, _inames, _domain in flow.statement_accesses(
+            stmt, term
+        )
+        if array == "off"
+    ]
+
+
+def test_a_ragged_access_reads_the_ends_of_its_row_in_the_offsets() -> None:
+    # ``off[i]`` is what the flat index reads, and ``off[i + 1]`` is where the
+    # row ends. ``val`` and ``col`` share their offsets, so the pair is listed
+    # once for the two of them.
+    term = term_of(scan_then_spmv)
+    product = term.stmts[2]
+    assert offsets_entries(product, term) == [
+        ("read", "off[i]"),
+        ("read", "off[i + 1]"),
+    ]
+    assert {
+        ("write", "y[i]"),
+        ("read", "val[i, j]"),
+        ("read", "x[col[i, j]]"),
+        ("read", "col[i, j]"),
+    } <= touched(product, term)
+    # The scan names ``off`` itself, and touches no ragged array.
+    assert offsets_entries(term.stmts[1], term) == [
+        ("write", "off[r + 1]"),
+        ("read", "off[r]"),
+    ]
+
+
+def test_a_ragged_write_reads_the_offsets_too() -> None:
+    # ``val[r, j] = ...`` stores to ``val[off[r] + j]``: the write goes through
+    # the offsets as the read does, and the two share one pair of reads.
+    term = term_of(scale_rows)
+    (stmt,) = term.stmts
+    assert offsets_entries(stmt, term) == [("read", "off[r]"), ("read", "off[r + 1]")]
+
+
+def test_offsets_the_kernel_does_not_declare_are_not_listed() -> None:
+    # Lowering adds ``off_cnt`` itself; nothing in the body can write it, and
+    # ``r`` in bounds of ``val``'s rows already keeps both reads of it in
+    # bounds. Listing it would add a footprint on an array the term lacks.
+    term = term_of(spmv_without_offsets)
+    (stmt,) = term.stmts
+    arrays = {array for array, *_ in flow.statement_accesses(stmt, term)}
+    assert arrays == {"y", "val", "x", "col"}
+
+
+def test_the_scan_carries_a_dependence_to_the_rows_read_through_it() -> None:
+    # ``S1[r]`` writes ``off[r + 1]``, which is where row ``r`` ends and row
+    # ``r + 1`` starts, so both of those rows of ``S2`` depend on it. Without
+    # the offsets among ``S2``'s accesses there was no dependence at all
+    # between the scan and the product.
+    term = term_of(scan_then_spmv)
+    deps = flow.dependences(term)
+    for pair in ("{ [1, 0] -> [2, 0] }", "{ [1, 0] -> [2, 1] }"):
+        assert not deps.intersect(
+            isl.Map(pair).align_params(deps.get_space())
+        ).is_empty(), pair
+    # Row ``2`` does not start or end at ``off[1]``.
+    assert deps.intersect(
+        isl.Map("{ [1, 0] -> [2, 2] }").align_params(deps.get_space())
+    ).is_empty()
+
+
+def test_the_schedule_checker_draws_the_same_dependence_through_the_offsets() -> None:
+    # The checker computes its own relation, to be able to name the cell of a
+    # refused cast; it reads the same collector, so it names ``off`` too.
+    from loopty.schedule import Schedule
+
+    schedule = Schedule(term_of(scan_then_spmv))
+    through_offsets = [
+        dep
+        for dep in schedule._deps  # noqa: SLF001 - the point of the test
+        if dep.array == "off" and (dep.source, dep.sink) == ("S1", "S2")
+    ]
+    assert [dep.kind for dep in through_offsets] == ["raw", "raw"]
+
+
+# }}}

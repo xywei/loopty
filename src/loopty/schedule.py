@@ -323,15 +323,16 @@ class _Dep:
         }[self.kind]
 
 
-def _accesses(stmt: Stmt) -> list[tuple[str, str, tuple[Any, ...]]]:
+def _accesses(stmt: Stmt, term: Term) -> list[tuple[str, str, tuple[Any, ...]]]:
     """Every array reference of a statement, as ``(kind, array, indices)``.
 
     The list comes from :func:`loopty.flow.statement_accesses`, which is the one
     place the question "what does this statement touch?" is answered: the
     assignee, everything in the right-hand side including a reduction body, the
-    reads inside the assignee's own subscripts, and the reads inside the guard.
-    A legality verdict is only as good as that list, and it used to be written
-    out a second time here, which is how the guard came to be missing from it.
+    reads inside the assignee's own subscripts, the reads inside the guard, and
+    the reads of a ragged array's offsets that its flat index makes. A legality
+    verdict is only as good as that list, and it used to be written out a
+    second time here, which is how the guard came to be missing from it.
 
     The shared collector records an accumulation once, as ``acc``; the
     dependence computation below wants the write and the read separately, so
@@ -342,7 +343,7 @@ def _accesses(stmt: Stmt) -> list[tuple[str, str, tuple[Any, ...]]]:
     from loopty.flow import statement_accesses
 
     out: list[tuple[str, str, tuple[Any, ...]]] = []
-    for array, indices, kind, _inames, _domain in statement_accesses(stmt):
+    for array, indices, kind, _inames, _domain in statement_accesses(stmt, term):
         if kind == "acc":
             out.append(("write", array, tuple(indices)))
             out.append(("read", array, tuple(indices)))
@@ -403,8 +404,8 @@ def _dependences(
                 for k, iname in enumerate(layout.coords[b.id])
             }
             allowed_b = {f"y{k}" for k in range(len(layout.coords[b.id]))} | params
-            for a_kind, a_array, a_indices in _accesses(a):
-                for b_kind, b_array, b_indices in _accesses(b):
+            for a_kind, a_array, a_indices in _accesses(a, term):
+                for b_kind, b_array, b_indices in _accesses(b, term):
                     if a_array != b_array:
                         continue
                     if a_kind == "read" and b_kind == "read":

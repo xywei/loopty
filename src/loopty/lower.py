@@ -1146,26 +1146,19 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
         body = expr(stmt.expr)
 
         # What this statement reads, from the one collector every rule uses:
-        # the right-hand side, the subscripts of the assignee, the guard, and
-        # the accumulated cell. A name missing here is a dependence edge that
-        # is never drawn, so the list is not written out a second time.
-        accesses = statement_accesses(stmt)
+        # the right-hand side, the subscripts of the assignee, the guard, the
+        # accumulated cell, and the offsets a ragged access, read or written,
+        # indexes through. A name missing here is a dependence edge that is
+        # never drawn, so the list is not written out a second time. The last
+        # of those is the edge loopy's single-writer heuristic used to supply
+        # when one statement wrote the offsets; the dependences below are
+        # final, so it has to come from the collector, and it follows the body.
         read_arrays = {
             array
-            for array, _indices, kind, _inames, _domain in accesses
+            for array, _indices, kind, _inames, _domain in statement_accesses(
+                stmt, term
+            )
             if kind in ("read", "acc")
-        }
-        # The flat index of a ragged access, read or written, also reads the
-        # offsets argument. That read is the layout's and not the term's, so
-        # the collector above does not list it, but a statement that writes
-        # the offsets has to be ordered against it all the same. loopy's
-        # single-writer heuristic used to supply the edge when that statement
-        # was the only writer; the dependences below are final, so it is drawn
-        # here, in the direction the body gives it.
-        read_arrays |= {
-            builder.offsets_for(array)
-            for array, _indices, _kind, _inames, _domain in accesses
-            if builder.ragged_axis(array) is not None
         }
         written = stmt.assignee.array
 

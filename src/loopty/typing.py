@@ -161,7 +161,9 @@ def in_bounds_facts(term: Term, owner: str) -> list[Fact]:
     reflections = term.reflections
     facts: list[Fact] = []
     for stmt in term.stmts:
-        for array, indices, kind, inames, domain in flow.statement_accesses(stmt):
+        for array, indices, kind, inames, domain in flow.statement_accesses(
+            stmt, term
+        ):
             arrtype = types.get(array)
             if not isinstance(arrtype, ArrType):
                 continue
