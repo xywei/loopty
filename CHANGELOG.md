@@ -134,8 +134,9 @@ with a pair of statement instances.
   input, the first differing cell and both values (the drawn arguments are in
   the provenance), and `assumed` with the reason when no input runs natively or
   the interpreter cannot read the term. An input with more statement instances
-  and reduction terms than `MAX_INSTANCES` is skipped before either run. The
-  fact is what catches state a body keeps where tracing does not look: a change
+  and reduction terms than `MAX_INSTANCES` is skipped before the native run,
+  and a domain is judged by its bounding box before its points are collected,
+  so an input far past the limit costs nothing. The fact is what catches state a body keeps where tracing does not look: a change
   nested below a container's elements (`acc[0][0] += 1`), an attribute of an
   object an attribute holds, a `deque`, a loop over a generator that wraps a
   domain, and a `dir()` or frame probe all trace to one iteration's value and

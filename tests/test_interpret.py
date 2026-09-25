@@ -219,6 +219,40 @@ def test_the_terms_of_a_reduction_count_against_the_limit() -> None:
     assert arguments["y"].numpy()[0] == 10.0
 
 
+def test_a_domain_past_the_limit_is_refused_before_a_point_is_visited(
+    monkeypatch,
+) -> None:
+    # Collecting a domain's points is itself the work: a million by a million
+    # is refused by its bounding box, not after a trillion points were visited.
+    import loopty.interpret as interpret_module
+
+    def visited(*_args):
+        raise AssertionError("a point of the domain was visited")
+
+    monkeypatch.setattr(interpret_module, "_enumerate", visited)
+    n = prim.Variable("n")
+    stmt = Stmt(
+        id="S0",
+        inames=("i", "j"),
+        domain=isl.Set("[a, n] -> { [i, j] : 0 <= i < a and 0 <= j < a }"),
+        assignee=Access("y", (0,)),
+        expr=1.0,
+        kind="assign",
+        guard=None,
+        where="hand.py:1",
+    )
+    real = np.dtype(np.float64)
+    term = Term(
+        name="square",
+        params=(("a", Nat), ("y", ArrType(axes=(n,), dtype=real, ragged=(False,)))),
+        sizes=("n",),
+        stmts=(stmt,),
+        post=None,
+    )
+    with pytest.raises(TooLarge, match="more than 1000 statement instances"):
+        interpret(term, {"a": 10**6, "y": Arr.zeros(1)}, limit=1000)
+
+
 @kernel
 def recount(cnt: Arr[Fin[n], Nat], val: Arr[Fin[n], Fin[cnt], Real]):  # noqa: F821
     for r in cnt.dom:

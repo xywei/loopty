@@ -124,10 +124,12 @@ def interpret(
     ``limit`` bounds the work: the statement instances and the terms of the
     reductions they evaluate, counted together, since one instance can sum a
     whole row. More is a :class:`TooLarge`, raised before anything runs when
-    the statement instances alone are over, and otherwise at the reduction term
-    that goes over, with the arrays partly written. An array of an integral
-    sort stored as floats is read as integers when the term does not write it,
-    which is what the native run does (see
+    the statement instances alone are over, and otherwise at the reduction that
+    goes over, with the arrays partly written. A domain is checked by its
+    bounding box before its points are collected (see :meth:`_Run.enumerate`),
+    so a domain far past the limit costs nothing to refuse. An array of an
+    integral sort stored as floats is read as integers when the term does not
+    write it, which is what the native run does (see
     :meth:`loopty.kernel.Kernel.__call__`).
     """
     return _Run(term, arguments).run(limit)
@@ -190,6 +192,26 @@ class _Run:
             raise TooLarge(
                 f"more than {self.limit} statement instances and reduction terms"
             )
+
+    def enumerate(
+        self, space: isl.Set, positions: Sequence[int]
+    ) -> list[tuple[int, ...]]:
+        """:func:`_enumerate` under the limit, checked before a point is visited.
+
+        Collecting a domain's points is itself the work the limit bounds, so a
+        domain with more points than the limit has left is refused first. The
+        check is by the domain's bounding box, the bound isl gives without
+        visiting points. A box can hold more points than its domain (a triangle
+        fills half of one), so an input near the limit may be refused that
+        would have fit; one far past it is refused at once, not after its
+        points have been collected.
+        """
+        if self.limit is not None and not space.is_empty() and space.is_bounded():
+            if _box_volume(space) > self.limit - self.spent:
+                raise TooLarge(
+                    f"more than {self.limit} statement instances and reduction terms"
+                )
+        return _enumerate(space, positions)
 
     def run(self, limit: int | None) -> dict[str, np.ndarray]:
         """Every instance of every statement, in the order of the source schedule."""
@@ -306,7 +328,7 @@ class _Run:
                 yield {name: env[name] for name in names}
             return
         if not still:
-            for coordinates in _enumerate(space, free[level:]):
+            for coordinates in self.enumerate(space, free[level:]):
                 point = dict(env)
                 point.update(
                     (names[k], value)
@@ -328,7 +350,7 @@ class _Run:
                 shadow.find_dim_by_name(isl.dim_type.param, name),
                 1,
             )
-        for (value,) in _enumerate(shadow, [position]):
+        for (value,) in self.enumerate(shadow, [position]):
             yield from self._walk(
                 space.fix_val(isl.dim_type.set, position, value),
                 names,
@@ -496,6 +518,16 @@ def _enumerate(space: isl.Set, positions: Sequence[int]) -> list[tuple[int, ...]
 
     space.foreach_point(visit)
     return sorted(found)
+
+
+def _box_volume(space: isl.Set) -> int:
+    """How many points the bounding box of a bounded, non-empty set holds."""
+    volume = 1
+    for position in range(space.dim(isl.dim_type.set)):
+        low = space.dim_min_val(position).to_python()
+        high = space.dim_max_val(position).to_python()
+        volume *= high - low + 1
+    return volume
 
 
 def _text(node: Any) -> str:
