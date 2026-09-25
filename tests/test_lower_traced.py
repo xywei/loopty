@@ -502,6 +502,28 @@ def test_a_renamed_ragged_reduction_nests_under_its_own_row_loop() -> None:
     assert names.index(("j_0",)) == names.index(("p",)) + 1, names
 
 
+def test_a_renamed_ragged_reduction_is_still_a_ragged_fiber() -> None:
+    # The second row sum is ``j_0`` in the kernel, and its bound is a row length
+    # just as the first one's is. A hardware axis on it is the ragged-fiber case
+    # under the name the step used; if the renamed sum were looked up under its
+    # written name, ``j_0`` would pass for a loop with a known extent.
+    from loopty.lower import lower_generic
+    from loopty.schedule import Schedule, data_dependent_inames
+
+    term = ragged_row_sums_twice.trace()
+    renamed = lower_generic(term, "c").reduction_inames
+    assert {"j", "j_0"} <= data_dependent_inames(term, renamed)
+
+    schedule = (
+        Schedule(ragged_row_sums_twice)
+        .split("j_0", 2, inner="k_in", outer="k_out")
+        .tag(k_in="l.0")
+    )
+    ok, reason = schedule.buildable
+    assert not ok
+    assert "ragged fiber" in reason and "k_in" in reason
+
+
 @kernel
 def ragged_total(
     cnt: Arr[Fin[n], Nat],  # noqa: F821
