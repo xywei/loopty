@@ -11,6 +11,7 @@ a tolerance.
 
 from __future__ import annotations
 
+import islpy as isl
 import numpy as np
 import pymbolic.primitives as prim
 import pytest
@@ -18,6 +19,7 @@ from lanky.prelude import Nat, Real
 
 from loopty import Arr, Fin, kernel, reduce_sum, when
 from loopty.interpret import InterpretError, TooLarge, interpret
+from loopty.term import Access, ArrType, Stmt, Term
 
 
 def _copies(arguments: dict) -> dict:
@@ -223,3 +225,32 @@ def test_a_loop_bound_the_kernel_writes_is_refused() -> None:
     }
     with pytest.raises(InterpretError, match="reads cnt, which recount also writes"):
         interpret(recount.term, arguments)
+
+
+def test_a_domain_parameter_that_is_not_a_whole_number_is_named() -> None:
+    # isl's parameters are integers, so a domain bounded by a real scalar has
+    # no points to enumerate at a = 2.5; the error says which value it got.
+    real = np.dtype(np.float64)
+    n, i, a = prim.Variable("n"), prim.Variable("i"), prim.Variable("a")
+    stmt = Stmt(
+        id="S0",
+        inames=("i",),
+        domain=isl.Set("[a, n] -> { [i] : 0 <= i < n and i < a }"),
+        assignee=Access("y", (i,)),
+        expr=1.0,
+        kind="assign",
+        guard=prim.Comparison(i, "<", a),
+        where="hand.py:1",
+    )
+    term = Term(
+        name="below",
+        params=(("a", Real), ("y", ArrType(axes=(n,), dtype=real, ragged=(False,)))),
+        sizes=("n",),
+        stmts=(stmt,),
+        post=None,
+    )
+    with pytest.raises(InterpretError, match="parameter a is 2.5, which is not"):
+        interpret(term, {"a": 2.5, "y": Arr.zeros(4)})
+    y = Arr.zeros(4)
+    interpret(term, {"a": 2.0, "y": y})
+    assert list(y.numpy()) == [1.0, 1.0, 0.0, 0.0]

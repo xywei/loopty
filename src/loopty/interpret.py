@@ -209,12 +209,21 @@ class _Run:
             for name in dict.fromkeys(stmt.assignee.array for stmt in stmts)
         }
 
-    def _known(self) -> dict[str, int]:
-        """The sizes and the integer scalars, which a domain may name."""
-        out = dict(self.sizes)
+    def _known(self) -> dict[str, Any]:
+        """The sizes and the numeric scalars, which a domain may name.
+
+        A domain parameter is an integer to isl. A scalar that is not a whole
+        number is kept as it is, so that fixing it refuses with its value
+        (:func:`_fix_param`) rather than reporting the parameter unknown.
+        """
+        out: dict[str, Any] = dict(self.sizes)
         for name, value in self.scalars.items():
-            if isinstance(value, int | np.integer) and not isinstance(value, bool):
+            if isinstance(value, bool | np.bool_):
+                continue
+            if isinstance(value, int | np.integer):
                 out.setdefault(name, int(value))
+            elif isinstance(value, float | np.floating):
+                out.setdefault(name, value)
         return out
 
     # }}}
