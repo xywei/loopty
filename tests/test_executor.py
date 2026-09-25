@@ -480,6 +480,37 @@ def test_an_integer_valued_float_index_array_is_accepted() -> None:
     assert np.allclose(out["y"], csr_want(csr_arguments()))
 
 
+def test_the_native_run_reads_an_integer_valued_float_index_array_too() -> None:
+    # The compiled run casts 1.0 to the index 1. The native run used to hand
+    # numpy the float, which refuses it as an index, so an input the contract
+    # accepts could not be run natively and so not tested differentially.
+    arguments = csr_arguments(columns=[0.0, 1.0, 0.0, 2.0, 3.0], dtype=np.float64)
+    csr_product(**arguments)
+    assert np.allclose(arguments["y"].numpy(), csr_want(csr_arguments()))
+    # The copy is the body's; the caller's array keeps its storage.
+    assert arguments["col"].numpy().dtype == np.float64
+
+    fact = executor().differential(
+        csr_product,
+        Schedule(csr_product),
+        csr_arguments(columns=[0.0, 1.0, 0.0, 2.0, 3.0], dtype=np.float64),
+    )
+    assert fact.status.value == "tested"
+
+
+def test_a_float_stored_integral_array_the_body_writes_is_not_copied() -> None:
+    # A write has to land in the caller's buffer, so an array the body writes is
+    # never swapped for a copy, whatever its storage.
+    @kernel
+    def count_up(c: Arr[Fin[n], Nat]):  # noqa: F821
+        for i in c.dom:
+            c[i] = c[i] + 1
+
+    counts = np.array([0.0, 2.0, 5.0])
+    count_up(counts)
+    assert counts.tolist() == [1.0, 3.0, 6.0]
+
+
 @kernel
 def broadcast_at(i: Fin[n], x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     """``y[k] = x[i]``: a *scalar* whose index type is what puts ``x[i]`` in bounds."""
