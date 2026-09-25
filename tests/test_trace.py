@@ -491,6 +491,40 @@ def test_a_loop_variable_escaping_into_a_reduction_bound_is_refused() -> None:
         term_of(reduced_after)
 
 
+def test_a_reduction_binder_does_not_bind_its_own_bound() -> None:
+    # Python evaluates ``val.dom[r]`` before the generator binds its own ``r``,
+    # so the ``r`` in the bound is the closed loop's variable. The lowered
+    # domain has one dimension ``r`` for the two, which reads as bound; the
+    # reduction as the body built it still tells them apart.
+    def rebound_after(
+        cnt: Arr[Fin[n], Nat],  # noqa: F821
+        val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+        y: Arr[Fin[n], Real],  # noqa: F821
+    ):
+        for r in y.dom:
+            y[r] = 0.0
+        y[0] = reduce_sum(1.0 for r in val.dom[r])
+
+    with pytest.raises(TraceError, match="loop variable 'r' of the loop at"):
+        term_of(rebound_after)
+
+
+def test_a_reduction_binder_binds_the_bounds_of_the_binders_after_it() -> None:
+    # ``k``'s bound ``cnt[j]`` is the binder before it, not the closed loop's
+    # ``j`` that shares its name.
+    def nested_sum(
+        cnt: Arr[Fin[n], Nat],  # noqa: F821
+        val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+        y: Arr[Fin[n], Real],  # noqa: F821
+    ):
+        for j in y.dom:
+            y[j] = 0.0
+        y[0] = reduce_sum(val[j, k] for j in val.dom for k in val.dom[j])
+
+    _, total = term_of(nested_sum).stmts
+    assert [r.inames for r in reductions_in(total.expr)] == [("j", "k")]
+
+
 def test_a_per_iteration_temporary_still_traces() -> None:
     def temporary(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
         for i in x.dom:

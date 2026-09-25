@@ -461,7 +461,14 @@ class Tracer:
         """
         return domain_set(self.inames, self.bounds, reflections=self.reflections)
 
-    def record(self, assignee: Access, expr: Any, kind: str, where: str) -> Stmt:
+    def record(
+        self,
+        assignee: Access,
+        expr: Any,
+        kind: str,
+        where: str,
+        source: Any = None,
+    ) -> Stmt:
         """Append one statement instance family to the term being built.
 
         A statement that mentions the variable of a loop it is not inside is
@@ -470,8 +477,15 @@ class Tracer:
         a Python name carrying the loop's generic point past the loop: out of
         it, as in ``for i in x.dom: s = s + x[i]`` followed by ``y[0] = s``, or
         into a later loop through a bound or a guard.
+
+        ``source`` is the right-hand side as the body built it, before
+        :func:`lower_reductions` gave its reductions an isl domain. It is
+        looked at too, because each reduction binder's bound is still its own
+        there: ``reduce_sum(... for r in val.dom[r])`` after a loop over ``r``
+        reads that loop's ``r`` in its bound, which the lowered domain can no
+        longer tell from the binder.
         """
-        escaped = self._escaped(assignee, expr)
+        escaped = self._escaped(assignee, expr, source)
         if escaped:
             cell = (
                 _shown(_subscript(assignee.array, assignee.indices))
@@ -495,16 +509,17 @@ class Tracer:
         self.stmts.append(stmt)
         return stmt
 
-    def _escaped(self, assignee: Access, expr: Any) -> set[str]:
+    def _escaped(self, assignee: Access, expr: Any, source: Any = None) -> set[str]:
         """Loop variables a statement mentions that no loop around it binds.
 
         Everything the statement's instances depend on is looked at: the
-        assignee's indices, the right-hand side with its reductions, the guard,
-        and the bounds of the enclosing loops, since ``for j in val.dom[r]``
-        after the loop over ``r`` has closed puts ``r`` in the domain alone.
+        assignee's indices, the right-hand side with its reductions (lowered,
+        and as the body built it), the guard, and the bounds of the enclosing
+        loops, since ``for j in val.dom[r]`` after the loop over ``r`` has
+        closed puts ``r`` in the domain alone.
         """
         return _loop_variables(
-            (assignee, expr, self.guard(), self.bounds),
+            (assignee, expr, source, self.guard(), self.bounds),
             self._inames,
             bound=self.inames,
             reflections=self.reflections,
@@ -533,12 +548,21 @@ def _loop_variables(
 ) -> set[str]:
     """The loop variables among ``names`` that ``node`` mentions free.
 
-    A reduction binds its own inames in its body, and so does a lanky binder
-    (``Sum``, ``Forall``, ``Exists``) that has not been lowered yet, as in a
-    guard. A lowered reduction keeps its bounds only in its isl domain, where a
-    loop variable shows up as a parameter: by name when the bound is affine,
-    inside the term a reflected parameter stands for when it is not, which is
-    what ``reflections`` is asked for.
+    A lanky binder (``Sum``, ``Forall``, ``Exists``) that has not been lowered
+    yet, as in a guard or a right-hand side as the body built it, binds each of
+    its variables in the binders after it and in its body, but not in its own
+    bound: Python evaluates the iterable of a generator's ``for`` before it
+    binds that ``for``'s target, so the ``r`` in ``for r in val.dom[r]`` is the
+    ``r`` from before, such as a closed loop's variable.
+
+    A lowered reduction binds its own inames in its body, and keeps its bounds
+    only in its isl domain, where a loop variable shows up as a parameter: by
+    name when the bound is affine, inside the term a reflected parameter stands
+    for when it is not, which is what ``reflections`` is asked for. Which
+    binder a bound belonged to is gone by then, so a bound that mentions a
+    closed loop's variable under the name of its own binder reads as bound
+    here; :meth:`Tracer.record` also walks the right-hand side before lowering
+    for that reason.
     """
     out: set[str] = set()
 
@@ -555,9 +579,10 @@ def _loop_variables(
                 if reflections is not None:
                     walk(reflections.get(param), inner)
         elif isinstance(node, Sum | Forall | Exists):
-            inner = bound | frozenset(var.name for var, _ in node.binders)
-            for _, domain in node.binders:
+            inner = bound
+            for var, domain in node.binders:
                 walk(getattr(domain, "bound", None), inner)
+                inner = inner | {var.name}
             walk(node.body, inner)
             walk(node.guard, inner)
         elif isinstance(node, Access):
@@ -877,7 +902,7 @@ class SymArr:
         expr = lower_reductions(value, tracer)
         assignee = Access(self.name, indices)
         kind = "accumulate" if _reads_assignee(expr, assignee) else "assign"
-        tracer.record(assignee, expr, kind, where)
+        tracer.record(assignee, expr, kind, where, source=value)
 
     def __len__(self) -> int:
         """Refuse: the size is symbolic; iterate ``.dom``."""
