@@ -141,7 +141,10 @@ end to end; the edges are sharp.
   global, or a list, dict or set carries state from one loop iteration to the
   next.
 - Typing rules and the ledger: in-bounds by isl or by type, write disjointness,
-  ordering, reduction exactness, postconditions.
+  ordering, reduction exactness, postconditions. A ragged access's reads of the
+  offsets it is flattened through, when the kernel declares them, are accesses
+  like any other: in-bounds obligations, and dependences every cast is checked
+  against.
 - `IslOracle`: `Empty`, `Subset`, `Bijective`, `Monotone`, each refutation with a
   witness.
 - `Schedule`: `tag`, `split`, `interchange`, `prioritize`, `tile`, `skew`,

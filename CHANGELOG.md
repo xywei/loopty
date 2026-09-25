@@ -282,9 +282,9 @@ with a pair of statement instances.
   shape; see note 7 in `docs/loopy-notes.md`. The heuristic had also been what
   ordered a read through a ragged array's offsets against a statement that
   writes them, when that statement was their only writer, and not always in the
-  body's direction. `lower_generic` now counts the offsets as read by every
-  statement that touches a ragged array, so a kernel that computes its offsets
-  and then reads through them is not refused with `VariableAccessNotOrdered`.
+  body's direction. Every statement that touches a ragged array now counts as
+  reading its offsets, so a kernel that computes its offsets and then reads
+  through them is not refused with `VariableAccessNotOrdered`.
   The instruction that computes a ragged row's length is ordered the same way,
   where the first statement that needs it runs. Left to the heuristic, it
   waited for a statement that rewrites the offsets even when that statement
@@ -434,6 +434,36 @@ with a pair of statement instances.
   JSON ledger. `loopty run` reports such a kernel as one it cannot schedule,
   naming the error, and exits 1, where it used to stop with a traceback from
   the search for kernels.
+- The schedule checker and the typing rules see the reads a ragged access makes
+  through its offsets. `val[r, j]` is `val[off[r] + j]` once lowered, and row
+  `r` ends at `off[r + 1]`, but neither read is in the body, so only the
+  lowering knew of them: a cast's legality check saw no dependence between a
+  statement that writes the offsets and one that indexes through them.
+  `tag(r="l.0")` on a loop that sums row `r` and then stores `off[r + 1]` was
+  accepted, and would run row `r + 1` before the offset it starts at is
+  stored; it is refused now, with that pair as the witness.
+  `flow.statement_accesses` lists `off[r]` and `off[r + 1]` after every ragged
+  access, read or written, whenever the kernel declares the offsets as a
+  parameter (the names lowering looks for, now `loopty.term.OFFSETS_CANDIDATES`
+  and `loopty.term.declared_offsets`), and takes the term to know. Both
+  dependence relations (`flow.dependences` and the schedule checker's own), the
+  in-bounds rule and the lowering's instruction order read that list; the
+  lowering's own addition of the offsets is gone. The two reads are in-bounds
+  obligations of their own: decided by isl for offsets of `n + 1` cells,
+  refuted with a witness for offsets declared a cell short. Offsets a kernel
+  does not declare are an argument lowering adds, which nothing in the body can
+  write and which the row index keeps in bounds, so they are not listed, and no
+  example's ledger changes.
+- An access listed over more than one domain is one in-bounds fact, about the
+  cells it reaches over all of them. The fact's id names the access and not the
+  domain, and the ledger keeps one fact per id, so the later of two facts
+  replaced the earlier: `y[r] = x[r - 1] + reduce_sum(x[r - 1] for q in
+  Fin[r])` was reported in bounds from the read inside the sum, which runs only
+  for `r >= 1`, and the refutation of the direct read of `x[-1]` was lost. The
+  offsets a ragged access reads through made this easier to reach: `off[r - 1]`
+  read directly, and again through `val[r - 1, j]` inside such a sum, collided
+  the same way. No example's ledger changes: where p2p lists a read twice, the
+  two facts agreed.
 - Two statements whose sums bind the same name lower and run. loopy realizes a
   reduction as a loop inside its instruction and an iname is one loop, so when
   the second statement depends on the first, its sum had to run inside a loop

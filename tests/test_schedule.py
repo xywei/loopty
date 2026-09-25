@@ -19,7 +19,7 @@ import pytest
 from lanky.prelude import Nat, Real
 
 import hand_terms as ht
-from loopty import Arr, Fin, when
+from loopty import Arr, Fin, reduce_sum, when
 from loopty.lower import reductions_of
 from loopty.schedule import IllegalCast, Schedule, parallel_tag
 
@@ -136,6 +136,81 @@ def test_a_parallel_tag_that_would_reorder_a_guard_read_is_rejected() -> None:
     assert "reads flag[" in message
     assert caught.value.fact.kind == "monotone"
     assert caught.value.fact.status.value == "refuted"
+
+
+def row_sums_then_next_offset(
+    ends: Arr[Fin[n], Nat],  # noqa: F821
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    off: Arr[Fin[n + 1], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """``S0`` sums row ``r`` through ``off[r]``; ``S1`` then stores ``off[r + 1]``.
+
+    ``S1[r]`` writes the offset ``S0[r + 1]`` indexes through, and the loop runs
+    them in that order. ``S0`` never names ``off``: its only reference to it is
+    the flat index lowering gives ``val[r, j]``, so the whole dependence rests on
+    the collector listing the layout's reads.
+    """
+    for r in y.dom:
+        y[r] = reduce_sum(val[r, j] for j in val.dom[r])
+        off[r + 1] = ends[r]
+
+
+def test_a_parallel_tag_that_would_read_through_stale_offsets_is_rejected() -> None:
+    # Run in parallel, row ``r + 1`` is summed before ``off[r + 1]``, where it
+    # starts, is stored. The schedule checker used to see no dependence between
+    # the two statements and accepted the tag.
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(
+        row_sums_then_next_offset, evaluate_annotations(row_sums_then_next_offset)
+    )
+    schedule = Schedule(term, sizes={"n": 4})
+    with pytest.raises(IllegalCast) as caught:
+        schedule.tag(r="l.0")
+    message = str(caught.value)
+    assert message.startswith("tag(r='l.0') illegal: instance S1[r=")
+    assert "writes off[" in message
+    assert "read by S0[" in message
+    (source_id, source), (sink_id, sink), params = caught.value.witness
+    assert (source_id, sink_id) == ("S1", "S0")
+    assert sink["r"] == source["r"] + 1
+    assert params["n"] == 4
+    assert caught.value.fact.kind == "monotone"
+    assert caught.value.fact.status.value == "refuted"
+
+
+def scan_then_row_sums(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    off: Arr[Fin[n + 1], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The scan of the counts, then row sums through the offsets it stored."""
+    off[0] = 0
+    for r in cnt.dom:
+        off[r + 1] = off[r] + cnt[r]
+    for i in y.dom:
+        y[i] = reduce_sum(val[i, j] for j in val.dom[i])
+
+
+def test_the_rows_read_after_the_scan_can_still_run_in_parallel() -> None:
+    # The offsets reads add dependences from the scan to the rows, and every
+    # one of them runs from the first loop to the second: none is carried by
+    # the row loop, so tagging it stays legal. The scan's own loop carries its
+    # recurrence and is refused, as it always was.
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(scan_then_row_sums, evaluate_annotations(scan_then_row_sums))
+    schedule = Schedule(term, sizes={"n": 6})
+    schedule.tag(i="l.0")
+    with pytest.raises(IllegalCast, match=r"writes off\[.*read by S1\["):
+        schedule.tag(r="l.0")
 
 
 # }}}

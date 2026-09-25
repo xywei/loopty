@@ -345,3 +345,112 @@ def test_a_nested_reduction_that_leaves_the_array_is_still_refuted() -> None:
 
 # }}}
 
+
+# {{{ the offsets a ragged access reads
+
+
+def spmv_through_offsets(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    off: Arr[Fin[n + 1], Nat],  # noqa: F821
+    col: Arr[Fin[n], Fin[cnt], Fin[m]],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    x: Arr[Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    for r in y.dom:
+        y[r] = reduce_sum(val[r, j] * x[col[r, j]] for j in val.dom[r])
+
+
+def spmv_through_short_offsets(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    off: Arr[Fin[n], Nat],  # noqa: F821
+    col: Arr[Fin[n], Fin[cnt], Fin[m]],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    x: Arr[Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    for r in y.dom:
+        y[r] = reduce_sum(val[r, j] * x[col[r, j]] for j in val.dom[r])
+
+
+def test_the_offsets_read_through_are_decided_in_bounds() -> None:
+    # ``val[r, j]`` is ``val[off[r] + j]`` once lowered, and row ``r`` ends at
+    # ``off[r + 1]``. Neither read is in the source, and both are true facts
+    # nobody stated: ``off`` has a cell for every row start and one past it.
+    facts = in_bounds_of(spmv_through_offsets)
+    for access in ("off[r]", "off[r + 1]"):
+        assert facts[access].status is Status.DECIDED, facts[access].provenance
+        assert facts[access].decided_by == "isl"
+        assert facts[access].statement.endswith("for every instance of S0")
+
+
+def test_offsets_declared_a_cell_short_are_refuted_at_the_last_row() -> None:
+    # The layout needs ``n + 1`` offsets. Declared with ``n``, the end of the
+    # last row is a cell ``off`` does not have; nothing else in the ledger
+    # notices, because the source never names ``off``.
+    facts = in_bounds_of(spmv_through_short_offsets)
+    assert facts["off[r]"].status is Status.DECIDED
+    refuted = facts["off[r + 1]"]
+    assert refuted.status is Status.REFUTED
+    assert refuted.decided_by == "isl"
+    assert refuted.provenance["witness"] is not None
+    assert refuted.provenance["witness_text"].startswith("[a0=")
+    assert [
+        name for name, fact in facts.items() if fact.status is Status.REFUTED
+    ] == ["off[r + 1]"]
+
+
+# }}}
+
+
+# {{{ one access listed over several domains
+
+
+def before_and_inside_a_sum(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    for r in y.dom:
+        y[r] = x[r - 1] + reduce_sum(x[r - 1] for q in Fin[r])
+
+
+def offsets_before_and_through_a_sum(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    off: Arr[Fin[n + 1], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    for r in y.dom:
+        y[r] = off[r - 1] + reduce_sum(
+            reduce_sum(val[r - 1, j] for j in val.dom[r - 1]) for q in Fin[r]
+        )
+
+
+def only_fact(fn, access: str):
+    """The one in-bounds fact about ``access``, checked to be the only one."""
+    _, facts = facts_of(fn)
+    (fact,) = [
+        fact
+        for fact in settled(facts)
+        if fact.kind == "in-bounds" and fact.id.endswith(f":read:{access}")
+    ]
+    return fact
+
+
+def test_an_access_read_over_two_domains_is_one_obligation_over_both() -> None:
+    # The direct read reaches ``x[-1]`` at ``r = 0``; the read inside the sum
+    # only runs for ``r >= 1``. Both have the id ``S0:read:x[r - 1]``, and the
+    # ledger keeps one fact per id: stated separately, the second, which is in
+    # bounds, would take the place of the first.
+    fact = only_fact(before_and_inside_a_sum, "x[r - 1]")
+    assert fact.status is Status.REFUTED
+    assert fact.provenance["witness_text"].startswith("[a0=-1] ")
+
+
+def test_the_offsets_a_sum_reads_through_do_not_hide_a_direct_read() -> None:
+    # The same collision, through the layout: ``val[r - 1, j]`` in the sum
+    # reads ``off[r - 1]`` for ``r >= 1`` only, and the direct read of
+    # ``off[r - 1]`` reaches ``off[-1]`` at ``r = 0``.
+    fact = only_fact(offsets_before_and_through_a_sum, "off[r - 1]")
+    assert fact.status is Status.REFUTED
+    assert fact.provenance["witness_text"].startswith("[a0=-1] ")
+
+
+# }}}

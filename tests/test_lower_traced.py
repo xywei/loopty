@@ -273,12 +273,12 @@ def row_sums_then_scan(
 )
 def test_reading_through_offsets_is_ordered_against_writing_them(which) -> None:
     # ``val[r, j]`` is ``val[off[r] + j]`` once lowered, a read of ``off`` that
-    # belongs to the layout and is not among the term's accesses. loopy's
-    # single-writer heuristic used to order it after the scan wherever the scan
-    # was, so the second kernel read its rows after rewriting their offsets.
-    # With every instruction's dependences final the edge has to come from the
-    # layout, or loopy refuses the kernel with VariableAccessNotOrdered; it now
-    # follows the body in both kernels.
+    # belongs to the layout and not to the body. loopy's single-writer
+    # heuristic used to order it after the scan wherever the scan was, so the
+    # second kernel read its rows after rewriting their offsets. With every
+    # instruction's dependences final the edge has to come from the access
+    # collector, which lists that read, or loopy refuses the kernel with
+    # VariableAccessNotOrdered; it now follows the body in both kernels.
     from loopty.arr import Arr as RuntimeArr
     from loopty.lower import lower_generic
 
