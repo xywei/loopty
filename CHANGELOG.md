@@ -434,6 +434,23 @@ with a pair of statement instances.
   JSON ledger. `loopty run` reports such a kernel as one it cannot schedule,
   naming the error, and exits 1, where it used to stop with a traceback from
   the search for kernels.
+- Two statements whose sums bind the same name lower and run. loopy realizes a
+  reduction as a loop inside its instruction and an iname is one loop, so when
+  the second statement depends on the first, its sum had to run inside a loop
+  that must finish before it starts: two statements whose nested sums both bind
+  `i` and `j`, or a sum over `j` followed by a loop over `j` that reads it,
+  failed at the first run with a `CycleError`. A reduction now keeps its
+  binders only when no other statement has them, as loop variables or as the
+  binders of an earlier sum, and is lowered under fresh inames (`j_0`)
+  otherwise. In one statement a name is shared only by sums over the same
+  domain, so `j` bound as the second of a pair and then alone no longer makes
+  loopy refuse the kernel for defining `j` twice. A nested reduction's domain
+  follows its renamed outer binder, which it used to name by the written name,
+  tying the inner loop to the other statement's outer one.
+  `Lowering.reduction_inames` lists the inames each reduction ends up with, and
+  `Schedule` addresses a reduction by them, so `split("j_0", 2)` reaches the
+  second sum and a parallel tag on it is judged by that sum's exactness rather
+  than by the last sum written over `j`. See note 8 in `docs/loopy-notes.md`.
 
 ### Changed
 

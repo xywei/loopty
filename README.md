@@ -216,11 +216,15 @@ end to end; the edges are sharp.
   ragged layouts and aliasing now are. Lowering has to declare some arrays with
   `shape=None` (see `docs/loopy-notes.md`), so a wrongly sized array is
   undefined behaviour rather than an error.
-- Two reductions that bind the same name over different domains cannot both
-  keep that name: loopy gives an iname one domain and a reduction cannot carry
-  a predicate, so the second one is lowered under a fresh iname (`j_0`). The
-  name in the term is unchanged, and so is every message, but a `Schedule` step
-  naming `j` reaches only the first of them.
+- A reduction binder keeps its name in the generated kernel only where nothing
+  else has it. loopy gives an iname one domain, a reduction cannot carry a
+  predicate, and two statements cannot share a reduction's loop, so a reduction
+  whose binder another statement already uses (as a loop variable or a binder),
+  or that its own statement binds over another domain, is lowered under a
+  fresh iname (`j_0`), and the binders nested in it follow. The name in the
+  term is unchanged, and so is every message, but a `Schedule` step names such
+  a reduction by its iname in the kernel (`split("j_0", 2)`), which
+  `Lowering.reduction_inames` lists.
 
 **Not yet.**
 

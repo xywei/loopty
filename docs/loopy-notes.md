@@ -1,6 +1,6 @@
 # Notes on loopy and islpy
 
-Seven interactions with loopty's dependencies that cost real debugging time, each
+Eight interactions with loopty's dependencies that cost real debugging time, each
 with the local workaround and the reason it is local. No upstream issues were
 filed: these are notes so that the next person meets the answer instead of the
 symptom.
@@ -175,3 +175,33 @@ loop followed by a statement that rewrites its offsets became a cycle through
 the loop, the bound and the rewrite. Because the bound is computed once, a
 statement that needs it after that array has been rewritten would see the old
 row length, so `lower_generic` refuses that order with a `LoweringError`.
+
+## 8. Two instructions cannot share a reduction iname
+
+**Symptom.** Two statements that sum over the same binder with the same domain,
+`s[0] = reduce_sum(a[j] for j in a.dom)` and then `s[1] = reduce_sum(b[j] ...)`,
+lower without complaint and fail at the first run with
+`pytools.graph.CycleError: EnterLoop(iname='j')`. So does a sum over `j`
+followed by a loop over `j` that reads it, and two statements whose nested sums
+bind `i` and `j` at the same two levels. One statement with two sums over `j`
+is fine.
+
+**Cause.** loopy realizes a reduction as an accumulator loop inside its
+instruction, and an iname is one loop however many instructions use it. When
+the second statement depends on the first (it writes the same array, or reads
+what the first wrote), its reduction has to run inside a loop that has to
+finish before the second statement may start. When the statements are
+independent loopy fuses the two loops, which is why the collision stayed
+hidden.
+
+**Local fix.** `_Builder.plan_reductions` lets a reduction keep its binders
+only when no other statement has them, as loop variables anywhere in the kernel
+or as the binders of an earlier reduction, and gives it fresh inames (`j_0`)
+otherwise; within one statement a name is shared only by reductions over the
+same domain. A nested reduction's domain
+names its enclosing binders as parameters, so a renamed outer binder is renamed
+there too, or the inner loop would hang from the other statement's outer one
+("Loop 'i' cannot be nested outside 'j_0'"). `Lowering.reduction_inames`
+records the names each reduction ends up with, and `Schedule` addresses a
+reduction by them.
+
