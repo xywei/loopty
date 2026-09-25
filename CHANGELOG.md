@@ -266,6 +266,49 @@ with a pair of statement instances.
   `scripts/refresh_example_outputs.py`, and the abridged ledger in `README.md`
   follows them: every `spmv.py` location moves up one line and nothing else
   changes.
+- `Arr` refuses a negative index into a dense array with an `IndexError`. It
+  handed the key straight to numpy, which reads `x[-1]` as the last cell, while
+  `Fin[n]` has no negative points and generated C reads `x[-1]` in front of the
+  buffer, so a native run could compute a value neither the ledger nor the
+  compiled kernel agrees with. A read under a false `when` still answers zero.
+- `LoopyExecutor.run` writes its results back into every `ndarray` output, not
+  only into an `Arr`. An output that is a strided view, or whose dtype is not
+  the lowered one, is copied on the way into loopy, and the results used to stay
+  in that copy.
+- `scripts/refresh_example_outputs.py` treats a command that exits non-zero as
+  a failure in both modes: the block is left as it was and the script exits 1.
+  It used to paste the partial output of a broken demo into the document, and
+  `--check` called a block current as long as its text matched.
+- A reduction's exactness class is that of the value it sums, not only of the
+  arrays it reads. `a * x[j]` with `a : Real` over an integer `x`, `0.1 * j` and
+  `x[j] / 2` were all `exact`, so a schedule refused to reassociate them and the
+  ledger stated an exactness that did not hold. A Python `float` element type
+  is `approx` as well; lanky reads anything that is not one of its sorts as an
+  index type.
+- Sizes, loop variables and reduction variables spelled like a C or OpenCL C
+  keyword are refused by the lowering, as parameters already were.
+  `Arr[Fin[long], Real]` and `for double in x.dom` passed the check and then
+  failed in the C compiler, on generated code.
+- The native run reads an integer-valued float array of an integral element
+  sort as integers when the body only reads it. The contract accepts
+  `col = [1.0, 0.0]` for `Fin[m]` and the compiled run casts it, but numpy
+  refuses a float as an index, so the input could not be tested
+  differentially. An array the body writes is passed as it is, so that its
+  writes land in the caller's buffer.
+- The isl oracle reads a witness and the sizes it holds at from one sample.
+  They came from two, which leaves isl free to report a cell outside an array
+  at a size where it is inside.
+- A reduction nested in another one is constrained by the outer binder and the
+  outer generator's condition. In `reduce_sum(reduce_sum(a[i, j] for j in
+  a.dom[i]) for i in a.dom)` the inner domain left `i` unconstrained, so
+  `a[i, j]` was refuted at `i = -1`. A nested binder that reuses the outer
+  one's name raises `TraceError`.
+- `resolve_sizes` solves only an axis that is linear in its one name. The
+  solution is read off two evaluations, so `Fin[n * n]` of nine cells gave
+  `n = 9`, and `Fin[(n + 1) // 2]` an `n` whose axis is too short. A `Fin` bound
+  that cannot be evaluated is measured against an axis written the same way
+  (`contract.axis_extents`), so `i : Fin[n * n]` is still bounded by the nine
+  cells it indexes.
 
 ### Changed
 
