@@ -124,6 +124,15 @@ def test_what_a_reduction_sums_decides_its_class_and_not_only_its_arrays() -> No
     assert exactness(weighted_counts) == "exact"
 
 
+def shadowing_binders(a: Arr[Fin[n], Fin[n], Real], s: Arr[Fin[1], Real]):  # noqa: F821
+    s[0] = reduce_sum(reduce_sum(a[i, i] for i in a.dom[i]) for i in a.dom)
+
+
+def test_a_nested_reduction_may_not_reuse_the_outer_binder() -> None:
+    with pytest.raises(TraceError, match="shadows the binder of the reduction"):
+        term_of(shadowing_binders)
+
+
 def test_accesses_are_read_off_the_expression() -> None:
     stmt = term_of(spmv).stmts[0]
     outer = {access.array for access in accesses_in(stmt.expr, into_reductions=False)}

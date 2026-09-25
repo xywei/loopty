@@ -694,13 +694,29 @@ def _sort_exactness(dtype: Any) -> str:
         return "approx"
 
 
-def lower_reductions(expr: Any, tracer: Tracer) -> Any:
+def lower_reductions(
+    expr: Any,
+    tracer: Tracer,
+    enclosing: Sequence[tuple[str, Any]] = (),
+    outer_guards: Sequence[Any] = (),
+) -> Any:
     """Replace every lanky ``Sum`` in ``expr`` by a :class:`~loopty.term.Reduction`.
 
     Lanky builds the temporary binder node used by ``reduce_sum``; Loopty gives
     it a domain. The domain's dimensions are the enclosing inames followed by the
     reduction's own, so a ragged reduction bound may mention the row it belongs
     to, and the set is directly comparable with the statement's domain.
+
+    A reduction nested inside another one also runs inside the outer one's
+    binders, and the tracer's loop stack does not hold those: they are not
+    loops of the statement. ``enclosing`` carries each outer binder with its
+    bound, outermost first, and ``outer_guards`` the outer generators' ``if``
+    clauses, and both are stated as constraints of the inner domain. The outer
+    binders are parameters of that domain rather than dimensions, which keeps
+    its dimensions the statement's inames followed by the reduction's own, the
+    shape every collector expects. Without them ``i`` in
+    ``reduce_sum(reduce_sum(a[i, j] for j in a.dom[i]) for i in a.dom)`` was an
+    unconstrained parameter, and ``a[i, j]`` was refuted at ``i = -1``.
 
     The accumulation's exactness class is derived from what it sums rather than
     fixed; see :func:`reduction_exactness`. It is the tolerance a later
@@ -716,14 +732,23 @@ def lower_reductions(expr: Any, tracer: Tracer) -> Any:
                     f"the reduction binder {var.name!r} shadows the enclosing "
                     f"loop variable {var.name!r}; rename one of them"
                 )
+            if any(var.name == name for name, _bound in enclosing):
+                raise TraceError(
+                    f"the reduction binder {var.name!r} shadows the binder of "
+                    "the reduction it is nested in; rename one of them"
+                )
             inames.append(var.name)
             bounds.append(_binder_bound(domain))
-        body = lower_reductions(expr.body, tracer)
+        inner = (*enclosing, *zip(inames, bounds, strict=True))
+        guards = (*outer_guards, expr.guard)
+        body = lower_reductions(expr.body, tracer, inner, guards)
         domain = domain_set(
             (*tracer.inames, *inames),
             (*tracer.bounds, *bounds),
             constraints=(
                 *constraints_of(tracer.guard()),
+                *_binder_constraints(enclosing, tracer),
+                *(piece for guard in outer_guards for piece in constraints_of(guard)),
                 *constraints_of(expr.guard),
             ),
             reflections=tracer.reflections,
@@ -732,10 +757,33 @@ def lower_reductions(expr: Any, tracer: Tracer) -> Any:
             "sum", tuple(inames), domain, body, reduction_exactness(body, tracer)
         )
     if isinstance(expr, prim.ExpressionNode):
-        return type(expr)(*(lower_reductions(arg, tracer) for arg in init_args(expr)))
+        return type(expr)(
+            *(
+                lower_reductions(arg, tracer, enclosing, outer_guards)
+                for arg in init_args(expr)
+            )
+        )
     if isinstance(expr, tuple):
-        return tuple(lower_reductions(item, tracer) for item in expr)
+        return tuple(
+            lower_reductions(item, tracer, enclosing, outer_guards) for item in expr
+        )
     return expr
+
+
+def _binder_constraints(
+    enclosing: Sequence[tuple[str, Any]], tracer: Tracer
+) -> tuple[str, ...]:
+    """``0 <= i < bound`` for each enclosing reduction binder, as isl text.
+
+    Rendered through the tracer's reflection table, so that a ragged outer bound
+    such as ``cnt[r]`` is the same parameter here as in every other set about
+    the term.
+    """
+    reflected: dict[str, Any] = {}
+    return tuple(
+        f"0 <= {name} < {expr_text(bound, None, reflected, tracer.reflections)}"
+        for name, bound in enclosing
+    )
 
 
 def accesses_in(expr: Any, into_reductions: bool = True) -> tuple[Access, ...]:
