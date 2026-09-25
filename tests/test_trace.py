@@ -7,8 +7,7 @@ import pytest
 from lanky.prelude import Nat, Real
 from lanky.terms import evaluate_annotations, render
 
-from loopty import Arr, Fin, when
-from loopty import reduce_sum
+from loopty import Arr, Fin, reduce_sum, when
 from loopty.term import Reduction
 from loopty.trace import TraceError, accesses_in, reductions_in, trace
 
