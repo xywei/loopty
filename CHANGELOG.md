@@ -266,6 +266,32 @@ with a pair of statement instances.
   `scripts/refresh_example_outputs.py`, and the abridged ledger in `README.md`
   follows them: every `spmv.py` location moves up one line and nothing else
   changes.
+- State that a Python name carries from one loop iteration to the next is
+  refused with a `TraceError` naming the name and the two fixes, instead of
+  tracing to a wrong term. `s = 0.0; for i in x.dom: s = s + x[i]` followed by
+  `y[0] = s` used to trace to one statement, `y[0] = 0.0 + x[i]`, with no loop
+  around it and `i` free, while the native run summed the array. Two checks
+  catch the idiom. A statement whose right-hand side, guard, assignee indices,
+  loop bounds or reduction bounds mention the variable of a loop it is not
+  inside is refused where it is recorded. And the locals of the frame running
+  a `for` (the kernel body or a helper it calls) are compared when the loop
+  opens and when it closes: a name bound before the loop and bound to a
+  different value after one iteration is loop-carried, whether the value is a
+  term or a plain Python number (a counter `k = k + 1` used as an index), and
+  `s += x[i]` and tuple unpacking count. The loop's own target, a per-iteration
+  temporary first bound inside the loop, a rebinding to the same object or an
+  equal value, and a name whose old value already mentions a closed loop's
+  variable (a `for` target reused by a later loop) are left alone. The fixes
+  are `reduce_sum(...)` for an accumulation and an indexed cell
+  (`s[i + 1] = s[i] + x[i]`, as `scan` in `examples/spmv.py` does) otherwise.
+  Both checks are trace-time only; plain `python` runs the body as written.
+- `lanky check` prints the error of a kernel that cannot be traced under its
+  `REFUTED` line: the `trace` fact carries it as its `reason`, next to an empty
+  `counterexample`, which is lanky's form for a closed claim refuted at no
+  assignment in particular. The fix a `TraceError` names used to reach only the
+  JSON ledger. `loopty run` reports such a kernel as one it cannot schedule,
+  naming the error, and exits 1, where it used to stop with a traceback from
+  the search for kernels.
 
 ### Changed
 

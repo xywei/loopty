@@ -35,7 +35,10 @@ def spmv(
 `reduce_sum` is a reduction: it eliminates the bound iname `j` over its symbolic
 domain. The `scan` kernel in the same example is deliberately different: a
 prefix sum is a recurrence with loop-carried dependences, not a reduction
-expression.
+expression. Either way the state has an index. An accumulator kept in a Python
+name (`s = s + x[i]` inside the loop) is refused when the kernel is traced,
+with a `TraceError` naming `reduce_sum` and the indexed cell as the two ways to
+write it.
 
 Three things are being said in the signature. The output `y` is a parameter, not
 a return value, because that is how a kernel writes. The sizes come from the
