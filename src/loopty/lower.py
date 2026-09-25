@@ -54,6 +54,7 @@ from loopty.term import (
     Reduction,
     Stmt,
     Term,
+    declared_offsets,
     free_name_sorts,
     free_name_sorts_message,
 )
@@ -91,11 +92,6 @@ COUNT_PARAM = "{counts}_{iname}"
 #: parameter that had to be suffixed to dodge a collision is found; this pattern
 #: is the fallback for a term written by hand, which records nothing.
 COUNT_PARAM_REFLECTED = "nl_{counts}_{iname}"
-
-#: Candidate names for the offsets array of a ragged axis, most specific first.
-#: The first one that is a parameter of the term wins; if none is, an argument
-#: named ``off_<counts>`` is added to the lowered kernel.
-OFFSETS_CANDIDATES = ("off_{counts}", "{counts}_off", "off")
 
 _LANG_VERSION = (2018, 2)
 
@@ -759,19 +755,19 @@ class _Builder:
     def offsets_for(self, name: str) -> str:
         """The offsets argument that flattens array ``name``.
 
-        The first of :data:`OFFSETS_CANDIDATES` that is a parameter of the term
-        wins, which makes ``spmv(off, col, val, x, y)`` work with no
-        configuration; when none is, an ``int32`` argument is added.
+        The first of :data:`loopty.term.OFFSETS_CANDIDATES` that is a parameter
+        of the term wins, which makes ``spmv(off, col, val, x, y)`` work with no
+        configuration; when none is, an ``int32`` argument is added. The choice
+        is :func:`loopty.term.declared_offsets`, the same one the access
+        collector makes when it lists the read of the offsets.
         """
         if name in self.ragged:
             return self.ragged[name]
         counts = self.counts_name(name)
-        params = dict(self.term.params)
-        for pattern in OFFSETS_CANDIDATES:
-            candidate = pattern.format(counts=counts)
-            if candidate in params:
-                self.ragged[name] = candidate
-                return candidate
+        declared = declared_offsets(self.term.params, counts)
+        if declared is not None:
+            self.ragged[name] = declared
+            return declared
         candidate = f"off_{counts}"
         typ = self.arr_types[name]
         outer = typ.axes[0]
@@ -1150,26 +1146,19 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
         body = expr(stmt.expr)
 
         # What this statement reads, from the one collector every rule uses:
-        # the right-hand side, the subscripts of the assignee, the guard, and
-        # the accumulated cell. A name missing here is a dependence edge that
-        # is never drawn, so the list is not written out a second time.
-        accesses = statement_accesses(stmt)
+        # the right-hand side, the subscripts of the assignee, the guard, the
+        # accumulated cell, and the offsets a ragged access, read or written,
+        # indexes through. A name missing here is a dependence edge that is
+        # never drawn, so the list is not written out a second time. The last
+        # of those is the edge loopy's single-writer heuristic used to supply
+        # when one statement wrote the offsets; the dependences below are
+        # final, so it has to come from the collector, and it follows the body.
         read_arrays = {
             array
-            for array, _indices, kind, _inames, _domain in accesses
+            for array, _indices, kind, _inames, _domain in statement_accesses(
+                stmt, term
+            )
             if kind in ("read", "acc")
-        }
-        # The flat index of a ragged access, read or written, also reads the
-        # offsets argument. That read is the layout's and not the term's, so
-        # the collector above does not list it, but a statement that writes
-        # the offsets has to be ordered against it all the same. loopy's
-        # single-writer heuristic used to supply the edge when that statement
-        # was the only writer; the dependences below are final, so it is drawn
-        # here, in the direction the body gives it.
-        read_arrays |= {
-            builder.offsets_for(array)
-            for array, _indices, _kind, _inames, _domain in accesses
-            if builder.ragged_axis(array) is not None
         }
         written = stmt.assignee.array
 
