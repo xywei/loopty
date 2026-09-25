@@ -235,6 +235,57 @@ def test_a_shadowed_reflected_bound_still_lowers_as_a_ragged_bound() -> None:
 # }}}
 
 
+# {{{ a reduction nested in another one
+
+
+@kernel
+def nested_total(a: Arr[Fin[n], Fin[m], Real], s: Arr[Fin[1], Real]):  # noqa: F821
+    """A double sum over a dense matrix."""
+    s[0] = reduce_sum(reduce_sum(a[i, j] for j in a.dom[i]) for i in a.dom)
+
+
+@kernel
+def lower_total(a: Arr[Fin[n], Fin[n], Real], s: Arr[Fin[1], Real]):  # noqa: F821
+    """A double sum over the lower triangle, whose inner bound is the outer binder."""
+    s[0] = reduce_sum(reduce_sum(a[i, j] for j in Fin[i + 1]) for i in a.dom)
+
+
+@kernel
+def two_totals(
+    a: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+    b: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+    s: Arr[Fin[2], Real],
+):
+    """Two double sums whose inner binders share a name under different outer ones."""
+    s[0] = reduce_sum(reduce_sum(a[i, j] for j in a.dom[i]) for i in a.dom)
+    s[1] = reduce_sum(reduce_sum(b[k, j] for j in b.dom[k]) for k in b.dom)
+
+
+def test_a_nested_reduction_still_lowers_and_runs() -> None:
+    # The inner domain now names the outer binder and its bound as parameters.
+    # The lowering already treats a reduction domain's extra names that way, so
+    # the dense and the triangular double sum compute what they did before.
+    a = np.arange(12.0).reshape(3, 4)
+    out = run(nested_total.trace(), a=a, s=np.zeros(1))
+    assert np.allclose(out["s"], [a.sum()])
+    t = np.arange(9.0).reshape(3, 3)
+    out = run(lower_total.trace(), a=t, s=np.zeros(1))
+    assert np.allclose(out["s"], [np.tril(t).sum()])
+
+
+def test_inner_binders_under_different_outer_binders_get_their_own_inames() -> None:
+    # Without the outer binder the two inner domains were the same set, so both
+    # inner sums shared the iname ``j`` while nested in ``i`` and in ``k``, and
+    # loopy found no loop nest to schedule. With it they differ, and the second
+    # is given an iname of its own as any two different reduction domains are.
+    a = np.arange(12.0).reshape(3, 4)
+    out = run(two_totals.trace(), a=a, b=2.0 * a, s=np.zeros(2))
+    assert np.allclose(out["s"], [a.sum(), 2.0 * a.sum()])
+
+
+# }}}
+
+
 # {{{ names the generated code cannot use
 
 
