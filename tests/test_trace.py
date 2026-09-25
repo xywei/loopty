@@ -1060,6 +1060,98 @@ def test_plain_python_runs_the_list_counter_as_written() -> None:
 # }}}
 
 
+# {{{ operations on a whole array
+
+
+def test_a_slice_assignment_is_refused_with_the_loop_that_does_it() -> None:
+    # ``y[:] = 0.0`` used to be recorded as one statement whose index was a
+    # slice, which nothing downstream reads as a loop.
+    def zeroed(y: Arr[Fin[n], Real]):  # noqa: F821
+        y[:] = 0.0
+
+    with pytest.raises(TraceError) as caught:
+        term_of(zeroed)
+    message = str(caught.value)
+    assert "y[:] = ... at test_trace.py:" in message
+    assert "an operation on the whole array y" in message
+    assert "for i in y.dom: y[i] = ..." in message
+
+
+def test_arithmetic_on_a_whole_array_is_refused() -> None:
+    # ``x * 2`` used to fail with numpy-free Python's "unsupported operand".
+    def doubled(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        z = x * 2
+        for i in y.dom:
+            y[i] = z[i]
+
+    with pytest.raises(TraceError, match=r"x \* \.\.\. at test_trace.py:\d+ is an"):
+        term_of(doubled)
+
+
+def test_fewer_indices_than_axes_name_a_row_and_are_refused() -> None:
+    # ``u[t]`` of a two-axis array is a whole row, natively as in numpy.
+    def rows(u: Arr[Fin[nt], Fin[nx], Real]):  # noqa: F821
+        for t in u.dom:
+            u[t] = 0.0
+
+    with pytest.raises(TraceError) as caught:
+        term_of(rows)
+    message = str(caught.value)
+    assert "u[t] = ... at test_trace.py:" in message
+    assert "gives 1 of the 2 indices of u" in message
+    assert "for i in u.dom: for j in u.dom[i]: u[i, j] = ..." in message
+
+
+def test_iterating_an_array_itself_is_refused() -> None:
+    # A symbolic array answers any index, so ``for v in x`` used to walk it
+    # forever through the old sequence protocol; the ``break`` keeps this test
+    # finite on a tracer without the refusal.
+    def first(x: Arr[Fin[n], Real], y: Arr[Fin[1], Real]):  # noqa: F821
+        for v in x:
+            y[0] = v
+            break
+
+    with pytest.raises(TraceError, match="iterating x itself at test_trace.py"):
+        term_of(first)
+
+
+def test_numpy_functions_of_a_whole_array_are_refused() -> None:
+    import numpy as np
+
+    def total(x: Arr[Fin[n], Real], y: Arr[Fin[1], Real]):  # noqa: F821
+        y[0] = np.sum(x)
+
+    def roots(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        z = np.sqrt(x)
+        for i in y.dom:
+            y[i] = z[i]
+
+    def storage(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        z = x.numpy()
+        for i in y.dom:
+            y[i] = z[i]
+
+    with pytest.raises(TraceError, match="numpy.sum of x is an operation"):
+        term_of(total)
+    with pytest.raises(TraceError, match="numpy.sqrt of x is an operation"):
+        term_of(roots)
+    with pytest.raises(TraceError, match="asks for the storage of the array"):
+        term_of(storage)
+
+
+def test_a_fiber_over_a_slice_is_refused() -> None:
+    def tail(u: Arr[Fin[nt], Fin[nx], Real]):  # noqa: F821
+        for t in u.dom:
+            for i in u.dom[1:]:
+                u[t, i] = 0.0
+
+    with pytest.raises(TraceError, match=r"u.dom\[1:\] at .* over more than one"):
+        term_of(tail)
+
+
+# }}}
+
+
 # {{{ a reduction's condition
 
 

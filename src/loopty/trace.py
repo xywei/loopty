@@ -1078,6 +1078,15 @@ class SymDom:
 
     def __getitem__(self, index: Any) -> SymDom:
         """The fiber over ``index``: the domain of the next axis."""
+        if _whole_key(index):
+            raise TraceError(
+                f"{_domain_text(self)}[{_key_text(index)}] at "
+                f"{_location(sys._getframe(1))} takes a fiber over more than "
+                "one point. A fiber is taken at one index, "
+                f"{_domain_text(self)}[i]; to leave points of a domain out, "
+                "iterate all of it and put the statements under "
+                "'with when(condition):'"
+            )
         if self.axis + 1 >= self.array.ndim:
             raise TraceError(
                 f"{self.array.name} has {self.array.ndim} axes; there is no "
@@ -1236,17 +1245,90 @@ class SymArr:
 
     def __getitem__(self, key: Any) -> Subscript:
         """Read: build the index expression ``name[...]``."""
+        self._refuse_whole(key, _location(sys._getframe(1)), write=False)
         return _subscript(self.name, _index_tuple(key))
 
     def __setitem__(self, key: Any, value: Any) -> None:
         """Write: record a statement at the caller's file and line."""
+        where = _location(sys._getframe(1))
+        self._refuse_whole(key, where, write=True)
         indices = _index_tuple(key)
         tracer = self.tracer
-        where = _location(sys._getframe(1))
         expr = lower_reductions(value, tracer, where=where)
         assignee = Access(self.name, indices)
         kind = "accumulate" if _reads_assignee(expr, assignee) else "assign"
         tracer.record(assignee, expr, kind, where, source=value)
+
+    def _refuse_whole(self, key: Any, where: str, write: bool) -> None:
+        """Refuse a subscript that names more than one cell.
+
+        A slice, an ``...``, a list or an array of indices, or fewer indices
+        than the array has axes (``u[t]`` of a two-axis ``u`` is a row) name
+        many cells at once, and a statement is one cell per instance. Natively
+        numpy would do the operation on all of them; the trace would record one
+        statement with a slice for an index, which nothing downstream reads as
+        a loop.
+        """
+        spelled = f"{self.name}[{_key_text(key)}]" + (" = ..." if write else "")
+        if _whole_key(key):
+            raise TraceError(_whole_array_message(self, spelled, where, write))
+        given = len(_index_tuple(key))
+        if given < self.ndim:
+            raise TraceError(
+                _whole_array_message(
+                    self,
+                    spelled,
+                    where,
+                    write,
+                    why=(
+                        f"gives {given} of the {self.ndim} indices of "
+                        f"{self.name}, so it names every cell that has them"
+                    ),
+                )
+            )
+
+    def __iter__(self) -> Any:
+        """Refuse: iterating an array walks its cells, a whole-array operation."""
+        raise TraceError(
+            _whole_array_message(
+                self,
+                f"iterating {self.name} itself",
+                _location(sys._getframe(1)),
+                write=False,
+            )
+        )
+
+    def numpy(self) -> Any:
+        """Refuse: a symbolic array has no storage to hand over."""
+        raise TraceError(
+            _whole_array_message(
+                self,
+                f"{self.name}.numpy()",
+                _location(sys._getframe(1)),
+                write=False,
+                why="asks for the storage of the array, and a traced array has none",
+            )
+        )
+
+    def __array__(self, *args: Any, **kwargs: Any) -> Any:
+        """Refuse: numpy cannot hold a symbolic array."""
+        raise TraceError(
+            _whole_array_message(self, f"converting {self.name} to numpy", "", False)
+        )
+
+    def __array_ufunc__(self, ufunc: Any, method: str, *inputs: Any, **kwargs: Any):
+        """Refuse: a numpy ufunc of an array is an operation on all its cells."""
+        name = getattr(ufunc, "__name__", "a ufunc")
+        raise TraceError(
+            _whole_array_message(self, f"numpy.{name} of {self.name}", "", False)
+        )
+
+    def __array_function__(self, func: Any, types: Any, args: Any, kwargs: Any):
+        """Refuse: a numpy function of an array is an operation on all its cells."""
+        name = getattr(func, "__name__", "a function")
+        raise TraceError(
+            _whole_array_message(self, f"numpy.{name} of {self.name}", "", False)
+        )
 
     def __len__(self) -> int:
         """Refuse: the size is symbolic; iterate ``.dom``."""
@@ -1262,6 +1344,95 @@ class SymArr:
 
     def __repr__(self) -> str:
         return f"SymArr({self.name}: {self.type})"
+
+
+#: The index names a message spells a loop nest with, one per axis.
+_INDEX_NAMES = ("i", "j", "k", "l")
+
+
+def _whole_key(key: Any) -> bool:
+    """Whether a subscript key names more than one cell per index."""
+    parts = key if isinstance(key, tuple) else (key,)
+    many = slice | list | np.ndarray | SymArr | SymDom
+    return any(part is Ellipsis or isinstance(part, many) for part in parts)
+
+
+def _key_text(key: Any) -> str:
+    """A subscript key the way the body spells it: ``:``, ``1:``, ``i, ...``."""
+
+    def text(part: Any) -> str:
+        if part is Ellipsis:
+            return "..."
+        if isinstance(part, slice):
+            ends = [
+                "" if end is None else _shown(end) for end in (part.start, part.stop)
+            ]
+            step = "" if part.step is None else f":{_shown(part.step)}"
+            return f"{ends[0]}:{ends[1]}{step}"
+        if isinstance(part, np.ndarray):
+            return "<array>"
+        return _shown(part)
+
+    parts = key if isinstance(key, tuple) else (key,)
+    return ", ".join(text(part) for part in parts)
+
+
+def _whole_array_message(
+    array: SymArr, spelled: str, where: str, write: bool, why: str = ""
+) -> str:
+    """What to say about an operation on a whole array, with the loop nest."""
+    indices: list[str] = []
+    loops: list[str] = []
+    for axis in range(array.ndim):
+        index = _INDEX_NAMES[axis] if axis < len(_INDEX_NAMES) else f"i{axis}"
+        domain = f"{array.name}.dom" + "".join(f"[{name}]" for name in indices)
+        loops.append(f"for {index} in {domain}:")
+        indices.append(index)
+    cell = f"{array.name}[{', '.join(indices)}]"
+    use = f"{cell} = ..." if write else f"... {cell} ..."
+    at = f" at {where}" if where else ""
+    because = f", and {why}" if why else ""
+    return (
+        f"{spelled}{at} is an operation on the whole array {array.name}{because}. "
+        "A traced kernel records one statement per family of cells, each cell "
+        "named by its indices, so an operation on many cells at once has no "
+        "statement to be. Write the loop nest and index the array: "
+        f"{' '.join(loops)} {use}"
+    )
+
+
+def _refused_operator(symbol: str, side: str) -> Any:
+    """A dunder of :class:`SymArr` that refuses the operator ``symbol``."""
+
+    def operation(self: SymArr, *_other: Any) -> Any:
+        spelled = {
+            "left": f"{self.name} {symbol} ...",
+            "right": f"... {symbol} {self.name}",
+            "unary": f"{symbol}{self.name}",
+            "call": f"{symbol}({self.name})",
+        }[side]
+        raise TraceError(
+            _whole_array_message(
+                self, spelled, _location(sys._getframe(1)), write=False
+            )
+        )
+
+    return operation
+
+
+for _name, _symbol in (
+    ("add", "+"), ("sub", "-"), ("mul", "*"), ("truediv", "/"),
+    ("floordiv", "//"), ("mod", "%"), ("pow", "**"), ("matmul", "@"),
+    ("and", "&"), ("or", "|"), ("xor", "^"), ("lshift", "<<"), ("rshift", ">>"),
+):  # fmt: skip
+    setattr(SymArr, f"__{_name}__", _refused_operator(_symbol, "left"))
+    setattr(SymArr, f"__r{_name}__", _refused_operator(_symbol, "right"))
+for _name, _symbol in (("lt", "<"), ("le", "<="), ("gt", ">"), ("ge", ">=")):
+    setattr(SymArr, f"__{_name}__", _refused_operator(_symbol, "left"))
+for _name, _symbol in (("neg", "-"), ("pos", "+"), ("invert", "~")):
+    setattr(SymArr, f"__{_name}__", _refused_operator(_symbol, "unary"))
+SymArr.__abs__ = _refused_operator("abs", "call")  # type: ignore[method-assign]
+del _name, _symbol
 
 
 def _reads_assignee(expr: Any, assignee: Access) -> bool:
