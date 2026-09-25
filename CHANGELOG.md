@@ -454,6 +454,16 @@ with a pair of statement instances.
   does not declare are an argument lowering adds, which nothing in the body can
   write and which the row index keeps in bounds, so they are not listed, and no
   example's ledger changes.
+- An access listed over more than one domain is one in-bounds fact, about the
+  cells it reaches over all of them. The fact's id names the access and not the
+  domain, and the ledger keeps one fact per id, so the later of two facts
+  replaced the earlier: `y[r] = x[r - 1] + reduce_sum(x[r - 1] for q in
+  Fin[r])` was reported in bounds from the read inside the sum, which runs only
+  for `r >= 1`, and the refutation of the direct read of `x[-1]` was lost. The
+  offsets a ragged access reads through made this easier to reach: `off[r - 1]`
+  read directly, and again through `val[r - 1, j]` inside such a sum, collided
+  the same way. No example's ledger changes: where p2p lists a read twice, the
+  two facts agreed.
 
 ### Changed
 
