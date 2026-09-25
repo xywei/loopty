@@ -233,3 +233,65 @@ def test_a_shadowed_reflected_bound_still_lowers_as_a_ragged_bound() -> None:
 
 
 # }}}
+
+
+# {{{ names the generated code cannot use
+
+
+@kernel
+def long_extent(x: Arr[Fin[long], Real]):  # noqa: F821
+    """A size spelled like a C type: loopy declares it ``int32_t const long``."""
+    for i in x.dom:
+        x[i] = 1.0
+
+
+@kernel
+def double_counter(x: Arr[Fin[n], Real]):  # noqa: F821
+    """A loop variable spelled like a C type: ``for (int32_t double = 0; ...)``."""
+    for double in x.dom:
+        x[double] = 1.0
+
+
+@kernel
+def int_binder(
+    x: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A reduction variable spelled like a C type."""
+    for r in y.dom:
+        y[r] = reduce_sum(x[r, int] for int in x.dom[r])
+
+
+@kernel
+def keyword_parameter(long: Arr[Fin[n], Real]):  # noqa: F821
+    """A parameter spelled like a C type, which was refused already."""
+    for i in long.dom:
+        long[i] = 1.0
+
+
+def test_a_size_spelled_like_a_keyword_is_refused() -> None:
+    # Only parameters used to be checked, so this reached the C compiler and
+    # failed there, about generated code the user never wrote.
+    from loopty.lower import LoweringError, lower_generic
+
+    with pytest.raises(LoweringError, match=r"sizes long\b"):
+        lower_generic(long_extent.trace(), "c")
+
+
+def test_a_loop_or_reduction_variable_spelled_like_a_keyword_is_refused() -> None:
+    from loopty.lower import LoweringError, lower_generic
+
+    with pytest.raises(LoweringError, match=r"loop variables double\b"):
+        lower_generic(double_counter.trace(), "c")
+    with pytest.raises(LoweringError, match=r"reduction variables int\b"):
+        lower_generic(int_binder.trace(), "c")
+
+
+def test_a_parameter_spelled_like_a_keyword_is_still_refused() -> None:
+    from loopty.lower import LoweringError, lower_generic
+
+    with pytest.raises(LoweringError, match=r"parameters long\b"):
+        lower_generic(keyword_parameter.trace(), "c")
+
+
+# }}}

@@ -486,6 +486,49 @@ def _kernel_name(name: str, taken: Sequence[str]) -> str:
     return candidate
 
 
+def _refuse_reserved_names(term: Term) -> None:
+    """Refuse a term that would make the generated code use a keyword as a name.
+
+    Every name the term chooses reaches the generated source verbatim: a
+    parameter as an argument, a size as the value argument loopy infers from a
+    shape (``Arr[Fin[long], Real]`` gives ``int32_t const long``), and a loop or
+    reduction variable as the counter of a ``for`` (``for double in x.dom``
+    gives ``for (int32_t double = 0; ...)``). Each is a compiler error about
+    code the user never wrote, so all of them are checked, not only the
+    parameters.
+
+    None of them is renamed the way the kernel is (see :func:`_kernel_name`).
+    A caller passes a parameter by name, and may pass a size the same way; a
+    schedule names inames (``split("j", 2)``) and so do the ledger's messages.
+    A rename would break each of those silently, where a refusal says what to
+    change. The names loopty generates itself (``off_cnt``, ``nl_cnt_r``, a
+    suffixed reduction binder) carry a prefix or a suffix and cannot be a
+    keyword.
+    """
+    roles: dict[str, list[str]] = {
+        "parameters": [name for name, _ in term.params],
+        "sizes": list(term.sizes),
+        "loop variables": [],
+        "reduction variables": [],
+    }
+    for stmt in term.stmts:
+        roles["loop variables"].extend(stmt.inames)
+        for reduction in reductions_of(stmt.expr):
+            roles["reduction variables"].extend(reduction.inames)
+    found = []
+    for role, names in roles.items():
+        reserved = sorted({name for name in names if _sanitize(name) in RESERVED_WORDS})
+        if reserved:
+            found.append(f"{role} {', '.join(reserved)}")
+    if found:
+        raise LoweringError(
+            f"{term.name} has names the generated code cannot use: "
+            f"{'; '.join(found)}. These are reserved words in C or OpenCL C; "
+            "rename them in the kernel (a parameter in its signature, a size in "
+            "its annotations, a loop or reduction variable where it is bound)."
+        )
+
+
 def _written_arrays(term: Term) -> tuple[str, ...]:
     """Arrays the term assigns to, in first-seen order."""
     names: list[str] = []
@@ -941,17 +984,7 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
     the kernel writes; both are recorded here rather than recovered by matching
     names against generated code.
     """
-    reserved = sorted(
-        name for name, _ in term.params if _sanitize(name) in RESERVED_WORDS
-    )
-    if reserved:
-        # An argument cannot be renamed the way the kernel can: the caller
-        # passes it by name, so a rename here would silently break every call.
-        raise LoweringError(
-            f"{term.name} has parameters the generated code cannot name: "
-            f"{', '.join(reserved)}. These are reserved words in C or OpenCL C; "
-            "rename them in the kernel's signature."
-        )
+    _refuse_reserved_names(term)
     builder = _Builder(term, target)
     builder.plan_reductions()
     expr = builder.expr
