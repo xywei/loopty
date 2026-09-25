@@ -49,9 +49,7 @@ Expression = Any
 OFFSETS_CANDIDATES = ("off_{counts}", "{counts}_off", "off")
 
 
-def declared_offsets(
-    params: Iterable[tuple[str, Any]], counts: str
-) -> str | None:
+def declared_offsets(params: Iterable[tuple[str, Any]], counts: str) -> str | None:
     """The parameter holding the offsets of a ragged axis over ``counts``.
 
     The first of :data:`OFFSETS_CANDIDATES` that names a parameter, or ``None``
