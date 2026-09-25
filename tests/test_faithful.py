@@ -364,6 +364,60 @@ def test_an_exact_output_is_compared_bit_for_bit() -> None:
     assert list(
         disagreement(np.array([3, 4]), np.array([3, 5]), "exact")
     ) == [False, True]
+    # The last bit of a double is a difference.
+    one = np.array([1.0])
+    assert disagreement(np.nextafter(one, 2.0), one, "exact").all()
+
+
+def test_two_nans_agree_whatever_their_sign_and_payload() -> None:
+    # IEEE 754 leaves a NaN result's sign and payload open, and pymbolic's
+    # ``-1*x`` for ``-x`` keeps the sign of a NaN that negation flips.
+    nan = np.array([np.nan, np.nan, np.nan])
+    other = np.array([-np.nan, np.nan, 1.0])
+    other[1] = np.frombuffer(np.uint64(0x7FF8000000000001).tobytes(), np.float64)[0]
+    assert np.isnan(other[1])
+    assert list(disagreement(other, nan, "exact")) == [False, False, True]
+    # A complex cell is compared part by part, NaN included.
+    want = np.array([complex(np.nan, 1.0), complex(np.nan, 1.0), complex(0.0, 1.0)])
+    got = np.array([complex(-np.nan, 1.0), complex(np.nan, -1.0), complex(-0.0, 1.0)])
+    assert list(disagreement(got, want, "exact")) == [False, True, True]
+
+
+NEGATED = '''
+from __future__ import annotations
+
+import numpy as np
+from lanky.prelude import Real
+
+from loopty import Arr, Fin, kernel
+
+
+@kernel
+def negated(x: Arr[Fin[n], Real.exact], y: Arr[Fin[n], Real.exact]):
+    for i in y.dom:
+        y[i] = -x[i]
+
+
+def example_inputs():
+    x = np.array([np.nan, np.inf, -0.0, 1.0])
+    return {"x": Arr.from_numpy(x), "y": Arr.zeros(4)}
+'''
+
+
+def test_a_nan_an_exact_kernel_computes_is_not_a_difference(tmp_path) -> None:
+    # The body negates, the term multiplies by -1, and the two NaNs differ in
+    # their sign bit; every other cell, the infinity and the signed zero among
+    # them, has the same bits in both runs.
+    from lanky.check import check_path
+
+    path = tmp_path / "negated.py"
+    path.write_text(NEGATED, encoding="utf-8")
+    (fact,) = [fact for fact in check_path(str(path)) if fact.kind == KIND]
+    assert fact.status is Status.TESTED, fact.provenance
+    assert fact.provenance["inputs"][0] == {
+        "input": "example_inputs()",
+        "outcome": "agreed",
+    }
 
 
 def test_an_approx_output_is_compared_at_its_tolerance() -> None:

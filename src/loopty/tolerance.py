@@ -13,7 +13,8 @@ The tolerance is per element, and depends on nothing but that element:
     reassoc, approx            |a_k - b_k| <= eps_class * (|b_k| + FLOOR)
 
 with ``b`` the expected output, ``eps_class`` from :data:`TOLERANCE` and
-``FLOOR`` the absolute floor :data:`TOLERANCE_FLOOR`.
+``FLOOR`` the absolute floor :data:`TOLERANCE_FLOOR`. How the faithfulness
+fact applies it, NaN included, is :func:`disagreement`.
 """
 
 from __future__ import annotations
@@ -97,11 +98,16 @@ def output_class(
 def disagreement(got: Any, want: Any, exactness: str) -> np.ndarray:
     """The cells at which ``got`` does not agree with ``want``, as a mask.
 
-    ``exact`` compares the bits of each cell, so ``-0.0`` and ``0.0`` differ
-    and a NaN agrees only with the same NaN. The other classes allow each cell
-    ``eps_class * (|want| + FLOOR)``; a cell whose two values are equal, or are
-    both NaN, agrees whatever its allowance, which is what keeps an infinity
-    both runs computed from reading as a difference of NaN.
+    ``exact`` compares the bits of each cell, so ``-0.0`` and ``0.0`` differ.
+    The one exception is NaN: two NaNs agree, whatever their sign and payload
+    bits. IEEE 754 leaves those unspecified for the result of an operation,
+    and two spellings of one operation set them differently: pymbolic writes
+    ``-x`` as ``-1*x``, and for a NaN ``x`` negation flips the sign bit where
+    the product keeps it. A complex cell is compared part by part. The other
+    classes allow each cell ``eps_class * (|want| + FLOOR)``; a cell whose two
+    values are equal, or are both NaN, agrees whatever its allowance, which is
+    what keeps an infinity both runs computed from reading as a difference of
+    NaN.
 
     The two arrays have one shape and one dtype, as two runs of a kernel on
     copies of one argument do; anything else is a disagreement at every cell.
@@ -113,12 +119,21 @@ def disagreement(got: Any, want: Any, exactness: str) -> np.ndarray:
     if want.dtype.kind not in "fc":
         return np.asarray(got != want, dtype=bool)
     if exactness == "exact":
-        width = want.dtype.itemsize
-        bits = [
-            np.ascontiguousarray(side).view(np.uint8).reshape(*side.shape, width)
+        # Each cell as its real parts: one for a float, two for a complex.
+        sides = [
+            np.stack([side.real, side.imag], axis=-1)
+            if side.dtype.kind == "c"
+            else side[..., np.newaxis]
             for side in (got, want)
         ]
-        return np.any(bits[0] != bits[1], axis=-1)
+        width = sides[1].dtype.itemsize
+        bits = [
+            np.ascontiguousarray(side).view(np.uint8).reshape(*side.shape, width)
+            for side in sides
+        ]
+        differ = np.any(bits[0] != bits[1], axis=-1)
+        differ &= ~(np.isnan(sides[0]) & np.isnan(sides[1]))
+        return np.any(differ, axis=-1)
     epsilon = TOLERANCE[exactness]
     with np.errstate(invalid="ignore", over="ignore"):
         same = got == want
