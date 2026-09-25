@@ -678,7 +678,8 @@ def _sort_exactness(dtype: Any) -> str:
     ``exact``, which is the wrong answer for ``float``. A builtin type arrives
     here from a hand-built term; a kernel annotated ``a: float`` does not pass
     one, because lanky evaluates a postponed annotation's builtin names as free
-    names, and ``Var("float")`` is still read as ``exact``.
+    names, and such a kernel is refused before it is traced
+    (:func:`loopty.term.free_name_sorts`).
     """
     from lanky.prelude import exactness_of
 

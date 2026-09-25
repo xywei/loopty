@@ -38,8 +38,8 @@ from lanky.terms import evaluate_annotations
 from loopty import typing as rules
 from loopty.arr import Arr, ArrSpec
 from loopty.contract import check_arguments, integral_sort
-from loopty.term import ArrType, Term
-from loopty.trace import array_type, mask_writes, trace, when
+from loopty.term import ArrType, Term, free_name_sorts, free_name_sorts_message
+from loopty.trace import TraceError, array_type, mask_writes, trace, when
 
 __all__ = [
     "Kernel",
@@ -352,7 +352,18 @@ class Kernel(_Decorated):
     # {{{ the term
 
     def trace(self) -> Term:
-        """Trace the body against a generic point and return its term."""
+        """Trace the body against a generic point and return its term.
+
+        A signature with a sort that is a free name (``a: float`` under
+        postponed annotations gives ``Var("float")``) is refused first, with
+        a :class:`~loopty.trace.TraceError` naming the sort to write instead;
+        see :func:`loopty.term.free_name_sorts`. The native run does not need
+        a sort and is not refused.
+        """
+        params = tuple(self.arg_types.items())
+        found = free_name_sorts(params)
+        if found:
+            raise TraceError(free_name_sorts_message(self.qualname, params, found))
         self._term = trace(self, self.annotations)
         self._facts = None
         return self._term

@@ -48,7 +48,15 @@ from loopy.symbolic import set_to_cond_expr
 from pymbolic.mapper import Mapper
 
 from loopty.flow import statement_accesses
-from loopty.term import Access, ArrType, Reduction, Stmt, Term
+from loopty.term import (
+    Access,
+    ArrType,
+    Reduction,
+    Stmt,
+    Term,
+    free_name_sorts,
+    free_name_sorts_message,
+)
 
 __all__ = [
     "COUNT_PARAM",
@@ -562,6 +570,19 @@ def _refuse_reserved_names(term: Term) -> None:
         )
 
 
+def _refuse_free_name_sorts(term: Term) -> None:
+    """Refuse a parameter whose sort is a free name, such as ``Var("float")``.
+
+    A traced kernel is refused before it gets here (see
+    :meth:`loopty.kernel.Kernel.trace`); a hand-built term is refused here,
+    rather than by :func:`numpy_dtype` with "no numpy dtype for float", which
+    does not say where the name came from or what to write instead.
+    """
+    found = free_name_sorts(term.params)
+    if found:
+        raise LoweringError(free_name_sorts_message(term.name, term.params, found))
+
+
 def _written_arrays(term: Term) -> tuple[str, ...]:
     """Arrays the term assigns to, in first-seen order."""
     names: list[str] = []
@@ -1018,6 +1039,7 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
     names against generated code.
     """
     _refuse_reserved_names(term)
+    _refuse_free_name_sorts(term)
     builder = _Builder(term, target)
     builder.plan_reductions()
     expr = builder.expr

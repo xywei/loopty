@@ -327,6 +327,14 @@ with a pair of statement instances.
   the native run raised numpy's "only integers ... are valid indices" and the
   compiled run "'float' object cannot be interpreted as an integer". It is a
   `ValueError` naming the argument now, and says `int(i)`.
+- A sort that is a free name is refused when the kernel is traced, with a
+  `TraceError` that says what to write instead: `Real` or `np.float64` for
+  `float`, `Nat`, `Int`, `Fin[n]` or `np.int64` for `int`. Under `from
+  __future__ import annotations` lanky's scope invents `float` and `int` like
+  any other name it does not know, so `a: float` gave the sort `Var("float")`,
+  which has no numpy dtype, is not an integral sort, and was called an `exact`
+  index type in the ledger. A hand-built term with such a sort is refused by
+  the lowering. The native run needs no sort and still runs.
 
 ### Changed
 

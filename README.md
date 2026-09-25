@@ -254,7 +254,10 @@ uv run ruff check .
 
 A kernel file needs `from __future__ import annotations` and a ruff `F821`
 per-file ignore, because a size such as `n` in `Arr[Fin[n], Real]` is a symbolic
-variable lanky invents while evaluating the annotation.
+variable lanky invents while evaluating the annotation. The same scope invents
+`float` and `int`, so a sort is written `Real`, `Nat`, `Int`, `Fin[n]` or a
+numpy type such as `np.float64`; a sort that is a free name is refused when the
+kernel is traced.
 
 ## Architecture
 

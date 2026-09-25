@@ -388,3 +388,57 @@ def test_a_kernel_named_like_an_underscored_keyword_is_renamed_with_a_prefix() -
 
 
 # }}}
+
+
+# {{{ sorts that are free names
+
+
+@kernel
+def scaled_by_float(
+    a: float,
+    x: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """``a: float`` under postponed annotations: lanky gives ``Var("float")``."""
+    for i in y.dom:
+        y[i] = a * x[i]
+
+
+@kernel
+def int_elements(c: Arr[Fin[n], int], y: Arr[Fin[n], Real]):  # noqa: F821
+    """An element sort spelled with the builtin ``int``."""
+    for i in y.dom:
+        y[i] = 2.0 * c[i]
+
+
+def test_a_sort_that_is_a_free_name_is_refused_with_the_sort_to_write() -> None:
+    # The sort used to reach the lowering as ``Var("float")``: no numpy dtype,
+    # not an integral sort, and read as an ``exact`` index type by the ledger.
+    from loopty.lower import LoweringError, lower_generic
+    from loopty.trace import TraceError
+
+    with pytest.raises(TraceError, match=r"a: float.*write Real.*np\.float64"):
+        scaled_by_float.trace()
+    with pytest.raises(TraceError, match=r"the elements of c as int.*write Nat"):
+        int_elements.trace()
+    # ``lanky check`` reports the refusal as the kernel's one fact.
+    (fact,) = scaled_by_float.facts()
+    assert fact.status.value == "refuted"
+    assert "write Real" in fact.provenance["error"]
+    # A hand-built term with such a sort is refused by the lowering, by name.
+    from lanky.terms import Var
+
+    from loopty.term import Term
+
+    term = Term(
+        name="bad", params=(("a", Var("float")),), sizes=(), stmts=(), post=None
+    )
+    with pytest.raises(LoweringError, match=r"a: float.*free name"):
+        lower_generic(term, "c")
+    # The native run needs no sort, and still runs.
+    y = np.zeros(3)
+    scaled_by_float(2.0, np.array([1.0, 2.0, 3.0]), y)
+    assert np.array_equal(y, [2.0, 4.0, 6.0])
+
+
+# }}}
