@@ -54,6 +54,7 @@ from loopty.term import (
     Reduction,
     Stmt,
     Term,
+    declared_offsets,
     free_name_sorts,
     free_name_sorts_message,
 )
@@ -91,11 +92,6 @@ COUNT_PARAM = "{counts}_{iname}"
 #: parameter that had to be suffixed to dodge a collision is found; this pattern
 #: is the fallback for a term written by hand, which records nothing.
 COUNT_PARAM_REFLECTED = "nl_{counts}_{iname}"
-
-#: Candidate names for the offsets array of a ragged axis, most specific first.
-#: The first one that is a parameter of the term wins; if none is, an argument
-#: named ``off_<counts>`` is added to the lowered kernel.
-OFFSETS_CANDIDATES = ("off_{counts}", "{counts}_off", "off")
 
 _LANG_VERSION = (2018, 2)
 
@@ -759,19 +755,19 @@ class _Builder:
     def offsets_for(self, name: str) -> str:
         """The offsets argument that flattens array ``name``.
 
-        The first of :data:`OFFSETS_CANDIDATES` that is a parameter of the term
-        wins, which makes ``spmv(off, col, val, x, y)`` work with no
-        configuration; when none is, an ``int32`` argument is added.
+        The first of :data:`loopty.term.OFFSETS_CANDIDATES` that is a parameter
+        of the term wins, which makes ``spmv(off, col, val, x, y)`` work with no
+        configuration; when none is, an ``int32`` argument is added. The choice
+        is :func:`loopty.term.declared_offsets`, the same one the access
+        collector makes when it lists the read of the offsets.
         """
         if name in self.ragged:
             return self.ragged[name]
         counts = self.counts_name(name)
-        params = dict(self.term.params)
-        for pattern in OFFSETS_CANDIDATES:
-            candidate = pattern.format(counts=counts)
-            if candidate in params:
-                self.ragged[name] = candidate
-                return candidate
+        declared = declared_offsets(self.term.params, counts)
+        if declared is not None:
+            self.ragged[name] = declared
+            return declared
         candidate = f"off_{counts}"
         typ = self.arr_types[name]
         outer = typ.axes[0]
