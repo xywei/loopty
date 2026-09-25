@@ -381,6 +381,12 @@ class Kernel(_Decorated):
     def facts(self) -> tuple[Fact, ...]:
         """The obligations this kernel owes, from the typing rules.
 
+        The last one is the ``trace-faithful`` fact: the traced term,
+        interpreted, against the native run of the body, on the module's
+        example inputs and on inputs drawn from the declared types. Every other
+        fact is about the term, and this one is about whether the term is the
+        body; see :mod:`loopty.faithful`.
+
         A body that cannot be traced is itself reported as a fact rather than as
         a crash, so that ``lanky check`` on a file with one broken kernel still
         prints the ledger of the others.
@@ -412,8 +418,11 @@ class Kernel(_Decorated):
                 ),
             )
             return self._facts
-        self._facts = tuple(
-            rules.facts_for(term, owner=self.qualname, where=self.where)
+        from loopty.faithful import faithfulness_fact
+
+        self._facts = (
+            *rules.facts_for(term, owner=self.qualname, where=self.where),
+            faithfulness_fact(self, term, owner=self.qualname, where=self.where),
         )
         return self._facts
 
@@ -499,8 +508,10 @@ class KernelTheory:
     ``facts(obj)`` traces a registered kernel and runs :mod:`loopty.typing` over
     the resulting term, returning the obligations: in-bounds per access, write
     disjointness, the ordering the dependences impose, the exactness class of
-    each reduction, and the postcondition. An object this theory does not own
-    gives an empty tuple, which is how several theories share one ledger.
+    each reduction, and the postcondition; then the ``trace-faithful`` fact,
+    that the term computes what the body computes (:mod:`loopty.faithful`). An
+    object this theory does not own gives an empty tuple, which is how several
+    theories share one ledger.
     """
 
     name = "kernel"

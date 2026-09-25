@@ -195,8 +195,13 @@ def test_checking_the_wrong_kernel_refutes_one_fact() -> None:
 
 def test_every_stencil_obligation_is_decided() -> None:
     ledger = check_path(KERNELS / "stencil.py")
-    assert len(ledger) == 5
-    assert {f.status for f in ledger} == {Status.DECIDED}
+    assert len(ledger) == 6
+    # Five obligations about the term, and the faithfulness fact about whether
+    # the term is the body, which running both can only test.
+    *obligations, faithful = ledger
+    assert {f.status for f in obligations} == {Status.DECIDED}
+    assert faithful.kind == "trace-faithful"
+    assert faithful.status is Status.TESTED
 
 
 def test_the_dense_kernel_file_checks_clean() -> None:

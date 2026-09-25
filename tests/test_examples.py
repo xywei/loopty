@@ -126,6 +126,31 @@ def test_a_demo_states_obligations_and_none_is_refuted(name: str) -> None:
             assert fact["decided_by"], fact
 
 
+#: The kernels of each demo, each of which owes one faithfulness fact.
+KERNELS = {
+    "spmv": {"scan", "spmv"},
+    "stencil_skew": {"jacobi"},
+    "wavefront_acoustic": {"acoustic"},
+    "reshape_layouts": {"rows_of", "cols_of", "transpose"},
+    "p2p": {"p2p"},
+}
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_every_kernel_of_a_demo_computes_what_its_body_computes(name: str) -> None:
+    # The traced term, interpreted, against the native body: on the demo's
+    # own example inputs first, then on inputs drawn from the declared types.
+    _result, facts = _invoke(name, "check")
+    faithful = [fact for fact in facts if fact["kind"] == "trace-faithful"]
+    assert {fact["owner"] for fact in faithful} == KERNELS[name]
+    for fact in faithful:
+        assert fact["status"] == "tested", fact
+        assert fact["decided_by"] == "interpreter"
+        inputs = fact["provenance"]["inputs"]
+        assert inputs[0] == {"input": "example_inputs()", "outcome": "agreed"}
+        assert [entry["outcome"] for entry in inputs] == ["agreed"] * 4
+
+
 @pytest.mark.parametrize("name", NAMES)
 def test_a_demo_compiles_and_agrees_with_the_native_run(name: str) -> None:
     result, facts = _invoke(name, "run")
