@@ -675,7 +675,10 @@ def _sort_exactness(dtype: Any) -> str:
 
     A Python or numpy scalar type is read by its kind, before lanky is asked:
     lanky calls anything that is not one of its sorts an index type and so
-    ``exact``, which is the wrong answer for ``float``.
+    ``exact``, which is the wrong answer for ``float``. A builtin type arrives
+    here from a hand-built term; a kernel annotated ``a: float`` does not pass
+    one, because lanky evaluates a postponed annotation's builtin names as free
+    names, and ``Var("float")`` is still read as ``exact``.
     """
     from lanky.prelude import exactness_of
 

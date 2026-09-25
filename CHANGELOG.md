@@ -270,7 +270,10 @@ with a pair of statement instances.
   handed the key straight to numpy, which reads `x[-1]` as the last cell, while
   `Fin[n]` has no negative points and generated C reads `x[-1]` in front of the
   buffer, so a native run could compute a value neither the ledger nor the
-  compiled kernel agrees with. A read under a false `when` still answers zero.
+  compiled kernel agrees with. A read under a false `when` still answers zero,
+  but a read taken before its guard opens (`v = x[i - 1]`, then
+  `with when(i > 0):`) now fails at `i = 0` on a native run, as `x[i + 1]`
+  already did at the other end; it belongs inside the guard.
 - `LoopyExecutor.run` writes its results back into every `ndarray` output, not
   only into an `Arr`. An output that is a strided view, or whose dtype is not
   the lowered one, is copied on the way into loopy, and the results used to stay
@@ -282,9 +285,9 @@ with a pair of statement instances.
 - A reduction's exactness class is that of the value it sums, not only of the
   arrays it reads. `a * x[j]` with `a : Real` over an integer `x`, `0.1 * j` and
   `x[j] / 2` were all `exact`, so a schedule refused to reassociate them and the
-  ledger stated an exactness that did not hold. A Python `float` element type
-  is `approx` as well; lanky reads anything that is not one of its sorts as an
-  index type.
+  ledger stated an exactness that did not hold. A Python `float` sort, as a
+  hand-built term may give one, is `approx` as well; lanky reads anything that
+  is not one of its sorts as an index type.
 - Sizes, loop variables and reduction variables spelled like a C or OpenCL C
   keyword are refused by the lowering, as parameters already were.
   `Arr[Fin[long], Real]` and `for double in x.dom` passed the check and then
@@ -302,7 +305,10 @@ with a pair of statement instances.
   outer generator's condition. In `reduce_sum(reduce_sum(a[i, j] for j in
   a.dom[i]) for i in a.dom)` the inner domain left `i` unconstrained, so
   `a[i, j]` was refuted at `i = -1`. A nested binder that reuses the outer
-  one's name raises `TraceError`.
+  one's name raises `TraceError`. Two statements whose nested sums both bind
+  `j`, under outer binders of different names, now lower: the two inner
+  domains used to be the same set, so they shared one iname nested in two
+  loops, and loopy found no loop nest to schedule.
 - `resolve_sizes` solves only an axis that is linear in its one name. The
   solution is read off two evaluations, so `Fin[n * n]` of nine cells gave
   `n = 9`, and `Fin[(n + 1) // 2]` an `n` whose axis is too short. A `Fin` bound
