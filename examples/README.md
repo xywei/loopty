@@ -1,6 +1,6 @@
 # The loopty demos
 
-Four files, each of which runs three ways. Every console block below is a
+Five files, each of which runs three ways. Every console block below is a
 snapshot of real output, not prose about it, and it is produced mechanically:
 
 ```console
@@ -18,6 +18,7 @@ here quietly stop being true.
 |---|---|
 | `spmv.py` | a ragged sparse product: an indirection in bounds by type, a scan with a postcondition, the theorem that postcondition needs, and a schedule whose reassociation is recorded |
 | `stencil_skew.py` | a rectangular tiling of a Jacobi stencil refused with a witness pair, and the skew that makes the same tiling legal |
+| `wavefront_acoustic.py` | two coupled statements in one acoustic-wave nest: a rectangular tiling refused with a witness that crosses them, and the skew that makes it a legal wavefront block |
 | `reshape_layouts.py` | `Fin[n * m]` as `Fin[n] x Fin[m]`, one buffer read in two layouts, and a transpose split and interchanged |
 | `p2p.py` | the near field of a fast multipole method: a two-level interaction list flattened into one ragged level, with the self-interaction guarded by `when` |
 
@@ -216,6 +217,106 @@ decided  isl    stencil_skew.py:62  jacobi  the order after skew(i, by='t') runs
 decided  isl    stencil_skew.py:62  jacobi  tile(t,i,8,8) renames the instances of jacobi one for one
 decided  isl    stencil_skew.py:62  jacobi  the order after tile(t,i,8,8) runs every dependence of jacobi forward
 tested   loopy  stencil_skew.py:62  jacobi  the scheduled run of jacobi agrees with the native run to the accurac...
+
+5 facts: 4 decided, 1 tested
+```
+
+## wavefront_acoustic.py
+
+A velocity update and a pressure update share one `(t, i)` loop nest. The
+pressure statement `S1` reads the velocity that `S0` wrote in the same time
+step, and the next step's velocity statement reads the pressure `S1` wrote. The
+one dependence a rectangular tile runs backwards is therefore **S1 -> S0**, at
+distance `(1, -1)`, and not a statement against itself as in the stencil.
+
+The rectangular tile is rejected with that cross-statement witness, and
+`skew("i", by="t").tile(...)` is accepted and runs. Geometrically this is a
+wavefront temporal block: rectangular in `(t, i + t)`, a parallelogram in
+`(t, i)`.
+
+A diamond is the next pressure test rather than something this demo has. It
+tiles along `t + i` and `t - i` at once, and that map is not unimodular (its
+image is the points of equal parity), so it needs a multi-axis affine schedule
+primitive whose checker reasons about that image. For this pair the two
+statements would also need an offset in time: `S1` at `(t, i + 1)` reads the
+velocity `S0` wrote at `(t, i)`, and the `t - i` direction runs that dependence
+backwards. The module docstring has the details.
+
+`uv run python examples/wavefront_acoustic.py --bench` times the untiled and the
+wavefront-blocked compiled kernels at a larger size. There is no console block
+for it: its numbers describe the machine that ran it, not loopty, and a speedup
+is not something CI could hold anyone to.
+
+### python examples/wavefront_acoustic.py
+
+```console
+$ uv run python examples/wavefront_acoustic.py
+native pressure, 16 levels by 32 points (first five levels around the impulse):
+[[0.    0.    0.    1.    0.    0.    0.   ]
+ [0.    0.    0.062 0.875 0.062 0.    0.   ]
+ [0.    0.004 0.172 0.648 0.172 0.004 0.   ]
+ [0.    0.018 0.301 0.362 0.301 0.018 0.   ]
+ [0.002 0.049 0.415 0.068 0.415 0.049 0.002]]
+statements: S0 writes velocity, S1 writes pressure
+
+Schedule(acoustic).tile('t', 'i', 4, 8) ->
+  IllegalCast: tile(t,i,4,8) illegal: instance S1[t=0, i=8] writes pressure[1, 8] read by S0[t=1, i=7] scheduled earlier (at nt=16, nx=32, as hinted)
+  witness: S1{'t': 0, 'i': 8} runs before S0{'t': 1, 'i': 7} at {'nt': 16, 'nx': 32}
+
+accepted: Schedule(acoustic, target='c').skew(i, by='t').tile(t,i,4,8)
+  loop nest: t_outer i_outer t_inner i_inner
+  decided  isl  skew(i, by='t') renames the instances of acoustic one for one
+  decided  isl  the order after skew(i, by='t') runs every dependence of acoustic forward
+  decided  isl  tile(t,i,4,8) renames the instances of acoustic one for one
+  decided  isl  the order after tile(t,i,4,8) runs every dependence of acoustic forward
+
+  pressure: difference 0 within 1e-06 (approx) -> tested
+  velocity: difference 0 within 1e-06 (approx) -> tested
+  the native run matches the hand-written recurrence: True
+```
+
+### lanky check examples/wavefront_acoustic.py
+
+Eight accesses, every one decided by isl over the domain the `when` guard
+narrows: `velocity[t + 1, i - 1]` is in bounds because the guard keeps `i > 0`,
+and both writes at `t + 1` because it keeps `t + 1 < nt`.
+
+```console
+$ uv run lanky check examples/wavefront_acoustic.py
+STATUS   BY   WHERE                     OWNER     STATEMENT
+-------  ---  ------------------------  --------  ------------------------------------------------------------
+decided  isl  wavefront_acoustic.py:82  acoustic  velocity[t + 1, i] is in bounds for every instance of S0
+decided  isl  wavefront_acoustic.py:82  acoustic  velocity[t, i] is in bounds for every instance of S0
+decided  isl  wavefront_acoustic.py:82  acoustic  pressure[t, i + 1] is in bounds for every instance of S0
+decided  isl  wavefront_acoustic.py:82  acoustic  pressure[t, i] is in bounds for every instance of S0
+decided  isl  wavefront_acoustic.py:85  acoustic  pressure[t + 1, i] is in bounds for every instance of S1
+decided  isl  wavefront_acoustic.py:85  acoustic  pressure[t, i] is in bounds for every instance of S1
+decided  isl  wavefront_acoustic.py:85  acoustic  velocity[t + 1, i] is in bounds for every instance of S1
+decided  isl  wavefront_acoustic.py:85  acoustic  velocity[t + 1, i - 1] is in bounds for every instance of S1
+decided  isl  wavefront_acoustic.py:82  acoustic  distinct instances of S0 write distinct cells of velocity
+decided  isl  wavefront_acoustic.py:85  acoustic  distinct instances of S1 write distinct cells of pressure
+decided  isl  wavefront_acoustic.py:70  acoustic  the source order runs every dependence forward in time
+
+11 facts: 11 decided
+```
+
+### loopty run examples/wavefront_acoustic.py
+
+Two outputs this time, and both are compared with the native run.
+
+```console
+$ uv run loopty run examples/wavefront_acoustic.py
+acoustic: Schedule(acoustic, target='c').skew(i, by='t').tile(t,i,4,8)
+  pressure: difference 0 within 1e-06 (approx) -> tested
+  velocity: difference 0 within 1e-06 (approx) -> tested
+
+STATUS   BY     WHERE                     OWNER     STATEMENT
+-------  -----  ------------------------  --------  ------------------------------------------------------------------------
+decided  isl    wavefront_acoustic.py:82  acoustic  skew(i, by='t') renames the instances of acoustic one for one
+decided  isl    wavefront_acoustic.py:82  acoustic  the order after skew(i, by='t') runs every dependence of acoustic for...
+decided  isl    wavefront_acoustic.py:82  acoustic  tile(t,i,4,8) renames the instances of acoustic one for one
+decided  isl    wavefront_acoustic.py:82  acoustic  the order after tile(t,i,4,8) runs every dependence of acoustic forward
+tested   loopy  wavefront_acoustic.py:82  acoustic  the scheduled run of acoustic agrees with the native run to the accur...
 
 5 facts: 4 decided, 1 tested
 ```

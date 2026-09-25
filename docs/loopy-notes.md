@@ -1,6 +1,6 @@
 # Notes on loopy and islpy
 
-Six interactions with loopty's dependencies that cost real debugging time, each
+Seven interactions with loopty's dependencies that cost real debugging time, each
 with the local workaround and the reason it is local. No upstream issues were
 filed: these are notes so that the next person meets the answer instead of the
 symptom.
@@ -139,3 +139,39 @@ departure is a schedule, hence a cast, hence checked. `schedule._with_priority`
 then *replaces* the priority at each accepted step rather than adding to it,
 because `lp.prioritize_loops` accumulates and an interchange would otherwise
 contradict the priority set before it.
+
+## 7. The single-writer heuristic draws an edge against the body's order
+
+**Symptom.** Two statements that feed each other, one of them across an
+iteration of an enclosing loop, lower without complaint and then fail at the
+first run with `DependencyCycleFound: S0, S1`. The acoustic update in
+`examples/wavefront_acoustic.py` is the case: `S0` reads the pressure `S1` wrote
+at the previous time level, and `S1` reads the velocity `S0` wrote at this one.
+
+**Cause.** `lp.make_kernel` applies a heuristic to every instruction whose
+`depends_on` is not marked final: it adds a dependence on the only writer of
+each variable the instruction reads, wherever in the body that writer is.
+`lower_generic` draws `S1 -> S0` from the data, and the heuristic adds
+`S0 -> S1` because `S1` is the only writer of the pressure `S0` reads. An
+instruction dependence orders two statements within one iteration; the order
+across iterations is the loop's, so the added edge is not a dependence at all.
+
+**Local fix.** Each statement's instruction is created with
+`depends_on_is_final=True`. `lower_generic` already orders a statement after
+every earlier one it could read from, write over, or overwrite the input of,
+which is the whole of the order within an iteration, so there is nothing left
+for the heuristic to add. One read is not among the term's accesses: the flat
+index of a ragged access goes through the offsets argument. A kernel that writes
+those offsets and reads through them (a scan fused with the product that uses
+it) relied on the heuristic for that edge, and without it loopy refuses the
+kernel with `VariableAccessNotOrdered`; `lower_generic` counts the offsets as
+read by every statement that touches a ragged array, so the edge is drawn, and
+in the direction the body gives it. The instructions that assign ragged bounds
+(`cnt_r_init`) are final too. One reads the counts, or the offsets when the
+counts are not a parameter, and it is ordered where the first statement that
+needs it is: after every earlier writer of that array and before every later
+one. Left to the heuristic, it waited for a later writer as well, and a ragged
+loop followed by a statement that rewrites its offsets became a cycle through
+the loop, the bound and the rewrite. Because the bound is computed once, a
+statement that needs it after that array has been rewritten would see the old
+row length, so `lower_generic` refuses that order with a `LoweringError`.

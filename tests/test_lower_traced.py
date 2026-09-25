@@ -235,6 +235,76 @@ def test_a_shadowed_reflected_bound_still_lowers_as_a_ragged_bound() -> None:
 # }}}
 
 
+# {{{ a kernel that writes the offsets it reads through
+
+
+@kernel
+def scan_then_row_sums(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    off: Arr[Fin[n + 1], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A scan of the counts, then row sums of ``val``, whose flat index is ``off``."""
+    for r in cnt.dom:
+        off[r + 1] = off[r] + cnt[r]
+    for r in y.dom:
+        for j in val.dom[r]:
+            y[r] = y[r] + val[r, j]
+
+
+@kernel
+def row_sums_then_scan(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    off: Arr[Fin[n + 1], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The same two loops the other way round."""
+    for r in y.dom:
+        for j in val.dom[r]:
+            y[r] = y[r] + val[r, j]
+    for r in cnt.dom:
+        off[r + 1] = off[r] + cnt[r]
+
+
+@pytest.mark.parametrize(
+    "which", [scan_then_row_sums, row_sums_then_scan], ids=lambda k: k.__name__
+)
+def test_reading_through_offsets_is_ordered_against_writing_them(which) -> None:
+    # ``val[r, j]`` is ``val[off[r] + j]`` once lowered, a read of ``off`` that
+    # belongs to the layout and is not among the term's accesses. loopy's
+    # single-writer heuristic used to order it after the scan wherever the scan
+    # was, so the second kernel read its rows after rewriting their offsets.
+    # With every instruction's dependences final the edge has to come from the
+    # layout, or loopy refuses the kernel with VariableAccessNotOrdered; it now
+    # follows the body in both kernels.
+    from loopty.arr import Arr as RuntimeArr
+    from loopty.lower import lower_generic
+
+    term = which.trace()
+    lowering = lower_generic(term, "c")
+    assert lowering.ragged == {"val": "off"}
+    insns = {insn.id: insn for insn in lowering.kernel.default_entrypoint.instructions}
+    assert "S0" in insns["S1"].depends_on
+    assert "S1" not in insns["S0"].depends_on
+
+    counts = [2, 0, 3, 1]
+    values = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    out = run(
+        term,
+        cnt=RuntimeArr.from_numpy(np.array(counts, dtype=np.int64)),
+        off=RuntimeArr.from_numpy(np.array([0, 2, 2, 5, 6], dtype=np.int64)),
+        val=RuntimeArr.ragged(counts, values=values),
+        y=np.zeros(4),
+    )
+    assert np.allclose(out["y"], [3.0, 0.0, 12.0, 6.0])
+    assert np.array_equal(out["off"], [0, 2, 2, 5, 6])
+
+
+# }}}
+
+
 # {{{ a reduction nested in another one
 
 

@@ -110,23 +110,23 @@ the schedule for this shape that does build and did run.
 $ uv run lanky check examples/spmv.py
 STATUS   BY             WHERE        OWNER          STATEMENT
 -------  -------------  -----------  -------------  ------------------------------------------------------------------------
-decided  isl            spmv.py:80   scan           off[0] is in bounds for every instance of S0
-decided  isl            spmv.py:82   scan           off[r + 1] is in bounds for every instance of S1
-decided  isl            spmv.py:82   scan           off[r] is in bounds for every instance of S1
-decided  isl            spmv.py:82   scan           cnt[r] is in bounds for every instance of S1
-decided  isl            spmv.py:80   scan           distinct instances of S0 write distinct cells of off
-decided  isl            spmv.py:82   scan           distinct instances of S1 write distinct cells of off
-decided  isl            spmv.py:70   scan           the source order runs every dependence forward in time
-assumed  -              spmv.py:70   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
-tested   property-test  spmv.py:85   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat] | off(0) ==...
-decided  isl            spmv.py:113  spmv           y[r] is in bounds for every instance of S0
-decided  isl            spmv.py:113  spmv           val[r, j] is in bounds for every instance of S0
-decided  type           spmv.py:113  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
-decided  isl            spmv.py:113  spmv           col[r, j] is in bounds for every instance of S0
-decided  isl            spmv.py:113  spmv           distinct instances of S0 write distinct cells of y
-decided  isl            spmv.py:103  spmv           the source order runs every dependence forward in time
-decided  type           spmv.py:113  spmv           the accumulation into y[r] over j is approx
-assumed  -              spmv.py:116  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
+decided  isl            spmv.py:79   scan           off[0] is in bounds for every instance of S0
+decided  isl            spmv.py:81   scan           off[r + 1] is in bounds for every instance of S1
+decided  isl            spmv.py:81   scan           off[r] is in bounds for every instance of S1
+decided  isl            spmv.py:81   scan           cnt[r] is in bounds for every instance of S1
+decided  isl            spmv.py:79   scan           distinct instances of S0 write distinct cells of off
+decided  isl            spmv.py:81   scan           distinct instances of S1 write distinct cells of off
+decided  isl            spmv.py:69   scan           the source order runs every dependence forward in time
+assumed  -              spmv.py:69   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+tested   property-test  spmv.py:84   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat] | off(0) ==...
+decided  isl            spmv.py:112  spmv           y[r] is in bounds for every instance of S0
+decided  isl            spmv.py:112  spmv           val[r, j] is in bounds for every instance of S0
+decided  type           spmv.py:112  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
+decided  isl            spmv.py:112  spmv           col[r, j] is in bounds for every instance of S0
+decided  isl            spmv.py:112  spmv           distinct instances of S0 write distinct cells of y
+decided  isl            spmv.py:102  spmv           the source order runs every dependence forward in time
+decided  type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
+assumed  -              spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
 
 17 facts: 2 assumed, 14 decided, 1 tested
 ```
@@ -163,13 +163,13 @@ scan: Schedule(scan, target='c')
 
 STATUS   BY     WHERE        OWNER  STATEMENT
 -------  -----  -----------  -----  ------------------------------------------------------------------------
-decided  isl    spmv.py:113  spmv   split(j, 2) renames the instances of spmv one for one
-decided  isl    spmv.py:113  spmv   the order after split(j, 2) runs every dependence of spmv forward
-decided  isl    spmv.py:113  spmv   realize('y', tree=True) renames the instances of spmv one for one
-decided  isl    spmv.py:113  spmv   the order after realize('y', tree=True) runs every dependence of spmv...
-decided  isl    spmv.py:113  spmv   the accumulation into y is reassociated by realize('y', tree=True), s...
-tested   loopy  spmv.py:113  spmv   the scheduled run of spmv agrees with the native run to the accuracy ...
-tested   loopy  spmv.py:80   scan   the scheduled run of scan agrees with the native run to the accuracy ...
+decided  isl    spmv.py:112  spmv   split(j, 2) renames the instances of spmv one for one
+decided  isl    spmv.py:112  spmv   the order after split(j, 2) runs every dependence of spmv forward
+decided  isl    spmv.py:112  spmv   realize('y', tree=True) renames the instances of spmv one for one
+decided  isl    spmv.py:112  spmv   the order after realize('y', tree=True) runs every dependence of spmv...
+decided  isl    spmv.py:112  spmv   the accumulation into y is reassociated by realize('y', tree=True), s...
+tested   loopy  spmv.py:112  spmv   the scheduled run of spmv agrees with the native run to the accuracy ...
+tested   loopy  spmv.py:79   scan   the scheduled run of scan agrees with the native run to the accuracy ...
 
 7 facts: 5 decided, 2 tested
 ```
@@ -365,7 +365,7 @@ transcripts, are in [device-runs.md](device-runs.md) and under
 debugging time, and the local workarounds for them, are in
 [loopy-notes.md](loopy-notes.md).
 
-All four demos, with every console block regenerated mechanically by
+All five demos, with every console block regenerated mechanically by
 `scripts/refresh_example_outputs.py`, are in
 [../examples/README.md](../examples/README.md). The blocks in *this* file are
 snapshots too, some of them elided where marked with `...`; run the commands if
