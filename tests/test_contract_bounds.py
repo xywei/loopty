@@ -60,6 +60,18 @@ def test_a_zero_dimensional_array_is_a_number() -> None:
     scalar_parameters(pick_next.arg_types, arguments(np.array(2)))
 
 
+def test_an_integral_scalar_has_to_be_stored_as_an_integer() -> None:
+    # A whole float is still a float: neither run can use it as an index.
+    types = pick_next.arg_types
+    for value in (2.0, np.float64(2.0), np.float32(2.0), np.array(2.0)):
+        with pytest.raises(ValueError, match=r"a float.*int\(i\)"):
+            scalar_parameters(types, arguments(value))
+    with pytest.raises(ValueError, match=r"a float.*finite whole number"):
+        scalar_parameters(types, arguments(float("inf")))
+    for value in (2, np.int64(2), np.int32(2), np.uint8(2), np.array(2)):
+        scalar_parameters(types, arguments(value))
+
+
 def test_an_affine_fin_bound_is_enforced_against_the_resolved_sizes() -> None:
     types = pick_next.arg_types
     for index in (0, 3, np.int64(3)):

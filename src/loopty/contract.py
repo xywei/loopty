@@ -40,7 +40,9 @@ other half of the signature. ``i: Fin[n]`` in a kernel writing ``x[i]`` makes
 that access in bounds by type just as an indirection is, so ``run(..., i=-1)``
 used to reach generated C as an address in front of ``x``.
 :func:`scalar_parameters` asks the declared sort of every non-array argument
-the same two questions, against the sizes the arrays of the call determine.
+the same two questions, against the sizes the arrays of the call determine,
+and asks one more: an integral scalar has to be stored as an integer, because
+neither run can use ``1.0`` as an index.
 
 Nothing here checks array *shapes*; see ``docs/loopy-notes.md`` for why lowering
 has to declare some arrays without one, and the README's status list for the
@@ -60,6 +62,7 @@ from loopty.idx import is_affine
 from loopty.term import ArrType
 
 __all__ = [
+    "INT64_RANGE",
     "axis_extents",
     "check_arguments",
     "counts_family",
@@ -466,6 +469,14 @@ def element_bound(
     return sort_bound(typ.dtype, sizes, extents)
 
 
+#: The half-open range of the integers a float-stored element of an integral
+#: sort is converted to: the native run reads such an array as ``int64`` (see
+#: :meth:`loopty.kernel.Kernel._integer_copies`). Both ends are floats that
+#: ``float64`` holds exactly, and every whole float inside them converts
+#: exactly.
+INT64_RANGE = (-(2.0**63), 2.0**63)
+
+
 def _not_an_integer(flat: np.ndarray) -> int | None:
     """The flat position of the first entry that is not a finite integer.
 
@@ -477,10 +488,18 @@ def _not_an_integer(flat: np.ndarray) -> int | None:
     ``inf`` are refused because that cast would silently truncate them, and
     ``nan`` because it compares false against every bound, which is how it used
     to pass a range test that both of its comparisons failed.
+
+    A whole float is also refused outside :data:`INT64_RANGE`. The native run
+    reads a float-stored index array as ``int64``, and ``1e20`` is a whole
+    float that no ``int64`` holds: the conversion used to give an unrelated
+    integer, and the reference run computed with it. For ``Fin[m]`` the range
+    test would refuse such a value anyway; ``Nat`` and ``Int`` have no upper
+    end, so this is the check that does.
     """
     if flat.dtype.kind in "biu":
         return None
-    whole = np.isfinite(flat) & (flat == np.rint(flat))
+    low, high = INT64_RANGE
+    whole = np.isfinite(flat) & (flat == np.rint(flat)) & (flat >= low) & (flat < high)
     offenders = np.flatnonzero(~whole)
     return int(offenders[0]) if offenders.size else None
 
@@ -543,10 +562,12 @@ def element_types(
                 raise ValueError(
                     f"{_cell_label(name, value, position)} is {flat[position]}, "
                     f"which is not a value of {typ.dtype}: an element of {name} "
-                    "has to be a finite whole number. loopty discharges an "
+                    "has to be a finite whole number, and one stored as a float "
+                    "has to fit in a 64-bit integer. loopty discharges an "
                     "indirection through this array as in bounds *by type*, and "
-                    "the compiled run reads the element as an integer, so a "
-                    "fractional or non-finite entry is an index nobody declared"
+                    "both runs read the element as an integer, so a fractional, "
+                    "non-finite or unrepresentable entry is an index nobody "
+                    "declared"
                 )
         limits = element_bound(typ, sizes, extents)
         if limits is None:
@@ -617,6 +638,15 @@ def scalar_parameters(
     asked the same way. The sizes come from the arrays the call supplies, so
     ``Fin[n]`` is only range-checked when some argument determines ``n``;
     without that the value is still required to be an integer.
+
+    An integral scalar has to be *stored* as an integer: a Python ``int``, a
+    numpy integer or a zero-dimensional integer array. ``1.0`` is refused
+    although it is a whole number, unlike the float-stored arrays
+    :func:`element_types` accepts, because neither run can use it: the
+    compiled run passes it to a C integer argument, which a float cannot be
+    converted to, and the native run indexes with it, which numpy refuses.
+    Converting it would be the caller's choice to make, so the message says
+    ``int(...)``.
     """
     sizes = resolve_sizes(types, supplied) if sizes is None else sizes
     extents = axis_extents(types, supplied) if extents is None else extents
@@ -640,12 +670,19 @@ def scalar_parameters(
                 f"{type(value).__name__}, which is not a number and so not a "
                 f"value of {sort}"
             )
-        if not np.isfinite(number) or number != np.rint(number):
+        if np.asarray(value).dtype.kind == "f":
+            whole = bool(np.isfinite(number) and number == np.rint(number))
+            advice = (
+                f"Pass int({name}) if the whole number is what you meant"
+                if whole
+                else "It is not a finite whole number either"
+            )
             raise ValueError(
-                f"the argument {name} is {supplied[name]}, which is not a value "
-                f"of {sort}: {name} has to be a finite whole number. loopty "
-                f"discharges an access indexed by {name} as in bounds *by "
-                "type*, with no check in the generated code"
+                f"the argument {name} is {value!r}, a float, which is not a "
+                f"value of {sort}: an integral parameter has to be passed as an "
+                "integer (a Python int, a numpy integer or a zero-dimensional "
+                "integer array). The compiled run cannot pass a float to a C "
+                f"integer argument, and the native run cannot index with one. {advice}"
             )
         limits = sort_bound(sort, sizes, extents)
         if limits is None:

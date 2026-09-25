@@ -302,8 +302,11 @@ class Kernel(_Decorated):
         Only arrays whose declared element sort is integral (``Fin``, ``Nat``,
         ``Int``) and whose storage is floating or complex are candidates, and
         :func:`loopty.contract.check_arguments` has already required every
-        entry of those to be a finite whole number, so the copy is exact:
-        ``int64`` holds every whole number a float holds exactly.
+        entry of those to be a finite whole number inside
+        :data:`loopty.contract.INT64_RANGE`, so the copy is exact. The copy is
+        ``int64`` while the lowering stores an integral sort as ``int32``; a
+        value between the two ranges runs natively and is narrowed by the
+        compiled run's cast, as the same value stored as ``int64`` is.
 
         An array the body *writes* is left as it is. A copy is a new buffer, and
         the native run's promise is that writes land in the caller's array; an

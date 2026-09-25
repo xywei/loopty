@@ -297,7 +297,10 @@ with a pair of statement instances.
   `col = [1.0, 0.0]` for `Fin[m]` and the compiled run casts it, but numpy
   refuses a float as an index, so the input could not be tested
   differentially. An array the body writes is passed as it is, so that its
-  writes land in the caller's buffer.
+  writes land in the caller's buffer. The contract refuses a float-stored
+  entry outside the range of `int64`: `1e20` is a whole number, a `Nat` array
+  has no upper end to refuse it by, and the conversion used to hand the body an
+  unrelated integer.
 - The isl oracle reads a witness and the sizes it holds at from one sample.
   They came from two, which leaves isl free to report a cell outside an array
   at a size where it is inside.
@@ -315,6 +318,11 @@ with a pair of statement instances.
   that cannot be evaluated is measured against an axis written the same way
   (`contract.axis_extents`), so `i : Fin[n * n]` is still bounded by the nine
   cells it indexes.
+- An integral scalar has to be passed as an integer. `i = 1.0` for `i: Fin[n]`
+  passed the contract as a finite whole number, and neither run could use it:
+  the native run raised numpy's "only integers ... are valid indices" and the
+  compiled run "'float' object cannot be interpreted as an integer". It is a
+  `ValueError` naming the argument now, and says `int(i)`.
 
 ### Changed
 

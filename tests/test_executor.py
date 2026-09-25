@@ -581,6 +581,55 @@ def test_a_fractional_scalar_parameter_is_refused() -> None:
         executor().run(term, **broadcast_arguments(float("nan")))
 
 
+def test_a_whole_float_for_an_integral_scalar_is_refused_on_both_runs() -> None:
+    # ``i = 1.0`` passed the contract as a finite whole number, and neither run
+    # could use it: numpy refuses a float index, and the compiled run cannot
+    # pass a float to a C integer argument.
+    term = broadcast_at.trace()
+    x = np.array([1.0, 10.0, 100.0, 1000.0])
+    with pytest.raises(ValueError, match=r"the argument i is 1\.0, a float.*int\(i\)"):
+        executor().run(term, **broadcast_arguments(1.0))
+    with pytest.raises(ValueError, match=r"the argument i is .*1\.0.*, a float"):
+        executor().run(term, **broadcast_arguments(np.float64(1.0)))
+    with pytest.raises(ValueError, match=r"the argument i is 1\.0, a float"):
+        broadcast_at(1.0, x, np.zeros(4))
+    # An integer runs, in either storage.
+    for index in (1, np.int64(1)):
+        out = executor().run(term, **broadcast_arguments(index))
+        assert np.allclose(out["y"], 10.0)
+        out = np.zeros(4)
+        broadcast_at(index, x, out)
+        assert np.allclose(out, 10.0)
+
+
+def test_a_float_stored_count_outside_the_int64_range_is_refused() -> None:
+    # The native run reads a float-stored array of an integral sort as int64.
+    # 1e20 is a whole float that no int64 holds, and ``Nat`` has no upper end
+    # to refuse it, so the conversion used to hand the body an unrelated
+    # integer and the reference run computed with it.
+    @kernel
+    def scale_counts(c: Arr[Fin[n], Nat], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = 2.0 * c[i]
+
+    counts = np.array([1.0, 1e20, 0.0])
+    with pytest.raises(ValueError, match=r"c\[1\] is 1e\+20.*64-bit integer"):
+        scale_counts(counts, np.zeros(3))
+    with pytest.raises(ValueError, match=r"c\[1\] is 1e\+20.*64-bit integer"):
+        executor().run(scale_counts.trace(), c=counts, y=np.zeros(3))
+    # Whole floats inside the range still convert, exactly, at both ends.
+    from loopty.contract import element_types
+
+    types = scale_counts.arg_types
+    edge = np.nextafter(2.0**63, 0.0)
+    element_types(types, {"c": np.array([edge, 0.0]), "y": np.zeros(2)})
+    with pytest.raises(ValueError, match=r"64-bit integer"):
+        element_types(types, {"c": np.array([2.0**63, 0.0]), "y": np.zeros(2)})
+    y = np.zeros(2)
+    scale_counts(np.array([edge, 3.0]), y)
+    assert y.tolist() == [2.0 * edge, 6.0]
+
+
 def test_the_native_run_checks_scalar_parameters_too() -> None:
     # The native run is a call, and the same claim about the call is made there.
     with pytest.raises(ValueError, match=r"the argument i is -1"):
