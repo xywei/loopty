@@ -502,6 +502,8 @@ with a pair of statement instances.
   something a trace assumes; it is what a schedule lowers an accumulation to
   when it reorders one, and `realize(var, tree=True)` over an `exact`
   accumulation is refused.
+- `loopty.sum` is no longer in `__all__`, so `from loopty import *` leaves the
+  builtin `sum` alone. The alias itself remains.
 - `islpy` is pinned below 2026. loopy 2025.2 calls `Aff.is_equal` during code
   generation for a tiled loop nest and `BasicMap.is_bijective` in `map_domain`,
   and islpy 2026 removed both. Drop the ceiling once a loopy release supports

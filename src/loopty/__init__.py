@@ -67,11 +67,12 @@ __all__ = [
     "kernel",
     "program",
     "reduce_sum",
-    "sum",
     "trace",
     "when",
 ]
 
 # Compatibility alias for the development API. New kernel code should use
-# ``reduce_sum``, which makes the operation's Loopty ownership explicit.
+# ``reduce_sum``, which makes the operation's Loopty ownership explicit. It is
+# not in ``__all__``, so that ``from loopty import *`` leaves the builtin
+# ``sum`` alone.
 sum = reduce_sum

@@ -46,3 +46,14 @@ def test_plugin_module_exports_the_four_entry_points() -> None:
     assert plugin.RunVerb().name == "run"
     assert plugin.KernelTheory.name == "kernel"
     assert plugin.LoopyExecutor.name == "loopy"
+
+
+def test_star_import_leaves_the_builtin_sum_alone() -> None:
+    # ``loopty.sum`` is the compatibility alias of ``reduce_sum``; exporting it
+    # made ``from loopty import *`` shadow the builtin in the importing module.
+    namespace: dict = {}
+    exec("from loopty import *", namespace)
+    assert "sum" not in namespace
+    assert namespace["reduce_sum"] is loopty.reduce_sum
+    assert loopty.sum is loopty.reduce_sum
+
