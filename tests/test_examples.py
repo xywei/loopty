@@ -31,7 +31,7 @@ EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 #: Every demo. A demo whose ledger has an ``assumed`` fact is not a failure: a
 #: postcondition nobody can decide yet is exactly what the ledger is for. A
 #: ``refuted`` one is, and every demo here is meant to come out clean.
-NAMES = ("spmv", "stencil_skew", "reshape_layouts", "p2p")
+NAMES = ("spmv", "stencil_skew", "wavefront_acoustic", "reshape_layouts", "p2p")
 
 _RESULTS: dict[tuple[str, str], tuple[Any, list[dict]]] = {}
 _MODULES: dict[str, Any] = {}
@@ -279,6 +279,50 @@ def test_the_stencil_demo_prints_the_rejection_then_the_agreement() -> None:
     assert "witness:" in result.stdout
     assert "-> tested" in result.stdout
     assert "matches the hand-written sweep: True" in result.stdout
+
+
+# }}}
+
+
+# {{{ the coupled wavefront stencil
+
+
+def test_the_wave_example_has_cross_instruction_time_dependence() -> None:
+    module = _module("wavefront_acoustic")
+    assert [stmt.id for stmt in module.acoustic.term.stmts] == ["S0", "S1"]
+
+    message, witness = module.rejected_tiling()
+    assert "illegal" in message
+    assert "writes pressure[" in message
+    (source_id, source), (sink_id, sink), params = witness
+
+    # Unlike stencil_skew, the cut dependence crosses the two instructions:
+    # pressure from S1 at the previous time level feeds velocity in S0. It is
+    # the only dependence with a negative space distance, (1, -1).
+    assert source_id != sink_id
+    assert source_id == "S1"
+    assert sink_id == "S0"
+    assert sink["t"] == source["t"] + 1
+    assert source["i"] == sink["i"] + 1
+    assert params["nt"] > 0 and params["nx"] > 0
+
+
+def test_skewing_the_coupled_wave_makes_the_tile_legal() -> None:
+    module = _module("wavefront_acoustic")
+    schedule = module.wavefront_schedule()
+    assert schedule.history == ("skew(i, by='t')", "tile(t,i,4,8)")
+    assert [fact.status.value for fact in schedule.facts()] == ["decided"] * 4
+    assert schedule.order == ("t_outer", "i_outer", "t_inner", "i_inner")
+
+
+def test_the_wave_demo_prints_the_rejection_then_both_agreements() -> None:
+    result, _ = _invoke("wavefront_acoustic", "python")
+    assert "IllegalCast" in result.stdout
+    assert "witness: S1" in result.stdout
+    assert "pressure: difference" in result.stdout
+    assert "velocity: difference" in result.stdout
+    assert result.stdout.count("-> tested") == 2
+    assert "matches the hand-written recurrence: True" in result.stdout
 
 
 # }}}
