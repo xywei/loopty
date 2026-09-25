@@ -183,6 +183,36 @@ def test_a_parallel_tag_that_would_read_through_stale_offsets_is_rejected() -> N
     assert caught.value.fact.status.value == "refuted"
 
 
+def scan_then_row_sums(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    off: Arr[Fin[n + 1], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The scan of the counts, then row sums through the offsets it stored."""
+    off[0] = 0
+    for r in cnt.dom:
+        off[r + 1] = off[r] + cnt[r]
+    for i in y.dom:
+        y[i] = reduce_sum(val[i, j] for j in val.dom[i])
+
+
+def test_the_rows_read_after_the_scan_can_still_run_in_parallel() -> None:
+    # The offsets reads add dependences from the scan to the rows, and every
+    # one of them runs from the first loop to the second: none is carried by
+    # the row loop, so tagging it stays legal. The scan's own loop carries its
+    # recurrence and is refused, as it always was.
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(scan_then_row_sums, evaluate_annotations(scan_then_row_sums))
+    schedule = Schedule(term, sizes={"n": 6})
+    schedule.tag(i="l.0")
+    with pytest.raises(IllegalCast, match=r"writes off\[.*read by S1\["):
+        schedule.tag(r="l.0")
+
+
 # }}}
 
 
