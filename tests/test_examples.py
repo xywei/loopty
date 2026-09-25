@@ -307,6 +307,37 @@ def test_the_wave_example_has_cross_instruction_time_dependence() -> None:
     assert params["nt"] > 0 and params["nx"] > 0
 
 
+@pytest.mark.parametrize(
+    ("sizes", "tile", "hinted"),
+    [
+        ((16, 32), (2, 2), True),
+        ((9, 33), (3, 5), True),
+        ((64, 64), (4, 16), True),
+        ((5, 7), (4, 8), False),
+    ],
+)
+def test_every_rectangular_wave_tile_cuts_the_same_dependence(
+    sizes: tuple[int, int], tile: tuple[int, int], hinted: bool
+) -> None:
+    # The pair the demo prints is not an accident of where isl happened to
+    # look. Whatever the tile and the sizes, the witness is S1 and then S0, one
+    # step later in time and one back in space, because that is the only
+    # dependence a rectangle cuts. The last case has no space-tile boundary at
+    # the hinted sizes, so isl chooses the sizes as well, and the pair is the
+    # same.
+    from loopty.schedule import IllegalCast, Schedule
+
+    module = _module("wavefront_acoustic")
+    nt, nx = sizes
+    schedule = Schedule(module.acoustic, target="c", sizes={"nt": nt, "nx": nx})
+    with pytest.raises(IllegalCast) as refused:
+        schedule.tile("t", "i", *tile)
+    assert ("as hinted" in str(refused.value)) is hinted
+    (source_id, source), (sink_id, sink), _params = refused.value.witness
+    assert (source_id, sink_id) == ("S1", "S0")
+    assert (sink["t"] - source["t"], sink["i"] - source["i"]) == (1, -1)
+
+
 def test_skewing_the_coupled_wave_makes_the_tile_legal() -> None:
     module = _module("wavefront_acoustic")
     schedule = module.wavefront_schedule()
