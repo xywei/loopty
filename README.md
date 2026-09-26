@@ -273,11 +273,13 @@ end to end; the edges are sharp.
 - An index expression isl cannot express widens the footprint to the whole
   array. That is sound, but it can reject a legal schedule.
 - The in-bounds fact of a ragged access `val[r, j]` is decided against the
-  row's length, and assumes the offsets lay every row out inside the flat
-  buffer, which the contract checks when a run starts. A kernel that writes
-  its counts or its offsets can break that during the run; the native run
-  checks every cell it reads through them and raises `IndexError`, and the
-  ledger does not see it.
+  row's length, and the dependences and disjoint writes of `val` are decided
+  over `[r, j]`. Both assume the offsets lay the rows out inside the flat
+  buffer and apart from each other, which the contract checks when a run
+  starts. A kernel that writes its counts or its offsets can break that during
+  the run. The native run checks every cell it reads through them against the
+  buffer and raises `IndexError` for one outside it, but two rows moved onto
+  the same cells go unnoticed, and the ledger sees neither.
 - `Schedule.affine` and maps whose image has holes. The diamond
   `(t, i) -> (t + i, t - i)` reaches only the points of equal parity, and
   loopy's own `map_domain` refuses it, so loopty rewrites the kernel over the

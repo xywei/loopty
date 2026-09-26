@@ -224,7 +224,19 @@ def row_sums_then_next_count(
             cnt[r + 1] = 0
 
 
-def test_a_parallel_tag_that_would_read_a_stale_row_length_is_rejected() -> None:
+def counts_rewritten_ahead(
+    cnt: Arr[Fin[n + 1], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The kernel of the issue: counts of ``n + 1`` cells, the write unguarded."""
+    for r in y.dom:
+        y[r] = reduce_sum(val[r, j] for j in val.dom[r])
+        cnt[r + 1] = 0
+
+
+@pytest.mark.parametrize("fn", [row_sums_then_next_count, counts_rewritten_ahead])
+def test_a_parallel_tag_that_would_read_a_stale_row_length_is_rejected(fn) -> None:
     # Run in parallel, row ``r + 1`` may be summed before its length is
     # cleared. The schedule checker used to see no dependence between the two
     # statements and accepted the tag.
@@ -232,9 +244,7 @@ def test_a_parallel_tag_that_would_read_a_stale_row_length_is_rejected() -> None
 
     from loopty.trace import trace
 
-    term = trace(
-        row_sums_then_next_count, evaluate_annotations(row_sums_then_next_count)
-    )
+    term = trace(fn, evaluate_annotations(fn))
     schedule = Schedule(term, sizes={"n": 4})
     with pytest.raises(IllegalCast) as caught:
         schedule.tag(r="l.0")
