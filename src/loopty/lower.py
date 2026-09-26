@@ -1756,6 +1756,14 @@ def _scalar_assumptions(term: Term, declared: set[str]) -> isl.BasicSet | None:
     ``i`` the assumption is false of. ``Nat`` contributes non-negativity and
     ``Int`` nothing. A constraint naming something loopy does not have as a
     parameter is dropped rather than guessed at.
+
+    The sizes the kernel is passed are said to be non-negative too, whenever
+    anything is said. An assumption brings every parameter of the kernel into
+    the domain loopy checks an access over, and loopy checks an access only
+    when that domain names everything the array's shape does. So ``off[0]``
+    of ``off: Arr[Fin[n + 1], Nat]``, written outside any loop, went unchecked
+    until a ``Nat`` scalar made ``n`` a parameter of the assumption, and was
+    then refused for ``n = -1``, which no array has.
     """
     from loopty.contract import sort_bound
 
@@ -1794,6 +1802,10 @@ def _scalar_assumptions(term: Term, declared: set[str]) -> isl.BasicSet | None:
             names.add(name)
     if not pieces:
         return None
+    for name in term.sizes:
+        if name in declared:
+            pieces.append(f"{name} >= 0")
+            names.add(name)
     # A set rather than the text ``lp.assume`` also accepts: that path wraps the
     # constraint in the kernel's own outer parameters, and a scalar argument is
     # not one of them until this assumption introduces it.

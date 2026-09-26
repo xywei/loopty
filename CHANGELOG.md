@@ -923,6 +923,12 @@ with a pair of statement instances.
   raised but returned, as a `refuted` agreement fact with the refusal as its
   reason and no outputs, the way the faithfulness fact counts it, so
   `loopty run` prints it under the fact's `REFUTED` line.
+- The assumption loopy is given for the sorts of the scalar parameters says
+  the sizes are non-negative too. An assumption makes every parameter of the
+  kernel part of the domain loopy checks an access over, and loopy checks an
+  access only when that domain names everything the array's shape does, so a
+  `Nat` scalar beside `off[0] = ...` of `off: Arr[Fin[n + 1], Nat]` outside
+  any loop had loopy refuse `off[0]` for `n = -1` with a `LoopyIndexError`.
 
 ### Changed
 

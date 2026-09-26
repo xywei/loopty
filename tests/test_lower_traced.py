@@ -1466,3 +1466,18 @@ def test_a_guard_against_a_real_scalar_agrees_on_the_c_target() -> None:
     assert list(y.numpy()) == [1.0, 1.0, 1.0, 0.0, 0.0]
     (stmt,) = below.term.stmts
     assert "a" not in stmt.domain.get_var_names(isl.dim_type.param)
+
+
+def test_a_natural_scalar_does_not_make_a_loop_free_access_unprovable() -> None:
+    # A Nat scalar is told to loopy as an assumption, which made n a parameter
+    # of the domain loopy checks off[0] over, and loopy then refused off[0] for
+    # n = -1: the sizes were not said to be non-negative alongside it.
+    @kernel
+    def seeded(a: Nat, cnt: Arr[Fin[n], Nat], off: Arr[Fin[n + 1], Nat]):  # noqa: F821
+        off[0] = a
+        for r in cnt.dom:
+            off[r + 1] = off[r] + cnt[r]
+
+    off = Arr.zeros(3, dtype=np.int64)
+    run(seeded, a=1, cnt=Arr.from_numpy(np.array([1, 2], dtype=np.int64)), off=off)
+    assert list(off.numpy()) == [1, 2, 4]
