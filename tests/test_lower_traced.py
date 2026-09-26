@@ -630,6 +630,44 @@ def test_a_ragged_domain_follows_the_loop_it_is_nested_in() -> None:
 # }}}
 
 
+# {{{ one Reduction object in two statements
+
+
+@kernel
+def two_sums_of_one_array(
+    x: Arr[Fin[n], Real],  # noqa: F821
+    s: Arr[Fin[2], Real],
+):
+    """The same sum twice, which the tracer records as two Reduction objects."""
+    s[0] = reduce_sum(x[j] for j in x.dom)
+    s[1] = reduce_sum(x[j] for j in x.dom)
+
+
+def test_a_reduction_object_two_statements_share_is_planned_in_each() -> None:
+    # The tracer builds a Reduction per statement; a term built by hand may
+    # share one. The plan was keyed by the object alone, so the second
+    # statement's overwrote the first's, both reduced over one iname, and loopy
+    # stopped with a CycleError.
+    import dataclasses
+
+    from loopty.lower import lower_generic
+
+    term = two_sums_of_one_array.trace()
+    first, second = term.stmts
+    shared = dataclasses.replace(
+        term, stmts=(first, dataclasses.replace(second, expr=first.expr))
+    )
+    assert lower_generic(shared, "c").reduction_inames == {
+        "S0:0": ("j",),
+        "S1:0": ("j_0",),
+    }
+    out = run(shared, x=np.arange(4.0), s=np.zeros(2))
+    assert np.allclose(out["s"], [6.0, 6.0])
+
+
+# }}}
+
+
 # {{{ names the generated code cannot use
 
 

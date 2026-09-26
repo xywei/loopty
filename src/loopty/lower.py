@@ -700,13 +700,19 @@ class _Builder:
         self.extra_args: list[Any] = []
         self.value_args: list[str] = []
         self._ragged_bounds: dict[str, tuple[str, str]] | None = None
-        #: Per reduction (by identity), the binders it had to rename, its domain
-        #: over the names it ends up with, and the inames those renames
-        #: introduce; see :meth:`plan_reductions`.
-        self.reduction_renames: dict[int, dict[str, str]] = {}
-        self.reduction_domains: dict[int, isl.Set] = {}
+        #: Per reduction, the binders it had to rename, its domain over the
+        #: names it ends up with, and the inames those renames introduce; see
+        #: :meth:`plan_reductions`. A reduction is keyed by the statement it is
+        #: planned in and its identity, because a term built by hand may hold
+        #: one ``Reduction`` object in two statements, and each of them has to
+        #: reduce over inames of its own.
+        self.reduction_renames: dict[tuple[str, int], dict[str, str]] = {}
+        self.reduction_domains: dict[tuple[str, int], isl.Set] = {}
         self.extra_inames: set[str] = set()
         self._renames: list[dict[str, str]] = []
+        #: The statement whose expressions are being lowered, which is the
+        #: other half of a reduction's key.
+        self.statement: str | None = None
         self.expr = ExpressionLowerer(self)
 
     # {{{ ragged storage
@@ -872,6 +878,14 @@ class _Builder:
         so when an outer binder is renamed, the parameter follows it: the domain
         compared here and handed to loopy is stated over the names the kernel
         will actually have (see :meth:`add_reduction_domain`).
+
+        A plan belongs to a reduction *in a statement*. The tracer builds a
+        fresh :class:`~loopty.term.Reduction` for every statement, but a term
+        built by hand may hold one object in two, and a plan keyed by the
+        object alone was one plan for both: the second statement's overwrote
+        the first's, both instructions reduced over one iname, and loopy
+        stopped with the ``CycleError`` above. Keyed by statement as well, the
+        shared object is planned twice, once in each, like two equal objects.
         """
         taken = set(self.term.sizes) | set(dict(self.term.params))
         taken |= {iname for stmt in self.term.stmts for iname in stmt.inames}
@@ -925,8 +939,10 @@ class _Builder:
             rename = {
                 old: new for old, new in zip(names, chosen, strict=True) if old != new
             }
-            self.reduction_renames[id(reduction)] = rename
-            self.reduction_domains[id(reduction)] = _domain_over(domain, chosen)
+            self.reduction_renames[stmt_id, id(reduction)] = rename
+            self.reduction_domains[stmt_id, id(reduction)] = _domain_over(
+                domain, chosen
+            )
             self.extra_inames.update(chosen)
             self._plan_in(
                 stmt_id, reduction.body, {**renaming, **rename}, owner, seen, taken
@@ -946,9 +962,16 @@ class _Builder:
             out.append(candidate)
         return tuple(out)
 
-    def reduction_rename(self, reduction: Reduction) -> dict[str, str]:
-        """How this reduction's binders were renamed, if they were."""
-        return self.reduction_renames.get(id(reduction), {})
+    def reduction_rename(
+        self, reduction: Reduction, statement: str | None = None
+    ) -> dict[str, str]:
+        """How this reduction's binders were renamed, if they were.
+
+        ``statement`` is the statement the reduction is read in, the one being
+        lowered when it is not given.
+        """
+        key = (self.statement if statement is None else statement, id(reduction))
+        return self.reduction_renames.get(key, {})
 
     def push_renaming(self, renaming: Mapping[str, str]) -> None:
         """Rename these variables while the reduction's body is lowered."""
@@ -977,7 +1000,7 @@ class _Builder:
         renamed too; the domain under the written names would tie the inner
         loop to the outer reduction of a different statement.
         """
-        planned = self.reduction_domains.get(id(reduction))
+        planned = self.reduction_domains.get((self.statement, id(reduction)))
         if planned is not None:
             self.extra_domains.append(planned)
             return
@@ -1022,7 +1045,9 @@ class _NullBuilder:
     def rename(self, name: str) -> str:
         return name
 
-    def reduction_rename(self, reduction: Reduction) -> dict[str, str]:
+    def reduction_rename(
+        self, reduction: Reduction, statement: str | None = None
+    ) -> dict[str, str]:
         return {}
 
     def add_reduction_domain(
@@ -1260,6 +1285,9 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
                 "loopty.term.Stmt. Write the whole right-hand side, or use "
                 "kind='assign'."
             )
+        # A reduction's plan is looked up by the statement it is lowered in;
+        # see _Builder.plan_reductions.
+        builder.statement = stmt.id
         assignee = expr(stmt.assignee)
         body = expr(stmt.expr)
 
@@ -1444,7 +1472,7 @@ def _reduction_inames(term: Term, builder: _Builder) -> dict[str, tuple[str, ...
     out: dict[str, tuple[str, ...]] = {}
     for stmt in term.stmts:
         for position, reduction in enumerate(reductions_of(stmt.expr)):
-            renaming = builder.reduction_rename(reduction)
+            renaming = builder.reduction_rename(reduction, stmt.id)
             out[f"{stmt.id}:{position}"] = tuple(
                 renaming.get(name, name) for name in reduction.inames
             )
