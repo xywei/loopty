@@ -116,27 +116,27 @@ row per work group, is the schedule for this shape that does build and did run.
 
 ```console
 $ uv run lanky check examples/spmv.py
-STATUS   BY             WHERE        OWNER          STATEMENT
--------  -------------  -----------  -------------  ------------------------------------------------------------------------
-decided  isl            spmv.py:79   scan           off[0] is in bounds for every instance of S0
-decided  isl            spmv.py:81   scan           off[r + 1] is in bounds for every instance of S1
-decided  isl            spmv.py:81   scan           off[r] is in bounds for every instance of S1
-decided  isl            spmv.py:81   scan           cnt[r] is in bounds for every instance of S1
-decided  isl            spmv.py:79   scan           distinct instances of S0 write distinct cells of off
-decided  isl            spmv.py:81   scan           distinct instances of S1 write distinct cells of off
-decided  isl            spmv.py:69   scan           the source order runs every dependence forward in time
-assumed  -              spmv.py:69   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
-tested   interpreter    spmv.py:69   scan           the traced term computes what the body computes
-tested   property-test  spmv.py:84   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat] | off(0) ==...
-decided  isl            spmv.py:112  spmv           y[r] is in bounds for every instance of S0
-decided  isl            spmv.py:112  spmv           val[r, j] is in bounds for every instance of S0
-decided  type           spmv.py:112  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
-decided  isl            spmv.py:112  spmv           col[r, j] is in bounds for every instance of S0
-decided  isl            spmv.py:112  spmv           distinct instances of S0 write distinct cells of y
-decided  isl            spmv.py:102  spmv           the source order runs every dependence forward in time
-decided  type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
-tested   interpreter    spmv.py:102  spmv           the traced term computes what the body computes
-assumed  -              spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
+STATUS                            BY             WHERE        OWNER          STATEMENT
+--------------------------------  -------------  -----------  -------------  ------------------------------------------------------------------------
+decided                           isl            spmv.py:79   scan           off[0] is in bounds for every instance of S0
+decided                           isl            spmv.py:81   scan           off[r + 1] is in bounds for every instance of S1
+decided                           isl            spmv.py:81   scan           off[r] is in bounds for every instance of S1
+decided                           isl            spmv.py:81   scan           cnt[r] is in bounds for every instance of S1
+decided                           isl            spmv.py:79   scan           distinct instances of S0 write distinct cells of off
+decided                           isl            spmv.py:81   scan           distinct instances of S1 write distinct cells of off
+decided                           isl            spmv.py:69   scan           the source order runs every dependence forward in time
+assumed                           -              spmv.py:69   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+tested                            interpreter    spmv.py:69   scan           the traced term computes what the body computes
+tested                            property-test  spmv.py:84   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat] | off(0) ==...
+decided                           isl            spmv.py:112  spmv           y[r] is in bounds for every instance of S0
+decided                           isl            spmv.py:112  spmv           val[r, j] is in bounds for every instance of S0
+decided                           type           spmv.py:112  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
+decided                           isl            spmv.py:112  spmv           col[r, j] is in bounds for every instance of S0
+decided                           isl            spmv.py:112  spmv           distinct instances of S0 write distinct cells of y
+decided                           isl            spmv.py:102  spmv           the source order runs every dependence forward in time
+decided                           type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
+tested                            interpreter    spmv.py:102  spmv           the traced term computes what the body computes
+assumed under scan:postcondition  -              spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
 
 19 facts: 2 assumed, 14 decided, 3 tested
 ```
@@ -165,8 +165,10 @@ Read the `BY` column.
   `refuted`, with the input and the first cell that differs.
 - Two facts are `assumed`: `scan`'s postcondition, which needs the recurrence,
   and the restatement of it inside `solve`. Nothing established them and nothing
-  pretends otherwise. `lanky check` still exits 0, because `ASSUMED` is not a
-  failure; only `REFUTED` is.
+  pretends otherwise. The restatement rests on `scan`'s fact, and its row says
+  so, `assumed under scan:postcondition`: whatever `scan`'s postcondition comes
+  to be worth, the restatement is worth no more. `lanky check` still exits 0,
+  because `ASSUMED` is not a failure; only `REFUTED` is.
 
 `lanky check --verbose` prints each oracle and whether it is available first.
 
@@ -351,7 +353,8 @@ transpose at the bottom is split and interchanged, and both steps are cast facts
   re-check. The in-bounds fact for `u[t, i - 1]` turns `refuted`, `lanky check`
   prints `6 facts: 1 assumed, 4 decided, 1 refuted` and then
   `REFUTED jacobi at ...: u[t, i - 1] is in bounds for every instance of S0`
-  with the cell that escapes under it, at the sizes isl read it off at:
+  with the cell that escapes under it, first as isl's tuple,
+  `witness: (0, -1)`, then named, at the sizes isl read it off at:
   `cells u[t, i - 1] reaches are cells u has, except [a0=0, a1=-1] at [nt=2, nx=2]`.
   It exits 1. The JSON has the same cell as `witness_text`, with the isl
   question beside it. The faithfulness fact turns `assumed`: the body now

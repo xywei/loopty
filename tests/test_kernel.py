@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from types import ModuleType
 
 import numpy as np
 import pytest
-from lanky.ledger import Status
+from lanky.ledger import Ledger, Status
 from lanky.plugins import registry
 from lanky.prelude import Nat, Real
 
 from loopty import Arr, Fin, kernel, program, when
 from loopty.kernel import Kernel, KernelTheory, Program
+
+KERNELS = Path(__file__).parent / "kernels"
 
 #: A module that re-exports the guard under another name, so that a body can
 #: reach it as an attribute without the identifier ``when`` appearing anywhere.
@@ -133,6 +137,105 @@ def test_a_program_runs_natively_and_records_its_callees_claims() -> None:
     assert [fact.kind for fact in facts] == ["postcondition-in-scope"]
     assert facts[0].status is Status.ASSUMED
     assert facts[0].owner.endswith("both")
+
+
+def test_a_programs_restatement_rests_on_the_callees_own_fact() -> None:
+    """``rests_on`` names the id the callee's postcondition fact really has.
+
+    It used to be a ``from`` entry in the provenance, which lanky could not
+    read, so the ledger showed the restatement as a free-standing assumption.
+    """
+    (restated,) = both.facts()
+    (post,) = [fact for fact in scan.facts() if fact.kind == "postcondition"]
+    assert restated.rests_on == (post.id,)
+    assert restated.provenance == {"callee": scan.qualname}
+
+    ledger = Ledger([*scan.facts(), restated])
+    assert ledger.support(restated).under == (post.id,)
+    assert ledger.support(restated).effective is Status.ASSUMED
+    # the kernel owns several facts, so the one meant is named by its id
+    lines = ledger.render().splitlines()
+    (row,) = [line for line in lines if "after scan(...)" in line]
+    assert row.startswith(f"assumed under {post.id}  ")
+
+
+def test_the_ledger_of_a_file_says_what_its_program_rests_on() -> None:
+    """Checked with its callees, a program's restatements name their facts."""
+    from lanky.check import check_path
+
+    ledger = check_path(KERNELS / "spmv_min.py")
+    (restated,) = [fact for fact in ledger if fact.kind == "postcondition-in-scope"]
+    (post,) = [fact for fact in ledger if fact.kind == "postcondition"]
+    assert restated.rests_on == (post.id,)
+    assert ledger.support(restated).under == (post.id,)
+    data = json.loads(ledger.to_json())
+    (row,) = [row for row in data if row["kind"] == "postcondition-in-scope"]
+    assert row["rests_on"] == [post.id]
+    assert row["under"] == [post.id]
+    assert row["effective"] == "assumed"
+
+
+CALLEE = '''
+from __future__ import annotations
+
+from lanky.prelude import Nat
+
+from loopty import Arr, Fin, kernel
+
+
+@kernel
+def scan(
+    cnt: Arr[Fin[n], Nat], off: Arr[Fin[n + 1], Nat]
+) -> (off[0] == 0) & all(off[r + 1] == off[r] + cnt[r] for r in Fin[n]):
+    """The offsets, in a file of their own."""
+    off[0] = 0
+    for r in cnt.dom:
+        off[r + 1] = off[r] + cnt[r]
+'''
+
+CALLER = """
+from __future__ import annotations
+
+from loopty_test_callee import scan
+
+from loopty import program
+
+
+@program
+def solve(cnt, off):
+    \"\"\"Runs a kernel of another file.\"\"\"
+    scan(cnt, off)
+"""
+
+
+def test_a_callee_of_another_file_is_an_id_this_ledger_does_not_hold(
+    tmp_path, capsys
+) -> None:
+    """The callee's fact is in its own file's ledger, and lanky says so.
+
+    The restatement still rests on the id the callee's fact has there, which
+    this ledger counts as an assumption and names under the table, without
+    failing the check.
+    """
+    import sys
+
+    from lanky import cli
+
+    (tmp_path / "loopty_test_callee.py").write_text(CALLEE, encoding="utf-8")
+    caller = tmp_path / "caller.py"
+    caller.write_text(CALLER, encoding="utf-8")
+    try:
+        assert cli.main(["check", str(caller)]) == 0
+    finally:
+        sys.modules.pop("loopty_test_callee", None)
+    printed = capsys.readouterr().out.splitlines()
+    (row,) = [line for line in printed if "after scan(...)" in line]
+    assert row.startswith("assumed under scan:postcondition  ")
+    unresolved = "rests on scan:postcondition, which this ledger does not hold"
+    assert any(
+        line.startswith("UNRESOLVED solve at caller.py:") and line.endswith(unresolved)
+        for line in printed
+    )
 
 
 def test_a_guard_is_found_under_an_aliased_import() -> None:
