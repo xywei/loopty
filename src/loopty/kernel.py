@@ -391,12 +391,13 @@ class Kernel(_Decorated):
         a crash, so that ``lanky check`` on a file with one broken kernel still
         prints the ledger of the others.
 
-        The error is also the fact's ``reason``, next to an empty
-        ``counterexample``. That is lanky's form for a closed claim refuted at
-        no assignment in particular, and lanky prints the reason of such a fact
-        under its ``REFUTED`` line; the error of a :class:`~loopty.trace.TraceError`
+        The error is also the fact's ``reason``, which lanky prints under the
+        fact's ``REFUTED`` line (``lanky.cli.refutation_lines``, which ``loopty
+        run`` prints too): the error of a :class:`~loopty.trace.TraceError`
         names the fix, and it belongs on the screen rather than only in the
-        JSON ledger.
+        JSON ledger. There is no ``counterexample``, because the claim is not
+        refuted at any assignment in particular, and lanky needs none to print
+        the reason.
         """
         if self._facts is not None:
             return self._facts
@@ -412,7 +413,7 @@ class Kernel(_Decorated):
                     term=None,
                     status=Status.REFUTED,
                     decided_by="trace",
-                    provenance={"error": error, "counterexample": {}, "reason": error},
+                    provenance={"error": error, "reason": error},
                     where=self.where,
                     owner=self.qualname,
                 ),

@@ -510,12 +510,13 @@ with a pair of statement instances.
   `for i in x.dom: y[i] = x[i]` traced over an iname `i0` on 3.13 and `i` on
   3.12.
 - `lanky check` prints the error of a kernel that cannot be traced under its
-  `REFUTED` line: the `trace` fact carries it as its `reason`, next to an empty
-  `counterexample`, which is lanky's form for a closed claim refuted at no
-  assignment in particular. The fix a `TraceError` names used to reach only the
-  JSON ledger. `loopty run` reports such a kernel as one it cannot schedule,
-  naming the error, and exits 1, where it used to stop with a traceback from
-  the search for kernels.
+  `REFUTED` line: the `trace` fact carries it as its `reason`, and no
+  `counterexample`, because it is refuted at no assignment in particular (an
+  empty one, there only to get the reason printed, is gone now that lanky
+  prints a reason without one). The fix a `TraceError` names used to reach only
+  the JSON ledger. `loopty run` reports such a kernel as one it cannot
+  schedule, naming the error, and exits 1, where it used to stop with a
+  traceback from the search for kernels.
 - The schedule checker and the typing rules see the reads a ragged access makes
   through its offsets. `val[r, j]` is `val[off[r] + j]` once lowered, and row
   `r` ends at `off[r + 1]`, but neither read is in the body, so only the

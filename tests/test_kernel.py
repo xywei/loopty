@@ -113,11 +113,13 @@ def test_a_body_that_cannot_be_traced_is_reported_as_a_fact() -> None:
     assert facts[0].status is Status.REFUTED
     assert facts[0].kind == "trace"
     assert "when" in facts[0].provenance["error"]
-    # A closed claim refuted at no assignment in particular: lanky prints the
-    # reason of such a fact under its REFUTED line, so the fix reaches the
-    # terminal and not only the JSON ledger.
-    assert facts[0].provenance["counterexample"] == {}
+    # lanky prints a refuted fact's reason under its REFUTED line, so the fix
+    # reaches the terminal and not only the JSON ledger. The claim is refuted
+    # at no assignment in particular, and there is no counterexample: the
+    # empty one this fact used to carry was there only to get the reason
+    # printed, which lanky now does without it.
     assert facts[0].provenance["reason"] == facts[0].provenance["error"]
+    assert "counterexample" not in facts[0].provenance
 
 
 def test_a_program_runs_natively_and_records_its_callees_claims() -> None:

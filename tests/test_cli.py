@@ -83,6 +83,15 @@ def write_fixture(tmp_path, body: str = FIXTURE):
     return path
 
 
+def refutation_block(out: str, prefix: str) -> tuple[list[str], int]:
+    """The lines of ``out``, and the index of the one ``REFUTED {prefix}...`` line."""
+    lines = out.splitlines()
+    (header,) = [
+        k for k, line in enumerate(lines) if line.startswith(f"REFUTED {prefix}")
+    ]
+    return lines, header
+
+
 def test_version_is_printed_without_a_verb(capsys) -> None:
     assert main(["--version"]) == 0
     assert "loopty" in capsys.readouterr().out
@@ -266,7 +275,8 @@ def test_check_refuses_a_loop_carried_name_and_prints_the_fix(
     The body used to trace to ``y[0] = 0.0 + x[i]`` and the ledger decided
     facts about that. Now tracing refuses it, the kernel's one fact is the
     refuted ``trace`` fact, and the message that names the fix is printed under
-    it rather than left in the JSON.
+    it rather than left in the JSON: the line right under ``REFUTED`` is the
+    error, with no counterexample line and no ``no witness recorded``.
     """
     from lanky.cli import main as lanky_main
 
@@ -275,8 +285,10 @@ def test_check_refuses_a_loop_carried_name_and_prints_the_fix(
     code = lanky_main(["check", str(path), "--json", str(out_path)])
     out = capsys.readouterr().out
     assert code == 1
-    assert "REFUTED running_sum" in out
-    assert "TraceError" in out
+    lines, header = refutation_block(out, "running_sum at ")
+    assert lines[header + 1].startswith("  TraceError: ")
+    assert "counterexample" not in out
+    assert "no witness recorded" not in out
     assert "carries 's'" in out
     assert "reduce_sum" in out
     assert "indexed cell" in out
@@ -284,6 +296,8 @@ def test_check_refuses_a_loop_carried_name_and_prints_the_fix(
     assert [(fact["kind"], fact["status"]) for fact in facts] == [
         ("trace", "refuted")
     ]
+    assert "counterexample" not in facts[0]["provenance"]
+    assert facts[0]["provenance"]["reason"].startswith("TraceError: ")
 
 
 def test_run_reports_a_loop_carried_name_instead_of_a_traceback(
