@@ -597,11 +597,12 @@ with a pair of statement instances.
   that the executor, `Schedule` and `loopty run` passed on. A statement's
   domain is now cut after every loop at which another statement leaves its
   nest, as a ragged one already was at its row, and an outer stretch drops the
-  constraints of the loops inside it rather than projecting them out, so the
-  loop over `r` does not wait for the inner loop to have an iteration. Every
-  example lowers to the code it lowered to before. One name for two
-  different loops, which only a term built by hand can have, is refused with a
-  `LoweringError` naming the loop. See note 10 in `docs/loopy-notes.md`.
+  constraints of the loops inside it rather than projecting them out, so two
+  inner loops over different extents do not leave the loop over `r` a union
+  that is not convex. Every example lowers to the code it lowered to before.
+  One name for two different loops, which only a term built by hand can have,
+  is refused with a `LoweringError` naming the loop. See note 10 in
+  `docs/loopy-notes.md`.
 - A statement that reads what an inner loop writes stays outside that loop.
   loopy adds to an instruction whose loops are not final the loops of every
   instruction that writes what it reads, less those the writer's subscripts

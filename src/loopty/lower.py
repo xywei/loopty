@@ -1212,14 +1212,19 @@ def _outer_part(domain: isl.Set, keep: int) -> isl.Set:
     """``domain`` over its first ``keep`` dimensions: the loops outside the rest.
 
     The constraints that mention an inner dimension are dropped, not projected
-    out. Projecting ``j`` out of ``0 <= j < m`` leaves ``m >= 1`` behind, and a
-    loop over ``r`` that ran only when the inner loop has an iteration would
-    skip every statement that sits after that inner loop. What is dropped is
-    not lost: the innermost domain of the statement keeps every constraint, so
-    the statement's instances are its domain, exactly. So are the constraints
-    on the sizes alone (``m >= 0``), which bound no loop: kept, they would make
-    this range differ from the same loop's range in a statement that has no
-    ``m``, and the merged loop would carry them as a predicate.
+    out. Projecting ``j`` out of ``0 <= j < m`` leaves ``m >= 1`` behind, which
+    says when the inner loop has an iteration and bounds nothing about ``r``.
+    Two inner loops side by side, over ``m`` and over ``p``, would then give the
+    loop over ``r`` the union of ``m >= 1`` and ``p >= 1``, which is not convex
+    and so cannot be one loop: :func:`_merge_domains` would refuse the kernel.
+    Beside a statement at the outer depth the union is the whole range again,
+    and the constraint would only come back as a predicate on the inner
+    statement. What is dropped is not lost: the innermost domain of the
+    statement keeps every constraint, so the statement's instances are its
+    domain, exactly. So are the constraints on the sizes alone (``m >= 0``),
+    which bound no loop: kept, they would make this range differ from the same
+    loop's range in a statement that has no ``m``, and the merged loop would
+    carry them as a predicate.
 
     Dropping can leave a loop without a bound when its bound was written
     through an inner loop (``0 <= r <= j < n``), which no loop a person writes

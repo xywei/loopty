@@ -287,7 +287,8 @@ def test_the_opencl_target_is_named_but_not_imported() -> None:
 
 def test_the_outer_part_of_a_domain_keeps_nothing_of_the_inner_loop() -> None:
     # Projected, ``0 <= j < m`` would leave ``m >= 1`` on the loop over ``r``,
-    # and a statement after the inner loop would not run when ``m`` is zero.
+    # and two inner loops side by side over ``m`` and ``p`` would give it a
+    # union that is not convex (see the traced test of two inner loops).
     import islpy as isl
 
     from loopty.lower import _outer_part

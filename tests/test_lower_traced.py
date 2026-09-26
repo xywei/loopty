@@ -788,8 +788,8 @@ def test_the_inner_loop_is_its_own_domain_nested_in_the_outer_one() -> None:
     }
     assert set(shapes) == {("r",), ("j",)}
     assert "r" in shapes[("j",)]
-    # The loop over ``r`` does not wait for the inner loop to have an
-    # iteration: its domain keeps nothing of ``j``'s, ``m >= 1`` included.
+    # The loop over ``r`` is the rows: its domain keeps nothing of ``j``'s,
+    # ``m >= 1`` included.
     (outer,) = [
         domain
         for domain in domains

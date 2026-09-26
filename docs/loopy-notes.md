@@ -289,15 +289,17 @@ another statement leaves its nest, and the statement's domain is cut there
 into a domain per stretch of loops: `{ [r] }` and `[r] -> { [j] }`, the first
 merging with the other statement's. An outer stretch drops the constraints that
 mention an inner loop instead of projecting the inner loop out
-(`_outer_part`): projecting `j` out of `0 <= j < m` leaves `m >= 1`, and a loop
-over `r` that ran only when the inner loop has an iteration would skip every
-statement after that inner loop. Nothing is lost by dropping, because the
-innermost stretch keeps every constraint. Constraints on the sizes alone go
-too, so the loop over `r` is the same set in both statements and carries no
-predicate. A statement no other one leaves keeps its single domain, so the code
-generated for every kernel that lowered before is what it was. What is left, one
-name for two different loops in a term built by hand, is refused with a
-`LoweringError` naming the loop.
+(`_outer_part`): projecting `j` out of `0 <= j < m` leaves `m >= 1`, and two
+inner loops side by side, over `m` and over `p`, would give the loop over `r`
+the union of `m >= 1` and `p >= 1`, which is not convex and cannot be one loop.
+Nothing is lost by dropping, because the innermost stretch keeps every
+constraint. Constraints on the sizes alone go too, so the loop over `r` is the
+same set in both statements and carries no predicate. A statement no other one
+leaves keeps its single domain, and the code generated for every example is
+what it was. What is left, one name for two different loops in a term built by
+hand, is refused with a `LoweringError` naming the loop.
+
+A statement beside an inner loop also has to stay out of it, which is note 12.
 
 ## 11. Hardware axes on reductions
 
