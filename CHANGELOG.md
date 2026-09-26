@@ -613,7 +613,9 @@ with a pair of statement instances.
   wrote one; `&` or `|` with an integer operand is bitwise in the same way. The
   fix is the complement written as a comparison (`i <= 0`), and an explicit
   comparison (`k != 0`) for an integer. A data comparison is a numpy `bool_`,
-  on which `~` is logical, and is not affected. The faithfulness fact counts a
+  on which `~` is logical, and is not affected, and natively a guard nested
+  under a false one is not asked, since nothing under it is written (a read out
+  of range there answers the integer 0). The faithfulness fact counts a
   `TraceError` from the native run as a disagreement, not as an input the body
   refuses, so such a kernel is `refuted` with the refusal as its reason instead
   of `assumed` for want of an input that ran.

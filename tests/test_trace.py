@@ -1703,6 +1703,23 @@ def test_a_guard_that_is_a_bool_runs_natively() -> None:
     assert list(y.numpy()) == [0.0, 1.0, 1.0, 0.0]
 
 
+def test_a_guard_under_a_false_guard_is_not_asked_natively() -> None:
+    # At i = n - 1 the outer guard is false and the read of w[i + 1] is out of
+    # range, which a masked read answers with the integer 0: nothing under the
+    # outer guard is written there, whatever the inner one says.
+    from loopty.kernel import Kernel
+
+    def weighted(w: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(i + 1 < y.dom.size):
+                with when(w[i + 1]):
+                    y[i] = 1.0
+
+    y = Arr.zeros(3)
+    Kernel(weighted)(Arr.from_numpy(np.array([0.0, 2.0, 0.0])), y)
+    assert list(y.numpy()) == [1.0, 0.0, 0.0]
+
+
 def test_a_concrete_integer_guard_is_refused_while_tracing() -> None:
     flag = 1
 

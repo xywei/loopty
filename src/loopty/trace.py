@@ -2816,7 +2816,9 @@ class when:  # noqa: N801 - a context manager written like a statement
     ``int``, ``i > 0`` a Python ``bool``, and ``~`` on a bool is bitwise, so
     the guard is ``-2`` or ``-1`` and always true, while the trace records
     ``not (i > 0)``. A data comparison is a numpy ``bool_``, on which ``~`` is
-    logical, and is not affected.
+    logical, and is not affected. Natively the guard is asked wherever the
+    guards around it hold; under a false one nothing is written whatever it
+    says.
     """
 
     def __init__(self, condition: Any) -> None:
@@ -2825,7 +2827,11 @@ class when:  # noqa: N801 - a context manager written like a statement
 
     def __enter__(self) -> when:
         """Open the guard."""
-        if _integer(self.condition):
+        # Natively, a guard inside a block whose guard is false is not asked:
+        # nothing under it is written, and a read out of range there answers
+        # the integer 0 (see _MaskedArr), whatever the array holds.
+        asked = self.tracer is not None or not _writes_are_masked()
+        if asked and _integer(self.condition):
             raise TraceError(
                 _integer_guard_message(self.condition, _location(sys._getframe(1)))
             )
