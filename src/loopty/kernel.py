@@ -370,8 +370,7 @@ class Kernel(_Decorated):
             if name in written:
                 continue
             if isinstance(value, Arr):
-                whole = np.real(value.numpy()).astype(np.int64)
-                out[name] = Arr(whole, value.offsets) if value.is_ragged else Arr(whole)
+                out[name] = value._replaced(np.real(value.numpy()).astype(np.int64))
             else:
                 out[name] = np.real(value).astype(np.int64)
         return out

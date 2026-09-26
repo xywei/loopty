@@ -37,6 +37,14 @@ a check rather than by a hope. Being a point is two questions and not one: a
 range test is a pair of comparisons, and ``nan`` fails both of them, so
 integrality (:func:`_not_an_integer`) is asked first and separately.
 
+*An array over a domain is over that domain.* ``L: Arr[Where[i: Fin[n], j:
+Fin[n], j < i], Real]`` has its in-bounds obligations decided over the exact
+triangle, and both runs index ``L`` at its points through a layout computed
+from the domain (:mod:`loopty.domain`). An argument over another set of points
+would make the compiled run read and write through a table or a box that is
+not its own, so :func:`domain_arguments` asks that the argument's points be
+the declared domain's at the sizes the call determines.
+
 *A scalar parameter of a refined sort really is one.* The same rule reaches the
 other half of the signature. ``i: Fin[n]`` in a kernel writing ``x[i]`` makes
 that access in bounds by type just as an indirection is, so ``run(..., i=-1)``
@@ -69,6 +77,7 @@ __all__ = [
     "check_arguments",
     "counts_family",
     "disjoint_arguments",
+    "domain_arguments",
     "element_bound",
     "element_types",
     "integral_sort",
@@ -93,7 +102,14 @@ def _buffer(value: Any) -> np.ndarray | None:
 
 
 def _values(value: Any) -> np.ndarray | None:
-    """An argument's elements as one flat array, or ``None``."""
+    """An argument's elements as one flat array, or ``None``.
+
+    An array over a domain has its elements at the domain's points, in their
+    order (:meth:`loopty.arr.Arr.cells`); a cell its box keeps outside the
+    domain is not one of them.
+    """
+    if isinstance(value, Arr) and value.domain is not None:
+        return value.cells()
     buffer = _buffer(value)
     return None if buffer is None else np.asarray(buffer).reshape(-1)
 
@@ -269,6 +285,15 @@ def resolve_sizes(
         if not isinstance(typ, ArrType):
             if isinstance(value, int | np.integer) and not isinstance(value, bool):
                 sizes.setdefault(name, int(value))
+            continue
+        if typ.domain is not None:
+            # An array over a domain was built at sizes of its own, by name; a
+            # name the declared domain shares is that size of the call.
+            if isinstance(value, Arr) and value.domain is not None:
+                declared = typ.domain.size_names()
+                for size_name, extent in value.sizes.items():
+                    if size_name in declared:
+                        sizes.setdefault(size_name, extent)
             continue
         for size, extent in _axis_extents_of(value, typ):
             if isinstance(size, prim.Variable):
@@ -594,7 +619,14 @@ def element_types(
 
 
 def _cell_label(name: str, value: Any, position: int) -> str:
-    """``col[1, 0]``: where in an argument the flat offset ``position`` is."""
+    """``col[1, 0]``: where in an argument the flat offset ``position`` is.
+
+    For an array over a domain the position is among its cells, in the order
+    of :meth:`loopty.arr.Arr.cells`.
+    """
+    if isinstance(value, Arr) and value.domain is not None:
+        point = value.domain.points()[position]
+        return f"{name}[{', '.join(str(k) for k in point)}]"
     if isinstance(value, Arr) and value.is_ragged:
         offsets = np.asarray(value.offsets)
         row = int(np.searchsorted(offsets, position, side="right") - 1)
@@ -707,6 +739,98 @@ def scalar_parameters(
 # }}}
 
 
+def domain_arguments(
+    types: Mapping[str, Any],
+    supplied: Mapping[str, Any],
+    sizes: Mapping[str, int] | None = None,
+) -> None:
+    """Refuse an argument that is not an array over its declared domain.
+
+    ``L: Arr[Where[i: Fin[n], j: Fin[n], j < i], Real]`` needs an array whose
+    points are the triangle's at the ``n`` of the call: built with
+    :meth:`loopty.arr.Arr.zeros` or :meth:`~loopty.arr.Arr.from_cells` from the
+    kernel's own domain (``kernel.arg_types["L"].domain``) or from any domain
+    with the same points. The points are compared, not the spelling. A plain
+    ``ndarray`` is refused, because nothing in it says which of its cells are
+    the domain's, and so is an array over other points: the compiled run would
+    read it through a box or a table of rows that is not its own, and the
+    in-bounds facts are about the declared domain. The sizes the domain names
+    have to be determined by the call, by its arrays or its scalars. The other
+    way round is refused too: an array over a domain passed for a parameter
+    whose type is a box, or ragged rows, has cells that type does not have.
+    """
+    from loopty.domain import fixed_set, same_points
+
+    sizes = resolve_sizes(types, supplied) if sizes is None else sizes
+    for name, typ in types.items():
+        if not isinstance(typ, ArrType) or name not in supplied:
+            continue
+        value = supplied[name]
+        if typ.domain is None:
+            if isinstance(value, Arr) and value.domain is not None:
+                raise ValueError(
+                    f"the argument {name} is an array over {value.domain!r}, and "
+                    f"{name}'s type has no domain: its cells are a box, or ragged "
+                    "rows, and an array over a domain has only the domain's"
+                )
+            continue
+        if not (isinstance(value, Arr) and value.domain is not None):
+            what = (
+                "an array with no domain"
+                if isinstance(value, Arr | np.ndarray)
+                else f"{value!r}"
+            )
+            raise ValueError(
+                f"the argument {name} is {what}, and {name}: Arr[{typ.domain}, "
+                "...] is an array over a domain, which says which cells are the "
+                "array's. Build it with Arr.zeros(domain, ...) or "
+                "Arr.from_cells(domain, values, ...), passing the sizes by name; "
+                "the kernel's own domain is kernel.arg_types"
+                f"[{name!r}].domain"
+            )
+        needed = typ.domain.size_names()
+        missing = sorted(needed - set(sizes))
+        if missing:
+            raise ValueError(
+                f"the call does not determine {', '.join(missing)}, which the "
+                f"domain {typ.domain} of {name} names, so the points {name} has "
+                "to have are not known. Pass an array whose axis is that size, "
+                f"or build {name} over the kernel's own domain, whose sizes "
+                "have those names"
+            )
+        fixed = {size: sizes[size] for size in needed}
+        same, witness = same_points(
+            fixed_set(typ.domain, fixed), value.domain.isl_points()
+        )
+        if same:
+            continue
+        if witness is None:
+            differ = (
+                f"the one has {value.domain.ndim} axes and the other "
+                f"{typ.domain.ndim}"
+            )
+        elif value.domain.contains(witness):
+            differ = (
+                f"{list(witness)} is a point of the argument's and not of the "
+                "declared one"
+            )
+        else:
+            differ = (
+                f"{list(witness)} is a point of the declared domain and not of "
+                "the argument's"
+            )
+        declared = ", ".join(f"{size}={fixed[size]}" for size in sorted(fixed))
+        raise ValueError(
+            f"the argument {name} is over {value.domain!r}, and its type says "
+            f"{typ.domain} at {declared or 'no sizes'}: {differ}. Both runs "
+            f"index {name} at the declared "
+            "domain's points through a layout computed from it, and the "
+            "in-bounds facts are about that domain, so an array over other "
+            "points would be read and written through a layout that is not "
+            "its own"
+        )
+
+
 def check_arguments(
     types: Mapping[str, Any],
     supplied: Mapping[str, Any],
@@ -726,6 +850,7 @@ def check_arguments(
     disjoint_arguments(supplied)
     ragged_arguments(types, supplied, offsets_args)
     sizes = resolve_sizes(types, supplied)
+    domain_arguments(types, supplied, sizes)
     extents = axis_extents(types, supplied)
     element_types(types, supplied, sizes, extents)
     scalar_parameters(types, supplied, sizes, extents)
