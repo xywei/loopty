@@ -280,3 +280,34 @@ def test_the_opencl_target_is_named_but_not_imported() -> None:
         target_for("cuda")
     # Importing loopty, lowering, and running must never pull in pyopencl.
     assert "pyopencl" not in sys.modules
+
+
+# {{{ the loops outside an inner loop
+
+
+def test_the_outer_part_of_a_domain_keeps_nothing_of_the_inner_loop() -> None:
+    # Projected, ``0 <= j < m`` would leave ``m >= 1`` on the loop over ``r``,
+    # and a statement after the inner loop would not run when ``m`` is zero.
+    import islpy as isl
+
+    from loopty.lower import _outer_part
+
+    dense = isl.Set("[n, m] -> { [r, j] : m >= 0 and 0 <= r < n and 0 <= j < m }")
+    rows = isl.Set("[n, m] -> { [r] : 0 <= r < n }")
+    assert _outer_part(dense, 1).is_equal(rows)
+    assert not dense.project_out(isl.dim_type.set, 1, 1).is_equal(rows)
+    # Nothing to drop when every loop is kept.
+    assert _outer_part(dense, 2) is dense
+
+
+def test_a_loop_bounded_only_through_an_inner_one_keeps_its_projection() -> None:
+    # Dropping ``r <= j < n`` would leave ``r`` unbounded, which no loop is.
+    import islpy as isl
+
+    from loopty.lower import _outer_part
+
+    through = isl.Set("[n] -> { [r, j] : 0 <= r <= j < n }")
+    assert _outer_part(through, 1).is_equal(isl.Set("[n] -> { [r] : 0 <= r < n }"))
+
+
+# }}}

@@ -630,6 +630,243 @@ def test_a_ragged_domain_follows_the_loop_it_is_nested_in() -> None:
 # }}}
 
 
+# {{{ statements at two depths of one loop
+
+
+@kernel
+def after_inner(
+    a: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A statement inside the loop over ``j``, and one after it, in ``r``'s."""
+    for r in y.dom:
+        for j in a.dom[r]:
+            y[r] = y[r] + a[r, j]
+        z[r] = 1.0
+
+
+@kernel
+def before_inner(
+    a: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The same two statements the other way round."""
+    for r in y.dom:
+        z[r] = 1.0
+        for j in a.dom[r]:
+            y[r] = y[r] + a[r, j]
+
+
+@kernel
+def guarded_inner(
+    a: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The statement inside the inner loop skips the first row; the other not."""
+    for r in y.dom:
+        for j in a.dom[r]:
+            with when(r > 0):
+                y[r] = y[r] + a[r, j]
+        z[r] = 1.0
+
+
+@kernel
+def side_by_side(
+    a: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+    b: Arr[Fin[n], Fin[p], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+):
+    """Two inner loops of different extents in one outer loop, nothing between."""
+    for r in y.dom:
+        for j in a.dom[r]:
+            y[r] = y[r] + a[r, j]
+        for k in b.dom[r]:
+            z[r] = z[r] + b[r, k]
+
+
+@kernel
+def three_depths(
+    a: Arr[Fin[n], Fin[m], Fin[p], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+):
+    """A statement at each depth of a triple nest."""
+    for r in y.dom:
+        y[r] = 0.0
+        for j in z.dom[r]:
+            z[r, j] = 0.0
+            for k in a.dom[r, j]:
+                z[r, j] = z[r, j] + a[r, j, k]
+            y[r] = y[r] + z[r, j]
+
+
+@kernel
+def rows_and_lengths(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    a: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+    c: Arr[Fin[n], Nat],  # noqa: F821
+):
+    """A ragged and a dense inner loop in one row loop, and the row's length."""
+    for r in y.dom:
+        for j in val.dom[r]:
+            y[r] = y[r] + val[r, j]
+        for k in a.dom[r]:
+            z[r] = z[r] + a[r, k]
+        c[r] = cnt[r]
+
+
+def native(fn, **arguments):
+    """The body's own run, on copies, as runtime arrays; the outputs as numpy."""
+    copies = {
+        name: Arr.from_numpy(np.array(value))
+        if isinstance(value, np.ndarray)
+        else value
+        for name, value in arguments.items()
+    }
+    fn(**copies)
+    return {
+        name: value.numpy() if isinstance(value, Arr) else value
+        for name, value in copies.items()
+    }
+
+
+def test_statements_at_two_depths_of_one_loop_lower_and_run() -> None:
+    # loopy defined ``r`` twice, once in the domain of the statement inside the
+    # loop over ``j`` and once in the other's, and refused the second with a
+    # bare RuntimeError that the executor and ``Schedule`` passed on.
+    a = np.arange(12.0).reshape(3, 4)
+    for fn in (after_inner, before_inner):
+        arguments = {"a": a, "y": np.zeros(3), "z": np.zeros(3)}
+        want = native(fn, **arguments)
+        out = run(fn.trace(), **arguments)
+        assert np.allclose(out["y"], a.sum(axis=1)), fn.__name__
+        assert np.array_equal(out["z"], np.ones(3)), fn.__name__
+        assert np.allclose(out["y"], want["y"]), fn.__name__
+
+
+def test_a_guard_inside_the_inner_loop_narrows_only_its_statement() -> None:
+    # The outer stretch of the guarded statement is ``1 <= r < n``, the other
+    # statement's is ``0 <= r < n``, and the loop runs over the second with the
+    # first put back as a predicate on the guarded statement alone.
+    a = np.arange(12.0).reshape(3, 4)
+    arguments = {"a": a, "y": np.zeros(3), "z": np.zeros(3)}
+    want = native(guarded_inner, **arguments)
+    out = run(guarded_inner.trace(), **arguments)
+    assert np.allclose(out["y"], [0.0, *a.sum(axis=1)[1:]])
+    assert np.array_equal(out["z"], np.ones(3))
+    assert np.allclose(out["y"], want["y"])
+
+
+def test_statements_at_two_depths_agree_with_the_body_under_a_schedule() -> None:
+    from loopty.executor import LoopyExecutor
+    from loopty.schedule import Schedule
+
+    square = Arr.from_numpy(np.arange(12.0).reshape(3, 4))
+    for fn in (after_inner, before_inner):
+        arrays = {"a": square, "y": Arr.zeros(3), "z": Arr.zeros(3)}
+        schedule = Schedule(fn).split("r", 2)
+        fact = LoopyExecutor().differential(fn, schedule, arrays)
+        assert fact.status.value == "tested", (fn.__name__, fact.provenance)
+
+
+def test_the_inner_loop_is_its_own_domain_nested_in_the_outer_one() -> None:
+    from loopty.lower import lower_generic
+
+    domains = lower_generic(after_inner.trace(), "c").kernel.default_entrypoint.domains
+    shapes = {
+        tuple(domain.get_var_names(isl.dim_type.set)): set(
+            domain.get_var_names(isl.dim_type.param)
+        )
+        for domain in domains
+    }
+    assert set(shapes) == {("r",), ("j",)}
+    assert "r" in shapes[("j",)]
+    # The loop over ``r`` does not wait for the inner loop to have an
+    # iteration: its domain keeps nothing of ``j``'s, ``m >= 1`` included.
+    (outer,) = [
+        domain
+        for domain in domains
+        if domain.get_var_names(isl.dim_type.set) == ["r"]
+    ]
+    outer = outer.to_set() if isinstance(outer, isl.BasicSet) else outer
+    rows = isl.Set("[n] -> { [r] : 0 <= r < n }").align_params(outer.get_space())
+    assert outer.align_params(rows.get_space()).is_equal(rows), outer
+
+
+def test_two_inner_loops_of_different_extents_lower_and_run() -> None:
+    # Projected out of their statements' domains, the two loops over ``r`` were
+    # ``m >= 1`` and ``p >= 1`` apart, a union loopy cannot take as one loop.
+    a = np.arange(12.0).reshape(3, 4)
+    b = np.arange(6.0).reshape(3, 2)
+    out = run(side_by_side.trace(), a=a, b=b, y=np.zeros(3), z=np.zeros(3))
+    assert np.allclose(out["y"], a.sum(axis=1))
+    assert np.allclose(out["z"], b.sum(axis=1))
+
+
+def test_a_statement_at_every_depth_of_a_triple_nest_lowers_and_runs() -> None:
+    a = np.arange(3.0 * 4 * 2).reshape(3, 4, 2)
+    arguments = {"a": a, "y": np.full(3, 7.0), "z": np.full((3, 4), 7.0)}
+    want = native(three_depths, **arguments)
+    out = run(three_depths.trace(), **arguments)
+    assert np.allclose(out["z"], a.sum(axis=2))
+    assert np.allclose(out["y"], a.sum(axis=(1, 2)))
+    assert np.allclose(out["z"], want["z"])
+    assert np.allclose(out["y"], want["y"])
+
+
+def test_a_ragged_and_a_dense_inner_loop_share_their_row_loop() -> None:
+    counts = [2, 0, 3]
+    values = [1.0, 2.0, 3.0, 4.0, 5.0]
+    a = np.arange(6.0).reshape(3, 2)
+    out = run(
+        rows_and_lengths.trace(),
+        cnt=np.array(counts),
+        val=Arr.ragged(counts, values=values),
+        a=a,
+        y=np.zeros(3),
+        z=np.zeros(3),
+        c=np.zeros(3, dtype=np.int64),
+    )
+    assert np.allclose(out["y"], [3.0, 0.0, 12.0])
+    assert np.allclose(out["z"], a.sum(axis=1))
+    assert list(out["c"]) == counts
+
+
+def test_one_name_for_two_different_loops_is_refused_by_name() -> None:
+    # A term built by hand can use ``j`` inside ``r`` in one statement and on
+    # its own in another, which no cut can make one loop. loopy refused it with
+    # a RuntimeError about a generated domain.
+    import dataclasses
+
+    import pymbolic.primitives as prim
+
+    from loopty.lower import LoweringError, lower_generic
+    from loopty.term import Access
+
+    term = after_inner.trace()
+    inner, after = term.stmts
+    alone = dataclasses.replace(
+        after,
+        inames=("j",),
+        domain=isl.Set("[m] -> { [j] : 0 <= j < m }"),
+        loop_domain=None,
+        assignee=Access("z", (prim.Variable("j"),)),
+    )
+    reused = dataclasses.replace(term, stmts=(inner, alone))
+    with pytest.raises(LoweringError, match="loop variable j for two different"):
+        lower_generic(reused, "c")
+
+
+# }}}
+
+
 # {{{ one Reduction object in two statements
 
 
