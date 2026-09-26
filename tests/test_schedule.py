@@ -1518,6 +1518,54 @@ def test_two_statements_of_one_fiber_cannot_move_by_different_maps() -> None:
     assert schedule.kernel is None
 
 
+def ragged_two_fibers(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+):
+    """Two row sums, each in a fiber of its own."""
+    for r in y.dom:
+        for j in val.dom[r]:
+            y[r] = y[r] + val[r, j]
+        for k in val.dom[r]:
+            z[r] = z[r] + 2.0 * val[r, k]
+
+
+def test_two_fibers_of_one_row_cannot_move_by_different_maps() -> None:
+    # Each fiber is a domain of its own, but one instruction computes the
+    # row's length for both, once per row, and it cannot run at the points of
+    # two maps. Moved alike, the two are one map, and the kernel computes.
+    from lanky.terms import evaluate_annotations
+
+    from loopty.arr import Arr as RuntimeArr
+    from loopty.trace import trace
+
+    term = trace(ragged_two_fibers, evaluate_annotations(ragged_two_fibers))
+    apart = Schedule(term).affine(
+        "{ S0[r] -> [q] : q = 2r; S1[r] -> [q] : q = 2r + 1 }"
+    )
+    assert [f.status.value for f in apart.facts()] == ["decided"] * 2 + ["refuted"]
+    ok, reason = apart.buildable
+    assert not ok
+    assert "bounds loops whose statements move by different maps" in reason
+    assert apart.kernel is None
+
+    alike = Schedule(term).affine("{ S0[r] -> [q] : q = r; S1[r] -> [q] : q = r }")
+    assert alike.buildable == (True, "")
+    counts = [2, 0, 3, 1, 4]
+    out = run(
+        alike,
+        cnt=RuntimeArr.from_numpy(np.array(counts, dtype=np.int64)),
+        val=RuntimeArr.ragged(counts, values=np.arange(1.0, 11.0)),
+        y=np.zeros(5),
+        z=np.zeros(5),
+    )
+    want = np.array([3.0, 0.0, 3.0 + 4.0 + 5.0, 6.0, 7.0 + 8.0 + 9.0 + 10.0])
+    assert np.array_equal(out["y"], want)
+    assert np.array_equal(out["z"], 2.0 * want)
+
+
 @pytest.mark.parametrize(
     ("mapping", "message"),
     [
@@ -1531,6 +1579,18 @@ def test_two_statements_of_one_fiber_cannot_move_by_different_maps() -> None:
             "some maps name a statement and some do not",
         ),
         ("{ S0[t] -> [k] : k = 2t; S2[t] -> [k] : k = 1 }", "S2 is not a statement"),
+        # isl keeps these two maps of S0 apart, since their spaces differ; one
+        # of them used to be dropped without a word, and the step recorded
+        # both.
+        (
+            "{ S0[t] -> [k] : k = 2t; S0[t] -> [k, m, o] : k = t; "
+            "S1[t] -> [k] : k = 2t + 1 }",
+            "S0 is given two maps",
+        ),
+        (
+            "{ [t] -> [k] : k = 2t; [t, u] -> [k] : k = t }",
+            "take or make different numbers of loops",
+        ),
     ],
 )
 def test_maps_per_statement_have_to_cover_the_loop_alike(

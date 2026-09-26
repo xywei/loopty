@@ -144,9 +144,11 @@ with a pair of statement instances.
   map's kernel. Every statement in the loops the maps name has to run in all
   of them and be given a map, the maps have to take the same loops to the
   same new ones, and a map may not name its output tuple, or a statement the
-  kernel does not have; each is a `ValueError` naming the statement. Two
-  statements of one ragged fiber moved by different maps are a `refuted`
-  `buildable` fact, since the fiber is one loopy domain. The diamond tiling of
+  kernel does not have, and a statement may not be given two maps; each is a
+  `ValueError` naming the statement. Two statements of one ragged fiber moved
+  by different maps are a `refuted` `buildable` fact, since the fiber is one
+  loopy domain, and so are two fibers of one row, whose length one instruction
+  computes for both. The diamond tiling of
   `examples/wavefront_acoustic.py` agrees with the native run bit for bit, and
   `loopty run` compiles it as a third schedule of the kernel (#46).
 - **Execution** (`loopty.executor`). `LoopyExecutor` runs a kernel, a schedule or

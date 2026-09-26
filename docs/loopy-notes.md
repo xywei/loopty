@@ -519,9 +519,11 @@ as `S0` at `(2t + i, 2t - i)` and `S1` at `(2t + 1 + i, 2t + 1 - i)`, run over
 the hull of the union, which the stride above does not see: half its points
 belong to neither statement. The statements of a loop have to move from the
 same loops to the same new ones, and two statements of one ragged fiber cannot
-move by different maps, since the fiber is one domain. isl decides the casts
-of any map whatever the kernel looks like; when the rewrite cannot write one
-for loopy (loops that no one domain defines, such as a row and the ragged
-fiber inside it, an image that is not one basic set, a piecewise inverse, or
-the fiber just named), the schedule carries a `refuted` `buildable` fact with
-the reason, and no kernel, rather than an error from loopy.
+move by different maps, since the fiber is one domain; nor can two fibers of
+one row, since one instruction computes the row's length for both. isl decides
+the casts of any map whatever the kernel looks like; when the rewrite cannot
+write one for loopy (loops that no one domain defines, such as a row and the
+ragged fiber inside it, an image that is not one basic set, a piecewise
+inverse, or the fibers just named), the schedule carries a `refuted`
+`buildable` fact with the reason, and no kernel, rather than an error from
+loopy.

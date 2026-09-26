@@ -302,8 +302,8 @@ end to end; the edges are sharp.
   `S0` at `2t` and `S1` at `2t + 1` along the diamond, the loops run over the
   hull of the union and visit the holes. A map the rewrite cannot write for
   loopy, such as one over a row and the ragged fiber inside it, or maps that
-  move two statements of one ragged fiber differently, is a `refuted`
-  `buildable` fact. See note 13 in `docs/loopy-notes.md`.
+  move two statements of one ragged fiber, or of two fibers of one row,
+  differently, is a `refuted` `buildable` fact. See note 13 in `docs/loopy-notes.md`.
 - `realize(var, tree=True)` checks and marks the reassociation; the reduction
   tree itself comes from splitting and tagging the reduction iname, which is
   checked separately and not verified on the C target.

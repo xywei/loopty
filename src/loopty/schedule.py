@@ -540,19 +540,29 @@ def _as_maps(mapping: Any) -> tuple[Any, dict[str, isl.Map] | None]:
             )
     named = [piece.has_tuple_name(isl.dim_type.in_) for piece in maps]
     if not any(named):
-        (single,) = maps  # one space, so one map
-        return single, None
+        if len(maps) != 1:
+            raise ValueError(
+                f"{mapping}: these maps take or make different numbers of "
+                "loops, and one map moves every statement in its loops; give "
+                "one map, or name the statement of each"
+            )
+        return maps[0], None
     if not all(named):
         raise ValueError(
             f"{mapping}: some maps name a statement and some do not; name the "
             "statement of every map, or give one map for every statement"
         )
-    pieces = {
-        piece.get_tuple_name(isl.dim_type.in_): piece.reset_tuple_id(
-            isl.dim_type.in_
-        )
-        for piece in maps
-    }
+    pieces: dict[str, isl.Map] = {}
+    for piece in maps:
+        stmt_id = piece.get_tuple_name(isl.dim_type.in_)
+        if stmt_id in pieces:
+            # isl keeps maps between different spaces apart, so two maps of
+            # one statement take or make different numbers of loops.
+            raise ValueError(
+                f"{mapping}: {stmt_id} is given two maps, and a statement "
+                "moves by one"
+            )
+        pieces[stmt_id] = piece.reset_tuple_id(isl.dim_type.in_)
     return mapping, pieces
 
 
@@ -2031,12 +2041,12 @@ class Schedule:
         diamond tiling of a pair of statements that feed each other needs. The
         statements still share their loops, so every map has to take the same
         loops to the same new ones, and every statement in those loops has to
-        run in all of them and be given one; each of those is a
-        ``ValueError`` naming the statement. The two questions below are asked
-        of the maps together, over the dependences between the statements as
-        well as within each, and the kernel runs the shared loops over the
-        union of the images, each statement at its own points only (see
-        :func:`_affine_kernel`).
+        run in all of them and be given one map, and only one; each of those
+        is a ``ValueError`` naming the statement. The two questions below are
+        asked of the maps together, over the dependences between the
+        statements as well as within each, and the kernel runs the shared
+        loops over the union of the images, each statement at its own points
+        only (see :func:`_affine_kernel`).
 
         The map is untrusted like any other transformation. It has to be
         defined on every instance and send no two of them to one point (the
@@ -2620,8 +2630,9 @@ def _affine_kernel(
     the kernel unchanged: loops that no one domain defines, an image that is
     not one basic set, an inverse that is piecewise, an instruction in some of
     the mapped loops and not the others, and, with maps per statement, a
-    nested domain whose instructions move by different maps, or an instruction
-    in the loops that is no statement's and bounds none of their loops.
+    nested domain whose instructions move by different maps, a row's length
+    that bounds fibers whose statements do, or an instruction in the loops
+    that is no statement's and bounds none of their loops.
     """
     from loopy.match import Id, parse_stack_match
     from loopy.symbolic import (
@@ -2858,7 +2869,8 @@ def _with_bound_maps(
                 "and the statements in those loops move by different maps"
             )
         maps = [_governing(entry, domain, pieces) for domain in bounded]
-        if not all(m.is_equal(maps[0]) for m in maps):  # pragma: no cover
+        if not all(m.is_equal(maps[0]) for m in maps):
+            # Two fibers of one row, whose statements move apart.
             raise _Inexpressible(
                 f"instruction {insn.id} bounds loops whose statements move by "
                 "different maps, and it runs once per row"
@@ -2880,9 +2892,9 @@ def _governing(entry: Any, domain: Any, pieces: Mapping[str, isl.Map]) -> isl.Ma
         for insn in entry.instructions
         if names & (set(insn.within_inames) | set(insn.reduction_inames()))
     ]
-    maps = [pieces[user] for user in users if user in pieces]
-    if not maps:
+    if not users:  # pragma: no cover - a domain holds a loop some instruction runs in
         return next(iter(pieces.values()))
+    maps = [pieces[user] for user in users if user in pieces]
     if len(maps) != len(users) or not all(m.is_equal(maps[0]) for m in maps):
         raise _Inexpressible(
             f"the domain {domain} is nested in the mapped loops and holds "
