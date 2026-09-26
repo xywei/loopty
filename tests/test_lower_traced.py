@@ -630,6 +630,469 @@ def test_a_ragged_domain_follows_the_loop_it_is_nested_in() -> None:
 # }}}
 
 
+# {{{ statements at two depths of one loop
+
+
+@kernel
+def after_inner(
+    a: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A statement inside the loop over ``j``, and one after it, in ``r``'s."""
+    for r in y.dom:
+        for j in a.dom[r]:
+            y[r] = y[r] + a[r, j]
+        z[r] = 1.0
+
+
+@kernel
+def before_inner(
+    a: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The same two statements the other way round."""
+    for r in y.dom:
+        z[r] = 1.0
+        for j in a.dom[r]:
+            y[r] = y[r] + a[r, j]
+
+
+@kernel
+def guarded_inner(
+    a: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The statement inside the inner loop skips the first row; the other not."""
+    for r in y.dom:
+        for j in a.dom[r]:
+            with when(r > 0):
+                y[r] = y[r] + a[r, j]
+        z[r] = 1.0
+
+
+@kernel
+def side_by_side(
+    a: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+    b: Arr[Fin[n], Fin[p], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+):
+    """Two inner loops of different extents in one outer loop, nothing between."""
+    for r in y.dom:
+        for j in a.dom[r]:
+            y[r] = y[r] + a[r, j]
+        for k in b.dom[r]:
+            z[r] = z[r] + b[r, k]
+
+
+@kernel
+def three_depths(
+    a: Arr[Fin[n], Fin[m], Fin[p], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+):
+    """A statement at each depth of a triple nest."""
+    for r in y.dom:
+        y[r] = 0.0
+        for j in z.dom[r]:
+            z[r, j] = 0.0
+            for k in a.dom[r, j]:
+                z[r, j] = z[r, j] + a[r, j, k]
+            y[r] = y[r] + z[r, j]
+
+
+@kernel
+def rows_and_lengths(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    a: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+    c: Arr[Fin[n], Nat],  # noqa: F821
+):
+    """A ragged and a dense inner loop in one row loop, and the row's length."""
+    for r in y.dom:
+        for j in val.dom[r]:
+            y[r] = y[r] + val[r, j]
+        for k in a.dom[r]:
+            z[r] = z[r] + a[r, k]
+        c[r] = cnt[r]
+
+
+def native(fn, **arguments):
+    """The body's own run, on copies, as runtime arrays; the outputs as numpy."""
+    copies = {
+        name: Arr.from_numpy(np.array(value))
+        if isinstance(value, np.ndarray)
+        else value
+        for name, value in arguments.items()
+    }
+    fn(**copies)
+    return {
+        name: value.numpy() if isinstance(value, Arr) else value
+        for name, value in copies.items()
+    }
+
+
+def test_statements_at_two_depths_of_one_loop_lower_and_run() -> None:
+    # loopy defined ``r`` twice, once in the domain of the statement inside the
+    # loop over ``j`` and once in the other's, and refused the second with a
+    # bare RuntimeError that the executor and ``Schedule`` passed on.
+    a = np.arange(12.0).reshape(3, 4)
+    for fn in (after_inner, before_inner):
+        arguments = {"a": a, "y": np.zeros(3), "z": np.zeros(3)}
+        want = native(fn, **arguments)
+        out = run(fn.trace(), **arguments)
+        assert np.allclose(out["y"], a.sum(axis=1)), fn.__name__
+        assert np.array_equal(out["z"], np.ones(3)), fn.__name__
+        assert np.allclose(out["y"], want["y"]), fn.__name__
+
+
+def test_a_guard_inside_the_inner_loop_narrows_only_its_statement() -> None:
+    # The outer stretch of the guarded statement is ``1 <= r < n``, the other
+    # statement's is ``0 <= r < n``, and the loop runs over the second with the
+    # first put back as a predicate on the guarded statement alone.
+    a = np.arange(12.0).reshape(3, 4)
+    arguments = {"a": a, "y": np.zeros(3), "z": np.zeros(3)}
+    want = native(guarded_inner, **arguments)
+    out = run(guarded_inner.trace(), **arguments)
+    assert np.allclose(out["y"], [0.0, *a.sum(axis=1)[1:]])
+    assert np.array_equal(out["z"], np.ones(3))
+    assert np.allclose(out["y"], want["y"])
+
+
+def test_statements_at_two_depths_agree_with_the_body_under_a_schedule() -> None:
+    from loopty.executor import LoopyExecutor
+    from loopty.schedule import Schedule
+
+    square = Arr.from_numpy(np.arange(12.0).reshape(3, 4))
+    for fn in (after_inner, before_inner):
+        arrays = {"a": square, "y": Arr.zeros(3), "z": Arr.zeros(3)}
+        schedule = Schedule(fn).split("r", 2)
+        fact = LoopyExecutor().differential(fn, schedule, arrays)
+        assert fact.status.value == "tested", (fn.__name__, fact.provenance)
+
+
+def test_the_inner_loop_is_its_own_domain_nested_in_the_outer_one() -> None:
+    from loopty.lower import lower_generic
+
+    domains = lower_generic(after_inner.trace(), "c").kernel.default_entrypoint.domains
+    shapes = {
+        tuple(domain.get_var_names(isl.dim_type.set)): set(
+            domain.get_var_names(isl.dim_type.param)
+        )
+        for domain in domains
+    }
+    assert set(shapes) == {("r",), ("j",)}
+    assert "r" in shapes[("j",)]
+    # The loop over ``r`` is the rows: its domain keeps nothing of ``j``'s,
+    # ``m >= 1`` included.
+    (outer,) = [
+        domain
+        for domain in domains
+        if domain.get_var_names(isl.dim_type.set) == ["r"]
+    ]
+    outer = outer.to_set() if isinstance(outer, isl.BasicSet) else outer
+    rows = isl.Set("[n] -> { [r] : 0 <= r < n }").align_params(outer.get_space())
+    assert outer.align_params(rows.get_space()).is_equal(rows), outer
+
+
+def test_two_inner_loops_of_different_extents_lower_and_run() -> None:
+    # Projected out of their statements' domains, the two loops over ``r`` were
+    # ``m >= 1`` and ``p >= 1`` apart, a union loopy cannot take as one loop.
+    a = np.arange(12.0).reshape(3, 4)
+    b = np.arange(6.0).reshape(3, 2)
+    out = run(side_by_side.trace(), a=a, b=b, y=np.zeros(3), z=np.zeros(3))
+    assert np.allclose(out["y"], a.sum(axis=1))
+    assert np.allclose(out["z"], b.sum(axis=1))
+
+
+def test_a_statement_at_every_depth_of_a_triple_nest_lowers_and_runs() -> None:
+    a = np.arange(3.0 * 4 * 2).reshape(3, 4, 2)
+    arguments = {"a": a, "y": np.full(3, 7.0), "z": np.full((3, 4), 7.0)}
+    want = native(three_depths, **arguments)
+    out = run(three_depths.trace(), **arguments)
+    assert np.allclose(out["z"], a.sum(axis=2))
+    assert np.allclose(out["y"], a.sum(axis=(1, 2)))
+    assert np.allclose(out["z"], want["z"])
+    assert np.allclose(out["y"], want["y"])
+
+
+def test_a_ragged_and_a_dense_inner_loop_share_their_row_loop() -> None:
+    counts = [2, 0, 3]
+    values = [1.0, 2.0, 3.0, 4.0, 5.0]
+    a = np.arange(6.0).reshape(3, 2)
+    out = run(
+        rows_and_lengths.trace(),
+        cnt=np.array(counts),
+        val=Arr.ragged(counts, values=values),
+        a=a,
+        y=np.zeros(3),
+        z=np.zeros(3),
+        c=np.zeros(3, dtype=np.int64),
+    )
+    assert np.allclose(out["y"], [3.0, 0.0, 12.0])
+    assert np.allclose(out["z"], a.sum(axis=1))
+    assert list(out["c"]) == counts
+
+
+@kernel
+def total_after_inner(
+    a: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A statement after the inner loop that reads what the loop accumulates."""
+    for r in y.dom:
+        for j in a.dom[r]:
+            y[r] = y[r] + a[r, j]
+        z[r] = z[r] + y[r]
+
+
+@kernel
+def copy_before_inner(
+    a: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A statement before the inner loop that reads what the loop then updates."""
+    for r in y.dom:
+        z[r] = y[r]
+        for j in a.dom[r]:
+            y[r] = y[r] + a[r, j]
+
+
+@kernel
+def total_in_a_later_loop(
+    a: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The same total, read by a loop of its own after the nest."""
+    for r in y.dom:
+        for j in a.dom[r]:
+            y[r] = y[r] + a[r, j]
+    for q in z.dom:
+        z[q] = z[q] + y[q]
+
+
+@kernel
+def total_after_ragged(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A statement after a ragged inner loop that reads what the loop sums."""
+    for r in y.dom:
+        for j in val.dom[r]:
+            y[r] = y[r] + val[r, j]
+        z[r] = z[r] + y[r]
+
+
+def test_a_statement_that_reads_the_inner_loop_stays_outside_it() -> None:
+    # loopy adds to an instruction whose loops are not final the loops of the
+    # instructions that write what it reads, less those the writer's subscripts
+    # name: the statement reading ``y[r]`` went into the loop over ``j``. It ran
+    # once per ``j``, which gave ``z`` the sum of the partial sums, and the
+    # copy before the loop saw ``y[r]`` after all but the last update.
+    a = np.arange(12.0).reshape(3, 4)
+    totals = 1.0 + a.sum(axis=1)
+    for fn, z in (
+        (total_after_inner, 10.0 + totals),
+        (copy_before_inner, np.ones(3)),
+    ):
+        arguments = {"a": a, "y": np.ones(3), "z": np.full(3, 10.0)}
+        want = native(fn, **arguments)
+        out = run(fn.trace(), **arguments)
+        assert np.allclose(out["y"], totals), fn.__name__
+        assert np.allclose(out["z"], z), (fn.__name__, out["z"])
+        assert np.allclose(out["z"], want["z"]), fn.__name__
+
+
+def test_a_loop_that_reads_an_earlier_nest_stays_out_of_its_inner_loop() -> None:
+    # The same inference, on shapes that lowered before statements at two
+    # depths did: a later loop of its own, and a ragged inner loop.
+    a = np.arange(12.0).reshape(3, 4)
+    arguments = {"a": a, "y": np.ones(3), "z": np.full(3, 10.0)}
+    out = run(total_in_a_later_loop.trace(), **arguments)
+    assert np.allclose(out["z"], 11.0 + a.sum(axis=1))
+
+    counts = [2, 0, 3]
+    out = run(
+        total_after_ragged.trace(),
+        cnt=np.array(counts),
+        val=Arr.ragged(counts, values=[1.0, 2.0, 3.0, 4.0, 5.0]),
+        y=np.ones(3),
+        z=np.full(3, 10.0),
+    )
+    assert np.allclose(out["z"], [14.0, 11.0, 23.0])
+
+
+def test_one_name_for_two_different_loops_is_refused_by_name() -> None:
+    # A term built by hand can use ``j`` inside ``r`` in one statement and on
+    # its own in another, which no cut can make one loop. loopy refused it with
+    # a RuntimeError about a generated domain.
+    import dataclasses
+
+    import pymbolic.primitives as prim
+
+    from loopty.lower import LoweringError, lower_generic
+    from loopty.term import Access
+
+    term = after_inner.trace()
+    inner, after = term.stmts
+    alone = dataclasses.replace(
+        after,
+        inames=("j",),
+        domain=isl.Set("[m] -> { [j] : 0 <= j < m }"),
+        loop_domain=None,
+        assignee=Access("z", (prim.Variable("j"),)),
+    )
+    reused = dataclasses.replace(term, stmts=(inner, alone))
+    with pytest.raises(LoweringError, match="loop variable j for two different"):
+        lower_generic(reused, "c")
+
+
+# }}}
+
+
+# {{{ a bound affine in an outer binder, and hardware axes on nested reductions
+
+
+@kernel
+def lower_total8(a: Arr[Fin[8], Fin[8], Real], s: Arr[Fin[1], Real]):
+    """The lower-triangle double sum at a size known when the code is generated."""
+    s[0] = reduce_sum(reduce_sum(a[i, j] for j in Fin[i + 1]) for i in a.dom)
+
+
+def test_an_inner_bound_affine_in_the_outer_binder_is_not_a_ragged_fiber() -> None:
+    # ``j < i + 1`` names ``i`` as a parameter of the inner domain, and every
+    # parameter that was not a size used to count as data.
+    from loopty.schedule import Schedule, data_dependent_inames
+
+    assert data_dependent_inames(lower_total.trace()) == frozenset()
+    schedule = Schedule(lower_total).split("j", 2, inner="ji", outer="jo").tag(
+        ji="l.0"
+    )
+    ok, reason = schedule.buildable
+    assert not ok
+    assert "ragged fiber" not in reason
+    assert "nested in the reduction over i" in reason and "ji" in reason
+
+
+def test_a_ragged_fiber_inside_a_statement_loop_is_still_one() -> None:
+    from loopty.schedule import data_dependent_inames
+
+    assert data_dependent_inames(rows_and_lengths.trace()) == frozenset({"j"})
+
+
+@kernel
+def ragged_inside_a_sum(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    b: Arr[Fin[p], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A ragged sum nested in a dense one, and the other way round."""
+    for r in y.dom:
+        y[r] = reduce_sum(
+            reduce_sum(val[r, j] * b[k] for j in val.dom[r]) for k in b.dom
+        ) + reduce_sum(
+            reduce_sum(val[r, i] * b[q] for q in b.dom) for i in val.dom[r]
+        )
+
+
+def test_a_ragged_fiber_nested_in_another_sum_is_still_one() -> None:
+    # The enclosing binder is no longer data; the row length beside it still
+    # is, and the ragged reason comes first.
+    from loopty.schedule import Schedule, data_dependent_inames
+
+    assert data_dependent_inames(ragged_inside_a_sum.trace()) == frozenset(
+        {"j", "i"}
+    )
+    ok, reason = Schedule(ragged_inside_a_sum).tag(j="l.0").buildable
+    assert not ok
+    assert "ragged fiber" in reason
+
+
+def test_the_nested_axis_loopty_refuses_is_one_loopy_cannot_build(monkeypatch):
+    # Measured, not guessed: loopy's plain OpenCL target stands in for the
+    # pyopencl one, which cannot be built without pyopencl, and code generation
+    # is all that is asked of it.
+    import warnings
+
+    lp = pytest.importorskip("loopy")
+    from loopty import lower
+    from loopty.schedule import Schedule
+
+    plain = lower.target_for
+    monkeypatch.setattr(
+        lower,
+        "target_for",
+        lambda target="c": lp.OpenCLTarget() if target == "opencl" else plain(target),
+    )
+    outer = Schedule(lower_total8, target="opencl").tag(i="l.0")
+    assert outer.buildable == (True, "")
+    with warnings.catch_warnings():
+        # Every work item stores the finished sum into ``s[0]``, the same
+        # value, and loopy says so the first time it generates the code.
+        warnings.simplefilter("ignore", lp.diagnostic.WriteRaceConditionWarning)
+        code = lp.generate_code_v2(outer.kernel).device_code()
+    assert "get_local_id" in code
+
+    inner = Schedule(lower_total8, target="opencl").tag(j="l.0")
+    ok, reason = inner.buildable
+    assert not ok
+    assert "nested in the reduction over i" in reason
+    with pytest.raises(Exception, match="does not use all local hw axes"):
+        lp.generate_code_v2(inner.kernel)
+
+
+# }}}
+
+
+# {{{ one Reduction object in two statements
+
+
+@kernel
+def two_sums_of_one_array(
+    x: Arr[Fin[n], Real],  # noqa: F821
+    s: Arr[Fin[2], Real],
+):
+    """The same sum twice, which the tracer records as two Reduction objects."""
+    s[0] = reduce_sum(x[j] for j in x.dom)
+    s[1] = reduce_sum(x[j] for j in x.dom)
+
+
+def test_a_reduction_object_two_statements_share_is_planned_in_each() -> None:
+    # The tracer builds a Reduction per statement; a term built by hand may
+    # share one. The plan was keyed by the object alone, so the second
+    # statement's overwrote the first's, both reduced over one iname, and loopy
+    # stopped with a CycleError.
+    import dataclasses
+
+    from loopty.lower import lower_generic
+
+    term = two_sums_of_one_array.trace()
+    first, second = term.stmts
+    shared = dataclasses.replace(
+        term, stmts=(first, dataclasses.replace(second, expr=first.expr))
+    )
+    assert lower_generic(shared, "c").reduction_inames == {
+        "S0:0": ("j",),
+        "S1:0": ("j_0",),
+    }
+    out = run(shared, x=np.arange(4.0), s=np.zeros(2))
+    assert np.allclose(out["s"], [6.0, 6.0])
+
+
+# }}}
+
+
 # {{{ names the generated code cannot use
 
 
@@ -818,3 +1281,27 @@ def test_an_equality_guard_and_an_equality_condition_lower_and_run() -> None:
     y = Arr.zeros(4)
     run(diagonal, a=square, y=y)
     assert list(y.numpy()) == [0.0, 5.0, 10.0, 15.0]
+
+
+def test_a_guard_against_a_real_scalar_agrees_on_the_c_target() -> None:
+    # The guard used to be a domain constraint, with a an integer parameter of
+    # the compiled kernel, and at a = 2.5 the compiled run disagreed with the
+    # native one by 1.0 at a cell. It is now a predicate on the real a.
+    from loopty.executor import LoopyExecutor
+    from loopty.schedule import Schedule
+
+    @kernel
+    def below(a: Real, y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(i < a):
+                y[i] = 1.0
+
+    fact = LoopyExecutor().differential(
+        below, Schedule(below, target="c"), {"a": 2.5, "y": Arr.zeros(5)}
+    )
+    assert fact.status.value == "tested", fact.provenance
+    y = Arr.zeros(5)
+    run(below, a=2.5, y=y)
+    assert list(y.numpy()) == [1.0, 1.0, 1.0, 0.0, 0.0]
+    (stmt,) = below.term.stmts
+    assert "a" not in stmt.domain.get_var_names(isl.dim_type.param)

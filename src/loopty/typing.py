@@ -41,6 +41,15 @@ is ``DECIDED`` by the type rather than by an oracle.
 parameters. It is emitted as a fact with its term, for whatever oracle can take
 it, and stays ``ASSUMED`` when none can, which is the honest outcome and is
 visible in the ledger rather than lost.
+
+The in-bounds, disjointness and ordering facts are stated over statement
+domains, and a guard narrows a domain only where isl can state it. A conjunct
+it cannot (one that reads an array, compares with ``!=``, or compares with a
+``Real`` scalar, which isl would read as an integer) leaves the domain wider
+than the instances that write, and each such fact lists those conjuncts, with
+the reason, under ``unnarrowed`` in its provenance: proved, it holds for the
+instances that write too; refuted, its witness may be an instance the guard
+masks.
 """
 
 from __future__ import annotations
@@ -65,6 +74,7 @@ __all__ = [
     "instance_labels",
     "ordering_facts",
     "postcondition_facts",
+    "postcondition_id",
     "reduction_facts",
     "render_instance",
     "write_disjointness_facts",
@@ -163,6 +173,12 @@ def in_bounds_facts(term: Term, owner: str) -> list[Fact]:
     reported in bounds from the sum, where ``r >= 1``, with the direct read of
     ``x[-1]`` gone from the ledger. The domains of one access are therefore
     gathered into one obligation, about the union of the cells they reach.
+
+    A read of the offsets a ragged access is flattened through is an access
+    the source never writes, so its fact says which access it serves:
+    ``off[r + 1], the end of row r that val[r, j] is flattened through, is in
+    bounds ...``, and ``layout`` in its provenance says the same. Without that
+    a refuted one names a read nobody can find in the kernel.
     """
     types = dict(term.params)
     sizes = flow.size_names(term)
@@ -181,14 +197,18 @@ def in_bounds_facts(term: Term, owner: str) -> list[Fact]:
         ):
             if not isinstance(types.get(array), ArrType):
                 continue
-            text = f"{array}[{', '.join(render(i) for i in indices)}]"
+            text = _access_text(array, indices)
             listed.setdefault((array, kind, text), []).append(
                 (tuple(indices), inames, domain)
             )
+        roles = _layout_roles(stmt, term)
         for (array, kind, text), places in listed.items():
             arrtype = types[array]
             indices = places[0][0]
             identifier = f"{owner}:in-bounds:{stmt.id}:{kind}:{text}"
+            role = roles.get((array, kind, text))
+            subject = text if role is None else f"{text}, {role},"
+            layout = {} if role is None else {"layout": role}
             reasons = [
                 _justified_by_type(place[0], arrtype, types) for place in places
             ]
@@ -198,11 +218,15 @@ def in_bounds_facts(term: Term, owner: str) -> list[Fact]:
                     Fact(
                         id=identifier,
                         kind="in-bounds",
-                        statement=f"{text} is in bounds by type ({reason})",
+                        statement=f"{subject} is in bounds by type ({reason})",
                         term=None,
                         status=Status.DECIDED,
                         decided_by="type",
-                        provenance={"rule": "index type", "reason": reason},
+                        provenance={
+                            "rule": "index type",
+                            "reason": reason,
+                            **layout,
+                        },
                         where=stmt.where,
                         owner=owner,
                     )
@@ -228,10 +252,10 @@ def in_bounds_facts(term: Term, owner: str) -> list[Fact]:
                     Fact(
                         id=identifier,
                         kind="in-bounds",
-                        statement=f"{text} is in bounds",
+                        statement=f"{subject} is in bounds",
                         term=None,
                         status=Status.ASSUMED,
-                        provenance={"reason": f"no isl form: {exc}"},
+                        provenance={"reason": f"no isl form: {exc}", **layout},
                         where=stmt.where,
                         owner=owner,
                     )
@@ -242,26 +266,28 @@ def in_bounds_facts(term: Term, owner: str) -> list[Fact]:
                     Fact(
                         id=identifier,
                         kind="in-bounds",
-                        statement=f"{text} is in bounds",
+                        statement=f"{subject} is in bounds",
                         term=None,
                         status=Status.ASSUMED,
                         provenance={
                             "reason": (
                                 "the index is not quasi-affine and its type does "
                                 "not bound it, so isl is not asked"
-                            )
+                            ),
+                            **layout,
                         },
                         where=stmt.where,
                         owner=owner,
                     )
                 )
                 continue
+            wide = any(place[2] is not stmt.loop_domain for place in places)
             facts.append(
                 Fact(
                     id=identifier,
                     kind="in-bounds",
                     statement=(
-                        f"{text} is in bounds for every instance of {stmt.id}"
+                        f"{subject} is in bounds for every instance of {stmt.id}"
                     ),
                     term=Subset(
                         reached,
@@ -270,12 +296,81 @@ def in_bounds_facts(term: Term, owner: str) -> list[Fact]:
                         labels=tuple(f"a{k}" for k in range(len(indices))),
                     ),
                     status=Status.ASSUMED,
-                    provenance={"access": text, "statement": stmt.id},
+                    provenance={
+                        "access": text,
+                        "statement": stmt.id,
+                        **layout,
+                        **(_unnarrowed(stmt) if wide else {}),
+                    },
                     where=stmt.where,
                     owner=owner,
                 )
             )
     return facts
+
+
+def _access_text(array: str, indices: Sequence[Any]) -> str:
+    """``val[r, j]``: an access as the ledger writes it."""
+    return f"{array}[{', '.join(render(i) for i in indices)}]"
+
+
+def _layout_roles(stmt: Any, term: Term) -> dict[tuple[str, str, str], str]:
+    """What each read of the offsets is to the ragged accesses it serves.
+
+    Keyed as :func:`in_bounds_facts` keys an access, ``(array, kind, text)``;
+    the value reads ``the end of row r that val[r, j] is flattened through``,
+    one clause per row end the read is, joined, and opens with ``read
+    directly and as`` when the statement also spells the read itself.
+    """
+    spelled = {
+        (array, kind, _access_text(array, indices))
+        for array, indices, kind, _inames, _domain in flow.source_accesses(
+            stmt, term
+        )
+    }
+    served: dict[tuple[str, str, str], dict[tuple[str, str], list[str]]] = {}
+    for access, read, end, row in flow.offsets_reads(stmt, term):
+        key = (read[0], read[2], _access_text(read[0], read[1]))
+        origin = _access_text(access[0], access[1])
+        origins = served.setdefault(key, {}).setdefault((end, render(row)), [])
+        if origin not in origins:
+            origins.append(origin)
+    out: dict[tuple[str, str, str], str] = {}
+    for key, ends in served.items():
+        clauses = [
+            f"the {end} of row {row} that {_listed(origins)} "
+            f"{'is' if len(origins) == 1 else 'are'} flattened through"
+            for (end, row), origins in ends.items()
+        ]
+        role = _listed(clauses)
+        out[key] = f"read directly and as {role}" if key in spelled else role
+    return out
+
+
+def _listed(items: Sequence[str]) -> str:
+    """``a``, ``a and b``, ``a, b and c``."""
+    if len(items) < 3:
+        return " and ".join(items)
+    return f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+def _unnarrowed(stmt: Any) -> dict[str, Any]:
+    """The provenance of a fact stated over a domain its guard left wide.
+
+    A guard conjunct isl cannot state (:attr:`loopty.term.Stmt.unnarrowed`)
+    does not narrow the statement's domain, so the domain over-approximates
+    the instances that write, and a fact about it is about instances the guard
+    masks as well. Proved, it holds for the instances that write all the same;
+    refuted, its witness may be one of the masked ones. The fact records which
+    conjuncts were left out, and why, under ``unnarrowed``.
+    """
+    if not stmt.unnarrowed:
+        return {}
+    return {
+        "unnarrowed": [
+            {"conjunct": conjunct, "why": why} for conjunct, why in stmt.unnarrowed
+        ]
+    }
 
 
 def _is_widened(relation: isl.Map, indices: Sequence[Any]) -> bool:
@@ -334,6 +429,7 @@ def write_disjointness_facts(term: Term, owner: str) -> list[Fact]:
                     "statement": stmt.id,
                     "array": footprint.array,
                     "kind": footprint.kind,
+                    **_unnarrowed(stmt),
                 },
                 where=stmt.where,
                 owner=owner,
@@ -369,6 +465,16 @@ def ordering_facts(term: Term, owner: str, where: str) -> list[Fact]:
                 owner=owner,
             )
         ]
+    # A statement whose guard is only partly stated contributes dependences
+    # from instances that write nothing; see _unnarrowed.
+    provenance: dict[str, Any] = {"dependences": str(deps)}
+    wide = {
+        stmt.id: _unnarrowed(stmt)["unnarrowed"]
+        for stmt in term.stmts
+        if stmt.unnarrowed
+    }
+    if wide:
+        provenance["unnarrowed"] = wide
     return [
         Fact(
             id=f"{owner}:ordering",
@@ -381,7 +487,7 @@ def ordering_facts(term: Term, owner: str, where: str) -> list[Fact]:
                 labels=instance_labels(term),
             ),
             status=Status.ASSUMED,
-            provenance={"dependences": str(deps)},
+            provenance=provenance,
             where=where,
             owner=owner,
         )
@@ -419,13 +525,23 @@ def reduction_facts(term: Term, owner: str) -> list[Fact]:
     return facts
 
 
+def postcondition_id(owner: str) -> str:
+    """The id of the fact a kernel's return annotation becomes.
+
+    One builder for it, because a program names the fact of each kernel it
+    calls by this id (see :meth:`loopty.kernel.Program.facts`), and an id that
+    drifted from the kernel's own would name a fact the ledger does not hold.
+    """
+    return f"{owner}:postcondition"
+
+
 def postcondition_facts(term: Term, owner: str, where: str) -> list[Fact]:
     """The return annotation as a fact, for whatever oracle can take it."""
     if term.post is None:
         return []
     return [
         Fact(
-            id=f"{owner}:postcondition",
+            id=postcondition_id(owner),
             kind="postcondition",
             statement=render(term.post),
             term=term.post,

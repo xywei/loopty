@@ -41,18 +41,19 @@ row verbatim, and checked by `scripts/refresh_example_outputs.py`):
 
 ```console
 $ lanky check examples/spmv.py
-STATUS   BY             WHERE        OWNER          STATEMENT
--------  -------------  -----------  -------------  ------------------------------------------------------------------------
-decided  isl            spmv.py:79   scan           off[0] is in bounds for every instance of S0
-decided  isl            spmv.py:81   scan           off[r + 1] is in bounds for every instance of S1
-decided  isl            spmv.py:79   scan           distinct instances of S0 write distinct cells of off
-assumed  -              spmv.py:69   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
-tested   property-test  spmv.py:84   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat] | off(0) ==...
-decided  isl            spmv.py:112  spmv           y[r] is in bounds for every instance of S0
-decided  type           spmv.py:112  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
-decided  isl            spmv.py:112  spmv           distinct instances of S0 write distinct cells of y
-decided  type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
-tested   interpreter    spmv.py:102  spmv           the traced term computes what the body computes
+STATUS                            BY             WHERE        OWNER          STATEMENT
+--------------------------------  -------------  -----------  -------------  ------------------------------------------------------------------------
+decided                           isl            spmv.py:79   scan           off[0] is in bounds for every instance of S0
+decided                           isl            spmv.py:81   scan           off[r + 1] is in bounds for every instance of S1
+decided                           isl            spmv.py:79   scan           distinct instances of S0 write distinct cells of off
+assumed                           -              spmv.py:69   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+tested                            property-test  spmv.py:84   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat] | off(0) ==...
+decided                           isl            spmv.py:112  spmv           y[r] is in bounds for every instance of S0
+decided                           type           spmv.py:112  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
+decided                           isl            spmv.py:112  spmv           distinct instances of S0 write distinct cells of y
+decided                           type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
+tested                            interpreter    spmv.py:102  spmv           the traced term computes what the body computes
+assumed under scan:postcondition  -              spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
 ...
 19 facts: 2 assumed, 14 decided, 3 tested
 ```
@@ -63,13 +64,19 @@ and here it was settled by the *type*: the entries of `col` are points of
 `Fin[m]` and `x` has `m` cells, so the shape of the data discharges it and isl
 is never called.
 
-And look at the last row, the one fact that is about the trace rather than
-about the term. Every other row is a claim about what tracing recorded; this
+And look at the `interpreter` row, the one fact that is about the trace rather
+than about the term. Every other row is a claim about what tracing recorded; this
 one checks that the record is the body. The term is run by an interpreter of
 its own, with numpy semantics, and compared with the body run natively, on the
 file's example inputs and on inputs drawn from the declared types. A body that
 kept state where tracing does not look would be refuted here, with the input
 and the first cell that differs.
+
+The last row belongs to `solve`, the `@program` that runs `scan` and then
+`spmv`. It restates `scan`'s postcondition in the program's scope, and rests on
+`scan`'s own postcondition fact, which the row names:
+`assumed under scan:postcondition`. Nothing has established that fact yet, and
+the restatement is worth no more than it.
 
 And a transformation is a cast, checked before it is applied:
 
@@ -128,8 +135,8 @@ message states, because which violating pair isl picks depends on them.
   transformation can preserve the meaning of a program and still be one the
   backend cannot generate. Every accepted step is asked whether the target can
   build it, and a failure is a `refuted` fact of kind `buildable` decided by
-  `loopy-target`, with the limit in words, rather than a `LoopyError` thrown
-  from inside code generation several steps later.
+  `loopy-target`, with the limit in words as its reason, rather than a
+  `LoopyError` thrown from inside code generation several steps later.
 - **The reference implementation is the kernel.** The same body runs on numpy
   under plain `python` and traces to the term loopy compiles, so the differential
   test compares a program with itself rather than with a second implementation.
@@ -156,9 +163,21 @@ end to end; the edges are sharp.
   next, when an array is used whole (`y[:] = ...`, `x * 2`, a numpy function of
   it), when a reduction's `if` clause is not a bound isl can state, when the
   trace changes Python state outside the arrays (a global, a closure variable,
-  an object's attribute, a list, dict, set or numpy array they hold, or the
-  same in a helper the body calls), and when the body prints, reads input,
-  opens a file or draws a random number.
+  an object's attribute or slot, a list, dict, set or numpy array they hold, a
+  ragged array's offsets, or the same in a helper the body calls), and when the
+  body prints, reads input, opens a file or draws a random number. The
+  kernel's own module and package count as its code wherever they are
+  installed, site-packages included.
+- `when` guards narrow a statement's isl domain where isl can state them: an
+  affine comparison of loop variables, sizes and scalars of an integral sort.
+  A guard that reads an array, compares with `!=`, or compares with a `Real`
+  scalar is evaluated at run time only, the statement lists it in
+  `Stmt.unnarrowed`, and the facts stated over its domain say so in their
+  provenance. A guard has to be a truth value, and one whose value is an
+  integer is a `TraceError`, on a native run and under tracing alike. Natively
+  that is what `~(i > 0)` is (`~` on a Python bool is bitwise), while the trace
+  records `not (i > 0)`, so such a kernel traces and its `trace-faithful` fact
+  is refuted by the native refusal, which names the fix.
 - The faithfulness fact. For each kernel, the traced term is run by an
   interpreter (`loopty.interpret`: statement by statement in source order over
   each statement's isl domain, expressions evaluated with numpy's arithmetic,
@@ -182,9 +201,10 @@ end to end; the edges are sharp.
   dependence backwards, and rewrites the kernel over the map's image; `skew` is
   that method with a particular map.
 - The target-capability check: a parallel tag inside a data-dependent (ragged)
-  loop bound, or a reduction split across parallel and sequential inames, is
-  reported as a `refuted` `buildable` fact and raises `UnbuildableSchedule` when
-  something asks for code.
+  loop bound, a hardware axis on a reduction nested in another, or a reduction
+  split across parallel and sequential inames, is reported as a `refuted`
+  `buildable` fact and raises `UnbuildableSchedule` when something asks for
+  code.
 - Lowering to loopy, including a ragged axis as a flat buffer plus offsets, and
   running on `lp.ExecutableCTarget`. Every argument of `LoopyExecutor.run` is
   an argument of the kernel; the target is chosen by the schedule
@@ -207,7 +227,9 @@ end to end; the edges are sharp.
   `loopty check FILE`, and `lanky run FILE` through the entry point.
   `--target` retargets every schedule in the file, re-checking its casts, and
   says so by name when one cannot be retargeted; without it each schedule keeps
-  the target it was written for.
+  the target it was written for. A refuted fact is repeated under the ledger
+  with what explains it, the block `lanky check` prints (a compiled run that
+  disagrees names the outputs and by how much), and the command exits 1.
 
 **Partial.**
 
@@ -222,8 +244,12 @@ end to end; the edges are sharp.
   spelling `val[r, j]` over `0 <= j < cnt[r]`, which is what the tracer and the
   demos produce, *is* decided. The monotone-offsets formulation is the
   documented next step; see the module docstring of `loopty/flow.py`.
-- `@program` restates a callee's postcondition as a fact in scope, but no rule
-  consumes postconditions as hypotheses yet, so "facts travel" is bookkeeping.
+- `@program` restates a callee's postcondition as a fact in scope, which rests
+  on the callee's own fact (lanky's `rests_on`, so the row reads
+  `assumed under scan:postcondition`), but no rule consumes postconditions as
+  hypotheses yet, so "facts travel" is bookkeeping. A callee imported from
+  another file has its fact in that file's ledger, so `lanky check` counts the
+  id as an assumption and names it in an `UNRESOLVED` line.
 - Only a two-axis (row, fiber) ragged array lowers. A deeper dependent sum
   raises.
 - A reduction nested in another one cannot take its bound from the outer
@@ -249,7 +275,7 @@ end to end; the edges are sharp.
   `examples/wavefront_acoustic.py` needs is out of reach, and the tiling is
   refused with a witness. A map the rewrite cannot write for loopy, such as one
   over a row and the ragged fiber inside it, is a `refuted` `buildable` fact.
-  See note 10 in `docs/loopy-notes.md`.
+  See note 13 in `docs/loopy-notes.md`.
 - `realize(var, tree=True)` checks and marks the reassociation; the reduction
   tree itself comes from splitting and tagging the reduction iname, which is
   checked separately and not verified on the C target.
@@ -278,15 +304,16 @@ end to end; the edges are sharp.
   a reduction by its iname in the kernel (`split("j_0", 2)`), which
   `Lowering.reduction_inames` lists.
 - The trace-time refusals of hidden state look one level below a name: into
-  the containers and the objects it holds, and the containers those objects
-  hold. `acc[0][0] += 1`, `holder.inner.s = ...`, a `deque`, a loop over a
-  generator that wraps a domain, and a `dir()` probe trace without an error,
-  and the `trace-faithful` fact is what refutes them. That fact is a test, not
-  a proof: it compares the runs on the inputs it tries, so hidden state no such
-  input exercises goes unseen. It stays `assumed`, with the reason, when no
-  input runs natively, when the term calls a function the interpreter has no
-  numpy counterpart for, or when a loop bound reads an array the same kernel
-  writes.
+  the containers and the objects it holds (their `__dict__` and their slots),
+  the buffers of the arrays it holds (both of a ragged one), and the containers
+  those objects hold. `acc[0][0] += 1`, `holder.inner.s = ...`, a `deque`, a
+  loop over a generator that wraps a domain, and a `dir()` probe trace without
+  an error, and the `trace-faithful` fact is what refutes them. That fact is a
+  test, not a proof: it compares the runs on the inputs it tries, so hidden
+  state no such input exercises goes unseen. It stays `assumed`, with the
+  reason, when no input runs natively, when the term calls a function the
+  interpreter has no numpy counterpart for, or when a loop bound reads an array
+  the same kernel writes.
 
 **Not yet.**
 
@@ -359,8 +386,9 @@ term is interpreted on its own and compared with the native run.
 **Transformations are casts.** Each states a reindexing map, which isl checks for
 bijectivity, and a new execution order, which isl checks for monotonicity on the
 dependence relation. Failure is an `IllegalCast` carrying the witness and the
-refuted fact. Casts that change floating-point semantics mark the result's
-exactness class instead of being refused.
+refuted fact, whose reason is the exception's message. Casts that change
+floating-point semantics mark the result's exactness class instead of being
+refused.
 
 **loopty is a lanky plugin.** It registers a *theory* (`KernelTheory`, which
 turns a kernel into facts), an *oracle* (`IslOracle`, trust class

@@ -66,11 +66,13 @@ with a pair of statement instances.
 - **A target-capability check** (`loopty.schedule`). Legal and buildable are
   different questions, and a step that passes the first can still fail the
   second. A parallel tag inside a loop whose bound comes from an array (a ragged
-  fiber), or a reduction split across parallel and sequential inames, produces a
-  `refuted` fact of kind `buildable` decided by `loopy-target` with the limit in
-  words, and `UnbuildableSchedule` is raised as soon as anything asks the
-  schedule for code. Both limits were measured on real devices; see
-  `docs/device-runs.md`. The design's own spmv device schedule is the case.
+  fiber), a hardware axis on a reduction nested in another, or a reduction split
+  across parallel and sequential inames, produces a `refuted` fact of kind
+  `buildable` decided by `loopy-target` with the limit in words, and
+  `UnbuildableSchedule` is raised as soon as anything asks the schedule for
+  code. The first and the last were measured on real devices, see
+  `docs/device-runs.md`, and the second in loopy's code generation, see note 11
+  in `docs/loopy-notes.md`. The design's own spmv device schedule is the case.
 - **`Schedule.retarget(target)`**. The same transformations replayed against
   another loopy target, with every cast checked again and the buildability
   question re-asked, rather than relabelled.
@@ -99,7 +101,7 @@ with a pair of statement instances.
   refused. `examples/wavefront_acoustic.py` tries the diamond three ways: with
   space first it is refused with a witness, with time first it is accepted and
   runs, and tiling it is refused, because the pair needs a time offset between
-  its statements. Note 10 in `docs/loopy-notes.md` has the details, and
+  its statements. Note 13 in `docs/loopy-notes.md` has the details, and
   `loopty.oracle.is_bijection_on` is the totality-and-bijectivity question the
   first fact asks.
 - **Execution** (`loopty.executor`). `LoopyExecutor` runs a kernel, a schedule or
@@ -538,12 +540,39 @@ with a pair of statement instances.
   `for i in x.dom: y[i] = x[i]` traced over an iname `i0` on 3.13 and `i` on
   3.12.
 - `lanky check` prints the error of a kernel that cannot be traced under its
-  `REFUTED` line: the `trace` fact carries it as its `reason`, next to an empty
-  `counterexample`, which is lanky's form for a closed claim refuted at no
-  assignment in particular. The fix a `TraceError` names used to reach only the
-  JSON ledger. `loopty run` reports such a kernel as one it cannot schedule,
-  naming the error, and exits 1, where it used to stop with a traceback from
-  the search for kernels.
+  `REFUTED` line: the `trace` fact carries it as its `reason`, and no
+  `counterexample`, because it is refuted at no assignment in particular (an
+  empty one, there only to get the reason printed, is gone now that lanky
+  prints a reason without one). The fix a `TraceError` names used to reach only
+  the JSON ledger. `loopty run` reports such a kernel as one it cannot
+  schedule, naming the error, and exits 1, where it used to stop with a
+  traceback from the search for kernels.
+- A refuted cast fact carries its explanation as `reason`, which lanky prints
+  under its `REFUTED` line: the message of the `IllegalCast` it is raised with,
+  or, for a `buildable` fact, the limit the target hits, which is also
+  `UnbuildableSchedule.reason`. It had it as `detail` alone, which only the
+  JSON ledger shows, so the block under the line read `no witness recorded`
+  for a fact with no witness (`exactness`, `buildable`) and was empty for a
+  `bijective` or `monotone` fact with one. `detail` stays, in the oracle's
+  words, and `witness` is recorded whenever isl gives one.
+- A fact the isl oracle refutes (an access out of bounds, two instances
+  writing one cell) carries a `reason` that names the question and the
+  labelled witness at its sizes, which lanky prints under its `REFUTED` line:
+  `cells u[i + 1] reaches are cells u has, except [a0=1] at [n=1]`. Nothing was
+  printed under the line, because lanky counts the oracle's `witness` as what
+  explains a refutation and prints neither it nor `witness_text`.
+- What refuted a fact is printed under its `REFUTED` line by `loopty run` as by
+  `lanky check`. `loopty run` printed the bare line; it now prints lanky's own
+  block (`lanky.cli.refutation_lines`) under each one, and the line itself as
+  lanky does, `REFUTED owner at where: statement`, after a blank line. A
+  refuted `agreement` fact names each output that disagreed, and by how much
+  against its allowance (or its shape and the native run's, when the two
+  differ), as its `reason`, where the block used to read `no witness
+  recorded`.
+- `loopty run` reports a body that raises `IndexError` or an `ArithmeticError`
+  on its example inputs (a read past the end, a division by zero) by name, as
+  it reports the other errors a run stops with, goes on to the file's other
+  kernels, and exits 1. It stopped with a traceback.
 - The schedule checker and the typing rules see the reads a ragged access makes
   through its offsets. `val[r, j]` is `val[off[r] + j]` once lowered, and row
   `r` ends at `off[r + 1]`, but neither read is in the body, so only the
@@ -615,6 +644,135 @@ with a pair of statement instances.
   wider column by the shape of the line and fails on a line that is gone. The
   abridged ledger in `README.md`, whose rows say they are verbatim, was kept
   so by hand, and its rule of dashes was not.
+- A `when` guard that compares with a `Real` scalar no longer narrows the
+  statement's isl domain. isl reads every name of a constraint as an integer,
+  so `with when(i < a):` with `a: Real` made `a` an integer parameter of the
+  domain, and at `a = 2.5` the compiled kernel disagreed with the native run
+  (the differential test was refuted by 1.0 at a cell), while the faithfulness
+  fact was left `assumed` because the interpreter would not fix a parameter at
+  a value that is not an integer. A comparison is a constraint only when every
+  name in it is a loop variable, a size, or a scalar of an integral sort
+  (`Nat`, `Int`, `Fin[...]`); any other conjunct is left to the statement's
+  guard predicate, evaluated at run time, and the domain over-approximates the
+  instances that write. `Stmt.unnarrowed` lists the conjuncts a domain leaves
+  out (this one, a data guard, a `!=`, a guard the trace already found
+  `False`), each with the reason, and the in-bounds, disjointness and ordering
+  facts stated over such a domain carry the list under `unnarrowed` in their
+  provenance: proved, they hold for the instances that write too; refuted, the
+  witness may be an instance the guard masks. A reduction condition that
+  compares with a `Real` scalar is refused, as a condition its domain cannot
+  state already was. `with when(i < a):` with `a: Nat` narrows the domain as
+  before.
+- A `when` guard whose value is an integer rather than a truth value is
+  refused with a `TraceError` that names the fix, on a native run as well as
+  under tracing. `~` on a Python bool is bitwise (`~True` is `-2`, `~False` is
+  `-1`, both true), so `with when(~(i > 0)):` on a loop variable wrote every
+  cell natively while the trace recorded `not (i > 0)` and the compiled kernel
+  wrote one; `&` or `|` with an integer operand is bitwise in the same way. The
+  fix is the complement written as a comparison (`i <= 0`), and an explicit
+  comparison (`k != 0`) for an integer. A data comparison is a numpy `bool_`,
+  on which `~` is logical, and is not affected, and natively a guard nested
+  under a false one is not asked, since nothing under it is written (a read out
+  of range there answers the integer 0). The faithfulness fact counts a
+  `TraceError` from the native run as a disagreement, not as an input the body
+  refuses, so such a kernel is `refuted` with the refusal as its reason instead
+  of `assumed` for want of an input that ran.
+- Which code is a library's, for the trace-time refusals of hidden state, is
+  decided by module. The kernel's own module and the top-level package holding
+  it (below a namespace package, the first regular package, which is the
+  author's alone) are never a library's, so a kernel installed into
+  site-packages by a non-editable install has its `print()` refused, the
+  helpers of its package followed and their module state copied, and the
+  objects of its classes compared, as a kernel in a source tree does. The
+  package is read off the module's `__package__` too, so a kernel file that
+  `lanky check` imports by path under a name of its own, or that `python -m`
+  runs as `__main__`, keeps the package it sits in. loopty's dependencies are
+  machinery whatever directory they come from, and so is the standard library,
+  by name where its code is where the standard library is (a `colorsys.py` of
+  the author's next to the kernel is the author's). Another installed package
+  is a library's for a kernel outside it, and its call locations are passed
+  over rather than disabled for good, so that a kernel of its own traced later
+  is watched.
+- The outside-state snapshot reads an object's slots along with its
+  `__dict__`, and a ragged `Arr`'s offsets along with its values. An object of
+  the kernel author's class with `__slots__` was not copied at all, so
+  `state.count += 1` on a global or closure-held one traced, and a write into
+  the offsets of a global ragged array went unseen. Every slot named along the
+  class's MRO is read (a private one by its mangled name, an unset one as
+  unbound, a base's slot that a subclass declares again as `Base.x`, and a
+  `__dict__` entry a slot's name hides as `__dict__['x']`), and the offsets
+  are copied as a second buffer, named `rows.offsets` in the message.
+- A kernel with statements at two depths of one loop lowers and runs: `z[r] =
+  1.0` after a dense loop over `j` that writes `y[r]`, or before it, and two
+  inner loops side by side in one outer loop. loopy defines each iname in one
+  domain, each statement contributed its domain over every loop around it, and
+  loopy refused the second domain that defined `r` with a bare `RuntimeError`
+  that the executor, `Schedule` and `loopty run` passed on. A statement's
+  domain is now cut after every loop at which another statement leaves its
+  nest, as a ragged one already was at its row, and an outer stretch drops the
+  constraints of the loops inside it rather than projecting them out, so two
+  inner loops over different extents do not leave the loop over `r` a union
+  that is not convex. Every example lowers to the code it lowered to before.
+  One name for two different loops, which only a term built by hand can have,
+  is refused with a `LoweringError` naming the loop. See note 10 in
+  `docs/loopy-notes.md`.
+- A statement that reads what an inner loop writes stays outside that loop.
+  loopy adds to an instruction whose loops are not final the loops of every
+  instruction that writes what it reads, less those the writer's subscripts
+  name, so `z[r] = z[r] + y[r]` after the loop over `j` that accumulates
+  `y[r]` ran once per `j`, and a copy of `y[r]` before that loop saw all but
+  the last update. A later loop that reads a nest's result, and a statement
+  after a ragged inner loop, computed the wrong values the same way before
+  this batch; the differential test refuted them, and `LoopyExecutor.run`
+  returned them. The loops of every instruction the lowering writes are now
+  final. See note 12 in `docs/loopy-notes.md`.
+- An inner reduction bounded by an expression affine in an outer reduction's
+  binder (`reduce_sum(a[i, j] for j in Fin[i + 1])` inside a sum over `i`) is a
+  triangle, not a ragged fiber. The inner domain names the binder as a
+  parameter, and `data_dependent_inames` counted every parameter that was not a
+  size as data read out of an array; an enclosing binder, or a loop of the
+  statement, is not. A parallel tag on a reduction nested in another is
+  refused as unbuildable with its own reason, the limit loopy actually has
+  (the enclosing reduction's accumulator is set outside the inner loop, by
+  instructions that do not run on its axis), where it used to be refused only
+  by accident, as a ragged fiber, and not at all when the inner bound was a
+  size. See note 11 in `docs/loopy-notes.md`, which also lists three limits
+  the check does not know yet.
+- A term built by hand that holds one `Reduction` object in two statements
+  lowers and runs. The lowering planned a reduction's inames by the object's
+  identity, so the second statement's plan replaced the first's, both
+  instructions reduced over one iname, and loopy stopped with a `CycleError`.
+  A plan now belongs to a reduction in a statement, as if each statement had
+  its own copy.
+- The differential test judges each cell by `loopty.tolerance.disagreement`,
+  the comparison the faithfulness fact makes. An infinity both runs computed
+  agrees, where `|inf - inf|` was NaN and the search for the worst cell then
+  raised `ValueError` out of `differential`; a NaN both runs computed in an
+  `exact` output agrees, where it was refuted; and `exact` compares bits, so
+  `-0.0` against `0.0` is a difference, as the docstring always said. The
+  `difference ... within ...` line reports the closest finite cell, or `inf`
+  for a disagreeing cell that is not finite, and outputs of different integer
+  widths are compared in the type both promote to.
+- An expected value that is not finite has no allowance in
+  `loopty.tolerance.disagreement`: `eps_class * (|inf| + 1)` is infinite, so a
+  finite value, or the infinity of the other sign, agreed with an expected
+  infinity under `approx` and `reassoc`. This is the comparison of the
+  faithfulness fact as well as of the differential test.
+- The in-bounds fact of a read of the offsets a ragged access is flattened
+  through says which access it serves: `off[r + 1], the end of row r that
+  val[r, j] is flattened through, is in bounds ...`, with `layout` in its
+  provenance saying the same, and `read directly and as ...` when the kernel
+  also reads it itself. The source never writes those reads, so a refuted one
+  used to name a read nobody could find in the kernel. No example declares its
+  offsets, so no transcript changes.
+- The C of a kernel with an `exact` output carries GCC's own pragma,
+  `#pragma GCC optimize ("fp-contract=off")` behind a guard that keeps it from
+  other compilers, beside the standard one GCC ignores. The build loopty runs
+  was pinned by `-ffp-contract=off`; the source `loopty run --emit-code` prints
+  was not, and GCC in a GNU dialect contracts by default whenever `-march` gives
+  it an FMA instruction. `tests/test_contraction.py` compiles the emitted
+  source by hand to show it, and on hardware with FMA runs it. See note 9 in
+  `docs/loopy-notes.md`.
 - `tile(second, first, ...)`, with the loop that comes second in the nest
   named first, is a tiling like the other: `skew("i", by="t").tile("i", "t",
   4, 4)` and a transpose's `tile("j", "i", 2, 2)` used to be refused as "not
@@ -706,6 +864,18 @@ with a pair of statement instances.
   the diamond, silences it locally.
 - `lanky>=0.1.0.dev0` is a dependency, resolved from a sibling checkout by
   `[tool.uv.sources]` during development.
+- **A program's restatement of a callee's postcondition rests on the callee's
+  fact.** `Program.facts` pointed at the callee's postcondition with a `from`
+  entry in the provenance, which lanky had no way to read, so the ledger
+  showed each restatement as an assumption standing on its own. It now sets
+  lanky's `Fact.rests_on` to the id of that fact, built by the new
+  `loopty.typing.postcondition_id`, which the kernel's own postcondition fact
+  uses too, so the two cannot drift apart. The ledger names the callee's fact
+  beside the restatement, as in `assumed under scan:postcondition`, counts it
+  in what the restatement is worth, and `lanky check --json` carries
+  `rests_on`, `effective` and `under`. The `from` entry is gone; `callee`
+  stays. The `lanky check` transcripts of `examples/spmv.py` show the new row,
+  and this needs the lanky that has `Fact.rests_on`.
 
 ### Notes
 

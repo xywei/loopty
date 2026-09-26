@@ -196,6 +196,68 @@ def test_a_refuted_fact_carries_a_labelled_witness() -> None:
     assert decided.provenance["witness_text"] == "[s=0, d0=4]"
 
 
+def test_a_refuted_fact_says_what_refutes_it_as_its_reason() -> None:
+    # lanky prints a refuted fact's ``reason`` under its REFUTED line, and
+    # prints no plugin's labelled witness. Without a reason, an out-of-bounds
+    # access or two colliding writes came out as a bare REFUTED line.
+    from lanky.cli import refutation_lines
+    from lanky.ledger import Fact, Status
+
+    from loopty.oracle import Empty, Monotone, Subset
+
+    def refuted(term):
+        fact = Fact(id="x", kind="k", statement="s", term=term)
+        decided = IslOracle().establish(fact)
+        assert decided.status is Status.REFUTED
+        assert decided.provenance["reason"] in refutation_lines(decided)
+        return decided.provenance["reason"]
+
+    # The claim, and the witness that is the exception to it, with the sizes.
+    escapes = Subset(
+        isl.Set("[n] -> { [a] : a = n and n = 3 }"),
+        isl.Set("[n] -> { [a] : 0 <= a < n }"),
+        description="cells u[i + 1] reaches are cells u has",
+        labels=("a0",),
+    )
+    assert refuted(escapes) == (
+        "cells u[i + 1] reaches are cells u has, except [a0=3] at [n=3]"
+    )
+    # An emptiness question names the bad case, and the witness is one of it.
+    collisions = Empty(
+        isl.Map("{ [s, d0] -> [s, d1] : s = 0 and d0 = 1 and d1 = 0 }"),
+        description="pairs of S0 instances writing the same cell",
+        labels=("s", "d"),
+    )
+    assert refuted(collisions) == (
+        "[s=0, d=1] -> [s=0, d=0] is one of the pairs of S0 instances writing "
+        "the same cell"
+    )
+    backwards = Monotone(
+        isl.Map("{ [i] -> [-i] }"),
+        isl.Map("{ [i] -> [i + 1] : i = 0 }"),
+        description="the source schedule is monotone on the dependences",
+        labels=("i",),
+    )
+    assert refuted(backwards) == (
+        "the source schedule is monotone on the dependences, except [i=0] -> [i=1]"
+    )
+    # A question with nothing to say what it asked falls back on the verdict.
+    bare = Subset(isl.Set("{ [a] : a = 5 }"), isl.Set("{ [a] : a < 5 }"))
+    assert refuted(bare) == "point (5,) is in the first set but not in the second"
+
+
+def test_a_fact_isl_decides_has_no_reason() -> None:
+    from lanky.ledger import Fact, Status
+
+    from loopty.oracle import Empty
+
+    empty = Empty(isl.Set("{ [i] : 1 = 0 }"))
+    fact = Fact(id="x", kind="k", statement="s", term=empty)
+    decided = IslOracle().establish(fact)
+    assert decided.status is Status.DECIDED
+    assert "reason" not in decided.provenance
+
+
 def test_a_witness_and_its_sizes_come_from_one_sample(monkeypatch) -> None:
     # The point and the parameter valuation of a refutation used to be read off
     # two separate samples, which leaves isl free to answer with two different

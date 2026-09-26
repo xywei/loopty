@@ -34,7 +34,7 @@ all three:
 * In the order ``(t + i, t - i)`` it is accepted, and loopy generates correct
   code over the image with its holes. loopy's own ``map_domain`` refuses this
   map (``t`` is ``(a + b) / 2``, which it cannot solve for), so loopty rewrites
-  the kernel itself; see ``docs/loopy-notes.md``, note 10. Both fields come out
+  the kernel itself; see ``docs/loopy-notes.md``, note 13. Both fields come out
   of the compiled run bit for bit as they come out of the native one. The
   parity is tested inside the innermost loop rather than stepped over, so half
   of its iterations do nothing: the answer is "correct", not "fast".

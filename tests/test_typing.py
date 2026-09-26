@@ -106,10 +106,15 @@ def gated_past_the_end(
 
 
 def in_bounds_of(fn) -> dict[str, object]:
-    """The in-bounds facts of a traced function, by the access they are about."""
+    """The in-bounds facts of a traced function, by the access they are about.
+
+    The access is the last part of the fact's id, ``...:read:off[r]``: the
+    statement of an offsets read says more than the access (see
+    :func:`test_an_offsets_fact_names_the_ragged_access_it_serves`).
+    """
     _, facts = facts_of(fn)
     return {
-        fact.statement.split(" is ")[0]: fact
+        fact.id.rsplit(":", 1)[-1]: fact
         for fact in settled(facts)
         if fact.kind == "in-bounds"
     }
@@ -405,6 +410,58 @@ def test_offsets_declared_a_cell_short_are_refuted_at_the_last_row() -> None:
     ] == ["off[r + 1]"]
 
 
+def test_an_offsets_fact_names_the_ragged_access_it_serves() -> None:
+    # The source never writes ``off[r + 1]``, so a refuted fact about it used
+    # to name a read nobody could find in the kernel.
+    facts = in_bounds_of(spmv_through_short_offsets)
+    served = "val[r, j] and col[r, j] are flattened through"
+    assert facts["off[r]"].statement == (
+        f"off[r], the start of row r that {served}, is in bounds for every "
+        "instance of S0"
+    )
+    refuted = facts["off[r + 1]"]
+    assert refuted.statement == (
+        f"off[r + 1], the end of row r that {served}, is in bounds for every "
+        "instance of S0"
+    )
+    assert refuted.provenance["layout"] == f"the end of row r that {served}"
+    # An access the source spells keeps its statement, and its provenance.
+    assert facts["val[r, j]"].statement == (
+        "val[r, j] is in bounds for every instance of S0"
+    )
+    assert "layout" not in facts["val[r, j]"].provenance
+
+
+def indirect_rows(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    off: Arr[Fin[n + 1], Nat],  # noqa: F821
+    p: Arr[Fin[k], Fin[n]],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[k], Real],  # noqa: F821
+):
+    for i in y.dom:
+        y[i] = val[p[i], 0]
+
+
+def test_an_assumed_offsets_fact_names_its_access_too() -> None:
+    facts = in_bounds_of(indirect_rows)
+    for access, end in (("off[p[i]]", "start"), ("off[p[i] + 1]", "end")):
+        fact = facts[access]
+        assert fact.status is Status.ASSUMED
+        assert fact.statement == (
+            f"{access}, the {end} of row p[i] that val[p[i], 0] is flattened "
+            "through, is in bounds"
+        )
+
+
+def test_an_offsets_read_the_source_also_spells_says_both() -> None:
+    fact = only_fact(offsets_before_and_through_a_sum, "off[r - 1]")
+    assert fact.statement.startswith(
+        "off[r - 1], read directly and as the start of row r - 1 that "
+        "val[r - 1, j] is flattened through, is in bounds"
+    )
+
+
 # }}}
 
 
@@ -456,6 +513,87 @@ def test_the_offsets_a_sum_reads_through_do_not_hide_a_direct_read() -> None:
     fact = only_fact(offsets_before_and_through_a_sum, "off[r - 1]")
     assert fact.status is Status.REFUTED
     assert fact.provenance["witness_text"].startswith("[a0=-1] ")
+
+
+# }}}
+
+
+# {{{ a guard isl cannot state
+
+
+def test_a_fact_over_a_domain_a_guard_left_wide_says_so() -> None:
+    # i < a with a : Real is not a constraint isl can state, so the domain is
+    # the whole loop nest and the facts about it are about masked instances too.
+    def below(a: Real, y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(i < a):
+                y[i] = 1.0
+
+    _term, facts = facts_of(below)
+    kinds = {fact.kind: fact for fact in facts}
+    (entry,) = kinds["in-bounds"].provenance["unnarrowed"]
+    assert entry["conjunct"] == "i < a"
+    assert "the scalar a of sort Real" in entry["why"]
+    assert kinds["disjoint-writes"].provenance["unnarrowed"] == [entry]
+    assert kinds["ordering"].provenance["unnarrowed"] == {"S0": [entry]}
+    # Wider is harder, never easier: y[i] is still in bounds everywhere.
+    (write,) = [f for f in settled(facts) if f.kind == "in-bounds"]
+    assert write.status is Status.DECIDED
+
+
+def test_a_real_guard_no_longer_discharges_an_obligation() -> None:
+    # Only the guard keeps x[i] in bounds: i < a < m. Read with a as an
+    # integer parameter, that was decided; left out of the domain, the read is
+    # refuted at an instance the guard masks, and the fact says the domain is
+    # wide. Sound, if not sharp: a Real a no longer proves anything about i.
+    def clipped(a: Real, x: Arr[Fin[m], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when((i < a) & (a < x.dom.size)):
+                y[i] = x[i]
+
+    _term, facts = facts_of(clipped)
+    bounds = {
+        fact.provenance["access"]: fact
+        for fact in settled(facts)
+        if fact.kind == "in-bounds"
+    }
+    read = bounds["x[i]"]
+    assert read.status is Status.REFUTED, read.provenance
+    assert [entry["conjunct"] for entry in read.provenance["unnarrowed"]] == [
+        "i < a",
+        "a < m",
+    ]
+    assert bounds["y[i]"].status is Status.DECIDED
+
+
+def test_a_guard_isl_states_whole_leaves_nothing_to_say() -> None:
+    def below(a: Nat, y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(i < a):
+                y[i] = 1.0
+
+    _term, facts = facts_of(below)
+    assert not any("unnarrowed" in fact.provenance for fact in facts)
+
+
+def test_a_guards_own_read_is_not_over_the_wide_domain() -> None:
+    # The guard's read happens at every point of the loop nest, which is the
+    # domain it is stated over, so nothing about it is over-approximated.
+    def flagged(flag: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(flag[i] > 0.0):
+                y[i] = 1.0
+
+    _term, facts = facts_of(flagged)
+    bounds = {
+        fact.provenance["access"]: fact
+        for fact in facts
+        if fact.kind == "in-bounds"
+    }
+    assert "unnarrowed" not in bounds["flag[i]"].provenance
+    assert bounds["y[i]"].provenance["unnarrowed"] == [
+        {"conjunct": "flag[i] > 0.0", "why": "reads an array or is not affine"}
+    ]
 
 
 # }}}

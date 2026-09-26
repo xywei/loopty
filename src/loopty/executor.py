@@ -51,7 +51,12 @@ import numpy as np
 
 from loopty.contract import check_arguments
 from loopty.term import Term
-from loopty.tolerance import TOLERANCE, TOLERANCE_FLOOR, output_class
+from loopty.tolerance import (
+    TOLERANCE,
+    TOLERANCE_FLOOR,
+    disagreement,
+    output_class,
+)
 
 if TYPE_CHECKING:
     from loopty.lower import Lowering
@@ -413,61 +418,115 @@ def _compare(
 ) -> tuple[bool, float, float]:
     """``(agree, difference, tolerance)`` under one exactness class.
 
-    Agreement is decided element by element, each against an allowance that
-    depends on that element's own expected magnitude and on nothing else:
-    ``|a_k - b_k| <= eps_class * (|b_k| + FLOOR)``, with ``exact`` asking for the
-    bits. The two numbers returned describe the element that came closest to
+    The verdict is :func:`loopty.tolerance.disagreement`, the comparison the
+    faithfulness fact makes too, cell by cell: the bits for ``exact``, so
+    ``-0.0`` against ``0.0`` is a difference and two NaNs are not, and for the
+    other classes ``|a_k - b_k| <= eps_class * (|b_k| + FLOOR)``, with a cell
+    whose two values match (are equal, or are both NaN) agreeing whatever its
+    allowance. That last clause is what an infinity both runs computed needs:
+    ``inf - inf`` is NaN, and a NaN is within no allowance. The two arrays are
+    compared in the type both promote to, so an ``int32`` output that loopy
+    wrote agrees with the ``int64`` array the native run filled, as it always
+    did.
+
+    The two numbers returned describe the finite cell that came closest to
     failing, ties going to the one with the smaller allowance, so a run that
-    prints them names the tightest case rather than an average.
+    prints them names the tightest case rather than an average. A cell that
+    disagrees with a value that is not finite on either side is reported first,
+    as a difference of ``inf`` beside that cell's allowance, which is zero when
+    the expected value is the one that is not finite: no finite cell describes
+    it.
     """
     got = np.asarray(got)
     want = np.asarray(want)
     if got.shape != want.shape:
         return False, float("inf"), 0.0
-    if exactness == "exact":
-        return bool(np.array_equal(got, want)), float(
-            np.max(np.abs(got - want)) if got.size else 0.0
-        ), 0.0
+    common = np.result_type(got, want)
+    got = got.astype(common, copy=False)
+    want = want.astype(common, copy=False)
+    differs = np.asarray(disagreement(got, want, exactness)).reshape(-1)
+    agree = not bool(differs.any())
     if not want.size:
         return True, 0.0, 0.0
     epsilon = TOLERANCE[exactness]
-    difference = np.abs(got - want)
-    allowed = epsilon * (np.abs(want) + TOLERANCE_FLOOR)
-    agree = bool(np.all(difference <= allowed))
+    flat_got, flat_want = got.reshape(-1), want.reshape(-1)
+    finite = np.isfinite(flat_got) & np.isfinite(flat_want)
+    with np.errstate(invalid="ignore", over="ignore"):
+        if common.kind in "fc":
+            difference = np.abs(flat_got - flat_want)
+        else:
+            # Integers and booleans: numpy refuses to subtract booleans, and an
+            # unsigned difference wraps around.
+            difference = np.abs(
+                flat_got.astype(np.float64) - flat_want.astype(np.float64)
+            )
+        allowed = epsilon * (np.abs(flat_want) + TOLERANCE_FLOOR)
+    unmatched = np.flatnonzero(differs & ~finite)
+    if unmatched.size:
+        # The allowance of that cell, which an expected value that is not
+        # finite does not have.
+        k = int(unmatched[0])
+        expected = bool(np.isfinite(flat_want[k]))
+        return False, float("inf"), float(allowed[k]) if expected else 0.0
+    if not finite.any():
+        return agree, 0.0, 0.0
+    if exactness == "exact":
+        return agree, float(np.max(difference[finite])), 0.0
+    difference, allowed = difference[finite], allowed[finite]
     ratio = np.divide(
         difference,
         allowed,
         out=np.where(difference > 0, np.inf, 0.0).astype(float),
         where=allowed > 0,
     )
-    flat_ratio = np.asarray(ratio).reshape(-1)
-    flat_allowed = np.asarray(allowed).reshape(-1)
-    worst = np.flatnonzero(flat_ratio == flat_ratio.max())
-    k = int(worst[int(np.argmin(flat_allowed[worst]))])
-    return (
-        agree,
-        float(np.asarray(difference).reshape(-1)[k]),
-        float(flat_allowed[k]),
-    )
+    worst = np.flatnonzero(ratio == ratio.max())
+    k = int(worst[int(np.argmin(allowed[worst]))])
+    return agree, float(difference[k]), float(allowed[k])
 
 
 def agreement(term: Term, schedule: Any, got: dict, want: dict) -> Any:
-    """The fact recording whether two runs of a kernel agree."""
+    """The fact recording whether two runs of a kernel agree.
+
+    A refuted one says which outputs disagreed as its ``reason``, one line per
+    output, which is what lanky prints under its ``REFUTED`` line: the
+    difference and what was allowed, or the two shapes when they are not the
+    same, since a difference between arrays of two shapes is not a number
+    anyone can read (``outputs`` records it as infinite). The numbers of every
+    output, agreeing or not, are in ``outputs``.
+    """
     from lanky.ledger import Fact, Status
 
     details: dict[str, Any] = {}
-    ok = True
+    disagreements: list[str] = []
     for name, want_array in want.items():
         exactness = exactness_of_output(term, schedule, name)
         agree, difference, tolerance = _compare(got[name], want_array, exactness)
-        ok = ok and agree
         details[name] = {
             "exactness": exactness,
             "difference": difference,
             "tolerance": tolerance,
             "agree": agree,
         }
+        if agree:
+            continue
+        shape = np.asarray(got[name]).shape
+        native_shape = np.asarray(want_array).shape
+        disagreements.append(
+            f"{name} has shape {shape}, and the native run's has shape "
+            f"{native_shape}"
+            if shape != native_shape
+            else f"{name} differs from the native run: difference "
+            f"{difference:.3g}, allowed {tolerance:.3g} ({exactness})"
+        )
+    ok = not disagreements
     history = tuple(getattr(schedule, "history", ()))
+    provenance: dict[str, Any] = {
+        "outputs": details,
+        "schedule": history,
+        "target": getattr(schedule, "target", "c"),
+    }
+    if not ok:
+        provenance["reason"] = "\n".join(disagreements)
     return Fact(
         id=f"agreement:{term.name}",
         kind="agreement",
@@ -478,11 +537,7 @@ def agreement(term: Term, schedule: Any, got: dict, want: dict) -> Any:
         term=None,
         status=Status.TESTED if ok else Status.REFUTED,
         decided_by="loopy",
-        provenance={
-            "outputs": details,
-            "schedule": history,
-            "target": getattr(schedule, "target", "c"),
-        },
+        provenance=provenance,
         where=term.stmts[0].where if term.stmts else "",
         owner=term.name,
     )

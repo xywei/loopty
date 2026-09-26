@@ -17,9 +17,12 @@ The fact-level entry points (``can_establish``, ``establish``) dispatch on the
 four question types below. A typing rule states an obligation by putting one of
 them in a fact's ``term``; the oracle answers it and writes back ``DECIDED`` or
 ``REFUTED``, and a refuted fact carries the witness in its provenance, labelled
-with the names of the coordinates so that the ledger can print ``S0[r=4]``
-rather than ``(0, 4)``. A fact whose term is not one of them is declined, which
-leaves it to a weaker oracle (the property tester) or to ``ASSUMED``.
+with the names of the coordinates so that it reads ``S0[r=4]`` rather than
+``(0, 4)``. The labelled witness is also in the fact's ``reason``, next to what
+the question asked, because the reason is what lanky prints under a
+``REFUTED`` line (``lanky.cli.refutation_lines``). A fact whose term is not one
+of them is declined, which leaves it to a weaker oracle (the property tester)
+or to ``ASSUMED``.
 """
 
 from __future__ import annotations
@@ -411,6 +414,26 @@ def decide(question: IslQuestion) -> Verdict:
     raise TypeError(f"not an isl question: {question!r}")
 
 
+def _refutation(question: IslQuestion, verdict: Verdict) -> str:
+    """What refutes ``question``, in words: the labelled witness and the question.
+
+    The question's ``description`` says what was asked. For :class:`Empty` it
+    names the bad case, so the witness is one of them: ``[s=0, d0=1] -> [s=0,
+    d0=0] is one of the pairs of S0 instances writing the same cell``. For the
+    other three it states the claim, so the witness is the exception: ``cells
+    u[i + 1] reaches are cells u has, except [a0=1]``. The sizes the witness was
+    read off at close the sentence. A question with no description, or a
+    verdict with no witness, is explained by the verdict's own ``detail``.
+    """
+    labelled = label_witness(verdict.witness, question.labels)
+    if not question.description or not labelled:
+        return verdict.detail
+    at = _at_text(verdict.parameters)
+    if isinstance(question, Empty):
+        return f"{labelled} is one of the {question.description}{at}"
+    return f"{question.description}, except {labelled}{at}"
+
+
 # }}}
 
 
@@ -421,9 +444,9 @@ class IslOracle:
     above are the whole decision procedure; this class is the adapter that
     lanky's ledger talks to. The typing rules in :mod:`loopty.typing` state
     their obligations as :data:`IslQuestion` terms, and this class answers them,
-    attaching the witness of a failure to the ``REFUTED`` fact's provenance so
-    that the ledger can say which cell or which pair of statement instances went
-    wrong.
+    attaching the witness of a failure to the ``REFUTED`` fact's provenance, and
+    a ``reason`` that puts it in words, so that the ledger can say which cell or
+    which pair of statement instances went wrong.
     """
 
     name = "isl"
@@ -449,7 +472,7 @@ class IslOracle:
         return getattr(fact, "kind", None) in self.KINDS
 
     def establish(self, fact: Any) -> Any:
-        """Decide ``fact`` and return it with a status and a witness.
+        """Decide ``fact``; a refuted one comes back with a witness and a reason.
 
         Returns ``None`` to decline a fact whose term is not an isl question,
         which is how a fact merely *named* like one is passed on to the next
@@ -475,6 +498,7 @@ class IslOracle:
             witness_params=dict(verdict.parameters or {}),
             detail=verdict.detail,
             question=type(question).__name__.lower(),
+            reason=_refutation(question, verdict),
         )
 
     # The primitives, also exposed as methods so that a plugin holding only the

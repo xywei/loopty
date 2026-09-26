@@ -106,8 +106,11 @@ def disagreement(got: Any, want: Any, exactness: str) -> np.ndarray:
     the product keeps it. The other classes allow each cell
     ``eps_class * (|want| + FLOOR)``; a cell whose two values match (are
     equal, or are both NaN) agrees whatever its allowance, which is what keeps
-    an infinity both runs computed from reading as a difference of NaN. A
-    complex cell matches part by part, so ``nan + 1j`` and ``nan + 2j`` do not.
+    an infinity both runs computed from reading as a difference of NaN. An
+    expected value that is not finite is matched or not, and has no allowance:
+    ``eps_class * inf`` would excuse every value, a finite one or the infinity
+    of the other sign. A complex cell matches part by part, so ``nan + 1j``
+    and ``nan + 2j`` do not.
 
     The two arrays have one shape and one dtype, as two runs of a kernel on
     copies of one argument do; anything else is a disagreement at every cell.
@@ -137,5 +140,7 @@ def disagreement(got: Any, want: Any, exactness: str) -> np.ndarray:
     epsilon = TOLERANCE[exactness]
     with np.errstate(invalid="ignore", over="ignore"):
         matched = np.all((parts[0] == parts[1]) | both_nan, axis=-1)
-        near = np.abs(got - want) <= epsilon * (np.abs(want) + TOLERANCE_FLOOR)
+        near = np.isfinite(want) & (
+            np.abs(got - want) <= epsilon * (np.abs(want) + TOLERANCE_FLOOR)
+        )
     return ~(matched | near)

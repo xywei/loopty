@@ -42,20 +42,23 @@ the checker approved rather than one loopy chose for itself.
 A rejected cast raises :class:`IllegalCast` carrying ``witness``, the pair of
 statement instances the transformation would reorder. That is the difference
 between "tiling is illegal here" and "instance (0, 8) writes what instance
-(1, 7) reads, and your tiling runs them the other way round".
+(1, 7) reads, and your tiling runs them the other way round". The refuted fact
+the exception carries says the same thing: its ``reason`` is the exception's
+message, which is what lanky prints under a ``REFUTED`` line.
 
 Legal is not the same as buildable
 ----------------------------------
 
 The two isl questions are about meaning, and meaning is all isl can see. A
 transformation can preserve it and still be one the backend cannot generate
-code for. loopy 2025.2 has two such limits, both of which the design's own
-spmv device schedule walks into: it will not put a hardware axis (``g.*``,
-``l.*``) inside a loop whose bound comes from an array, which is exactly what a
-CSR inner loop is, and it will not generate a reduction whose inames are partly
-parallel and partly sequential. Neither is a wrong verdict about the cast, and
-neither used to be reported: the casts were all ``DECIDED`` and loopy then threw
-during code generation, several steps away from the line that caused it.
+code for. loopy 2025.2 has such limits, two of which the design's own spmv
+device schedule walks into: it will not put a hardware axis (``g.*``, ``l.*``)
+inside a loop whose bound comes from an array, which is exactly what a CSR
+inner loop is, and it will not generate a reduction whose inames are partly
+parallel and partly sequential. A third is a hardware axis on a reduction
+nested in another one. None is a wrong verdict about the cast, and none used to
+be reported: the casts were all ``DECIDED`` and loopy then threw during code
+generation, several steps away from the line that caused it.
 
 So every accepted step is asked a third question, this one about the target
 rather than about meaning, and its answer is a fact of kind ``buildable``
@@ -100,6 +103,7 @@ from loopty import oracle as isl_oracle
 from loopty.lower import (
     Lowering,
     _plain,
+    _reduction_nesting,
     is_reserved,
     lower_generic,
     reductions_of,
@@ -130,7 +134,8 @@ class IllegalCast(TypeError):
     oracle, and ``str()`` renders the explanation: which dependence, which two
     instances, and which way round the new order would run them. ``fact`` is the
     ``REFUTED`` ledger entry, carried on the exception because the schedule that
-    would have held it was never built.
+    would have held it was never built; its ``reason`` is this message, and its
+    ``witness`` this witness when isl gave one.
     """
 
     def __init__(self, message: str, witness: Any = None, fact: Any = None) -> None:
@@ -147,7 +152,7 @@ class UnbuildableSchedule(TypeError):
     combination of the schedule and the target, so the exception carries
     ``reason`` in the words of the limit it hits, and ``fact``, the ``REFUTED``
     ``buildable`` entry the schedule has been carrying since the step that
-    caused it.
+    caused it, whose ``reason`` is the same words.
     """
 
     def __init__(self, message: str, reason: str = "", fact: Any = None) -> None:
@@ -716,11 +721,15 @@ def _constrains(domain: isl.Set, position: int, param: int) -> bool:
 
 
 def _data_dependent_in(
-    domain: isl.Set, inames: Sequence[str], sizes: set[str]
+    domain: isl.Set, inames: Sequence[str], known: set[str]
 ) -> set[str]:
-    """The inames of one domain whose bound comes from data rather than a size."""
+    """The inames of one domain whose bound comes from data.
+
+    ``known`` names the parameters that do not: the sizes, and the loops and
+    binders a domain may name as parameters because it is nested in them.
+    """
     params = list(domain.get_var_names(isl.dim_type.param))
-    positions = [k for k, name in enumerate(params) if name not in sizes]
+    positions = [k for k, name in enumerate(params) if name not in known]
     if not positions:
         return set()
     out: set[str] = set()
@@ -744,16 +753,29 @@ def data_dependent_inames(
 
     ``reduction_inames`` is :attr:`loopty.lower.Lowering.reduction_inames`, so
     that a reduction the lowering gave fresh inames is reported under them.
+
+    A nested reduction's domain names the binders of the reductions around it
+    as parameters, and they are not data: ``j`` in
+    ``reduce_sum(reduce_sum(a[i, j] for j in Fin[i + 1]) for i in a.dom)`` is
+    bounded by the outer binder ``i``, a triangle and not a ragged fiber. Nor
+    is a loop variable of the statement. Only a parameter that is none of
+    these, and not a size, is read out of an array.
     """
     sizes = set(term.sizes)
     renamed = reduction_inames or {}
     out: set[str] = set()
     for stmt in term.stmts:
         out |= _data_dependent_in(stmt.domain, stmt.inames, sizes)
-        for position, reduction in enumerate(reductions_of(stmt.expr)):
+        nesting = _reduction_nesting(stmt.expr)
+        for position, (reduction, enclosing) in enumerate(nesting):
             names = renamed.get(f"{stmt.id}:{position}", reduction.inames)
+            loops = {
+                binder for k in enclosing for binder in nesting[k][0].inames
+            }
             out |= _data_dependent_in(
-                reduction.domain, (*stmt.inames, *names), sizes
+                reduction.domain,
+                (*stmt.inames, *names),
+                sizes | set(stmt.inames) | loops,
             )
     return frozenset(out)
 
@@ -761,9 +783,11 @@ def data_dependent_inames(
 def _unbuildable_reason(draft: _Draft) -> str | None:
     """Why loopy could not generate code for this draft, or ``None``.
 
-    Two limits of loopy 2025.2, both measured rather than guessed: a device run
-    of the design's spmv schedule fails on the first, and applying loopy's own
-    ``split_reduction_outward`` remedy to it then fails on the second.
+    Three limits of loopy 2025.2, all measured rather than guessed: a device
+    run of the design's spmv schedule fails on the first, applying loopy's own
+    ``split_reduction_outward`` remedy to it then fails on the third, and code
+    generation for a double sum with its inner reduction on a local axis fails
+    on the second ("instruction ... does not use all local hw axes").
     """
     parallel = {name for name, tag in draft.tags.items() if parallel_tag(tag)}
     inside = sorted(parallel & draft.data_dependent)
@@ -775,6 +799,25 @@ def _unbuildable_reason(draft: _Draft) -> str | None:
             "axis in a domain with a data-dependent parameter. Parallelize an "
             "enclosing loop with a size known at launch instead, such as the "
             "rows of a CSR product"
+        )
+    nested = sorted(
+        name
+        for name in parallel
+        if draft.reductions.get(name) in draft.nested_in
+    )
+    if nested:
+        names = ", ".join(nested)
+        outer = draft.nested_in[draft.reductions[nested[0]]]
+        around = ", ".join(
+            sorted(name for name, key in draft.reductions.items() if key == outer)
+        )
+        return (
+            f"the parallel tag on {names} puts a hardware axis on a reduction "
+            f"nested in the reduction over {around}, and loopy cannot generate "
+            "code for it: the enclosing reduction's accumulator is set and "
+            f"updated outside the loop over {names}, by instructions that do "
+            "not run on its axis. Put the axis on the enclosing reduction, or "
+            "on a loop of the statement, instead"
         )
     by_reduction: dict[str, list[str]] = {}
     for iname, key in draft.reductions.items():
@@ -847,6 +890,9 @@ class _Draft:
     data_dependent: set[str] = field(default_factory=set)
     #: Why the step could not be written as a loopy kernel, when it could not.
     unbuildable: str | None = None
+    #: Reduction key -> the key of the reduction it is nested in, for every
+    #: reduction that is nested in another; see :func:`_unbuildable_reason`.
+    nested_in: dict[str, str] = field(default_factory=dict)
 
 
 def _transformed(kernel: Any, transform: Any, *args: Any, **kwargs: Any) -> Any:
@@ -912,14 +958,20 @@ class Schedule:
         # so that a step names the loop it acts on.
         self._reductions: dict[str, str] = {}
         self._reduction_info: dict[str, tuple[str, str]] = {}
+        #: Which reduction each nested one sits in, by key; nesting is a fact
+        #: about the term, so no step changes it.
+        self._nested_in: dict[str, str] = {}
         reduction_inames = self._lowering.reduction_inames
         for stmt in self._term.stmts:
-            for position, reduction in enumerate(reductions_of(stmt.expr)):
+            nesting = _reduction_nesting(stmt.expr)
+            for position, (reduction, enclosing) in enumerate(nesting):
                 key = f"{stmt.id}:{position}"
                 self._reduction_info[key] = (
                     stmt.assignee.array,
                     reduction.exactness,
                 )
+                if enclosing:
+                    self._nested_in[key] = f"{stmt.id}:{enclosing[-1]}"
                 for iname in reduction_inames.get(key, reduction.inames):
                     self._reductions[iname] = key
         self._reassoc: frozenset[str] = frozenset()
@@ -973,6 +1025,7 @@ class Schedule:
             reduction_info=dict(self._reduction_info),
             reassoc=set(self._reassoc),
             data_dependent=set(self._data_dependent),
+            nested_in=dict(self._nested_in),
         )
 
     @property
@@ -1037,7 +1090,7 @@ class Schedule:
 
         A pair, ``(ok, reason)``, with ``reason`` empty when it is buildable.
         The question is asked of every accepted step; see
-        :func:`_unbuildable_reason` for the two limits it knows about.
+        :func:`_unbuildable_reason` for the limits it knows about.
         """
         return (self._unbuildable is None, self._unbuildable or "")
 
@@ -1122,10 +1175,13 @@ class Schedule:
             # found would read the wrong contract.
             accumulated, exactness = draft.reduction_info[draft.reductions[name]]
             if exactness == "exact":
-                raise IllegalCast(
+                message = (
                     f"tag({name}={tag!r}) illegal: it would run the pieces of "
                     f"the accumulation into {accumulated} at the same time, "
-                    "which reassociates an exact reduction",
+                    "which reassociates an exact reduction"
+                )
+                raise IllegalCast(
+                    message,
                     witness=None,
                     fact=self._fact(
                         "exactness",
@@ -1134,6 +1190,7 @@ class Schedule:
                         witness=None,
                         detail=f"the accumulation into {accumulated} is exact",
                         position=len(self._history),
+                        reason=message,
                     ),
                 )
             draft.reassoc.add(accumulated)
@@ -1550,6 +1607,11 @@ class Schedule:
             raise ValueError(f"{var!r} is not accumulated by {self._term.name}")
         text = f"realize({var!r}, tree={tree})"
         if tree and exactness == "exact":
+            message = (
+                f"{text} illegal: the accumulation into {var} is exact, and a "
+                "reduction tree reassociates it; ask for the accumulation at "
+                "'reassoc' if the bits may change"
+            )
             fact = self._fact(
                 "exactness",
                 f"the accumulation into {var} may be reassociated",
@@ -1557,14 +1619,9 @@ class Schedule:
                 witness=None,
                 detail=f"the accumulation into {var} is exact",
                 position=len(self._history),
+                reason=message,
             )
-            raise IllegalCast(
-                f"{text} illegal: the accumulation into {var} is exact, and a "
-                "reduction tree reassociates it; ask for the accumulation at "
-                "'reassoc' if the bits may change",
-                witness=None,
-                fact=fact,
-            )
+            raise IllegalCast(message, witness=None, fact=fact)
         draft = self._draft()
         if tree:
             draft.reassoc.add(var)
@@ -1622,6 +1679,12 @@ class Schedule:
         # two, and only a caller's map (``affine``) can do either.
         verdict = isl_oracle.is_bijection_on(step, self._instances)
         step = step.intersect_domain(self._instances)
+        message = (
+            ""
+            if verdict.ok
+            else f"{text} illegal: the reindexing is not a bijection on the "
+            f"instances of {self._term.name}; {verdict.detail}"
+        )
         facts.append(
             self._fact(
                 "bijective",
@@ -1630,15 +1693,11 @@ class Schedule:
                 witness=verdict.witness,
                 detail=verdict.detail,
                 position=position,
+                reason=message,
             )
         )
         if not verdict.ok:
-            raise IllegalCast(
-                f"{text} illegal: the reindexing is not a bijection on the "
-                f"instances of {self._term.name}; {verdict.detail}",
-                witness=verdict.witness,
-                fact=facts[-1],
-            )
+            raise IllegalCast(message, witness=verdict.witness, fact=facts[-1])
 
         reindex = self._reindex.apply_range(step)
         instances = step.range()
@@ -1654,24 +1713,27 @@ class Schedule:
         # Attribution costs one isl question per dependence, and is only needed
         # to explain a refusal, so it is asked only when there is one to explain.
         bad = None if overall.ok else self._first_violation(schedule)
+        refused = bad is not None or not overall.ok
+        witness = overall.witness if bad is None else bad[1]
+        if bad is not None:
+            message = self._render_violation(text, *bad)
+        elif refused:
+            message = f"{text} illegal: {overall.detail}"
+        else:
+            message = ""
         facts.append(
             self._fact(
                 "monotone",
                 f"the order after {text} runs every dependence of "
                 f"{self._term.name} forward",
-                status="decided" if bad is None and overall.ok else "refuted",
-                witness=overall.witness if bad is None else bad[1],
+                status="refuted" if refused else "decided",
+                witness=witness,
                 detail=overall.detail if bad is None else bad[2],
                 position=position,
+                reason=message,
             )
         )
-        if bad is not None or not overall.ok:
-            witness = overall.witness if bad is None else bad[1]
-            message = (
-                self._render_violation(text, *bad)
-                if bad is not None
-                else f"{text} illegal: {overall.detail}"
-            )
+        if refused:
             raise IllegalCast(message, witness=witness, fact=facts[-1])
 
         other = self._clone()
@@ -1706,6 +1768,7 @@ class Schedule:
                     detail=reason,
                     position=position,
                     oracle="loopy-target",
+                    reason=reason,
                 )
             )
         for accumulated in sorted(set(draft.reassoc) - set(self._reassoc)):
@@ -1839,11 +1902,29 @@ class Schedule:
         detail: str,
         position: int,
         oracle: str = "isl",
+        reason: str = "",
     ) -> Any:
         """One ledger entry for one question about one step.
 
         ``oracle`` is who answered: ``isl`` for the two questions about meaning,
         ``loopy-target`` for the one about what the backend can generate.
+
+        ``detail`` is the answer in the oracle's own words, and every fact
+        keeps it. A refuted fact also carries ``reason``, the explanation a
+        reader is owed: for a refused cast, the message of the
+        :class:`IllegalCast` it raises, and for a schedule the target cannot
+        build, the limit in words. ``reason`` is what lanky prints under a
+        ``REFUTED`` line (``lanky.cli.refutation_lines``), and ``detail``
+        reaches only the JSON ledger, so a refutation explained by ``detail``
+        alone reads as unexplained on the screen. A refuted fact given no
+        ``reason`` falls back on its ``detail``, so none is left without one.
+
+        ``witness`` is recorded when isl gave one, which is for the two
+        questions about meaning: an instance a reindexing misses, or a pair of
+        instances that shows it is not one for one, or the dependence a new
+        order runs backwards.
+        Exactness and buildability are not questions for isl, and their facts
+        have none.
         """
         from lanky.ledger import Fact, Status
 
@@ -1855,6 +1936,8 @@ class Schedule:
         }
         if witness:
             provenance["witness"] = witness
+        if status == "refuted":
+            provenance["reason"] = reason or detail
         return Fact(
             id=f"cast:{self._term.name}:{position}:{kind}",
             kind=kind,
