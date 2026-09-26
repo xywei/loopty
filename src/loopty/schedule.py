@@ -123,6 +123,7 @@ from pymbolic.mapper.substitutor import substitute
 
 from loopty import idx
 from loopty import oracle as isl_oracle
+from loopty.flow import bounds_dimension
 from loopty.lower import (
     Lowering,
     _plain,
@@ -714,35 +715,6 @@ def _cross_check(term: Term, mine: isl.Map | None) -> tuple[isl.Map | None, str]
 # {{{ what the target can build
 
 
-def _constrains(domain: isl.Set, position: int, param: int) -> bool:
-    """Does parameter ``param`` bound set dimension ``position`` of ``domain``?
-
-    Read off the constraints rather than inferred by projecting: a constraint
-    that mentions both the dimension and the parameter is one in which the
-    parameter helps bound it, and nothing else counts. Projecting the other
-    dimensions out instead would answer yes far too often, because eliminating
-    a dimension leaves behind what its own existence implied. For the spmv
-    reduction over ``[r, j]`` with ``0 <= j < nl_cnt_r``, projecting ``j`` out
-    leaves ``nl_cnt_r >= 1``, which would make the *row* loop look as if its
-    bound came from data.
-    """
-    found = False
-
-    def visit_basic_set(basic_set: isl.BasicSet) -> None:
-        nonlocal found
-        for constraint in basic_set.get_constraints():
-            if constraint.get_coefficient_val(isl.dim_type.set, position).is_zero():
-                continue
-            if not constraint.get_coefficient_val(
-                isl.dim_type.param, param
-            ).is_zero():
-                found = True
-                return
-
-    domain.foreach_basic_set(visit_basic_set)
-    return found
-
-
 def _data_dependent_in(
     domain: isl.Set, inames: Sequence[str], known: set[str]
 ) -> set[str]:
@@ -757,7 +729,7 @@ def _data_dependent_in(
         return set()
     out: set[str] = set()
     for position in range(min(domain.dim(isl.dim_type.set), len(inames))):
-        if any(_constrains(domain, position, param) for param in positions):
+        if any(bounds_dimension(domain, position, param) for param in positions):
             out.add(inames[position])
     return out
 

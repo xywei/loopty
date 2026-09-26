@@ -19,11 +19,13 @@ refuses the call if they do.
 *A ragged argument agrees with its counts family.* ``val: Arr[Fin[n], Fin[cnt],
 Real]`` says row ``r`` of ``val`` has ``cnt[r]`` entries. The generated loop is
 bounded by ``cnt[r]`` while the flattened access is ``off[r] + j``, so a ``val``
-whose own offsets disagree with ``cnt`` makes compiled C read past a row while
-the native run, which follows the ``Arr``'s own counts, stays inside it. Two
+whose own offsets disagree with ``cnt`` makes compiled C read past a row. Two
 ragged arguments over one counts family are flattened through *one* offsets
 argument, so they have to agree with each other as well, and with an offsets
 array the caller supplies by hand. :func:`ragged_arguments` checks all three.
+Both runs then index through the counts and offsets the kernel declares, as the
+kernel leaves them (:meth:`loopty.arr.Arr.through`), and this is the check
+that the declared layout is the argument's own when the run starts.
 
 *An element of a refined sort really is one.* ``col: Arr[..., Fin[m]]`` is what
 discharges ``x[col[r, j]]`` in bounds **by type**, with no isl call and no
@@ -169,8 +171,10 @@ def ragged_arguments(
       the ragged arguments carry.
 
     ``offsets_args`` maps an array to the offsets argument its flat storage is
-    indexed through (:attr:`loopty.lower.Lowering.ragged`). The native run has
-    no such argument, so it is omitted there and the third check does not apply.
+    indexed through: :attr:`loopty.lower.Lowering.ragged` for a compiled run,
+    and the offsets the kernel declares (:func:`loopty.term.declared_layout`)
+    for a native one, which indexes through them too. Offsets the caller does
+    not pass are the array's own, and the third check has nothing to compare.
     """
     offsets_args = offsets_args or {}
     families: dict[str, list[tuple[str, np.ndarray]]] = {}

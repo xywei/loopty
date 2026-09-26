@@ -2833,7 +2833,10 @@ def mask_writes(value: Any) -> Any:
     """
     if isinstance(value, Arr):
         offsets = value.offsets if value.is_ragged else None
-        return _MaskedArr(value.numpy(), offsets)
+        masked = _MaskedArr(value.numpy(), offsets)
+        # A view already reading through a kernel's declared layout keeps it.
+        layout = value.layout
+        return masked if layout is None else masked.through(*layout)
     if isinstance(value, np.ndarray):
         return value.view(_MaskedArray)
     return value

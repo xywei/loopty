@@ -24,6 +24,8 @@ import islpy as isl
 import pymbolic.primitives as prim
 
 __all__ = [
+    "COUNT_PARAM",
+    "COUNT_PARAM_REFLECTED",
     "OFFSETS_CANDIDATES",
     "Access",
     "ArrType",
@@ -31,6 +33,8 @@ __all__ = [
     "Reduction",
     "Stmt",
     "Term",
+    "count_param_names",
+    "declared_layout",
     "declared_offsets",
     "free_name_sorts",
     "free_name_sorts_message",
@@ -44,9 +48,39 @@ Expression = Any
 #: The first one that is a parameter of the term is the array a ragged access is
 #: flattened through; if none is, lowering adds an argument named
 #: ``off_<counts>``. The rule lives here rather than in :mod:`loopty.lower`
-#: because two modules read it: lowering, which indexes through the offsets, and
-#: :func:`loopty.flow.statement_accesses`, which lists that index as a read.
+#: because several modules read it: lowering, which indexes through the
+#: offsets, :func:`loopty.flow.statement_accesses`, which lists that index as a
+#: read, and the native run and the interpreter, which index through the same
+#: array (:func:`declared_layout`).
 OFFSETS_CANDIDATES = ("off_{counts}", "{counts}_off", "off")
+
+#: How a ragged loop bound appears as a parameter of a statement domain: the
+#: counts name, an underscore, and the enclosing iname. For a loop over
+#: ``val.dom[r]`` of ``val: Arr[Fin[n], Fin[cnt], Real]`` that is ``cnt_r``, and
+#: lowering assigns it ``off[r+1] - off[r]`` (or ``cnt[r]`` when the counts array
+#: itself is a parameter) in a scalar temporary inside the ``r`` loop. It lives
+#: here, with :data:`COUNT_PARAM_REFLECTED`, because two modules recognize it:
+#: lowering, which assigns the parameter, and :mod:`loopty.flow`, which lists
+#: the read that assignment makes.
+COUNT_PARAM = "{counts}_{iname}"
+
+#: The same bound as the tracer spells it when it reflects the non-affine term
+#: ``cnt[r]`` into a fresh isl parameter (see ``loopty.idx``). Both spellings are
+#: recognized, so that a hand-written term and a traced one lower the same way.
+#:
+#: It is a spelling and not the definition. A traced term records what it
+#: actually allocated on :attr:`Term.reflected`, which is where a parameter that
+#: had to be suffixed to dodge a collision is found; this pattern is the
+#: fallback for a term written by hand, which records nothing.
+COUNT_PARAM_REFLECTED = "nl_{counts}_{iname}"
+
+
+def count_param_names(counts: str, iname: str) -> tuple[str, ...]:
+    """Every spelling of one ragged bound parameter, most direct first."""
+    return (
+        COUNT_PARAM.format(counts=counts, iname=iname),
+        COUNT_PARAM_REFLECTED.format(counts=counts, iname=iname),
+    )
 
 
 def declared_offsets(params: Iterable[tuple[str, Any]], counts: str) -> str | None:
@@ -62,6 +96,42 @@ def declared_offsets(params: Iterable[tuple[str, Any]], counts: str) -> str | No
         if candidate in names:
             return candidate
     return None
+
+
+def declared_layout(
+    params: Iterable[tuple[str, Any]],
+) -> dict[str, tuple[str | None, str | None]]:
+    """The arguments each ragged parameter is indexed through, as lowering does.
+
+    ``{"val": ("cnt", "off")}`` for ``val: Arr[Fin[n], Fin[cnt], Real]`` beside
+    ``cnt`` and ``off`` parameters: the first is the counts parameter, which
+    bounds a row (``val.dom[r]`` is ``cnt[r]`` long), and the second the offsets
+    parameter (:func:`declared_offsets`), where a row starts (``val[r, j]`` is
+    ``val[off[r] + j]``). Either is ``None`` when the kernel does not declare
+    it, and a ragged parameter that declares neither is left out: it has only
+    its own layout.
+
+    This is the layout the lowered kernel reads, because those are the
+    arguments it is handed, and the one the native run and the interpreter read
+    too, so that a kernel that writes its counts or its offsets means one thing
+    however it is run. See :meth:`loopty.arr.Arr.through`.
+    """
+    listed = tuple(params)
+    types = dict(listed)
+    out: dict[str, tuple[str | None, str | None]] = {}
+    for name, typ in listed:
+        if not isinstance(typ, ArrType) or not any(typ.ragged):
+            continue
+        axis = typ.ragged.index(True)
+        size = typ.axes[axis]
+        if axis != 1 or len(typ.axes) != 2 or not isinstance(size, prim.Variable):
+            continue
+        counts = size.name if isinstance(types.get(size.name), ArrType) else None
+        offsets = declared_offsets(listed, size.name)
+        if counts is None and offsets is None:
+            continue
+        out[name] = (counts, offsets)
+    return out
 
 
 @dataclass(frozen=True)
@@ -201,8 +271,7 @@ class Term:
     builds another isl set about this term, or that has to read ``cnt[r]`` back
     out of a domain parameter, has to be told what was allocated instead of
     guessing from the spelling. A term written by hand leaves it empty and is
-    read by spelling, which is what :data:`loopty.lower.COUNT_PARAM_REFLECTED`
-    is for.
+    read by spelling, which is what :data:`COUNT_PARAM_REFLECTED` is for.
     """
 
     name: str

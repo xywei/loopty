@@ -206,6 +206,92 @@ def test_a_parallel_tag_that_would_read_through_stale_offsets_is_rejected() -> N
     assert caught.value.fact.status.value == "refuted"
 
 
+def row_sums_then_next_count(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """``S0`` sums row ``r``, ``cnt[r]`` long; ``S1`` then clears ``cnt[r + 1]``.
+
+    ``S1[r]`` writes the length of the row ``S0[r + 1]`` sums. ``S0`` never
+    names ``cnt``: its only reference to it is the bound of its reduction,
+    which lowering reads once per row, so the whole dependence rests on the
+    collector listing that read.
+    """
+    for r in y.dom:
+        y[r] = reduce_sum(val[r, j] for j in val.dom[r])
+        with when(r + 1 < y.dom.size):
+            cnt[r + 1] = 0
+
+
+def counts_rewritten_ahead(
+    cnt: Arr[Fin[n + 1], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The kernel of the issue: counts of ``n + 1`` cells, the write unguarded."""
+    for r in y.dom:
+        y[r] = reduce_sum(val[r, j] for j in val.dom[r])
+        cnt[r + 1] = 0
+
+
+@pytest.mark.parametrize("fn", [row_sums_then_next_count, counts_rewritten_ahead])
+def test_a_parallel_tag_that_would_read_a_stale_row_length_is_rejected(fn) -> None:
+    # Run in parallel, row ``r + 1`` may be summed before its length is
+    # cleared. The schedule checker used to see no dependence between the two
+    # statements and accepted the tag.
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(fn, evaluate_annotations(fn))
+    schedule = Schedule(term, sizes={"n": 4})
+    with pytest.raises(IllegalCast) as caught:
+        schedule.tag(r="l.0")
+    message = str(caught.value)
+    assert message.startswith("tag(r='l.0') illegal: instance S1[r=")
+    assert "writes cnt[" in message
+    assert "read by S0[" in message
+    (source_id, source), (sink_id, sink), _params = caught.value.witness
+    assert (source_id, sink_id) == ("S1", "S0")
+    assert sink["r"] == source["r"] + 1
+    assert caught.value.fact.kind == "monotone"
+    assert caught.value.fact.status.value == "refuted"
+
+
+def offsets_stored_then_row_sums(
+    s: Arr[Fin[n], Nat],  # noqa: F821
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    off: Arr[Fin[n + 1], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """``S0`` stores where row ``r`` starts; ``S1`` then sums that row.
+
+    The lowered code reads ``off[r]``, the start, and takes the row's length
+    from ``cnt[r]``; it never reads ``off[r + 1]``.
+    """
+    for r in y.dom:
+        off[r] = s[r]
+        y[r] = reduce_sum(val[r, j] for j in val.dom[r])
+
+
+def test_a_row_that_stores_its_own_start_first_can_still_run_in_parallel() -> None:
+    # Each row reads only the offset it stored itself. The collector used to
+    # list ``off[r + 1]`` too, a read the lowered code does not make, and the
+    # tag was refused with "S1[r=2] reads off[3] overwritten by S0[r=3]".
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(
+        offsets_stored_then_row_sums,
+        evaluate_annotations(offsets_stored_then_row_sums),
+    )
+    tagged = Schedule(term, sizes={"n": 4}).tag(r="l.0")
+    assert [fact.status.value for fact in tagged.facts()] == ["decided"] * 2
+
+
 def scan_then_row_sums(
     cnt: Arr[Fin[n], Nat],  # noqa: F821
     off: Arr[Fin[n + 1], Nat],  # noqa: F821
