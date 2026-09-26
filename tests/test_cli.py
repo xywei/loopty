@@ -524,6 +524,101 @@ def test_every_schedule_of_one_kernel_keeps_its_facts_in_the_ledger(tmp_path) ->
 # }}}
 
 
+# {{{ what a run raises (#44)
+
+
+RAISES = FIXTURE.replace(
+    "scale = Scale()",
+    '''scale = Scale()
+
+
+class Broken(Scale):
+    """A body that raises an error of its own on the file's inputs."""
+
+    __name__ = "broken"
+    term = Term(
+        name="broken",
+        params=Scale.term.params,
+        sizes=Scale.term.sizes,
+        stmts=Scale.term.stmts,
+        post=None,
+    )
+
+    def __call__(self, x, y):
+        raise KeyError("no entry for this input")
+
+
+broken = Broken()''',
+).replace(
+    'sched = Schedule(scale).split("i", 4)',
+    'first = Schedule(broken)\nsched = Schedule(scale).split("i", 4)',
+)
+
+
+def test_run_reports_any_error_a_body_raises_and_goes_on(tmp_path, capsys) -> None:
+    # A KeyError of the body's own ended the command with a traceback, and
+    # the kernels after it in the file were not run.
+    path = write_fixture(tmp_path, RAISES)
+    code = main(["run", str(path)])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "  KeyError: 'no entry for this input'" in out
+    # The next schedule in the file still ran, and agreed.
+    assert "  y: difference 0 " in out
+
+
+FLIPPED = '''
+"""A guard that is an integer natively: ~ on a Python bool is bitwise."""
+
+from __future__ import annotations
+
+import numpy as np
+from lanky.prelude import Real
+
+from loopty import Arr, Fin, kernel, when
+
+
+@kernel
+def flipped(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
+    for i in y.dom:
+        with when(~(i > 0)):
+            y[i] = x[i]
+
+
+def example_inputs():
+    return {"x": Arr.from_numpy(np.arange(4.0)), "y": Arr.zeros(4)}
+'''
+
+
+@pytest.mark.filterwarnings("ignore:Bitwise inversion:DeprecationWarning")
+def test_run_prints_a_native_refusal_as_a_refuted_agreement(tmp_path, capsys):
+    """The run's agreement is refuted with the refusal, as the trace fact is.
+
+    ``differential`` raised the native TraceError, which ``loopty run`` then
+    reported as an error with no fact in the ledger.
+    """
+    path = write_fixture(tmp_path, FLIPPED)
+    out_path = tmp_path / "ledger.json"
+    code = main(["run", str(path), "--json", str(out_path)])
+    out = capsys.readouterr().out
+    assert code == 1
+    lines, header = refutation_block(out, "flipped at fixture.py:")
+    assert lines[header].endswith(
+        "the scheduled run of flipped agrees with the native run to the accuracy "
+        "its types state"
+    )
+    assert lines[header + 1].startswith("  the body, run natively, is refused")
+    assert "'i <= 0' for '~(i > 0)'" in out
+    facts = json.loads(out_path.read_text(encoding="utf-8"))
+    (fact,) = [fact for fact in facts if fact["kind"] == "agreement"]
+    assert fact["status"] == "refuted"
+    assert fact["provenance"]["error"].startswith("TraceError: ")
+    assert fact["provenance"]["outputs"] == {}
+
+
+# }}}
+
+
 # {{{ a refutation over a domain a guard left wide (#40)
 
 

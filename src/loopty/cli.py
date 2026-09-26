@@ -58,6 +58,12 @@ a compiled run disagreed on), or a line saying nothing was recorded. The
 command then exits 1, as it does when a kernel cannot be scheduled, a schedule
 cannot be retargeted, or a run raises.
 
+A run that raises, whatever it raises, is reported by the exception's type and
+message, the kernel counts as failed, and the file's other kernels are still
+run. A body that tracing refuses natively (a ``when`` guard whose native value
+is an integer) is a refuted agreement fact instead, with the refusal as its
+reason; see :meth:`loopty.executor.LoopyExecutor.differential`.
+
 Every schedule keeps its own facts in the ledger, however many schedules of one
 kernel the file has, because a fact's id names the schedule it is about (see
 :attr:`loopty.schedule.Schedule.key`).
@@ -254,7 +260,7 @@ class RunVerb:
         from lanky.plugins import registry
 
         from loopty.executor import LoopyExecutor, emit_code
-        from loopty.schedule import IllegalCast, Schedule
+        from loopty.schedule import Schedule
         from loopty.trace import TraceError
 
         target = getattr(args, "target", None)
@@ -319,17 +325,13 @@ class RunVerb:
                     print(f"  ran {name} on the {schedule.target} target")
                     continue
                 fact = executor.differential(native, schedule, inputs)
-            except (
-                IllegalCast,
-                RuntimeError,
-                ValueError,
-                TypeError,
-                # What a body raises on the inputs it was given, a cell that is
-                # not there or a division by zero, as ``loopty.faithful`` counts
-                # them: the file's to fix, and said as plainly as the rest.
-                IndexError,
-                ArithmeticError,
-            ) as exc:
+            except Exception as exc:  # noqa: BLE001 - reported, as every failure is
+                # Whatever a run raises is the file's to fix: a cell that is not
+                # there, a division by zero, a KeyError of the body's own, or a
+                # refusal of the compiled half. It is said by type and message,
+                # the kernel counts as failed, and the file's other kernels
+                # still run. A native TraceError is not among them: it comes
+                # back from ``differential`` as a refuted agreement fact.
                 print(f"  {type(exc).__name__}: {exc}")
                 failures += 1
                 continue

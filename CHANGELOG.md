@@ -851,6 +851,14 @@ with a pair of statement instances.
   step has left the schedule with no kernel, so such a tag was accepted there
   with a decided `bijective` and `monotone` fact; on a schedule with a kernel
   the unknown name was loopy's `LoopyError`.
+- `loopty run` reports whatever a run raises by its type and message, counts
+  the kernel as failed, goes on to the file's other kernels, and exits 1. Only
+  the errors it expected were reported (`IndexError`, `ArithmeticError`,
+  `ValueError` and a few more); a body's `KeyError` ended the command with a
+  traceback. A native `TraceError` in `LoopyExecutor.differential` is not
+  raised but returned, as a `refuted` agreement fact with the refusal as its
+  reason and no outputs, the way the faithfulness fact counts it, so
+  `loopty run` prints it under the fact's `REFUTED` line.
 
 ### Changed
 
