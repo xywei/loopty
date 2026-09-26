@@ -173,6 +173,69 @@ def test_the_ledger_of_a_file_says_what_its_program_rests_on() -> None:
     assert row["effective"] == "assumed"
 
 
+CALLEE = '''
+from __future__ import annotations
+
+from lanky.prelude import Nat
+
+from loopty import Arr, Fin, kernel
+
+
+@kernel
+def scan(
+    cnt: Arr[Fin[n], Nat], off: Arr[Fin[n + 1], Nat]
+) -> (off[0] == 0) & all(off[r + 1] == off[r] + cnt[r] for r in Fin[n]):
+    """The offsets, in a file of their own."""
+    off[0] = 0
+    for r in cnt.dom:
+        off[r + 1] = off[r] + cnt[r]
+'''
+
+CALLER = """
+from __future__ import annotations
+
+from loopty_test_callee import scan
+
+from loopty import program
+
+
+@program
+def solve(cnt, off):
+    \"\"\"Runs a kernel of another file.\"\"\"
+    scan(cnt, off)
+"""
+
+
+def test_a_callee_of_another_file_is_an_id_this_ledger_does_not_hold(
+    tmp_path, capsys
+) -> None:
+    """The callee's fact is in its own file's ledger, and lanky says so.
+
+    The restatement still rests on the id the callee's fact has there, which
+    this ledger counts as an assumption and names under the table, without
+    failing the check.
+    """
+    import sys
+
+    from lanky import cli
+
+    (tmp_path / "loopty_test_callee.py").write_text(CALLEE, encoding="utf-8")
+    caller = tmp_path / "caller.py"
+    caller.write_text(CALLER, encoding="utf-8")
+    try:
+        assert cli.main(["check", str(caller)]) == 0
+    finally:
+        sys.modules.pop("loopty_test_callee", None)
+    printed = capsys.readouterr().out.splitlines()
+    (row,) = [line for line in printed if "after scan(...)" in line]
+    assert row.startswith("assumed under scan:postcondition  ")
+    unresolved = "rests on scan:postcondition, which this ledger does not hold"
+    assert any(
+        line.startswith("UNRESOLVED solve at caller.py:") and line.endswith(unresolved)
+        for line in printed
+    )
+
+
 def test_a_guard_is_found_under_an_aliased_import() -> None:
     # ``guards_writes`` used to be ``"when" in co_names``, so importing the
     # guard under another name ran the native body unmasked: the write under a
