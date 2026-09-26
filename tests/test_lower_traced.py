@@ -867,6 +867,65 @@ def test_one_name_for_two_different_loops_is_refused_by_name() -> None:
 # }}}
 
 
+# {{{ a bound affine in an outer binder, and hardware axes on nested reductions
+
+
+@kernel
+def lower_total8(a: Arr[Fin[8], Fin[8], Real], s: Arr[Fin[1], Real]):
+    """The lower-triangle double sum at a size known when the code is generated."""
+    s[0] = reduce_sum(reduce_sum(a[i, j] for j in Fin[i + 1]) for i in a.dom)
+
+
+def test_an_inner_bound_affine_in_the_outer_binder_is_not_a_ragged_fiber() -> None:
+    # ``j < i + 1`` names ``i`` as a parameter of the inner domain, and every
+    # parameter that was not a size used to count as data.
+    from loopty.schedule import Schedule, data_dependent_inames
+
+    assert data_dependent_inames(lower_total.trace()) == frozenset()
+    schedule = Schedule(lower_total).split("j", 2, inner="ji", outer="jo").tag(
+        ji="l.0"
+    )
+    ok, reason = schedule.buildable
+    assert not ok
+    assert "ragged fiber" not in reason
+    assert "nested in the reduction over i" in reason and "ji" in reason
+
+
+def test_a_ragged_fiber_inside_a_statement_loop_is_still_one() -> None:
+    from loopty.schedule import data_dependent_inames
+
+    assert data_dependent_inames(rows_and_lengths.trace()) == frozenset({"j"})
+
+
+def test_the_nested_axis_loopty_refuses_is_one_loopy_cannot_build(monkeypatch):
+    # Measured, not guessed: loopy's plain OpenCL target stands in for the
+    # pyopencl one, which cannot be built without pyopencl, and code generation
+    # is all that is asked of it.
+    lp = pytest.importorskip("loopy")
+    from loopty import lower
+    from loopty.schedule import Schedule
+
+    plain = lower.target_for
+    monkeypatch.setattr(
+        lower,
+        "target_for",
+        lambda target="c": lp.OpenCLTarget() if target == "opencl" else plain(target),
+    )
+    outer = Schedule(lower_total8, target="opencl").tag(i="l.0")
+    assert outer.buildable == (True, "")
+    assert "get_local_id" in lp.generate_code_v2(outer.kernel).device_code()
+
+    inner = Schedule(lower_total8, target="opencl").tag(j="l.0")
+    ok, reason = inner.buildable
+    assert not ok
+    assert "nested in the reduction over i" in reason
+    with pytest.raises(Exception, match="does not use all local hw axes"):
+        lp.generate_code_v2(inner.kernel)
+
+
+# }}}
+
+
 # {{{ one Reduction object in two statements
 
 

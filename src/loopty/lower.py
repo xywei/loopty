@@ -260,6 +260,28 @@ def reductions_of(expr: Any) -> tuple[Reduction, ...]:
     return tuple(node for node in walk(expr) if isinstance(node, Reduction))
 
 
+def _reduction_nesting(expr: Any) -> list[tuple[Reduction, tuple[int, ...]]]:
+    """Every reduction in ``expr``, with the reductions it is nested in.
+
+    In the order of :func:`reductions_of`, so that a position names the same
+    reduction in both, and each paired with the positions of the reductions
+    enclosing it, outermost first.
+    """
+    out: list[tuple[Reduction, tuple[int, ...]]] = []
+
+    def visit(node: Any, enclosing: tuple[int, ...]) -> None:
+        if isinstance(node, Reduction):
+            position = len(out)
+            out.append((node, enclosing))
+            visit(node.body, (*enclosing, position))
+            return
+        for child in _children(node):
+            visit(child, enclosing)
+
+    visit(expr, ())
+    return out
+
+
 # }}}
 
 
