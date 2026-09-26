@@ -1291,6 +1291,102 @@ def test_a_loop_a_guard_narrows_to_a_congruence_steps_over_it_too() -> None:
         assert np.array_equal(out["y"], want), n
 
 
+def _as_loopy_had_it(schedule: Schedule) -> Schedule:
+    """The schedule with the kernel before its loops were counted."""
+    other = schedule._clone()
+    other._code = other._kernel
+    return other
+
+
+def _points(domain: isl.BasicSet, **sizes: int) -> int:
+    """How many points a domain has at these sizes."""
+    out = isl.Set.from_basic_set(domain)
+    for name, value in sizes.items():
+        position = out.get_var_names(isl.dim_type.param).index(name)
+        out = out.fix_val(
+            isl.dim_type.param, position, isl.Val.int_from_si(out.get_ctx(), value)
+        )
+    return out.count_val().to_python()
+
+
+@pytest.mark.parametrize(
+    ("mapping", "then", "strides"),
+    [
+        (DIAMOND, (), {"b": "2*b_step - a"}),
+        # A cut by an odd factor leaves the counted loop an offset that
+        # depends on the loop outside it too.
+        (DIAMOND, ("split", "b", 3), {"b_inner": "2*b_inner_step - a - b_outer"}),
+        (
+            DIAMOND,
+            ("tile", "a", "b", 3, 5),
+            {"b_inner": "2*b_inner_step - a_outer - a_inner - b_outer"},
+        ),
+        (
+            "{ [t, i] -> [a, b] : a = t + i - 7 and b = t - i - 13 }",
+            (),
+            {"b": "2*b_step - a"},
+        ),
+        # Determinant 6: b steps by six.
+        ("{ [t, i] -> [a, b] : a = 2t + i and b = 3i }", (), {"b": "6*b_step - 3*a"}),
+        # Both loops over a lattice, the inner one from the outer's counter.
+        (
+            "{ [t, i] -> [a, b] : a = 3t and b = t + 2i }",
+            (),
+            {"a": "3*a_step", "b": "2*b_step - a_step"},
+        ),
+    ],
+)
+def test_counted_loops_meet_each_instance_once_and_compute_the_same(
+    mapping: str, then: tuple, strides: dict[str, str]
+) -> None:
+    # The differential test of the counting: the kernel loopy was given before
+    # (a loop over every b, with the lattice tested inside it) and the one
+    # with the loop over a lattice counted compute the same, bit for bit, and
+    # match the reference. The counted domain, less anything loopy would test,
+    # has exactly one point per instance, where the other has more.
+    schedule = Schedule(ht.jacobi_term()).affine(mapping)
+    if then:
+        method, *arguments = then
+        schedule = getattr(schedule, method)(*arguments)
+    assert schedule.strides == strides
+    (counted,) = schedule.kernel.default_entrypoint.domains
+    (tested,) = _as_loopy_had_it(schedule).kernel.default_entrypoint.domains
+    assert counted.dim(isl.dim_type.div) == 0
+    assert tested.dim(isl.dim_type.div) > 0
+    nt, nx = 7, 9
+    instances = (nt - 1) * (nx - 2)
+    assert _points(counted, nt=nt, nx=nx) == instances
+    assert _points(tested.remove_divs(), nt=nt, nx=nx) > instances
+    # One kernel's runs together: loopy's C compiler writes every source to
+    # one file, so going back and forth between two kernels makes codepy
+    # rebuild each time, with a warning that its cache has a collision.
+    for built in (schedule, _as_loopy_had_it(schedule)):
+        for nt, nx in [*STENCIL_SIZES, (8, 5)]:
+            u = _jacobi_input(nt, nx)
+            out = run(built, u=u.copy())["u"]
+            assert np.array_equal(out, ht.jacobi_reference(u)), (nt, nx)
+
+
+def test_a_congruence_cut_by_an_odd_factor_steps_from_its_outer_loop() -> None:
+    # i even, cut by 3: i_inner = i - 3*i_outer has the parity of i_outer,
+    # so the counted loop starts from a remainder of the loop outside it.
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(every_other, evaluate_annotations(every_other))
+    split = Schedule(term, sizes={"n": 10}).split("i", 3)
+    ((name, _expression),) = split.strides.items()
+    assert name == "i_inner"
+    for built in (split, _as_loopy_had_it(split)):
+        for n in range(1, 12):
+            x = np.arange(n, dtype=np.float64)
+            want = np.full(n, -1.0)
+            want[::2] = 2.0 * x[::2]
+            out = run(built, x=x, y=np.full(n, -1.0))
+            assert np.array_equal(out["y"], want), n
+
+
 # {{{ a map per statement (#46)
 
 #: The coupled pair's two statements, interleaved: S0 at the even points of

@@ -513,6 +513,15 @@ def test_the_offset_diamond_tiles_the_pair_and_agrees_bit_for_bit() -> None:
     schedule = module.offset_diamond_schedule()
     assert schedule.order == ("a_outer", "b_outer", "a_inner", "b_inner")
     assert [fact.status.value for fact in schedule.facts()] == ["decided"] * 4
+    # Against the native run, the fields differ by nothing at all, though the
+    # fact only asks for the approx tolerance.
+    fact = LoopyExecutor().differential(module.acoustic, schedule, module.initial())
+    assert fact.status.value == "tested"
+    outputs = fact.provenance["outputs"]
+    assert {name: outputs[name]["difference"] for name in outputs} == {
+        "pressure": 0,
+        "velocity": 0,
+    }
     # The two images are the points where a + b is even and those where it is
     # odd: together, every point of the loops, each of them one statement's.
     untiled = Schedule(module.acoustic, sizes={"nt": 16, "nx": 32}).affine(
