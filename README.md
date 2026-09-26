@@ -173,8 +173,8 @@ end to end; the edges are sharp.
   the program lowers to. `LoopyExecutor().run(program, ...)` runs it,
   `Schedule(program)` schedules it, and `loopty run` compares every program in
   a file with its native run, as it does a kernel. A body that does anything
-  to an argument but pass it to a kernel is refused with a `TraceError` naming
-  the fix.
+  to an argument but pass it to a kernel, or make an array like it, is refused
+  with a `TraceError` naming the fix.
 - Tracing a body to a typed term: accesses, statements, reductions, ragged
   fibers, `when` guards, source locations, and a `TraceError` that names the fix
   when a Python `if` is used on a computed value, when a Python name, a
@@ -285,12 +285,15 @@ end to end; the edges are sharp.
   the program runs them. Fusing them is a cast over the program's term that
   is not written yet, and so is deciding the storage of an intermediate. The
   compiled program is one call, so the contract checks its arguments when it
-  starts, and offsets a callee reads rows through have to agree with the
-  arrays on entry even when an earlier callee writes them. The kernels an
-  array is passed to have to declare the same element sort for it, and every
-  call has to read a ragged family's rows through the same offsets; a loop in
-  the body whose trip count is an argument (a host loop) is refused, and so is
-  an array made like a ragged one. On the C target a temporary is a
+  starts and not at every call: an array whose cells a callee's contract
+  checks (an element sort `Fin[m]`, the counts or offsets of a ragged family
+  it reads) is refused once an earlier call has written it or the program
+  made it, because nothing would check it before the callee's in-bounds facts
+  rely on it. The kernels an array is passed to have to declare the same
+  element sort for it, and every call has to read a ragged family's rows
+  through the same offsets; a loop in the body whose trip count is an
+  argument (a host loop) is refused, and so is an array made like a ragged
+  one. On the C target a temporary is a
   variable-length array on the stack of the call, which bounds its size (note
   14 in `docs/loopy-notes.md`); on OpenCL it is a global temporary, which is
   generated but, like every device path, not run from a development machine.

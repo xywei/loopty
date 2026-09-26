@@ -177,11 +177,15 @@ with a pair of statement instances.
   kernel call is recorded instead of run, with its arguments by parameter,
   and the callees' terms follow one another in call order, in the program's
   names, with no AST pass. A callee's arrays and scalars become what the
-  program passed (a number passed for a scalar is substituted); its sizes are
-  unified through the arrays, a program array having the type of the first
-  call that passes it and every later call having to agree, so that `scale`'s
-  `n` is `scan`'s `n + 1` when both are handed `off`, and two sizes nothing
-  shows equal are refused; its loops, reduction binders and reflected
+  program passed; a number passed for a scalar is substituted, and checked
+  against the scalar's sort when the term is built, since no contract sees it
+  afterwards (a `Fin[n]` whose `n` is known only at the call refuses a
+  number). Its sizes are unified through the arrays, a program array having
+  the type of the first call that passes it and every later call having to
+  agree, so that `scale`'s `n` is `scan`'s `n + 1` when both are handed `off`,
+  and `n + 1` against `n + 2` makes one size the other plus one; a scalar
+  that sizes an array sizes it in the program's names too, and two sizes
+  nothing shows equal are refused. Its loops, reduction binders and reflected
   parameters get names no earlier call has; its statements are named after the
   call (`scan.S1`, and `step@2.S0` in a second call of `step`) and keep their
   own `file:line`. A program called by a program is recorded in place.
@@ -197,8 +201,16 @@ with a pair of statement instances.
   it to numpy, is refused with a `TraceError` naming the fix, and so are a
   loop whose trip count is an argument, an array from outside the program,
   one array for two parameters of a call, an array given for a scalar, a
-  parameter no kernel is given, two element sorts for one array, and two
-  calls reading one ragged family through different offsets.
+  parameter no kernel is given, a parameter with a default, two element sorts
+  for one array, two calls reading one ragged family through different
+  offsets, a body that returns an array it made, and a program that writes
+  none of its parameters. The compiled program's contract checks its
+  arguments once, when it starts, so an array whose cells a callee's contract
+  checks and its in-bounds facts rest on (an element sort `Fin[m]`, the counts
+  or the offsets of a ragged family it reads) is refused when an earlier call
+  wrote it or the program made it: `perm[i] = i + 1` in one kernel would be
+  an address past the end of `x` in the next one's `x[perm[i]]`, where the
+  native run is refused by that kernel's contract.
 - **An array a program makes is a temporary** (`Arr.zeros_like`,
   `Term.temporaries`). `Arr.zeros_like(u)` is zeros laid out as `u` natively,
   and inside a program being traced it makes a placeholder, named after the
@@ -211,7 +223,10 @@ with a pair of statement instances.
   OpenCL, because loopy's C host code never allocates a global temporary (note
   14 in `docs/loopy-notes.md`). `Lowering.temporaries` names them, and a
   temporary's element sort counts in the exactness class and the contraction
-  pin as a parameter's does. A ragged one is refused.
+  pin as a parameter's does. A ragged one is refused, and so is one that
+  natively holds integers where the kernels it is passed to declare reals,
+  since the native run would truncate what the compiled one keeps
+  (`Arr.zeros_like(c, dtype=np.float64)` is the fix).
 - **A term may state its offsets** (`Term.offsets`, `Term.offsets_of`). The
   offsets a counts family's rows are read through were always read off the
   names of the term's parameters, which is right for a kernel and wrong for a
@@ -988,6 +1003,10 @@ with a pair of statement instances.
   access only when that domain names everything the array's shape does, so a
   `Nat` scalar beside `off[0] = ...` of `off: Arr[Fin[n + 1], Nat]` outside
   any loop had loopy refuse `off[0]` for `n = -1` with a `LoopyIndexError`.
+- The contract refuses an argument too short for its type at any size: an
+  `off` of no cells for `Arr[Fin[n + 1], Nat]` stands for `n = -1`, which
+  every fact about the kernel excludes, and which loopy, reading `n` off the
+  shape, used as the index of `off[n]` (`contract.sizes_not_negative`).
 
 ### Changed
 
