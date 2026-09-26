@@ -838,6 +838,12 @@ with a pair of statement instances.
   are told apart by the array. `examples/wavefront_acoustic.py` runs the
   diamond under `loopty run` beside the wavefront block, which it left to
   `python` for this reason, and its transcript is regenerated.
+- `Schedule.tag` refuses a name that is neither a loop nor the loop of a
+  reduction, and a tag loopy cannot read, with a `ValueError`, before anything
+  else. loopy's `tag_inames` was the only check, and it is not asked once a
+  step has left the schedule with no kernel, so such a tag was accepted there
+  with a decided `bijective` and `monotone` fact; on a schedule with a kernel
+  the unknown name was loopy's `LoopyError`.
 
 ### Changed
 

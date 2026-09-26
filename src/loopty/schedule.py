@@ -1442,8 +1442,34 @@ class Schedule:
         ones are the interesting case: they remove the iname from the order, so
         tagging a loop that carries a dependence is rejected here rather than
         producing a race at run time.
+
+        A name that is neither a loop nor the loop of a reduction, and a tag
+        loopy cannot read, are refused with a ``ValueError`` before anything
+        else, as :meth:`split` refuses an unknown loop. loopy's own
+        ``tag_inames`` refuses both too, but it is not asked once a step has
+        left the schedule with no kernel (see :attr:`kernel`), and the steps
+        after that one are still checked, so that their facts say what the
+        schedule is.
         """
+        from loopy.kernel.data import parse_tag
+
         draft = self._draft()
+        unknown = [
+            name
+            for name in inames
+            if name not in draft.order and name not in draft.reductions
+        ]
+        if unknown:
+            listed = ", ".join(repr(name) for name in unknown)
+            verb = "is not an iname" if len(unknown) == 1 else "are not inames"
+            raise ValueError(f"{listed} {verb} of {self._term.name}")
+        for name, tag in inames.items():
+            try:
+                parse_tag(tag)
+            except ValueError as exc:
+                raise ValueError(
+                    f"tag({name}={tag!r}): loopy cannot read the tag: {exc}"
+                ) from exc
         for name, tag in inames.items():
             if name not in draft.reductions or not parallel_tag(tag):
                 continue

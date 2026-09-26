@@ -752,6 +752,50 @@ def test_a_map_the_kernel_rewrite_cannot_write_is_reported_not_thrown() -> None:
         LoopyExecutor().run(later, cnt=np.array([1, 2]), val=np.ones(3), y=np.zeros(2))
 
 
+def test_a_tag_names_a_loop_with_or_without_a_kernel() -> None:
+    # loopy's tag_inames was the only check that a tagged loop exists, and it
+    # is not asked once a step has left the schedule with no kernel: the tag
+    # was accepted, with a decided bijective and monotone fact (#43).
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(ragged_row_sums, evaluate_annotations(ragged_row_sums))
+    unbuildable = Schedule(term, sizes={"n": 4}).affine(
+        "{ [r, j] -> [q, k] : q = r and k = j + r }"
+    )
+    assert unbuildable.kernel is None
+    buildable = Schedule(term, sizes={"n": 4})
+    for schedule, row in ((unbuildable, "q"), (buildable, "r")):
+        with pytest.raises(ValueError, match="'no_such_loop' is not an iname"):
+            schedule.tag(no_such_loop="g.0")
+        with pytest.raises(ValueError, match="loopy cannot read the tag"):
+            schedule.tag(**{row: "g.zero"})
+    # A reduction's loop is a loop a tag may name.
+    Schedule(ht.spmv_term()).tag(j="l.0")
+    # And a kernel-less schedule still takes a tag on a loop it has.
+    assert unbuildable.tag(q="g.0").tags == {"q": "g.0"}
+
+
+def test_only_the_loops_a_ragged_loop_becomes_keep_its_extent_from_data() -> None:
+    # What a hardware axis may not sit inside is a loop whose extent is read
+    # from an array. Tiling the ragged fiber with the dense row loop makes the
+    # fiber's halves such loops and leaves the row's halves alone; skewing the
+    # fiber by the row leaves the row alone.
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(ragged_row_sums, evaluate_annotations(ragged_row_sums))
+    schedule = Schedule(term, sizes={"n": 4})
+    assert schedule._data_dependent == {"j"}
+    tiled = schedule.tile("r", "j", 2, 2)
+    assert tiled._data_dependent == {"j_outer", "j_inner"}
+    assert schedule.skew("j", by="r")._data_dependent == {"j"}
+    diamond = schedule.affine("{ [r, j] -> [a, b] : a = r + j and b = r - j }")
+    assert diamond._data_dependent == {"a", "b"}
+
+
 def ragged_row_totals(
     cnt: Arr[Fin[n], Nat],  # noqa: F821
     val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
