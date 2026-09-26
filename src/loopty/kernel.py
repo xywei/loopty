@@ -38,7 +38,13 @@ from lanky.terms import evaluate_annotations
 from loopty import typing as rules
 from loopty.arr import Arr, ArrSpec
 from loopty.contract import check_arguments, integral_sort
-from loopty.term import ArrType, Term, free_name_sorts, free_name_sorts_message
+from loopty.term import (
+    ArrType,
+    Term,
+    declared_layout,
+    free_name_sorts,
+    free_name_sorts_message,
+)
 from loopty.trace import TraceError, array_type, mask_writes, trace, when
 
 __all__ = [
@@ -244,11 +250,12 @@ class Kernel(_Decorated):
 
         The arguments are checked against the kernel's declared types first, by
         :mod:`loopty.contract`: two array parameters may not share storage, a
-        ragged argument has to agree with the counts array its type names, and
-        an element of a refined sort such as ``Fin[m]`` has to be one. These are
-        the assumptions the typing rules make about a *call*, and the native run
-        is a call, so it makes the same promise the compiled run does rather
-        than a weaker one.
+        ragged argument has to agree with the counts array its type names and
+        with the offsets the kernel declares beside it, if it declares them,
+        and an element of a refined sort such as ``Fin[m]`` has to be one.
+        These are the assumptions the typing rules make about a *call*, and the
+        native run is a call, so it makes the same promise the compiled run
+        does rather than a weaker one.
 
         Every array argument is then wrapped in the masking view of
         :func:`loopty.trace.mask_writes`, which shares the caller's buffer, so
@@ -273,6 +280,16 @@ class Kernel(_Decorated):
         reference run, which is the slow path by construction; the demos are
         unchanged to the tenth of a second.
 
+        *A ragged array is read through the layout the kernel declares.* The
+        counts array its type names bounds a row, and a declared offsets
+        parameter (:func:`loopty.term.declared_offsets`) says where a row
+        starts, read as the body has left them (:meth:`loopty.arr.Arr.through`,
+        :func:`loopty.term.declared_layout`). Those are the arrays the lowered
+        kernel is handed and indexes through, so a kernel that writes them
+        means the same thing natively as compiled, where following the
+        array's own offsets gave it a second meaning. On entry the two layouts
+        agree, which is what the contract checked above.
+
         *An index array stored as floats is read as integers.* The contract
         accepts ``col = [1.0, 0.0]`` for ``col: Arr[..., Fin[m]]``, because being
         a point of ``Fin[m]`` is a property of the value, and the compiled run
@@ -282,19 +299,37 @@ class Kernel(_Decorated):
         :meth:`_integer_copies` for which arrays are copied and why only those.
         """
         bound = self._bound(args, kwargs)
-        check_arguments(self.arg_types, bound)
+        layout = declared_layout(tuple(self.arg_types.items()))
+        check_arguments(
+            self.arg_types,
+            bound,
+            {name: offsets for name, (_, offsets) in layout.items() if offsets},
+        )
         copies = self._integer_copies(bound)
         code = self.fn.__code__
         names = code.co_varnames[: code.co_argcount]
         positional = [
-            copies.get(names[k], arg) if k < len(names) else arg
+            self._prepare(copies.get(names[k], arg) if k < len(names) else arg)
             for k, arg in enumerate(args)
         ]
-        keywords = {name: copies.get(name, value) for name, value in kwargs.items()}
-        return self.fn(
-            *(self._prepare(arg) for arg in positional),
-            **{name: self._prepare(value) for name, value in keywords.items()},
-        )
+        keywords = {
+            name: self._prepare(copies.get(name, value))
+            for name, value in kwargs.items()
+        }
+        prepared = {**dict(zip(names, positional, strict=False)), **keywords}
+        for name, (counts, offsets) in layout.items():
+            value = prepared.get(name)
+            if not (isinstance(value, Arr) and value.is_ragged):
+                continue
+            view = value.through(
+                prepared.get(counts) if counts else None,
+                prepared.get(offsets) if offsets else None,
+            )
+            if name in keywords:
+                keywords[name] = view
+            else:
+                positional[names.index(name)] = view
+        return self.fn(*positional, **keywords)
 
     def _integer_copies(self, bound: dict[str, Any]) -> dict[str, Any]:
         """Integer copies of the float-stored arrays of an integral sort.

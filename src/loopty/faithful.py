@@ -49,7 +49,7 @@ from lanky.terms import evaluate, free_variables
 
 from loopty.arr import Arr
 from loopty.interpret import InterpretError, TooLarge, interpret
-from loopty.term import ArrType, Term
+from loopty.term import ArrType, Term, declared_layout
 from loopty.tolerance import disagreement, output_class
 from loopty.trace import TraceError
 
@@ -222,7 +222,9 @@ def sample_arguments(
     from a standard normal. Arrays the kernel writes are drawn too, because a
     kernel may read what it writes before writing it, and both runs have to
     start from the same values. An integral scalar named like a size is that
-    size.
+    size. Offsets the kernel declares beside a ragged array
+    (:func:`loopty.term.declared_layout`) are that array's offsets rather than
+    a draw, since a call has to pass them so (:mod:`loopty.contract`).
     """
     rng = np.random.default_rng(seed)
     types = dict(term.params)
@@ -253,6 +255,15 @@ def sample_arguments(
             raise _NoSample(f"the row lengths {counts_name} of {name} are negative")
         values = _draw(typ.dtype, (int(lengths.sum()),), sizes, rng)
         arguments[name] = Arr.ragged(lengths, values=values)
+    for name, (_counts, offsets) in declared_layout(term.params).items():
+        drawn = arguments.get(offsets) if offsets else None
+        layout = arguments.get(name)
+        if not isinstance(drawn, Arr) or not isinstance(layout, Arr):
+            continue
+        if drawn.numpy().shape == layout.offsets.shape:
+            arguments[offsets] = Arr.from_numpy(
+                layout.offsets.astype(drawn.dtype, copy=True)
+            )
     ordered = {name: arguments[name] for name, _typ in term.params}
     return ordered, sizes
 

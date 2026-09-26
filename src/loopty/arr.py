@@ -14,6 +14,12 @@ Ragged storage is a dependent sum stored flat: row ``r`` occupies
 is the difference of consecutive offsets. Indexing is ``arr[r, j]``, in the
 index-type axes, never in flat addresses; the layout (``loopty.idx``) owns the
 translation.
+
+Inside a kernel a ragged array is read through the layout the kernel declares
+rather than its own (:meth:`Arr.through`): the counts array its type names
+bounds a row, and a declared offsets array says where a row starts, as they do
+in the lowered kernel, which is handed those arrays and reads them as the
+kernel has left them.
 """
 
 from __future__ import annotations
@@ -120,7 +126,7 @@ class Arr:
     ``r`` is ``values[offsets[r]:offsets[r+1]]``.
     """
 
-    __slots__ = ("_offsets", "_values")
+    __slots__ = ("_layout", "_offsets", "_values")
 
     def __init__(
         self, values: np.ndarray, offsets: np.ndarray | None = None
@@ -158,6 +164,7 @@ class Arr:
                 )
             self._values = values
             self._offsets = offsets
+        self._layout: tuple[Any, Any] | None = None
 
     # -- constructors ----------------------------------------------------
 
@@ -229,6 +236,95 @@ class Arr:
             raise TypeError("Arr[...] needs at least an element type")
         return ArrSpec(axes=tuple(parts[:-1]), dtype=parts[-1])
 
+    # -- the declared layout ------------------------------------------------
+
+    def through(self, counts: Any = None, offsets: Any = None) -> Arr:
+        """This ragged array, read through the layout a kernel declares.
+
+        ``counts`` and ``offsets`` are the arguments a kernel declares beside
+        it, ``cnt`` and ``off`` for ``val: Arr[Fin[n], Fin[cnt], Real]`` (see
+        :func:`loopty.term.declared_layout`), either one ``None`` when the
+        kernel declares no such parameter. The result shares this array's
+        buffers and reads those arrays at every use: row ``r`` is
+        ``counts[r]`` long, or ``offsets[r + 1] - offsets[r]`` without counts,
+        and ``[r, j]`` is the cell ``offsets[r] + j`` of the flat buffer. Where
+        one is ``None`` this array's own offsets stand in.
+
+        That is what the lowered kernel does: it is handed those arrays as
+        arguments, runs a loop over ``val.dom[r]`` to the count it reads from
+        them once per row, and indexes ``val[off[r] + j]`` with ``off`` as the
+        kernel has left it. So a native run that reads the same arrays gives a
+        kernel that writes its counts or its offsets the meaning the compiled
+        run gives it, where the array's own layout gave it another. The
+        contract checks that the two layouts agree on entry
+        (:func:`loopty.contract.ragged_arguments`); after that the declared one
+        is the one both runs follow.
+
+        The number of rows stays this array's own, and every read is still
+        checked: a column against the length of its row, and the cell it lands
+        on against the flat buffer, since offsets a kernel has rewritten can
+        point anywhere.
+        """
+        if self._offsets is None:
+            raise TypeError("a dense array has no layout to read through")
+        view = object.__new__(type(self))
+        view._values = self._values
+        view._offsets = self._offsets
+        view._layout = (counts, offsets)
+        return view
+
+    @property
+    def layout(self) -> tuple[Any, Any] | None:
+        """The ``(counts, offsets)`` this array is read through, if any.
+
+        ``None`` for an array that follows its own offsets; see
+        :meth:`through`.
+        """
+        return self._layout
+
+    def _row_start(self, row: int) -> int:
+        """Where row ``row`` starts in the flat buffer, by the layout followed."""
+        declared = None if self._layout is None else self._layout[1]
+        if declared is not None:
+            return int(_flat(declared)[row])
+        assert self._offsets is not None
+        return int(self._offsets[row])
+
+    def _row_length(self, row: int) -> int:
+        """How many entries row ``row`` has, by the layout followed.
+
+        Never negative: a count a kernel has made negative, or offsets it has
+        made decrease, give a loop over the row no iterations, as they give the
+        compiled ``for (j = 0; j < len; ++j)``.
+        """
+        if self._layout is not None:
+            counts, offsets = self._layout
+            if counts is not None:
+                return max(int(_flat(counts)[row]), 0)
+            if offsets is not None:
+                flat = _flat(offsets)
+                return max(int(flat[row + 1]) - int(flat[row]), 0)
+        assert self._offsets is not None
+        return int(self._offsets[row + 1] - self._offsets[row])
+
+    def _row_slice(self, row: int) -> slice:
+        """The flat range of row ``row``, checked against the buffer."""
+        start = self._row_start(row)
+        stop = start + self._row_length(row)
+        if start < 0 or stop > self._values.size:
+            raise IndexError(
+                f"row {row} occupies cells {start} to {stop} of the flat buffer "
+                f"by {self._described_layout()}, and the buffer has "
+                f"{self._values.size}"
+            )
+        return slice(start, stop)
+
+    def _described_layout(self) -> str:
+        """How the layout followed reads in a message."""
+        if self._layout is None:
+            return "its own offsets"
+        return "the counts and offsets the kernel declares"
+
     # -- shape ------------------------------------------------------------
 
     @property
@@ -296,8 +392,7 @@ class Arr:
             if len(prefix) == 0:
                 return int(self._offsets.size - 1)
             if len(prefix) == 1:
-                row = prefix[0]
-                return int(self._offsets[row + 1] - self._offsets[row])
+                return self._row_length(prefix[0])
             raise IndexError(f"a ragged array has 2 axes, not {len(prefix) + 1}")
         if len(prefix) >= self._values.ndim:
             raise IndexError(
@@ -319,13 +414,20 @@ class Arr:
         assert offsets is not None
         if not 0 <= row < offsets.size - 1:
             raise IndexError(f"row {row} out of range for {offsets.size - 1} rows")
-        count = int(offsets[row + 1] - offsets[row])
+        count = self._row_length(row)
         column = int(column)
         if not 0 <= column < count:
             raise IndexError(
                 f"column {column} out of range for row {row} of length {count}"
             )
-        return int(offsets[row]) + column
+        flat = self._row_start(row) + column
+        if not 0 <= flat < self._values.size:
+            raise IndexError(
+                f"[{row}, {column}] is cell {flat} of the flat buffer by "
+                f"{self._described_layout()}, and the buffer has "
+                f"{self._values.size}"
+            )
+        return flat
 
     def _dense_key(self, key: Any) -> Any:
         """``key``, once it is known to hold no negative integer index.
@@ -370,7 +472,7 @@ class Arr:
         offsets = self._offsets
         if not 0 <= row < offsets.size - 1:
             raise IndexError(f"row {row} out of range for {offsets.size - 1} rows")
-        return self._values[offsets[row] : offsets[row + 1]]
+        return self._values[self._row_slice(row)]
 
     def __setitem__(self, key: Any, value: Any) -> None:
         if self._offsets is None:
@@ -385,7 +487,7 @@ class Arr:
         offsets = self._offsets
         if not 0 <= row < offsets.size - 1:
             raise IndexError(f"row {row} out of range for {offsets.size - 1} rows")
-        self._values[offsets[row] : offsets[row + 1]] = value
+        self._values[self._row_slice(row)] = value
 
     def numpy(self) -> np.ndarray:
         """The backing numpy array: the dense array, or the flat ragged values."""
@@ -405,3 +507,16 @@ class Arr:
             return f"Arr(shape={self.shape}, dtype={self.dtype})"
         counts = tuple(int(c) for c in self.counts)
         return f"Arr.ragged(counts={counts}, dtype={self.dtype})"
+
+
+def _flat(value: Any) -> np.ndarray:
+    """The elements of a counts or offsets argument, as one flat array.
+
+    The buffer itself, not a copy and not through the argument's own
+    ``__getitem__``: the layout is read as the kernel has left it, and a
+    masking view's answer of zero under a false guard is for the body's reads,
+    not for the row a read lands in.
+    """
+    if isinstance(value, Arr):
+        value = value.numpy()
+    return np.asarray(value).reshape(-1)

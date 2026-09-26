@@ -310,16 +310,14 @@ def offsets_entries(stmt, term) -> list[tuple[str, str]]:
     ]
 
 
-def test_a_ragged_access_reads_the_ends_of_its_row_in_the_offsets() -> None:
-    # ``off[i]`` is what the flat index reads, and ``off[i + 1]`` is where the
-    # row ends. ``val`` and ``col`` share their offsets, so the pair is listed
-    # once for the two of them.
+def test_a_ragged_access_reads_the_start_of_its_row_in_the_offsets() -> None:
+    # ``off[i]`` is what the flat index reads. ``val`` and ``col`` share their
+    # offsets, so it is listed once for the two of them. ``off[i + 1]``, where
+    # the row ends, is not read by anything here: the counts are a parameter,
+    # and the loop over the row runs to ``cnt[i]``.
     term = term_of(scan_then_spmv)
     product = term.stmts[2]
-    assert offsets_entries(product, term) == [
-        ("read", "off[i]"),
-        ("read", "off[i + 1]"),
-    ]
+    assert offsets_entries(product, term) == [("read", "off[i]")]
     assert {
         ("write", "y[i]"),
         ("read", "val[i, j]"),
@@ -335,37 +333,39 @@ def test_a_ragged_access_reads_the_ends_of_its_row_in_the_offsets() -> None:
 
 def test_a_ragged_write_reads_the_offsets_too() -> None:
     # ``val[r, j] = ...`` stores to ``val[off[r] + j]``: the write goes through
-    # the offsets as the read does, and the two share one pair of reads.
+    # the offsets as the read does, and the two share one read.
     term = term_of(scale_rows)
     (stmt,) = term.stmts
-    assert offsets_entries(stmt, term) == [("read", "off[r]"), ("read", "off[r + 1]")]
+    assert offsets_entries(stmt, term) == [("read", "off[r]")]
 
 
 def test_offsets_the_kernel_does_not_declare_are_not_listed() -> None:
     # Lowering adds ``off_cnt`` itself; nothing in the body can write it, and
-    # ``r`` in bounds of ``val``'s rows already keeps both reads of it in
+    # ``r`` in bounds of ``val``'s rows already keeps the read of it in
     # bounds. Listing it would add a footprint on an array the term lacks.
+    # The row's length is read from ``cnt``, which the kernel does declare.
     term = term_of(spmv_without_offsets)
     (stmt,) = term.stmts
     arrays = {array for array, *_ in flow.statement_accesses(stmt, term)}
-    assert arrays == {"y", "val", "x", "col"}
+    assert arrays == {"y", "val", "x", "col", "cnt"}
 
 
 def test_the_scan_carries_a_dependence_to_the_rows_read_through_it() -> None:
-    # ``S1[r]`` writes ``off[r + 1]``, which is where row ``r`` ends and row
-    # ``r + 1`` starts, so both of those rows of ``S2`` depend on it. Without
-    # the offsets among ``S2``'s accesses there was no dependence at all
-    # between the scan and the product.
+    # ``S1[r]`` writes ``off[r + 1]``, which is where row ``r + 1`` starts, so
+    # that row of ``S2`` depends on it. Without the offsets among ``S2``'s
+    # accesses there was no dependence at all between the scan and the
+    # product.
     term = term_of(scan_then_spmv)
     deps = flow.dependences(term)
-    for pair in ("{ [1, 0] -> [2, 0] }", "{ [1, 0] -> [2, 1] }"):
-        assert not deps.intersect(
+    assert not deps.intersect(
+        isl.Map("{ [1, 0] -> [2, 1] }").align_params(deps.get_space())
+    ).is_empty()
+    # Row ``0`` ends at ``off[1]``, but nothing reads where a row ends when the
+    # counts are a parameter, and row ``2`` does not start there.
+    for pair in ("{ [1, 0] -> [2, 0] }", "{ [1, 0] -> [2, 2] }"):
+        assert deps.intersect(
             isl.Map(pair).align_params(deps.get_space())
         ).is_empty(), pair
-    # Row ``2`` does not start or end at ``off[1]``.
-    assert deps.intersect(
-        isl.Map("{ [1, 0] -> [2, 2] }").align_params(deps.get_space())
-    ).is_empty()
 
 
 def test_the_schedule_checker_draws_the_same_dependence_through_the_offsets() -> None:
@@ -379,7 +379,121 @@ def test_the_schedule_checker_draws_the_same_dependence_through_the_offsets() ->
         for dep in schedule._deps  # noqa: SLF001 - the point of the test
         if dep.array == "off" and (dep.source, dep.sink) == ("S1", "S2")
     ]
-    assert [dep.kind for dep in through_offsets] == ["raw", "raw"]
+    assert [dep.kind for dep in through_offsets] == ["raw"]
+
+
+# }}}
+
+
+# {{{ the read a ragged loop's bound makes
+
+
+def counts_rewritten_ahead(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """``S0`` sums row ``r``, whose length is ``cnt[r]``; ``S1`` then clears
+    the length of the next row."""
+    for r in y.dom:
+        y[r] = reduce_sum(val[r, j] for j in val.dom[r])
+        with when(r + 1 < y.dom.size):
+            cnt[r + 1] = 0
+
+
+def guarded_rows(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    z: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+):
+    """A loop over the fiber of every row, with a guard on the row."""
+    for r in cnt.dom:
+        for j in val.dom[r]:
+            with when(r > 0):
+                z[r, j] = val[r, j]
+
+
+def same_loops(domain: str, expected: str) -> bool:
+    """Whether ``domain`` is ``expected`` wherever its parameters may be.
+
+    The constraints a set keeps on its parameters alone (``n >= 0``) are not
+    what is being compared.
+    """
+    got = isl.Set(domain)
+    want = isl.Set(expected).align_params(got.get_space())
+    got = got.align_params(want.get_space())
+    return got.is_equal(want.intersect_params(got.params()))
+
+
+def bound_entries(stmt, term) -> list[tuple[tuple[str, ...], str, str]]:
+    """``(inames, "cnt[...]", domain)`` for each read of ``cnt``, in order."""
+    from lanky.terms import render
+
+    return [
+        (inames, f"{array}[{', '.join(render(i) for i in indices)}]", str(domain))
+        for array, indices, kind, inames, domain in flow.statement_accesses(
+            stmt, term
+        )
+        if array == "cnt" and kind == "read"
+    ]
+
+
+def test_a_ragged_loop_reads_its_bound_from_the_counts() -> None:
+    # Lowering assigns the reduction's bound ``cnt[r]`` inside the loop over
+    # ``r``; that read is in no expression of the statement, and it used to
+    # be in no list either.
+    term = term_of(counts_rewritten_ahead)
+    ((inames, text, domain),) = bound_entries(term.stmts[0], term)
+    assert (inames, text) == (("r",), "cnt[r]")
+    assert same_loops(domain, "[n] -> { [r] : 0 <= r < n }")
+    (layout,) = flow.layout_reads(term.stmts[0], term)
+    assert (layout.part, layout.loops, layout.access) == ("length", ("j",), None)
+
+
+def test_the_bound_is_read_over_the_loops_up_to_its_row() -> None:
+    # Once per row, whether or not the row has entries and whatever the guard
+    # inside the loop says: the statement's domain is over ``j`` and narrowed
+    # to ``r > 0``, and the read of ``cnt[r]`` is over every ``r``.
+    term = term_of(guarded_rows)
+    (stmt,) = term.stmts
+    ((inames, text, domain),) = bound_entries(stmt, term)
+    assert (inames, text) == (("r",), "cnt[r]")
+    assert same_loops(domain, "[n] -> { [r] : 0 <= r < n }")
+
+
+def test_a_writer_of_the_counts_is_ordered_against_the_rows_they_bound() -> None:
+    # ``S1[r]`` writes ``cnt[r + 1]``, the length of the row ``S0[r + 1]``
+    # sums. The dependence is there only because the bound's read is listed.
+    term = term_of(counts_rewritten_ahead)
+    deps = flow.dependences(term)
+    assert not deps.intersect(
+        isl.Map("{ [1, 0] -> [0, 1] }").align_params(deps.get_space())
+    ).is_empty()
+
+
+def test_a_bound_computed_from_the_offsets_reads_both_ends_of_the_row() -> None:
+    # A term built by hand whose counts are not a parameter: lowering computes
+    # the row's length as ``off[r + 1] - off[r]``, so both are read, once per
+    # row, and ``off[r]`` a second time by the flat index, over the reduction.
+    import hand_terms as ht
+
+    term = ht.spmv_term()
+    (stmt,) = term.stmts
+    parts = [
+        (layout.part, layout.read[3], layout.loops, layout.access is None)
+        for layout in flow.layout_reads(stmt, term)
+    ]
+    assert parts == [
+        ("start", ("r", "j"), (), False),
+        ("start", ("r", "j"), (), False),
+        ("start", ("r",), ("j",), True),
+        ("end", ("r",), ("j",), True),
+    ]
+    assert offsets_entries(stmt, term) == [
+        ("read", "off[r]"),
+        ("read", "off[r]"),
+        ("read", "off[r + 1]"),
+    ]
 
 
 # }}}

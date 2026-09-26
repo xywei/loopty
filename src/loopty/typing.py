@@ -166,19 +166,21 @@ def in_bounds_facts(term: Term, owner: str) -> list[Fact]:
 
     The fact's id names the access, ``S1:read:x[r - 1]``, and not the domain it
     runs over, while the collector can list one access over several: the body's
-    and the guard's, a reduction's, and the offsets every ragged access reads
-    through. The ledger keeps one fact per id, so two facts for one access
-    would leave the later in place of the earlier, whatever the earlier said:
-    ``x[r - 1]`` read directly and again in a sum over ``q < r`` would be
-    reported in bounds from the sum, where ``r >= 1``, with the direct read of
-    ``x[-1]`` gone from the ledger. The domains of one access are therefore
-    gathered into one obligation, about the union of the cells they reach.
+    and the guard's, a reduction's, and the reads a ragged layout makes (the
+    offsets a ragged access reads through, the bound of a ragged loop). The
+    ledger keeps one fact per id, so two facts for one access would leave the
+    later in place of the earlier, whatever the earlier said: ``x[r - 1]``
+    read directly and again in a sum over ``q < r`` would be reported in
+    bounds from the sum, where ``r >= 1``, with the direct read of ``x[-1]``
+    gone from the ledger. The domains of one access are therefore gathered
+    into one obligation, about the union of the cells they reach.
 
-    A read of the offsets a ragged access is flattened through is an access
-    the source never writes, so its fact says which access it serves:
-    ``off[r + 1], the end of row r that val[r, j] is flattened through, is in
-    bounds ...``, and ``layout`` in its provenance says the same. Without that
-    a refuted one names a read nobody can find in the kernel.
+    A read a ragged layout makes is an access the source never writes, so its
+    fact says what it serves: ``off[r], the start of row r that val[r, j] is
+    flattened through, is in bounds ...``, or ``cnt[r], the length of row r
+    that bounds the loop over j, is in bounds ...``, and ``layout`` in its
+    provenance says the same. Without that a refuted one names a read nobody
+    can find in the kernel.
     """
     types = dict(term.params)
     sizes = flow.size_names(term)
@@ -315,12 +317,16 @@ def _access_text(array: str, indices: Sequence[Any]) -> str:
 
 
 def _layout_roles(stmt: Any, term: Term) -> dict[tuple[str, str, str], str]:
-    """What each read of the offsets is to the ragged accesses it serves.
+    """What each read a ragged layout makes is to the accesses and loops it serves.
 
-    Keyed as :func:`in_bounds_facts` keys an access, ``(array, kind, text)``;
-    the value reads ``the end of row r that val[r, j] is flattened through``,
-    one clause per row end the read is, joined, and opens with ``read
-    directly and as`` when the statement also spells the read itself.
+    Keyed as :func:`in_bounds_facts` keys an access, ``(array, kind, text)``.
+    The value reads ``the start of row r that val[r, j] is flattened through``
+    for a read the flat index makes, ``the length of row r that bounds the loop
+    over j`` for a ragged loop's bound read from the counts, and ``the end of
+    row r whose length bounds the loop over j`` for one computed from the
+    offsets (:func:`loopty.flow.layout_reads`). A read that is several of those
+    gets one clause each, joined, and opens with ``read directly and as`` when
+    the statement also spells the read itself.
     """
     spelled = {
         (array, kind, _access_text(array, indices))
@@ -328,23 +334,50 @@ def _layout_roles(stmt: Any, term: Term) -> dict[tuple[str, str, str], str]:
             stmt, term
         )
     }
-    served: dict[tuple[str, str, str], dict[tuple[str, str], list[str]]] = {}
-    for access, read, end, row in flow.offsets_reads(stmt, term):
-        key = (read[0], read[2], _access_text(read[0], read[1]))
-        origin = _access_text(access[0], access[1])
-        origins = served.setdefault(key, {}).setdefault((end, render(row)), [])
-        if origin not in origins:
-            origins.append(origin)
+    served: dict[tuple[str, str, str], dict[tuple[str, str, str], list[str]]] = {}
+    for layout in flow.layout_reads(stmt, term):
+        array, indices, kind, _inames, _domain = layout.read
+        key = (array, kind, _access_text(array, indices))
+        if layout.access is not None:
+            how = "index"
+            users = [_access_text(layout.access[0], layout.access[1])]
+        else:
+            how = "bound"
+            users = list(layout.loops)
+        clause = served.setdefault(key, {}).setdefault(
+            (how, layout.part, render(layout.row)), []
+        )
+        clause.extend(user for user in users if user not in clause)
     out: dict[tuple[str, str, str], str] = {}
-    for key, ends in served.items():
-        clauses = [
-            f"the {end} of row {row} that {_listed(origins)} "
-            f"{'is' if len(origins) == 1 else 'are'} flattened through"
-            for (end, row), origins in ends.items()
-        ]
-        role = _listed(clauses)
+    for key, clauses in served.items():
+        role = _listed(
+            [
+                _layout_clause(how, part, row, users)
+                for (how, part, row), users in clauses.items()
+            ]
+        )
         out[key] = f"read directly and as {role}" if key in spelled else role
     return out
+
+
+def _layout_clause(how: str, part: str, row: str, users: Sequence[str]) -> str:
+    """One clause of :func:`_layout_roles`: what a layout read is to its users."""
+    if how == "index":
+        verb = "is" if len(users) == 1 else "are"
+        spelled = _listed(users)
+        return f"the {part} of row {row} that {spelled} {verb} flattened through"
+    loops = (
+        "a loop"
+        if not users
+        else f"the loop over {users[0]}"
+        if len(users) == 1
+        else f"the loops over {_listed(users)}"
+    )
+    if part == "length":
+        return f"the length of row {row} that bounds {loops}"
+    if part == "row":
+        return f"the index of the row whose length bounds {loops}"
+    return f"the {part} of row {row} whose length bounds {loops}"
 
 
 def _listed(items: Sequence[str]) -> str:

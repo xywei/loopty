@@ -35,6 +35,10 @@ a fresh isl parameter named after the term (``nl_cnt_r``, the convention
 its questions for *every* value of a parameter, so a subset or emptiness verdict
 proved this way is a proof schema over all counts, which is exactly the
 per-generic-row statement wanted, and it is sound because it can only widen.
+The parameter does not hide the array it comes from: the read of ``cnt[r]`` that
+computes it is an access of the statement like any other
+(:func:`layout_reads`), so a statement that writes the counts is ordered
+against the rows they bound.
 
 The allocation of those names is a table and not a function of the term, because
 the readable spelling is not injective: ``cnt[r]`` and ``cnt*r`` both read
@@ -97,13 +101,16 @@ import pymbolic.primitives as prim
 from lanky.terms import init_args
 
 from loopty.idx import Reflections
-from loopty.term import ArrType, Stmt, Term, declared_offsets
+from loopty.term import ArrType, Stmt, Term, count_param_names, declared_offsets
 
 __all__ = [
     "Footprint",
+    "LayoutRead",
     "assume_sizes",
+    "bounds_dimension",
     "NonAffine",
     "cell_set",
+    "counts_families",
     "dependences",
     "free_names",
     "domain_set",
@@ -111,7 +118,10 @@ __all__ = [
     "footprints",
     "instance_domain",
     "instance_space_depth",
+    "layout_reads",
+    "loops_outside",
     "pad_map",
+    "ragged_bound_params",
     "schedule_of",
     "size_names",
 ]
@@ -506,12 +516,16 @@ _Access = tuple[str, tuple[Any, ...], str, tuple[str, ...], isl.Set]
 def statement_accesses(stmt: Stmt, term: Term) -> tuple[_Access, ...]:
     """Every cell family a statement touches, with the domain it touches it over.
 
-    Each entry is ``(array, indices, kind, inames, domain)``. An access written
-    directly in the statement ranges over the statement's own domain; an access
-    inside a reduction ranges over the reduction's domain, which carries the
-    enclosing inames as its outer dimensions and the reduction's binders as its
-    inner ones. Keeping the two apart is what makes ``val[r, j]`` an obligation
-    about ``j`` in the row's count rather than about an unconstrained ``j``.
+    Each entry is ``(array, indices, kind, inames, domain)``, where ``inames``
+    name the dimensions of ``domain``. An access written directly in the
+    statement ranges over the statement's own domain; an access inside a
+    reduction ranges over the reduction's domain, which carries the enclosing
+    inames as its outer dimensions and the reduction's binders as its inner
+    ones. Keeping the two apart is what makes ``val[r, j]`` an obligation about
+    ``j`` in the row's count rather than about an unconstrained ``j``. The read
+    of a ragged loop's bound ranges over the loop nest up to its row, the
+    statement's first few inames, because it happens once per row (see
+    :func:`layout_reads`).
 
     A statement evaluates three expressions, and all three are read: the
     right-hand side, the *subscripts of the assignee*, and the guard.
@@ -534,12 +548,12 @@ def statement_accesses(stmt: Stmt, term: Term) -> tuple[_Access, ...]:
     read over the narrowed domain would prove it in bounds by the very
     condition that does not protect it.
 
-    One more read belongs to none of the three expressions: the layout's, which
+    Two more reads belong to none of the three expressions: the layout's, which
     is why ``term`` is needed at all. A ragged ``val: Arr[Fin[n], Fin[cnt],
     Real]`` is stored flat, so ``val[r, j]`` is ``val[off[r] + j]`` once
-    lowered, and the row it indexes is the flat range ``off[r] <= a <
-    off[r + 1]``. See :func:`_offsets_reads` for when those two reads are
-    listed and why.
+    lowered, and a loop over ``val.dom[r]`` runs to ``cnt[r]``, which the
+    lowered kernel reads once per row. See :func:`layout_reads` for when those
+    reads are listed and why.
 
     This is the one collector: :mod:`loopty.typing` states its in-bounds
     obligations from it, :func:`footprints` builds the dependence relation from
@@ -547,17 +561,18 @@ def statement_accesses(stmt: Stmt, term: Term) -> tuple[_Access, ...]:
     :mod:`loopty.lower` derives an instruction's dependencies from it. An
     omission here is an omission everywhere, which is the point: it used to be
     possible for four collectors to disagree about what a statement reads, and
-    the offsets read was, for a while, known to the lowering alone.
+    the offsets read and the bound's read were, for a while, known to the
+    lowering alone.
     """
-    return tuple(_with_offsets_reads(source_accesses(stmt, term), term))
+    return tuple(_with_layout_reads(stmt, term))
 
 
 def source_accesses(stmt: Stmt, term: Term) -> tuple[_Access, ...]:
     """The accesses of :func:`statement_accesses` that the source spells.
 
-    Everything but the reads of the offsets a ragged access is flattened
-    through, which the layout adds (see :func:`offsets_reads`). Rules ask
-    :func:`statement_accesses`; this is for saying where an access came from.
+    Everything but the reads the layout of a ragged array adds (see
+    :func:`layout_reads`). Rules ask :func:`statement_accesses`; this is for
+    saying where an access came from.
     """
     from lanky.terms import structurally_equal
 
@@ -600,67 +615,88 @@ def source_accesses(stmt: Stmt, term: Term) -> tuple[_Access, ...]:
     return tuple(out)
 
 
-def offsets_reads(
-    stmt: Stmt, term: Term
-) -> tuple[tuple[_Access, _Access, str, Any], ...]:
-    """Each read of the offsets that a ragged access of ``stmt`` makes, and why.
+# {{{ the reads a ragged layout makes
 
-    One entry ``(access, read, end, row)`` per read :func:`_offsets_reads`
-    lists: the ragged access as the source spells it, the read of the offsets
-    as :func:`statement_accesses` lists it, ``"start"`` for ``off[r]`` or
-    ``"end"`` for ``off[r + 1]``, and the row ``r`` whose ends those are, the
-    row that ``val[r, j]`` is flattened through. The source never writes those
-    reads, so an obligation about one is stated with the access it serves; see
-    :func:`loopty.typing.in_bounds_facts`.
+
+@dataclass(frozen=True)
+class LayoutRead:
+    """One read the layout of a ragged array makes, which the source never spells.
+
+    ``read`` is the entry :func:`statement_accesses` lists for it. ``part`` says
+    what the cell it reads is to row ``row``: ``"start"``, where the row starts
+    in flat storage (``off[r]``), ``"end"``, where it ends (``off[r + 1]``),
+    ``"length"``, how many entries it has (``cnt[r]``), or ``"row"``, a read
+    the row expression itself makes (``p[i]`` in ``cnt[p[i]]``). A read a
+    ragged access is flattened through names that access, as
+    :func:`source_accesses` lists it, in ``access``; a read a loop's bound is
+    computed from names the loops it bounds in ``loops``, by the names the term
+    gives them.
     """
-    out: list[tuple[_Access, _Access, str, Any]] = []
+
+    read: _Access
+    part: str
+    row: Any
+    access: _Access | None = None
+    loops: tuple[str, ...] = ()
+
+
+def layout_reads(stmt: Stmt, term: Term) -> tuple[LayoutRead, ...]:
+    """Every read the layout of a ragged array makes in ``stmt``, and why.
+
+    A ragged ``val: Arr[Fin[n], Fin[cnt], Real]`` is a flat buffer, and the
+    lowered kernel reads two things to use it that the body never names:
+
+    * **The start of a row**, for every access to ``val[r, j]``, read or
+      written: the flat index is ``off[r] + j``, so the access reads
+      ``off[r]`` (:func:`_index_reads`).
+    * **The length of a row**, for every loop over ``val.dom[r]``, a ``for`` or
+      a reduction's generator: the loop runs to a scalar lowering assigns once
+      per row, ``cnt[r]`` when the counts are a parameter, which they always
+      are in a traced kernel, and ``off[r + 1] - off[r]`` in a term built by
+      hand whose counts are not. A loop over the fiber of any other row,
+      ``val.dom[r - 1]`` or ``val.dom[p[i]]``, reads that row's length where
+      it starts, and whatever the row expression reads (:func:`_bound_reads`).
+
+    ``off[r + 1]`` is therefore listed only where a row's length is computed
+    from the offsets. The flat index does not read it, and neither does
+    anything else in a kernel whose counts are a parameter, so listing it there
+    would order a write of the offsets against a read the code never makes.
+
+    Listing these reads is what makes the layout's uses visible to every rule
+    and not only to the lowering. A statement that writes ``off`` or ``cnt`` is
+    ordered against one that indexes through them or loops over their rows, in
+    the dependence relation and so in every cast's legality check; and each
+    read is an in-bounds obligation of its own, which is where counts or
+    offsets declared a cell short are caught. The native run and the term
+    interpreter read the same arrays, the ones the kernel declares
+    (:func:`loopty.term.declared_layout`), so a kernel that writes them means
+    one thing however it runs.
+
+    Nothing is listed for offsets the kernel does not declare
+    (:func:`loopty.term.declared_offsets`). Lowering then adds them as an
+    argument of ``n + 1`` cells that nothing in the body can name, so there is
+    no writer to order against, and the row index being in bounds of ``val``'s
+    first axis, which ``val[r, j]``'s own obligation states, keeps the reads in
+    bounds. Nor is anything listed for a ragged axis that is not bounded by a
+    counts name, which lowering refuses on its own.
+    """
+    out: list[LayoutRead] = []
     for access in source_accesses(stmt, term):
-        array, indices, _kind, inames, domain = access
-        reads = _offsets_reads(term, array, indices, inames, domain)
-        if not reads:
-            continue
-        start, end = reads
-        row = start[1][0]
-        out.append((access, start, "start", row))
-        out.append((access, end, "end", row))
+        for read in _index_reads(term, access):
+            out.append(LayoutRead(read, "start", read[1][0], access=access))
+    out.extend(_bound_reads(stmt, term))
     return tuple(out)
 
 
-def _offsets_reads(
-    term: Term,
-    array: str,
-    indices: Sequence[Any],
-    inames: tuple[str, ...],
-    domain: isl.Set,
-) -> tuple[_Access, ...]:
-    """The reads of the offsets that one access to ``array`` makes.
+def _index_reads(term: Term, access: _Access) -> tuple[_Access, ...]:
+    """The read of the offsets that one access makes through its flat index.
 
     For ``val[r, j]`` of a ragged ``val`` flattened through ``off``, that is
-    ``off[r]``, which the flat index ``off[r] + j`` reads, and ``off[r + 1]``,
-    where row ``r`` ends. The flat index reads only the first. The second is
-    what lowering computes the row's length from when the counts are not an
-    argument, and is otherwise tied to them by the layout (``off[r + 1] -
-    off[r]`` is ``cnt[r]``); listing it states the row as the flat range
-    between the two, and for a dependence it can only add pairs, never lose
-    one. Both are reads over the domain of the access, whatever its kind: a
+    ``off[r]``, a read over the domain of the access, whatever its kind: a
     write to ``val[r, j]`` goes through ``off[r]`` just as a read does. This is
-    the read :func:`loopty.lower.lower_generic` indexes through, listed here so
-    that every rule sees it and not only the lowering:
-
-    * a statement that writes ``off`` is ordered against one that indexes
-      through it, in the dependence relation and so in every cast's legality
-      check, and not only among the lowered kernel's instructions;
-    * the two reads are in-bounds obligations of their own, which is where an
-      offsets array declared one cell short of ``n + 1`` is caught.
-
-    Nothing is listed when the kernel declares no offsets parameter
-    (:func:`loopty.term.declared_offsets`). Lowering then adds the offsets as
-    an argument of ``n + 1`` cells that nothing in the body can name, so there
-    is no writer to order against, and ``r`` being in bounds of ``val``'s first
-    axis, which ``val[r, j]``'s own obligation already states, keeps both reads
-    in bounds. Nor is anything listed for a ragged axis that is not bounded by
-    a counts name, which lowering refuses on its own.
+    the read :func:`loopty.lower.lower_generic` indexes through.
     """
+    array, indices, _kind, inames, domain = access
     typ = dict(term.params).get(array)
     if not isinstance(typ, ArrType):
         return ()
@@ -673,38 +709,335 @@ def _offsets_reads(
     offsets = declared_offsets(term.params, counts.name)
     if offsets is None:
         return ()
-    row = indices[axis - 1]
-    return (
-        (offsets, (row,), "read", inames, domain),
-        (offsets, (row + 1,), "read", inames, domain),
-    )
+    return ((offsets, (indices[axis - 1],), "read", inames, domain),)
 
 
-def _with_offsets_reads(accesses: Sequence[_Access], term: Term) -> list[_Access]:
-    """``accesses`` with each ragged access followed by its offsets reads.
+def counts_families(term: Term) -> tuple[str, ...]:
+    """The counts name of every ragged parameter, in signature order.
 
-    A read already listed over the same domain is not listed twice: ``val[r,
-    j]`` and ``col[r, j]`` in one reduction share their offsets, and a statement
-    may read ``off[r]`` itself. Over a different domain it is kept, because
-    that is a different set of instances reading it.
+    ``cnt`` for ``val: Arr[Fin[n], Fin[cnt], Real]``. A ragged axis whose bound
+    is not a bare name has no counts family, and is skipped here; lowering
+    refuses it, with the reason.
+    """
+    names: list[str] = []
+    for _name, typ in term.params:
+        if not isinstance(typ, ArrType):
+            continue
+        for size, ragged in zip(typ.axes, typ.ragged, strict=True):
+            if ragged and isinstance(size, prim.Variable) and size.name not in names:
+                names.append(size.name)
+    return tuple(names)
+
+
+def _counts_subscript(
+    expr: Any, families: Collection[str], inames: Collection[str]
+) -> tuple[str, str] | None:
+    """``(counts, iname)`` if ``expr`` is ``cnt[r]`` for a counts array and iname."""
+    if not isinstance(expr, prim.Subscript):
+        return None
+    if not isinstance(expr.aggregate, prim.Variable):
+        return None
+    if expr.aggregate.name not in families:
+        return None
+    index = expr.index
+    if isinstance(index, tuple):
+        if len(index) != 1:
+            return None
+        index = index[0]
+    if not isinstance(index, prim.Variable) or index.name not in inames:
+        return None
+    return (expr.aggregate.name, index.name)
+
+
+def ragged_bound_params(term: Term) -> dict[str, tuple[str, str]]:
+    """Domain parameters standing for a ragged bound: name -> ``(counts, iname)``.
+
+    ``nl_cnt_r`` stands for ``cnt[r]``, the length of row ``r`` of the arrays
+    laid out over ``cnt``, with ``r`` a loop variable of a statement. Those are
+    the bounds lowering can assign in a scalar temporary inside the loop over
+    the row, which is why :func:`layout_reads` states their read once per row.
+
+    Two sources, because a term reaches here two ways. A term written by hand
+    spells the parameter, ``cnt_r`` or ``nl_cnt_r``, and is recognized by
+    :func:`loopty.term.count_param_names`. A traced term records what it
+    allocated on :attr:`loopty.term.Term.reflected`, and a parameter there is a
+    ragged bound when the term it stands for is a counts array subscripted by
+    a loop variable. The second source is what keeps a parameter that had to be
+    suffixed (because the readable spelling was taken) recognizable as the row
+    length it is, instead of being declared as a size argument nobody passes.
+    """
+    families = counts_families(term)
+    inames = {iname for stmt in term.stmts for iname in stmt.inames}
+    out: dict[str, tuple[str, str]] = {}
+    for counts in families:
+        for stmt in term.stmts:
+            for iname in stmt.inames:
+                for param in count_param_names(counts, iname):
+                    out.setdefault(param, (counts, iname))
+    for symbol, expr in term.reflected:
+        pair = _counts_subscript(expr, families, inames)
+        if pair is not None:
+            out.setdefault(symbol, pair)
+    return out
+
+
+def bounds_dimension(domain: isl.Set, position: int, param: int) -> bool:
+    """Does parameter ``param`` bound set dimension ``position`` of ``domain``?
+
+    Read off the constraints rather than inferred by projecting: a constraint
+    that mentions both the dimension and the parameter is one in which the
+    parameter helps bound it, and nothing else counts. Projecting the other
+    dimensions out instead would answer yes far too often, because eliminating
+    a dimension leaves behind what its own existence implied. For the spmv
+    reduction over ``[r, j]`` with ``0 <= j < nl_cnt_r``, projecting ``j`` out
+    leaves ``nl_cnt_r >= 1``, which would make the *row* loop look as if its
+    bound came from data.
+    """
+    found = False
+
+    def visit_basic_set(basic_set: isl.BasicSet) -> None:
+        nonlocal found
+        for constraint in basic_set.get_constraints():
+            if constraint.get_coefficient_val(isl.dim_type.set, position).is_zero():
+                continue
+            if not constraint.get_coefficient_val(
+                isl.dim_type.param, param
+            ).is_zero():
+                found = True
+                return
+
+    domain.foreach_basic_set(visit_basic_set)
+    return found
+
+
+def loops_outside(domain: isl.Set, keep: int) -> isl.Set:
+    """``domain`` over its first ``keep`` dimensions, whatever the loops inside do.
+
+    Where something runs once per iteration of the outer loops, as the read of
+    a ragged loop's bound does, it runs whether or not the inner loops have an
+    iteration. So the constraints that mention an inner dimension are dropped
+    before the inner dimensions are projected out: projecting ``j`` out of
+    ``0 <= j < cnt_r`` alone would leave ``cnt_r >= 1`` behind, and a row with
+    no entries reads its length all the same. The constraints on the outer
+    dimensions and on the parameters alone are kept. When dropping leaves a
+    dimension unbounded (a bound written through an inner loop, ``0 <= r <= j <
+    n``, which no loop a person writes has) the plain projection is used, which
+    bounds the same loops. :func:`loopty.lower._outer_part` is the lowering's
+    variant, which also drops the constraints on the parameters alone.
+    """
+    total = domain.dim(isl.dim_type.set)
+    if keep >= total:
+        return domain
+    inner = total - keep
+    dropped = domain.drop_constraints_involving_dims(
+        isl.dim_type.set, keep, inner
+    ).project_out(isl.dim_type.set, keep, inner)
+    if dropped.is_bounded():
+        return dropped
+    return domain.project_out(isl.dim_type.set, keep, inner)
+
+
+def _bound_rows(term: Term) -> dict[str, tuple[str, Any]]:
+    """Domain parameters that stand for the length of a row: name -> ``(counts, row)``.
+
+    Every parameter :func:`ragged_bound_params` recognizes, with its loop
+    variable as the row, and every parameter the term reflected for a counts
+    array subscripted by any one index, ``cnt[r - 1]`` or ``cnt[p[i]]``: a
+    bound lowering cannot assign, since no loop has that row as its variable,
+    and one the native run reads all the same.
+    """
+    families = counts_families(term)
+    out: dict[str, tuple[str, Any]] = {
+        param: (counts, prim.Variable(iname))
+        for param, (counts, iname) in ragged_bound_params(term).items()
+    }
+    for symbol, expr in term.reflected:
+        if symbol in out or not isinstance(expr, prim.Subscript):
+            continue
+        if not isinstance(expr.aggregate, prim.Variable):
+            continue
+        if expr.aggregate.name not in families:
+            continue
+        index = expr.index
+        if isinstance(index, tuple):
+            if len(index) != 1:
+                continue
+            index = index[0]
+        out[symbol] = (expr.aggregate.name, index)
+    return out
+
+
+def _bounded_domains(stmt: Stmt) -> list[tuple[isl.Set, tuple[str | None, ...], int]]:
+    """The domains a ragged bound can occur in, with names and a first loop.
+
+    Each is ``(domain, names, first)``, and the bounds of a domain are looked
+    for from dimension ``first`` on. The statement's loop nest comes first,
+    over its loop variables and before a guard narrowed it (``loop_domain``,
+    since a guard masks writes and the loops run whatever it says), from ``0``.
+    Then the domain of every reduction it evaluates, in the right-hand side,
+    the assignee's subscripts or the guard, over the loop variables and then
+    the reduction's binders, from the first binder, since a bound of a loop
+    variable there is the statement's own again. A dimension whose name cannot
+    be told is ``None``.
+    """
+    from loopty.trace import reductions_in
+
+    loops = stmt.loop_domain if stmt.loop_domain is not None else stmt.domain
+    out: list[tuple[isl.Set, tuple[str | None, ...], int]] = [
+        (loops, tuple(stmt.inames), 0)
+    ]
+    for source in (stmt.expr, tuple(stmt.assignee.indices), stmt.guard):
+        if source is None:
+            continue
+        for reduction in reductions_in(source):
+            names: tuple[str | None, ...] = (*stmt.inames, *reduction.inames)
+            n_dim = reduction.domain.dim(isl.dim_type.set)
+            if len(names) != n_dim:
+                lead = n_dim - len(reduction.inames)
+                names = (*(None,) * max(lead, 0), *reduction.inames)[-n_dim:]
+            out.append((reduction.domain, names, n_dim - len(reduction.inames)))
+    return out
+
+
+def _bound_reads(stmt: Stmt, term: Term) -> list[LayoutRead]:
+    """The reads the bounds of the ragged loops of ``stmt`` make.
+
+    For each parameter of the statement's domain, or of a reduction's, that
+    stands for the length of a row (:func:`_bound_rows`): ``cnt[e]`` when the
+    counts are a parameter, which they always are in a traced kernel, together
+    with whatever ``e`` reads itself (``p[i]`` in ``cnt[p[i]]``), or ``off[e]``
+    and ``off[e + 1]`` when only the offsets are.
+
+    Where the read happens depends on who computes the bound. The length of
+    row ``r`` of a loop variable ``r`` (:func:`ragged_bound_params`) is
+    assigned by lowering once per row, in the loop over ``r`` and outside any
+    loop inside it or any guard, whether or not the row has entries, so the
+    read is stated over the loop nest up to ``r``: :func:`loops_outside` of
+    the statement's ``loop_domain``. Any other bound is read where the loop it
+    bounds starts, once per iteration of the loops around that one, which are
+    the dimensions of the domain before the first one it bounds.
+    """
+    rows = _bound_rows(term)
+    lowered = ragged_bound_params(term)
+    params = dict(term.params)
+    base = stmt.loop_domain if stmt.loop_domain is not None else stmt.domain
+    per_row: dict[tuple[str, str], tuple[Any, list[str]]] = {}
+    elsewhere: list[tuple[str, Any, tuple[str, ...], isl.Set, list[str]]] = []
+    for domain, names, first in _bounded_domains(stmt):
+        for param_position, param in enumerate(
+            domain.get_var_names(isl.dim_type.param)
+        ):
+            row_of = rows.get(param)
+            if row_of is None:
+                continue
+            bounded = [
+                position
+                for position in range(first, len(names))
+                if bounds_dimension(domain, position, param_position)
+            ]
+            if not bounded:
+                continue
+            loops = [name for name in (names[k] for k in bounded) if name is not None]
+            counts, row = row_of
+            pair = lowered.get(param)
+            if pair is not None and pair[1] in stmt.inames:
+                _, seen = per_row.setdefault(pair, (row, []))
+                seen.extend(name for name in loops if name not in seen)
+                continue
+            start = bounded[0]
+            inames = tuple(name or f"i{k}" for k, name in enumerate(names[:start]))
+            elsewhere.append(
+                (counts, row, inames, loops_outside(domain, start), loops)
+            )
+    out: list[LayoutRead] = []
+    for (counts, iname), (row, loops) in per_row.items():
+        depth = stmt.inames.index(iname) + 1
+        read_over = (tuple(stmt.inames[:depth]), loops_outside(base, depth))
+        out.extend(_row_length_reads(term, params, counts, row, read_over, loops))
+    for counts, row, inames, domain, loops in elsewhere:
+        out.extend(
+            _row_length_reads(term, params, counts, row, (inames, domain), loops)
+        )
+    return out
+
+
+def _row_length_reads(
+    term: Term,
+    params: Mapping[str, Any],
+    counts: str,
+    row: Any,
+    read_over: tuple[tuple[str, ...], isl.Set],
+    loops: Sequence[str],
+) -> list[LayoutRead]:
+    """The reads computing the length of row ``row``, over ``read_over``."""
+    from loopty.trace import accesses_in
+
+    inames, domain = read_over
+    bounded = tuple(loops)
+    if isinstance(params.get(counts), ArrType):
+        out = [
+            LayoutRead(
+                (counts, (row,), "read", inames, domain), "length", row, loops=bounded
+            )
+        ]
+        for access in accesses_in(row):
+            if isinstance(params.get(access.array), ArrType):
+                read = (access.array, access.indices, "read", inames, domain)
+                out.append(LayoutRead(read, "row", row, loops=bounded))
+        return out
+    offsets = declared_offsets(term.params, counts)
+    if offsets is None:
+        return []
+    return [
+        LayoutRead(
+            (offsets, (index,), "read", inames, domain), part, row, loops=bounded
+        )
+        for part, index in (("start", row), ("end", row + 1))
+    ]
+
+
+def _with_layout_reads(stmt: Stmt, term: Term) -> list[_Access]:
+    """The source's accesses, each ragged one followed by its offsets read,
+    and then the reads the ragged loops' bounds make.
+
+    A layout read already listed over the same domain is not listed twice:
+    ``val[r, j]`` and ``col[r, j]`` in one reduction share their offsets, a
+    statement may read ``off[r]`` or ``cnt[r]`` itself, and two reductions over
+    ``val.dom[r]`` share their bound. Over a different domain it is kept,
+    because that is a different set of instances reading it.
     """
     from lanky.terms import structurally_equal
 
     out: list[_Access] = []
-    for access in accesses:
+
+    def add(read: _Access) -> None:
+        if not any(
+            seen[0] == read[0]
+            and seen[2] == read[2]
+            and seen[3] == read[3]
+            and seen[4] is read[4]
+            and structurally_equal(seen[1], read[1])
+            for seen in out
+        ):
+            out.append(read)
+
+    for access in source_accesses(stmt, term):
         out.append(access)
-        array, indices, _kind, inames, domain = access
-        for read in _offsets_reads(term, array, indices, inames, domain):
-            if not any(
-                seen[0] == read[0]
-                and seen[2] == read[2]
-                and seen[3] == read[3]
-                and seen[4] is read[4]
-                and structurally_equal(seen[1], read[1])
-                for seen in out
-            ):
-                out.append(read)
+        for read in _index_reads(term, access):
+            add(read)
+    for layout in _bound_reads(stmt, term):
+        add(layout.read)
     return out
+
+
+# }}}
+
+
+def _lift(n_inames: int, n_prefix: int) -> isl.Map:
+    """``{ [i0, i1, i2] -> [i0, i1] }``: a statement's instance to a loop prefix."""
+    source = ", ".join(f"i{k}" for k in range(n_inames))
+    target = ", ".join(f"i{k}" for k in range(n_prefix))
+    return isl.Map(f"{{ [{source}] -> [{target}] }}")
 
 
 def footprints(term: Term) -> tuple[Footprint, ...]:
@@ -716,6 +1049,13 @@ def footprints(term: Term) -> tuple[Footprint, ...]:
     the padded instance space, so footprints of different statements compose;
     the dimensions a reduction adds are projected out, because a reduction is
     part of one statement instance and not a set of instances of its own.
+
+    A read stated over fewer loops than the statement has, the bound of a
+    ragged loop read once per row, is a read of every instance in that row:
+    each of them runs after the bound is read, so a writer of the counts has
+    to be ordered against all of them, which can only add pairs. The instances
+    are the statement's, since the order the pairs are intersected with is
+    defined on those alone.
     """
     depth = instance_space_depth(term)
     out: list[Footprint] = []
@@ -725,10 +1065,14 @@ def footprints(term: Term) -> tuple[Footprint, ...]:
         for array, indices, kind, inames, domain in statement_accesses(stmt, term):
             relation = access_relation(inames, domain, indices)
             extra = len(inames) - len(stmt.inames)
-            if extra:
+            if extra > 0:
                 relation = relation.project_out(
                     isl.dim_type.in_, len(stmt.inames), extra
                 )
+            elif extra < 0:
+                lift = _lift(len(stmt.inames), len(inames))
+                lift = _align(lift, relation.get_space())
+                relation = lift.apply_range(_align(relation, lift.get_space()))
             padded = into_instances.apply_range(
                 _align(relation, into_instances.get_space())
             )

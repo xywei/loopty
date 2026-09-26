@@ -384,52 +384,185 @@ def spmv_through_short_offsets(
 
 
 def test_the_offsets_read_through_are_decided_in_bounds() -> None:
-    # ``val[r, j]`` is ``val[off[r] + j]`` once lowered, and row ``r`` ends at
-    # ``off[r + 1]``. Neither read is in the source, and both are true facts
-    # nobody stated: ``off`` has a cell for every row start and one past it.
+    # ``val[r, j]`` is ``val[off[r] + j]`` once lowered, a read that is not in
+    # the source, and a true fact nobody stated: ``off`` has a cell for every
+    # row start. Where row ``r`` ends, ``off[r + 1]``, is not read at all,
+    # since the row's length is read from ``cnt``, so it is not an obligation.
     facts = in_bounds_of(spmv_through_offsets)
-    for access in ("off[r]", "off[r + 1]"):
-        assert facts[access].status is Status.DECIDED, facts[access].provenance
-        assert facts[access].decided_by == "isl"
-        assert facts[access].statement.endswith("for every instance of S0")
+    assert facts["off[r]"].status is Status.DECIDED, facts["off[r]"].provenance
+    assert facts["off[r]"].decided_by == "isl"
+    assert facts["off[r]"].statement.endswith("for every instance of S0")
+    assert "off[r + 1]" not in facts
 
 
-def test_offsets_declared_a_cell_short_are_refuted_at_the_last_row() -> None:
-    # The layout needs ``n + 1`` offsets. Declared with ``n``, the end of the
-    # last row is a cell ``off`` does not have; nothing else in the ledger
-    # notices, because the source never names ``off``.
+def test_offsets_a_cell_short_are_in_bounds_where_only_row_starts_are_read() -> None:
+    # The lowered code reads ``off[r]`` for ``r < n`` and nothing past it, so
+    # ``n`` offsets are enough for it. Its ledger used to refute ``off[r + 1]``,
+    # a read the code does not make. A call is still refused by the contract,
+    # because offsets of ``n`` cells are not the layout of ``n`` rows.
     facts = in_bounds_of(spmv_through_short_offsets)
+    assert facts["off[r]"].status is Status.DECIDED
+    assert "off[r + 1]" not in facts
+    assert not [name for name, fact in facts.items() if fact.status is Status.REFUTED]
+
+
+def short_offsets_hand_term():
+    """:func:`hand_terms.spmv_term` with ``off`` declared a cell short.
+
+    Its counts are not a parameter, so lowering computes a row's length as
+    ``off[r + 1] - off[r]``, and the end of the last row is a cell ``off``
+    does not have.
+    """
+    import dataclasses
+
+    import hand_terms as ht
+
+    term = ht.spmv_term()
+    params = tuple(
+        (name, ht.dense(ht.V("n"), dtype=ht.INT) if name == "off" else typ)
+        for name, typ in term.params
+    )
+    return dataclasses.replace(term, params=params)
+
+
+def test_offsets_a_row_length_is_read_from_are_refuted_a_cell_short() -> None:
+    # Nothing else in the ledger notices, because the source never names
+    # ``off``.
+    term = short_offsets_hand_term()
+    facts = {
+        fact.id.rsplit(":", 1)[-1]: fact
+        for fact in settled(rules.facts_for(term, owner=term.name, where="t:1"))
+        if fact.kind == "in-bounds"
+    }
     assert facts["off[r]"].status is Status.DECIDED
     refuted = facts["off[r + 1]"]
     assert refuted.status is Status.REFUTED
     assert refuted.decided_by == "isl"
     assert refuted.provenance["witness"] is not None
     assert refuted.provenance["witness_text"].startswith("[a0=")
-    assert [
-        name for name, fact in facts.items() if fact.status is Status.REFUTED
-    ] == ["off[r + 1]"]
+    # The source never writes ``off[r + 1]``, so the fact says what it serves.
+    assert refuted.statement == (
+        "off[r + 1], the end of row r whose length bounds the loop over j, is "
+        "in bounds for every instance of S0"
+    )
+    assert refuted.provenance["layout"] == (
+        "the end of row r whose length bounds the loop over j"
+    )
+    assert facts["off[r]"].provenance["layout"] == (
+        "the start of row r that val[r, j] and col[r, j] are flattened through "
+        "and the start of row r whose length bounds the loop over j"
+    )
 
 
 def test_an_offsets_fact_names_the_ragged_access_it_serves() -> None:
-    # The source never writes ``off[r + 1]``, so a refuted fact about it used
-    # to name a read nobody could find in the kernel.
+    # The source never writes ``off[r]``, so a fact about it used to name a
+    # read nobody could find in the kernel.
     facts = in_bounds_of(spmv_through_short_offsets)
     served = "val[r, j] and col[r, j] are flattened through"
     assert facts["off[r]"].statement == (
         f"off[r], the start of row r that {served}, is in bounds for every "
         "instance of S0"
     )
-    refuted = facts["off[r + 1]"]
-    assert refuted.statement == (
-        f"off[r + 1], the end of row r that {served}, is in bounds for every "
-        "instance of S0"
-    )
-    assert refuted.provenance["layout"] == f"the end of row r that {served}"
+    assert facts["off[r]"].provenance["layout"] == f"the start of row r that {served}"
     # An access the source spells keeps its statement, and its provenance.
     assert facts["val[r, j]"].statement == (
         "val[r, j] is in bounds for every instance of S0"
     )
     assert "layout" not in facts["val[r, j]"].provenance
+
+
+def spmv_short_counts(
+    cnt: Arr[Fin[n - 1], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    for r in y.dom:
+        y[r] = reduce_sum(val[r, j] for j in val.dom[r])
+
+
+def test_a_ragged_loop_bound_is_an_obligation_of_its_own() -> None:
+    # The loop over ``val.dom[r]`` runs to ``cnt[r]``, which the lowered code
+    # reads once per row. That read is in no expression of the body.
+    facts = in_bounds_of(spmv_through_offsets)
+    fact = facts["cnt[r]"]
+    assert fact.status is Status.DECIDED
+    assert fact.decided_by == "isl"
+    assert fact.statement == (
+        "cnt[r], the length of row r that bounds the loop over j, is in bounds "
+        "for every instance of S0"
+    )
+    assert fact.provenance["layout"] == (
+        "the length of row r that bounds the loop over j"
+    )
+
+
+def previous_row_sums(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    for r in y.dom:
+        y[r] = reduce_sum(val[r - 1, j] for j in val.dom[r - 1])
+
+
+def indirect_row_sums(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    p: Arr[Fin[k], Fin[n]],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[k], Real],  # noqa: F821
+):
+    for i in y.dom:
+        y[i] = reduce_sum(val[p[i], j] for j in val.dom[p[i]])
+
+
+def test_the_length_of_another_row_is_read_where_its_loop_starts() -> None:
+    # ``val.dom[r - 1]`` runs to ``cnt[r - 1]``, read at every ``r``, and at
+    # ``r = 0`` that is a cell ``cnt`` does not have.
+    fact = in_bounds_of(previous_row_sums)["cnt[r - 1]"]
+    assert fact.status is Status.REFUTED
+    assert fact.statement == (
+        "cnt[r - 1], the length of row r - 1 that bounds the loop over j, is in "
+        "bounds for every instance of S0"
+    )
+    assert fact.provenance["witness_text"].startswith("[a0=-1]")
+
+
+def test_a_bound_inside_a_sum_is_read_only_where_that_sum_runs() -> None:
+    # The inner sum runs for ``q < r``, so only for ``r >= 1``, and reads
+    # ``cnt[r - 1]`` there alone.
+    fact = in_bounds_of(offsets_before_and_through_a_sum)["cnt[r - 1]"]
+    assert fact.status is Status.DECIDED, fact.provenance
+
+
+def test_the_length_of_an_indirect_row_is_in_bounds_by_type() -> None:
+    # ``cnt[p[i]]`` is in bounds because ``p``'s entries are points of
+    # ``Fin[n]``, and ``p[i]`` is read to find the row, as well as directly.
+    facts = in_bounds_of(indirect_row_sums)
+    length = facts["cnt[p[i]]"]
+    assert length.status is Status.DECIDED
+    assert length.decided_by == "type"
+    assert length.statement.startswith(
+        "cnt[p[i]], the length of row p[i] that bounds the loop over j, is in "
+        "bounds by type"
+    )
+    row = facts["p[i]"]
+    assert row.status is Status.DECIDED
+    assert row.statement.startswith(
+        "p[i], read directly and as the index of the row whose length bounds "
+        "the loop over j, is in bounds"
+    )
+
+
+def test_counts_declared_a_cell_short_are_refuted_at_the_last_row() -> None:
+    # Nothing else noticed: ``val[r, j]`` is decided against the row's length,
+    # whatever that length is, and nothing in the body names ``cnt``.
+    facts = in_bounds_of(spmv_short_counts)
+    refuted = facts["cnt[r]"]
+    assert refuted.status is Status.REFUTED
+    assert refuted.provenance["witness_text"].startswith("[a0=")
+    assert [
+        name for name, fact in facts.items() if fact.status is Status.REFUTED
+    ] == ["cnt[r]"]
 
 
 def indirect_rows(
@@ -445,13 +578,15 @@ def indirect_rows(
 
 def test_an_assumed_offsets_fact_names_its_access_too() -> None:
     facts = in_bounds_of(indirect_rows)
-    for access, end in (("off[p[i]]", "start"), ("off[p[i] + 1]", "end")):
-        fact = facts[access]
-        assert fact.status is Status.ASSUMED
-        assert fact.statement == (
-            f"{access}, the {end} of row p[i] that val[p[i], 0] is flattened "
-            "through, is in bounds"
-        )
+    fact = facts["off[p[i]]"]
+    assert fact.status is Status.ASSUMED
+    assert fact.statement == (
+        "off[p[i]], the start of row p[i] that val[p[i], 0] is flattened "
+        "through, is in bounds"
+    )
+    # No loop runs over a row here, so nothing reads a row's end or length.
+    assert "off[p[i] + 1]" not in facts
+    assert not [access for access in facts if access.startswith("cnt[")]
 
 
 def test_an_offsets_read_the_source_also_spells_says_both() -> None:

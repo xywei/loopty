@@ -28,7 +28,9 @@ the C loop a CSR product wants. Naming that parameter is the one piece of
 vocabulary shared between the tracer, which builds the domains, and this module,
 which reads them: :data:`COUNT_PARAM` is the direct spelling and
 :data:`COUNT_PARAM_REFLECTED` the one the tracer produces when it reflects the
-non-affine term ``cnt[r]`` into a fresh isl parameter. Both are recognized.
+non-affine term ``cnt[r]`` into a fresh isl parameter. Both are recognized, by
+:func:`loopty.flow.ragged_bound_params`, which is also how the access collector
+lists the read the assignment makes; the spellings live in :mod:`loopty.term`.
 """
 
 from __future__ import annotations
@@ -47,13 +49,22 @@ from loopy.symbolic import Reduction as LoopyReduction
 from loopy.symbolic import set_to_cond_expr
 from pymbolic.mapper import Mapper
 
-from loopty.flow import statement_accesses
+from loopty.flow import (
+    access_relation,
+    bounds_dimension,
+    counts_families,
+    ragged_bound_params,
+    statement_accesses,
+)
 from loopty.term import (
+    COUNT_PARAM,
+    COUNT_PARAM_REFLECTED,
     Access,
     ArrType,
     Reduction,
     Stmt,
     Term,
+    count_param_names,
     declared_offsets,
     free_name_sorts,
     free_name_sorts_message,
@@ -79,23 +90,6 @@ __all__ = [
     "numpy_dtype",
     "target_for",
 ]
-
-#: How a ragged loop bound appears as a parameter of a statement domain: the
-#: counts name, an underscore, and the enclosing iname. For a loop over
-#: ``val.dom[r]`` of ``val: Arr[Fin[n], Fin[cnt], Real]`` that is ``cnt_r``, and
-#: lowering assigns it ``off[r+1] - off[r]`` (or ``cnt[r]`` when the counts array
-#: itself is a parameter) in a scalar temporary inside the ``r`` loop.
-COUNT_PARAM = "{counts}_{iname}"
-
-#: The same bound as the tracer spells it when it reflects the non-affine term
-#: ``cnt[r]`` into a fresh isl parameter (see ``loopty.idx``). Both spellings are
-#: recognized, so that a hand-written term and a traced one lower the same way.
-#:
-#: It is a spelling and not the definition. A traced term records what it
-#: actually allocated on :attr:`loopty.term.Term.reflected`, which is where a
-#: parameter that had to be suffixed to dodge a collision is found; this pattern
-#: is the fallback for a term written by hand, which records nothing.
-COUNT_PARAM_REFLECTED = "nl_{counts}_{iname}"
 
 _LANG_VERSION = (2018, 2)
 
@@ -146,34 +140,6 @@ class LoweringError(TypeError):
 def count_param_name(counts: str, iname: str) -> str:
     """The domain parameter standing for a ragged bound; see :data:`COUNT_PARAM`."""
     return COUNT_PARAM.format(counts=counts, iname=iname)
-
-
-def count_param_names(counts: str, iname: str) -> tuple[str, ...]:
-    """Every spelling of one ragged bound parameter, most direct first."""
-    return (
-        COUNT_PARAM.format(counts=counts, iname=iname),
-        COUNT_PARAM_REFLECTED.format(counts=counts, iname=iname),
-    )
-
-
-def _counts_subscript(
-    expr: Any, families: set[str], inames: set[str]
-) -> tuple[str, str] | None:
-    """``(counts, iname)`` if ``expr`` is ``cnt[r]`` for a counts array and iname."""
-    if not isinstance(expr, prim.Subscript):
-        return None
-    if not isinstance(expr.aggregate, prim.Variable):
-        return None
-    if expr.aggregate.name not in families:
-        return None
-    index = expr.index
-    if isinstance(index, tuple):
-        if len(index) != 1:
-            return None
-        index = index[0]
-    if not isinstance(index, prim.Variable) or index.name not in inames:
-        return None
-    return (expr.aggregate.name, index.name)
 
 
 # {{{ dtypes and targets
@@ -780,34 +746,18 @@ class _Builder:
     def ragged_bound_params(self) -> dict[str, tuple[str, str]]:
         """Domain parameters standing for a ragged bound: name -> counts, iname.
 
-        Two sources, because a term reaches here two ways. A term written by
-        hand spells the parameter, ``cnt_r`` or ``nl_cnt_r``, and is recognized
-        by :func:`count_param_names`. A traced term records what it allocated on
-        :attr:`loopty.term.Term.reflected`, and a parameter there is a ragged
-        bound when the term it stands for is a counts array subscripted by an
-        iname. The second source is what keeps a parameter that had to be
-        suffixed (because the readable spelling was taken) recognizable as the
-        row length it is, instead of being declared as a size argument nobody
-        passes.
+        :func:`loopty.flow.ragged_bound_params`, the recognition the access
+        collector lists the bound's read by, so that the parameter lowering
+        assigns and the read the rules check are recognized alike. It keeps
+        the bounds whose row is a loop variable of a statement, which are the
+        ones a scalar temporary inside that loop can hold.
         """
         if self._ragged_bounds is None:
-            self._ragged_bounds = self._compute_ragged_bounds()
+            # The counts families first: a ragged axis that names no counts
+            # array is refused here, with the reason, as it always was.
+            self.counts_families  # noqa: B018 - raises for an unnamed bound
+            self._ragged_bounds = ragged_bound_params(self.term)
         return self._ragged_bounds
-
-    def _compute_ragged_bounds(self) -> dict[str, tuple[str, str]]:
-        families = self.counts_families
-        out: dict[str, tuple[str, str]] = {}
-        for counts in families:
-            for stmt in self.term.stmts:
-                for iname in stmt.inames:
-                    for param in count_param_names(counts, iname):
-                        out.setdefault(param, (counts, iname))
-        inames = {iname for stmt in self.term.stmts for iname in stmt.inames}
-        for symbol, expr in self.term.reflected:
-            pair = _counts_subscript(expr, set(families), inames)
-            if pair is not None:
-                out.setdefault(symbol, pair)
-        return out
 
     def count_param_spellings(self, counts: str, iname: str) -> tuple[str, ...]:
         """Every name this one ragged bound could go by, most direct first."""
@@ -1388,6 +1338,118 @@ def _count_inits(
     return insns, ids, reads
 
 
+def _loops_before_fiber(loops: isl.Set, param: str) -> int:
+    """How many loops of a statement enclose the first loop ``param`` bounds.
+
+    ``loops`` is the statement's domain over its loop variables. A loop over a
+    ragged fiber reads its bound where it starts, once per iteration of the
+    loops around it, so those are the loops across whose iterations the body
+    sees a row length change. When ``param`` bounds none of them, all of them
+    count.
+    """
+    index = loops.find_dim_by_name(isl.dim_type.param, param)
+    total = loops.dim(isl.dim_type.set)
+    if index < 0:
+        return total
+    for position in range(total):
+        if bounds_dimension(loops, position, index):
+            return position
+    return total
+
+
+def _refuse_bounds_rewritten_in_a_loop(
+    term: Term,
+    count_insns: Sequence[Any],
+    count_params: Mapping[str, str],
+    count_reads: Mapping[str, str],
+    uses: Mapping[str, Sequence[tuple[Stmt, int]]],
+) -> None:
+    """Refuse a row length that a loop inside its row would read stale.
+
+    The lowered kernel computes the length of row ``r`` once per row, in the
+    loop over ``r`` (:func:`_count_inits`). The body reads it where the loop
+    over the row's fiber starts, once per iteration of every loop around that
+    one. The two agree unless a statement rewrites the cell the length is read
+    from inside a loop that sits between the two and also encloses a statement
+    bounded by it::
+
+        for r in y.dom:
+            for i in x.dom:
+                y[r] = y[r] + x[i] + reduce_sum(val[r, j] for j in val.dom[r])
+                cnt[r] = 1
+
+    From the second ``i`` on, the body sums a row of the new length and the
+    lowered kernel one of the old. :func:`lower_generic` refuses the rewrite
+    that comes between two statements in the body's order; this is the same
+    stale length across the iterations of a loop the two share, whichever of
+    them comes first in the body, and it is refused the same way. Two rewrites
+    are not refused. One inside the loop over the fiber itself: that loop reads
+    its bound once, when it starts, in the body as in the lowered kernel. And
+    one of another row's cell (:func:`_writes_its_row`): ``cnt[r + 1] = 0``
+    inside row ``r`` changes a length that both runs read when row ``r + 1``
+    starts.
+
+    ``uses`` maps a bound's instruction to each statement bounded by it, with
+    how many of the statement's loops enclose the start of the loop the bound
+    bounds (:func:`_loops_before_fiber`, or every loop for a sum).
+    """
+    rows = {insn.id: len(insn.within_inames) for insn in count_insns}
+    families = set(counts_families(term))
+    for count_id, users in uses.items():
+        source = count_reads[count_id]
+        row = rows[count_id]
+        # ``cnt[r]``, or ``off[r]`` and ``off[r + 1]`` when the counts are not
+        # a parameter (see _count_inits).
+        shifts = (0,) if source in families else (0, 1)
+        for writer in term.stmts:
+            if writer.assignee.array != source:
+                continue
+            for user, fiber in users:
+                shared = 0
+                for mine, theirs in zip(user.inames, writer.inames, strict=False):
+                    if mine != theirs:
+                        break
+                    shared += 1
+                if min(shared, fiber) <= row:
+                    continue
+                if not _writes_its_row(writer, row, shifts):
+                    continue
+                loop = user.inames[row]
+                raise LoweringError(
+                    f"statement {user.id} is bounded by the row length "
+                    f"{count_params[count_id]}, which is computed from {source} "
+                    f"once per row, before the loop over {loop}; {writer.id} "
+                    f"rewrites that row's {source} inside that loop, so from its "
+                    f"second iteration on {user.id} would see the old length "
+                    "where the body reads the new one. Rewrite it outside the "
+                    f"loop over {loop}, or in a kernel of its own."
+                )
+
+
+def _writes_its_row(writer: Stmt, row: int, shifts: Sequence[int]) -> bool:
+    """Can ``writer`` write a cell its own row's length is read from?
+
+    The row is ``writer``'s loop variable at depth ``row - 1``, and the cells
+    are that variable plus each of ``shifts``: ``cnt[r]``, or ``off[r]`` and
+    ``off[r + 1]``. Asked of the statement's domain, so a write a guard masks
+    where isl can state the guard is not counted. An index isl cannot state
+    reaches every cell (:func:`loopty.flow.access_relation`), so the answer
+    errs towards a refusal.
+    """
+    indices = tuple(writer.assignee.indices)
+    if len(indices) != 1:
+        return True
+    written = access_relation(writer.inames, writer.domain, indices)
+    source = ", ".join(writer.inames)
+    iname = writer.inames[row - 1]
+    for shift in shifts:
+        cell = isl.Map(f"{{ [{source}] -> [{iname} + {shift}] }}")
+        cell = cell.align_params(written.get_space())
+        if not written.align_params(cell.get_space()).intersect(cell).is_empty():
+            return True
+    return False
+
+
 def lower_generic(term: Term, target: str = "c") -> Lowering:
     """Lower ``term``, keeping the map from term statements to instructions.
 
@@ -1528,19 +1590,27 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
         first_use: dict[str, str] = {}
         rewritten: dict[str, str] = {}
         writers: dict[str, list[str]] = {}
+        uses: dict[str, list[tuple[Stmt, int]]] = {}
         for stmt in term.stmts:
             insn = by_id[insn_ids[stmt.id]]
+            loops = _domain_over(stmt.domain, stmt.inames)
             needed = {
                 count_ids[param]
-                for param in _domain_params(_domain_over(stmt.domain, stmt.inames))
+                for param in _domain_params(loops)
                 if param in count_ids
             }
+            for count_id in needed:
+                uses.setdefault(count_id, []).append(
+                    (stmt, _loops_before_fiber(loops, count_params[count_id]))
+                )
             for reduction in reductions_of(stmt.expr):
-                needed |= {
-                    count_ids[param]
-                    for param in _domain_params(reduction.domain)
-                    if param in count_ids
-                }
+                for param in _domain_params(reduction.domain):
+                    if param in count_ids:
+                        needed.add(count_ids[param])
+                        # A sum is evaluated inside every loop of its statement.
+                        uses.setdefault(count_ids[param], []).append(
+                            (stmt, len(stmt.inames))
+                        )
             stale = sorted(needed & rewritten.keys())
             if stale:
                 count_id = stale[0]
@@ -1571,6 +1641,9 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
             if needed:
                 by_id[insn.id] = insn.copy(depends_on=insn.depends_on | needed)
             writers.setdefault(written, []).append(insn.id)
+        _refuse_bounds_rewritten_in_a_loop(
+            term, count_insns, count_params, count_reads, uses
+        )
         insns = [by_id[insn.id] for insn in insns]
         # A bound no statement needs keeps the heuristic, as before.
         count_insns = [

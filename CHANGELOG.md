@@ -793,6 +793,60 @@ with a pair of statement instances.
 - A skewed loop keeps its tag in the kernel. The skew went through
   `lp.map_domain` and back, which dropped it: a loop the schedule checked as
   a local axis ran one iteration at a time.
+- The schedule checker and the typing rules see the read a ragged loop's bound
+  makes. `for j in val.dom[r]` and `reduce_sum(... for j in val.dom[r])` run
+  to `cnt[r]`, which lowering assigns once per row, but the read was only a
+  reflected parameter of a domain and in no statement's accesses:
+  `tag(r="l.0")` on a loop that sums row `r` and then clears `cnt[r + 1]` was
+  accepted, and could sum row `r + 1` on either side of the change to its
+  length; it is refused now, with that pair as the witness.
+  `flow.layout_reads` lists the read, `cnt[r]`, or `off[r]` and `off[r + 1]`
+  in a term built by hand whose counts are not a parameter, on every
+  statement the bound bounds, over the loop nest up to the row, since the
+  bound is read once per row whatever the loops inside it or a guard do. The
+  fiber of another row, `val.dom[r - 1]` or `val.dom[p[i]]`, which lowering
+  cannot assign, has its length read where its loop starts, with whatever the
+  row expression reads. `flow.statement_accesses` lists these reads after the
+  source's accesses, so both dependence relations, the in-bounds rule and the
+  lowering's instruction order read them. Each is an in-bounds fact that says
+  what it serves, `cnt[r], the length of row r that bounds the loop over j,
+  is in bounds ...`, which is where counts declared a cell short, and the
+  length of row `-1`, are refuted. The recognition of a ragged bound
+  parameter moved from the lowering next to the collector, as
+  `flow.ragged_bound_params`; the spellings `COUNT_PARAM`,
+  `COUNT_PARAM_REFLECTED` and `count_param_names` live in `loopty.term`, and
+  are still importable from `loopty.lower`. The `lanky check` transcripts of
+  `examples/spmv.py` have one more row, and the ledger of `examples/p2p.py`
+  three more.
+- `off[r + 1]` is listed only where the lowered code reads it: where a row's
+  length is computed from the offsets. The flat index of `val[r, j]` reads
+  `off[r]` alone, so a kernel whose counts are a parameter, which a traced
+  kernel's always are, never reads where a row ends. Storing `off[r]` before
+  summing row `r` through it was refused a parallel tag over that read
+  (`S1[r=2] reads off[3] overwritten by S0[r=3]`), and is accepted again. The
+  in-bounds facts follow the reads: offsets of `n` cells beside the counts are
+  decided for the row starts the code reads, and a call with them is still
+  refused by the contract, since they are not the layout of `n` rows.
+- A kernel that writes its counts or its offsets means one thing however it
+  runs. The native run and the term interpreter read a ragged array through
+  the counts and offsets the kernel declares, as the kernel has left them
+  (`Arr.through`, `loopty.term.declared_layout`), which is what the lowered
+  kernel does with the arguments it is handed. They followed the array's own
+  offsets instead: row sums followed by `off[r + 1] = ends[r]` computed
+  `[3, 3, 15]` natively and `[3, 2, 9]` compiled, and only the differential
+  run noticed. Every read through the declared layout is checked against the
+  flat buffer, since rewritten offsets can point anywhere. The contract checks
+  a declared offsets argument against the ragged argument on the native path
+  too, as it did on the compiled one, so the two layouts agree when a run
+  starts, and the faithfulness fact's samples pass the drawn array's offsets
+  for such a parameter, where they drew them at random and would now be
+  refused. One case still had two meanings, and lowering now refuses it: a
+  loop inside row `r` that both rewrites `cnt[r]` and holds a statement
+  bounded by it. The body reads the length where the loop over the fiber
+  starts, once per iteration of that loop, and the lowered kernel once per
+  row, so from the loop's second iteration on the two summed rows of
+  different lengths; with the rewrite first in the body, loopy could not
+  schedule the kernel at all.
 
 ### Changed
 
