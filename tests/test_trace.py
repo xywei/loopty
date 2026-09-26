@@ -1554,3 +1554,700 @@ def test_a_global_the_body_creates_is_refused(monkeypatch) -> None:
 
 # }}}
 
+
+
+# {{{ guards isl cannot state as integers
+
+
+def _loop_nest(domain) -> isl.Set:
+    """The one-deep loop nest ``0 <= i < n``, in ``domain``'s parameter space."""
+    return isl.Set("[n] -> { [i] : 0 <= i < n }").align_params(domain.get_space())
+
+
+def test_a_guard_against_a_real_scalar_leaves_the_domain_unnarrowed() -> None:
+    # isl reads every name of a constraint as an integer, so stating i < a
+    # would take a = 2.5 for an integer parameter; the domain and the compiled
+    # kernel then disagreed with the native run.
+    def below(a: Real, y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(i < a):
+                y[i] = 1.0
+
+    (stmt,) = term_of(below).stmts
+    assert "a" not in stmt.domain.get_var_names(isl.dim_type.param)
+    assert stmt.domain.is_equal(_loop_nest(stmt.domain))
+    # The guard itself is kept, and evaluated at run time.
+    assert render(stmt.guard) == "i < a"
+    ((conjunct, why),) = stmt.unnarrowed
+    assert conjunct == "i < a"
+    assert "the scalar a of sort Real" in why
+    assert "isl would read every name of a constraint as an integer" in why
+
+
+def test_the_same_guard_against_an_integral_scalar_still_narrows() -> None:
+    def below(a: Nat, y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(i < a):
+                y[i] = 1.0
+
+    (stmt,) = term_of(below).stmts
+    assert "a" in stmt.domain.get_var_names(isl.dim_type.param)
+    nest = _loop_nest(stmt.domain)
+    assert stmt.domain.is_subset(nest) and not stmt.domain.is_equal(nest)
+    assert stmt.unnarrowed == ()
+
+
+def test_only_the_conjuncts_isl_cannot_state_are_left_out() -> None:
+    def clipped(a: Real, y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when((i < a) & (i + 1 < y.dom.size)):
+                y[i] = 1.0
+
+    (stmt,) = term_of(clipped).stmts
+    assert stmt.domain.is_equal(
+        isl.Set("[n] -> { [i] : 0 <= i < n - 1 }").align_params(stmt.domain.get_space())
+    )
+    assert [conjunct for conjunct, _why in stmt.unnarrowed] == ["i < a"]
+
+
+def test_a_data_guard_is_recorded_as_unnarrowed_too() -> None:
+    def positive(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(x[i] > 0.0):
+                y[i] = x[i]
+
+    (stmt,) = term_of(positive).stmts
+    assert stmt.unnarrowed == (("x[i] > 0.0", "reads an array or is not affine"),)
+
+
+def test_a_guard_the_trace_can_evaluate_is_a_constant() -> None:
+    # A condition on values the trace knows, a module constant say, reaches
+    # when as a bool. True leaves every instance writing, which is what the
+    # domain says, so nothing is listed; False leaves none, and is listed.
+    order = 2
+
+    def higher(y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when((order > 1) & (i + 1 < y.dom.size)):
+                y[i] = 1.0
+
+    def never(y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(order > 3):
+                y[i] = 1.0
+
+    (stmt,) = term_of(higher).stmts
+    assert stmt.unnarrowed == ()
+    assert stmt.domain.is_equal(
+        isl.Set("[n] -> { [i] : 0 <= i < n - 1 }").align_params(stmt.domain.get_space())
+    )
+    (stmt,) = term_of(never).stmts
+    assert stmt.unnarrowed == (
+        ("False", "is the constant False, which is not stated to isl"),
+    )
+
+
+def test_a_reduction_condition_against_a_real_scalar_is_refused() -> None:
+    # A reduction keeps its condition only in its domain, so a condition the
+    # domain cannot state is refused rather than dropped.
+    def partial(a: Real, x: Arr[Fin[n], Real], y: Arr[Fin[1], Real]):  # noqa: F821
+        y[0] = reduce_sum(x[j] for j in x.dom if j < a)
+
+    with pytest.raises(TraceError) as caught:
+        term_of(partial)
+    message = str(caught.value)
+    assert "the condition 'j < a' of the reduction over j" in message
+    assert "compares with the scalar a of sort Real" in message
+    assert "loop variables, sizes and integral scalars" in message
+
+
+def test_a_reduction_condition_against_an_integral_scalar_is_its_domain() -> None:
+    def partial(a: Nat, x: Arr[Fin[n], Real], y: Arr[Fin[1], Real]):  # noqa: F821
+        y[0] = reduce_sum(x[j] for j in x.dom if j < a)
+
+    (reduction,) = reductions_in(term_of(partial).stmts[0].expr)
+    assert "a" in reduction.domain.get_var_names(isl.dim_type.param)
+
+
+# }}}
+
+
+# {{{ a guard is a truth value
+
+
+def flipped(y: Arr[Fin[n], Real]):  # noqa: F821
+    """``~`` on a Python bool is bitwise: the guard is -2 or -1, always true."""
+    for i in y.dom:
+        with when(~(i > 0)):
+            y[i] = 1.0
+
+
+def test_natively_a_guard_that_is_an_integer_is_refused() -> None:
+    # ~False is -1 at i = 0; the trace records not (i > 0) and writes y[0]
+    # only, while the native run used to write every cell. Python warns about
+    # ~ on a bool, which this suite makes an error, and a user's run does not.
+    import warnings
+
+    from loopty.kernel import Kernel
+
+    y = Arr.zeros(3)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        with pytest.raises(TraceError) as caught:
+            Kernel(flipped)(y)
+    message = str(caught.value)
+    assert "is the integer -1, not a truth value" in message
+    assert "test_trace.py:" in message
+    assert "'i <= 0' for '~(i > 0)'" in message
+    assert list(y.numpy()) == [0.0, 0.0, 0.0]
+
+
+def test_a_numpy_integer_guard_is_refused_natively_as_well() -> None:
+    # & with an integer operand is bitwise too: True & 2 is 0.
+    def masked(m: Arr[Fin[n], Nat], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when((i >= 0) & m[i]):
+                y[i] = 1.0
+
+    from loopty.kernel import Kernel
+
+    with pytest.raises(TraceError, match="is the integer 0, not a truth value"):
+        Kernel(masked)(Arr.from_numpy(np.array([2, 1])), Arr.zeros(2))
+
+
+def test_a_guard_that_is_a_bool_runs_natively() -> None:
+    # A data comparison is a numpy bool, on which ~ is logical; a comparison of
+    # loop variables is a Python bool.
+    def complement(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(~(x[i] > 0.0) & (i + 1 < y.dom.size)):
+                y[i] = 1.0
+
+    from loopty.kernel import Kernel
+
+    y = Arr.zeros(4)
+    Kernel(complement)(Arr.from_numpy(np.array([1.0, -1.0, 0.0, -2.0])), y)
+    assert list(y.numpy()) == [0.0, 1.0, 1.0, 0.0]
+
+
+def test_a_guard_under_a_false_guard_is_not_asked_natively() -> None:
+    # At i = n - 1 the outer guard is false and the read of w[i + 1] is out of
+    # range, which a masked read answers with the integer 0: nothing under the
+    # outer guard is written there, whatever the inner one says.
+    from loopty.kernel import Kernel
+
+    def weighted(w: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(i + 1 < y.dom.size):
+                with when(w[i + 1]):
+                    y[i] = 1.0
+
+    y = Arr.zeros(3)
+    Kernel(weighted)(Arr.from_numpy(np.array([0.0, 2.0, 0.0])), y)
+    assert list(y.numpy()) == [1.0, 0.0, 0.0]
+
+
+def test_a_concrete_integer_guard_is_refused_while_tracing() -> None:
+    flag = 1
+
+    def constant(y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(flag):
+                y[i] = 1.0
+
+    with pytest.raises(TraceError, match="is the integer 1, not a truth value"):
+        term_of(constant)
+
+
+# }}}
+
+
+# {{{ the slots of an object, and the offsets of a ragged array
+
+
+class _Slotted:
+    """An object of the kernel author's that keeps its state in slots."""
+
+    __slots__ = ("count", "__secret", "unset")
+
+    def __init__(self) -> None:
+        self.count = 0.0
+        self.__secret = 1.0
+
+    def secret(self) -> float:
+        return self.__secret
+
+
+class _Mixed(_Slotted):
+    """Slots from a base class, and a ``__dict__`` of its own."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.label = "a"
+
+
+def test_an_attribute_kept_in_a_slot_is_state() -> None:
+    state = _Slotted()
+
+    def counted(y: Arr[Fin[1], Real]):  # noqa: F821
+        state.count = state.count + 1.0
+        y[0] = state.count
+
+    with pytest.raises(TraceError) as caught:
+        term_of(counted)
+    message = str(caught.value)
+    assert "changed the attribute 'count' of 'state'" in message
+    assert "'state.count' is 0.0 before the trace and 1.0 after it" in message
+
+
+def test_a_private_slot_is_read_by_its_mangled_name() -> None:
+    state = _Slotted()
+
+    def peeking(y: Arr[Fin[1], Real]):  # noqa: F821
+        state._Slotted__secret = state.secret() + 1.0
+        y[0] = 1.0
+
+    with pytest.raises(TraceError, match="the attribute '_Slotted__secret'"):
+        term_of(peeking)
+
+
+def test_a_slot_set_for_the_first_time_is_a_change() -> None:
+    state = _Slotted()
+
+    def filling(y: Arr[Fin[1], Real]):  # noqa: F821
+        state.unset = 1.0
+        y[0] = 1.0
+
+    with pytest.raises(
+        TraceError, match="'state.unset' is unbound before the trace and 1.0"
+    ):
+        term_of(filling)
+
+
+def test_slots_and_a_dict_are_both_read() -> None:
+    state = _Mixed()
+
+    def relabelled(y: Arr[Fin[1], Real]):  # noqa: F821
+        state.label = "b"
+        y[0] = state.count
+
+    def recounted(y: Arr[Fin[1], Real]):  # noqa: F821
+        state.count = 2.0
+        y[0] = 1.0
+
+    with pytest.raises(TraceError, match="the attribute 'label' of 'state'"):
+        term_of(relabelled)
+    with pytest.raises(TraceError, match="the attribute 'count' of 'state'"):
+        term_of(recounted)
+
+
+def test_a_slotted_object_the_body_only_reads_is_not_state() -> None:
+    state = _Slotted()
+
+    def scaled(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = x[i] * state.secret()
+
+    (stmt,) = term_of(scaled).stmts
+    assert render(stmt.expr) == "x[i]*1.0"
+
+
+class _Redeclared(_Slotted):
+    """A subclass that declares its base's slot again: two cells named count."""
+
+    __slots__ = ("count",)
+
+
+def test_a_slot_declared_again_and_a_hidden_dict_entry_are_cells_too() -> None:
+    # Python keeps one member descriptor per declaring class, so the base's
+    # count is still there under the subclass's; and an instance __dict__ can
+    # hold an entry a slot's name hides. A write to either changes state that
+    # state.count does not show.
+    redeclared = _Redeclared()
+    mixed = _Mixed()
+    base_count = _Slotted.__dict__["count"]
+
+    def through_the_base(y: Arr[Fin[1], Real]):  # noqa: F821
+        base_count.__set__(redeclared, 5.0)
+        y[0] = redeclared.count
+
+    def into_the_dict(y: Arr[Fin[1], Real]):  # noqa: F821
+        mixed.__dict__["count"] = 3.0
+        y[0] = mixed.count
+
+    with pytest.raises(
+        TraceError,
+        match=r"'redeclared\._Slotted\.count' is unbound before the trace and 5\.0",
+    ):
+        term_of(through_the_base)
+    with pytest.raises(
+        TraceError,
+        match=r"\"mixed\.__dict__\['count'\]\" is unbound before the trace and 3\.0",
+    ):
+        term_of(into_the_dict)
+
+
+def test_a_write_into_the_offsets_of_a_ragged_array_is_refused() -> None:
+    rows = Arr.ragged([1, 2], values=np.zeros(3))
+
+    def shifting(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        rows.offsets[1] = 2
+        for i in y.dom:
+            y[i] = x[i]
+
+    with pytest.raises(TraceError) as caught:
+        term_of(shifting)
+    message = str(caught.value)
+    assert "changed the array 'rows.offsets'" in message
+    assert "'rows.offsets[1]' is 1 before the trace and 2 after it" in message
+
+
+def test_a_write_into_the_values_of_a_ragged_array_is_still_refused() -> None:
+    rows = Arr.ragged([1, 2], values=np.zeros(3))
+
+    def stashing(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        rows[1, 1] = 5.0
+        for i in y.dom:
+            y[i] = x[i]
+
+    with pytest.raises(TraceError, match=r"'rows\[2\]' is 0.0 before the trace"):
+        term_of(stashing)
+
+
+# }}}
+
+
+# {{{ a kernel installed into site-packages
+
+
+@pytest.fixture
+def site_packages(tmp_path, monkeypatch, request):
+    """A directory that counts as site-packages, with a writer of packages into it.
+
+    Its path is added to the library roots, which is where a non-editable
+    install puts a kernel, and to ``sys.path``. The packages written into it
+    are imported by name and forgotten again at the end.
+    """
+    import importlib
+    import os
+    import sys
+    import textwrap
+
+    # The module, not the function loopty exports under the same name.
+    tracing = importlib.import_module("loopty.trace")
+    site = tmp_path / "site-packages"
+    site.mkdir()
+    roots = tracing._library_roots()
+    monkeypatch.setattr(
+        tracing, "_library_roots", lambda: (*roots, os.path.realpath(site))
+    )
+    tracing._library_file.cache_clear()
+    request.addfinalizer(tracing._library_file.cache_clear)
+    monkeypatch.syspath_prepend(str(site))
+    written: list[str] = []
+
+    def forget() -> None:
+        for name in list(sys.modules):
+            if any(name == top or name.startswith(top + ".") for top in written):
+                del sys.modules[name]
+
+    request.addfinalizer(forget)
+
+    def install(files: dict[str, str]):
+        for relative, text in files.items():
+            path = site / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(textwrap.dedent(text))
+            written.append(relative.split("/")[0].removesuffix(".py"))
+        importlib.invalidate_caches()
+        return importlib.import_module
+
+    return install
+
+
+_HEADER = """\
+    from __future__ import annotations
+
+    from lanky.prelude import Real
+
+    from loopty import Arr, Fin
+"""
+
+
+def test_a_print_in_an_installed_kernel_is_refused(site_packages) -> None:
+    load = site_packages(
+        {
+            "installed_chatty/__init__.py": "",
+            "installed_chatty/kernels.py": _HEADER
+            + """
+    def chatty(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
+        for i in y.dom:
+            print("at", i)
+            y[i] = x[i]
+    """,
+        }
+    )
+    from loopty.trace import _library_file
+
+    module = load("installed_chatty.kernels")
+    assert _library_file(module.__file__)
+    with pytest.raises(TraceError, match=r"calls print\(\) at kernels.py:"):
+        term_of(module.chatty)
+
+
+def test_the_helpers_of_an_installed_kernel_are_followed(site_packages) -> None:
+    load = site_packages(
+        {
+            "installed_noted/__init__.py": "",
+            "installed_noted/helpers.py": """\
+    SEEN = []
+
+
+    class Box:
+        __slots__ = ("count",)
+
+        def __init__(self):
+            self.count = 0.0
+
+
+    BOX = Box()
+
+
+    def note(value):
+        SEEN.append(value)
+        return value
+    """,
+            "installed_noted/kernels.py": _HEADER
+            + """
+    from installed_noted.helpers import BOX, note
+
+
+    def noted(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
+        for i in y.dom:
+            y[i] = note(x[i])
+
+
+    def counted(y: Arr[Fin[1], Real]):
+        BOX.count = BOX.count + 1.0
+        y[0] = BOX.count
+    """,
+        }
+    )
+    module = load("installed_noted.kernels")
+    with pytest.raises(TraceError, match="changed the global list 'SEEN'"):
+        term_of(module.noted)
+    with pytest.raises(TraceError, match="changed the attribute 'count' of 'BOX'"):
+        term_of(module.counted)
+
+
+def test_another_installed_package_is_still_a_library(site_packages) -> None:
+    # Its print is not the body's while another package's kernel is traced,
+    # and is when a kernel of its own is: the location was only passed over,
+    # not disabled for good.
+    load = site_packages(
+        {
+            "installed_loud/__init__.py": """\
+    def shout(value):
+        print(value)
+        return value
+    """,
+            "installed_loud/kernels.py": _HEADER
+            + """
+    from installed_loud import shout
+
+
+    def loud(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
+        for i in y.dom:
+            y[i] = shout(x[i])
+    """,
+            "installed_quiet/__init__.py": "",
+            "installed_quiet/kernels.py": _HEADER
+            + """
+    from installed_loud import shout
+
+
+    def quiet(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
+        for i in y.dom:
+            y[i] = shout(x[i])
+    """,
+        }
+    )
+    quiet = load("installed_quiet.kernels").quiet
+    loud = load("installed_loud.kernels").loud
+    (stmt,) = term_of(quiet).stmts
+    assert render(stmt.expr) == "x[i]"
+    with pytest.raises(TraceError, match=r"calls print\(\) at __init__.py:"):
+        term_of(loud)
+
+
+def test_a_namespace_package_is_not_all_the_kernels(site_packages) -> None:
+    # Two distributions install into one namespace directory; the kernel's own
+    # package is the regular package below it, and the other is a library.
+    load = site_packages(
+        {
+            "installed_ns/alpha/__init__.py": "",
+            "installed_ns/alpha/kernels.py": _HEADER
+            + """
+    from installed_ns.beta import shout
+
+
+    def relayed(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
+        for i in y.dom:
+            y[i] = shout(x[i])
+
+
+    def chatty(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
+        for i in y.dom:
+            print(i)
+            y[i] = x[i]
+    """,
+            "installed_ns/beta/__init__.py": """\
+    def shout(value):
+        print(value)
+        return value
+    """,
+        }
+    )
+    from loopty.trace import _own_of
+
+    module = load("installed_ns.alpha.kernels")
+    assert _own_of(module.relayed).package == "installed_ns.alpha"
+    (stmt,) = term_of(module.relayed).stmts
+    assert render(stmt.expr) == "x[i]"
+    with pytest.raises(TraceError, match=r"calls print\(\) at kernels.py:"):
+        term_of(module.chatty)
+
+
+def test_an_installed_kernel_file_checked_by_path_keeps_its_package(
+    site_packages,
+) -> None:
+    # lanky check imports the file as lanky_checked_kernels, a name of its own,
+    # and gives it the package it sits in; the kernel's own code is that
+    # package, as it is when the package imports the file.
+    import os
+
+    from lanky.check import import_path
+
+    from loopty.trace import _own_of
+
+    load = site_packages(
+        {
+            "installed_checked/__init__.py": "",
+            "installed_checked/helpers.py": """\
+    SEEN = []
+
+
+    def note(value):
+        SEEN.append(value)
+        return value
+
+
+    def shout(value):
+        print(value)
+        return value
+    """,
+            "installed_checked/kernels.py": _HEADER
+            + """
+    from .helpers import note, shout
+
+
+    def noted(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
+        for i in y.dom:
+            y[i] = note(x[i])
+
+
+    def shouted(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
+        for i in y.dom:
+            y[i] = shout(x[i])
+    """,
+        }
+    )
+    package = load("installed_checked")
+    checked = import_path(os.path.join(os.path.dirname(package.__file__), "kernels.py"))
+    assert checked.__name__ == "lanky_checked_kernels"
+    assert _own_of(checked.noted).package == "installed_checked"
+    with pytest.raises(TraceError, match="changed the global list 'SEEN'"):
+        term_of(checked.noted)
+    with pytest.raises(TraceError, match=r"calls print\(\) at helpers.py:"):
+        term_of(checked.shouted)
+    # python -m runs a module of the package as __main__, in the package.
+    namespace = {"__name__": "__main__", "__package__": "installed_checked"}
+    exec("def body():\n    pass\n", namespace)
+    assert _own_of(namespace["body"]).package == "installed_checked"
+
+
+def test_library_code_is_decided_by_module() -> None:
+    import logging
+
+    from loopty.trace import _library, _Own
+
+    own = _Own("mykernels.stencil", "mykernels")
+    site = "/opt/site-packages"
+    assert not _library("mykernels.helpers", f"{site}/mykernels/helpers.py", own)
+    assert _library("numpy.linalg", "/src/numpy/linalg.py", own)
+    assert _library("logging", logging.__file__, own)
+    # A standard library name is the standard library's where its code is.
+    assert not _library("logging", "/src/logging/__init__.py", own)
+    # A kernel defined in a module of loopty's own is only that module.
+    inside = _Own("loopty.examples", None)
+    assert not _library("loopty.examples", "/src/loopty/examples.py", inside)
+    assert _library("loopty.trace", "/src/loopty/trace.py", inside)
+
+
+# }}}
+
+
+def test_a_module_named_like_the_standard_library_is_the_authors(
+    tmp_path, monkeypatch
+) -> None:
+    # colorsys.py next to the kernel's script is the author's module, whatever
+    # the standard library has under the same name: its helper's module state
+    # is copied and its print is watched, as they are for any other name.
+    import importlib
+    import os
+    import sys
+    import textwrap
+
+    name = "colorsys"
+    assert name in sys.stdlib_module_names
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delitem(sys.modules, name, raising=False)
+    (tmp_path / f"{name}.py").write_text(
+        textwrap.dedent(
+            """\
+            SEEN = []
+
+
+            def note(value):
+                SEEN.append(value)
+                return value
+
+
+            def shout(value):
+                print(value)
+                return value
+            """
+        )
+    )
+    importlib.invalidate_caches()
+    helpers = importlib.import_module(name)
+    assert os.path.dirname(os.path.realpath(helpers.__file__)) == os.path.realpath(
+        tmp_path
+    )
+    note, shout = helpers.note, helpers.shout
+
+    def noted(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = note(x[i])
+
+    def shouted(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = shout(x[i])
+
+    with pytest.raises(TraceError, match="changed the global list 'SEEN'"):
+        term_of(noted)
+    with pytest.raises(TraceError, match=r"calls print\(\) at colorsys.py:"):
+        term_of(shouted)
+
+
+# }}}

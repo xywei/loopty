@@ -38,7 +38,9 @@ the checker approved rather than one loopy chose for itself.
 A rejected cast raises :class:`IllegalCast` carrying ``witness``, the pair of
 statement instances the transformation would reorder. That is the difference
 between "tiling is illegal here" and "instance (0, 8) writes what instance
-(1, 7) reads, and your tiling runs them the other way round".
+(1, 7) reads, and your tiling runs them the other way round". The refuted fact
+the exception carries says the same thing: its ``reason`` is the exception's
+message, which is what lanky prints under a ``REFUTED`` line.
 
 Legal is not the same as buildable
 ----------------------------------
@@ -108,7 +110,8 @@ class IllegalCast(TypeError):
     oracle, and ``str()`` renders the explanation: which dependence, which two
     instances, and which way round the new order would run them. ``fact`` is the
     ``REFUTED`` ledger entry, carried on the exception because the schedule that
-    would have held it was never built.
+    would have held it was never built; its ``reason`` is this message, and its
+    ``witness`` this witness when isl gave one.
     """
 
     def __init__(self, message: str, witness: Any = None, fact: Any = None) -> None:
@@ -125,7 +128,7 @@ class UnbuildableSchedule(TypeError):
     combination of the schedule and the target, so the exception carries
     ``reason`` in the words of the limit it hits, and ``fact``, the ``REFUTED``
     ``buildable`` entry the schedule has been carrying since the step that
-    caused it.
+    caused it, whose ``reason`` is the same words.
     """
 
     def __init__(self, message: str, reason: str = "", fact: Any = None) -> None:
@@ -970,10 +973,13 @@ class Schedule:
             # found would read the wrong contract.
             accumulated, exactness = draft.reduction_info[draft.reductions[name]]
             if exactness == "exact":
-                raise IllegalCast(
+                message = (
                     f"tag({name}={tag!r}) illegal: it would run the pieces of "
                     f"the accumulation into {accumulated} at the same time, "
-                    "which reassociates an exact reduction",
+                    "which reassociates an exact reduction"
+                )
+                raise IllegalCast(
+                    message,
                     witness=None,
                     fact=self._fact(
                         "exactness",
@@ -982,6 +988,7 @@ class Schedule:
                         witness=None,
                         detail=f"the accumulation into {accumulated} is exact",
                         position=len(self._history),
+                        reason=message,
                     ),
                 )
             draft.reassoc.add(accumulated)
@@ -1185,6 +1192,11 @@ class Schedule:
             raise ValueError(f"{var!r} is not accumulated by {self._term.name}")
         text = f"realize({var!r}, tree={tree})"
         if tree and exactness == "exact":
+            message = (
+                f"{text} illegal: the accumulation into {var} is exact, and a "
+                "reduction tree reassociates it; ask for the accumulation at "
+                "'reassoc' if the bits may change"
+            )
             fact = self._fact(
                 "exactness",
                 f"the accumulation into {var} may be reassociated",
@@ -1192,14 +1204,9 @@ class Schedule:
                 witness=None,
                 detail=f"the accumulation into {var} is exact",
                 position=len(self._history),
+                reason=message,
             )
-            raise IllegalCast(
-                f"{text} illegal: the accumulation into {var} is exact, and a "
-                "reduction tree reassociates it; ask for the accumulation at "
-                "'reassoc' if the bits may change",
-                witness=None,
-                fact=fact,
-            )
+            raise IllegalCast(message, witness=None, fact=fact)
         draft = self._draft()
         if tree:
             draft.reassoc.add(var)
@@ -1255,6 +1262,12 @@ class Schedule:
         facts: list[Any] = []
 
         verdict = isl_oracle.is_bijective(step)
+        message = (
+            ""
+            if verdict.ok
+            else f"{text} illegal: the reindexing is not a bijection on the "
+            f"instances of {self._term.name}; {verdict.detail}"
+        )
         facts.append(
             self._fact(
                 "bijective",
@@ -1263,15 +1276,11 @@ class Schedule:
                 witness=verdict.witness,
                 detail=verdict.detail,
                 position=position,
+                reason=message,
             )
         )
         if not verdict.ok:
-            raise IllegalCast(
-                f"{text} illegal: the reindexing is not a bijection on the "
-                f"instances of {self._term.name}; {verdict.detail}",
-                witness=verdict.witness,
-                fact=facts[-1],
-            )
+            raise IllegalCast(message, witness=verdict.witness, fact=facts[-1])
 
         reindex = self._reindex.apply_range(step)
         instances = step.range()
@@ -1287,24 +1296,27 @@ class Schedule:
         # Attribution costs one isl question per dependence, and is only needed
         # to explain a refusal, so it is asked only when there is one to explain.
         bad = None if overall.ok else self._first_violation(schedule)
+        refused = bad is not None or not overall.ok
+        witness = overall.witness if bad is None else bad[1]
+        if bad is not None:
+            message = self._render_violation(text, *bad)
+        elif refused:
+            message = f"{text} illegal: {overall.detail}"
+        else:
+            message = ""
         facts.append(
             self._fact(
                 "monotone",
                 f"the order after {text} runs every dependence of "
                 f"{self._term.name} forward",
-                status="decided" if bad is None and overall.ok else "refuted",
-                witness=overall.witness if bad is None else bad[1],
+                status="refuted" if refused else "decided",
+                witness=witness,
                 detail=overall.detail if bad is None else bad[2],
                 position=position,
+                reason=message,
             )
         )
-        if bad is not None or not overall.ok:
-            witness = overall.witness if bad is None else bad[1]
-            message = (
-                self._render_violation(text, *bad)
-                if bad is not None
-                else f"{text} illegal: {overall.detail}"
-            )
+        if refused:
             raise IllegalCast(message, witness=witness, fact=facts[-1])
 
         other = self._clone()
@@ -1335,6 +1347,7 @@ class Schedule:
                     detail=reason,
                     position=position,
                     oracle="loopy-target",
+                    reason=reason,
                 )
             )
         for accumulated in sorted(set(draft.reassoc) - set(self._reassoc)):
@@ -1468,11 +1481,28 @@ class Schedule:
         detail: str,
         position: int,
         oracle: str = "isl",
+        reason: str = "",
     ) -> Any:
         """One ledger entry for one question about one step.
 
         ``oracle`` is who answered: ``isl`` for the two questions about meaning,
         ``loopy-target`` for the one about what the backend can generate.
+
+        ``detail`` is the answer in the oracle's own words, and every fact
+        keeps it. A refuted fact also carries ``reason``, the explanation a
+        reader is owed: for a refused cast, the message of the
+        :class:`IllegalCast` it raises, and for a schedule the target cannot
+        build, the limit in words. ``reason`` is what lanky prints under a
+        ``REFUTED`` line (``lanky.cli.refutation_lines``), and ``detail``
+        reaches only the JSON ledger, so a refutation explained by ``detail``
+        alone reads as unexplained on the screen. A refuted fact given no
+        ``reason`` falls back on its ``detail``, so none is left without one.
+
+        ``witness`` is recorded when isl gave one, which is for the two
+        questions about meaning: a pair of instances that shows a reindexing is
+        not one for one, or the dependence a new order runs backwards.
+        Exactness and buildability are not questions for isl, and their facts
+        have none.
         """
         from lanky.ledger import Fact, Status
 
@@ -1484,6 +1514,8 @@ class Schedule:
         }
         if witness:
             provenance["witness"] = witness
+        if status == "refuted":
+            provenance["reason"] = reason or detail
         return Fact(
             id=f"cast:{self._term.name}:{position}:{kind}",
             kind=kind,

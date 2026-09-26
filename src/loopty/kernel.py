@@ -391,12 +391,13 @@ class Kernel(_Decorated):
         a crash, so that ``lanky check`` on a file with one broken kernel still
         prints the ledger of the others.
 
-        The error is also the fact's ``reason``, next to an empty
-        ``counterexample``. That is lanky's form for a closed claim refuted at
-        no assignment in particular, and lanky prints the reason of such a fact
-        under its ``REFUTED`` line; the error of a :class:`~loopty.trace.TraceError`
+        The error is also the fact's ``reason``, which lanky prints under the
+        fact's ``REFUTED`` line (``lanky.cli.refutation_lines``, which ``loopty
+        run`` prints too): the error of a :class:`~loopty.trace.TraceError`
         names the fix, and it belongs on the screen rather than only in the
-        JSON ledger.
+        JSON ledger. There is no ``counterexample``, because the claim is not
+        refuted at any assignment in particular, and lanky needs none to print
+        the reason.
         """
         if self._facts is not None:
             return self._facts
@@ -412,7 +413,7 @@ class Kernel(_Decorated):
                     term=None,
                     status=Status.REFUTED,
                     decided_by="trace",
-                    provenance={"error": error, "counterexample": {}, "reason": error},
+                    provenance={"error": error, "reason": error},
                     where=self.where,
                     owner=self.qualname,
                 ),
@@ -437,8 +438,11 @@ class Program(_Decorated):
     calls kernels, which run natively, so ``python file.py`` works end to end.
     What it adds to the ledger is bookkeeping rather than reasoning: the
     postcondition of every kernel it calls is restated as a fact *in the scope
-    of the program*, pointing at the callee's own fact, so that a reader can see
-    which claims the program depends on.
+    of the program*, which rests on the callee's own fact. That is lanky's
+    ``rests_on``, so the ledger names the callee's postcondition beside the
+    restatement (``assumed under scan:postcondition``) and counts it in what
+    the restatement is worth, and a reader can see which claims the program
+    depends on.
 
     What it does not do yet is use those postconditions as hypotheses. Carrying
     the scan's recurrence into the in-bounds proof of the product is the
@@ -467,7 +471,14 @@ class Program(_Decorated):
         return tuple(out)
 
     def facts(self) -> tuple[Fact, ...]:
-        """One fact per callee postcondition, as a claim in this program's scope."""
+        """One fact per callee postcondition, as a claim in this program's scope.
+
+        Each rests on the callee's postcondition fact, named by the id the
+        callee's own facts give it (:func:`loopty.typing.postcondition_id`).
+        When the callee is checked in the same file, that fact is in the same
+        ledger, and the restatement is worth no more than it; when it is not,
+        lanky counts the id it cannot find as an assumption.
+        """
         out: list[Fact] = []
         for callee in self.callees():
             try:
@@ -488,12 +499,10 @@ class Program(_Decorated):
                     ),
                     term=post,
                     status=Status.ASSUMED,
-                    provenance={
-                        "callee": callee.qualname,
-                        "from": f"{callee.qualname}:postcondition",
-                    },
+                    provenance={"callee": callee.qualname},
                     where=self.where,
                     owner=self.qualname,
+                    rests_on=(rules.postcondition_id(callee.qualname),),
                 )
             )
         return tuple(out)
