@@ -472,18 +472,56 @@ after a skew or a diamond is still loopy's own `split_iname`.
 **What loopy makes of it.** loopy 2025.2 generates correct code for the image:
 the stencil, the coupled acoustic pair, and the stencil tiled in `(a, b)` all
 agree with the native run bit for bit, at sizes of both parities. What it
-generates is the image's bounding loops with the parity tested by an `if`
-inside the innermost one, `if (-b - a + 2 * ((b + a) / 2) == 0)`, not a loop
-that steps by two, so half the iterations of that loop do nothing. A kernel
-that has to be fast in diamond coordinates would want the stride, which neither
-loopy nor this rewrite produces.
+generates from the image as isl states it is the image's bounding loops with
+the parity tested by an `if` inside the innermost one,
+`if (-b - a + 2 * ((b + a) / 2) == 0)`, not a loop that steps by two, so half
+the iterations of that loop do nothing.
 
-**The limits of the fix.** A map applies to every statement in its loops,
-because loopy gives the statements of a loop one domain, so a map per statement
-(a time offset between two statements, which diamond tiling of the acoustic pair
-needs) is refused. isl decides the casts of any map whatever the kernel looks
-like; when the rewrite cannot write one for loopy (loops that no one domain
-defines, such as a row and the ragged fiber inside it, an image that is not one
-basic set, or a piecewise inverse), the schedule carries a `refuted`
-`buildable` fact with the reason, and no kernel, rather than an error from
-loopy.
+**The stride.** So the kernel code is generated from states the lattice
+itself (`schedule._stepped`). Once a step has set the nest, every loop is
+asked, outermost first, whether isl finds a stride for it in its domain given
+the loops outside it (`get_stride_info`, with the loops inside it projected
+out). The diamond's `b` steps by 2 from `-a`, so it is replaced by a counter,
+`b = 2*b_step - a`, in the domain, whose preimage has no holes left, and in
+every instruction, and loopy loops over `b_step` with no test:
+`[nt, nx] -> { [a, b_step] : b_step >= 0 and 2 - nx + a <= b_step < a and
+b_step <= -2 + nt }`. For fixed outer loops the counter and the loop increase
+together, so the instances and their order are the ones the checker approved,
+and isl confirms for each loop that the new domain maps back onto the old one.
+It is done on the kernel code is made from and not on the one later steps
+transform, so a tile splits the loop the checker knows, and the loop counted
+after `affine(...).tile("a", "b", 4, 4)` is `b_inner`. `Schedule.strides` names
+each loop replaced and its expression. A loop with a tag, the loop of a
+reduction, a loop another domain names as a parameter, and a loop whose offset
+involves a loop that does not run around all its instructions keep loopy's
+test. A guard that narrows a loop to a congruence (`when(i % 2 == 0)`) is
+stepped over the same way.
+
+**A map per statement.** A time offset between two statements, which diamond
+tiling of the acoustic pair needs, is a map per statement:
+`{ S0[t, i] -> [a, b] : a = t + i and b = t - i; S1[t, i] -> [a, b] : a = t +
+i and b = t - i + 1 }`. isl decides its casts like any other, since an
+instance carries its statement. loopy gives the statements of a loop one
+domain, and the two have to share their loops to interleave, so the rewrite
+keeps one domain for the new loops, the union of the two images when isl
+coalesces it into one basic set and its polyhedral hull otherwise, and
+predicates each instruction on its own image, as the lowering predicates a
+statement a `when` narrows. In each instruction the old loops are replaced by
+its own statement's inverse. For the acoustic pair the images are the points
+where `a + b` is even and those where it is odd, so every point is one
+statement's; the code tests which, `if (-1 * a + -1 * b + 2 * ((a + b) / 2) ==
+0)` for `S0`, and the four by four tiling agrees with the native run bit for
+bit. The length of a ragged row, which an instruction of its own computes in
+the row's loop, moves with the statement whose fiber it bounds.
+
+**The limits of the fix.** Maps whose images leave holes between them, such
+as `S0` at `(2t + i, 2t - i)` and `S1` at `(2t + 1 + i, 2t + 1 - i)`, run over
+the hull of the union, which the stride above does not see: half its points
+belong to neither statement. The statements of a loop have to move from the
+same loops to the same new ones, and two statements of one ragged fiber cannot
+move by different maps, since the fiber is one domain. isl decides the casts
+of any map whatever the kernel looks like; when the rewrite cannot write one
+for loopy (loops that no one domain defines, such as a row and the ragged
+fiber inside it, an image that is not one basic set, a piecewise inverse, or
+the fiber just named), the schedule carries a `refuted` `buildable` fact with
+the reason, and no kernel, rather than an error from loopy.
