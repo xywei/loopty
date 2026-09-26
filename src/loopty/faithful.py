@@ -24,7 +24,9 @@ The fact, of kind ``trace-faithful``, is
 * ``tested`` when every input either agreed or could not be run natively and
   at least one agreed,
 * ``refuted`` at the first input that disagrees, with the input and the first
-  differing cell, or with the error the term raised where the body ran,
+  differing cell, or with the error the term raised where the body ran, or
+  with the :class:`~loopty.trace.TraceError` a native run of the body raised
+  (a ``when`` guard whose native value is an integer, say) where the term ran,
 * ``assumed``, with the reason, when no input ran natively or when the term
   holds something the interpreter has no meaning for.
 
@@ -48,6 +50,7 @@ from loopty.arr import Arr
 from loopty.interpret import InterpretError, TooLarge, interpret
 from loopty.term import ArrType, Term
 from loopty.tolerance import disagreement, output_class
+from loopty.trace import TraceError
 
 __all__ = [
     "KIND",
@@ -377,7 +380,9 @@ def _compare(
     Otherwise ``("skipped", why)`` when the body cannot run the input or the
     input is too large to interpret, ``("unknown", why)`` when the term cannot
     be interpreted at all, and ``("differ", (counterexample, reason))`` when
-    the two disagree.
+    the two disagree. A :class:`~loopty.trace.TraceError` from the native run
+    is a disagreement and not a skipped input: it refuses the body's spelling,
+    not the values it was given.
 
     The interpreter runs first, because it is the one with a bound on its work
     (:data:`MAX_INSTANCES`): an example input written for a benchmark is
@@ -398,6 +403,17 @@ def _compare(
             failure = exc
         try:
             kernel(**native)
+        except TraceError as exc:
+            # Not an input the body refuses but a spelling it is refused for,
+            # whatever the input: a guard such as ``~(i > 0)``, whose native
+            # value is a bitwise integer where the trace recorded ``not``.
+            error = f"{type(exc).__name__}: {exc}"
+            return "differ", (
+                {"input": label, "body raised": error},
+                f"on {label} the traced term, interpreted, runs and the body, "
+                "run natively, is refused, so the term is not what the body "
+                f"computes. {error}",
+            )
         except Exception as exc:  # noqa: BLE001 - an input the body refuses
             return "skipped", f"the body raised {type(exc).__name__}: {exc}"
     if isinstance(failure, InterpretError):

@@ -341,6 +341,10 @@ class TraceError(RuntimeError):
     bound, an operation on a whole array, a reduction condition its domain
     cannot state, a change to Python state outside the arrays, and a call that
     prints, reads, opens a file or draws a random number are the other cases.
+
+    One case is raised by a native run as well as by a trace: a ``when`` guard
+    whose value is an integer rather than a truth value, which is what ``~``
+    makes of a Python bool.
     """
 
 
@@ -2605,15 +2609,49 @@ def mask_writes(value: Any) -> Any:
     return value
 
 
+def _integer_guard_message(value: Any, where: str) -> str:
+    """What to say about a guard whose value is an integer and not a bool."""
+    at = f" at {where}" if where else ""
+    return (
+        f"the guard of 'with when(...)'{at} is the integer {int(value)}, not a "
+        "truth value. Python's '~' is bitwise on an int and on a bool: ~True is "
+        "-2 and ~False is -1, and both are true, so a guard such as "
+        "'~(i > 0)' on a loop variable holds at every point when the body runs "
+        "natively, while the traced term reads it as 'not' and the compiled "
+        "kernel skips the points where i > 0. '&' and '|' with an integer "
+        "operand are bitwise in the same way. Write the complement as a "
+        "comparison ('i <= 0' for '~(i > 0)', and "
+        "'(i <= 0) | (i >= n)' for '~((i > 0) & (i < n))'), and compare an "
+        "integer explicitly ('k != 0') rather than guarding on it."
+    )
+
+
+def _integer(value: Any) -> bool:
+    """Whether ``value`` is a Python or numpy integer that is not a bool."""
+    return isinstance(value, int | np.integer) and not isinstance(
+        value, bool | np.bool_
+    )
+
+
 class when:  # noqa: N801 - a context manager written like a statement
     """Guard the writes of a block by ``condition``.
 
     Under tracing the condition is pushed onto the guard stack: the statements
-    recorded inside carry it, and it narrows their domain when it is affine, so
-    a guarded access is proved in bounds exactly where it runs. Under plain
-    ``python`` the block still executes and the writes are masked, which is why
-    the guard has to be a condition on data and not a Python ``if``: masking
-    keeps the traced term and the native run agreeing statement for statement.
+    recorded inside carry it, and it narrows their domain where isl can state
+    it (an affine comparison of loop variables, sizes and integral scalars; see
+    :func:`constraints_of`), so a guarded access is proved in bounds exactly
+    where it runs. Under plain ``python`` the block still executes and the
+    writes are masked, which is why the guard has to be a condition on data and
+    not a Python ``if``: masking keeps the traced term and the native run
+    agreeing statement for statement.
+
+    The condition has to be a truth value, and an integer that is not a bool
+    is refused, under tracing and natively, with a :class:`TraceError`. The
+    native value of ``~(i > 0)`` is where one comes from: ``i`` is a Python
+    ``int``, ``i > 0`` a Python ``bool``, and ``~`` on a bool is bitwise, so
+    the guard is ``-2`` or ``-1`` and always true, while the trace records
+    ``not (i > 0)``. A data comparison is a numpy ``bool_``, on which ``~`` is
+    logical, and is not affected.
     """
 
     def __init__(self, condition: Any) -> None:
@@ -2622,6 +2660,10 @@ class when:  # noqa: N801 - a context manager written like a statement
 
     def __enter__(self) -> when:
         """Open the guard."""
+        if _integer(self.condition):
+            raise TraceError(
+                _integer_guard_message(self.condition, _location(sys._getframe(1)))
+            )
         if self.tracer is not None:
             self.tracer.push_guard(self.condition)
         else:

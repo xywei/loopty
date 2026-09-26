@@ -178,6 +178,29 @@ def test_a_guard_against_a_real_scalar_is_tested() -> None:
     assert fact.provenance["compared"] == 3
 
 
+def test_a_guard_whose_native_value_is_an_integer_is_refuted() -> None:
+    # ~ on the Python bool i > 0 is -2 or -1 natively, and 'not' in the trace.
+    # The native run refuses the spelling, whatever the input, so the fact is
+    # refuted with the refusal, which names the fix, and not skipped.
+    def flipped(y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(~(i > 0)):
+                y[i] = 1.0
+
+    fact = faithful(flipped)
+    assert fact.status is Status.REFUTED, fact.provenance
+    assert fact.decided_by == "interpreter"
+    counterexample = fact.provenance["counterexample"]
+    assert counterexample["input"].startswith("sample 1 (")
+    assert counterexample["body raised"].startswith("TraceError: the guard of")
+    reason = fact.provenance["reason"]
+    assert "the body, run natively, is refused" in reason
+    assert "'i <= 0' for '~(i > 0)'" in reason
+    assert fact.provenance["inputs"] == [
+        {"input": counterexample["input"], "outcome": "differed"}
+    ]
+
+
 # }}}
 
 

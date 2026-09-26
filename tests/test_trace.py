@@ -1643,3 +1643,76 @@ def test_a_reduction_condition_against_an_integral_scalar_is_its_domain() -> Non
 
 
 # }}}
+
+
+# {{{ a guard is a truth value
+
+
+def flipped(y: Arr[Fin[n], Real]):  # noqa: F821
+    """``~`` on a Python bool is bitwise: the guard is -2 or -1, always true."""
+    for i in y.dom:
+        with when(~(i > 0)):
+            y[i] = 1.0
+
+
+def test_natively_a_guard_that_is_an_integer_is_refused() -> None:
+    # ~False is -1 at i = 0; the trace records not (i > 0) and writes y[0]
+    # only, while the native run used to write every cell. Python warns about
+    # ~ on a bool, which this suite makes an error, and a user's run does not.
+    import warnings
+
+    from loopty.kernel import Kernel
+
+    y = Arr.zeros(3)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        with pytest.raises(TraceError) as caught:
+            Kernel(flipped)(y)
+    message = str(caught.value)
+    assert "is the integer -1, not a truth value" in message
+    assert "test_trace.py:" in message
+    assert "'i <= 0' for '~(i > 0)'" in message
+    assert list(y.numpy()) == [0.0, 0.0, 0.0]
+
+
+def test_a_numpy_integer_guard_is_refused_natively_as_well() -> None:
+    # & with an integer operand is bitwise too: True & 2 is 0.
+    def masked(m: Arr[Fin[n], Nat], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when((i >= 0) & m[i]):
+                y[i] = 1.0
+
+    from loopty.kernel import Kernel
+
+    with pytest.raises(TraceError, match="is the integer 0, not a truth value"):
+        Kernel(masked)(Arr.from_numpy(np.array([2, 1])), Arr.zeros(2))
+
+
+def test_a_guard_that_is_a_bool_runs_natively() -> None:
+    # A data comparison is a numpy bool, on which ~ is logical; a comparison of
+    # loop variables is a Python bool.
+    def complement(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(~(x[i] > 0.0) & (i + 1 < y.dom.size)):
+                y[i] = 1.0
+
+    from loopty.kernel import Kernel
+
+    y = Arr.zeros(4)
+    Kernel(complement)(Arr.from_numpy(np.array([1.0, -1.0, 0.0, -2.0])), y)
+    assert list(y.numpy()) == [0.0, 1.0, 1.0, 0.0]
+
+
+def test_a_concrete_integer_guard_is_refused_while_tracing() -> None:
+    flag = 1
+
+    def constant(y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(flag):
+                y[i] = 1.0
+
+    with pytest.raises(TraceError, match="is the integer 1, not a truth value"):
+        term_of(constant)
+
+
+# }}}
