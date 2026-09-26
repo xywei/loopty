@@ -67,6 +67,17 @@ carries its ``DECIDED`` cast facts, and still reports what it is: the refusal
 happens when something asks for code (see :class:`UnbuildableSchedule`), which
 is the moment the claim actually matters.
 
+Fact ids
+--------
+
+A fact's id names the schedule it is about, precisely enough to tell it from
+every other schedule of the kernel: the kernel, the target, and every step up
+to the one the fact is about, with every argument it was given
+(:attr:`Schedule.key`). Two schedules of one kernel in one file therefore keep
+their facts apart in a ledger, which keeps one fact per id, while two that
+share their first steps share the facts about those steps, which are the same
+claims.
+
 Maps whose image has holes
 --------------------------
 
@@ -1147,6 +1158,26 @@ class Schedule:
         """The example inputs recorded with :meth:`example`, if any."""
         return None if self._examples is None else dict(self._examples)
 
+    @property
+    def key(self) -> str:
+        """The schedule, as the ids of its facts name it.
+
+        The kernel's name, the target in brackets, and every step as it was
+        called, with every argument it was given::
+
+            spmv[c].split('j', 2, inner='j_in', outer='j_out').realize('y', tree=True)
+
+        The steps are the recipes :meth:`retarget` replays, so two schedules
+        with one key are one schedule. :attr:`history` and the repr are for
+        reading and leave out what does not change the text (``split(j, 2)``
+        does not name its halves), which two different schedules can differ
+        in. The id of a cast fact is ``cast:`` and this key up to the step it
+        is about, then its kind; that of the agreement a run of the schedule
+        records (:func:`loopty.executor.agreement`) is ``agreement:`` and the
+        whole key.
+        """
+        return _key(self._term.name, self._target, self._steps)
+
     def __repr__(self) -> str:
         steps = "".join(f".{step}" for step in self._history)
         return f"Schedule({self._term.name}, target={self._target!r}){steps}"
@@ -1189,8 +1220,9 @@ class Schedule:
                         status="refuted",
                         witness=None,
                         detail=f"the accumulation into {accumulated} is exact",
-                        position=len(self._history),
+                        step=("tag", (), dict(inames)),
                         reason=message,
+                        about=accumulated,
                     ),
                 )
             draft.reassoc.add(accumulated)
@@ -1618,8 +1650,9 @@ class Schedule:
                 status="refuted",
                 witness=None,
                 detail=f"the accumulation into {var} is exact",
-                position=len(self._history),
+                step=("realize", (var,), {"tree": tree}),
                 reason=message,
+                about=var,
             )
             raise IllegalCast(message, witness=None, fact=fact)
         draft = self._draft()
@@ -1659,19 +1692,19 @@ class Schedule:
         self,
         draft: _Draft,
         text: str,
-        recipe: tuple[str, tuple, dict] | None = None,
+        recipe: tuple[str, tuple, dict],
     ) -> Schedule:
         """Check one transformation and return the schedule it produces.
 
         ``recipe`` is how the transformation would be written in Python, as
-        ``(method, args, kwargs)``, kept so that :meth:`retarget` can replay it.
+        ``(method, args, kwargs)``, kept so that :meth:`retarget` can replay it,
+        and so that the facts about this step name it (see :attr:`key`).
         """
         layout = _Layout(
             stmt_ids=self._layout.stmt_ids, coords=dict(draft.coords)
         )
         step = _step_map(self._layout, layout, draft.mappings)
 
-        position = len(self._history)
         facts: list[Any] = []
 
         # Defined on every instance, and one for one there: a map that misses
@@ -1692,7 +1725,7 @@ class Schedule:
                 status="decided" if verdict.ok else "refuted",
                 witness=verdict.witness,
                 detail=verdict.detail,
-                position=position,
+                step=recipe,
                 reason=message,
             )
         )
@@ -1729,7 +1762,7 @@ class Schedule:
                 status="refuted" if refused else "decided",
                 witness=witness,
                 detail=overall.detail if bad is None else bad[2],
-                position=position,
+                step=recipe,
                 reason=message,
             )
         )
@@ -1766,7 +1799,7 @@ class Schedule:
                     status="refuted",
                     witness=None,
                     detail=reason,
-                    position=position,
+                    step=recipe,
                     oracle="loopy-target",
                     reason=reason,
                 )
@@ -1780,13 +1813,12 @@ class Schedule:
                     status="decided",
                     witness=None,
                     detail=f"exactness of {accumulated} lowered to reassoc",
-                    position=position,
+                    step=recipe,
+                    about=accumulated,
                 )
             )
         other._history = (*self._history, text)
-        other._steps = (
-            (*self._steps, recipe) if recipe is not None else self._steps
-        )
+        other._steps = (*self._steps, recipe)
         other._facts = (*self._facts, *facts)
         return other
 
@@ -1900,11 +1932,19 @@ class Schedule:
         status: str,
         witness: Any,
         detail: str,
-        position: int,
+        step: tuple[str, tuple, dict],
         oracle: str = "isl",
         reason: str = "",
+        about: str = "",
     ) -> Any:
         """One ledger entry for one question about one step.
+
+        ``step`` is the step's recipe, ``(method, args, kwargs)``, and the
+        fact's id is :attr:`key` with it as the last step: the steps up to
+        this one, and not a count of them, because two schedules of one kernel
+        both have a first step and keep facts in one ledger. ``about`` tells
+        apart two facts of one kind about one step, such as the exactness of
+        two accumulations one ``tag`` reassociates, and is the array's name.
 
         ``oracle`` is who answered: ``isl`` for the two questions about meaning,
         ``loopy-target`` for the one about what the backend can generate.
@@ -1938,8 +1978,10 @@ class Schedule:
             provenance["witness"] = witness
         if status == "refuted":
             provenance["reason"] = reason or detail
+        suffix = f":{about}" if about else ""
         return Fact(
-            id=f"cast:{self._term.name}:{position}:{kind}",
+            id=f"cast:{_key(self._term.name, self._target, (*self._steps, step))}"
+            f":{kind}{suffix}",
             kind=kind,
             statement=statement,
             term=None,
@@ -1953,6 +1995,29 @@ class Schedule:
     def facts(self) -> tuple:
         """The cast facts accumulated by the transformations applied so far."""
         return self._facts
+
+
+def _key(name: str, target: str, steps: Sequence[tuple[str, tuple, dict]]) -> str:
+    """``spmv[c].split('j', 2, inner='j_in', outer='j_out')``: :attr:`Schedule.key`."""
+    return f"{name}[{target}]" + "".join(f".{_call_text(step)}" for step in steps)
+
+
+def _call_text(step: tuple[str, tuple, dict]) -> str:
+    """One recipe as the call it is, every argument written out.
+
+    An isl map, which is what :meth:`Schedule.affine` records, is written as
+    its text, which is what ``affine`` also accepts.
+    """
+    method, args, kwargs = step
+
+    def shown(value: Any) -> str:
+        if isinstance(value, isl.Map | isl.BasicMap):
+            return repr(str(value))
+        return repr(value)
+
+    parts = [shown(arg) for arg in args]
+    parts += [f"{name}={shown(value)}" for name, value in kwargs.items()]
+    return f"{method}({', '.join(parts)})"
 
 
 def _sizes_text(params: dict[str, int], hint: dict[str, int]) -> str:

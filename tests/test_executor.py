@@ -130,6 +130,21 @@ def test_a_disagreement_is_refuted_rather_than_raised() -> None:
     assert not fact.provenance["outputs"]["z"]["agree"]
 
 
+def test_an_agreement_fact_is_named_after_the_schedule_that_ran() -> None:
+    arrays = {
+        "a": 2.0,
+        "x": np.arange(4, dtype=np.float64),
+        "y": np.ones(4),
+        "z": np.zeros(4),
+    }
+    split = Schedule(ht.axpy_term()).split("i", 2)
+    fact = executor().differential(axpy_reference, split, arrays)
+    assert fact.id == f"agreement:{split.key}"
+    assert fact.id != executor().differential(
+        axpy_reference, Schedule(ht.axpy_term()), arrays
+    ).id
+
+
 def test_the_exactness_class_of_an_output_is_the_weakest_of_three() -> None:
     term = ht.spmv_term(exactness="exact")
     plain = Schedule(term)

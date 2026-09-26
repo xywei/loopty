@@ -793,6 +793,21 @@ with a pair of statement instances.
 - A skewed loop keeps its tag in the kernel. The skew went through
   `lp.map_domain` and back, which dropped it: a loop the schedule checked as
   a local axis ran one iteration at a time.
+- Two schedules of one kernel in one file keep their own facts in the ledger.
+  A cast fact's id named the kernel and the position of the step
+  (`cast:spmv:0:bijective`), and an agreement fact's the kernel alone, so the
+  second schedule's facts replaced the first's in `loopty run`'s ledger. The
+  ids now name the schedule: `Schedule.key` is the kernel, the target and
+  every step with every argument it was given
+  (`spmv[c].split('j', 2, inner='j_in', outer='j_out')`), a cast fact's id is
+  `cast:`, the key up to its step, and its kind, and an agreement's is
+  `agreement:` and the whole key. Two schedules that begin alike share the
+  facts about those steps, which are the same claims, and a schedule run twice
+  from one file, on two sets of inputs, keeps both agreements (`#2`). Two
+  exactness facts of one step, when one tag reassociates two accumulations,
+  are told apart by the array. `examples/wavefront_acoustic.py` runs the
+  diamond under `loopty run` beside the wavefront block, which it left to
+  `python` for this reason, and its transcript is regenerated.
 
 ### Changed
 

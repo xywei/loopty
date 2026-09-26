@@ -489,3 +489,36 @@ def test_run_prints_why_a_schedule_cannot_be_built_under_its_line(
     )
     assert lines[header + 1] == f"  {limit}"
     assert "no witness recorded" not in out
+
+
+# {{{ two schedules of one kernel (#36)
+
+
+def test_every_schedule_of_one_kernel_keeps_its_facts_in_the_ledger(tmp_path) -> None:
+    """Three schedules of ``scale``: two different ones, and the first again.
+
+    The facts were named by the kernel and the position of the step, so the
+    second schedule's facts replaced the first's, and one agreement fact was
+    left for three runs. Now each schedule's facts are its own; the third,
+    which is the first again, shares its cast facts, which are the same
+    claims, and keeps its own agreement, since it ran on inputs of its own.
+    """
+    body = FIXTURE + (
+        '\nother = Schedule(scale).split("i", 2)\n'
+        'again = Schedule(scale).split("i", 4).example('
+        "x=np.ones(8), y=np.zeros(8))\n"
+    )
+    path = write_fixture(tmp_path, body)
+    out_path = tmp_path / "ledger.json"
+    assert main(["run", str(path), "--json", str(out_path)]) == 0
+    facts = json.loads(out_path.read_text(encoding="utf-8"))
+    kinds = [fact["kind"] for fact in facts]
+    assert kinds.count("bijective") == kinds.count("monotone") == 2
+    agreements = [fact["id"] for fact in facts if fact["kind"] == "agreement"]
+    four = "agreement:scale[c].split('i', 4, inner='i_inner', outer='i_outer')"
+    two = "agreement:scale[c].split('i', 2, inner='i_inner', outer='i_outer')"
+    assert agreements == [four, two, f"{four}#2"]
+    assert len({fact["id"] for fact in facts}) == len(facts) == 7
+
+
+# }}}

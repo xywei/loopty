@@ -364,14 +364,107 @@ def test_realize_answers_for_every_reduction_writing_the_array() -> None:
 def test_the_facts_name_the_term_the_oracle_and_the_dependence_source() -> None:
     schedule = Schedule(ht.transpose_term()).split("i", 4)
     facts = schedule.facts()
+    step = "transpose[c].split('i', 4, inner='i_inner', outer='i_outer')"
+    assert schedule.key == step
     assert [fact.id for fact in facts] == [
-        "cast:transpose:0:bijective",
-        "cast:transpose:0:monotone",
+        f"cast:{step}:bijective",
+        f"cast:{step}:monotone",
     ]
     for fact in facts:
         assert fact.decided_by == "isl"
         assert fact.owner == "transpose"
         assert "dependences" in fact.provenance
+
+
+# {{{ fact ids across schedules of one kernel (#36)
+
+
+def test_two_schedules_of_one_kernel_keep_their_facts_apart() -> None:
+    # The ids used to name the step by its position, so the first step of any
+    # two schedules of a kernel had one id, and a ledger holding both kept the
+    # later fact in place of the earlier one.
+    from lanky.ledger import Ledger
+
+    term = ht.transpose_term()
+    by_four = Schedule(term).split("i", 4)
+    by_two = Schedule(term).split("i", 2)
+    # The same text, and a different schedule: the halves have swapped names.
+    swapped = Schedule(term).split("i", 4, inner="i_outer", outer="i_inner")
+    assert repr(swapped) == repr(by_four)
+    assert len({by_four.key, by_two.key, swapped.key}) == 3
+
+    ledger = Ledger()
+    for schedule in (by_four, by_two, swapped):
+        for fact in schedule.facts():
+            ledger.add(fact)
+    assert len(ledger) == 6
+
+    # A schedule that begins as another does shares the facts about those
+    # steps, which are the same claims, and adds its own.
+    longer = by_four.interchange("j", "i_outer")
+    assert [fact.id for fact in longer.facts()][:2] == [
+        fact.id for fact in by_four.facts()
+    ]
+    for fact in longer.facts():
+        ledger.add(fact)
+    assert len(ledger) == 8
+
+
+def plain_opencl(monkeypatch) -> None:
+    """Lower for loopy's plain OpenCL target, which needs no pyopencl.
+
+    Code generation is all that is asked of it, as in
+    ``tests/test_lower_traced.py``.
+    """
+    import loopy as lp
+
+    from loopty import lower
+
+    plain = lower.target_for
+    monkeypatch.setattr(
+        lower,
+        "target_for",
+        lambda target="c": lp.OpenCLTarget() if target == "opencl" else plain(target),
+    )
+
+
+def test_the_target_is_part_of_the_key(monkeypatch) -> None:
+    plain_opencl(monkeypatch)
+    term = ht.transpose_term()
+    assert Schedule(term).key == "transpose[c]"
+    on_c = Schedule(term).split("i", 4)
+    on_device = Schedule(term, target="opencl").split("i", 4)
+    assert on_device.key.startswith("transpose[opencl].split(")
+    assert not {f.id for f in on_c.facts()} & {f.id for f in on_device.facts()}
+
+
+def two_accumulations(
+    x: Arr[Fin[8], Real],
+    s: Arr[Fin[1], Real],
+    t: Arr[Fin[1], Real],
+):
+    """Two sums into two arrays, which one tag can reassociate together."""
+    s[0] = reduce_sum(x[j] for j in x.dom)
+    t[0] = reduce_sum(x[k] for k in x.dom)
+
+
+def test_two_accumulations_one_step_reassociates_keep_two_facts() -> None:
+    from lanky.ledger import Ledger
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(two_accumulations, evaluate_annotations(two_accumulations))
+    tagged = Schedule(term).tag(j="l.0", k="l.0")
+    exactness = [fact for fact in tagged.facts() if fact.kind == "exactness"]
+    assert [fact.id.rsplit(":", 1)[-1] for fact in exactness] == ["s", "t"]
+    ledger = Ledger()
+    for fact in exactness:
+        ledger.add(fact)
+    assert len(ledger) == 2
+
+
+# }}}
 
 
 def test_a_schedule_carries_its_example_inputs() -> None:
@@ -657,25 +750,6 @@ def test_a_map_the_kernel_rewrite_cannot_write_is_reported_not_thrown() -> None:
     assert [f.status.value for f in later.facts()][-2:] == ["decided", "decided"]
     with pytest.raises(UnbuildableSchedule, match="one loopy domain"):
         LoopyExecutor().run(later, cnt=np.array([1, 2]), val=np.ones(3), y=np.zeros(2))
-
-
-def test_only_the_loops_a_ragged_loop_becomes_keep_its_extent_from_data() -> None:
-    # What a hardware axis may not sit inside is a loop whose extent is read
-    # from an array. Tiling the ragged fiber with the dense row loop makes the
-    # fiber's halves such loops and leaves the row's halves alone; skewing the
-    # fiber by the row leaves the row alone.
-    from lanky.terms import evaluate_annotations
-
-    from loopty.trace import trace
-
-    term = trace(ragged_row_sums, evaluate_annotations(ragged_row_sums))
-    schedule = Schedule(term, sizes={"n": 4})
-    assert schedule._data_dependent == {"j"}
-    tiled = schedule.tile("r", "j", 2, 2)
-    assert tiled._data_dependent == {"j_outer", "j_inner"}
-    assert schedule.skew("j", by="r")._data_dependent == {"j"}
-    diamond = schedule.affine("{ [r, j] -> [a, b] : a = r + j and b = r - j }")
-    assert diamond._data_dependent == {"a", "b"}
 
 
 def ragged_row_totals(

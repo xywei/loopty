@@ -494,8 +494,6 @@ def agreement(term: Term, schedule: Any, got: dict, want: dict) -> Any:
     anyone can read (``outputs`` records it as infinite). The numbers of every
     output, agreeing or not, are in ``outputs``.
     """
-    from lanky.ledger import Fact, Status
-
     details: dict[str, Any] = {}
     disagreements: list[str] = []
     for name, want_array in want.items():
@@ -519,16 +517,38 @@ def agreement(term: Term, schedule: Any, got: dict, want: dict) -> Any:
             f"{difference:.3g}, allowed {tolerance:.3g} ({exactness})"
         )
     ok = not disagreements
-    history = tuple(getattr(schedule, "history", ()))
-    provenance: dict[str, Any] = {
-        "outputs": details,
-        "schedule": history,
-        "target": getattr(schedule, "target", "c"),
-    }
+    provenance = _agreement_provenance(schedule, details)
     if not ok:
         provenance["reason"] = "\n".join(disagreements)
+    return _agreement_fact(term, schedule, ok, provenance)
+
+
+def _agreement_provenance(schedule: Any, details: dict[str, Any]) -> dict[str, Any]:
+    """What every agreement fact records beside its verdict."""
+    return {
+        "outputs": details,
+        "schedule": tuple(getattr(schedule, "history", ())),
+        "target": getattr(schedule, "target", "c"),
+    }
+
+
+def _agreement_fact(
+    term: Term, schedule: Any, ok: bool, provenance: dict[str, Any]
+) -> Any:
+    """The agreement fact itself, named after the schedule that was run.
+
+    Its id is ``agreement:`` and the schedule's
+    :attr:`~loopty.schedule.Schedule.key`, so that two schedules of one kernel
+    run from one file keep two facts in the ledger; a kernel or a term run
+    without a schedule is named by its name and target alone.
+    """
+    from lanky.ledger import Fact, Status
+
+    key = getattr(schedule, "key", None)
+    if not isinstance(key, str):
+        key = f"{term.name}[{provenance['target']}]"
     return Fact(
-        id=f"agreement:{term.name}",
+        id=f"agreement:{key}",
         kind="agreement",
         statement=(
             f"the scheduled run of {term.name} agrees with the native run "

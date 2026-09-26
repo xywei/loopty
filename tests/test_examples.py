@@ -407,6 +407,20 @@ def test_the_wave_demo_prints_the_rejections_then_every_agreement() -> None:
     assert "matches the hand-written recurrence: True" in result.stdout
 
 
+def test_loopty_run_keeps_the_facts_of_both_wave_schedules() -> None:
+    # The block and the diamond are two schedules of one kernel. Their facts
+    # used to share ids, so the diamond was left out of the file's schedules.
+    _result, facts = _invoke("wavefront_acoustic", "run")
+    agreements = [fact for fact in facts if fact["kind"] == "agreement"]
+    assert [fact["provenance"]["schedule"] for fact in agreements] == [
+        ["skew(i, by='t')", "tile(t,i,4,8)"],
+        ["affine({ [t, i] -> [a = t + i, b = t - i] })"],
+    ]
+    casts = [fact for fact in facts if fact["kind"] in ("bijective", "monotone")]
+    assert len(casts) == 6
+    assert len({fact["id"] for fact in facts}) == len(facts)
+
+
 def test_the_space_first_diamond_runs_the_cross_statement_dependence_backwards():
     # a = i + t and b = i - t: S1 at (t, i) feeds S0 at (t + 1, i - 1), which
     # has the same a and a b two lower, so the order runs it the wrong way.

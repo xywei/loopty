@@ -57,11 +57,16 @@ one, the fact's ``reason`` (the limit a ``buildable`` fact hits, or the outputs
 a compiled run disagreed on), or a line saying nothing was recorded. The
 command then exits 1, as it does when a kernel cannot be scheduled, a schedule
 cannot be retargeted, or a run raises.
+
+Every schedule keeps its own facts in the ledger, however many schedules of one
+kernel the file has, because a fact's id names the schedule it is about (see
+:attr:`loopty.schedule.Schedule.key`).
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 from pathlib import Path
 from typing import Any
 
@@ -291,6 +296,7 @@ class RunVerb:
         # target it runs on, so this only makes the executor insist on it.
         executor = LoopyExecutor(target=target)
         ledger = Ledger()
+        runs: dict[str, int] = {}
         for schedule in schedules:
             name = _name_of(schedule)
             print(f"{name}: {schedule!r}")
@@ -327,6 +333,12 @@ class RunVerb:
                 print(f"  {type(exc).__name__}: {exc}")
                 failures += 1
                 continue
+            runs[fact.id] = runs.get(fact.id, 0) + 1
+            if runs[fact.id] > 1:
+                # Two schedules with one key are one schedule, but a file may
+                # run it twice, on two sets of inputs: each run keeps its fact,
+                # so that a refuted one is not replaced by a later tested one.
+                fact = dataclasses.replace(fact, id=f"{fact.id}#{runs[fact.id]}")
             ledger.add(fact)
             outputs = fact.provenance.get("outputs", {})
             for output, detail in outputs.items():
