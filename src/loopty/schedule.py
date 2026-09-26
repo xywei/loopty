@@ -5,9 +5,10 @@ A transformation is untrusted. ``.split``, ``.tile``, ``.interchange``,
 transform and then hand the result to a small checker, which asks isl two
 questions: is the reindexing a bijection on statement instances, and is the new
 execution order monotone on the dependence relation? Parallel inames (``g.*``,
-``l.*``) carry no order, so they are dropped from the order before the second
-question is asked. This is the de Bruijn criterion applied to scheduling: any
-Python transformation is admissible because its output is checked, not its code.
+``l.*``, ``ilp``, ``vec``) carry no order, so they are dropped from the order
+before the second question is asked. This is the de Bruijn criterion applied
+to scheduling: any Python transformation is admissible because its output is
+checked, not its code.
 
 Three things have to be written down for those two questions to be askable.
 
@@ -147,8 +148,11 @@ __all__ = [
 ]
 
 #: Iname tags that impose no order: two instances differing only in such an
-#: iname may run in either order, or at the same time.
-PARALLEL_TAG_PREFIXES = ("g.", "l.", "ilp")
+#: iname may run in either order, or at the same time. ``ilp`` and ``vec`` are
+#: among them although neither is launched in parallel: loopy runs such a loop
+#: around each instruction of its body separately (unrolled, or in vectors),
+#: so two statements of the loop no longer interleave as the source wrote.
+PARALLEL_TAG_PREFIXES = ("g.", "l.", "ilp", "vec")
 
 
 def parallel_tag(tag: str) -> bool:
@@ -803,8 +807,8 @@ def _concurrent(tag: Any) -> bool:
     """Is ``tag`` one of loopy's concurrent tags: a hardware axis, ilp or vec?
 
     This is loopy's own class (``ConcurrentTag``), which its check for a
-    loop whose extent is read out of an array asks, and not the checker's
-    :func:`parallel_tag`, which leaves ``vec`` out and has no ``ilp.seq``.
+    loop whose extent is read out of an array asks. It names the tags
+    :func:`parallel_tag` names by their text, read as loopy reads them.
     """
     from loopy.kernel.data import ConcurrentTag
 
@@ -1024,7 +1028,7 @@ def _reduction_role(tag: str | None) -> str:
     checker reads ``ilp`` differently, as an order-free loop
     (:data:`PARALLEL_TAG_PREFIXES`), which is what makes it ask an
     accumulation's permission to be reassociated before a reduction loop is
-    tagged so.
+    tagged so, and ``vec`` too.
     """
     from loopy.kernel.data import (
         ConcurrentTag,

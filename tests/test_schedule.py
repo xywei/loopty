@@ -123,7 +123,43 @@ def test_running_a_loop_that_carries_a_dependence_in_parallel_is_rejected() -> N
 def test_a_parallel_tag_is_what_makes_an_iname_unordered() -> None:
     assert parallel_tag("g.0")
     assert parallel_tag("l.1")
+    assert parallel_tag("ilp")
+    assert parallel_tag("vec")
     assert not parallel_tag("unr")
+
+
+def carried_across_statements(
+    y: Arr[Fin[9], Real],
+    z: Arr[Fin[8], Real],
+):
+    """``S0`` of iteration ``i + 1`` reads what ``S1`` of iteration ``i`` wrote."""
+    for i in z.dom:
+        z[i] = y[i]
+        y[i + 1] = z[i] + 1.0
+
+
+def test_a_vectorized_loop_that_carries_a_dependence_is_rejected() -> None:
+    # loopy runs a vec loop around each instruction separately, as it runs an
+    # ilp loop, so S0 runs for every i before S1 runs for any. vec kept its
+    # place in the order, the cast was decided, and the compiled y and z
+    # disagreed with the body's (#57).
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(
+        carried_across_statements, evaluate_annotations(carried_across_statements)
+    )
+    for tag in ("vec", "ilp"):
+        with pytest.raises(IllegalCast) as caught:
+            Schedule(term).tag(i=tag)
+        message = str(caught.value)
+        assert message.startswith(f"tag(i='{tag}') illegal: instance S1[i=")
+        assert "read by S0[i=" in message
+    unrolled = Schedule(term).tag(i="unr")
+    y = np.zeros(9)
+    out = run(unrolled, y=y, z=np.zeros(8))
+    assert np.array_equal(out["y"], np.arange(9.0))
 
 
 def gated_by_the_next(
