@@ -157,15 +157,25 @@ r_inner j_inner`, which runs the dependence forward, and loopy generated
 with the body's while every cast fact was `decided`. `interchange("j", "r")` on
 the same kernel reaches the same place.
 
-**Local fix.** `schedule._nest_reason` reads the nesting off the kernel's
-domains after each step (the loops a domain names as parameters, and theirs in
-turn) and refuses as unbuildable an order that puts a loop outside a loop its
-domain is nested in, naming the two and the interchange that would put them
-right. Buildability is asked of the schedule as it stands, so a later
-`interchange("r_inner", "j_outer")` makes the tiled schedule buildable again,
-and it runs the tiles in the order that was checked. Checking loopy's own
-linearized nest against the order would be the complete answer, and would cost
-a scheduling pass per step.
+The domains are not the whole of it. loopy also nests a loop inside another
+when every instruction in the first is in the second and the second has more
+(`find_loop_nest_around_map` in `loopy.schedule`, which both of its schedulers
+keep to). A statement loop `k` over a row's cells, with a ragged reduction in
+its body, `w[r + 1, k] = w[r, k] + reduce_sum(val[r, j] for j in val.dom[r])`,
+shares the domain `{ [r, k] }` with the row, and is still nested in `r`,
+because the row length is assigned in `r` and outside `k`. There
+`tile("r", "k", 2, 2)` warned the same way, loopy generated `r_inner r_outer
+k_inner k_outer`, and the compiled `w` disagreed with the body's.
+
+**Local fix.** `schedule._nest_reason` reads the nesting after each step with
+loopy's own `find_loop_nest_around_map` (and the loops those loops are nested
+in, in turn) and refuses as unbuildable an order that puts a loop outside a
+loop loopy nests it inside, naming the two, why loopy nests one in the other,
+and the interchange that would put them right. Buildability is asked of the
+schedule as it stands, so a later `interchange("r_inner", "j_outer")` makes the
+tiled schedule buildable again, and it runs the tiles in the order that was
+checked. Checking loopy's own linearized nest against the order would be the
+complete answer, and would cost a scheduling pass per step.
 
 ## 7. The single-writer heuristic draws an edge against the body's order
 

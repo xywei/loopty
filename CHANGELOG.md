@@ -814,15 +814,18 @@ with a pair of statement instances.
   loopy asks it. The tests generate the code with loopy's plain OpenCL target
   and see loopy's own error for each; note 11 of `docs/loopy-notes.md` has the
   table.
-- A tile or an interchange that orders a loop outside a loop its domain is
-  nested in is a `refuted` `buildable` fact. loopy nests a ragged fiber's
-  domain inside its row, and the loops below a statement at a shallower depth
-  inside the loops around them, and when the loop priority disagrees it drops
-  the priority and runs a nest of its own choosing, which the cast facts did
-  not check: `tile("r", "j", 2, 2)` on the ragged recurrence `w[r + 1, j] =
-  w[r, j] + val[r, j]` was decided and compiled to code that ran the
-  dependence backwards. The nesting is read off the kernel's domains after
-  every step, and the reason names the two loops and the interchange that puts
+- A tile or an interchange that orders a loop outside a loop loopy nests it
+  inside is a `refuted` `buildable` fact. loopy nests a ragged fiber's domain
+  inside its row, the loops below a statement at a shallower depth inside the
+  loops around them, and a statement loop inside the row of a ragged
+  reduction in its body, and when the loop priority disagrees it drops the
+  priority and runs a nest of its own choosing, which the cast facts did not
+  check: `tile("r", "j", 2, 2)` on the ragged recurrence `w[r + 1, j] = w[r,
+  j] + val[r, j]` was decided and compiled to code that ran the dependence
+  backwards, and so was `tile("r", "k", 2, 2)` on `w[r + 1, k] = w[r, k] +
+  reduce_sum(val[r, j] for j in val.dom[r])`. The nesting is read after every
+  step with loopy's own `find_loop_nest_around_map`, and the reason names the
+  two loops, why loopy nests one in the other, and the interchange that puts
   them right. Buildability is now asked of the schedule as it stands rather
   than kept once lost, so that interchange makes the tiled schedule buildable
   again, and the schedule then carries no `buildable` fact; a schedule's one

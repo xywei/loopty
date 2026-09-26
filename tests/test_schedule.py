@@ -954,7 +954,11 @@ def test_a_tile_that_orders_a_fiber_outside_its_row_is_not_buildable() -> None:
     ]
     ok, reason = tiled.buildable
     assert not ok
-    assert reason.startswith("the loop j_outer is ordered outside r_inner")
+    assert reason.startswith(
+        "the loop j_outer is ordered outside r_inner, but loopy nests it inside "
+        "r_inner: the domain of j_outer names r_inner, as a ragged fiber's "
+        "names its row. "
+    )
     assert "interchange('r_inner', 'j_outer')" in reason
     (fact,) = [f for f in tiled.facts() if f.kind == "buildable"]
     assert (fact.status.value, fact.decided_by) == ("refuted", "loopy-target")
@@ -1013,6 +1017,75 @@ def test_a_dense_loop_below_another_statement_is_nested_in_its_row_too() -> None
     transposed = Schedule(ht.transpose_term()).interchange("j", "i")
     assert transposed.buildable == (True, "")
     assert not any("Cannot satisfy" in w for w in _loopy_warnings(transposed))
+
+
+def ragged_scan(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    w: Arr[Fin[n + 1], Fin[q], Real],  # noqa: F821
+):
+    """Each row's total added down the columns: ``(r, k)`` feeds ``(r + 1, k)``."""
+    for r in val.dom:
+        for k in w.dom[r]:
+            w[r + 1, k] = w[r, k] + reduce_sum(val[r, j] for j in val.dom[r])
+
+
+def _scan_inputs() -> dict:
+    inputs = _shift_inputs()
+    del inputs["z"]
+    return inputs
+
+
+def _scan_reference() -> np.ndarray:
+    """``w`` after the scan, row by row, in numpy."""
+    inputs = _scan_inputs()
+    w, flat = inputs["w"], inputs["val"].numpy()
+    offsets = np.concatenate([[0], np.cumsum(SHIFT_COUNTS)])
+    for r in range(len(SHIFT_COUNTS)):
+        w[r + 1] = w[r] + flat[offsets[r] : offsets[r + 1]].sum()
+    return w
+
+
+def test_a_loop_nested_in_its_row_by_instructions_alone_stays_inside() -> None:
+    # k shares one domain with r, and loopy still nests it inside r: the
+    # length of row r, which the reduction reads, is assigned in r and outside
+    # k. Read off the domains alone, the tile was buildable, loopy ran r_inner
+    # outside r_outer, and the compiled w disagreed with the body's.
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(ragged_scan, evaluate_annotations(ragged_scan))
+    base = Schedule(term, sizes={"n": 6, "q": 3})
+    (domain,) = [
+        domain
+        for domain in base.kernel.default_entrypoint.domains
+        if "k" in domain.get_var_names(isl.dim_type.set)
+    ]
+    assert "r" in domain.get_var_names(isl.dim_type.set)
+
+    tiled = base.tile("r", "k", 2, 2)
+    assert [f.status.value for f in tiled.facts() if f.kind != "buildable"] == [
+        "decided",
+        "decided",
+    ]
+    ok, reason = tiled.buildable
+    assert not ok
+    assert reason.startswith(
+        "the loop k_outer is ordered outside r_inner, but loopy nests it inside "
+        "r_inner: r_inner runs every instruction k_outer runs, and "
+    )
+    assert "interchange('r_inner', 'k_outer')" in reason
+    assert any("Cannot satisfy constraint" in w for w in _loopy_warnings(tiled))
+    swapped = base.interchange("k", "r")
+    assert swapped.buildable[1].startswith("the loop k is ordered outside r,")
+    assert any("Cannot satisfy constraint" in w for w in _loopy_warnings(swapped))
+
+    repaired = tiled.interchange("r_inner", "k_outer")
+    assert repaired.buildable == (True, "")
+    assert not any("Cannot satisfy" in w for w in _loopy_warnings(repaired))
+    out = run(repaired, **_scan_inputs())
+    assert np.array_equal(out["w"], _scan_reference())
 
 
 # }}}

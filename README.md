@@ -204,7 +204,7 @@ end to end; the edges are sharp.
   loop bound, a hardware axis on a reduction nested in another, a reduction
   loopy will not realize (partly in parallel and partly in sequence, across two
   local axes, on a group axis, or on a local axis whose extent has no numeric
-  maximum), or a loop ordered outside a loop its domain is nested in, is
+  maximum), or a loop ordered outside a loop loopy nests it inside, is
   reported as a `refuted` `buildable` fact and raises `UnbuildableSchedule`
   when something asks for code. It is asked of the schedule as it stands after
   every step, so an interchange can make a tiled ragged loop buildable again.

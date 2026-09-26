@@ -61,7 +61,7 @@ inner loop is, and it will not generate a reduction whose inames are partly
 parallel and partly sequential. The others known are about reductions too (a
 hardware axis on one nested in another, a reduction on a group axis or across
 two local axes, a local axis whose extent has no numeric maximum) and about
-order (a loop put outside a loop its domain is nested in, which loopy cannot
+order (a loop put outside a loop loopy nests it inside, which loopy cannot
 run in that order). None is a wrong verdict about the cast, and none used to
 be reported: the casts were all ``DECIDED`` and loopy then threw during code
 generation, several steps away from the line that caused it, or ran a nest of
@@ -821,7 +821,7 @@ def _unbuildable_reason(draft: _Draft) -> str | None:
       other concurrent axis, a group axis above all;
     * a local axis whose extent has no numeric maximum, where a reduction on
       a local axis needs one (see :func:`_extent_reason`);
-    * a loop ordered outside a loop its domain is nested in, which loopy cannot
+    * a loop ordered outside a loop loopy nests it inside, which loopy cannot
       run in that order (see :func:`_nest_reason`).
 
     Note 11 of ``docs/loopy-notes.md`` has the table of what loopy says to
@@ -1046,58 +1046,79 @@ def _unbounded_extent(kernel: Any, iname: str) -> str | None:
     return None
 
 
-def _enclosing_loops(kernel: Any) -> dict[str, set[str]]:
-    """For each loop of ``kernel``, the loops loopy nests it inside.
+def _enclosing_loops(kernel: Any) -> dict[str, dict[str, str]]:
+    """For each loop of ``kernel``, the loops loopy nests it inside, and why.
 
-    loopy nests a kernel's domains as a tree: a domain that names a loop as a
-    parameter is defined inside that loop, and so is every loop it defines.
-    The loops a loop is nested in are the ones its domain names, and the ones
-    theirs name in turn.
+    Read off loopy's own ``find_loop_nest_around_map``, the nesting both of
+    its schedulers keep to, so that the two cannot drift apart. loopy nests a
+    loop inside another for one of two reasons. A domain that names a loop as
+    a parameter is defined inside that loop, with every loop it defines: a
+    ragged fiber's domain names its row, and so does the inner domain of a
+    nest another statement leaves (note 10 of ``docs/loopy-notes.md``). And a
+    loop whose instructions are some of another loop's, and not all of them,
+    runs inside it, whatever the domains say: ``k`` in ``w[r + 1, k] = w[r, k]
+    + reduce_sum(val[r, j] for j in val.dom[r])`` shares one domain with ``r``
+    and is still nested in it, because the length of row ``r`` is assigned in
+    ``r`` and outside ``k``. The loops a loop is nested in are these, and the
+    ones those are nested in, in turn, each with the reason in words.
     """
+    from loopy.schedule import find_loop_nest_around_map
+
     entry = kernel.default_entrypoint
-    inames = set(entry.all_inames())
-    direct: dict[str, set[str]] = {}
+    direct = find_loop_nest_around_map(entry)
+    named: dict[str, set[str]] = {}
     for domain in entry.domains:
-        params = {
-            name
-            for name in domain.get_var_names(isl.dim_type.param)
-            if name in inames
-        }
+        params = set(domain.get_var_names(isl.dim_type.param))
         for name in domain.get_var_names(isl.dim_type.set):
-            direct.setdefault(name, set()).update(params)
-    out: dict[str, set[str]] = {}
-    for name, params in direct.items():
-        reached: set[str] = set()
-        pending = list(params)
+            named.setdefault(name, set()).update(params)
+    insns = entry.iname_to_insns()
+
+    def why(inner: str, outer: str) -> str:
+        if outer in named.get(inner, ()):
+            return (
+                f"the domain of {inner} names {outer}, as a ragged fiber's "
+                "names its row"
+            )
+        others = ", ".join(sorted(insns[outer] - insns[inner]))
+        return f"{outer} runs every instruction {inner} runs, and {others} as well"
+
+    out: dict[str, dict[str, str]] = {}
+    for name in sorted(direct):
+        reached: dict[str, str] = {}
+        pending = [(outer, why(name, outer)) for outer in sorted(direct[name])]
         while pending:
-            current = pending.pop()
+            current, reason = pending.pop(0)
             if current in reached:
                 continue
-            reached.add(current)
-            pending.extend(direct.get(current, ()))
+            reached[current] = reason
+            pending.extend(
+                (outer, f"{reason}, and {current} is nested in {outer} in turn")
+                for outer in sorted(direct.get(current, ()))
+            )
         out[name] = reached
     return out
 
 
 def _nest_reason(draft: _Draft) -> str | None:
-    """A loop ordered outside a loop its domain is nested in, or ``None``.
+    """A loop ordered outside a loop loopy nests it inside, or ``None``.
 
-    loopy keeps the nesting of its domains (see :func:`_enclosing_loops`). A
-    ragged fiber's domain names its row, because the row's length is read
-    there, and the domain of a statement that another statement leaves names
-    the loops around it (note 10 of ``docs/loopy-notes.md``). The loop
-    priority :func:`_with_priority` sets is only a preference, and loopy drops
-    it when the two disagree ("Cannot satisfy constraint that iname ... must
-    be nested within ...") and runs a nest of its own choosing, which the cast
-    facts did not check and which can run a dependence backwards. A tile of a
-    ragged fiber with its row orders ``j_outer`` before ``r_inner``, and an
-    interchange can put the fiber before the row outright.
+    loopy keeps a nesting of its own (see :func:`_enclosing_loops`): a ragged
+    fiber inside its row, because the row's length is read there, the loops
+    of a statement that another statement leaves inside the loops around it
+    (note 10 of ``docs/loopy-notes.md``), and a statement loop inside the row
+    of a ragged reduction in it, because the row's length is assigned outside
+    the statement loop. The loop priority :func:`_with_priority` sets is only
+    a preference, and loopy drops it when the two disagree ("Cannot satisfy
+    constraint that iname ... must be nested within ...") and runs a nest of
+    its own choosing, which the cast facts did not check and which can run a
+    dependence backwards. A tile of a ragged fiber with its row orders
+    ``j_outer`` before ``r_inner``, and an interchange can put the fiber
+    before the row outright.
 
-    Read off the kernel's domains after the step and asked of each
-    statement's ordered loops, which is the nest the priority states; a
-    parallel loop has no place in it. Checking loopy's own linearized nest
-    against the order would be the complete answer, and would cost a
-    scheduling pass per step.
+    Read off the kernel after the step and asked of each statement's ordered
+    loops, which is the nest the priority states; a parallel loop has no
+    place in it. Checking loopy's own linearized nest against the order would
+    be the complete answer, and would cost a scheduling pass per step.
     """
     if draft.kernel is None:
         return None
@@ -1106,16 +1127,16 @@ def _nest_reason(draft: _Draft) -> str | None:
     for nest in _nests(layout, draft.order, draft.tags).values():
         for position, loop in enumerate(nest):
             for inner in nest[position + 1 :]:
-                if inner not in around.get(loop, ()):
+                why = around.get(loop, {}).get(inner)
+                if why is None:
                     continue
                 return (
-                    f"the loop {loop} is ordered outside {inner}, but its domain "
-                    f"is nested in {inner}'s, as a ragged fiber's is in its "
-                    "row's, so loopy cannot run the order that was checked: it "
-                    "would drop the loop priority and run a nest of its own "
-                    "choosing, which the cast facts say nothing about. Order "
-                    f"{inner} outside {loop}, as interchange({inner!r}, "
-                    f"{loop!r}) does"
+                    f"the loop {loop} is ordered outside {inner}, but loopy "
+                    f"nests it inside {inner}: {why}. So loopy cannot run the "
+                    "order that was checked: it would drop the loop priority "
+                    "and run a nest of its own choosing, which the cast facts "
+                    f"say nothing about. Order {inner} outside {loop}, as "
+                    f"interchange({inner!r}, {loop!r}) does"
                 )
     return None
 
