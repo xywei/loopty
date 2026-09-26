@@ -22,6 +22,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 
 pytest.importorskip("loopy")
@@ -371,14 +372,67 @@ def test_skewing_the_coupled_wave_makes_the_tile_legal() -> None:
     assert schedule.order == ("t_outer", "i_outer", "t_inner", "i_inner")
 
 
-def test_the_wave_demo_prints_the_rejection_then_both_agreements() -> None:
+def test_the_wave_demo_prints_the_rejections_then_every_agreement() -> None:
+    # Two schedules, the wavefront block and the diamond, and two fields each.
     result, _ = _invoke("wavefront_acoustic", "python")
-    assert "IllegalCast" in result.stdout
+    assert result.stdout.count("IllegalCast") == 3
     assert "witness: S1" in result.stdout
     assert "pressure: difference" in result.stdout
     assert "velocity: difference" in result.stdout
-    assert result.stdout.count("-> tested") == 2
+    assert result.stdout.count("-> tested") == 4
+    assert "mod 2" in result.stdout
     assert "matches the hand-written recurrence: True" in result.stdout
+
+
+def test_the_space_first_diamond_runs_the_cross_statement_dependence_backwards():
+    # a = i + t and b = i - t: S1 at (t, i) feeds S0 at (t + 1, i - 1), which
+    # has the same a and a b two lower, so the order runs it the wrong way.
+    module = _module("wavefront_acoustic")
+    message, witness = module.rejected_diamond()
+    assert message.startswith("affine(")
+    assert "writes pressure[" in message
+    (source_id, source), (sink_id, sink), _params = witness
+    assert (source_id, sink_id) == ("S1", "S0")
+    assert (sink["t"] - source["t"], sink["i"] - source["i"]) == (1, -1)
+
+
+def test_the_time_first_diamond_is_accepted_and_agrees_bit_for_bit() -> None:
+    # The question the spike asked: loopy, given the image with its holes,
+    # generates code that computes what the native body computes. The
+    # differential compares at the approx tolerance; the hand recurrence is
+    # compared exactly, at sizes of both parities.
+    from loopty.executor import LoopyExecutor
+
+    module = _module("wavefront_acoustic")
+    schedule = module.diamond_schedule()
+    assert schedule.order == ("a", "b")
+    assert [fact.status.value for fact in schedule.facts()] == ["decided"] * 2
+    for nt, nx in [(3, 4), (5, 7), (9, 33), (16, 32)]:
+        data = module.initial(nt, nx)
+        pressure = data["pressure"].numpy().copy()
+        velocity = data["velocity"].numpy().copy()
+        out = LoopyExecutor().run(
+            module.diamond_schedule(nt, nx),
+            pressure=pressure.copy(),
+            velocity=velocity.copy(),
+            courant=module.COURANT,
+        )
+        want_pressure, want_velocity = module.reference(pressure, velocity)
+        assert np.array_equal(out["pressure"], want_pressure), (nt, nx)
+        assert np.array_equal(out["velocity"], want_velocity), (nt, nx)
+
+
+def test_tiling_the_wave_diamond_cuts_the_same_step_dependence() -> None:
+    # What the docstring predicted: S0 at (t, i) writes the velocity S1 at
+    # (t, i + 1) reads, a distance of (0, 1), which t - i runs backwards. A
+    # diamond tiling of this pair needs a time offset between the statements.
+    module = _module("wavefront_acoustic")
+    message, witness = module.rejected_diamond_tiling()
+    assert message.startswith("tile(a,b,4,4) illegal")
+    assert "writes velocity[" in message
+    (source_id, source), (sink_id, sink), _params = witness
+    assert (source_id, sink_id) == ("S0", "S1")
+    assert (sink["t"] - source["t"], sink["i"] - source["i"]) == (0, 1)
 
 
 # }}}
@@ -447,7 +501,6 @@ def test_the_guarded_self_interaction_is_left_out_of_the_sum() -> None:
         data["term"],
         data["pot"],
     )
-    import numpy as np
 
     # The direct sum skips the self pair with a Python ``if``; the kernel skips
     # it with ``when``, which masks the write. The two have to agree, or the

@@ -19,20 +19,38 @@ Skewing ``i`` by ``t`` changes that distance to ``(1, 0)`` and leaves every othe
 one non-negative, and the same tiling is then legal. The tiles are rectangles in
 ``(t, i + t)``, which are parallelograms in ``(t, i)``: a wavefront temporal
 block. That is the building block behind diamond tiling, but it is not a
-diamond. A diamond tiles along ``t + i`` and ``t - i`` at once, and the map
+diamond.
+
+A diamond tiles along ``t + i`` and ``t - i`` at once, and the map
 ``(t, i) -> (t + i, t - i)`` is not unimodular: its image is only the points
-whose two coordinates have the same parity. No single skew expresses it; it
-needs a multi-axis affine schedule, which loopty does not have yet. For this
-pair it needs one thing more, an offset in time between the two statements
-(``S0`` at ``2t`` and ``S1`` at ``2t + 1``, say), because ``S1`` at
-``(t, i + 1)`` reads the velocity ``S0`` wrote at ``(t, i)``, a distance of
-``(0, 1)`` that the ``t - i`` direction runs backwards.
+whose two coordinates have the same parity. No skew expresses it, and
+``Schedule.affine`` takes it as it is. Three things happen, and the demo prints
+all three:
+
+* In the order ``(i + t, i - t)``, space first, the map is refused: the
+  dependence of ``S0`` at ``(t + 1, i - 1)`` on ``S1`` at ``(t, i)`` keeps the
+  first coordinate and lowers the second by two, so the new order runs it
+  backwards, and the witness names those two instances.
+* In the order ``(t + i, t - i)`` it is accepted, and loopy generates correct
+  code over the image with its holes. loopy's own ``map_domain`` refuses this
+  map (``t`` is ``(a + b) / 2``, which it cannot solve for), so loopty rewrites
+  the kernel itself; see ``docs/loopy-notes.md``, note 10. Both fields come out
+  of the compiled run bit for bit as they come out of the native one. The
+  parity is tested inside the innermost loop rather than stepped over, so half
+  of its iterations do nothing: the answer is "correct", not "fast".
+* Tiling that diamond, rectangles in ``(t + i, t - i)``, is refused: ``S1`` at
+  ``(t, i + 1)`` reads the velocity ``S0`` wrote at ``(t, i)``, a distance of
+  ``(0, 1)`` that the ``t - i`` direction runs backwards. A real diamond tiling
+  of this pair needs an offset in time between the two statements (``S0`` at
+  ``2t`` and ``S1`` at ``2t + 1``, say), and a map per statement is what
+  ``affine`` does not take: loopy gives the statements of a loop one domain.
 
 Run this file three ways.
 
 ``python examples/wavefront_acoustic.py``
     Runs the kernel natively, prints the rejection and its witness, builds the
-    skewed schedule, runs it on the C target and compares both fields.
+    skewed schedule, runs it on the C target and compares both fields; then
+    does the same for the diamond, with its two refusals.
 
 ``lanky check examples/wavefront_acoustic.py``
     Prints the ledger of the kernel's own obligations: all eight accesses in
@@ -41,6 +59,8 @@ Run this file three ways.
 
 ``loopty run examples/wavefront_acoustic.py``
     Compiles the skewed and tiled schedule and compares it with the native run.
+    The diamond is left to the first command: two schedules of one kernel in
+    one file would share the ids of their facts in the ledger (issue #36).
 
 A fourth, ``python examples/wavefront_acoustic.py --bench``, times the untiled
 and the wavefront-blocked kernels at a larger size. It is a measurement, not a
@@ -140,8 +160,49 @@ def wavefront_schedule(nt: int = NT, nx: int = NX) -> Schedule:
     )
 
 
-#: What ``loopty run`` compiles and compares; the rejected tiling lives in
-#: :func:`rejected_tiling`, where the exception is the answer.
+#: The diamond coordinates, time first: ``a = t + i`` and ``b = t - i``. The
+#: map has determinant -2, so its image is the points where ``a`` and ``b``
+#: have the same parity.
+DIAMOND = "{ [t, i] -> [a, b] : a = t + i and b = t - i }"
+
+#: The same diamond with space first, ``a = i + t`` and ``b = i - t``.
+DIAMOND_SPACE_FIRST = "{ [t, i] -> [a, b] : a = i + t and b = i - t }"
+
+
+def rejected_diamond(nt: int = NT, nx: int = NX) -> tuple[str, tuple]:
+    """Ask for the space-first diamond and return the message and the witness."""
+    from loopty.schedule import IllegalCast
+
+    schedule = Schedule(acoustic, target="c", sizes={"nt": nt, "nx": nx})
+    try:
+        schedule.affine(DIAMOND_SPACE_FIRST)
+    except IllegalCast as refused:
+        return str(refused), refused.witness
+    raise AssertionError("the space-first diamond should be illegal")
+
+
+def diamond_schedule(nt: int = NT, nx: int = NX) -> Schedule:
+    """The loop nest in diamond coordinates, time first."""
+    return Schedule(acoustic, target="c", sizes={"nt": nt, "nx": nx}).affine(
+        DIAMOND
+    )
+
+
+def rejected_diamond_tiling(nt: int = NT, nx: int = NX) -> tuple[str, tuple]:
+    """Ask to tile the diamond and return the message and the witness."""
+    from loopty.schedule import IllegalCast
+
+    try:
+        diamond_schedule(nt, nx).tile("a", "b", 4, 4)
+    except IllegalCast as refused:
+        return str(refused), refused.witness
+    raise AssertionError("tiling the diamond should be illegal for this pair")
+
+
+#: What ``loopty run`` compiles and compares. The rejected casts live in
+#: :func:`rejected_tiling`, :func:`rejected_diamond` and
+#: :func:`rejected_diamond_tiling`, where the exception is the answer, and the
+#: diamond itself in :func:`diamond_schedule`, which :func:`main` runs.
 blocked = wavefront_schedule().example(**initial())
 
 
@@ -244,7 +305,35 @@ def main() -> int:
         data["velocity"].numpy(), want_velocity
     )
     print(f"  the native run matches the hand-written recurrence: {agrees}")
-    return 0 if agrees and fact.status.value == "tested" else 1
+
+    message, _witness = rejected_diamond()
+    print()
+    print(f"Schedule(acoustic).affine({DIAMOND_SPACE_FIRST!r}) ->")
+    print(f"  IllegalCast: {message}")
+
+    schedule = diamond_schedule()
+    (domain,) = schedule.kernel.default_entrypoint.domains
+    print()
+    print(f"accepted: {schedule!r}")
+    print(f"  loop nest: {' '.join(schedule.order)}")
+    print(f"  loopy domain: {domain}")
+    for step in schedule.facts():
+        print(f"  {step.status.value:8} {step.decided_by or '-':4} {step.statement}")
+    print()
+    diamond_fact = LoopyExecutor().differential(acoustic, schedule, initial())
+    for name, detail in diamond_fact.provenance["outputs"].items():
+        print(
+            f"  {name}: difference {detail['difference']:.3g} within "
+            f"{detail['tolerance']:.3g} ({detail['exactness']}) -> "
+            f"{diamond_fact.status.value}"
+        )
+
+    message, _witness = rejected_diamond_tiling()
+    print()
+    print(f"{schedule!r}.tile('a', 'b', 4, 4) ->")
+    print(f"  IllegalCast: {message}")
+    tested = fact.status.value == diamond_fact.status.value == "tested"
+    return 0 if agrees and tested else 1
 
 
 if __name__ == "__main__":

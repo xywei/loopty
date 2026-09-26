@@ -20,7 +20,7 @@ marked with `...` is an excerpt and the lines it keeps are checked verbatim.
 |---|---|
 | `spmv.py` | a ragged sparse product: an indirection in bounds by type, a scan with a postcondition, the theorem that postcondition needs, and a schedule whose reassociation is recorded |
 | `stencil_skew.py` | a rectangular tiling of a Jacobi stencil refused with a witness pair, and the skew that makes the same tiling legal |
-| `wavefront_acoustic.py` | two coupled statements in one acoustic-wave nest: a rectangular tiling refused with a witness that crosses them, and the skew that makes it a legal wavefront block |
+| `wavefront_acoustic.py` | two coupled statements in one acoustic-wave nest: a rectangular tiling refused with a witness that crosses them, the skew that makes it a legal wavefront block, and the diamond map, accepted and run, whose tiling is refused |
 | `reshape_layouts.py` | `Fin[n * m]` as `Fin[n] x Fin[m]`, one buffer read in two layouts, and a transpose split and interchanged |
 | `p2p.py` | the near field of a fast multipole method: a two-level interaction list flattened into one ragged level, with the self-interaction guarded by `when` |
 
@@ -242,13 +242,22 @@ The rectangular tile is rejected with that cross-statement witness, and
 wavefront temporal block: rectangular in `(t, i + t)`, a parallelogram in
 `(t, i)`.
 
-A diamond is the next pressure test rather than something this demo has. It
-tiles along `t + i` and `t - i` at once, and that map is not unimodular (its
-image is the points of equal parity), so it needs a multi-axis affine schedule
-primitive whose checker reasons about that image. For this pair the two
-statements would also need an offset in time: `S1` at `(t, i + 1)` reads the
-velocity `S0` wrote at `(t, i)`, and the `t - i` direction runs that dependence
-backwards. The module docstring has the details.
+Then the diamond, `Schedule.affine("{ [t, i] -> [a, b] : a = t + i and b = t - i }")`.
+The map is not unimodular: its image is only the points of equal parity, which
+the printed loopy domain states as `(a + b) mod 2 = 0`. Written with space
+first, `a = i + t` and `b = i - t`, it is refused, because `S0` at
+`(t + 1, i - 1)` reads what `S1` wrote at `(t, i)` and the new order runs that
+backwards. Written with time first it is accepted, and the question this demo
+was extended to answer has its answer: loopy generates correct code over that
+image, and both fields agree with the native run bit for bit. loopy's own
+`map_domain` refuses the map, so loopty rewrites the kernel itself, and the
+generated loop tests the parity inside the innermost loop rather than stepping
+by two, so it is correct and not fast (note 10 in `../docs/loopy-notes.md`).
+Tiling the diamond is refused: `S1` at `(t, i + 1)` reads the velocity `S0`
+wrote at `(t, i)`, a distance of `(0, 1)` that the `t - i` direction runs
+backwards. A diamond tiling of this pair needs an offset in time between the two
+statements, and `affine` moves every statement in its loops alike. The module
+docstring has the details.
 
 `uv run python examples/wavefront_acoustic.py --bench` times the untiled and the
 wavefront-blocked compiled kernels at a larger size. There is no console block
@@ -281,6 +290,21 @@ accepted: Schedule(acoustic, target='c').skew(i, by='t').tile(t,i,4,8)
   pressure: difference 0 within 1e-06 (approx) -> tested
   velocity: difference 0 within 1e-06 (approx) -> tested
   the native run matches the hand-written recurrence: True
+
+Schedule(acoustic).affine('{ [t, i] -> [a, b] : a = i + t and b = i - t }') ->
+  IllegalCast: affine({ [t, i] -> [a = t + i, b = -t + i] }) illegal: instance S1[t=0, i=2] writes pressure[1, 2] read by S0[t=1, i=1] scheduled earlier (at nt=16, nx=32, as hinted)
+
+accepted: Schedule(acoustic, target='c').affine({ [t, i] -> [a = t + i, b = t - i] })
+  loop nest: a b
+  loopy domain: [nt, nx] -> { [a, b] : (a + b) mod 2 = 0 and b >= -a and 4 - 2nx + a <= b <= -2 + a and b <= -4 + 2nt - a }
+  decided  isl  affine({ [t, i] -> [a = t + i, b = t - i] }) renames the instances of acoustic one for one
+  decided  isl  the order after affine({ [t, i] -> [a = t + i, b = t - i] }) runs every dependence of acoustic forward
+
+  pressure: difference 0 within 1e-06 (approx) -> tested
+  velocity: difference 0 within 1e-06 (approx) -> tested
+
+Schedule(acoustic, target='c').affine({ [t, i] -> [a = t + i, b = t - i] }).tile('a', 'b', 4, 4) ->
+  IllegalCast: tile(a,b,4,4) illegal: instance S0[t=7, i=15] writes velocity[8, 15] read by S1[t=7, i=16] scheduled earlier (at nt=16, nx=32, as hinted)
 ```
 
 ### lanky check examples/wavefront_acoustic.py
@@ -291,27 +315,29 @@ and both writes at `t + 1` because it keeps `t + 1 < nt`.
 
 ```console
 $ uv run lanky check examples/wavefront_acoustic.py
-STATUS   BY           WHERE                     OWNER     STATEMENT
--------  -----------  ------------------------  --------  ------------------------------------------------------------
-decided  isl          wavefront_acoustic.py:82  acoustic  velocity[t + 1, i] is in bounds for every instance of S0
-decided  isl          wavefront_acoustic.py:82  acoustic  velocity[t, i] is in bounds for every instance of S0
-decided  isl          wavefront_acoustic.py:82  acoustic  pressure[t, i + 1] is in bounds for every instance of S0
-decided  isl          wavefront_acoustic.py:82  acoustic  pressure[t, i] is in bounds for every instance of S0
-decided  isl          wavefront_acoustic.py:85  acoustic  pressure[t + 1, i] is in bounds for every instance of S1
-decided  isl          wavefront_acoustic.py:85  acoustic  pressure[t, i] is in bounds for every instance of S1
-decided  isl          wavefront_acoustic.py:85  acoustic  velocity[t + 1, i] is in bounds for every instance of S1
-decided  isl          wavefront_acoustic.py:85  acoustic  velocity[t + 1, i - 1] is in bounds for every instance of S1
-decided  isl          wavefront_acoustic.py:82  acoustic  distinct instances of S0 write distinct cells of velocity
-decided  isl          wavefront_acoustic.py:85  acoustic  distinct instances of S1 write distinct cells of pressure
-decided  isl          wavefront_acoustic.py:70  acoustic  the source order runs every dependence forward in time
-tested   interpreter  wavefront_acoustic.py:70  acoustic  the traced term computes what the body computes
+STATUS   BY           WHERE                      OWNER     STATEMENT
+-------  -----------  -------------------------  --------  ------------------------------------------------------------
+decided  isl          wavefront_acoustic.py:102  acoustic  velocity[t + 1, i] is in bounds for every instance of S0
+decided  isl          wavefront_acoustic.py:102  acoustic  velocity[t, i] is in bounds for every instance of S0
+decided  isl          wavefront_acoustic.py:102  acoustic  pressure[t, i + 1] is in bounds for every instance of S0
+decided  isl          wavefront_acoustic.py:102  acoustic  pressure[t, i] is in bounds for every instance of S0
+decided  isl          wavefront_acoustic.py:105  acoustic  pressure[t + 1, i] is in bounds for every instance of S1
+decided  isl          wavefront_acoustic.py:105  acoustic  pressure[t, i] is in bounds for every instance of S1
+decided  isl          wavefront_acoustic.py:105  acoustic  velocity[t + 1, i] is in bounds for every instance of S1
+decided  isl          wavefront_acoustic.py:105  acoustic  velocity[t + 1, i - 1] is in bounds for every instance of S1
+decided  isl          wavefront_acoustic.py:102  acoustic  distinct instances of S0 write distinct cells of velocity
+decided  isl          wavefront_acoustic.py:105  acoustic  distinct instances of S1 write distinct cells of pressure
+decided  isl          wavefront_acoustic.py:90   acoustic  the source order runs every dependence forward in time
+tested   interpreter  wavefront_acoustic.py:90   acoustic  the traced term computes what the body computes
 
 12 facts: 11 decided, 1 tested
 ```
 
 ### loopty run examples/wavefront_acoustic.py
 
-Two outputs this time, and both are compared with the native run.
+Two outputs this time, and both are compared with the native run. The diamond
+is run by the first command only: two schedules of one kernel in one file
+would share the ids of their facts in this ledger (issue #36).
 
 ```console
 $ uv run loopty run examples/wavefront_acoustic.py
@@ -319,13 +345,13 @@ acoustic: Schedule(acoustic, target='c').skew(i, by='t').tile(t,i,4,8)
   pressure: difference 0 within 1e-06 (approx) -> tested
   velocity: difference 0 within 1e-06 (approx) -> tested
 
-STATUS   BY     WHERE                     OWNER     STATEMENT
--------  -----  ------------------------  --------  ------------------------------------------------------------------------
-decided  isl    wavefront_acoustic.py:82  acoustic  skew(i, by='t') renames the instances of acoustic one for one
-decided  isl    wavefront_acoustic.py:82  acoustic  the order after skew(i, by='t') runs every dependence of acoustic for...
-decided  isl    wavefront_acoustic.py:82  acoustic  tile(t,i,4,8) renames the instances of acoustic one for one
-decided  isl    wavefront_acoustic.py:82  acoustic  the order after tile(t,i,4,8) runs every dependence of acoustic forward
-tested   loopy  wavefront_acoustic.py:82  acoustic  the scheduled run of acoustic agrees with the native run to the accur...
+STATUS   BY     WHERE                      OWNER     STATEMENT
+-------  -----  -------------------------  --------  ------------------------------------------------------------------------
+decided  isl    wavefront_acoustic.py:102  acoustic  skew(i, by='t') renames the instances of acoustic one for one
+decided  isl    wavefront_acoustic.py:102  acoustic  the order after skew(i, by='t') runs every dependence of acoustic for...
+decided  isl    wavefront_acoustic.py:102  acoustic  tile(t,i,4,8) renames the instances of acoustic one for one
+decided  isl    wavefront_acoustic.py:102  acoustic  the order after tile(t,i,4,8) runs every dependence of acoustic forward
+tested   loopy  wavefront_acoustic.py:102  acoustic  the scheduled run of acoustic agrees with the native run to the accur...
 
 5 facts: 4 decided, 1 tested
 ```
