@@ -132,6 +132,17 @@ class Stmt:
     eager) and masks the write rather than skipping the block. ``None`` means
     "the same as ``domain``", which is right for a statement without a guard
     and for a term written by hand.
+
+    ``unnarrowed`` lists the conjuncts of ``guard`` that ``domain`` does not
+    state, each as ``(conjunct, why)`` with the conjunct as the body spells it.
+    isl states an affine comparison of integers (loop variables, sizes, scalars
+    of an integral sort) and nothing else, so a guard that reads an array,
+    compares with ``!=``, or compares with a ``Real`` scalar is evaluated at
+    run time only, and ``domain`` is wider than the instances that write. That
+    is sound, since an obligation over a wider set is harder, but a fact stated
+    over the domain is then about instances that write nothing, and says so
+    (see :func:`loopty.typing.in_bounds_facts`). Empty for a statement whose
+    guard is stated whole, and for a term written by hand.
     """
 
     id: str
@@ -144,6 +155,7 @@ class Stmt:
     where: str
     order: tuple[int, ...] = ()
     loop_domain: isl.Set | None = None
+    unnarrowed: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)

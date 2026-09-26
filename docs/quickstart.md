@@ -244,9 +244,15 @@ def jacobi(u: Arr[Fin[nt], Fin[nx], Real]):
 
 The guard is a `when` block and not an `if`, because tracing an `if` on a value
 the kernel computes would have to choose a branch. `when` records the condition,
-intersects it into the statement's isl domain when it is affine, and under plain
-`python` masks the writes of the block. The narrowed domain is what makes
-`u[t + 1, i]` in bounds: it is only ever written where `t + 1 < nt`.
+intersects it into the statement's isl domain where isl can state it (an affine
+comparison of loop variables, sizes and integral scalars, as here), and under
+plain `python` masks the writes of the block. The narrowed domain is what makes
+`u[t + 1, i]` in bounds: it is only ever written where `t + 1 < nt`. A guard
+isl cannot state, such as one that reads an array or compares with a `Real`
+scalar, is checked at run time instead, and the facts about the statement say
+that its domain is wider than the instances that write. A guard has to be a
+truth value: write the complement of a comparison as a comparison (`i <= 0`),
+not with `~`, which is bitwise on a Python bool and gives `-2` or `-1`.
 
 The dependences are the classic pair, `(1, 1)` and `(1, -1)`. A rectangular tile
 of the `(t, i)` nest cuts both.

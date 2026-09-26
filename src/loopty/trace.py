@@ -17,8 +17,12 @@ cannot be traced: tracing would have to pick a branch, and the value is not
 known until the kernel runs. A symbolic condition asked for its truth value
 raises :class:`TraceError` naming ``when`` as the fix. Under tracing ``when``
 pushes the condition onto the guard stack, and the statements recorded inside
-carry it and have it intersected into their domain when it is affine, so a
-guarded access is in bounds exactly where it is executed. Under plain
+carry it and have it intersected into their domain where isl can state it, an
+affine comparison of integers (loop variables, sizes, scalars of an integral
+sort), so a guarded access is in bounds exactly where it is executed. Any other
+conjunct is left to the statement's guard, evaluated at run time, and the
+statement records it as leaving its domain wider than the instances that write
+(:attr:`loopty.term.Stmt.unnarrowed`). Under plain
 ``python`` it masks the writes of the block rather than skipping them, which is
 what keeps one body serving as both the specification and the reference run.
 
@@ -51,10 +55,12 @@ of them. So a symbolic array refuses to be used whole (``y[:] = ...``,
 ``x * 2``, ``for v in x``, a numpy function of it), with the loop nest that
 does the same one cell at a time as the fix. And :func:`trace` copies the state
 the body's code reaches by name outside itself (module globals, closure cells,
-defaults, one level into the containers and objects they hold, and the same
-for the helpers it calls) and compares it once the body has run; a change is
-refused, and so is a call that prints, reads input, opens a file or draws a
-random number, which :class:`_CallWatch` sees through ``sys.monitoring``.
+defaults, one level into the containers, arrays and objects they hold, and the
+same for the helpers it calls) and compares it once the body has run; a change
+is refused, and so is a call that prints, reads input, opens a file or draws a
+random number, which :class:`_CallWatch` sees through ``sys.monitoring``. Code
+is the kernel author's or a library's by its module (:func:`_library`), so a
+kernel installed into site-packages is watched like one in a source tree.
 State hidden deeper than that is what the faithfulness fact is for; see
 :mod:`loopty.faithful`.
 """
@@ -78,6 +84,7 @@ from types import (
     BuiltinFunctionType,
     CodeType,
     FunctionType,
+    MemberDescriptorType,
     MethodType,
     ModuleType,
     SimpleNamespace,
@@ -101,7 +108,7 @@ from lanky.terms import (
 )
 
 from loopty.arr import Arr, ArrSpec
-from loopty.flow import domain_set, expr_text
+from loopty.flow import domain_set, expr_text, free_names
 from loopty.idx import Reflections
 from loopty.term import Access, ArrType, Reduction, Stmt, Term
 
@@ -337,6 +344,10 @@ class TraceError(RuntimeError):
     bound, an operation on a whole array, a reduction condition its domain
     cannot state, a change to Python state outside the arrays, and a call that
     prints, reads, opens a file or draws a random number are the other cases.
+
+    One case is raised by a native run as well as by a trace: a ``when`` guard
+    whose value is an integer rather than a truth value, which is what ``~``
+    makes of a Python bool.
     """
 
 
@@ -443,6 +454,15 @@ class Tracer:
         self.effects: list[tuple[str, str]] = []
         #: The thread running the body; calls on any other are not its effects.
         self.thread = threading.get_ident()
+        #: The names a guard may hand isl as integers: the sizes, the scalar
+        #: parameters of an integral sort (filled in by :func:`trace` from the
+        #: signature), and every loop variable, added as it is made. isl holds
+        #: every name of a constraint as an integer, so a comparison naming
+        #: anything else is not stated as one; see :func:`constraints_of`.
+        self.integers: set[str] = set()
+        #: The kernel's own code, which is watched and followed wherever it is
+        #: installed; see :class:`_Own`. :func:`trace` sets it.
+        self.own: _Own | None = None
 
     # {{{ loops
 
@@ -462,6 +482,7 @@ class Tracer:
             name = f"{stem}_{suffix}"
             suffix += 1
         self._inames.add(name)
+        self.integers.add(name)
         # An iname and a reflected parameter share one isl space, so neither may
         # take a name the other has.
         self.reflections.reserve((name,))
@@ -662,12 +683,32 @@ class Tracer:
     # }}}
 
     def domain(self) -> Any:
-        """The isl set of the enclosing loop nest, narrowed by affine guards."""
+        """The isl set of the enclosing loop nest, narrowed by the guards.
+
+        Only a comparison isl can state narrows it: an affine one, over loop
+        variables, sizes and scalars of an integral sort (see
+        :func:`constraints_of`). Every other conjunct of the guard is left to
+        the statement's guard predicate, evaluated at run time, and the domain
+        is wider than the instances that write; :meth:`unnarrowed` says which
+        conjuncts, and why.
+        """
         return domain_set(
             self.inames,
             self.bounds,
-            constraints=constraints_of(self.guard()),
+            constraints=constraints_of(self.guard(), self),
             reflections=self.reflections,
+        )
+
+    def unnarrowed(self) -> tuple[tuple[str, str], ...]:
+        """The conjuncts of the open guards that do not narrow :meth:`domain`.
+
+        Each is ``(conjunct, why)``, the conjunct as the body spells it. A
+        statement records them (:attr:`loopty.term.Stmt.unnarrowed`), so that
+        the facts stated over its domain can say that the domain is an
+        over-approximation, and of what.
+        """
+        return tuple(
+            (_shown(part), why) for part, why in _unstated(self.guard(), self)
         )
 
     def loop_domain(self) -> Any:
@@ -726,6 +767,7 @@ class Tracer:
             where=where,
             order=(*self._path, self._position()),
             loop_domain=self.loop_domain() if self.guards else None,
+            unnarrowed=self.unnarrowed(),
         )
         self.stmts.append(stmt)
         return stmt
@@ -1040,8 +1082,9 @@ def _library_roots() -> tuple[str, ...]:
     """The directories whose code belongs to a library and not to a kernel.
 
     The packages of :data:`_LIBRARIES`, found without importing them, and the
-    standard library and site-packages directories. A kernel's own file, and
-    a helper next to it, are in none of them.
+    standard library and site-packages directories. A kernel in a source tree,
+    and a helper next to it, are in none of them; a kernel installed into
+    site-packages is in one, and :func:`_library` exempts it by its module.
     """
     roots: list[str] = []
     for name in _LIBRARIES:
@@ -1060,7 +1103,12 @@ def _library_roots() -> tuple[str, ...]:
 
 @functools.lru_cache(maxsize=4096)
 def _library_file(filename: str) -> bool:
-    """Whether code from ``filename`` is a library's rather than the kernel's."""
+    """Whether code from ``filename`` is in a library's directory.
+
+    That is a question about the path alone. A kernel installed into
+    site-packages is in one, and is still the kernel's code; :func:`_library`
+    is the question every check asks, and it asks this one last.
+    """
     if filename.startswith("<frozen"):
         return True
     if filename.startswith("<"):
@@ -1071,18 +1119,145 @@ def _library_file(filename: str) -> bool:
     )
 
 
-def _user_object(value: Any) -> bool:
+def _machinery_module(module: str | None, filename: str | None = None) -> bool:
+    """Whether ``module``, with its code in ``filename``, is loopty's machinery.
+
+    A module of :data:`_LIBRARIES` is, by the name of its top-level package,
+    whatever directory it was imported from: an editable install of one is in
+    a source tree. A module with a standard library name is when its code is
+    where the standard library is (:func:`_library_file`), or has no file: a
+    module of the author's that takes such a name, ``wave.py`` next to the
+    script that imports it, is the author's code and not the standard
+    library's. No kernel is written in the machinery, so its code is machinery
+    for every trace.
+    """
+    if not module:
+        return False
+    top = module.partition(".")[0]
+    if top in _LIBRARIES:
+        return True
+    if top not in sys.stdlib_module_names:
+        return False
+    return filename is None or _library_file(filename)
+
+
+@dataclass(frozen=True)
+class _Own:
+    """The kernel's own code, which is never a library's, wherever it is installed.
+
+    ``module`` is the name of the module the body is defined in, and
+    ``package`` the top-level package holding it, or ``None`` when that package
+    is machinery (:func:`_machinery_module`), whose other modules stay
+    machinery. A kernel installed into site-packages by a non-editable install
+    lives in a library's directory, and it is still the kernel's code: its
+    calls are watched, the helpers of its package followed and the objects of
+    its classes copied, as they are for a kernel in a source tree.
+    """
+
+    module: str
+    package: str | None
+
+    def holds(self, module: str | None) -> bool:
+        """Whether code of ``module`` is the kernel's own."""
+        if not module:
+            return False
+        if module == self.module:
+            return True
+        package = self.package
+        return package is not None and (
+            module == package or module.startswith(package + ".")
+        )
+
+
+def _own_of(function: Any) -> _Own | None:
+    """The kernel code of ``function``: its module, and the package holding it.
+
+    The package is the top-level one, or, when that is a namespace package
+    (a directory several distributions install into, with no ``__init__``),
+    the first regular package below it, which is the kernel author's alone.
+    It is read off the module's ``__package__`` as well as its name, because
+    a module can sit in a package without being named after it: ``lanky
+    check`` imports a file under a name of its own (``lanky_checked_kernels``)
+    and gives it the package the file is in, and ``python -m`` runs a module
+    of a package as ``__main__``.
+    """
+    if isinstance(function, MethodType):
+        function = function.__func__
+    module = _module_of_function(function)
+    if not module:
+        return None
+    code = getattr(function, "__code__", None)
+    filename = getattr(code, "co_filename", None)
+    if _machinery_module(module, filename):
+        return _Own(module, None)
+    dotted = module
+    parent = function.__globals__.get("__package__")
+    if (
+        isinstance(parent, str)
+        and parent
+        and module != parent
+        and not module.startswith(parent + ".")
+    ):
+        dotted = f"{parent}.{module.rpartition('.')[2]}"
+    parts = dotted.split(".")
+    if _machinery_module(parts[0], filename):
+        # A file checked from inside one of loopty's dependencies is its
+        # own module there, and the rest of the package stays machinery.
+        return _Own(module, None)
+    package = parts[0]
+    for depth in range(1, len(parts) + 1):
+        package = ".".join(parts[:depth])
+        found = sys.modules.get(package)
+        namespace = (
+            found is not None
+            and getattr(found, "__file__", None) is None
+            and hasattr(found, "__path__")
+        )
+        if not namespace:
+            break
+    return _Own(module, package)
+
+
+def _library(module: str | None, filename: str | None, own: _Own | None) -> bool:
+    """Whether code of ``module``, in ``filename``, is a library's for this trace.
+
+    Decided by module. The kernel's own module and the package holding it
+    (``own``) are never a library's; :data:`_LIBRARIES` and the standard
+    library always are (:func:`_machinery_module`); anything else is a
+    library's when its file is in a library's directory (:func:`_library_file`),
+    which is where a third-party package installed next to the kernel lives.
+    Code whose module is not known is judged by its file alone.
+    """
+    if own is not None and own.holds(module):
+        return False
+    if _machinery_module(module, filename):
+        return True
+    return filename is not None and _library_file(filename)
+
+
+def _module_of_function(function: Any) -> str | None:
+    """The module a function's code runs in, by its globals."""
+    namespace = getattr(function, "__globals__", None)
+    module = namespace.get("__name__") if isinstance(namespace, dict) else None
+    return module if isinstance(module, str) else None
+
+
+def _user_object(value: Any, own: _Own | None = None) -> bool:
     """Whether ``value`` is an object of the kernel author's, with attributes.
 
     Modules, classes, functions and code are not, and neither is an object of
     a library's type (a lanky sort, a numpy array, a ``logging.Logger``, an
-    object from site-packages): its attributes are the library's business, and
-    may change while a body is traced without the body having done anything,
-    as a logger's level cache does on its first ``debug`` call. A type is a
-    library's when the module defining it is in :data:`_LIBRARIES` or its file
-    is under :func:`_library_roots`. A :class:`types.SimpleNamespace` is the
+    object from a third-party package): its attributes are the library's
+    business, and may change while a body is traced without the body having
+    done anything, as a logger's level cache does on its first ``debug`` call.
+    A type is a library's when the module defining it is (:func:`_library`),
+    so a class of the kernel's own package (``own``) is the author's wherever
+    the package is installed. A :class:`types.SimpleNamespace` is the
     exception: a bag of attributes with no machinery of its own, so what it
     holds is exactly what the kernel author put there.
+
+    Attributes are what :func:`_attributes` reads, the ``__dict__`` and the
+    slots, so an object of a class with ``__slots__`` counts.
     """
     if isinstance(
         value, ModuleType | type | FunctionType | MethodType | BuiltinFunctionType
@@ -1091,16 +1266,67 @@ def _user_object(value: Any) -> bool:
     if type(value) is SimpleNamespace:
         return True
     module = getattr(type(value), "__module__", None) or ""
-    if module == "builtins" or module.split(".")[0] in _LIBRARIES:
+    if module == "builtins":
         return False
     defined_in = getattr(sys.modules.get(module), "__file__", None)
-    if isinstance(defined_in, str) and _library_file(defined_in):
+    if _library(module, defined_in if isinstance(defined_in, str) else None, own):
         return False
+    return _attributes(value) is not None
+
+
+def _attributes(value: Any) -> dict[str, Any] | None:
+    """The attributes ``value`` keeps, in its slots and in its ``__dict__``.
+
+    Every slot named along the class's MRO is read through the member
+    descriptor its class defines, under its mangled name when it is private
+    (``__slots__ = ("__n",)`` in ``class Box`` keeps ``_Box__n``), and one that
+    is not set is left out. Each descriptor is a cell of its own, so a slot a
+    subclass declares again does not hide its base's: the base's is kept as
+    ``Base.x``, and an entry of the ``__dict__`` that a slot's name hides as
+    ``__dict__['x']``. Which name a cell gets depends on the classes alone, not
+    on which cells are set, so two snapshots name the same cells alike.
+    ``None`` when the object keeps attributes in neither place, as an
+    ``object()`` or a number does.
+    """
+    out: dict[str, Any] = {}
+    found = False
+    declared: set[str] = set()
+    for cls in type(value).__mro__:
+        slots = cls.__dict__.get("__slots__")
+        if slots is None:
+            continue
+        found = True
+        for slot in (slots,) if isinstance(slots, str) else slots:
+            if slot in ("__dict__", "__weakref__"):
+                continue
+            name = _mangled(cls, slot)
+            descriptor = cls.__dict__.get(name)
+            if not isinstance(descriptor, MemberDescriptorType):
+                continue
+            key = name if name not in declared else f"{cls.__qualname__}.{name}"
+            declared.add(name)
+            try:
+                out.setdefault(key, descriptor.__get__(value, cls))
+            except AttributeError:
+                continue
     try:
-        vars(value)
+        entries = vars(value)
     except TypeError:
-        return False
-    return True
+        pass
+    else:
+        found = True
+        for name, item in entries.items():
+            key = name if name not in declared else f"__dict__[{name!r}]"
+            out.setdefault(key, item)
+    return out if found else None
+
+
+def _mangled(cls: type, name: str) -> str:
+    """``name`` as Python stores it in ``cls``: ``__n`` in ``Box`` is ``_Box__n``."""
+    stem = cls.__name__.lstrip("_")
+    if name.startswith("__") and not name.endswith("__") and stem:
+        return f"_{stem}{name}"
+    return name
 
 
 @dataclass
@@ -1170,21 +1396,25 @@ def _read_cell(cell: Any) -> Any:
         return _UNBOUND
 
 
-def _outside(function: Any, owned: Collection[int]) -> _Outside:
+def _outside(
+    function: Any, owned: Collection[int], own: _Own | None = None
+) -> _Outside:
     """Copy the state the body's code reaches by name outside the trace.
 
     The roots are the globals the code of ``function`` names (with the code of
     the functions defined inside it, and whether the module binds them yet or
     not), its closure cells and its default values, and the same for every
     function of the kernel author's that those hold, :data:`_HELPER_DEPTH`
-    levels deep: a helper keeping a counter in its module is state too. Each
-    value is copied one level deep, as the loop snapshot is: a list, dict or
-    set shallowly, looking through tuples, a numpy array (or the buffer of an
-    :class:`~loopty.arr.Arr`) cell by cell, and an object of the kernel
-    author's (:func:`_user_object`) by its attributes, with a list, dict, set
-    or array an attribute holds copied as well. A container or object reached
-    twice is copied once, and one the tracer keeps for itself (``owned``) not
-    at all.
+    levels deep: a helper keeping a counter in its module is state too. A
+    function is the author's when its module is not a library's for this trace
+    (:func:`_library`, with ``own`` the kernel's own code). Each value is
+    copied one level deep, as the loop snapshot is: a list, dict or set
+    shallowly, looking through tuples, a numpy array cell by cell (an
+    :class:`~loopty.arr.Arr` by its buffer, and a ragged one by its offsets as
+    well), and an object of the kernel author's (:func:`_user_object`) by its
+    attributes, slots included, with a list, dict, set or array an attribute
+    holds copied as well. A container or object reached twice is copied once,
+    and one the tracer keeps for itself (``owned``) not at all.
 
     A numpy array is copied whole, because a write into it is an effect the
     compiled kernel never makes even when no output reads it back, which the
@@ -1218,21 +1448,35 @@ def _outside(function: Any, owned: Collection[int]) -> _Outside:
                 seen.add(id(value))
                 held.append(_Held(label, root, scope, value, kind(value)))
                 return
-        buffer = value.numpy() if isinstance(value, Arr) else value
-        if isinstance(buffer, np.ndarray):
-            if id(buffer) not in seen:
-                seen.add(id(buffer))
-                buffers.append(_Held(label, root, scope, buffer, buffer.copy()))
+        if isinstance(value, Arr):
+            # A ragged array keeps two buffers, and a write into its offsets
+            # moves where every row starts.
+            parts = [(label, value.numpy())]
+            if value.is_ragged:
+                parts.append((f"{label}.offsets", value.offsets))
+        elif isinstance(value, np.ndarray):
+            parts = [(label, value)]
+        else:
+            parts = []
+        if parts:
+            for part_label, buffer in parts:
+                if id(buffer) not in seen:
+                    seen.add(id(buffer))
+                    buffers.append(
+                        _Held(part_label, root, scope, buffer, buffer.copy())
+                    )
             return
         if isinstance(value, MethodType):
             value = value.__func__
         if isinstance(value, FunctionType):
-            if depth < _HELPER_DEPTH and not _library_file(value.__code__.co_filename):
+            if depth < _HELPER_DEPTH and not _library(
+                _module_of_function(value), value.__code__.co_filename, own
+            ):
                 pending.append((value, depth + 1))
             return
-        if level == 0 and _user_object(value):
+        if level == 0 and _user_object(value, own):
             seen.add(id(value))
-            attributes = dict(vars(value))
+            attributes = _attributes(value) or {}
             objects.append(_Attributes(label, root, scope, value, attributes))
             for attribute, item in attributes.items():
                 visit(item, f"{label}.{attribute}", root, scope, 1, depth)
@@ -1345,7 +1589,7 @@ def _outside_changes(outside: _Outside, tracer: Tracer) -> list[_Change]:
     for entry in outside.objects:
         if (entry.scope, entry.root) in rebound:
             continue
-        now = vars(entry.obj)
+        now = _attributes(entry.obj) or {}
         for attribute in dict.fromkeys([*entry.copy, *now]):
             before = entry.copy.get(attribute, _UNBOUND)
             after = now.get(attribute, _UNBOUND)
@@ -1483,12 +1727,16 @@ class _CallWatch:
 
     One tool id is taken, the first of :data:`IDS` that nothing holds, the
     first time a body is traced, and kept. Its ``CALL`` events are on only
-    while a trace runs. A call made from a library's code (see
-    :func:`_library_file`) is never the body's, and its location is disabled
-    for good, so that the tracer's own calls cost nothing after the first
-    trace. A call from the kernel author's code that has an effect
-    (:func:`_effect_of`) is recorded on the tracer, and :func:`trace` refuses
-    it once the body has run.
+    while a trace runs. A call made from a library's code is never the body's.
+    Which code is a library's is decided by the module the calling frame runs
+    in (:func:`_library`), so the kernel's own module and package are watched
+    even when they are installed into site-packages. A call location in
+    :data:`_LIBRARIES` or the standard library is disabled for good, so that
+    the tracer's own calls cost nothing after the first trace; one in another
+    installed package is only passed over, because that package may hold the
+    kernel of a later trace, and a disabled location stays disabled. A call
+    from the kernel author's code that has an effect (:func:`_effect_of`) is
+    recorded on the tracer, and :func:`trace` refuses it once the body has run.
 
     Without a free tool id nothing is watched, and the faithfulness fact is
     what remains.
@@ -1537,8 +1785,19 @@ class _CallWatch:
             tracer = current_tracer()
             if tracer is None or tracer.thread != threading.get_ident():
                 return None
-            if _library_file(code.co_filename):
-                return sys.monitoring.DISABLE
+            # The frame one below this callback is the one making the call.
+            frame = sys._getframe(1)
+            module = (
+                frame.f_globals.get("__name__") if frame.f_code is code else None
+            )
+            if not isinstance(module, str):
+                module = None
+            if _library(module, code.co_filename, tracer.own):
+                if _machinery_module(
+                    module, code.co_filename
+                ) or code.co_filename.startswith("<frozen"):
+                    return sys.monitoring.DISABLE
+                return None
             effect = _effect_of(function, first)
             if effect is not None:
                 tracer.effects.append((effect, _call_location(code, offset)))
@@ -1567,35 +1826,143 @@ def _effects_message(name: str, effects: Sequence[tuple[str, str]]) -> str:
 # {{{ guards as isl constraints
 
 
-def constraints_of(condition: Any) -> tuple[str, ...]:
+#: Why a conjunct that reads an array, or is not an affine comparison, is not
+#: a constraint.
+_NOT_AFFINE = "reads an array or is not affine"
+
+#: Why a conjunct comparing with ``!=`` is not a constraint.
+_UNEQUAL = "compares with '!=', which is not a convex set of points"
+
+#: Why a guard that is already false is not a constraint.
+_FALSE = "is the constant False, which is not stated to isl"
+
+
+def constraints_of(
+    condition: Any, tracer: Tracer | None = None, bound: Collection[str] = ()
+) -> tuple[str, ...]:
     """Render a guard as isl constraints, dropping what isl cannot express.
 
     A guard narrows the statement's domain, which is what makes
     ``with when(i + 1 < n): u[i + 1] = ...`` provably in bounds. A guard that is
     not quasi-affine (a data-dependent test) is dropped, which widens the domain
     and can only make an obligation harder, never falsely discharge one.
+
+    isl holds every name of a constraint as an integer. With a ``tracer``, a
+    comparison is kept only when every name in it is one the tracer knows to
+    be an integer (:attr:`Tracer.integers`: a loop variable, a size, a scalar
+    of sort ``Nat``, ``Int`` or ``Fin[...]``) or one of the reduction binders
+    in ``bound``. ``i < a`` with ``a : Real`` is dropped: stated to isl it
+    reads ``a`` as an integer parameter, and at ``a = 2.5`` the domain, and
+    the compiled kernel built from it, would disagree with the native run.
+    Without a tracer every name is taken for an integer, which is right for a
+    hand-built guard over sizes and loop variables only.
+    """
+    return tuple(
+        text for _part, text, _why in _conjuncts(condition, tracer, bound) if text
+    )
+
+
+def _unstated(
+    condition: Any, tracer: Tracer | None = None, bound: Collection[str] = ()
+) -> list[tuple[Any, str]]:
+    """The conjuncts :func:`constraints_of` drops, each with the reason."""
+    return [
+        (part, why)
+        for part, text, why in _conjuncts(condition, tracer, bound)
+        if text is None
+    ]
+
+
+def _conjuncts(
+    condition: Any, tracer: Tracer | None, bound: Collection[str]
+) -> list[tuple[Any, str | None, str]]:
+    """``(conjunct, constraint, why)`` for each conjunct of a guard.
+
+    ``constraint`` is the conjunct's isl text, or ``None`` when it cannot be
+    one, and then ``why`` says why.
     """
     if condition is None:
-        return ()
+        return []
+    if isinstance(condition, bool | np.bool_):
+        # A guard the trace computed, from values it knows: true leaves every
+        # instance of the loop nest writing, which is what the domain says.
+        return [] if condition else [(condition, None, _FALSE)]
     if isinstance(condition, prim.LogicalAnd):
-        out: tuple[str, ...] = ()
-        for child in condition.children:
-            out += constraints_of(child)
-        return out
-    if isinstance(condition, prim.Comparison):
-        try:
-            left = expr_text(condition.left, None, None)
-            right = expr_text(condition.right, None, None)
-        except ValueError:
-            return ()
-        operator = condition.operator
-        if operator == "!=":
-            return ()
-        # isl spells equality with one '='; its parser refuses Python's '=='.
-        if operator == "==":
-            operator = "="
-        return (f"{left} {operator} {right}",)
-    return ()
+        return [
+            piece
+            for child in condition.children
+            for piece in _conjuncts(child, tracer, bound)
+        ]
+    if not isinstance(condition, prim.Comparison):
+        return [(condition, None, _NOT_AFFINE)]
+    try:
+        left = expr_text(condition.left, None, None)
+        right = expr_text(condition.right, None, None)
+    except ValueError:
+        return [(condition, None, _NOT_AFFINE)]
+    operator = condition.operator
+    if operator == "!=":
+        return [(condition, None, _UNEQUAL)]
+    if tracer is not None:
+        known = tracer.integers.union(bound)
+        others = sorted((free_names(left) | free_names(right)) - known)
+        if others:
+            return [(condition, None, _not_integers_text(others, tracer))]
+    # isl spells equality with one '='; its parser refuses Python's '=='.
+    if operator == "==":
+        operator = "="
+    return [(condition, f"{left} {operator} {right}", "")]
+
+
+def _not_integers_text(names: Sequence[str], tracer: Tracer) -> str:
+    """Why a comparison naming ``names`` is not a constraint: isl's are integers."""
+    described = []
+    for name in names:
+        sort = tracer.params.get(name)
+        if name in tracer.params and not isinstance(sort, ArrSpec):
+            described.append(f"the scalar {name} of sort {_sort_text(sort)}")
+        else:
+            described.append(name)
+    listed = " and ".join(described)
+    which = "which is" if len(names) == 1 else "which are"
+    return (
+        f"compares with {listed}, {which} not a loop variable, a size or a "
+        "scalar of an integral sort (Nat, Int, Fin[...]), and isl would read "
+        "every name of a constraint as an integer"
+    )
+
+
+def _sort_text(sort: Any) -> str:
+    """A sort the way a message names it: ``Real``, ``float64``."""
+    if isinstance(sort, type):
+        return sort.__name__
+    return str(sort)
+
+
+def _integer_names(params: Sequence[tuple[str, Any]]) -> set[str]:
+    """The names of a signature that are integers, other than loop variables.
+
+    The sizes an array's axes name, the sizes a ``Fin`` sort names (an element
+    sort ``Fin[m]``, or a scalar's ``i : Fin[n]``), and the scalar parameters
+    of an integral sort (:func:`loopty.contract.integral_sort`). An array
+    parameter is none of them, even where a ragged axis names it as its counts.
+    """
+    from loopty.contract import integral_sort
+
+    arrays = {name for name, typ in params if isinstance(typ, ArrType)}
+    out: set[str] = set()
+    for name, typ in params:
+        if isinstance(typ, ArrType):
+            out |= _free_size_names(typ.axes)
+            sort = typ.dtype
+        else:
+            sort = typ
+            if integral_sort(sort):
+                out.add(name)
+        base = sort.base if isinstance(sort, Refined) else sort
+        if isinstance(base, FinType):
+            out |= _free_size_names([base.bound])
+    return out - arrays
 
 
 # }}}
@@ -2224,10 +2591,11 @@ def lower_reductions(
     every point while the body skips the ones the condition excludes.
     """
     if isinstance(expr, Sum):
-        unstated = _unstated(expr.guard)
+        binders = [var.name for var, _domain in expr.binders]
+        bound = {*(name for name, _bound in enclosing), *binders}
+        unstated = _unstated(expr.guard, tracer, bound)
         if unstated:
-            names = [var.name for var, _domain in expr.binders]
-            raise TraceError(_reduction_condition_message(unstated, names, where))
+            raise TraceError(_reduction_condition_message(unstated, binders, where))
         inames: list[str] = []
         bounds: list[Any] = []
         for var, domain in expr.binders:
@@ -2250,10 +2618,14 @@ def lower_reductions(
             (*tracer.inames, *inames),
             (*tracer.bounds, *bounds),
             constraints=(
-                *constraints_of(tracer.guard()),
+                *constraints_of(tracer.guard(), tracer),
                 *_binder_constraints(enclosing, tracer),
-                *(piece for guard in outer_guards for piece in constraints_of(guard)),
-                *constraints_of(expr.guard),
+                *(
+                    piece
+                    for guard in outer_guards
+                    for piece in constraints_of(guard, tracer, bound)
+                ),
+                *constraints_of(expr.guard, tracer, bound),
             ),
             reflections=tracer.reflections,
         )
@@ -2275,31 +2647,18 @@ def lower_reductions(
     return expr
 
 
-def _unstated(condition: Any) -> list[Any]:
-    """The conjuncts of a condition that :func:`constraints_of` has to drop."""
-    if condition is None:
-        return []
-    if isinstance(condition, prim.LogicalAnd):
-        return [part for child in condition.children for part in _unstated(child)]
-    if constraints_of(condition):
-        return []
-    return [condition]
-
-
 def _reduction_condition_message(
-    parts: Sequence[Any], binders: Sequence[str], where: str
+    parts: Sequence[tuple[Any, str]], binders: Sequence[str], where: str
 ) -> str:
-    """What to say about a reduction condition its domain cannot state."""
-    listed = " and ".join(repr(_shown(part)) for part in parts)
+    """What to say about a reduction condition its domain cannot state.
+
+    ``parts`` are the conjuncts its domain cannot state, each with the reason
+    :func:`constraints_of` gives for dropping it.
+    """
+    listed = " and ".join(repr(_shown(part)) for part, _why in parts)
     at = f" at {where}" if where else ""
-    unequal = any(
-        isinstance(part, prim.Comparison) and part.operator == "!=" for part in parts
-    )
-    why = (
-        "compares with '!=', which is not a convex set of points"
-        if unequal
-        else "reads an array or is not affine"
-    )
+    why = "; ".join(dict.fromkeys(why for _part, why in parts))
+    unequal = any(why == _UNEQUAL for _part, why in parts)
     split = (
         " For '!=', split the sum in two, one over '<' and one over '>'."
         if unequal
@@ -2310,10 +2669,10 @@ def _reduction_condition_message(
         "cannot be a constraint of the reduction's domain, which is the only "
         "place a reduction keeps its condition: the term would sum over every "
         "point, while the body skips the points the condition excludes. isl "
-        "states an affine comparison of loop variables and sizes, and this "
-        f"condition {why}.{split} Otherwise write each term to an indexed cell, "
-        "0.0 where the condition is false and the term under "
-        "'with when(condition):', and sum the cells."
+        "states an affine comparison of loop variables, sizes and integral "
+        f"scalars, and this condition {why}.{split} Otherwise write each term "
+        "to an indexed cell, 0.0 where the condition is false and the term "
+        "under 'with when(condition):', and sum the cells."
     )
 
 
@@ -2480,15 +2839,51 @@ def mask_writes(value: Any) -> Any:
     return value
 
 
+def _integer_guard_message(value: Any, where: str) -> str:
+    """What to say about a guard whose value is an integer and not a bool."""
+    at = f" at {where}" if where else ""
+    return (
+        f"the guard of 'with when(...)'{at} is the integer {int(value)}, not a "
+        "truth value. Python's '~' is bitwise on an int and on a bool: ~True is "
+        "-2 and ~False is -1, and both are true, so a guard such as "
+        "'~(i > 0)' on a loop variable holds at every point when the body runs "
+        "natively, while the traced term reads it as 'not' and the compiled "
+        "kernel skips the points where i > 0. '&' and '|' with an integer "
+        "operand are bitwise in the same way. Write the complement as a "
+        "comparison ('i <= 0' for '~(i > 0)', and "
+        "'(i <= 0) | (i >= n)' for '~((i > 0) & (i < n))'), and compare an "
+        "integer explicitly ('k != 0') rather than guarding on it."
+    )
+
+
+def _integer(value: Any) -> bool:
+    """Whether ``value`` is a Python or numpy integer that is not a bool."""
+    return isinstance(value, int | np.integer) and not isinstance(
+        value, bool | np.bool_
+    )
+
+
 class when:  # noqa: N801 - a context manager written like a statement
     """Guard the writes of a block by ``condition``.
 
     Under tracing the condition is pushed onto the guard stack: the statements
-    recorded inside carry it, and it narrows their domain when it is affine, so
-    a guarded access is proved in bounds exactly where it runs. Under plain
-    ``python`` the block still executes and the writes are masked, which is why
-    the guard has to be a condition on data and not a Python ``if``: masking
-    keeps the traced term and the native run agreeing statement for statement.
+    recorded inside carry it, and it narrows their domain where isl can state
+    it (an affine comparison of loop variables, sizes and integral scalars; see
+    :func:`constraints_of`), so a guarded access is proved in bounds exactly
+    where it runs. Under plain ``python`` the block still executes and the
+    writes are masked, which is why the guard has to be a condition on data and
+    not a Python ``if``: masking keeps the traced term and the native run
+    agreeing statement for statement.
+
+    The condition has to be a truth value, and an integer that is not a bool
+    is refused, under tracing and natively, with a :class:`TraceError`. The
+    native value of ``~(i > 0)`` is where one comes from: ``i`` is a Python
+    ``int``, ``i > 0`` a Python ``bool``, and ``~`` on a bool is bitwise, so
+    the guard is ``-2`` or ``-1`` and always true, while the trace records
+    ``not (i > 0)``. A data comparison is a numpy ``bool_``, on which ``~`` is
+    logical, and is not affected. Natively the guard is asked wherever the
+    guards around it hold; under a false one nothing is written whatever it
+    says.
     """
 
     def __init__(self, condition: Any) -> None:
@@ -2497,6 +2892,14 @@ class when:  # noqa: N801 - a context manager written like a statement
 
     def __enter__(self) -> when:
         """Open the guard."""
+        # Natively, a guard inside a block whose guard is false is not asked:
+        # nothing under it is written, and a read out of range there answers
+        # the integer 0 (see _MaskedArr), whatever the array holds.
+        asked = self.tracer is not None or not _writes_are_masked()
+        if asked and _integer(self.condition):
+            raise TraceError(
+                _integer_guard_message(self.condition, _location(sys._getframe(1)))
+            )
         if self.tracer is not None:
             self.tracer.push_guard(self.condition)
         else:
@@ -2603,7 +3006,8 @@ def trace(kernel: Any, arg_types: Any) -> Term:
     post_annotation = types.pop("return", None)
 
     tracer = Tracer(name, types)
-    outside = _outside(function, tracer._owned())
+    tracer.own = _own_of(function)
+    outside = _outside(function, tracer._owned(), tracer.own)
     arguments: list[Any] = []
     params: list[tuple[str, Any]] = []
     for parameter, annotation in types.items():
@@ -2618,6 +3022,7 @@ def trace(kernel: Any, arg_types: Any) -> Term:
         else:
             params.append((parameter, annotation))
             arguments.append(Var(parameter))
+    tracer.integers |= _integer_names(params)
 
     _TRACERS.append(tracer)
     watching = _CallWatch.start()
