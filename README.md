@@ -164,9 +164,11 @@ end to end; the edges are sharp.
   A guard that reads an array, compares with `!=`, or compares with a `Real`
   scalar is evaluated at run time only, the statement lists it in
   `Stmt.unnarrowed`, and the facts stated over its domain say so in their
-  provenance. A guard has to be a truth value: one that is an integer, which
-  is what `~(i > 0)` is natively (`~` on a Python bool is bitwise), is a
-  `TraceError` on a native run as well as under tracing.
+  provenance. A guard has to be a truth value, and one whose value is an
+  integer is a `TraceError`, on a native run and under tracing alike. Natively
+  that is what `~(i > 0)` is (`~` on a Python bool is bitwise), while the trace
+  records `not (i > 0)`, so such a kernel traces and its `trace-faithful` fact
+  is refuted by the native refusal, which names the fix.
 - The faithfulness fact. For each kernel, the traced term is run by an
   interpreter (`loopty.interpret`: statement by statement in source order over
   each statement's isl domain, expressions evaluated with numpy's arithmetic,
@@ -271,14 +273,14 @@ end to end; the edges are sharp.
 - The trace-time refusals of hidden state look one level below a name: into
   the containers and the objects it holds (their `__dict__` and their slots),
   the buffers of the arrays it holds (both of a ragged one), and the containers
-  those objects hold. `acc[0][0] += 1`, `holder.inner.s = ...`, a `deque`, a loop over a
-  generator that wraps a domain, and a `dir()` probe trace without an error,
-  and the `trace-faithful` fact is what refutes them. That fact is a test, not
-  a proof: it compares the runs on the inputs it tries, so hidden state no such
-  input exercises goes unseen. It stays `assumed`, with the reason, when no
-  input runs natively, when the term calls a function the interpreter has no
-  numpy counterpart for, or when a loop bound reads an array the same kernel
-  writes.
+  those objects hold. `acc[0][0] += 1`, `holder.inner.s = ...`, a `deque`, a
+  loop over a generator that wraps a domain, and a `dir()` probe trace without
+  an error, and the `trace-faithful` fact is what refutes them. That fact is a
+  test, not a proof: it compares the runs on the inputs it tries, so hidden
+  state no such input exercises goes unseen. It stays `assumed`, with the
+  reason, when no input runs natively, when the term calls a function the
+  interpreter has no numpy counterpart for, or when a loop bound reads an array
+  the same kernel writes.
 
 **Not yet.**
 
