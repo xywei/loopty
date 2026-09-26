@@ -484,6 +484,31 @@ def test_a_fact_over_a_domain_a_guard_left_wide_says_so() -> None:
     assert write.status is Status.DECIDED
 
 
+def test_a_real_guard_no_longer_discharges_an_obligation() -> None:
+    # Only the guard keeps x[i] in bounds: i < a < m. Read with a as an
+    # integer parameter, that was decided; left out of the domain, the read is
+    # refuted at an instance the guard masks, and the fact says the domain is
+    # wide. Sound, if not sharp: a Real a no longer proves anything about i.
+    def clipped(a: Real, x: Arr[Fin[m], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when((i < a) & (a < x.dom.size)):
+                y[i] = x[i]
+
+    _term, facts = facts_of(clipped)
+    bounds = {
+        fact.provenance["access"]: fact
+        for fact in settled(facts)
+        if fact.kind == "in-bounds"
+    }
+    read = bounds["x[i]"]
+    assert read.status is Status.REFUTED, read.provenance
+    assert [entry["conjunct"] for entry in read.provenance["unnarrowed"]] == [
+        "i < a",
+        "a < m",
+    ]
+    assert bounds["y[i]"].status is Status.DECIDED
+
+
 def test_a_guard_isl_states_whole_leaves_nothing_to_say() -> None:
     def below(a: Nat, y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
