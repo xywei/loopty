@@ -452,22 +452,48 @@ def _compare(
 
 
 def agreement(term: Term, schedule: Any, got: dict, want: dict) -> Any:
-    """The fact recording whether two runs of a kernel agree."""
+    """The fact recording whether two runs of a kernel agree.
+
+    A refuted one says which outputs disagreed as its ``reason``, one line per
+    output, which is what lanky prints under its ``REFUTED`` line: the
+    difference and what was allowed, or the two shapes when they are not the
+    same, since a difference between arrays of two shapes is not a number
+    anyone can read (``outputs`` records it as infinite). The numbers of every
+    output, agreeing or not, are in ``outputs``.
+    """
     from lanky.ledger import Fact, Status
 
     details: dict[str, Any] = {}
-    ok = True
+    disagreements: list[str] = []
     for name, want_array in want.items():
         exactness = exactness_of_output(term, schedule, name)
         agree, difference, tolerance = _compare(got[name], want_array, exactness)
-        ok = ok and agree
         details[name] = {
             "exactness": exactness,
             "difference": difference,
             "tolerance": tolerance,
             "agree": agree,
         }
+        if agree:
+            continue
+        shape = np.asarray(got[name]).shape
+        native_shape = np.asarray(want_array).shape
+        disagreements.append(
+            f"{name} has shape {shape}, and the native run's has shape "
+            f"{native_shape}"
+            if shape != native_shape
+            else f"{name} differs from the native run: difference "
+            f"{difference:.3g}, allowed {tolerance:.3g} ({exactness})"
+        )
+    ok = not disagreements
     history = tuple(getattr(schedule, "history", ()))
+    provenance: dict[str, Any] = {
+        "outputs": details,
+        "schedule": history,
+        "target": getattr(schedule, "target", "c"),
+    }
+    if not ok:
+        provenance["reason"] = "\n".join(disagreements)
     return Fact(
         id=f"agreement:{term.name}",
         kind="agreement",
@@ -478,11 +504,7 @@ def agreement(term: Term, schedule: Any, got: dict, want: dict) -> Any:
         term=None,
         status=Status.TESTED if ok else Status.REFUTED,
         decided_by="loopy",
-        provenance={
-            "outputs": details,
-            "schedule": history,
-            "target": getattr(schedule, "target", "c"),
-        },
+        provenance=provenance,
         where=term.stmts[0].where if term.stmts else "",
         owner=term.name,
     )

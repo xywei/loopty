@@ -74,6 +74,7 @@ __all__ = [
     "instance_labels",
     "ordering_facts",
     "postcondition_facts",
+    "postcondition_id",
     "reduction_facts",
     "render_instance",
     "write_disjointness_facts",
@@ -463,13 +464,23 @@ def reduction_facts(term: Term, owner: str) -> list[Fact]:
     return facts
 
 
+def postcondition_id(owner: str) -> str:
+    """The id of the fact a kernel's return annotation becomes.
+
+    One builder for it, because a program names the fact of each kernel it
+    calls by this id (see :meth:`loopty.kernel.Program.facts`), and an id that
+    drifted from the kernel's own would name a fact the ledger does not hold.
+    """
+    return f"{owner}:postcondition"
+
+
 def postcondition_facts(term: Term, owner: str, where: str) -> list[Fact]:
     """The return annotation as a fact, for whatever oracle can take it."""
     if term.post is None:
         return []
     return [
         Fact(
-            id=f"{owner}:postcondition",
+            id=postcondition_id(owner),
             kind="postcondition",
             statement=render(term.post),
             term=term.post,

@@ -41,18 +41,19 @@ row verbatim, and checked by `scripts/refresh_example_outputs.py`):
 
 ```console
 $ lanky check examples/spmv.py
-STATUS   BY             WHERE        OWNER          STATEMENT
--------  -------------  -----------  -------------  ------------------------------------------------------------------------
-decided  isl            spmv.py:79   scan           off[0] is in bounds for every instance of S0
-decided  isl            spmv.py:81   scan           off[r + 1] is in bounds for every instance of S1
-decided  isl            spmv.py:79   scan           distinct instances of S0 write distinct cells of off
-assumed  -              spmv.py:69   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
-tested   property-test  spmv.py:84   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat] | off(0) ==...
-decided  isl            spmv.py:112  spmv           y[r] is in bounds for every instance of S0
-decided  type           spmv.py:112  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
-decided  isl            spmv.py:112  spmv           distinct instances of S0 write distinct cells of y
-decided  type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
-tested   interpreter    spmv.py:102  spmv           the traced term computes what the body computes
+STATUS                            BY             WHERE        OWNER          STATEMENT
+--------------------------------  -------------  -----------  -------------  ------------------------------------------------------------------------
+decided                           isl            spmv.py:79   scan           off[0] is in bounds for every instance of S0
+decided                           isl            spmv.py:81   scan           off[r + 1] is in bounds for every instance of S1
+decided                           isl            spmv.py:79   scan           distinct instances of S0 write distinct cells of off
+assumed                           -              spmv.py:69   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+tested                            property-test  spmv.py:84   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat] | off(0) ==...
+decided                           isl            spmv.py:112  spmv           y[r] is in bounds for every instance of S0
+decided                           type           spmv.py:112  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
+decided                           isl            spmv.py:112  spmv           distinct instances of S0 write distinct cells of y
+decided                           type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
+tested                            interpreter    spmv.py:102  spmv           the traced term computes what the body computes
+assumed under scan:postcondition  -              spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
 ...
 19 facts: 2 assumed, 14 decided, 3 tested
 ```
@@ -63,13 +64,19 @@ and here it was settled by the *type*: the entries of `col` are points of
 `Fin[m]` and `x` has `m` cells, so the shape of the data discharges it and isl
 is never called.
 
-And look at the last row, the one fact that is about the trace rather than
-about the term. Every other row is a claim about what tracing recorded; this
+And look at the `interpreter` row, the one fact that is about the trace rather
+than about the term. Every other row is a claim about what tracing recorded; this
 one checks that the record is the body. The term is run by an interpreter of
 its own, with numpy semantics, and compared with the body run natively, on the
 file's example inputs and on inputs drawn from the declared types. A body that
 kept state where tracing does not look would be refuted here, with the input
 and the first cell that differs.
+
+The last row belongs to `solve`, the `@program` that runs `scan` and then
+`spmv`. It restates `scan`'s postcondition in the program's scope, and rests on
+`scan`'s own postcondition fact, which the row names:
+`assumed under scan:postcondition`. Nothing has established that fact yet, and
+the restatement is worth no more than it.
 
 And a transformation is a cast, checked before it is applied:
 
@@ -126,8 +133,8 @@ message states, because which violating pair isl picks depends on them.
   transformation can preserve the meaning of a program and still be one the
   backend cannot generate. Every accepted step is asked whether the target can
   build it, and a failure is a `refuted` fact of kind `buildable` decided by
-  `loopy-target`, with the limit in words, rather than a `LoopyError` thrown
-  from inside code generation several steps later.
+  `loopy-target`, with the limit in words as its reason, rather than a
+  `LoopyError` thrown from inside code generation several steps later.
 - **The reference implementation is the kernel.** The same body runs on numpy
   under plain `python` and traces to the term loopy compiles, so the differential
   test compares a program with itself rather than with a second implementation.
@@ -213,7 +220,9 @@ end to end; the edges are sharp.
   `loopty check FILE`, and `lanky run FILE` through the entry point.
   `--target` retargets every schedule in the file, re-checking its casts, and
   says so by name when one cannot be retargeted; without it each schedule keeps
-  the target it was written for.
+  the target it was written for. A refuted fact is repeated under the ledger
+  with what explains it, the block `lanky check` prints (a compiled run that
+  disagrees names the outputs and by how much), and the command exits 1.
 
 **Partial.**
 
@@ -228,8 +237,12 @@ end to end; the edges are sharp.
   spelling `val[r, j]` over `0 <= j < cnt[r]`, which is what the tracer and the
   demos produce, *is* decided. The monotone-offsets formulation is the
   documented next step; see the module docstring of `loopty/flow.py`.
-- `@program` restates a callee's postcondition as a fact in scope, but no rule
-  consumes postconditions as hypotheses yet, so "facts travel" is bookkeeping.
+- `@program` restates a callee's postcondition as a fact in scope, which rests
+  on the callee's own fact (lanky's `rests_on`, so the row reads
+  `assumed under scan:postcondition`), but no rule consumes postconditions as
+  hypotheses yet, so "facts travel" is bookkeeping. A callee imported from
+  another file has its fact in that file's ledger, so `lanky check` counts the
+  id as an assumption and names it in an `UNRESOLVED` line.
 - Only a two-axis (row, fiber) ragged array lowers. A deeper dependent sum
   raises.
 - A reduction nested in another one cannot take its bound from the outer
@@ -353,8 +366,9 @@ term is interpreted on its own and compared with the native run.
 **Transformations are casts.** Each states a reindexing map, which isl checks for
 bijectivity, and a new execution order, which isl checks for monotonicity on the
 dependence relation. Failure is an `IllegalCast` carrying the witness and the
-refuted fact. Casts that change floating-point semantics mark the result's
-exactness class instead of being refused.
+refuted fact, whose reason is the exception's message. Casts that change
+floating-point semantics mark the result's exactness class instead of being
+refused.
 
 **loopty is a lanky plugin.** It registers a *theory* (`KernelTheory`, which
 turns a kernel into facts), an *oracle* (`IslOracle`, trust class
