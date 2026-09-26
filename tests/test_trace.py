@@ -1716,3 +1716,303 @@ def test_a_concrete_integer_guard_is_refused_while_tracing() -> None:
 
 
 # }}}
+
+
+# {{{ the slots of an object, and the offsets of a ragged array
+
+
+class _Slotted:
+    """An object of the kernel author's that keeps its state in slots."""
+
+    __slots__ = ("count", "__secret", "unset")
+
+    def __init__(self) -> None:
+        self.count = 0.0
+        self.__secret = 1.0
+
+    def secret(self) -> float:
+        return self.__secret
+
+
+class _Mixed(_Slotted):
+    """Slots from a base class, and a ``__dict__`` of its own."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.label = "a"
+
+
+def test_an_attribute_kept_in_a_slot_is_state() -> None:
+    state = _Slotted()
+
+    def counted(y: Arr[Fin[1], Real]):  # noqa: F821
+        state.count = state.count + 1.0
+        y[0] = state.count
+
+    with pytest.raises(TraceError) as caught:
+        term_of(counted)
+    message = str(caught.value)
+    assert "changed the attribute 'count' of 'state'" in message
+    assert "'state.count' is 0.0 before the trace and 1.0 after it" in message
+
+
+def test_a_private_slot_is_read_by_its_mangled_name() -> None:
+    state = _Slotted()
+
+    def peeking(y: Arr[Fin[1], Real]):  # noqa: F821
+        state._Slotted__secret = state.secret() + 1.0
+        y[0] = 1.0
+
+    with pytest.raises(TraceError, match="the attribute '_Slotted__secret'"):
+        term_of(peeking)
+
+
+def test_a_slot_set_for_the_first_time_is_a_change() -> None:
+    state = _Slotted()
+
+    def filling(y: Arr[Fin[1], Real]):  # noqa: F821
+        state.unset = 1.0
+        y[0] = 1.0
+
+    with pytest.raises(
+        TraceError, match="'state.unset' is unbound before the trace and 1.0"
+    ):
+        term_of(filling)
+
+
+def test_slots_and_a_dict_are_both_read() -> None:
+    state = _Mixed()
+
+    def relabelled(y: Arr[Fin[1], Real]):  # noqa: F821
+        state.label = "b"
+        y[0] = state.count
+
+    def recounted(y: Arr[Fin[1], Real]):  # noqa: F821
+        state.count = 2.0
+        y[0] = 1.0
+
+    with pytest.raises(TraceError, match="the attribute 'label' of 'state'"):
+        term_of(relabelled)
+    with pytest.raises(TraceError, match="the attribute 'count' of 'state'"):
+        term_of(recounted)
+
+
+def test_a_slotted_object_the_body_only_reads_is_not_state() -> None:
+    state = _Slotted()
+
+    def scaled(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = x[i] * state.secret()
+
+    (stmt,) = term_of(scaled).stmts
+    assert render(stmt.expr) == "x[i]*1.0"
+
+
+def test_a_write_into_the_offsets_of_a_ragged_array_is_refused() -> None:
+    rows = Arr.ragged([1, 2], values=np.zeros(3))
+
+    def shifting(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        rows.offsets[1] = 2
+        for i in y.dom:
+            y[i] = x[i]
+
+    with pytest.raises(TraceError) as caught:
+        term_of(shifting)
+    message = str(caught.value)
+    assert "changed the array 'rows.offsets'" in message
+    assert "'rows.offsets[1]' is 1 before the trace and 2 after it" in message
+
+
+def test_a_write_into_the_values_of_a_ragged_array_is_still_refused() -> None:
+    rows = Arr.ragged([1, 2], values=np.zeros(3))
+
+    def stashing(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        rows[1, 1] = 5.0
+        for i in y.dom:
+            y[i] = x[i]
+
+    with pytest.raises(TraceError, match=r"'rows\[2\]' is 0.0 before the trace"):
+        term_of(stashing)
+
+
+# }}}
+
+
+# {{{ a kernel installed into site-packages
+
+
+@pytest.fixture
+def site_packages(tmp_path, monkeypatch, request):
+    """A directory that counts as site-packages, with a writer of packages into it.
+
+    Its path is added to the library roots, which is where a non-editable
+    install puts a kernel, and to ``sys.path``. The packages written into it
+    are imported by name and forgotten again at the end.
+    """
+    import importlib
+    import os
+    import sys
+    import textwrap
+
+    # The module, not the function loopty exports under the same name.
+    tracing = importlib.import_module("loopty.trace")
+    site = tmp_path / "site-packages"
+    site.mkdir()
+    roots = tracing._library_roots()
+    monkeypatch.setattr(
+        tracing, "_library_roots", lambda: (*roots, os.path.realpath(site))
+    )
+    tracing._library_file.cache_clear()
+    request.addfinalizer(tracing._library_file.cache_clear)
+    monkeypatch.syspath_prepend(str(site))
+    written: list[str] = []
+
+    def forget() -> None:
+        for name in list(sys.modules):
+            if any(name == top or name.startswith(top + ".") for top in written):
+                del sys.modules[name]
+
+    request.addfinalizer(forget)
+
+    def install(files: dict[str, str]):
+        for relative, text in files.items():
+            path = site / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(textwrap.dedent(text))
+            written.append(relative.split("/")[0].removesuffix(".py"))
+        importlib.invalidate_caches()
+        return importlib.import_module
+
+    return install
+
+
+_HEADER = """\
+    from __future__ import annotations
+
+    from lanky.prelude import Real
+
+    from loopty import Arr, Fin
+"""
+
+
+def test_a_print_in_an_installed_kernel_is_refused(site_packages) -> None:
+    load = site_packages(
+        {
+            "installed_chatty/__init__.py": "",
+            "installed_chatty/kernels.py": _HEADER
+            + """
+    def chatty(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
+        for i in y.dom:
+            print("at", i)
+            y[i] = x[i]
+    """,
+        }
+    )
+    from loopty.trace import _library_file
+
+    module = load("installed_chatty.kernels")
+    assert _library_file(module.__file__)
+    with pytest.raises(TraceError, match=r"calls print\(\) at kernels.py:"):
+        term_of(module.chatty)
+
+
+def test_the_helpers_of_an_installed_kernel_are_followed(site_packages) -> None:
+    load = site_packages(
+        {
+            "installed_noted/__init__.py": "",
+            "installed_noted/helpers.py": """\
+    SEEN = []
+
+
+    class Box:
+        __slots__ = ("count",)
+
+        def __init__(self):
+            self.count = 0.0
+
+
+    BOX = Box()
+
+
+    def note(value):
+        SEEN.append(value)
+        return value
+    """,
+            "installed_noted/kernels.py": _HEADER
+            + """
+    from installed_noted.helpers import BOX, note
+
+
+    def noted(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
+        for i in y.dom:
+            y[i] = note(x[i])
+
+
+    def counted(y: Arr[Fin[1], Real]):
+        BOX.count = BOX.count + 1.0
+        y[0] = BOX.count
+    """,
+        }
+    )
+    module = load("installed_noted.kernels")
+    with pytest.raises(TraceError, match="changed the global list 'SEEN'"):
+        term_of(module.noted)
+    with pytest.raises(TraceError, match="changed the attribute 'count' of 'BOX'"):
+        term_of(module.counted)
+
+
+def test_another_installed_package_is_still_a_library(site_packages) -> None:
+    # Its print is not the body's while another package's kernel is traced,
+    # and is when a kernel of its own is: the location was only passed over,
+    # not disabled for good.
+    load = site_packages(
+        {
+            "installed_loud/__init__.py": """\
+    def shout(value):
+        print(value)
+        return value
+    """,
+            "installed_loud/kernels.py": _HEADER
+            + """
+    from installed_loud import shout
+
+
+    def loud(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
+        for i in y.dom:
+            y[i] = shout(x[i])
+    """,
+            "installed_quiet/__init__.py": "",
+            "installed_quiet/kernels.py": _HEADER
+            + """
+    from installed_loud import shout
+
+
+    def quiet(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
+        for i in y.dom:
+            y[i] = shout(x[i])
+    """,
+        }
+    )
+    quiet = load("installed_quiet.kernels").quiet
+    loud = load("installed_loud.kernels").loud
+    (stmt,) = term_of(quiet).stmts
+    assert render(stmt.expr) == "x[i]"
+    with pytest.raises(TraceError, match=r"calls print\(\) at __init__.py:"):
+        term_of(loud)
+
+
+def test_library_code_is_decided_by_module() -> None:
+    from loopty.trace import _library, _Own
+
+    own = _Own("mykernels.stencil", "mykernels")
+    site = "/opt/site-packages"
+    assert not _library("mykernels.helpers", f"{site}/mykernels/helpers.py", own)
+    assert _library("numpy.linalg", "/src/numpy/linalg.py", own)
+    assert _library("logging", "/src/logging/__init__.py", own)
+    # A kernel defined in a module of loopty's own is only that module.
+    inside = _Own("loopty.examples", None)
+    assert not _library("loopty.examples", "/src/loopty/examples.py", inside)
+    assert _library("loopty.trace", "/src/loopty/trace.py", inside)
+
+
+# }}}

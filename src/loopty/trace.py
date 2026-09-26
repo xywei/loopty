@@ -55,10 +55,12 @@ of them. So a symbolic array refuses to be used whole (``y[:] = ...``,
 ``x * 2``, ``for v in x``, a numpy function of it), with the loop nest that
 does the same one cell at a time as the fix. And :func:`trace` copies the state
 the body's code reaches by name outside itself (module globals, closure cells,
-defaults, one level into the containers and objects they hold, and the same
-for the helpers it calls) and compares it once the body has run; a change is
-refused, and so is a call that prints, reads input, opens a file or draws a
-random number, which :class:`_CallWatch` sees through ``sys.monitoring``.
+defaults, one level into the containers, arrays and objects they hold, and the
+same for the helpers it calls) and compares it once the body has run; a change
+is refused, and so is a call that prints, reads input, opens a file or draws a
+random number, which :class:`_CallWatch` sees through ``sys.monitoring``. Code
+is the kernel author's or a library's by its module (:func:`_library`), so a
+kernel installed into site-packages is watched like one in a source tree.
 State hidden deeper than that is what the faithfulness fact is for; see
 :mod:`loopty.faithful`.
 """
@@ -82,6 +84,7 @@ from types import (
     BuiltinFunctionType,
     CodeType,
     FunctionType,
+    MemberDescriptorType,
     MethodType,
     ModuleType,
     SimpleNamespace,
@@ -457,6 +460,9 @@ class Tracer:
         #: every name of a constraint as an integer, so a comparison naming
         #: anything else is not stated as one; see :func:`constraints_of`.
         self.integers: set[str] = set()
+        #: The kernel's own code, which is watched and followed wherever it is
+        #: installed; see :class:`_Own`. :func:`trace` sets it.
+        self.own: _Own | None = None
 
     # {{{ loops
 
@@ -1076,8 +1082,9 @@ def _library_roots() -> tuple[str, ...]:
     """The directories whose code belongs to a library and not to a kernel.
 
     The packages of :data:`_LIBRARIES`, found without importing them, and the
-    standard library and site-packages directories. A kernel's own file, and
-    a helper next to it, are in none of them.
+    standard library and site-packages directories. A kernel in a source tree,
+    and a helper next to it, are in none of them; a kernel installed into
+    site-packages is in one, and :func:`_library` exempts it by its module.
     """
     roots: list[str] = []
     for name in _LIBRARIES:
@@ -1096,7 +1103,12 @@ def _library_roots() -> tuple[str, ...]:
 
 @functools.lru_cache(maxsize=4096)
 def _library_file(filename: str) -> bool:
-    """Whether code from ``filename`` is a library's rather than the kernel's."""
+    """Whether code from ``filename`` is in a library's directory.
+
+    That is a question about the path alone. A kernel installed into
+    site-packages is in one, and is still the kernel's code; :func:`_library`
+    is the question every check asks, and it asks this one last.
+    """
     if filename.startswith("<frozen"):
         return True
     if filename.startswith("<"):
@@ -1107,18 +1119,99 @@ def _library_file(filename: str) -> bool:
     )
 
 
-def _user_object(value: Any) -> bool:
+def _machinery_module(module: str | None) -> bool:
+    """Whether ``module`` belongs to :data:`_LIBRARIES` or the standard library.
+
+    Decided by the name of its top-level package, whatever directory it was
+    imported from. No kernel is written in one of these, so their code is
+    machinery for every trace.
+    """
+    if not module:
+        return False
+    top = module.partition(".")[0]
+    return top in _LIBRARIES or top in sys.stdlib_module_names
+
+
+@dataclass(frozen=True)
+class _Own:
+    """The kernel's own code, which is never a library's, wherever it is installed.
+
+    ``module`` is the name of the module the body is defined in, and
+    ``package`` the top-level package holding it, or ``None`` when that package
+    is machinery (:func:`_machinery_module`), whose other modules stay
+    machinery. A kernel installed into site-packages by a non-editable install
+    lives in a library's directory, and it is still the kernel's code: its
+    calls are watched, the helpers of its package followed and the objects of
+    its classes copied, as they are for a kernel in a source tree.
+    """
+
+    module: str
+    package: str | None
+
+    def holds(self, module: str | None) -> bool:
+        """Whether code of ``module`` is the kernel's own."""
+        if not module:
+            return False
+        if module == self.module:
+            return True
+        package = self.package
+        return package is not None and (
+            module == package or module.startswith(package + ".")
+        )
+
+
+def _own_of(function: Any) -> _Own | None:
+    """The kernel code of ``function``: its module, and the package holding it."""
+    if isinstance(function, MethodType):
+        function = function.__func__
+    namespace = getattr(function, "__globals__", None)
+    module = namespace.get("__name__") if isinstance(namespace, dict) else None
+    if not isinstance(module, str) or not module:
+        return None
+    package = None if _machinery_module(module) else module.partition(".")[0]
+    return _Own(module, package)
+
+
+def _library(module: str | None, filename: str | None, own: _Own | None) -> bool:
+    """Whether code of ``module``, in ``filename``, is a library's for this trace.
+
+    Decided by module. The kernel's own module and the package holding it
+    (``own``) are never a library's; :data:`_LIBRARIES` and the standard
+    library always are; anything else is a library's when its file is in a
+    library's directory (:func:`_library_file`), which is where a third-party
+    package installed next to the kernel lives. Code whose module is not known
+    is judged by its file alone.
+    """
+    if own is not None and own.holds(module):
+        return False
+    if _machinery_module(module):
+        return True
+    return filename is not None and _library_file(filename)
+
+
+def _module_of_function(function: Any) -> str | None:
+    """The module a function's code runs in, by its globals."""
+    namespace = getattr(function, "__globals__", None)
+    module = namespace.get("__name__") if isinstance(namespace, dict) else None
+    return module if isinstance(module, str) else None
+
+
+def _user_object(value: Any, own: _Own | None = None) -> bool:
     """Whether ``value`` is an object of the kernel author's, with attributes.
 
     Modules, classes, functions and code are not, and neither is an object of
     a library's type (a lanky sort, a numpy array, a ``logging.Logger``, an
-    object from site-packages): its attributes are the library's business, and
-    may change while a body is traced without the body having done anything,
-    as a logger's level cache does on its first ``debug`` call. A type is a
-    library's when the module defining it is in :data:`_LIBRARIES` or its file
-    is under :func:`_library_roots`. A :class:`types.SimpleNamespace` is the
+    object from a third-party package): its attributes are the library's
+    business, and may change while a body is traced without the body having
+    done anything, as a logger's level cache does on its first ``debug`` call.
+    A type is a library's when the module defining it is (:func:`_library`),
+    so a class of the kernel's own package (``own``) is the author's wherever
+    the package is installed. A :class:`types.SimpleNamespace` is the
     exception: a bag of attributes with no machinery of its own, so what it
     holds is exactly what the kernel author put there.
+
+    Attributes are what :func:`_attributes` reads, the ``__dict__`` and the
+    slots, so an object of a class with ``__slots__`` counts.
     """
     if isinstance(
         value, ModuleType | type | FunctionType | MethodType | BuiltinFunctionType
@@ -1127,16 +1220,55 @@ def _user_object(value: Any) -> bool:
     if type(value) is SimpleNamespace:
         return True
     module = getattr(type(value), "__module__", None) or ""
-    if module == "builtins" or module.split(".")[0] in _LIBRARIES:
+    if module == "builtins":
         return False
     defined_in = getattr(sys.modules.get(module), "__file__", None)
-    if isinstance(defined_in, str) and _library_file(defined_in):
+    if _library(module, defined_in if isinstance(defined_in, str) else None, own):
         return False
+    return _attributes(value) is not None
+
+
+def _attributes(value: Any) -> dict[str, Any] | None:
+    """The attributes ``value`` keeps, in its ``__dict__`` and in its slots.
+
+    Every slot named along the class's MRO is read through the member
+    descriptor its class defines, under its mangled name when it is private
+    (``__slots__ = ("__n",)`` in ``class Box`` keeps ``_Box__n``), and one that
+    is not set is left out. ``None`` when the object keeps attributes in
+    neither place, as an ``object()`` or a number does.
+    """
+    out: dict[str, Any] = {}
+    found = False
     try:
-        vars(value)
+        out.update(vars(value))
+        found = True
     except TypeError:
-        return False
-    return True
+        pass
+    for cls in type(value).__mro__:
+        slots = cls.__dict__.get("__slots__")
+        if slots is None:
+            continue
+        found = True
+        for slot in (slots,) if isinstance(slots, str) else slots:
+            if slot in ("__dict__", "__weakref__"):
+                continue
+            name = _mangled(cls, slot)
+            descriptor = cls.__dict__.get(name)
+            if not isinstance(descriptor, MemberDescriptorType):
+                continue
+            try:
+                out.setdefault(name, descriptor.__get__(value, cls))
+            except AttributeError:
+                continue
+    return out if found else None
+
+
+def _mangled(cls: type, name: str) -> str:
+    """``name`` as Python stores it in ``cls``: ``__n`` in ``Box`` is ``_Box__n``."""
+    stem = cls.__name__.lstrip("_")
+    if name.startswith("__") and not name.endswith("__") and stem:
+        return f"_{stem}{name}"
+    return name
 
 
 @dataclass
@@ -1206,21 +1338,25 @@ def _read_cell(cell: Any) -> Any:
         return _UNBOUND
 
 
-def _outside(function: Any, owned: Collection[int]) -> _Outside:
+def _outside(
+    function: Any, owned: Collection[int], own: _Own | None = None
+) -> _Outside:
     """Copy the state the body's code reaches by name outside the trace.
 
     The roots are the globals the code of ``function`` names (with the code of
     the functions defined inside it, and whether the module binds them yet or
     not), its closure cells and its default values, and the same for every
     function of the kernel author's that those hold, :data:`_HELPER_DEPTH`
-    levels deep: a helper keeping a counter in its module is state too. Each
-    value is copied one level deep, as the loop snapshot is: a list, dict or
-    set shallowly, looking through tuples, a numpy array (or the buffer of an
-    :class:`~loopty.arr.Arr`) cell by cell, and an object of the kernel
-    author's (:func:`_user_object`) by its attributes, with a list, dict, set
-    or array an attribute holds copied as well. A container or object reached
-    twice is copied once, and one the tracer keeps for itself (``owned``) not
-    at all.
+    levels deep: a helper keeping a counter in its module is state too. A
+    function is the author's when its module is not a library's for this trace
+    (:func:`_library`, with ``own`` the kernel's own code). Each value is
+    copied one level deep, as the loop snapshot is: a list, dict or set
+    shallowly, looking through tuples, a numpy array cell by cell (an
+    :class:`~loopty.arr.Arr` by its buffer, and a ragged one by its offsets as
+    well), and an object of the kernel author's (:func:`_user_object`) by its
+    attributes, slots included, with a list, dict, set or array an attribute
+    holds copied as well. A container or object reached twice is copied once,
+    and one the tracer keeps for itself (``owned``) not at all.
 
     A numpy array is copied whole, because a write into it is an effect the
     compiled kernel never makes even when no output reads it back, which the
@@ -1254,21 +1390,35 @@ def _outside(function: Any, owned: Collection[int]) -> _Outside:
                 seen.add(id(value))
                 held.append(_Held(label, root, scope, value, kind(value)))
                 return
-        buffer = value.numpy() if isinstance(value, Arr) else value
-        if isinstance(buffer, np.ndarray):
-            if id(buffer) not in seen:
-                seen.add(id(buffer))
-                buffers.append(_Held(label, root, scope, buffer, buffer.copy()))
+        if isinstance(value, Arr):
+            # A ragged array keeps two buffers, and a write into its offsets
+            # moves where every row starts.
+            parts = [(label, value.numpy())]
+            if value.is_ragged:
+                parts.append((f"{label}.offsets", value.offsets))
+        elif isinstance(value, np.ndarray):
+            parts = [(label, value)]
+        else:
+            parts = []
+        if parts:
+            for part_label, buffer in parts:
+                if id(buffer) not in seen:
+                    seen.add(id(buffer))
+                    buffers.append(
+                        _Held(part_label, root, scope, buffer, buffer.copy())
+                    )
             return
         if isinstance(value, MethodType):
             value = value.__func__
         if isinstance(value, FunctionType):
-            if depth < _HELPER_DEPTH and not _library_file(value.__code__.co_filename):
+            if depth < _HELPER_DEPTH and not _library(
+                _module_of_function(value), value.__code__.co_filename, own
+            ):
                 pending.append((value, depth + 1))
             return
-        if level == 0 and _user_object(value):
+        if level == 0 and _user_object(value, own):
             seen.add(id(value))
-            attributes = dict(vars(value))
+            attributes = _attributes(value) or {}
             objects.append(_Attributes(label, root, scope, value, attributes))
             for attribute, item in attributes.items():
                 visit(item, f"{label}.{attribute}", root, scope, 1, depth)
@@ -1381,7 +1531,7 @@ def _outside_changes(outside: _Outside, tracer: Tracer) -> list[_Change]:
     for entry in outside.objects:
         if (entry.scope, entry.root) in rebound:
             continue
-        now = vars(entry.obj)
+        now = _attributes(entry.obj) or {}
         for attribute in dict.fromkeys([*entry.copy, *now]):
             before = entry.copy.get(attribute, _UNBOUND)
             after = now.get(attribute, _UNBOUND)
@@ -1519,12 +1669,16 @@ class _CallWatch:
 
     One tool id is taken, the first of :data:`IDS` that nothing holds, the
     first time a body is traced, and kept. Its ``CALL`` events are on only
-    while a trace runs. A call made from a library's code (see
-    :func:`_library_file`) is never the body's, and its location is disabled
-    for good, so that the tracer's own calls cost nothing after the first
-    trace. A call from the kernel author's code that has an effect
-    (:func:`_effect_of`) is recorded on the tracer, and :func:`trace` refuses
-    it once the body has run.
+    while a trace runs. A call made from a library's code is never the body's.
+    Which code is a library's is decided by the module the calling frame runs
+    in (:func:`_library`), so the kernel's own module and package are watched
+    even when they are installed into site-packages. A call location in
+    :data:`_LIBRARIES` or the standard library is disabled for good, so that
+    the tracer's own calls cost nothing after the first trace; one in another
+    installed package is only passed over, because that package may hold the
+    kernel of a later trace, and a disabled location stays disabled. A call
+    from the kernel author's code that has an effect (:func:`_effect_of`) is
+    recorded on the tracer, and :func:`trace` refuses it once the body has run.
 
     Without a free tool id nothing is watched, and the faithfulness fact is
     what remains.
@@ -1573,8 +1727,19 @@ class _CallWatch:
             tracer = current_tracer()
             if tracer is None or tracer.thread != threading.get_ident():
                 return None
-            if _library_file(code.co_filename):
-                return sys.monitoring.DISABLE
+            # The frame one below this callback is the one making the call.
+            frame = sys._getframe(1)
+            module = (
+                frame.f_globals.get("__name__") if frame.f_code is code else None
+            )
+            if not isinstance(module, str):
+                module = None
+            if _library(module, code.co_filename, tracer.own):
+                if _machinery_module(module) or code.co_filename.startswith(
+                    "<frozen"
+                ):
+                    return sys.monitoring.DISABLE
+                return None
             effect = _effect_of(function, first)
             if effect is not None:
                 tracer.effects.append((effect, _call_location(code, offset)))
@@ -2770,7 +2935,8 @@ def trace(kernel: Any, arg_types: Any) -> Term:
     post_annotation = types.pop("return", None)
 
     tracer = Tracer(name, types)
-    outside = _outside(function, tracer._owned())
+    tracer.own = _own_of(function)
+    outside = _outside(function, tracer._owned(), tracer.own)
     arguments: list[Any] = []
     params: list[tuple[str, Any]] = []
     for parameter, annotation in types.items():
