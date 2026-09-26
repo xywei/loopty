@@ -99,6 +99,53 @@ The rejection names two real instances of the kernel, not an empty set or a
 failed pattern match. It is the pair a person would find by hand, at sizes the
 message states, because which violating pair isl picks depends on them.
 
+And an array's index set need not be a box. One value per pair of particles is
+an array over the lower triangle, and the triangle is its type:
+
+```python
+@kernel
+def pairs(
+    x: Arr[Fin[n], Real],
+    y: Arr[Fin[n], Real],
+    q: Arr[Fin[n], Real],
+    f: Arr[Where[i: Fin[n], j: Fin[n], j < i], Real],
+    e: Arr[Fin[n], Real],
+):
+    for i in f.dom:
+        for j in f.dom[i]:
+            dx = x[i] - x[j]
+            dy = y[i] - y[j]
+            f[i, j] = q[i] * q[j] / (1.0 + dx * dx + dy * dy)
+    for p in e.dom:
+        e[p] = reduce_sum(f[p, j] for j in f.dom[p]) + reduce_sum(
+            f[k, p] for k in e.dom if k > p
+        )
+```
+
+`Where` takes binders, written as slices, and then the constraints that cut
+their box; `Sigma[i: Fin[n], Fin[i + 1]]` is a sum with affine fibers, and
+`Fin[n] + Fin[m]` a union of pieces. Every in-bounds obligation is decided over
+the exact set:
+
+```console
+$ lanky check examples/pairs.py
+STATUS   BY           WHERE        OWNER  STATEMENT
+-------  -----------  -----------  -----  ------------------------------------------------------
+decided  isl          pairs.py:78  pairs  f[i, j] is in bounds for every instance of S0
+...
+decided  isl          pairs.py:80  pairs  f[p, j] is in bounds for every instance of S1
+decided  isl          pairs.py:80  pairs  f[k, p] is in bounds for every instance of S1
+...
+16 facts: 15 decided, 1 tested
+```
+
+`f[k, p]` is read under `k > p`, which makes `(k, p)` a point of the triangle,
+while `f[p, p]` would be refused although the `n x n` box around the triangle
+has the cell. How `f` is stored is a separate choice that changes no fact:
+`Schedule(pairs)` keeps it in that box, and `Schedule(pairs).pack("f")` keeps
+its cells and no others, row after row, read as `f[off_f[i] + j]` through a
+table of row starts. Both compiled runs agree with the native one.
+
 ## What nothing else does
 
 - **The ragged shape is a type, and it is the *same* type isl reasons about.** A
@@ -143,6 +190,12 @@ message states, because which violating pair isl picks depends on them.
   That the trace *is* the body is checked too, not assumed: every kernel's
   ledger has a `trace-faithful` fact, the traced term interpreted and compared
   with the native run, bit for bit when the output is `exact`.
+- **The index set of an argument is a type, and not a box.** An array over the
+  lower triangle, a band, a sum with affine fibers or a union of pieces is
+  written as that set, `Arr[Where[i: Fin[n], j: Fin[n], j < i], Real]`, and its
+  in-bounds obligations are decided over the set itself, so a cell of the
+  bounding box outside it is refused. Where the cells are kept is a layout,
+  boxed or packed, chosen by a schedule step, and changes no fact.
 - **It plugs into a proof host.** loopty registers a theory, an isl oracle, an
   executor and a `run` verb with [lanky](https://github.com/xywei/lanky), so a
   residual obligation an oracle cannot decide is an ordinary theorem a person can
@@ -222,13 +275,28 @@ end to end; the edges are sharp.
   an argument of the kernel; the target is chosen by the schedule
   (`Schedule(kernel, target="opencl")`) or by the executor
   (`LoopyExecutor(target="opencl")`).
+- Array arguments over polyhedral domains (`loopty.domain`): `Where[...]`,
+  binders written as slices and then the comparisons that cut their box,
+  joined by `&`; `Sigma[...]`, binders and an unnamed last fiber affine in
+  them; and a union of pieces, `Fin[n] + Fin[m]` (lanky's `SumType`). `.dom`
+  runs binder by binder, `L.dom[i]` over the points the constraints allow at
+  `i` (a fiber at a point outside the domain is empty), and a union's pieces
+  by number, which a trace runs as the Python loop it is. The in-bounds
+  obligations are decided over the exact set. An argument over other points
+  is refused at every entry point, and so is a plain `ndarray`. Both layouts
+  lower and run on the C target: the box of the binders, addressed by loopy,
+  and packed rows through a table of row starts (`Schedule.pack`), which the
+  executor computes from the domain and passes. `Arr.zeros(domain, n=...,
+  storage=...)` and `Arr.from_cells` build such an array, and `Arr.cells()`
+  reads it in one order whatever its layout. `examples/pairs.py` is the demo.
 - The argument contract, enforced at every entry point that runs a kernel
   (compiled, differential and native): two distinct array parameters may not
   share storage, a ragged argument has to agree with the counts array its type
-  names and with any offsets passed alongside it, and a value of a refined sort
-  such as `Fin[m]` has to be one — an array element and a scalar argument
-  alike, and being one means being a finite whole number in range, not merely
-  passing two comparisons. These are the assumptions the typing
+  names and with any offsets passed alongside it, an argument over a domain has
+  to have the declared domain's points at the sizes of the call, and a value
+  of a refined sort such as `Fin[m]` has to be one — an array element and a
+  scalar argument alike, and being one means being a finite whole number in
+  range, not merely passing two comparisons. These are the assumptions the typing
   rules make about a *call* rather than about the term, and a violation is a
   `ValueError` naming the argument. Distinct parameters being disjoint storage
   is the load-bearing one: dependences are computed per array name, so a kernel
@@ -264,6 +332,16 @@ end to end; the edges are sharp.
   id as an assumption and names it in an `UNRESOLVED` line.
 - Only a two-axis (row, fiber) ragged array lowers. A deeper dependent sum
   raises.
+- A polyhedral domain is an array's whole index set, so it cannot sit beside
+  a dense axis (`Arr[Fin[k], Where[...], Real]` is refused; write the axis as
+  a binder of the domain). The pieces of a union have the same number of axes,
+  and a piece is chosen by a Python integer, never by a loop variable. A
+  constraint is a conjunction of comparisons: `!=` and `|` are refused rather
+  than widened (write a union instead), and the packed layout refuses a domain
+  whose rows skip columns (a remainder in a constraint). Natively, an array
+  over a domain enumerates its points with isl when it is built and checks
+  each access against them in Python, and a compiled run whose layout is not
+  the argument's copies the array into it and back.
 - A reduction nested in another one cannot take its bound from the outer
   binder when that bound is not affine:
   `reduce_sum(reduce_sum(val[q, j] for j in val.dom[q]) for q in val.dom)` is
@@ -394,8 +472,9 @@ dependences are plain maps and the checker is a handful of isl calls.
 
 **Index types carry shape.** `Fin[n]` is an index type, `Fin[a*b]` normalizes to
 `Fin[a] x Fin[b]`, and a ragged axis is a dependent sum whose bound is another
-array's entry. `Layout` and `RaggedLayout` are the maps from index space to
-storage.
+array's entry. An array's index set may also be a polyhedral domain, an isl set
+it is compared with exactly. `Layout` and `RaggedLayout` are the maps from index
+space to storage, and a domain's box and its packed rows are two more.
 
 **Evaluate annotations, trace bodies.** No Python parser and no AST pass.
 Annotations are evaluated with lanky's scope, and the body is run once against
@@ -428,7 +507,7 @@ loopty is loop + ty, for types: loops, typed. It follows `loopy`, `sumpy`, and
 
 - [docs/quickstart.md](docs/quickstart.md): the two demos end to end, with the
   output the commands actually print.
-- [examples/README.md](examples/README.md): all five demos, with every console
+- [examples/README.md](examples/README.md): all six demos, with every console
   block regenerated by `scripts/refresh_example_outputs.py`.
 - [docs/device-runs.md](docs/device-runs.md) and
   [docs/device-runs/](docs/device-runs/): the demos run on real OpenCL devices,

@@ -32,7 +32,14 @@ EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 #: Every demo. A demo whose ledger has an ``assumed`` fact is not a failure: a
 #: postcondition nobody can decide yet is exactly what the ledger is for. A
 #: ``refuted`` one is, and every demo here is meant to come out clean.
-NAMES = ("spmv", "stencil_skew", "wavefront_acoustic", "reshape_layouts", "p2p")
+NAMES = (
+    "spmv",
+    "stencil_skew",
+    "wavefront_acoustic",
+    "reshape_layouts",
+    "p2p",
+    "pairs",
+)
 
 _RESULTS: dict[tuple[str, str], tuple[Any, list[dict]]] = {}
 _MODULES: dict[str, Any] = {}
@@ -134,6 +141,7 @@ KERNELS = {
     "wavefront_acoustic": {"acoustic"},
     "reshape_layouts": {"rows_of", "cols_of", "transpose"},
     "p2p": {"p2p"},
+    "pairs": {"pairs"},
 }
 
 
@@ -550,6 +558,45 @@ def test_the_guarded_self_interaction_is_left_out_of_the_sum() -> None:
         for target in range(len(offsets) - 1)
         for a in range(offsets[target], offsets[target + 1])
     ), "the demo is pointless unless some list contains its own target"
+
+
+# }}}
+
+
+# {{{ the pair interactions over the triangle
+
+
+def test_every_in_bounds_obligation_of_the_pairs_is_decided_by_isl() -> None:
+    # Over the exact triangle: the row f[p, j], and the column f[k, p] read
+    # under k > p, which only the domain, and not its box, makes a point.
+    _result, facts = _invoke("pairs", "check")
+    in_bounds = [fact for fact in facts if fact["kind"] == "in-bounds"]
+    assert in_bounds
+    assert {fact["status"] for fact in in_bounds} == {"decided"}
+    assert {fact["decided_by"] for fact in in_bounds} == {"isl"}
+    statements = {fact["statement"] for fact in in_bounds}
+    assert "f[k, p] is in bounds for every instance of S1" in statements
+
+
+def test_the_pairs_run_in_both_layouts_and_both_agree() -> None:
+    result, facts = _invoke("pairs", "run")
+    assert result.returncode == 0, result.stdout + result.stderr
+    agreements = sorted(
+        fact["id"] for fact in facts if fact["kind"] == "agreement"
+    )
+    assert agreements == ["agreement:pairs[c]", "agreement:pairs[c].pack('f')"]
+
+
+def test_the_packed_pairs_keep_the_triangle_and_no_more() -> None:
+    module = _module("pairs")
+    boxed = module.scene()["f"]
+    packed = module.scene(storage="packed")["f"]
+    particles = module.PARTICLES
+    assert boxed.numpy().size == particles * particles
+    assert packed.numpy().size == particles * (particles - 1) // 2
+    data = module.scene(storage="packed")
+    module.pairs(**data)
+    assert np.allclose(data["e"].numpy(), module.dense(data))
 
 
 # }}}
