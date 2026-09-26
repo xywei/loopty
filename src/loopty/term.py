@@ -24,6 +24,8 @@ import islpy as isl
 import pymbolic.primitives as prim
 
 __all__ = [
+    "COUNT_PARAM",
+    "COUNT_PARAM_REFLECTED",
     "OFFSETS_CANDIDATES",
     "Access",
     "ArrType",
@@ -31,6 +33,7 @@ __all__ = [
     "Reduction",
     "Stmt",
     "Term",
+    "count_param_names",
     "declared_layout",
     "declared_offsets",
     "free_name_sorts",
@@ -50,6 +53,34 @@ Expression = Any
 #: read, and the native run and the interpreter, which index through the same
 #: array (:func:`declared_layout`).
 OFFSETS_CANDIDATES = ("off_{counts}", "{counts}_off", "off")
+
+#: How a ragged loop bound appears as a parameter of a statement domain: the
+#: counts name, an underscore, and the enclosing iname. For a loop over
+#: ``val.dom[r]`` of ``val: Arr[Fin[n], Fin[cnt], Real]`` that is ``cnt_r``, and
+#: lowering assigns it ``off[r+1] - off[r]`` (or ``cnt[r]`` when the counts array
+#: itself is a parameter) in a scalar temporary inside the ``r`` loop. It lives
+#: here, with :data:`COUNT_PARAM_REFLECTED`, because two modules recognize it:
+#: lowering, which assigns the parameter, and :mod:`loopty.flow`, which lists
+#: the read that assignment makes.
+COUNT_PARAM = "{counts}_{iname}"
+
+#: The same bound as the tracer spells it when it reflects the non-affine term
+#: ``cnt[r]`` into a fresh isl parameter (see ``loopty.idx``). Both spellings are
+#: recognized, so that a hand-written term and a traced one lower the same way.
+#:
+#: It is a spelling and not the definition. A traced term records what it
+#: actually allocated on :attr:`Term.reflected`, which is where a parameter that
+#: had to be suffixed to dodge a collision is found; this pattern is the
+#: fallback for a term written by hand, which records nothing.
+COUNT_PARAM_REFLECTED = "nl_{counts}_{iname}"
+
+
+def count_param_names(counts: str, iname: str) -> tuple[str, ...]:
+    """Every spelling of one ragged bound parameter, most direct first."""
+    return (
+        COUNT_PARAM.format(counts=counts, iname=iname),
+        COUNT_PARAM_REFLECTED.format(counts=counts, iname=iname),
+    )
 
 
 def declared_offsets(params: Iterable[tuple[str, Any]], counts: str) -> str | None:
@@ -240,8 +271,7 @@ class Term:
     builds another isl set about this term, or that has to read ``cnt[r]`` back
     out of a domain parameter, has to be told what was allocated instead of
     guessing from the spelling. A term written by hand leaves it empty and is
-    read by spelling, which is what :data:`loopty.lower.COUNT_PARAM_REFLECTED`
-    is for.
+    read by spelling, which is what :data:`COUNT_PARAM_REFLECTED` is for.
     """
 
     name: str

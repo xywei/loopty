@@ -55,7 +55,7 @@ decided                           type           spmv.py:112  spmv           the
 tested                            interpreter    spmv.py:102  spmv           the traced term computes what the body computes
 assumed under scan:postcondition  -              spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
 ...
-19 facts: 2 assumed, 14 decided, 3 tested
+20 facts: 2 assumed, 15 decided, 3 tested
 ```
 
 Look at the `x[col[r, j]]` row, and at what decided it. That indirection is the
@@ -187,10 +187,14 @@ end to end; the edges are sharp.
   agreement and `refuted` with the input and the first differing cell, which
   is where state hidden past every check above shows up.
 - Typing rules and the ledger: in-bounds by isl or by type, write disjointness,
-  ordering, reduction exactness, postconditions. A ragged access's reads of the
-  offsets it is flattened through, when the kernel declares them, are accesses
-  like any other: in-bounds obligations, and dependences every cast is checked
-  against.
+  ordering, reduction exactness, postconditions. The reads a ragged layout
+  makes are accesses like any other, in-bounds obligations and dependences
+  every cast is checked against: the start of the row a ragged access is
+  flattened through (`off[r]`, when the kernel declares the offsets), and the
+  length of the row a loop over a ragged fiber runs to (`cnt[r]`, which the
+  lowered code reads once per row). Each is listed where the lowered code
+  reads it and nowhere else, so a kernel that writes its counts or its offsets
+  is ordered against exactly the rows that use them.
 - One meaning for a kernel that writes its own layout. The native run and the
   term interpreter read a ragged array through the counts and offsets the
   kernel declares, as the kernel has left them, which is what the lowered code

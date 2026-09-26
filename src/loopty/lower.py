@@ -28,7 +28,9 @@ the C loop a CSR product wants. Naming that parameter is the one piece of
 vocabulary shared between the tracer, which builds the domains, and this module,
 which reads them: :data:`COUNT_PARAM` is the direct spelling and
 :data:`COUNT_PARAM_REFLECTED` the one the tracer produces when it reflects the
-non-affine term ``cnt[r]`` into a fresh isl parameter. Both are recognized.
+non-affine term ``cnt[r]`` into a fresh isl parameter. Both are recognized, by
+:func:`loopty.flow.ragged_bound_params`, which is also how the access collector
+lists the read the assignment makes; the spellings live in :mod:`loopty.term`.
 """
 
 from __future__ import annotations
@@ -47,13 +49,16 @@ from loopy.symbolic import Reduction as LoopyReduction
 from loopy.symbolic import set_to_cond_expr
 from pymbolic.mapper import Mapper
 
-from loopty.flow import statement_accesses
+from loopty.flow import ragged_bound_params, statement_accesses
 from loopty.term import (
+    COUNT_PARAM,
+    COUNT_PARAM_REFLECTED,
     Access,
     ArrType,
     Reduction,
     Stmt,
     Term,
+    count_param_names,
     declared_offsets,
     free_name_sorts,
     free_name_sorts_message,
@@ -79,23 +84,6 @@ __all__ = [
     "numpy_dtype",
     "target_for",
 ]
-
-#: How a ragged loop bound appears as a parameter of a statement domain: the
-#: counts name, an underscore, and the enclosing iname. For a loop over
-#: ``val.dom[r]`` of ``val: Arr[Fin[n], Fin[cnt], Real]`` that is ``cnt_r``, and
-#: lowering assigns it ``off[r+1] - off[r]`` (or ``cnt[r]`` when the counts array
-#: itself is a parameter) in a scalar temporary inside the ``r`` loop.
-COUNT_PARAM = "{counts}_{iname}"
-
-#: The same bound as the tracer spells it when it reflects the non-affine term
-#: ``cnt[r]`` into a fresh isl parameter (see ``loopty.idx``). Both spellings are
-#: recognized, so that a hand-written term and a traced one lower the same way.
-#:
-#: It is a spelling and not the definition. A traced term records what it
-#: actually allocated on :attr:`loopty.term.Term.reflected`, which is where a
-#: parameter that had to be suffixed to dodge a collision is found; this pattern
-#: is the fallback for a term written by hand, which records nothing.
-COUNT_PARAM_REFLECTED = "nl_{counts}_{iname}"
 
 _LANG_VERSION = (2018, 2)
 
@@ -146,34 +134,6 @@ class LoweringError(TypeError):
 def count_param_name(counts: str, iname: str) -> str:
     """The domain parameter standing for a ragged bound; see :data:`COUNT_PARAM`."""
     return COUNT_PARAM.format(counts=counts, iname=iname)
-
-
-def count_param_names(counts: str, iname: str) -> tuple[str, ...]:
-    """Every spelling of one ragged bound parameter, most direct first."""
-    return (
-        COUNT_PARAM.format(counts=counts, iname=iname),
-        COUNT_PARAM_REFLECTED.format(counts=counts, iname=iname),
-    )
-
-
-def _counts_subscript(
-    expr: Any, families: set[str], inames: set[str]
-) -> tuple[str, str] | None:
-    """``(counts, iname)`` if ``expr`` is ``cnt[r]`` for a counts array and iname."""
-    if not isinstance(expr, prim.Subscript):
-        return None
-    if not isinstance(expr.aggregate, prim.Variable):
-        return None
-    if expr.aggregate.name not in families:
-        return None
-    index = expr.index
-    if isinstance(index, tuple):
-        if len(index) != 1:
-            return None
-        index = index[0]
-    if not isinstance(index, prim.Variable) or index.name not in inames:
-        return None
-    return (expr.aggregate.name, index.name)
 
 
 # {{{ dtypes and targets
@@ -780,34 +740,18 @@ class _Builder:
     def ragged_bound_params(self) -> dict[str, tuple[str, str]]:
         """Domain parameters standing for a ragged bound: name -> counts, iname.
 
-        Two sources, because a term reaches here two ways. A term written by
-        hand spells the parameter, ``cnt_r`` or ``nl_cnt_r``, and is recognized
-        by :func:`count_param_names`. A traced term records what it allocated on
-        :attr:`loopty.term.Term.reflected`, and a parameter there is a ragged
-        bound when the term it stands for is a counts array subscripted by an
-        iname. The second source is what keeps a parameter that had to be
-        suffixed (because the readable spelling was taken) recognizable as the
-        row length it is, instead of being declared as a size argument nobody
-        passes.
+        :func:`loopty.flow.ragged_bound_params`, the recognition the access
+        collector lists the bound's read by, so that the parameter lowering
+        assigns and the read the rules check are recognized alike. It keeps
+        the bounds whose row is a loop variable of a statement, which are the
+        ones a scalar temporary inside that loop can hold.
         """
         if self._ragged_bounds is None:
-            self._ragged_bounds = self._compute_ragged_bounds()
+            # The counts families first: a ragged axis that names no counts
+            # array is refused here, with the reason, as it always was.
+            self.counts_families  # noqa: B018 - raises for an unnamed bound
+            self._ragged_bounds = ragged_bound_params(self.term)
         return self._ragged_bounds
-
-    def _compute_ragged_bounds(self) -> dict[str, tuple[str, str]]:
-        families = self.counts_families
-        out: dict[str, tuple[str, str]] = {}
-        for counts in families:
-            for stmt in self.term.stmts:
-                for iname in stmt.inames:
-                    for param in count_param_names(counts, iname):
-                        out.setdefault(param, (counts, iname))
-        inames = {iname for stmt in self.term.stmts for iname in stmt.inames}
-        for symbol, expr in self.term.reflected:
-            pair = _counts_subscript(expr, set(families), inames)
-            if pair is not None:
-                out.setdefault(symbol, pair)
-        return out
 
     def count_param_spellings(self, counts: str, iname: str) -> tuple[str, ...]:
         """Every name this one ragged bound could go by, most direct first."""

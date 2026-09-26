@@ -132,20 +132,23 @@ decided                           isl            spmv.py:112  spmv           y[r
 decided                           isl            spmv.py:112  spmv           val[r, j] is in bounds for every instance of S0
 decided                           type           spmv.py:112  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
 decided                           isl            spmv.py:112  spmv           col[r, j] is in bounds for every instance of S0
+decided                           isl            spmv.py:112  spmv           cnt[r], the length of row r that bounds the loop over j, is in bounds...
 decided                           isl            spmv.py:112  spmv           distinct instances of S0 write distinct cells of y
 decided                           isl            spmv.py:102  spmv           the source order runs every dependence forward in time
 decided                           type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
 tested                            interpreter    spmv.py:102  spmv           the traced term computes what the body computes
 assumed under scan:postcondition  -              spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
 
-19 facts: 2 assumed, 14 decided, 3 tested
+20 facts: 2 assumed, 15 decided, 3 tested
 ```
 
 Read the `BY` column.
 
 - `isl` decided the ordinary in-bounds and disjointness obligations, including
   the ragged ones: the bound of the fiber is a parameter and isl answers for
-  every value of it.
+  every value of it. The read that computes the bound is one of them too:
+  `cnt[r]` appears nowhere in the body, but the compiled loop over `j` runs to
+  it, so it is stated as the length of row `r` and checked like any read.
 - `type` decided two. `x[col[r, j]] is in bounds by type` is the indirection:
   the typing rule never called the oracle, because the element type of `col` is
   the index type of `x`. `the accumulation into y[r] over j is approx` is the
