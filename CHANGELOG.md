@@ -643,6 +643,18 @@ with a pair of statement instances.
   islpy 2026.
 - `lanky>=0.1.0.dev0` is a dependency, resolved from a sibling checkout by
   `[tool.uv.sources]` during development.
+- **A program's restatement of a callee's postcondition rests on the callee's
+  fact.** `Program.facts` pointed at the callee's postcondition with a `from`
+  entry in the provenance, which lanky had no way to read, so the ledger
+  showed each restatement as an assumption standing on its own. It now sets
+  lanky's `Fact.rests_on` to the id of that fact, built by the new
+  `loopty.typing.postcondition_id`, which the kernel's own postcondition fact
+  uses too, so the two cannot drift apart. The ledger names the callee's fact
+  beside the restatement, as in `assumed under scan:postcondition`, counts it
+  in what the restatement is worth, and `lanky check --json` carries
+  `rests_on`, `effective` and `under`. The `from` entry is gone; `callee`
+  stays. The `lanky check` transcripts of `examples/spmv.py` show the new row,
+  and this needs the lanky that has `Fact.rests_on`.
 
 ### Notes
 

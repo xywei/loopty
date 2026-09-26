@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from types import ModuleType
 
 import numpy as np
 import pytest
-from lanky.ledger import Status
+from lanky.ledger import Ledger, Status
 from lanky.plugins import registry
 from lanky.prelude import Nat, Real
 
 from loopty import Arr, Fin, kernel, program, when
 from loopty.kernel import Kernel, KernelTheory, Program
+
+KERNELS = Path(__file__).parent / "kernels"
 
 #: A module that re-exports the guard under another name, so that a body can
 #: reach it as an attribute without the identifier ``when`` appearing anywhere.
@@ -131,6 +135,42 @@ def test_a_program_runs_natively_and_records_its_callees_claims() -> None:
     assert [fact.kind for fact in facts] == ["postcondition-in-scope"]
     assert facts[0].status is Status.ASSUMED
     assert facts[0].owner.endswith("both")
+
+
+def test_a_programs_restatement_rests_on_the_callees_own_fact() -> None:
+    """``rests_on`` names the id the callee's postcondition fact really has.
+
+    It used to be a ``from`` entry in the provenance, which lanky could not
+    read, so the ledger showed the restatement as a free-standing assumption.
+    """
+    (restated,) = both.facts()
+    (post,) = [fact for fact in scan.facts() if fact.kind == "postcondition"]
+    assert restated.rests_on == (post.id,)
+    assert restated.provenance == {"callee": scan.qualname}
+
+    ledger = Ledger([*scan.facts(), restated])
+    assert ledger.support(restated).under == (post.id,)
+    assert ledger.support(restated).effective is Status.ASSUMED
+    # the kernel owns several facts, so the one meant is named by its id
+    lines = ledger.render().splitlines()
+    (row,) = [line for line in lines if "after scan(...)" in line]
+    assert row.startswith(f"assumed under {post.id}  ")
+
+
+def test_the_ledger_of_a_file_says_what_its_program_rests_on() -> None:
+    """Checked with its callees, a program's restatements name their facts."""
+    from lanky.check import check_path
+
+    ledger = check_path(KERNELS / "spmv_min.py")
+    (restated,) = [fact for fact in ledger if fact.kind == "postcondition-in-scope"]
+    (post,) = [fact for fact in ledger if fact.kind == "postcondition"]
+    assert restated.rests_on == (post.id,)
+    assert ledger.support(restated).under == (post.id,)
+    data = json.loads(ledger.to_json())
+    (row,) = [row for row in data if row["kind"] == "postcondition-in-scope"]
+    assert row["rests_on"] == [post.id]
+    assert row["under"] == [post.id]
+    assert row["effective"] == "assumed"
 
 
 def test_a_guard_is_found_under_an_aliased_import() -> None:
