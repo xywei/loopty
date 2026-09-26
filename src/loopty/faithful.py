@@ -26,7 +26,8 @@ The fact, of kind ``trace-faithful``, is
 * ``refuted`` at the first input that disagrees, with the input and the first
   differing cell, or with the error the term raised where the body ran, or
   with the :class:`~loopty.trace.TraceError` a native run of the body raised
-  (a ``when`` guard whose native value is an integer, say) where the term ran,
+  (a ``when`` guard whose native value is an integer, say), which refuses the
+  body's spelling on every input, whether or not the term ran,
 * ``assumed``, with the reason, when no input ran natively or when the term
   holds something the interpreter has no meaning for.
 
@@ -406,13 +407,21 @@ def _compare(
         except TraceError as exc:
             # Not an input the body refuses but a spelling it is refused for,
             # whatever the input: a guard such as ``~(i > 0)``, whose native
-            # value is a bitwise integer where the trace recorded ``not``.
+            # value is a bitwise integer where the trace recorded ``not``. So
+            # it refutes whether or not the term ran, and says which.
             error = f"{type(exc).__name__}: {exc}"
+            counterexample = {"input": label, "body raised": error}
+            if failure is None:
+                ran = "the traced term, interpreted, runs and "
+            else:
+                counterexample["term raised"] = (
+                    f"{type(failure).__name__}: {failure}"
+                )
+                ran = ""
             return "differ", (
-                {"input": label, "body raised": error},
-                f"on {label} the traced term, interpreted, runs and the body, "
-                "run natively, is refused, so the term is not what the body "
-                f"computes. {error}",
+                counterexample,
+                f"on {label} {ran}the body, run natively, is refused, so the "
+                f"term is not what the body computes. {error}",
             )
         except Exception as exc:  # noqa: BLE001 - an input the body refuses
             return "skipped", f"the body raised {type(exc).__name__}: {exc}"

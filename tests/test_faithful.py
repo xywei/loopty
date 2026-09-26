@@ -201,6 +201,28 @@ def test_a_guard_whose_native_value_is_an_integer_is_refuted() -> None:
     ]
 
 
+def test_a_native_refusal_refutes_where_the_term_raised_too() -> None:
+    # The interpreted term reads x[n] in the second loop, and the body never
+    # gets there: its first guard is refused at i = 0. The refusal is about
+    # the spelling, so the fact is refuted, and the reason does not claim that
+    # the term ran.
+    def flipped_then_shifted(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(~(i > 0)):
+                y[i] = 1.0
+        for i in y.dom:
+            y[i] = x[i + 1]
+
+    fact = faithful(flipped_then_shifted)
+    assert fact.status is Status.REFUTED, fact.provenance
+    counterexample = fact.provenance["counterexample"]
+    assert counterexample["body raised"].startswith("TraceError: the guard of")
+    assert counterexample["term raised"].startswith("IndexError")
+    reason = fact.provenance["reason"]
+    assert "the body, run natively, is refused" in reason
+    assert "interpreted, runs" not in reason
+
+
 # }}}
 
 
