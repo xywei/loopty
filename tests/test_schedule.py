@@ -221,17 +221,30 @@ def test_the_rows_read_after_the_scan_can_still_run_in_parallel() -> None:
 
 def test_a_reindexing_that_collapses_instances_is_rejected() -> None:
     # loopty ships no transformation that collapses an index space, which is
-    # exactly why the checker has to be asked: any Python function may produce a
-    # draft, and the bijection is decided about its output, not its code.
+    # exactly why the checker has to be asked: ``affine`` takes any map, and
+    # the bijection is decided about the map, not about who wrote it.
     schedule = Schedule(ht.jacobi_term())
-    draft = schedule._draft()
-    draft.constraints["S0"] = ["y1 = 0"]
-    draft.overridden["S0"] = {"i"}
     with pytest.raises(IllegalCast) as caught:
-        schedule._commit(draft, "flatten(i)")
+        schedule.affine("{ [t, i] -> [t2, i2] : t2 = t and i2 = 0 }")
     assert "not a bijection" in str(caught.value)
+    assert "not injective" in str(caught.value)
     assert caught.value.fact.kind == "bijective"
     assert caught.value.fact.status.value == "refuted"
+
+
+def test_a_reindexing_that_misses_instances_is_rejected() -> None:
+    # One for one on the instances it reaches, and none at all for the rest:
+    # the map would drop every step after the third from the program, which a
+    # bijectivity check on the map's own domain cannot see.
+    schedule = Schedule(ht.jacobi_term(), sizes={"nt": 8, "nx": 8})
+    with pytest.raises(IllegalCast) as caught:
+        schedule.affine("{ [t, i] -> [t2, i2] : t2 = t and i2 = i and t <= 2 }")
+    assert "not total" in str(caught.value)
+    fact = caught.value.fact
+    assert (fact.kind, fact.status.value) == ("bijective", "refuted")
+    # The witness is an instance of the statement the map does not reach.
+    statement, t, _i = fact.provenance["witness"]
+    assert statement == 0 and t > 2
 
 
 # }}}
@@ -346,6 +359,24 @@ def test_a_schedule_carries_its_example_inputs() -> None:
     assert Schedule(ht.spmv_term()).examples is None
 
 
+def test_a_new_loop_cannot_take_the_name_of_another_one() -> None:
+    # Splitting i with its inner half called j would make two loops of the
+    # transpose one: the checker's coordinates used to get j twice, and loopy
+    # then refused the split from inside.
+    with pytest.raises(ValueError, match="share its name"):
+        Schedule(ht.transpose_term()).split("i", 4, inner="j")
+    with pytest.raises(ValueError, match="share its name"):
+        Schedule(ht.transpose_term()).split("i", 4, outer="n")
+
+
+def test_skewing_or_tiling_a_loop_by_itself_is_refused() -> None:
+    schedule = Schedule(ht.jacobi_term())
+    with pytest.raises(ValueError, match="two different loops"):
+        schedule.skew("i", by="i")
+    with pytest.raises(ValueError, match="two different loops"):
+        schedule.tile("t", "t", 4, 4)
+
+
 def test_unknown_inames_are_refused_before_loopy_sees_them() -> None:
     schedule = Schedule(ht.transpose_term())
     with pytest.raises(ValueError, match="not an iname"):
@@ -368,6 +399,282 @@ def test_a_term_with_no_dependences_says_so_on_both_sides() -> None:
     schedule = Schedule(ht.transpose_term()).split("i", 4)
     note = schedule.facts()[0].provenance["dependences"]
     assert "none either" in note
+
+
+# {{{ affine maps
+
+#: The diamond coordinates, ``a = t + i`` and ``b = t - i``. The map has
+#: determinant -2, so its image is only the points of equal parity.
+DIAMOND = "{ [t, i] -> [a, b] : a = t + i and b = t - i }"
+
+#: Sizes that include a single interior point, an odd and an even extent, and
+#: more time levels than points and the other way round.
+STENCIL_SIZES = [(2, 3), (3, 3), (6, 6), (7, 9), (13, 4), (16, 16)]
+
+
+def _jacobi_input(nt: int, nx: int) -> np.ndarray:
+    u = np.zeros((nt, nx))
+    u[0] = np.random.default_rng(100 * nt + nx).standard_normal(nx)
+    return u
+
+
+def test_the_diamond_is_accepted_and_the_stencil_still_computes() -> None:
+    schedule = Schedule(ht.jacobi_term(), sizes={"nt": 16, "nx": 16}).affine(
+        DIAMOND
+    )
+    assert schedule.history == ("affine({ [t, i] -> [a = t + i, b = t - i] })",)
+    assert schedule.order == ("a", "b")
+    assert [(f.kind, f.status.value) for f in schedule.facts()] == [
+        ("bijective", "decided"),
+        ("monotone", "decided"),
+    ]
+    assert schedule.buildable == (True, "")
+
+    # The kernel loops over the image, which has holes: isl states it with the
+    # parity as an existentially quantified constraint, and the old loops are
+    # floor divisions of the new ones.
+    (domain,) = schedule.kernel.default_entrypoint.domains
+    assert domain.get_var_names(isl.dim_type.set) == ["a", "b"]
+    assert "mod 2" in str(domain)
+
+    # loopy generates correct code for it, bit for bit, at every size.
+    for nt, nx in STENCIL_SIZES:
+        u = _jacobi_input(nt, nx)
+        out = run(schedule, u=u.copy())
+        assert np.array_equal(out["u"], ht.jacobi_reference(u)), (nt, nx)
+
+
+def test_loopy_itself_refuses_the_diamond() -> None:
+    # Why the rewrite is loopty's: both of loopy's own affine transforms solve
+    # for each old iname with a unit coefficient, and t = (a + b) / 2 has none.
+    # A loopy that learns to do this makes this test fail, and the rewrite can
+    # then be dropped for lp.map_domain.
+    import warnings
+
+    import loopy as lp
+    from loopy.diagnostic import LoopyError
+
+    kernel = Schedule(ht.jacobi_term()).kernel
+    kernel = kernel.with_kernel(
+        kernel.default_entrypoint.copy(loop_priority=frozenset())
+    )
+    with (
+        pytest.raises(LoopyError, match="No suitable equation"),
+        warnings.catch_warnings(),
+    ):
+        # map_domain asks the BasicMap whether it is bijective, which islpy
+        # 2025 answers with a deprecation warning; loopty no longer calls it,
+        # so the exemption lives here and not in the suite's filters.
+        warnings.filterwarnings(
+            "ignore",
+            message="BasicMap.is_bijective with implicit conversion",
+            category=DeprecationWarning,
+        )
+        lp.map_domain(kernel, isl.BasicMap(DIAMOND))
+    with pytest.raises(RuntimeError, match="division with remainder"):
+        lp.affine_map_inames(kernel, "t, i", "a, b", ["a = t + i", "b = t - i"])
+
+
+def test_tiling_the_diamond_is_legal_for_the_stencil_and_computes() -> None:
+    # The stencil's two dependences, (1, 1) and (1, -1), become (2, 0) and
+    # (0, 2): both non-negative, so rectangles in (a, b), which are diamonds
+    # in (t, i), are legal. loopy splits the image's loops as it would any.
+    schedule = (
+        Schedule(ht.jacobi_term(), sizes={"nt": 16, "nx": 16})
+        .affine(DIAMOND)
+        .tile("a", "b", 4, 4)
+    )
+    assert schedule.order == ("a_outer", "b_outer", "a_inner", "b_inner")
+    assert [fact.status.value for fact in schedule.facts()] == ["decided"] * 4
+    for nt, nx in [*STENCIL_SIZES, (17, 23), (32, 32)]:
+        u = _jacobi_input(nt, nx)
+        out = run(schedule, u=u.copy())
+        assert np.array_equal(out["u"], ht.jacobi_reference(u)), (nt, nx)
+
+
+def test_a_diamond_that_runs_a_dependence_backwards_is_refused() -> None:
+    # With the space axis first, a = i + t and b = i - t: the dependence
+    # S0[t, i] -> S0[t + 1, i - 1] keeps a and lowers b by two, so the new
+    # order runs it the wrong way round, and the witness says so.
+    schedule = Schedule(ht.jacobi_term(), sizes={"nt": 16, "nx": 16})
+    with pytest.raises(IllegalCast) as caught:
+        schedule.affine("{ [t, i] -> [a, b] : a = i + t and b = i - t }")
+    (source_id, source), (sink_id, sink), _params = caught.value.witness
+    assert source_id == sink_id == "S0"
+    assert (sink["t"] - source["t"], sink["i"] - source["i"]) == (1, -1)
+    assert caught.value.fact.kind == "monotone"
+    assert "scheduled earlier" in str(caught.value)
+
+
+def test_skew_is_the_affine_map_that_keeps_the_loop_names(monkeypatch) -> None:
+    import loopy as lp
+
+    # A skew goes through the same rewrite as any affine map, not through
+    # lp.map_domain, which it used to call.
+    def refuse(*args, **kwargs):  # pragma: no cover - reached only on regression
+        raise AssertionError("skew called lp.map_domain")
+
+    monkeypatch.setattr(lp, "map_domain", refuse)
+    skewed = Schedule(ht.jacobi_term()).skew("i", by="t")
+
+    # The same map written out, with the names put back on the outputs.
+    mapping = isl.Map("{ [t, i] -> [t2, i2] : t2 = t and i2 = i + t }")
+    mapping = mapping.set_dim_name(isl.dim_type.out, 0, "t")
+    mapping = mapping.set_dim_name(isl.dim_type.out, 1, "i")
+    affine = Schedule(ht.jacobi_term()).affine(mapping)
+
+    assert skewed.order == affine.order == ("t", "i")
+    assert [f.status.value for f in skewed.facts()] == [
+        f.status.value for f in affine.facts()
+    ]
+    (mine,) = skewed.kernel.default_entrypoint.domains
+    (theirs,) = affine.kernel.default_entrypoint.domains
+    assert mine.is_equal(theirs)
+    assert "t < i" in str(mine)
+
+
+def test_a_permutation_that_keeps_the_names_is_an_interchange() -> None:
+    mapping = isl.Map("{ [i, j] -> [j2, i2] : j2 = j and i2 = i }")
+    mapping = mapping.set_dim_name(isl.dim_type.out, 0, "j")
+    mapping = mapping.set_dim_name(isl.dim_type.out, 1, "i")
+    schedule = Schedule(ht.transpose_term()).affine(mapping)
+    assert schedule.order == Schedule(ht.transpose_term()).interchange("j", "i").order
+    assert [fact.status.value for fact in schedule.facts()] == ["decided"] * 2
+
+    a = np.arange(8, dtype=np.float64).reshape(2, 4)
+    out = run(schedule, a=a, b=np.zeros((4, 2)))
+    assert np.array_equal(out["b"], a.T)
+
+
+def test_a_map_over_a_ragged_row_loop_moves_the_fiber_with_it() -> None:
+    # Reversing the rows of a CSR product. The fiber's domain names the row as
+    # a parameter, which is how loopy nests it, so it is rewritten too, with
+    # the new row loop in its place.
+    arrays = ht.csr_example()
+    schedule = Schedule(ht.spmv_term(), sizes={"n": 4, "m": 5}).affine(
+        "[n] -> { [r] -> [q] : q = n - 1 - r }"
+    )
+    assert [fact.status.value for fact in schedule.facts()] == ["decided"] * 2
+    domains = [str(d) for d in schedule.kernel.default_entrypoint.domains]
+    assert any("[j]" in text and "q" in text.split("->")[0] for text in domains)
+
+    def fresh() -> dict:
+        return {k: (v.copy() if hasattr(v, "copy") else v) for k, v in arrays.items()}
+
+    reversed_rows = run(schedule, **fresh())
+    in_order = run(Schedule(ht.spmv_term()), **fresh())
+    assert np.array_equal(reversed_rows["y"], in_order["y"])
+
+
+def ragged_row_sums(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """Row sums written as a loop over the fiber, not as a reduction."""
+    for r in y.dom:
+        for j in val.dom[r]:
+            y[r] = y[r] + val[r, j]
+
+
+def test_a_map_the_kernel_rewrite_cannot_write_is_reported_not_thrown() -> None:
+    # The row and the fiber are two loopy domains, one nested in the other,
+    # and a map that mixes them has no one domain to be the image of. The map
+    # is legal, so the casts are decided; what is refuted is buildability, and
+    # the schedule has no kernel from then on.
+    from lanky.terms import evaluate_annotations
+
+    from loopty.executor import LoopyExecutor
+    from loopty.schedule import UnbuildableSchedule
+    from loopty.trace import trace
+
+    term = trace(ragged_row_sums, evaluate_annotations(ragged_row_sums))
+    schedule = Schedule(term, sizes={"n": 4}).affine(
+        "{ [r, j] -> [q, k] : q = r and k = j + r }"
+    )
+    assert [f.status.value for f in schedule.facts() if f.kind != "buildable"] == [
+        "decided",
+        "decided",
+    ]
+    ok, reason = schedule.buildable
+    assert not ok
+    assert "not all defined by one loopy domain" in reason
+    (fact,) = [f for f in schedule.facts() if f.kind == "buildable"]
+    assert (fact.status.value, fact.decided_by) == ("refuted", "loopy-target")
+    assert schedule.kernel is None
+
+    # Later steps are still checked, and still unbuildable.
+    later = schedule.split("q", 2)
+    assert later.kernel is None
+    assert later.buildable == (False, reason)
+    assert [f.status.value for f in later.facts()][-2:] == ["decided", "decided"]
+    with pytest.raises(UnbuildableSchedule, match="one loopy domain"):
+        LoopyExecutor().run(later, cnt=np.array([1, 2]), val=np.ones(3), y=np.zeros(2))
+
+
+def test_only_the_loops_a_ragged_loop_becomes_keep_its_extent_from_data() -> None:
+    # What a hardware axis may not sit inside is a loop whose extent is read
+    # from an array. Tiling the ragged fiber with the dense row loop makes the
+    # fiber's halves such loops and leaves the row's halves alone; skewing the
+    # fiber by the row leaves the row alone.
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(ragged_row_sums, evaluate_annotations(ragged_row_sums))
+    schedule = Schedule(term, sizes={"n": 4})
+    assert schedule._data_dependent == {"j"}
+    tiled = schedule.tile("r", "j", 2, 2)
+    assert tiled._data_dependent == {"j_outer", "j_inner"}
+    assert schedule.skew("j", by="r")._data_dependent == {"j"}
+    diamond = schedule.affine("{ [r, j] -> [a, b] : a = r + j and b = r - j }")
+    assert diamond._data_dependent == {"a", "b"}
+
+
+@pytest.mark.parametrize(
+    ("mapping", "message"),
+    [
+        ("{ [t, k] -> [a, b] : a = t and b = k }", "not loops of jacobi: k"),
+        ("{ [t] -> [i] : i = t }", "share its name"),
+        ("{ [t] -> [nx] : nx = t }", "share its name"),
+        ("{ [t] -> [u] : u = t }", "share its name"),
+        ("{ [t] -> [int] : int = t }", "cannot name a loop"),
+        ("[p] -> { [t] -> [a] : a = t + p }", "not sizes of jacobi"),
+        ("{ S0[t, i] -> [a, b] : a = t and b = i }", "named tuple"),
+        ("{ [t, i] -> [a, b] : a = t and b = i", "is not an isl map"),
+    ],
+)
+def test_affine_refuses_a_map_it_cannot_give_a_meaning(
+    mapping: str, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        Schedule(ht.jacobi_term()).affine(mapping)
+
+
+def test_affine_refuses_reduction_loops_tagged_loops_and_unions() -> None:
+    with pytest.raises(ValueError, match="j is the loop of a reduction"):
+        Schedule(ht.spmv_term()).affine("{ [j] -> [k] : k = j }")
+    doubled = isl.Map("{ [t, i] -> [a, b] : a = t and b = i }")
+    doubled = doubled.set_dim_name(isl.dim_type.out, 1, "a")
+    with pytest.raises(ValueError, match="a is named twice"):
+        Schedule(ht.jacobi_term()).affine(doubled)
+    with pytest.raises(ValueError, match="carries a tag"):
+        Schedule(ht.transpose_term()).tag(i="g.0").affine("{ [i] -> [k] : k = i }")
+    with pytest.raises(TypeError, match="one map for every statement"):
+        Schedule(ht.jacobi_term()).affine(isl.UnionMap(DIAMOND))
+    with pytest.raises(ValueError, match="has to be named"):
+        Schedule(ht.jacobi_term()).affine("{ [t, i] -> [t + i, t - i] }")
+
+
+def test_retargeting_replays_an_affine_step() -> None:
+    schedule = Schedule(ht.jacobi_term(), sizes={"nt": 6, "nx": 6}).affine(DIAMOND)
+    other = schedule.retarget("c-source")
+    assert other.history == schedule.history
+    assert other.order == ("a", "b")
+    assert all(fact.provenance["target"] == "c-source" for fact in other.facts())
+
+
+# }}}
 
 
 # {{{ retargeting

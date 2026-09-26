@@ -27,24 +27,19 @@ if _HERE not in sys.path:
 def _silence_loopys_own_deprecations() -> Iterator[None]:
     """Let a deprecation from loopty fail the run, and only from loopty.
 
-    The same three exemptions as ``filterwarnings`` in ``pyproject.toml``, applied
+    The same two exemptions as ``filterwarnings`` in ``pyproject.toml``, applied
     again here because a ``-W error::DeprecationWarning`` on the command line
     takes precedence over the ini file and would otherwise turn loopy's own
     warnings into failures of loopty's tests. A filter installed inside the test
     is installed last, so it wins, and it wins over nothing else: every other
     deprecation, including any that loopty causes, is still an error.
 
-    All three exemptions are described in ``docs/loopy-notes.md``.
+    Both exemptions are described in ``docs/loopy-notes.md``.
     """
     with warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore",
             message="'GCCToolchain.copy' is deprecated",
-            category=DeprecationWarning,
-        )
-        warnings.filterwarnings(
-            "ignore",
-            message="BasicMap.is_bijective with implicit conversion",
             category=DeprecationWarning,
         )
         # Fires only on a cold code-generation cache (loopy's persistent dict

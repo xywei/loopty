@@ -7,6 +7,7 @@ import islpy as isl
 from loopty.oracle import (
     TRUST_CLASS,
     IslOracle,
+    is_bijection_on,
     is_bijective,
     is_empty,
     is_monotone,
@@ -68,6 +69,25 @@ def test_a_collapsing_map_is_refuted_with_two_colliding_instances() -> None:
     assert source != target
     assert source[0] == target[0]
     assert "not injective" in verdict.detail
+
+
+def test_a_map_that_misses_a_point_of_the_domain_is_not_total() -> None:
+    # One for one wherever it is defined, and undefined at i = 3: as a
+    # reindexing of { [i] : 0 <= i < 4 } it loses an instance, which
+    # is_bijective, asking only about the map's own domain, would accept.
+    partial = isl.Map("{ [i] -> [j] : j = i and 0 <= i < 3 }")
+    domain = isl.Set("{ [i] : 0 <= i < 4 }")
+    assert is_bijective(partial)
+    verdict = is_bijection_on(partial, domain)
+    assert not verdict
+    assert verdict.witness == (3,)
+    assert "not total" in verdict.detail
+
+    # Total on the domain, it is the bijection question, witness and all.
+    assert is_bijection_on(isl.Map("{ [i] -> [j] : j = 2i }"), domain)
+    merged = is_bijection_on(isl.Map("{ [i] -> [j] : j = 0 }"), domain)
+    assert not merged
+    assert "not injective" in merged.detail
 
 
 def test_a_one_to_many_map_is_refuted_as_not_single_valued() -> None:

@@ -40,6 +40,7 @@ __all__ = [
     "Subset",
     "Verdict",
     "decide",
+    "is_bijection_on",
     "is_bijective",
     "is_empty",
     "is_monotone",
@@ -238,6 +239,27 @@ def is_bijective(a_map: isl.Map) -> Verdict:
         else "not single-valued",
         parameters,
     )
+
+
+def is_bijection_on(a_map: isl.Map, domain: isl.Set) -> Verdict:
+    """Is ``a_map`` defined at every point of ``domain``, and a bijection there?
+
+    :func:`is_bijective` asks about the map's own domain, which is the whole
+    question for a reindexing loopty writes and not for one a caller writes: a
+    map that is undefined at some statement instance renames the others one
+    for one and drops that instance from the program. The witness of the
+    first failure is the point the map misses.
+    """
+    missing = domain.subtract(a_map.domain())
+    if not missing.is_empty():
+        point, parameters = _witness(missing)
+        return Verdict(
+            False,
+            point,
+            f"not total: instance {point} has no image{_at_text(parameters)}",
+            parameters,
+        )
+    return is_bijective(a_map.intersect_domain(domain))
 
 
 def is_monotone(schedule: isl.Map, deps: isl.Map) -> Verdict:
