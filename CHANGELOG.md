@@ -793,6 +793,22 @@ with a pair of statement instances.
 - A skewed loop keeps its tag in the kernel. The skew went through
   `lp.map_domain` and back, which dropped it: a loop the schedule checked as
   a local axis ran one iteration at a time.
+- The target-capability check knows the other reductions loopy 2025.2 will not
+  realize, and asks about the ones it knew the way loopy does. A reduction on a
+  group axis (or on `ilp.seq` or `vec`), a reduction split with both halves on
+  local axes, and a reduction on a local axis whose extent has no numeric
+  maximum (`reduce_sum(a[i, j] for j in Fin[i + 1])` with `j` on `l.0` and `n`
+  free), or inside a statement loop on a local axis that has none, passed
+  `buildable` and then failed in code generation; each is a `refuted`
+  `buildable` fact now, with its cause in words. A reduction's loops are
+  classified with loopy's own tag classes, as `realize_reduction` classifies
+  them, so an `ilp` loop, which loopy unrolls, is a sequence: split with its
+  other half on a local axis it is refused, as loopy refuses it, and split
+  with the other half untagged it is buildable, where it used to be refused.
+  The extent is asked of the loop's bounds with `static_max_of_pw_aff(...,
+  constants_only=True)`, as loopy asks it. The tests generate the code with
+  loopy's plain OpenCL target and see loopy's own error for each; note 11 of
+  `docs/loopy-notes.md` has the table.
 - Two schedules of one kernel in one file keep their own facts in the ledger.
   A cast fact's id named the kernel and the position of the step
   (`cast:spmv:0:bijective`), and an agreement fact's the kernel alone, so the

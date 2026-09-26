@@ -55,10 +55,12 @@ code for. loopy 2025.2 has such limits, two of which the design's own spmv
 device schedule walks into: it will not put a hardware axis (``g.*``, ``l.*``)
 inside a loop whose bound comes from an array, which is exactly what a CSR
 inner loop is, and it will not generate a reduction whose inames are partly
-parallel and partly sequential. A third is a hardware axis on a reduction
-nested in another one. None is a wrong verdict about the cast, and none used to
-be reported: the casts were all ``DECIDED`` and loopy then threw during code
-generation, several steps away from the line that caused it.
+parallel and partly sequential. The others known are about reductions too (a
+hardware axis on one nested in another, a reduction on a group axis or across
+two local axes, a local axis whose extent has no numeric maximum). None is a
+wrong verdict about the cast, and none used to be reported: the casts were all
+``DECIDED`` and loopy then threw during code generation, several steps away
+from the line that caused it.
 
 So every accepted step is asked a third question, this one about the target
 rather than about meaning, and its answer is a fact of kind ``buildable``
@@ -794,11 +796,24 @@ def data_dependent_inames(
 def _unbuildable_reason(draft: _Draft) -> str | None:
     """Why loopy could not generate code for this draft, or ``None``.
 
-    Three limits of loopy 2025.2, all measured rather than guessed: a device
-    run of the design's spmv schedule fails on the first, applying loopy's own
-    ``split_reduction_outward`` remedy to it then fails on the third, and code
-    generation for a double sum with its inner reduction on a local axis fails
-    on the second ("instruction ... does not use all local hw axes").
+    Limits of loopy 2025.2, all measured rather than guessed, in the order
+    they are asked:
+
+    * a parallel tag inside a ragged fiber: a device run of the design's spmv
+      schedule fails on it;
+    * a hardware axis on a reduction nested in another: code generation for a
+      double sum with its inner reduction on a local axis fails ("instruction
+      ... does not use all local hw axes");
+    * the three ways loopy refuses to realize a reduction, asked as it asks
+      them (see :func:`_reduction_reason`): partly on a local axis and partly
+      in sequence (applying loopy's own ``split_reduction_outward`` remedy to
+      the spmv schedule fails on this one), across two local axes, and on any
+      other concurrent axis, a group axis above all;
+    * a local axis whose extent has no numeric maximum, where a reduction on
+      a local axis needs one (see :func:`_extent_reason`).
+
+    Note 11 of ``docs/loopy-notes.md`` has the table of what loopy says to
+    each.
     """
     parallel = {name for name, tag in draft.tags.items() if parallel_tag(tag)}
     inside = sorted(parallel & draft.data_dependent)
@@ -834,21 +849,166 @@ def _unbuildable_reason(draft: _Draft) -> str | None:
     for iname, key in draft.reductions.items():
         by_reduction.setdefault(key, []).append(iname)
     for key, inames in sorted(by_reduction.items()):
-        accumulated = draft.reduction_info.get(key, (key, ""))[0]
-        tagged = sorted(name for name in inames if name in parallel)
-        untagged = sorted(name for name in inames if name not in parallel)
-        if tagged and untagged:
-            return (
-                f"the reduction into {accumulated} runs over {', '.join(tagged)} "
-                f"in parallel and {', '.join(untagged)} in sequence, and loopy "
-                "generates code only for a reduction whose inames are all one or "
-                "all the other. loopty has no split_reduction transform to offer "
-                "as the remedy"
-            )
+        reason = _reduction_reason(draft, key, inames)
+        if reason is not None:
+            return reason
+    for key, inames in sorted(by_reduction.items()):
+        reason = _extent_reason(draft, key, inames)
+        if reason is not None:
+            return reason
     return None
 
 
-# }}}
+def _reduction_role(tag: str | None) -> str:
+    """How loopy realizes a reduction over a loop with this tag.
+
+    ``"local"``, ``"sequential"``, ``"unrolled"`` or ``"refused"``, as
+    ``loopy.transform.realize_reduction`` classifies a reduction's inames, and
+    read off loopy's own tag classes so that the two cannot drift apart: an
+    untagged loop is summed in sequence, and so is one loopy unrolls (``unr``,
+    ``ilp``), which is told apart only so that a reason can say so; a local
+    axis (``l.*``) is summed in a tree across the work items of a group; and a
+    reduction over any other concurrent axis (a group axis ``g.*``,
+    ``ilp.seq``, ``vec``) is not generated at all. The checker reads
+    ``ilp`` differently, as an order-free loop (:data:`PARALLEL_TAG_PREFIXES`),
+    which is what makes it ask an accumulation's permission to be reassociated
+    before a reduction loop is tagged so; loopy unrolls it, in order.
+    """
+    from loopy.kernel.data import (
+        ConcurrentTag,
+        LocalInameTagBase,
+        UnrolledIlpTag,
+        UnrollTag,
+        parse_tag,
+    )
+
+    parsed = parse_tag(tag)
+    if isinstance(parsed, UnrollTag | UnrolledIlpTag):
+        return "unrolled"
+    if isinstance(parsed, LocalInameTagBase):
+        return "local"
+    if isinstance(parsed, ConcurrentTag):
+        return "refused"
+    return "sequential"
+
+
+def _reduction_reason(draft: _Draft, key: str, inames: Sequence[str]) -> str | None:
+    """Why loopy would refuse to realize one reduction, or ``None``.
+
+    Asked in the order loopy asks (``map_reduction`` in
+    ``loopy.transform.realize_reduction``), so that the reason is the error
+    loopy would raise: part of it on a local axis and part in sequence, then
+    two local axes, then a concurrent axis that is not a local one. A
+    reduction is generated only when every loop of it is sequential, or when
+    it is one loop, on a local axis.
+    """
+    accumulated = draft.reduction_info.get(key, (key, ""))[0]
+    roles = {name: _reduction_role(draft.tags.get(name)) for name in inames}
+    local = sorted(name for name, role in roles.items() if role == "local")
+    sequential = sorted(
+        name for name, role in roles.items() if role in ("sequential", "unrolled")
+    )
+    refused = sorted(name for name, role in roles.items() if role == "refused")
+    if local and sequential:
+        unrolled = [name for name in sequential if roles[name] == "unrolled"]
+        how = (
+            f" (loopy unrolls {', '.join(unrolled)}, which is a sequence)"
+            if unrolled
+            else ""
+        )
+        return (
+            f"the reduction into {accumulated} runs over {', '.join(local)} "
+            f"in parallel and {', '.join(sequential)} in sequence{how}, and "
+            "loopy generates code only for a reduction whose inames are all one "
+            "or all the other. loopty has no split_reduction transform to offer "
+            "as the remedy"
+        )
+    if len(local) > 1:
+        return (
+            f"the reduction into {accumulated} runs over {', '.join(local)} on "
+            f"{len(local)} local axes, and loopy sums a reduction across one "
+            "local axis at most, and only when that axis is the whole of it. "
+            "loopty has no split_reduction transform to offer as the remedy"
+        )
+    if refused:
+        tags = ", ".join(f"{name}={draft.tags[name]!r}" for name in refused)
+        return (
+            f"the reduction into {accumulated} runs over {tags}, and loopy "
+            "runs a reduction in parallel only across the work items of a "
+            "group, on a local axis (l.*): a group axis, ilp.seq or vec on the "
+            "loop of a reduction is refused. Put it on a local axis instead, or "
+            "put the axis on a loop of the statement"
+        )
+    return None
+
+
+def _extent_reason(draft: _Draft, key: str, inames: Sequence[str]) -> str | None:
+    """A reduction on a local axis whose partial sums loopy cannot size.
+
+    loopy sums a reduction on a local axis as a tree, over an array in local
+    memory with one cell per work item of every local axis the statement runs
+    on: the reduction's own, and those of the statement's loops around it
+    (``map_reduction_local`` in ``loopy.transform.realize_reduction``). The
+    shape of that array has to be a number when the code is generated, so
+    each of those extents needs a numeric maximum over every value of the
+    sizes. loopy looks for it with ``static_max_of_pw_aff(...,
+    constants_only=True)`` on the loop's bounds, and this asks it the same way:
+    ``y[i] = reduce_sum(a[i, j] for j in Fin[i + 1])`` with ``j`` on ``l.0``
+    has none while ``n`` is free, and has 8 in a kernel over ``Fin[8]``.
+    """
+    if draft.kernel is None:
+        return None
+    local = [n for n in inames if _reduction_role(draft.tags.get(n)) == "local"]
+    if not local:
+        return None
+    statement = key.rsplit(":", 1)[0]
+    around = [
+        name
+        for name in draft.coords.get(statement, ())
+        if _reduction_role(draft.tags.get(name)) == "local"
+    ]
+    accumulated = draft.reduction_info.get(key, (key, ""))[0]
+    for name in (*local, *around):
+        extent = _unbounded_extent(draft.kernel, name)
+        if extent is None:
+            continue
+        whose = (
+            f"the reduction into {accumulated} runs over {name} on a local axis"
+            if name in local
+            else f"the reduction into {accumulated} runs on a local axis inside "
+            f"the loop {name}, which is on a local axis too"
+        )
+        return (
+            f"{whose}, and loopy sums such a reduction in local memory, in an "
+            "array with a cell per work item whose shape has to be a number "
+            f"when the code is generated; the extent of {name} is {extent}, "
+            "which no number bounds while the sizes it names are free. Declare "
+            "that extent as a number (Fin[8] rather than Fin[n]), or run the "
+            "reduction in sequence"
+        )
+    return None
+
+
+def _unbounded_extent(kernel: Any, iname: str) -> str | None:
+    """The extent of ``iname`` when it has no numeric maximum, or ``None``.
+
+    Asked as ``loopy.transform.realize_reduction`` asks it, of the size in the
+    loop's bounds: the extent over every value of the sizes and of the loops
+    around it.
+    """
+    from loopy.diagnostic import StaticValueFindingError
+    from loopy.isl_helpers import static_max_of_pw_aff
+    from loopy.symbolic import pw_aff_to_expr
+
+    size = kernel.default_entrypoint.get_iname_bounds(iname).size
+    try:
+        static_max_of_pw_aff(size, constants_only=True)
+    except StaticValueFindingError:
+        try:
+            return f"at most {pw_aff_to_expr(size)}"
+        except Exception:  # noqa: BLE001 - a piecewise extent is shown as isl has it
+            return f"at most {size}"
+    return None
 
 
 def _term_of(obj: Any) -> Term:

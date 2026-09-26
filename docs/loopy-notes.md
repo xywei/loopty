@@ -307,7 +307,7 @@ A statement beside an inner loop also has to stay out of it, which is note 12.
 
 What loopy 2025.2 generates code for, measured with its plain OpenCL target on
 a double sum `reduce_sum(reduce_sum(a[i, j] for j in Fin[i + 1]) for i in
-a.dom)` and on a sum inside a statement loop:
+a.dom)`, on a single sum, and on a sum inside a statement loop:
 
 | schedule | loopy | loopty's `buildable` |
 |---|---|---|
@@ -315,9 +315,14 @@ a.dom)` and on a sum inside a statement loop:
 | `i` on `l.0`, `j` on `l.1` | the same | refused, the same |
 | outer reduction `i` on `l.0`, `j` sequential | builds | buildable |
 | `j` split, the inner half on `l.0` | "contains both parallel and sequential inames" | refused |
-| a reduction on `g.0` | "the only form of parallelism supported by reductions is 'local'" | not checked |
-| a reduction split, both halves on `l.*` | "contains more than one parallel iname" | not checked |
-| a local axis over a symbolic extent | "a numeric maximum was not found" | not checked |
+| `j` split, the inner half on `l.0`, the outer on `ilp` | the same | refused, the same |
+| `j` split, the inner half on `ilp` | builds | buildable |
+| a reduction on `g.0`, `ilp.seq` or `vec` | "the only form of parallelism supported by reductions is 'local'" | refused |
+| a reduction split, both halves on `l.*` | "contains more than one parallel iname" | refused |
+| a reduction on `l.0` over a symbolic extent (`Fin[i + 1]`, `i < n`) | "a numeric maximum was not found" | refused |
+| the same over `Fin[8]` | builds | buildable |
+| a reduction on `l.0` in a statement loop on `l.1` over `Fin[n]` | "a numeric maximum was not found" | refused |
+| the same with the statement loop on `g.0` | builds | buildable |
 
 The first row is the nested case: loopy sets and updates the enclosing
 reduction's accumulator outside the inner reduction's loop, in instructions
@@ -328,9 +333,22 @@ accident, as a ragged fiber: the inner domain names the outer binder `i` as a
 parameter, and every parameter that was not a size counted as data read out of
 an array. An enclosing binder, or a loop of the statement, is not data now, so
 a bound affine in one is a triangle, and a reduction over it is not a ragged
-fiber. The rows marked "not checked" are limits the check does not know yet
-(issue #35); a schedule that hits one passes `buildable` and fails in code
-generation.
+fiber.
+
+The rows from the fourth on are how `map_reduction` in
+`loopy.transform.realize_reduction` classifies a reduction's loops, and
+`schedule._reduction_reason` asks them the way it does, with loopy's own tag
+classes: an untagged loop and one loopy unrolls (`unr`, `ilp`) are summed in
+sequence, a local axis in a tree across a group, and any other concurrent axis
+not at all. So `ilp` is a sequence here, although the checker counts it as an
+order-free loop and asks an accumulation's permission before a reduction loop
+is tagged with it. A reduction is generated when all of its loops are
+sequential, or when it is one loop on a local axis. That one then needs its
+extent, and the extent of every local axis of the statement around it, to have
+a numeric maximum, because loopy keeps the partial sums in an array in local
+memory whose shape is fixed when the code is generated (`_get_int_iname_size`);
+`schedule._extent_reason` asks `static_max_of_pw_aff(...,
+constants_only=True)` of the loop's bounds, as loopy does.
 
 ## 12. loopy adds loops to an instruction whose loops are not final
 

@@ -1055,6 +1055,159 @@ def test_the_nested_axis_loopty_refuses_is_one_loopy_cannot_build(monkeypatch):
 # }}}
 
 
+# {{{ the other limits loopy has on reductions (#35)
+
+
+@kernel
+def total8(a: Arr[Fin[8], Real], s: Arr[Fin[1], Real]):
+    """A sum over a size known when the code is generated."""
+    s[0] = reduce_sum(a[i] for i in a.dom)
+
+
+@kernel
+def triangle_rows(a: Arr[Fin[n], Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """Each row summed up to the diagonal: the extent of j is at most n."""
+    for i in y.dom:
+        y[i] = reduce_sum(a[i, j] for j in Fin[i + 1])
+
+
+@kernel
+def triangle_rows8(a: Arr[Fin[8], Fin[8], Real], y: Arr[Fin[8], Real]):
+    """The same at a size known when the code is generated."""
+    for i in y.dom:
+        y[i] = reduce_sum(a[i, j] for j in Fin[i + 1])
+
+
+@kernel
+def rows_of_eight(a: Arr[Fin[n], Fin[8], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """Rows of a fixed length, and any number of them."""
+    for i in y.dom:
+        y[i] = reduce_sum(a[i, j] for j in a.dom[i])
+
+
+@pytest.fixture
+def plain_opencl(monkeypatch):
+    """loopy's plain OpenCL target, as the nested-axis test above uses it.
+
+    It stands in for the pyopencl one, which cannot be built without
+    pyopencl, and code generation is all that is asked of it.
+    """
+    lp = pytest.importorskip("loopy")
+    from loopty import lower
+
+    plain = lower.target_for
+    monkeypatch.setattr(
+        lower,
+        "target_for",
+        lambda target="c": lp.OpenCLTarget() if target == "opencl" else plain(target),
+    )
+    return lp
+
+
+def generated(lp, schedule) -> str:
+    """The device code loopy generates for ``schedule``."""
+    import warnings
+
+    with warnings.catch_warnings():
+        # A work item per cell of a sum stores one finished value, and an
+        # unrolled loop sends loopy to its older scheduler; both say so.
+        warnings.simplefilter("ignore", lp.diagnostic.LoopyWarning)
+        return lp.generate_code_v2(schedule.kernel).device_code()
+
+
+@pytest.mark.parametrize("tag", ["g.0", "ilp.seq", "vec"])
+def test_a_reduction_on_a_concurrent_axis_that_is_not_local_is_refused(
+    plain_opencl, tag
+) -> None:
+    from loopty.schedule import Schedule
+
+    lp = plain_opencl
+    schedule = Schedule(total8, target="opencl").tag(i=tag)
+    ok, reason = schedule.buildable
+    assert not ok
+    assert f"runs over i={tag!r}" in reason and "on a local axis (l.*)" in reason
+    with pytest.raises(Exception, match="only form of parallelism supported"):
+        generated(lp, schedule)
+
+
+def test_a_reduction_across_two_local_axes_is_refused(plain_opencl) -> None:
+    from loopty.schedule import Schedule
+
+    lp = plain_opencl
+    schedule = (
+        Schedule(total8, target="opencl")
+        .split("i", 2, inner="ii", outer="io")
+        .tag(ii="l.0", io="l.1")
+    )
+    ok, reason = schedule.buildable
+    assert not ok
+    assert "runs over ii, io on 2 local axes" in reason
+    with pytest.raises(Exception, match="more than one parallel iname"):
+        generated(lp, schedule)
+
+
+def test_an_unrolled_reduction_loop_is_a_sequence_as_loopy_reads_it(
+    plain_opencl,
+) -> None:
+    # loopy unrolls an ``ilp`` loop and sums over it in order. Beside a local
+    # axis that is a reduction partly in parallel, which loopy refuses and the
+    # check used to pass; beside an untagged loop it is all in sequence, which
+    # loopy builds and the check used to refuse.
+    from loopty.schedule import Schedule
+
+    lp = plain_opencl
+    split = Schedule(total8, target="opencl").split("i", 2, inner="ii", outer="io")
+    mixed = split.tag(ii="l.0", io="ilp")
+    ok, reason = mixed.buildable
+    assert not ok
+    assert "over ii in parallel and io in sequence (loopy unrolls io" in reason
+    with pytest.raises(Exception, match="both parallel and sequential"):
+        generated(lp, mixed)
+
+    unrolled = split.tag(ii="ilp")
+    assert unrolled.buildable == (True, "")
+    assert generated(lp, unrolled)
+
+
+def test_a_local_reduction_needs_a_numeric_maximum_of_its_extent(plain_opencl):
+    from loopty.schedule import Schedule
+
+    lp = plain_opencl
+    symbolic = Schedule(triangle_rows, target="opencl").tag(j="l.0")
+    ok, reason = symbolic.buildable
+    assert not ok
+    assert "runs over j on a local axis" in reason
+    assert "the extent of j is at most n" in reason
+    with pytest.raises(Exception, match="a numeric maximum was not found"):
+        generated(lp, symbolic)
+
+    fixed = Schedule(triangle_rows8, target="opencl").tag(j="l.0")
+    assert fixed.buildable == (True, "")
+    assert "get_local_id" in generated(lp, fixed)
+
+
+def test_a_local_loop_around_a_local_reduction_needs_one_too(plain_opencl):
+    # loopy sizes the reduction's array in local memory by every local axis
+    # the statement runs on, and n is not a number.
+    from loopty.schedule import Schedule
+
+    lp = plain_opencl
+    around = Schedule(rows_of_eight, target="opencl").tag(i="l.1", j="l.0")
+    ok, reason = around.buildable
+    assert not ok
+    assert "inside the loop i, which is on a local axis too" in reason
+    assert "the extent of i is at most n" in reason
+    with pytest.raises(Exception, match="a numeric maximum was not found"):
+        generated(lp, around)
+
+    grouped = Schedule(rows_of_eight, target="opencl").tag(i="g.0", j="l.0")
+    assert grouped.buildable == (True, "")
+    assert "get_group_id" in generated(lp, grouped)
+
+
+# }}}
+
+
 # {{{ one Reduction object in two statements
 
 
