@@ -625,8 +625,10 @@ with a pair of statement instances.
   author's alone) are never a library's, so a kernel installed into
   site-packages by a non-editable install has its `print()` refused, the
   helpers of its package followed and their module state copied, and the
-  objects of its classes compared, as a kernel in a source tree does. loopty's dependencies and the
-  standard library are machinery whatever directory they come from; another
+  objects of its classes compared, as a kernel in a source tree does. loopty's
+  dependencies are machinery whatever directory they come from, and so is the
+  standard library, by name where its code is where the standard library is (a
+  `colorsys.py` of the author's next to the kernel is the author's). Another
   installed package is a library's for a kernel outside it, and its call
   locations are passed over rather than disabled for good, so that a kernel of
   its own traced later is watched.

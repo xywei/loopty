@@ -2057,17 +2057,77 @@ def test_a_namespace_package_is_not_all_the_kernels(site_packages) -> None:
 
 
 def test_library_code_is_decided_by_module() -> None:
+    import logging
+
     from loopty.trace import _library, _Own
 
     own = _Own("mykernels.stencil", "mykernels")
     site = "/opt/site-packages"
     assert not _library("mykernels.helpers", f"{site}/mykernels/helpers.py", own)
     assert _library("numpy.linalg", "/src/numpy/linalg.py", own)
-    assert _library("logging", "/src/logging/__init__.py", own)
+    assert _library("logging", logging.__file__, own)
+    # A standard library name is the standard library's where its code is.
+    assert not _library("logging", "/src/logging/__init__.py", own)
     # A kernel defined in a module of loopty's own is only that module.
     inside = _Own("loopty.examples", None)
     assert not _library("loopty.examples", "/src/loopty/examples.py", inside)
     assert _library("loopty.trace", "/src/loopty/trace.py", inside)
+
+
+# }}}
+
+
+def test_a_module_named_like_the_standard_library_is_the_authors(
+    tmp_path, monkeypatch
+) -> None:
+    # colorsys.py next to the kernel's script is the author's module, whatever
+    # the standard library has under the same name: its helper's module state
+    # is copied and its print is watched, as they are for any other name.
+    import importlib
+    import os
+    import sys
+    import textwrap
+
+    name = "colorsys"
+    assert name in sys.stdlib_module_names
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delitem(sys.modules, name, raising=False)
+    (tmp_path / f"{name}.py").write_text(
+        textwrap.dedent(
+            """\
+            SEEN = []
+
+
+            def note(value):
+                SEEN.append(value)
+                return value
+
+
+            def shout(value):
+                print(value)
+                return value
+            """
+        )
+    )
+    importlib.invalidate_caches()
+    helpers = importlib.import_module(name)
+    assert os.path.dirname(os.path.realpath(helpers.__file__)) == os.path.realpath(
+        tmp_path
+    )
+    note, shout = helpers.note, helpers.shout
+
+    def noted(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = note(x[i])
+
+    def shouted(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = shout(x[i])
+
+    with pytest.raises(TraceError, match="changed the global list 'SEEN'"):
+        term_of(noted)
+    with pytest.raises(TraceError, match=r"calls print\(\) at colorsys.py:"):
+        term_of(shouted)
 
 
 # }}}

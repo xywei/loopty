@@ -1119,17 +1119,26 @@ def _library_file(filename: str) -> bool:
     )
 
 
-def _machinery_module(module: str | None) -> bool:
-    """Whether ``module`` belongs to :data:`_LIBRARIES` or the standard library.
+def _machinery_module(module: str | None, filename: str | None = None) -> bool:
+    """Whether ``module``, with its code in ``filename``, is loopty's machinery.
 
-    Decided by the name of its top-level package, whatever directory it was
-    imported from. No kernel is written in one of these, so their code is
-    machinery for every trace.
+    A module of :data:`_LIBRARIES` is, by the name of its top-level package,
+    whatever directory it was imported from: an editable install of one is in
+    a source tree. A module with a standard library name is when its code is
+    where the standard library is (:func:`_library_file`), or has no file: a
+    module of the author's that takes such a name, ``wave.py`` next to the
+    script that imports it, is the author's code and not the standard
+    library's. No kernel is written in the machinery, so its code is machinery
+    for every trace.
     """
     if not module:
         return False
     top = module.partition(".")[0]
-    return top in _LIBRARIES or top in sys.stdlib_module_names
+    if top in _LIBRARIES:
+        return True
+    if top not in sys.stdlib_module_names:
+        return False
+    return filename is None or _library_file(filename)
 
 
 @dataclass(frozen=True)
@@ -1172,7 +1181,8 @@ def _own_of(function: Any) -> _Own | None:
     module = _module_of_function(function)
     if not module:
         return None
-    if _machinery_module(module):
+    code = getattr(function, "__code__", None)
+    if _machinery_module(module, getattr(code, "co_filename", None)):
         return _Own(module, None)
     parts = module.split(".")
     package = parts[0]
@@ -1194,14 +1204,14 @@ def _library(module: str | None, filename: str | None, own: _Own | None) -> bool
 
     Decided by module. The kernel's own module and the package holding it
     (``own``) are never a library's; :data:`_LIBRARIES` and the standard
-    library always are; anything else is a library's when its file is in a
-    library's directory (:func:`_library_file`), which is where a third-party
-    package installed next to the kernel lives. Code whose module is not known
-    is judged by its file alone.
+    library always are (:func:`_machinery_module`); anything else is a
+    library's when its file is in a library's directory (:func:`_library_file`),
+    which is where a third-party package installed next to the kernel lives.
+    Code whose module is not known is judged by its file alone.
     """
     if own is not None and own.holds(module):
         return False
-    if _machinery_module(module):
+    if _machinery_module(module, filename):
         return True
     return filename is not None and _library_file(filename)
 
@@ -1752,9 +1762,9 @@ class _CallWatch:
             if not isinstance(module, str):
                 module = None
             if _library(module, code.co_filename, tracer.own):
-                if _machinery_module(module) or code.co_filename.startswith(
-                    "<frozen"
-                ):
+                if _machinery_module(
+                    module, code.co_filename
+                ) or code.co_filename.startswith("<frozen"):
                     return sys.monitoring.DISABLE
                 return None
             effect = _effect_of(function, first)
