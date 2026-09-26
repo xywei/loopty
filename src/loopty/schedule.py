@@ -37,7 +37,10 @@ rejected.
 
 The order checked is also the order imposed: every accepted step sets loopy's
 loop priority to the nest it just checked, so the generated code runs the nest
-the checker approved rather than one loopy chose for itself.
+the checker approved rather than one loopy chose for itself. loopy takes a
+priority as a preference, though, and drops one it cannot keep; a nest it
+cannot keep is therefore refused as unbuildable (below), rather than left for
+loopy to replace with a nest nobody checked.
 
 A rejected cast raises :class:`IllegalCast` carrying ``witness``, the pair of
 statement instances the transformation would reorder. That is the difference
@@ -57,17 +60,24 @@ inside a loop whose bound comes from an array, which is exactly what a CSR
 inner loop is, and it will not generate a reduction whose inames are partly
 parallel and partly sequential. The others known are about reductions too (a
 hardware axis on one nested in another, a reduction on a group axis or across
-two local axes, a local axis whose extent has no numeric maximum). None is a
-wrong verdict about the cast, and none used to be reported: the casts were all
-``DECIDED`` and loopy then threw during code generation, several steps away
-from the line that caused it.
+two local axes, a local axis whose extent has no numeric maximum) and about
+order (a loop put outside a loop its domain is nested in, which loopy cannot
+run in that order). None is a wrong verdict about the cast, and none used to
+be reported: the casts were all ``DECIDED`` and loopy then threw during code
+generation, several steps away from the line that caused it, or ran a nest of
+its own choosing.
 
 So every accepted step is asked a third question, this one about the target
 rather than about meaning, and its answer is a fact of kind ``buildable``
 decided by ``loopy-target``. A schedule that fails it still exists, still
 carries its ``DECIDED`` cast facts, and still reports what it is: the refusal
 happens when something asks for code (see :class:`UnbuildableSchedule`), which
-is the moment the claim actually matters.
+is the moment the claim actually matters. The question is about the schedule
+as it stands, so it is asked again after every step, and a later step can put
+right what an earlier one broke: an interchange that puts a row loop back
+outside its fiber makes a tiled ragged loop buildable again, and the schedule
+then carries no ``buildable`` fact, as any buildable schedule does. A kernel
+the rewrite of :meth:`Schedule.affine` could not write stays unwritten.
 
 Fact ids
 --------
@@ -810,10 +820,12 @@ def _unbuildable_reason(draft: _Draft) -> str | None:
       the spmv schedule fails on this one), across two local axes, and on any
       other concurrent axis, a group axis above all;
     * a local axis whose extent has no numeric maximum, where a reduction on
-      a local axis needs one (see :func:`_extent_reason`).
+      a local axis needs one (see :func:`_extent_reason`);
+    * a loop ordered outside a loop its domain is nested in, which loopy cannot
+      run in that order (see :func:`_nest_reason`).
 
     Note 11 of ``docs/loopy-notes.md`` has the table of what loopy says to
-    each.
+    each, and note 6 the loop orders.
     """
     parallel = {name for name, tag in draft.tags.items() if parallel_tag(tag)}
     inside = sorted(parallel & draft.data_dependent)
@@ -856,7 +868,7 @@ def _unbuildable_reason(draft: _Draft) -> str | None:
         reason = _extent_reason(draft, key, inames)
         if reason is not None:
             return reason
-    return None
+    return _nest_reason(draft)
 
 
 def _reduction_role(tag: str | None) -> str:
@@ -1009,6 +1021,83 @@ def _unbounded_extent(kernel: Any, iname: str) -> str | None:
         except Exception:  # noqa: BLE001 - a piecewise extent is shown as isl has it
             return f"at most {size}"
     return None
+
+
+def _enclosing_loops(kernel: Any) -> dict[str, set[str]]:
+    """For each loop of ``kernel``, the loops loopy nests it inside.
+
+    loopy nests a kernel's domains as a tree: a domain that names a loop as a
+    parameter is defined inside that loop, and so is every loop it defines.
+    The loops a loop is nested in are the ones its domain names, and the ones
+    theirs name in turn.
+    """
+    entry = kernel.default_entrypoint
+    inames = set(entry.all_inames())
+    direct: dict[str, set[str]] = {}
+    for domain in entry.domains:
+        params = {
+            name
+            for name in domain.get_var_names(isl.dim_type.param)
+            if name in inames
+        }
+        for name in domain.get_var_names(isl.dim_type.set):
+            direct.setdefault(name, set()).update(params)
+    out: dict[str, set[str]] = {}
+    for name, params in direct.items():
+        reached: set[str] = set()
+        pending = list(params)
+        while pending:
+            current = pending.pop()
+            if current in reached:
+                continue
+            reached.add(current)
+            pending.extend(direct.get(current, ()))
+        out[name] = reached
+    return out
+
+
+def _nest_reason(draft: _Draft) -> str | None:
+    """A loop ordered outside a loop its domain is nested in, or ``None``.
+
+    loopy keeps the nesting of its domains (see :func:`_enclosing_loops`). A
+    ragged fiber's domain names its row, because the row's length is read
+    there, and the domain of a statement that another statement leaves names
+    the loops around it (note 10 of ``docs/loopy-notes.md``). The loop
+    priority :func:`_with_priority` sets is only a preference, and loopy drops
+    it when the two disagree ("Cannot satisfy constraint that iname ... must
+    be nested within ...") and runs a nest of its own choosing, which the cast
+    facts did not check and which can run a dependence backwards. A tile of a
+    ragged fiber with its row orders ``j_outer`` before ``r_inner``, and an
+    interchange can put the fiber before the row outright.
+
+    Read off the kernel's domains after the step and asked of each
+    statement's ordered loops, which is the nest the priority states; a
+    parallel loop has no place in it. Checking loopy's own linearized nest
+    against the order would be the complete answer, and would cost a
+    scheduling pass per step.
+    """
+    if draft.kernel is None:
+        return None
+    around = _enclosing_loops(draft.kernel)
+    layout = _Layout(stmt_ids=tuple(draft.coords), coords=dict(draft.coords))
+    for nest in _nests(layout, draft.order, draft.tags).values():
+        for position, loop in enumerate(nest):
+            for inner in nest[position + 1 :]:
+                if inner not in around.get(loop, ()):
+                    continue
+                return (
+                    f"the loop {loop} is ordered outside {inner}, but its domain "
+                    f"is nested in {inner}'s, as a ragged fiber's is in its "
+                    "row's, so loopy cannot run the order that was checked: it "
+                    "would drop the loop priority and run a nest of its own "
+                    "choosing, which the cast facts say nothing about. Order "
+                    f"{inner} outside {loop}, as interchange({inner!r}, "
+                    f"{loop!r}) does"
+                )
+    return None
+
+
+# }}}
 
 
 def _term_of(obj: Any) -> Term:
@@ -1945,25 +2034,35 @@ class Schedule:
         other._reduction_info = dict(draft.reduction_info)
         other._data_dependent = frozenset(draft.data_dependent)
         # The cast is legal; whether the target can build it is a separate
-        # question, asked once per step and recorded either way.
-        reason = (
-            self._unbuildable or draft.unbuildable or _unbuildable_reason(draft)
-        )
+        # question, about the schedule as it now stands, so it is asked again
+        # at every step. A kernel the rewrite could not write stays unwritten;
+        # anything else is read off the draft, and a later step can put right
+        # what an earlier one broke, such as an order loopy cannot keep.
+        if draft.kernel is None:
+            reason = draft.unbuildable or self._unbuildable
+        else:
+            reason = _unbuildable_reason(draft)
         other._unbuildable = reason
-        if reason is not None and self._unbuildable is None:
-            facts.append(
-                self._fact(
-                    "buildable",
-                    f"{self._target} code can be generated for "
-                    f"{self._term.name} after {text}",
-                    status="refuted",
-                    witness=None,
-                    detail=reason,
-                    step=recipe,
-                    oracle="loopy-target",
-                    reason=reason,
+        earlier = self._facts
+        if reason != self._unbuildable:
+            # The one ``buildable`` fact a schedule carries is about its
+            # current reason, and is the fact ``require_buildable`` raises
+            # with, so it goes when the reason goes or changes.
+            earlier = tuple(fact for fact in earlier if fact.kind != "buildable")
+            if reason is not None:
+                facts.append(
+                    self._fact(
+                        "buildable",
+                        f"{self._target} code can be generated for "
+                        f"{self._term.name} after {text}",
+                        status="refuted",
+                        witness=None,
+                        detail=reason,
+                        step=recipe,
+                        oracle="loopy-target",
+                        reason=reason,
+                    )
                 )
-            )
         for accumulated in sorted(set(draft.reassoc) - set(self._reassoc)):
             facts.append(
                 self._fact(
@@ -1979,7 +2078,7 @@ class Schedule:
             )
         other._history = (*self._history, text)
         other._steps = (*self._steps, recipe)
-        other._facts = (*self._facts, *facts)
+        other._facts = (*earlier, *facts)
         return other
 
     def _first_violation(

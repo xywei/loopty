@@ -142,6 +142,31 @@ then *replaces* the priority at each accepted step rather than adding to it,
 because `lp.prioritize_loops` accumulates and an interchange would otherwise
 contradict the priority set before it.
 
+**A priority is a preference.** loopy nests a kernel's domains as a tree: a
+domain that names a loop as a parameter is defined inside that loop, and every
+loop it defines runs inside it. A ragged fiber names its row, because the row's
+length is read there (`[r, nl_cnt_r] -> { [j] : 0 <= j < nl_cnt_r }`), and a
+statement that another statement leaves has its domain cut after the loops
+around it (note 10), which then names them too. That nesting is a constraint,
+and when the priority disagrees with it loopy warns "Cannot satisfy constraint
+that iname 'r_inner' must be nested within 'j_outer'", drops the priority, and
+generates a nest of its own choosing. `tile("r", "j", 2, 2)` on a ragged
+recurrence `w[r + 1, j] = w[r, j] + val[r, j]` asks for `r_outer j_outer
+r_inner j_inner`, which runs the dependence forward, and loopy generated
+`r_inner r_outer j_inner j_outer`, which does not: the compiled `w` disagreed
+with the body's while every cast fact was `decided`. `interchange("j", "r")` on
+the same kernel reaches the same place.
+
+**Local fix.** `schedule._nest_reason` reads the nesting off the kernel's
+domains after each step (the loops a domain names as parameters, and theirs in
+turn) and refuses as unbuildable an order that puts a loop outside a loop its
+domain is nested in, naming the two and the interchange that would put them
+right. Buildability is asked of the schedule as it stands, so a later
+`interchange("r_inner", "j_outer")` makes the tiled schedule buildable again,
+and it runs the tiles in the order that was checked. Checking loopy's own
+linearized nest against the order would be the complete answer, and would cost
+a scheduling pass per step.
+
 ## 7. The single-writer heuristic draws an edge against the body's order
 
 **Symptom.** Two statements that feed each other, one of them across an

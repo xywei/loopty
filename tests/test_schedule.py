@@ -790,13 +790,20 @@ def test_a_statement_in_one_of_two_tiled_loops_is_split_by_its_own_loop() -> Non
     want = np.array([3.0, 0.0, 3.0 + 4.0 + 5.0, 6.0, 7.0 + 8.0 + 9.0 + 10.0])
     tiled = Schedule(term, sizes={"n": 5}).tile("r", "j", 2, 2)
     assert tiled.order == ("r_outer", "j_outer", "r_inner", "j_inner")
-    assert [fact.status.value for fact in tiled.facts()] == ["decided"] * 2
+    assert [fact.status.value for fact in tiled.facts()] == [
+        "decided",
+        "decided",
+        "refuted",
+    ]
     assert tiled._layout.coords["S0"] == ("r_outer", "r_inner")
     # The fiber's bound is read in the row loop, so loopy cannot run j_outer
-    # outside r_inner and would pick a nest of its own (issue #41). Run the
-    # tiles with both halves of the row outside, an order it can keep.
+    # outside r_inner and would pick a nest of its own (#41), which the tile
+    # is refused as unbuildable for. Run the tiles with both halves of the
+    # row outside, an order it can keep.
     rows_first = tiled.interchange("r_inner", "j_outer")
     assert rows_first.order == ("r_outer", "r_inner", "j_outer", "j_inner")
+    assert rows_first.buildable == (True, "")
+    assert [fact.status.value for fact in rows_first.facts()] == ["decided"] * 4
     assert np.array_equal(_row_totals_run(rows_first), want)
 
     # An affine map that is two maps side by side is taken apart the same way;
@@ -817,6 +824,154 @@ def test_a_statement_in_one_of_two_tiled_loops_is_split_by_its_own_loop() -> Non
         Schedule(term, sizes={"n": 5}).affine(
             "{ [r, j] -> [a, b] : a = r + j and b = r - j }"
         )
+
+
+# {{{ orders loopy cannot keep (#41)
+
+
+def ragged_shift(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    w: Arr[Fin[n + 1], Fin[q], Real],  # noqa: F821
+    z: Arr[Fin[q], Real],  # noqa: F821
+):
+    """A ragged recurrence down the rows: ``(r, j)`` feeds ``(r + 1, j)``."""
+    for k in z.dom:
+        z[k] = 0.0
+    for r in val.dom:
+        for j in val.dom[r]:
+            w[r + 1, j] = w[r, j] + val[r, j]
+
+
+SHIFT_COUNTS = np.array([2, 1, 3, 1, 2, 2])
+
+
+def _shift_inputs() -> dict:
+    from loopty.arr import Arr as RuntimeArr
+
+    counts = SHIFT_COUNTS
+    w = np.zeros((len(counts) + 1, 3))
+    w[0] = [1.0, 2.0, 3.0]
+    return {
+        "cnt": RuntimeArr.from_numpy(counts.astype(np.int64)),
+        "val": RuntimeArr.ragged(counts, values=np.arange(1.0, counts.sum() + 1.0)),
+        "w": w,
+        "z": np.zeros(3),
+    }
+
+
+def _shift_reference() -> np.ndarray:
+    """``w`` after the recurrence, row by row, in numpy."""
+    inputs = _shift_inputs()
+    w, flat = inputs["w"], inputs["val"].numpy()
+    offsets = np.concatenate([[0], np.cumsum(SHIFT_COUNTS)])
+    for r, count in enumerate(SHIFT_COUNTS):
+        for j in range(count):
+            w[r + 1, j] = w[r, j] + flat[offsets[r] + j]
+    return w
+
+
+def _shift_term():
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    return trace(ragged_shift, evaluate_annotations(ragged_shift))
+
+
+def _loopy_warnings(schedule: Schedule) -> list[str]:
+    """What loopy warns while it generates the code of ``schedule``.
+
+    With loopy's caches off, because code it finds there comes back without
+    the warnings it was generated with.
+    """
+    import warnings
+
+    import loopy as lp
+
+    with warnings.catch_warnings(record=True) as caught, lp.CacheMode(False):
+        warnings.simplefilter("always")
+        lp.generate_code_v2(schedule.kernel)
+    return [str(warning.message) for warning in caught]
+
+
+def test_a_tile_that_orders_a_fiber_outside_its_row_is_not_buildable() -> None:
+    # The casts are decided: the order they check runs (r, j) -> (r + 1, j)
+    # forward. loopy cannot run it, because the fiber's domain is nested in
+    # the row's: it ran r_inner outside r_outer and the fiber's halves the
+    # other way round, and the compiled w disagreed with the body's.
+    from loopty.executor import LoopyExecutor
+    from loopty.schedule import UnbuildableSchedule
+
+    tiled = Schedule(_shift_term(), sizes={"n": 6, "q": 3}).tile("r", "j", 2, 2)
+    assert [f.status.value for f in tiled.facts() if f.kind != "buildable"] == [
+        "decided",
+        "decided",
+    ]
+    ok, reason = tiled.buildable
+    assert not ok
+    assert reason.startswith("the loop j_outer is ordered outside r_inner")
+    assert "interchange('r_inner', 'j_outer')" in reason
+    (fact,) = [f for f in tiled.facts() if f.kind == "buildable"]
+    assert (fact.status.value, fact.decided_by) == ("refuted", "loopy-target")
+    assert fact.provenance["reason"] == reason
+    # What the refusal stands for, measured: loopy drops the priority.
+    assert any("Cannot satisfy constraint" in w for w in _loopy_warnings(tiled))
+    with pytest.raises(UnbuildableSchedule, match="j_outer is ordered outside"):
+        LoopyExecutor().run(tiled, **_shift_inputs())
+
+    # Putting the row back outside the fiber is an order loopy keeps, the
+    # schedule is buildable again and carries no buildable fact, and the
+    # tiles compute what the body does.
+    repaired = tiled.interchange("r_inner", "j_outer")
+    assert repaired.buildable == (True, "")
+    assert not [f for f in repaired.facts() if f.kind == "buildable"]
+    assert not any("Cannot satisfy" in w for w in _loopy_warnings(repaired))
+    out = run(repaired, **_shift_inputs())
+    assert np.array_equal(out["w"], _shift_reference())
+
+
+def test_an_interchange_that_puts_a_fiber_before_its_row_is_not_buildable() -> None:
+    swapped = Schedule(_shift_term()).interchange("j", "r")
+    assert [f.status.value for f in swapped.facts()] == [
+        "decided",
+        "decided",
+        "refuted",
+    ]
+    assert swapped.buildable[1].startswith("the loop j is ordered outside r")
+    assert any("Cannot satisfy constraint" in w for w in _loopy_warnings(swapped))
+
+
+def rows_then_totals(
+    a: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A dense inner loop below a statement at the depth of the row."""
+    for r in y.dom:
+        z[r] = 1.0
+        for j in a.dom[r]:
+            y[r] = y[r] + a[r, j]
+
+
+def test_a_dense_loop_below_another_statement_is_nested_in_its_row_too() -> None:
+    # A domain cut after r (note 10 of docs/loopy-notes.md) names r, and loopy
+    # nests the inner loop in r for it, dense as the loop is.
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(rows_then_totals, evaluate_annotations(rows_then_totals))
+    swapped = Schedule(term).interchange("j", "r")
+    assert swapped.buildable[1].startswith("the loop j is ordered outside r")
+    assert any("Cannot satisfy constraint" in w for w in _loopy_warnings(swapped))
+    # One domain over both loops, as a lone dense nest is, is loopy's to order.
+    transposed = Schedule(ht.transpose_term()).interchange("j", "i")
+    assert transposed.buildable == (True, "")
+    assert not any("Cannot satisfy" in w for w in _loopy_warnings(transposed))
+
+
+# }}}
 
 
 def test_a_new_loop_cannot_take_a_name_the_lowering_added() -> None:

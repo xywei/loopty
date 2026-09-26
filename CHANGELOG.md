@@ -809,6 +809,20 @@ with a pair of statement instances.
   constants_only=True)`, as loopy asks it. The tests generate the code with
   loopy's plain OpenCL target and see loopy's own error for each; note 11 of
   `docs/loopy-notes.md` has the table.
+- A tile or an interchange that orders a loop outside a loop its domain is
+  nested in is a `refuted` `buildable` fact. loopy nests a ragged fiber's
+  domain inside its row, and the loops below a statement at a shallower depth
+  inside the loops around them, and when the loop priority disagrees it drops
+  the priority and runs a nest of its own choosing, which the cast facts did
+  not check: `tile("r", "j", 2, 2)` on the ragged recurrence `w[r + 1, j] =
+  w[r, j] + val[r, j]` was decided and compiled to code that ran the
+  dependence backwards. The nesting is read off the kernel's domains after
+  every step, and the reason names the two loops and the interchange that puts
+  them right. Buildability is now asked of the schedule as it stands rather
+  than kept once lost, so that interchange makes the tiled schedule buildable
+  again, and the schedule then carries no `buildable` fact; a schedule's one
+  `buildable` fact is about its current reason. A kernel `affine` could not
+  write stays unwritten. See note 6 in `docs/loopy-notes.md`.
 - Two schedules of one kernel in one file keep their own facts in the ledger.
   A cast fact's id named the kernel and the position of the step
   (`cast:spmv:0:bijective`), and an agreement fact's the kernel alone, so the
