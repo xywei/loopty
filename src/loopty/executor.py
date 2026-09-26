@@ -118,9 +118,7 @@ def _copy(value: Any) -> Any:
     from loopty.arr import Arr
 
     if isinstance(value, Arr):
-        if value.is_ragged:
-            return Arr(value.numpy().copy(), value.offsets.copy())
-        return Arr(value.numpy().copy())
+        return value.copy()
     if isinstance(value, np.ndarray):
         return value.copy()
     return value
@@ -132,9 +130,16 @@ def _call_arguments(
     """Match positional and keyword arguments to the term's parameters.
 
     A ragged :class:`~loopty.arr.Arr` supplies two arguments, its flat values and
-    its offsets, which is the same splitting the lowering did to the type.
+    its offsets, which is the same splitting the lowering did to the type. An
+    array over a polyhedral domain supplies its values in the layout the
+    lowering chose for it (:attr:`loopty.lower.Lowering.storage`), converted
+    from its own when the two differ, and the table of row starts when that
+    layout is ``packed``. Such a kernel is also given every size the call
+    determines that it takes as a value argument, since a flat buffer has no
+    shape for loopy to read a size off.
     """
     from loopty.arr import Arr
+    from loopty.contract import resolve_sizes
 
     names = [name for name, _ in term.params]
     supplied: dict[str, Any] = dict(zip(names, args, strict=False))
@@ -148,6 +153,13 @@ def _call_arguments(
     }
     out: dict[str, np.ndarray] = {}
     for name, value in supplied.items():
+        if isinstance(value, Arr) and value.domain is not None:
+            storage = lowering.storage.get(name, "box")
+            out[name] = _as_numpy(value.stored(storage), dtypes.get(name))
+            table = lowering.tables.get(name)
+            if table is not None:
+                out[table] = _as_numpy(value.table(), dtypes.get(table))
+            continue
         if isinstance(value, Arr) and value.is_ragged:
             offsets = lowering.ragged.get(name)
             if offsets is not None and offsets not in supplied:
@@ -156,6 +168,11 @@ def _call_arguments(
             out[name] = _as_numpy(value, dtypes.get(name))
         else:
             out[name] = value
+    if lowering.storage:
+        sizes = resolve_sizes(dict(term.params), supplied)
+        for name in lowering.value_args:
+            if name not in out and name in sizes:
+                out[name] = sizes[name]
     return out
 
 
@@ -259,7 +276,11 @@ class LoopyExecutor:
             # caller comparing outputs sees the array it passed in.
             if name in out:
                 out[name] = original
-        self._write_back(supplied, out)
+        self._write_back(supplied, out, lowering.storage)
+        for name in out:
+            # An output over a domain is its cells, whatever layout it ran in.
+            if name in lowering.storage:
+                out[name] = supplied[name].cells()
         return out
 
     def _collect(
@@ -282,7 +303,9 @@ class LoopyExecutor:
         return out
 
     @staticmethod
-    def _write_back(supplied: dict, results: dict) -> None:
+    def _write_back(
+        supplied: dict, results: dict, storage: dict[str, str] | None = None
+    ) -> None:
         """Copy the outputs into the arrays the caller handed in.
 
         Outputs are parameters, so a kernel run is expected to have changed what
@@ -297,12 +320,18 @@ class LoopyExecutor:
         copied on the way in, and the results used to stay in that copy. Such
         an output is written back here, cast to the caller's dtype the way any
         assignment into it would be.
+
+        An array over a domain ran in the layout ``storage`` names for it, and
+        loads its values at its points from that buffer into its own layout.
         """
         from loopty.arr import Arr
 
+        storage = storage or {}
         for name, value in results.items():
             given = supplied.get(name)
-            if isinstance(given, Arr):
+            if isinstance(given, Arr) and given.domain is not None:
+                given.load(storage.get(name, "box"), value)
+            elif isinstance(given, Arr):
                 given.numpy()[...] = np.asarray(value).reshape(given.numpy().shape)
             elif isinstance(given, np.ndarray) and given is not value:
                 result = np.asarray(value)
@@ -367,6 +396,8 @@ class LoopyExecutor:
         (:mod:`loopty.faithful`). Anything else the body raises is the input's
         or the body's, and is raised.
         """
+        from loopty.arr import Arr
+
         term, _lowered, lowering, _target = _resolve(schedule, self.target)
         # Before the copies: ``_copy`` gives every argument a buffer of its own,
         # which is exactly what hides an alias between two of them, and the
@@ -399,7 +430,9 @@ class LoopyExecutor:
                     return _refused_agreement(term, schedule, exc)
                 native_args = {
                     name: (
-                        value.numpy()
+                        value.cells()
+                        if isinstance(value, Arr) and value.domain is not None
+                        else value.numpy()
                         if hasattr(value, "numpy") and not isinstance(value, np.ndarray)
                         else value
                     )

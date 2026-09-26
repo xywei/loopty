@@ -1,6 +1,6 @@
 # Notes on loopy and islpy
 
-Thirteen interactions with loopty's dependencies that cost real debugging
+Fourteen interactions with loopty's dependencies that cost real debugging
 time, each with the local workaround and the reason it is local. No upstream
 issues were filed: these are notes so that the next person meets the answer
 instead of the symptom.
@@ -487,3 +487,23 @@ defines, such as a row and the ragged fiber inside it, an image that is not one
 basic set, or a piecewise inverse), the schedule carries a `refuted`
 `buildable` fact with the reason, and no kernel, rather than an error from
 loopy.
+
+## 14. A flat buffer gives loopy no size to read
+
+**Symptom.** A kernel over a union of pieces, or with an array stored packed
+(see `loopty.domain`), and no dense array whose shape names a size, fails with
+`TypeError: value argument 'm' was not given and could not be automatically
+determined`, for a size the call determines perfectly well.
+
+**Cause.** loopy finds a value argument the caller does not pass by reading
+it off the shape of an array argument that mentions it. A union's pieces one
+after another, and packed rows, are flat buffers of a length no loop bound
+states, and are declared with `shape=None` (as a ragged array's values are),
+so there is nothing to read `n` off. A single domain in its box has a shape,
+the box, and loopy reads its sizes from that as from any dense array.
+
+**Local fix.** `executor._call_arguments` passes, for a kernel with an array
+over a domain, every size the call determines (`contract.resolve_sizes`, which
+reads an array over a domain's own sizes by name) that the kernel takes as a
+value argument and the caller did not pass. A kernel with no such array is
+called exactly as before, so nothing that ran changes.

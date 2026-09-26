@@ -31,6 +31,16 @@ which reads them: :data:`COUNT_PARAM` is the direct spelling and
 non-affine term ``cnt[r]`` into a fresh isl parameter. Both are recognized, by
 :func:`loopty.flow.ragged_bound_params`, which is also how the access collector
 lists the read the assignment makes; the spellings live in :mod:`loopty.term`.
+
+*An array over a polyhedral domain is stored in the layout the lowering is
+given* (:mod:`loopty.domain`). The domain itself needs nothing: a statement's
+domain already carries the constraints of the fibers it runs over, so the
+triangle is a triangular loop nest. Only the address is the layout's. Boxed, a
+single domain is an array of the box's shape and ``L[i, j]`` is left to loopy;
+a union's pieces follow one another in a flat buffer, each boxed, at a base that
+is a sum of the boxes before it. Packed, ``L[i, j]`` is ``L[off_L[i] + j]``
+through a table of row starts that the executor computes from the domain and
+passes in, as it passes a ragged array's offsets.
 """
 
 from __future__ import annotations
@@ -49,6 +59,7 @@ from loopy.symbolic import Reduction as LoopyReduction
 from loopy.symbolic import set_to_cond_expr
 from pymbolic.mapper import Mapper
 
+from loopty.domain import STORAGES, Union
 from loopty.flow import (
     access_relation,
     bounds_dimension,
@@ -56,6 +67,7 @@ from loopty.flow import (
     ragged_bound_params,
     statement_accesses,
 )
+from loopty.idx import linearize
 from loopty.term import (
     COUNT_PARAM,
     COUNT_PARAM_REFLECTED,
@@ -423,6 +435,11 @@ class Lowering:
     reduction's loops by them. ``contraction`` says whether the compiler may
     fuse ``a * b + c`` into one multiply-add; it is ``False`` when an output is
     compared bit for bit, see :func:`allows_contraction`.
+
+    ``storage`` says, for every array over a polyhedral domain, which layout
+    it is stored in, ``"box"`` or ``"packed"`` (:mod:`loopty.domain`), and
+    ``tables`` names the argument holding the table of row starts of each
+    packed one, which the executor computes and passes.
     """
 
     term: Term
@@ -435,6 +452,8 @@ class Lowering:
     target: str = "c"
     reduction_inames: dict[str, tuple[str, ...]] = field(default_factory=dict)
     contraction: bool = True
+    storage: dict[str, str] = field(default_factory=dict)
+    tables: dict[str, str] = field(default_factory=dict)
 
     @property
     def name(self) -> str:
@@ -688,7 +707,9 @@ def _written_arrays(term: Term) -> tuple[str, ...]:
 class _Builder:
     """Mutable scratch space for one lowering; see :func:`lower_generic`."""
 
-    def __init__(self, term: Term, target: str) -> None:
+    def __init__(
+        self, term: Term, target: str, layouts: Mapping[str, str] | None = None
+    ) -> None:
         self.term = term
         self.target = target
         self.arr_types: dict[str, ArrType] = {
@@ -699,6 +720,10 @@ class _Builder:
         }
         self.written = _written_arrays(term)
         self.ragged: dict[str, str] = {}
+        #: The layout of every array over a domain, and the argument holding
+        #: the table of row starts of each packed one; see Lowering.
+        self.storage = _storage_plan(term, layouts)
+        self.tables: dict[str, str] = {}
         self.extra_domains: list[isl.Set] = []
         self.extra_args: list[Any] = []
         self.value_args: list[str] = []
@@ -814,6 +839,9 @@ class _Builder:
     def access(self, name: str, indices: tuple[Any, ...]) -> prim.Expression:
         """The flat-storage reference for an index tuple in index-type axes."""
         variable = prim.Variable(name)
+        typ = self.arr_types.get(name)
+        if typ is not None and typ.domain is not None:
+            return self.domain_access(name, typ, indices)
         axis = self.ragged_axis(name)
         if axis is None:
             if not indices:
@@ -827,6 +855,73 @@ class _Builder:
         offsets = self.offsets_for(name)
         flat = prim.Subscript(prim.Variable(offsets), (indices[0],)) + indices[1]
         return prim.Subscript(variable, (flat,))
+
+    def domain_access(
+        self, name: str, typ: ArrType, indices: tuple[Any, ...]
+    ) -> prim.Expression:
+        """The reference into an array over a domain, through its layout.
+
+        See the module docstring: boxed, a single domain is indexed as it is
+        and a union's piece at its base in a flat buffer; packed, through the
+        table of row starts, ``L[off_L[i] + j]``. The piece of a union is a
+        Python integer in every access (the tracer refuses anything else), so
+        its base is a term of the sizes alone.
+        """
+        domain = typ.domain
+        union = isinstance(domain, Union)
+        pieces = domain.pieces if union else (domain,)
+        if union:
+            position = indices[0]
+            if not isinstance(position, int | np.integer):
+                raise LoweringError(
+                    f"{name} is indexed by {position!r} in its piece, and the "
+                    f"piece of the union {domain} is chosen by an integer"
+                )
+            position = int(position)
+            rest = tuple(indices[1:])
+        else:
+            position, rest = 0, tuple(indices)
+        variable = prim.Variable(name)
+        boxes = [tuple(_plain(extent) for extent in piece.box()) for piece in pieces]
+        if self.storage[name] == "box":
+            if not union:
+                return prim.Subscript(variable, rest)
+            base = _total(_volume(box) for box in boxes[:position])
+            flat = _plus(base, linearize(rest, boxes[position]))
+            return prim.Subscript(variable, (flat,))
+        rows = [box[:-1] for box in boxes]
+        base = _total(_volume(box) for box in rows[:position])
+        entry = _plus(base, linearize(rest[:-1], rows[position]) if rest[:-1] else 0)
+        start = prim.Subscript(prim.Variable(self.table_for(name)), (entry,))
+        return prim.Subscript(variable, (_plus(start, rest[-1]),))
+
+    def table_for(self, name: str) -> str:
+        """The argument holding the table of row starts of a packed array.
+
+        ``off_<name>``, suffixed while it is a name the kernel already uses, and
+        an ``int32`` argument of no declared shape, which the executor fills
+        from the array's domain (:meth:`loopty.domain.Fixed.table`).
+        """
+        if name in self.tables:
+            return self.tables[name]
+        taken = set(dict(self.term.params)) | set(self.term.sizes)
+        taken |= {iname for stmt in self.term.stmts for iname in stmt.inames}
+        taken |= {symbol for symbol, _ in self.term.reflected}
+        taken |= {arg.name for arg in self.extra_args}
+        candidate = f"off_{name}"
+        while candidate in taken:
+            candidate = f"{candidate}_"
+        self.extra_args.append(
+            lp.GlobalArg(
+                candidate,
+                np.dtype(np.int32),
+                shape=None,
+                is_input=True,
+                is_output=False,
+            )
+        )
+        self.tables[name] = candidate
+        return candidate
 
     # }}}
 
@@ -1006,6 +1101,89 @@ class _Builder:
             from loopty.idx import to_set
 
             self.extra_domains.append(to_set((size,), names=(binder.name,)))
+
+
+def _storage_plan(
+    term: Term, layouts: Mapping[str, str] | None
+) -> dict[str, str]:
+    """The layout of every array over a domain: ``"box"`` unless ``layouts`` says.
+
+    ``layouts`` may name only arrays over a domain, and only a layout of
+    :data:`loopty.domain.STORAGES`; anything else is refused, since a dense or
+    ragged array has one layout and no choice to make.
+    """
+    arrays = {name: typ for name, typ in term.params if isinstance(typ, ArrType)}
+    plan = {name: "box" for name, typ in arrays.items() if typ.domain is not None}
+    for name, storage in (layouts or {}).items():
+        if name not in plan:
+            raise LoweringError(
+                f"{name} is not an array over a Where, Sigma or union domain of "
+                f"{term.name}, so it has no layout to choose; a dense or ragged "
+                "array is stored one way"
+            )
+        if storage not in STORAGES:
+            raise LoweringError(
+                f"an array over a domain is stored "
+                f"{' or '.join(map(repr, STORAGES))}, not {storage!r}"
+            )
+        plan[name] = storage
+    return plan
+
+
+def _refuse_packed_without_interval_rows(term: Term, builder: _Builder) -> None:
+    """Refuse a packed array whose domain has a row that is not an interval.
+
+    The packed layout stores a row as the run from its first column to its
+    last, and addresses ``(r, j)`` as ``table[r] + j``, so a column the row
+    skips (``j % 2 == 0``) would take a cell it does not have. Asked of isl
+    for every size (:meth:`loopty.domain.Polyhedron.rows_are_intervals`).
+    """
+    for name, storage in builder.storage.items():
+        if storage != "packed":
+            continue
+        domain = builder.arr_types[name].domain
+        pieces = domain.pieces if isinstance(domain, Union) else (domain,)
+        for piece in pieces:
+            if piece.rows_are_intervals():
+                continue
+            raise LoweringError(
+                f"{name} of {term.name} is stored packed, a row at a time from "
+                f"its first column, and a row of {piece} is not an interval "
+                "for every size: a constraint with a remainder or a floor "
+                "division skips columns inside a row. Store it boxed."
+            )
+
+
+def _volume(extents: Sequence[Any]) -> Any:
+    """The number of cells of a box, folded where the extents are integers."""
+    total: Any = 1
+    for extent in extents:
+        if isinstance(total, int) and isinstance(extent, int):
+            total *= extent
+        elif isinstance(total, int) and total == 1:
+            total = extent
+        else:
+            total = prim.Product((total, extent))
+    return total
+
+
+def _plus(left: Any, right: Any) -> Any:
+    """``left + right``, folded where either is the integer ``0``."""
+    if isinstance(left, int) and left == 0:
+        return right
+    if isinstance(right, int) and right == 0:
+        return left
+    if isinstance(left, int) and isinstance(right, int):
+        return left + right
+    return prim.Sum((left, right))
+
+
+def _total(terms: Iterator[Any] | Sequence[Any]) -> Any:
+    """The sum of ``terms``, folded as :func:`_plus` folds."""
+    out: Any = 0
+    for term in terms:
+        out = _plus(out, term)
+    return out
 
 
 def _plus_one(size: Any) -> Any:
@@ -1450,17 +1628,23 @@ def _writes_its_row(writer: Stmt, row: int, shifts: Sequence[int]) -> bool:
     return False
 
 
-def lower_generic(term: Term, target: str = "c") -> Lowering:
+def lower_generic(
+    term: Term, target: str = "c", layouts: Mapping[str, str] | None = None
+) -> Lowering:
     """Lower ``term``, keeping the map from term statements to instructions.
 
     This is :func:`lower` plus bookkeeping. A schedule needs to say *which term
     statement* it would reorder, and an executor needs to know which arguments
     the kernel writes; both are recorded here rather than recovered by matching
     names against generated code.
+
+    ``layouts`` chooses the layout of an array over a polyhedral domain,
+    ``{"L": "packed"}``; every such array is boxed otherwise.
     """
     _refuse_reserved_names(term)
     _refuse_free_name_sorts(term)
-    builder = _Builder(term, target)
+    builder = _Builder(term, target, layouts)
+    _refuse_packed_without_interval_rows(term, builder)
     _refuse_bounds_over_reduction_binders(term, builder)
     builder.plan_reductions()
     expr = builder.expr
@@ -1698,6 +1882,8 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
         target=target,
         reduction_inames=_reduction_inames(term, builder),
         contraction=contraction,
+        storage=dict(builder.storage),
+        tables=dict(builder.tables),
     )
 
 
@@ -2092,10 +2278,17 @@ def _arguments(
     for name in sorted(sizes):
         declare_value(name, np.dtype(np.int32))
 
-    def shape_of(typ: ArrType, ragged: bool) -> tuple[Any, ...] | None:
+    def shape_of(typ: ArrType, ragged: bool, name: str) -> tuple[Any, ...] | None:
         if ragged:
             return None
-        shape = tuple(_plain(size) for size in typ.axes)
+        if typ.domain is not None:
+            # Only a single domain in a box has a shape; a union, or packed
+            # rows, is a flat buffer of a length no loop bound states.
+            if isinstance(typ.domain, Union) or builder.storage[name] != "box":
+                return None
+            shape = tuple(_plain(extent) for extent in typ.domain.box())
+        else:
+            shape = tuple(_plain(size) for size in typ.axes)
         free: set[str] = set()
         for size in shape:
             free |= {name for name in _names_in(size)}
@@ -2113,7 +2306,7 @@ def _arguments(
             lp.GlobalArg(
                 name,
                 numpy_dtype(typ.dtype),
-                shape=shape_of(typ, ragged),
+                shape=shape_of(typ, ragged, name),
                 is_input=True,
                 is_output=is_output,
             )
@@ -2138,9 +2331,11 @@ def _names_in(expr: Any) -> set[str]:
     return {node.name for node in walk(expr) if isinstance(node, prim.Variable)}
 
 
-def lower(term: Term, target: str = "c") -> Any:
+def lower(
+    term: Term, target: str = "c", layouts: Mapping[str, str] | None = None
+) -> Any:
     """Build the loopy kernel for ``term`` on ``target``."""
-    return lower_generic(term, target).kernel
+    return lower_generic(term, target, layouts).kernel
 
 
 def _register_term_lowering() -> None:
