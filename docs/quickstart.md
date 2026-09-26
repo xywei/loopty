@@ -350,12 +350,13 @@ transpose at the bottom is split and interchanged, and both steps are cast facts
 - Break something. Change the stencil's guard from `i > 0` to `i >= 0` and
   re-check. The in-bounds fact for `u[t, i - 1]` turns `refuted`, `lanky check`
   prints `6 facts: 1 assumed, 4 decided, 1 refuted` and then
-  `REFUTED jacobi at ...: u[t, i - 1] is in bounds for every instance of S0`,
-  and it exits 1. The witness in the JSON is the cell that escapes,
-  `"witness_text": "[a0=0, a1=-1]"`, with the isl question beside it. The
-  faithfulness fact turns `assumed`: the body now reads in front of `u` on
-  every input, natively as well, so there was nothing to compare, and its
-  reason says so.
+  `REFUTED jacobi at ...: u[t, i - 1] is in bounds for every instance of S0`
+  with the cell that escapes under it, at the sizes isl read it off at:
+  `cells u[t, i - 1] reaches are cells u has, except [a0=0, a1=-1] at [nt=2, nx=2]`.
+  It exits 1. The JSON has the same cell as `witness_text`, with the isl
+  question beside it. The faithfulness fact turns `assumed`: the body now
+  reads in front of `u` on every input, natively as well, so there was nothing
+  to compare, and its reason says so.
 - Hide some state from the tracer. In the stencil, keep a count in a list of
   lists: `acc = [[0.0]]` before the loops, `acc[0][0] += 1.0` at the top of
   the inner loop, and divide by `acc[0][0]` instead of by 2. Tracing looks one

@@ -300,6 +300,68 @@ def test_check_refuses_a_loop_carried_name_and_prints_the_fix(
     assert facts[0]["provenance"]["reason"].startswith("TraceError: ")
 
 
+OUT_OF_BOUNDS = '''
+"""A read one past the end, and a loop that writes one cell over and over."""
+
+from __future__ import annotations
+
+from lanky.prelude import Real
+
+from loopty import Arr, Fin, kernel
+
+
+@kernel
+def shift(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):
+    for i in u.dom:
+        v[i] = u[i + 1]
+
+
+@kernel
+def collide(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
+    for i in x.dom:
+        y[0] = x[i]
+'''
+
+
+def test_check_prints_the_witness_of_an_isl_refutation_under_its_line(
+    tmp_path, capsys
+) -> None:
+    """What isl refuted is explained under the ``REFUTED`` line, in words.
+
+    The isl oracle recorded the cell that escapes, and the two instances that
+    write one cell, as ``witness`` and ``witness_text``, which lanky does not
+    print, and no ``reason``, which it does. So both lines came out bare. Now
+    the reason names the question and the labelled witness.
+    """
+    from lanky.cli import main as lanky_main
+
+    path = write_fixture(tmp_path, OUT_OF_BOUNDS)
+    out_path = tmp_path / "ledger.json"
+    code = lanky_main(["check", str(path), "--json", str(out_path)])
+    out = capsys.readouterr().out
+    assert code == 1
+    lines, header = refutation_block(out, "shift at ")
+    assert lines[header].endswith("u[i + 1] is in bounds for every instance of S0")
+    facts = json.loads(out_path.read_text(encoding="utf-8"))
+    refuted = {fact["owner"]: fact for fact in facts if fact["status"] == "refuted"}
+    assert [f["owner"] for f in facts if f["status"] == "refuted"] == [
+        "shift",
+        "collide",
+    ]
+    escapes = refuted["shift"]
+    reason = escapes["provenance"]["reason"]
+    assert reason.startswith("cells u[i + 1] reaches are cells u has, except [a0=")
+    assert escapes["provenance"]["witness_text"] in reason
+    assert f"  {reason}" in lines[header + 1 : header + 3]
+
+    lines, header = refutation_block(out, "collide at ")
+    assert lines[header].endswith("distinct instances of S0 write distinct cells of y")
+    reason = refuted["collide"]["provenance"]["reason"]
+    assert " is one of the pairs of S0 instances writing the same cell" in reason
+    assert reason.startswith("[s=0, d0=")
+    assert f"  {reason}" in lines[header + 1 : header + 3]
+
+
 def test_run_reports_a_loop_carried_name_instead_of_a_traceback(
     tmp_path, capsys
 ) -> None:

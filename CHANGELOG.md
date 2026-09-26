@@ -525,6 +525,12 @@ with a pair of statement instances.
   for a fact with no witness (`exactness`, `buildable`) and was empty for a
   `bijective` or `monotone` fact with one. `detail` stays, in the oracle's
   words, and `witness` is recorded whenever isl gives one.
+- A fact the isl oracle refutes (an access out of bounds, two instances
+  writing one cell) carries a `reason` that names the question and the
+  labelled witness at its sizes, which lanky prints under its `REFUTED` line:
+  `cells u[i + 1] reaches are cells u has, except [a0=1] at [n=1]`. Nothing was
+  printed under the line, because lanky counts the oracle's `witness` as what
+  explains a refutation and prints neither it nor `witness_text`.
 - What refuted a fact is printed under its `REFUTED` line by `loopty run` as by
   `lanky check`. `loopty run` printed the bare line; it now prints lanky's own
   block (`lanky.cli.refutation_lines`) under each one, and the line itself as
