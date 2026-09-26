@@ -1,6 +1,6 @@
 # Notes on loopy and islpy
 
-Thirteen interactions with loopty's dependencies that cost real debugging
+Fourteen interactions with loopty's dependencies that cost real debugging
 time, each with the local workaround and the reason it is local. No upstream
 issues were filed: these are notes so that the next person meets the answer
 instead of the symptom.
@@ -487,3 +487,31 @@ defines, such as a row and the ragged fiber inside it, an image that is not one
 basic set, or a piecewise inverse), the schedule carries a `refuted`
 `buildable` fact with the reason, and no kernel, rather than an error from
 loopy.
+
+## 14. The C target does not allocate a global temporary
+
+**Symptom.** A kernel with `lp.TemporaryVariable("f", np.float64, shape=("n",),
+address_space=lp.AddressSpace.GLOBAL)`, written in one loop and read in the
+next, compiles for `lp.ExecutableCTarget` and kills the process when it is
+called: exit status 139, no Python traceback. The generated device function
+takes `f` as a pointer argument, `double *__restrict__ f`, beside the real
+arguments.
+
+**Cause.** A global temporary is a device-memory buffer the host allocates for
+each call. loopy's PyOpenCL host code does that. Its C host code never does, so
+the device function is handed a pointer nothing set, and the first write
+through it is a write to wherever that is.
+
+**Local fix.** `lower._temporary` declares a program's own arrays (the
+temporaries of a program's term, `loopty.compose`) by target: private on C,
+which the C target declares as a variable-length array on the stack of the
+call (`double f[n];`), and global on OpenCL. An address space left to loopy
+(`lp.auto`) comes out private too, since nothing in the kernel is parallel,
+which on OpenCL would be a variable-length private array that OpenCL C does
+not have.
+
+**What that costs.** On C the stack bounds how big a temporary can be: a
+program whose intermediate is larger than the thread's stack crashes the same
+way, and nothing checks the size first. The demos' intermediates are a few
+hundred bytes. The OpenCL path is generated, not run: nothing on a development
+machine imports pyopencl.

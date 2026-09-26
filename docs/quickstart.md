@@ -183,6 +183,9 @@ spmv: Schedule(spmv, target='c').split(j, 2).realize('y', tree=True)
   y: difference 5.55e-17 within 1.48e-06 (approx) -> tested
 scan: Schedule(scan, target='c')
   off: difference 0 within 0 (exact) -> tested
+solve: Schedule(solve, target='c')
+  y: difference 0 within 1e-06 (approx) -> tested
+  off: difference 0 within 0 (exact) -> tested
 
 STATUS   BY     WHERE        OWNER  STATEMENT
 -------  -----  -----------  -----  ------------------------------------------------------------------------
@@ -193,8 +196,9 @@ decided  isl    spmv.py:112  spmv   the order after realize('y', tree=True) runs
 decided  isl    spmv.py:112  spmv   the accumulation into y is reassociated by realize('y', tree=True), s...
 tested   loopy  spmv.py:112  spmv   the scheduled run of spmv agrees with the native run to the accuracy ...
 tested   loopy  spmv.py:79   scan   the scheduled run of scan agrees with the native run to the accuracy ...
+tested   loopy  spmv.py:115  solve  the scheduled run of solve agrees with the native run to the accuracy...
 
-7 facts: 5 decided, 2 tested
+8 facts: 5 decided, 3 tested
 ```
 
 The ragged loop became a genuine CSR loop: a flat buffer, an offsets argument,
@@ -227,8 +231,18 @@ kernel never mentioned any of them.
 
 `scan` agrees exactly, because its output is `Nat` and integer arithmetic is
 exact. `spmv` agrees to `5.55e-17`, comfortably inside the reassociation
-tolerance. The two `loopy` rows are facts like any other: an executor is an
-oracle of trust class `test`.
+tolerance. The `loopy` rows are facts like any other: an executor is an oracle
+of trust class `test`.
+
+`solve`, the program, is compiled as well, as one kernel. Its term is what its
+body does run against placeholders: `scan`'s statements, then `spmv`'s, in the
+program's names, with `spmv`'s loop over `r` renamed `r_0` so that two loops
+keep two names. The compiled program is compared with the program run
+natively, both of its outputs at once. `spmv` declares no offsets, so the
+program reads the rows through their own, as `spmv` does alone; the program
+parameter called `off` is `scan`'s output and is not taken for them.
+`examples/composition.py` composes two kernels with an edge between them, and
+an intermediate array the program keeps to itself.
 
 ## The stencil, and a transformation that is refused
 
@@ -402,6 +416,7 @@ transpose at the bottom is split and interchanged, and both steps are cast facts
 | runtime arrays, dense and ragged | `src/loopty/arr.py` |
 | the Term IR | `src/loopty/term.py` |
 | tracing a body | `src/loopty/trace.py` |
+| a program's term, composed from its calls | `src/loopty/compose.py` |
 | footprints and dependences | `src/loopty/flow.py` |
 | typing rules, the facts | `src/loopty/typing.py` |
 | the isl oracle and its witnesses | `src/loopty/oracle.py` |
@@ -416,7 +431,7 @@ transcripts, are in [device-runs.md](device-runs.md) and under
 debugging time, and the local workarounds for them, are in
 [loopy-notes.md](loopy-notes.md).
 
-All five demos, with every console block regenerated mechanically by
+All six demos, with every console block regenerated mechanically by
 `scripts/refresh_example_outputs.py`, are in
 [../examples/README.md](../examples/README.md). The blocks in *this* file come
 from the same script, some of them elided where marked with `...`; run the

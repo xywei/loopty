@@ -574,6 +574,10 @@ def _agreement_fact(
     :attr:`~loopty.schedule.Schedule.key`, so that two schedules of one kernel
     run from one file keep two facts in the ledger; a kernel or a term run
     without a schedule is named by its name and target alone.
+
+    It is placed at the term's first statement, or at the term's own
+    :attr:`~loopty.term.Term.where` when it has one: a program's term does,
+    since its first statement is some kernel's, perhaps in another file.
     """
     from lanky.ledger import Fact, Status
 
@@ -591,7 +595,7 @@ def _agreement_fact(
         status=Status.TESTED if ok else Status.REFUTED,
         decided_by="loopy",
         provenance=provenance,
-        where=term.stmts[0].where if term.stmts else "",
+        where=term.where or (term.stmts[0].where if term.stmts else ""),
         owner=term.name,
     )
 

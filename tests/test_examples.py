@@ -32,7 +32,14 @@ EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 #: Every demo. A demo whose ledger has an ``assumed`` fact is not a failure: a
 #: postcondition nobody can decide yet is exactly what the ledger is for. A
 #: ``refuted`` one is, and every demo here is meant to come out clean.
-NAMES = ("spmv", "stencil_skew", "wavefront_acoustic", "reshape_layouts", "p2p")
+NAMES = (
+    "spmv",
+    "stencil_skew",
+    "wavefront_acoustic",
+    "reshape_layouts",
+    "p2p",
+    "composition",
+)
 
 _RESULTS: dict[tuple[str, str], tuple[Any, list[dict]]] = {}
 _MODULES: dict[str, Any] = {}
@@ -134,6 +141,7 @@ KERNELS = {
     "wavefront_acoustic": {"acoustic"},
     "reshape_layouts": {"rows_of", "cols_of", "transpose"},
     "p2p": {"p2p"},
+    "composition": {"flux", "divergence"},
 }
 
 
@@ -550,6 +558,41 @@ def test_the_guarded_self_interaction_is_left_out_of_the_sum() -> None:
         for target in range(len(offsets) - 1)
         for a in range(offsets[target], offsets[target + 1])
     ), "the demo is pointless unless some list contains its own target"
+
+
+# }}}
+
+
+# {{{ programs
+
+
+def test_loopty_run_compiles_each_program_as_one_kernel() -> None:
+    # A program is run like a kernel: its term lowered, compiled, and compared
+    # with its native run, in the ledger as an agreement of its own.
+    for name, program in (("spmv", "solve"), ("composition", "burgers_rhs")):
+        result, facts = _invoke(name, "run")
+        assert f"{program}: Schedule({program}, target='c')" in result.stdout
+        (fact,) = [
+            fact
+            for fact in facts
+            if fact["kind"] == "agreement" and fact["owner"] == program
+        ]
+        assert fact["status"] == "tested", fact
+
+
+def test_the_composed_program_keeps_its_intermediate_to_itself() -> None:
+    module = _module("composition")
+    term = module.burgers_rhs.term
+    assert term.param_names == ("u", "rhs")
+    assert [name for name, _ in term.temporaries] == ["f"]
+    assert [stmt.id for stmt in term.stmts] == [
+        "f.zeros",
+        "flux.S0",
+        "divergence.S0",
+    ]
+    result, _ = _invoke("composition", "python")
+    assert "double f[n];" in result.stdout
+    assert "-> tested" in result.stdout
 
 
 # }}}

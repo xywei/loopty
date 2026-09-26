@@ -101,7 +101,7 @@ import pymbolic.primitives as prim
 from lanky.terms import init_args
 
 from loopty.idx import Reflections
-from loopty.term import ArrType, Stmt, Term, count_param_names, declared_offsets
+from loopty.term import ArrType, Stmt, Term, count_param_names
 
 __all__ = [
     "Footprint",
@@ -673,7 +673,7 @@ def layout_reads(stmt: Stmt, term: Term) -> tuple[LayoutRead, ...]:
     one thing however it runs.
 
     Nothing is listed for offsets the kernel does not declare
-    (:func:`loopty.term.declared_offsets`). Lowering then adds them as an
+    (:meth:`loopty.term.Term.offsets_of`). Lowering then adds them as an
     argument of ``n + 1`` cells that nothing in the body can name, so there is
     no writer to order against, and the row index being in bounds of ``val``'s
     first axis, which ``val[r, j]``'s own obligation states, keeps the reads in
@@ -697,7 +697,7 @@ def _index_reads(term: Term, access: _Access) -> tuple[_Access, ...]:
     the read :func:`loopty.lower.lower_generic` indexes through.
     """
     array, indices, _kind, inames, domain = access
-    typ = dict(term.params).get(array)
+    typ = term.array_types.get(array)
     if not isinstance(typ, ArrType):
         return ()
     axis = next((k for k, flag in enumerate(typ.ragged) if flag), None)
@@ -706,7 +706,7 @@ def _index_reads(term: Term, access: _Access) -> tuple[_Access, ...]:
     counts = typ.axes[axis]
     if not isinstance(counts, prim.Variable):
         return ()
-    offsets = declared_offsets(term.params, counts.name)
+    offsets = term.offsets_of(counts.name)
     if offsets is None:
         return ()
     return ((offsets, (indices[axis - 1],), "read", inames, domain),)
@@ -985,7 +985,7 @@ def _row_length_reads(
                 read = (access.array, access.indices, "read", inames, domain)
                 out.append(LayoutRead(read, "row", row, loops=bounded))
         return out
-    offsets = declared_offsets(term.params, counts)
+    offsets = term.offsets_of(counts)
     if offsets is None:
         return []
     return [

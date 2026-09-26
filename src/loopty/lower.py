@@ -65,7 +65,6 @@ from loopty.term import (
     Stmt,
     Term,
     count_param_names,
-    declared_offsets,
     free_name_sorts,
     free_name_sorts_message,
 )
@@ -422,7 +421,9 @@ class Lowering:
     :meth:`_Builder.plan_reductions` had to rename them, and a schedule names a
     reduction's loops by them. ``contraction`` says whether the compiler may
     fuse ``a * b + c`` into one multiply-add; it is ``False`` when an output is
-    compared bit for bit, see :func:`allows_contraction`.
+    compared bit for bit, see :func:`allows_contraction`. ``temporaries``
+    names the arrays declared as loopy temporaries, a program's own arrays
+    (:attr:`loopty.term.Term.temporaries`), which are nobody's argument.
     """
 
     term: Term
@@ -435,6 +436,7 @@ class Lowering:
     target: str = "c"
     reduction_inames: dict[str, tuple[str, ...]] = field(default_factory=dict)
     contraction: bool = True
+    temporaries: tuple[str, ...] = ()
 
     @property
     def name(self) -> str:
@@ -578,6 +580,7 @@ def _refuse_reserved_names(term: Term) -> None:
     """
     roles: dict[str, list[str]] = {
         "parameters": [name for name, _ in term.params],
+        "program-local arrays": [name for name, _ in term.temporaries],
         "sizes": list(term.sizes),
         "loop variables": [],
         "reduction variables": [],
@@ -598,7 +601,8 @@ def _refuse_reserved_names(term: Term) -> None:
             "or start with an underscore and a capital letter or with two "
             "underscores, which C reserves; rename them in the kernel (a "
             "parameter in its signature, a size in its annotations, a loop or "
-            "reduction variable where it is bound)."
+            "reduction variable where it is bound), or in the program that "
+            "makes a program-local array."
         )
 
 
@@ -691,9 +695,9 @@ class _Builder:
     def __init__(self, term: Term, target: str) -> None:
         self.term = term
         self.target = target
-        self.arr_types: dict[str, ArrType] = {
-            name: typ for name, typ in term.params if isinstance(typ, ArrType)
-        }
+        #: Parameters and a program's temporaries alike: an access is lowered
+        #: the same way whoever allocates the array.
+        self.arr_types: dict[str, ArrType] = term.array_types
         self.scalar_types: dict[str, Any] = {
             name: typ for name, typ in term.params if not isinstance(typ, ArrType)
         }
@@ -786,17 +790,31 @@ class _Builder:
         The first of :data:`loopty.term.OFFSETS_CANDIDATES` that is a parameter
         of the term wins, which makes ``spmv(off, col, val, x, y)`` work with no
         configuration; when none is, an ``int32`` argument is added. The choice
-        is :func:`loopty.term.declared_offsets`, the same one the access
-        collector makes when it lists the read of the offsets.
+        is :meth:`loopty.term.Term.offsets_of`, the same one the access
+        collector makes when it lists the read of the offsets, and a term that
+        states its offsets (a program's) has them taken as stated.
+
+        The added argument is ``off_<counts>``, suffixed with underscores when
+        the term already uses that name. Only a term that states its offsets
+        can: a kernel with a parameter of that name has it found as declared.
         """
         if name in self.ragged:
             return self.ragged[name]
         counts = self.counts_name(name)
-        declared = declared_offsets(self.term.params, counts)
+        declared = self.term.offsets_of(counts)
         if declared is not None:
             self.ragged[name] = declared
             return declared
         candidate = f"off_{counts}"
+        used = set(self.term.param_names) | set(self.term.sizes)
+        used |= {temporary for temporary, _ in self.term.temporaries}
+        used |= {symbol for symbol, _ in self.term.reflected}
+        for stmt in self.term.stmts:
+            used |= set(stmt.inames)
+            for reduction in reductions_of(stmt.expr):
+                used |= set(reduction.inames)
+        while candidate in used:
+            candidate = f"{candidate}_"
         typ = self.arr_types[name]
         outer = typ.axes[0]
         self.extra_args.append(
@@ -875,6 +893,7 @@ class _Builder:
         shared object is planned twice, once in each, like two equal objects.
         """
         taken = set(self.term.sizes) | set(dict(self.term.params))
+        taken |= set(dict(self.term.temporaries))
         taken |= {iname for stmt in self.term.stmts for iname in stmt.inames}
         taken |= {symbol for symbol, _ in self.term.reflected}
         for stmt in self.term.stmts:
@@ -1698,6 +1717,7 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
         target=target,
         reduction_inames=_reduction_inames(term, builder),
         contraction=contraction,
+        temporaries=tuple(name for name, _ in term.temporaries),
     )
 
 
@@ -1756,6 +1776,14 @@ def _scalar_assumptions(term: Term, declared: set[str]) -> isl.BasicSet | None:
     ``i`` the assumption is false of. ``Nat`` contributes non-negativity and
     ``Int`` nothing. A constraint naming something loopy does not have as a
     parameter is dropped rather than guessed at.
+
+    The sizes the kernel is passed are said to be non-negative too, whenever
+    anything is said. An assumption brings every parameter of the kernel into
+    the domain loopy checks an access over, and loopy checks an access only
+    when that domain names everything the array's shape does. So ``off[0]``
+    of ``off: Arr[Fin[n + 1], Nat]``, written outside any loop, went unchecked
+    until a ``Nat`` scalar made ``n`` a parameter of the assumption, and was
+    then refused for ``n = -1``, which no array has.
     """
     from loopty.contract import sort_bound
 
@@ -1794,6 +1822,10 @@ def _scalar_assumptions(term: Term, declared: set[str]) -> isl.BasicSet | None:
             names.add(name)
     if not pieces:
         return None
+    for name in term.sizes:
+        if name in declared:
+            pieces.append(f"{name} >= 0")
+            names.add(name)
     # A set rather than the text ``lp.assume`` also accepts: that path wraps the
     # constraint in the kernel's own outer parameters, and a scalar argument is
     # not one of them until this assumption introduces it.
@@ -2032,6 +2064,9 @@ def _arguments(
     shape mentions it are declared without one: see :func:`_used_names`. A ragged
     array is a flat buffer of a length no loop bound knows, so it is always in
     that case, and its offsets argument is what gives its rows back.
+
+    A program's temporaries (:attr:`loopty.term.Term.temporaries`) come last,
+    as loopy temporaries: see :func:`_temporary`.
     """
     used = _used_names(domains, insns)
     # An array the generated code never mentions cannot be passed: loopy's C
@@ -2065,6 +2100,7 @@ def _arguments(
     # A reduction binder that had to be renamed is an iname of the generated
     # kernel and not a size the caller passes; see _Builder.plan_reductions.
     known_inames |= builder.extra_inames
+    temporaries = dict(term.temporaries)
     sizes = [
         name
         for name in used
@@ -2072,6 +2108,7 @@ def _arguments(
         and name not in known_inames
         and name not in provided
         and name not in dict(term.params)
+        and name not in temporaries
     ]
     scalars = {name for name, typ in term.params if not isinstance(typ, ArrType)}
 
@@ -2130,7 +2167,51 @@ def _arguments(
         array_args.append(extra.name)
         declared.add(extra.name)
 
+    for name, typ in term.temporaries:
+        args.append(_temporary(term, name, typ, builder.target, declared | scalars))
+        declared.add(name)
+
     return args, tuple(array_args), tuple(value_args), tuple(outputs)
+
+
+def _temporary(
+    term: Term, name: str, typ: ArrType, target: str | None, declared: set[str]
+) -> Any:
+    """The loopy temporary for one of a program's own arrays.
+
+    Where it lives depends on the target, because loopy 2025.2 allocates a
+    temporary in global memory on one target and not on the other (note 14 in
+    ``docs/loopy-notes.md``). On OpenCL it is a global temporary, which the
+    PyOpenCL host code allocates for each call. On C it is private, which the
+    C target declares as a variable-length array on the stack of the call
+    (``double f[n];``): the C host code never allocates a global temporary and
+    passes the device function a pointer it never set, so a global one there
+    crashes the process. The stack bounds how big such an array can be.
+
+    A ragged temporary is refused, since nothing would give it its offsets, and
+    so is one whose shape names a size nothing else in the kernel uses, which
+    loopy would have no value for.
+    """
+    if any(typ.ragged):
+        raise LoweringError(
+            f"{name} is an array {term.name} makes for itself, and it is ragged; "
+            "a temporary has no offsets for its rows to be found by, so make "
+            "it a parameter of the program instead"
+        )
+    shape = tuple(_plain(size) for size in typ.axes)
+    missing = sorted(
+        {found for size in shape for found in _names_in(size)} - declared
+    )
+    if missing:
+        raise LoweringError(
+            f"the temporary {name} of {term.name} is sized by "
+            f"{', '.join(missing)}, which nothing else in the kernel names, so "
+            "loopy would have no value for it"
+        )
+    space = lp.AddressSpace.GLOBAL if target == "opencl" else lp.AddressSpace.PRIVATE
+    return lp.TemporaryVariable(
+        name, numpy_dtype(typ.dtype), shape=shape, address_space=space
+    )
 
 
 def _names_in(expr: Any) -> set[str]:

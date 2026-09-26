@@ -11,9 +11,9 @@ Run this file three ways and it answers three different questions.
     tried strongest first, and the ledger says who decided what.
 
 ``loopty run examples/spmv.py``
-    The kernels are lowered through loopy, compiled for the C target, run on
-    the example inputs, and compared with the native run at the tolerance the
-    exactness class states.
+    The kernels, and ``solve`` as one kernel, are lowered through loopy,
+    compiled for the C target, run on the example inputs, and compared with
+    the native run at the tolerance the exactness class states.
 
 What is worth reading here
 --------------------------
@@ -152,11 +152,18 @@ def random_csr(rows: int = 6, cols: int = 5, seed: int = 0) -> dict:
 
 
 def example_inputs() -> dict:
-    """The inputs ``loopty run`` gives each kernel in this file."""
+    """The inputs ``loopty run`` gives each kernel in this file, and the program.
+
+    ``solve`` gets the whole matrix. Its ``off`` starts out zero, as ``scan``
+    expects, and ``spmv`` reads the rows through their own offsets, because it
+    declares none of its own; a program parameter called ``off`` is not taken
+    for them.
+    """
     data = random_csr()
     return {
         "scan": {"cnt": data["cnt"], "off": data["off"]},
         "spmv": {key: data[key] for key in ("cnt", "col", "val", "x", "y")},
+        "solve": random_csr(),
     }
 
 

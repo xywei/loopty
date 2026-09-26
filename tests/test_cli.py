@@ -707,3 +707,73 @@ def test_check_says_a_witness_may_be_one_the_guard_masks(tmp_path, capsys) -> No
 
 
 # }}}
+
+
+PROGRAMS = '''
+from __future__ import annotations
+
+import numpy as np
+from lanky.prelude import Real
+
+from loopty import Arr, Fin, kernel, program
+
+
+@kernel
+def doubled(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
+    """Twice x, into y."""
+    for i in y.dom:
+        y[i] = 2.0 * x[i]
+
+
+@kernel
+def total(y: Arr[Fin[n], Real], z: Arr[Fin[n], Real]):
+    """y plus one, into z."""
+    for i in z.dom:
+        z[i] = y[i] + 1.0
+
+
+@program
+def chain(x, z):
+    """Twice x, plus one, through an array of the program's own."""
+    y = Arr.zeros_like(x)
+    doubled(x, y)
+    total(y, z)
+
+
+@program
+def peeks(x, z):
+    """Reads a cell of its argument, which a program's term cannot have."""
+    doubled(x, z)
+    print(x[0])
+
+
+def example_inputs():
+    x = np.arange(6, dtype=np.float64)
+    return {
+        "doubled": {"x": Arr.from_numpy(x.copy()), "y": Arr.zeros(6)},
+        "total": {"y": Arr.from_numpy(x.copy()), "z": Arr.zeros(6)},
+        "chain": {"x": Arr.from_numpy(x.copy()), "z": Arr.zeros(6)},
+        "peeks": {"x": Arr.from_numpy(x.copy()), "z": Arr.zeros(6)},
+    }
+'''
+
+
+def test_run_compiles_a_program_and_names_one_it_cannot(tmp_path, capsys) -> None:
+    # A program is run like a kernel: its term lowered as one kernel and
+    # compared with the program's own body. One whose body does something to
+    # an argument but pass it on has no term, and is named with the fix.
+    path = write_fixture(tmp_path, PROGRAMS)
+    ledger = tmp_path / "ledger.json"
+    code = main(["run", str(path), "--json", str(ledger)])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "chain: Schedule(chain, target='c')" in out
+    assert "cannot schedule peeks for c: TraceError: " in out
+    assert "reads a cell of its parameter x" in out
+    (fact,) = [
+        fact
+        for fact in json.loads(ledger.read_text())
+        if fact["kind"] == "agreement" and fact["owner"] == "chain"
+    ]
+    assert fact["status"] == "tested"
+    assert set(fact["provenance"]["outputs"]) == {"z"}
