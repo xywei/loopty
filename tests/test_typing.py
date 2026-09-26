@@ -106,10 +106,15 @@ def gated_past_the_end(
 
 
 def in_bounds_of(fn) -> dict[str, object]:
-    """The in-bounds facts of a traced function, by the access they are about."""
+    """The in-bounds facts of a traced function, by the access they are about.
+
+    The access is the last part of the fact's id, ``...:read:off[r]``: the
+    statement of an offsets read says more than the access (see
+    :func:`test_an_offsets_fact_names_the_ragged_access_it_serves`).
+    """
     _, facts = facts_of(fn)
     return {
-        fact.statement.split(" is ")[0]: fact
+        fact.id.rsplit(":", 1)[-1]: fact
         for fact in settled(facts)
         if fact.kind == "in-bounds"
     }
@@ -403,6 +408,58 @@ def test_offsets_declared_a_cell_short_are_refuted_at_the_last_row() -> None:
     assert [
         name for name, fact in facts.items() if fact.status is Status.REFUTED
     ] == ["off[r + 1]"]
+
+
+def test_an_offsets_fact_names_the_ragged_access_it_serves() -> None:
+    # The source never writes ``off[r + 1]``, so a refuted fact about it used
+    # to name a read nobody could find in the kernel.
+    facts = in_bounds_of(spmv_through_short_offsets)
+    served = "val[r, j] and col[r, j] are flattened through"
+    assert facts["off[r]"].statement == (
+        f"off[r], the start of row r that {served}, is in bounds for every "
+        "instance of S0"
+    )
+    refuted = facts["off[r + 1]"]
+    assert refuted.statement == (
+        f"off[r + 1], the end of row r that {served}, is in bounds for every "
+        "instance of S0"
+    )
+    assert refuted.provenance["layout"] == f"the end of row r that {served}"
+    # An access the source spells keeps its statement, and its provenance.
+    assert facts["val[r, j]"].statement == (
+        "val[r, j] is in bounds for every instance of S0"
+    )
+    assert "layout" not in facts["val[r, j]"].provenance
+
+
+def indirect_rows(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    off: Arr[Fin[n + 1], Nat],  # noqa: F821
+    p: Arr[Fin[k], Fin[n]],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[k], Real],  # noqa: F821
+):
+    for i in y.dom:
+        y[i] = val[p[i], 0]
+
+
+def test_an_assumed_offsets_fact_names_its_access_too() -> None:
+    facts = in_bounds_of(indirect_rows)
+    for access, end in (("off[p[i]]", "start"), ("off[p[i] + 1]", "end")):
+        fact = facts[access]
+        assert fact.status is Status.ASSUMED
+        assert fact.statement == (
+            f"{access}, the {end} of row p[i] that val[p[i], 0] is flattened "
+            "through, is in bounds"
+        )
+
+
+def test_an_offsets_read_the_source_also_spells_says_both() -> None:
+    fact = only_fact(offsets_before_and_through_a_sum, "off[r - 1]")
+    assert fact.statement.startswith(
+        "off[r - 1], read directly and as the start of row r - 1 that "
+        "val[r - 1, j] is flattened through, is in bounds"
+    )
 
 
 # }}}

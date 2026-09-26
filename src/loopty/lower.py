@@ -62,6 +62,7 @@ from loopty.term import (
 __all__ = [
     "COUNT_PARAM",
     "COUNT_PARAM_REFLECTED",
+    "GCC_NO_CONTRACTION_PRAGMA",
     "NO_CONTRACTION_FLAG",
     "NO_CONTRACTION_PRAGMAS",
     "RESERVED_PREFIX",
@@ -100,17 +101,31 @@ _LANG_VERSION = (2018, 2)
 
 #: The C compiler flag that keeps ``a * b + c`` two roundings, set on a kernel
 #: with an ``exact`` output (see :func:`allows_contraction`). GCC and clang both
-#: take it, and GCC takes nothing else: it ignores the standard pragma below.
-#: loopy compiles with ``-std=c99``, in which GCC does not contract anyway, but
-#: clang does, and the flag says so rather than leaving it to the compiler.
+#: take it, and GCC ignores the standard pragma below. loopy compiles with
+#: ``-std=c99``, in which GCC does not contract anyway, but clang does, and the
+#: flag says so rather than leaving it to the compiler.
 NO_CONTRACTION_FLAG = "-ffp-contract=off"
 
-#: The pragma that asks the same in the source, per target. C99's is honoured by
-#: clang and ignored by GCC, which the flag covers. OpenCL C may contract by
-#: default and has no build option to stop it, so there the pragma is the way.
+#: GCC's own spelling of the flag in the source, behind a guard that keeps it
+#: from any other compiler. The flag pins the build loopty runs; this pins the
+#: source that ``loopty run --emit-code`` prints, which someone may compile by
+#: hand with GCC in a GNU dialect, where GCC contracts by default whenever
+#: ``-march`` gives it an FMA instruction. GCC documents the ``optimize``
+#: pragma as meant for debugging; here it asks for less optimization, not
+#: more, and for exactly the one thing the flag asks for.
+GCC_NO_CONTRACTION_PRAGMA = (
+    "#if defined(__GNUC__) && !defined(__clang__)\n"
+    '#pragma GCC optimize ("fp-contract=off")\n'
+    "#endif"
+)
+
+#: The pragmas that ask the same in the source, per target. C99's is honoured
+#: by clang and ignored by GCC, which :data:`GCC_NO_CONTRACTION_PRAGMA` and the
+#: flag cover. OpenCL C may contract by default and has no build option to stop
+#: it, so there the pragma is the way.
 NO_CONTRACTION_PRAGMAS = {
-    "c": "#pragma STDC FP_CONTRACT OFF",
-    "c-source": "#pragma STDC FP_CONTRACT OFF",
+    "c": f"#pragma STDC FP_CONTRACT OFF\n{GCC_NO_CONTRACTION_PRAGMA}",
+    "c-source": f"#pragma STDC FP_CONTRACT OFF\n{GCC_NO_CONTRACTION_PRAGMA}",
     "opencl": "#pragma OPENCL FP_CONTRACT OFF",
 }
 
@@ -258,6 +273,28 @@ def walk(expr: Any) -> Iterator[Any]:
 def reductions_of(expr: Any) -> tuple[Reduction, ...]:
     """Every :class:`~loopty.term.Reduction` in ``expr``, outermost first."""
     return tuple(node for node in walk(expr) if isinstance(node, Reduction))
+
+
+def _reduction_nesting(expr: Any) -> list[tuple[Reduction, tuple[int, ...]]]:
+    """Every reduction in ``expr``, with the reductions it is nested in.
+
+    In the order of :func:`reductions_of`, so that a position names the same
+    reduction in both, and each paired with the positions of the reductions
+    enclosing it, outermost first.
+    """
+    out: list[tuple[Reduction, tuple[int, ...]]] = []
+
+    def visit(node: Any, enclosing: tuple[int, ...]) -> None:
+        if isinstance(node, Reduction):
+            position = len(out)
+            out.append((node, enclosing))
+            visit(node.body, (*enclosing, position))
+            return
+        for child in _children(node):
+            visit(child, enclosing)
+
+    visit(expr, ())
+    return out
 
 
 # }}}
@@ -700,13 +737,19 @@ class _Builder:
         self.extra_args: list[Any] = []
         self.value_args: list[str] = []
         self._ragged_bounds: dict[str, tuple[str, str]] | None = None
-        #: Per reduction (by identity), the binders it had to rename, its domain
-        #: over the names it ends up with, and the inames those renames
-        #: introduce; see :meth:`plan_reductions`.
-        self.reduction_renames: dict[int, dict[str, str]] = {}
-        self.reduction_domains: dict[int, isl.Set] = {}
+        #: Per reduction, the binders it had to rename, its domain over the
+        #: names it ends up with, and the inames those renames introduce; see
+        #: :meth:`plan_reductions`. A reduction is keyed by the statement it is
+        #: planned in and its identity, because a term built by hand may hold
+        #: one ``Reduction`` object in two statements, and each of them has to
+        #: reduce over inames of its own.
+        self.reduction_renames: dict[tuple[str, int], dict[str, str]] = {}
+        self.reduction_domains: dict[tuple[str, int], isl.Set] = {}
         self.extra_inames: set[str] = set()
         self._renames: list[dict[str, str]] = []
+        #: The statement whose expressions are being lowered, which is the
+        #: other half of a reduction's key.
+        self.statement: str | None = None
         self.expr = ExpressionLowerer(self)
 
     # {{{ ragged storage
@@ -872,6 +915,14 @@ class _Builder:
         so when an outer binder is renamed, the parameter follows it: the domain
         compared here and handed to loopy is stated over the names the kernel
         will actually have (see :meth:`add_reduction_domain`).
+
+        A plan belongs to a reduction *in a statement*. The tracer builds a
+        fresh :class:`~loopty.term.Reduction` for every statement, but a term
+        built by hand may hold one object in two, and a plan keyed by the
+        object alone was one plan for both: the second statement's overwrote
+        the first's, both instructions reduced over one iname, and loopy
+        stopped with the ``CycleError`` above. Keyed by statement as well, the
+        shared object is planned twice, once in each, like two equal objects.
         """
         taken = set(self.term.sizes) | set(dict(self.term.params))
         taken |= {iname for stmt in self.term.stmts for iname in stmt.inames}
@@ -925,8 +976,10 @@ class _Builder:
             rename = {
                 old: new for old, new in zip(names, chosen, strict=True) if old != new
             }
-            self.reduction_renames[id(reduction)] = rename
-            self.reduction_domains[id(reduction)] = _domain_over(domain, chosen)
+            self.reduction_renames[stmt_id, id(reduction)] = rename
+            self.reduction_domains[stmt_id, id(reduction)] = _domain_over(
+                domain, chosen
+            )
             self.extra_inames.update(chosen)
             self._plan_in(
                 stmt_id, reduction.body, {**renaming, **rename}, owner, seen, taken
@@ -946,9 +999,16 @@ class _Builder:
             out.append(candidate)
         return tuple(out)
 
-    def reduction_rename(self, reduction: Reduction) -> dict[str, str]:
-        """How this reduction's binders were renamed, if they were."""
-        return self.reduction_renames.get(id(reduction), {})
+    def reduction_rename(
+        self, reduction: Reduction, statement: str | None = None
+    ) -> dict[str, str]:
+        """How this reduction's binders were renamed, if they were.
+
+        ``statement`` is the statement the reduction is read in, the one being
+        lowered when it is not given.
+        """
+        key = (self.statement if statement is None else statement, id(reduction))
+        return self.reduction_renames.get(key, {})
 
     def push_renaming(self, renaming: Mapping[str, str]) -> None:
         """Rename these variables while the reduction's body is lowered."""
@@ -977,7 +1037,7 @@ class _Builder:
         renamed too; the domain under the written names would tie the inner
         loop to the outer reduction of a different statement.
         """
-        planned = self.reduction_domains.get(id(reduction))
+        planned = self.reduction_domains.get((self.statement, id(reduction)))
         if planned is not None:
             self.extra_domains.append(planned)
             return
@@ -1022,7 +1082,9 @@ class _NullBuilder:
     def rename(self, name: str) -> str:
         return name
 
-    def reduction_rename(self, reduction: Reduction) -> dict[str, str]:
+    def reduction_rename(
+        self, reduction: Reduction, statement: str | None = None
+    ) -> dict[str, str]:
         return {}
 
     def add_reduction_domain(
@@ -1113,39 +1175,149 @@ def _forget_params(domain: isl.Set, params: Sequence[str]) -> isl.Set:
     return domain
 
 
+def _depth_cuts(term: Term) -> dict[str, frozenset[int]]:
+    """Where each statement's domain is cut so that every loop is defined once.
+
+    loopy defines an iname in exactly one domain, and a statement's domain is
+    over every loop around it. Two statements at different depths of one loop,
+    ``y[r] = y[r] + a[r, j]`` inside the loop over ``j`` and ``z[r] = 1.0``
+    after it, contributed ``{ [r, j] }`` and ``{ [r] }``, and loopy refused the
+    second for redefining ``r`` with a bare ``RuntimeError``. So a statement's
+    domain is cut after every loop at which another statement leaves its nest:
+    after position ``k`` when the other's loops agree with its first ``k + 1``
+    and then stop or go on into a different loop. ``{ [r, j] }`` becomes
+    ``{ [r] }`` and ``[r] -> { [j] }``, the first merges with the other
+    statement's domain, and the nest is the one the source wrote.
+
+    A traced term gives every loop an iname of its own (a second ``for r`` is
+    ``r_0``), so agreeing on a name is agreeing on a loop. A statement whose
+    loops need no cut keeps its single domain, as every statement did before.
+    """
+    cuts: dict[str, set[int]] = {stmt.id: set() for stmt in term.stmts}
+    for stmt in term.stmts:
+        for other in term.stmts:
+            if other is stmt:
+                continue
+            shared = 0
+            for mine, theirs in zip(stmt.inames, other.inames, strict=False):
+                if mine != theirs:
+                    break
+                shared += 1
+            if 0 < shared < len(stmt.inames):
+                cuts[stmt.id].add(shared - 1)
+    return {key: frozenset(value) for key, value in cuts.items()}
+
+
+def _outer_part(domain: isl.Set, keep: int) -> isl.Set:
+    """``domain`` over its first ``keep`` dimensions: the loops outside the rest.
+
+    The constraints that mention an inner dimension are dropped, not projected
+    out. Projecting ``j`` out of ``0 <= j < m`` leaves ``m >= 1`` behind, which
+    says when the inner loop has an iteration and bounds nothing about ``r``.
+    Two inner loops side by side, over ``m`` and over ``p``, would then give the
+    loop over ``r`` the union of ``m >= 1`` and ``p >= 1``, which is not convex
+    and so cannot be one loop: :func:`_merge_domains` would refuse the kernel.
+    Beside a statement at the outer depth the union is the whole range again,
+    and the constraint would only come back as a predicate on the inner
+    statement. What is dropped is not lost: the innermost domain of the
+    statement keeps every constraint, so the statement's instances are its
+    domain, exactly. So are the constraints on the sizes alone (``m >= 0``),
+    which bound no loop: kept, they would make this range differ from the same
+    loop's range in a statement that has no ``m``, and the merged loop would
+    carry them as a predicate.
+
+    Dropping can leave a loop without a bound when its bound was written
+    through an inner loop (``0 <= r <= j < n``), which no loop a person writes
+    does. The projection is used then, which is a loop range too.
+    """
+    total = domain.dim(isl.dim_type.set)
+    if keep >= total:
+        return domain
+    inner = total - keep
+    dropped = (
+        domain.drop_constraints_involving_dims(isl.dim_type.set, keep, inner)
+        .project_out(isl.dim_type.set, keep, inner)
+        .drop_constraints_not_involving_dims(isl.dim_type.set, 0, keep)
+    )
+    if dropped.is_bounded():
+        return dropped
+    return domain.project_out(isl.dim_type.set, keep, inner)
+
+
 def _statement_domains(
-    stmt: Stmt, ragged_bounds: Mapping[str, tuple[str, str]]
+    stmt: Stmt,
+    ragged_bounds: Mapping[str, tuple[str, str]],
+    cuts: frozenset[int] = frozenset(),
 ) -> list[isl.Set]:
-    """The domains a statement contributes, split at a ragged bound.
+    """The domains a statement contributes, one per stretch of its loop nest.
 
     loopy refuses a domain whose parameter is written inside a loop the same
     domain provides ("domain parameter may not be written inside a domain
     dependent on it"), and a ragged bound is exactly that: ``cnt_r`` is assigned
     inside the ``r`` loop, and it bounds ``j``. The cure is the shape loopy wants
     anyway, a nest of domains: ``{ [r] : 0 <= r < n }`` outside, and
-    ``[r, cnt_r] -> { [j] : 0 <= j < cnt_r }`` inside it. A dense statement has
-    no such parameter and keeps its single domain.
+    ``[r, cnt_r] -> { [j] : 0 <= j < cnt_r }`` inside it.
+
+    The nest is also cut at each position of ``cuts``, where another statement
+    leaves the loop (see :func:`_depth_cuts`). Each stretch of loops is a domain
+    over those loops, with the loops outside it as parameters and the loops
+    inside it dropped (see :func:`_outer_part`); a row length assigned inside
+    the stretch, or deeper, is forgotten from every stretch but the last. A
+    dense statement no other one leaves keeps its single domain.
     """
-    params = set(_domain_params(stmt.domain))
+    inames = tuple(stmt.inames)
+    full = _domain_over(stmt.domain, inames)
+    params = set(_domain_params(full))
     present = [p for p in ragged_bounds if p in params]
-    if not present:
-        return [_domain_over(stmt.domain, stmt.inames)]
+    rows = {
+        param: inames.index(ragged_bounds[param][1])
+        for param in present
+        if ragged_bounds[param][1] in inames
+    }
+    positions = set(cuts)
+    if rows:
+        positions.add(max(rows.values()))
+    ends = sorted(p for p in positions if 0 <= p < len(inames) - 1)
+    if not ends:
+        return [full]
 
-    cut = -1
-    for position, iname in enumerate(stmt.inames):
-        if any(ragged_bounds[param][1] == iname for param in present):
-            cut = max(cut, position)
-    if cut < 0 or cut + 1 >= len(stmt.inames):
-        return [_domain_over(stmt.domain, stmt.inames)]
+    out: list[isl.Set] = []
+    start = 0
+    for end in ends:
+        stretch = _outer_part(full, end + 1)
+        # A row length whose row is not one of these loops at all is forgotten
+        # too: no loop around this statement assigns it.
+        stretch = _forget_params(
+            stretch, [param for param in present if rows.get(param, start) >= start]
+        )
+        out.append(_domain_over(stretch, inames[start : end + 1]))
+        start = end + 1
+    out.append(_domain_over(full, inames[start:]))
+    return out
 
-    outer = stmt.domain.project_out(
-        isl.dim_type.set, cut + 1, stmt.domain.dim(isl.dim_type.set) - (cut + 1)
-    )
-    outer = _forget_params(outer, present)
-    return [
-        _domain_over(outer, stmt.inames[: cut + 1]),
-        _domain_over(stmt.domain, stmt.inames[cut + 1 :]),
-    ]
+
+def _refuse_redefined_inames(domains: Sequence[isl.Set], term: Term) -> None:
+    """Refuse a kernel in which two domains still define one loop.
+
+    What is left once :func:`_merge_domains` has merged the domains over the
+    same loops and :func:`_depth_cuts` has cut every nest another statement
+    leaves: a term built by hand that uses one name for two different loops,
+    such as ``j`` inside ``r`` in one statement and on its own in another.
+    loopy would refuse it with a bare ``RuntimeError`` about a generated
+    domain; this names the loop and the two domains.
+    """
+    defined: dict[str, isl.Set] = {}
+    for domain in domains:
+        for iname in domain.get_var_names(isl.dim_type.set):
+            earlier = defined.setdefault(iname, domain)
+            if earlier is domain:
+                continue
+            raise LoweringError(
+                f"{term.name} uses the loop variable {iname} for two different "
+                f"loops, whose domains {earlier} and {domain} cannot be one "
+                "domain: loopy defines each loop variable once. Give one of "
+                "the loops a name of its own."
+            )
 
 
 def _count_inits(
@@ -1205,6 +1377,10 @@ def _count_inits(
                         expression=value,
                         id=insn_id,
                         within_inames=frozenset(enclosing),
+                        # The row loop and the loops around it, and none that
+                        # loopy would infer from a writer of the counts; see
+                        # the statements' instructions in lower_generic.
+                        within_inames_is_final=True,
                         temp_var_type=lp.Optional(np.dtype(np.int32)),
                     )
                 )
@@ -1238,11 +1414,12 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
     #: domain is widened by :func:`_merge_domains` can get it back as a
     #: predicate; see :func:`_restore_narrower_domains`.
     own_domains: dict[str, list[isl.Set]] = {}
+    cuts = _depth_cuts(term)
 
     for stmt in term.stmts:
         if not isinstance(stmt, Stmt):  # pragma: no cover - defensive
             raise LoweringError(f"not a statement: {stmt!r}")
-        mine = _statement_domains(stmt, ragged_bounds)
+        mine = _statement_domains(stmt, ragged_bounds, cuts[stmt.id])
         own_domains[_sanitize(stmt.id)] = list(mine)
         domains.extend(mine)
 
@@ -1260,6 +1437,9 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
                 "loopty.term.Stmt. Write the whole right-hand side, or use "
                 "kind='assign'."
             )
+        # A reduction's plan is looked up by the statement it is lowered in;
+        # see _Builder.plan_reductions.
+        builder.statement = stmt.id
         assignee = expr(stmt.assignee)
         body = expr(stmt.expr)
 
@@ -1301,6 +1481,14 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
                 expression=body,
                 id=insn_id,
                 within_inames=frozenset(stmt.inames),
+                # Final too: these are every loop around the statement, and no
+                # others. Left open, loopy adds to an instruction the loops of
+                # every instruction that writes what it reads, less the loops
+                # the writer's subscripts name, so ``z[r] = z[r] + y[r]`` after
+                # the loop over ``j`` that accumulates ``y[r]`` was put inside
+                # that loop, ran once per ``j``, and never ran for a row whose
+                # loop over ``j`` is empty. See note 12 in docs/loopy-notes.md.
+                within_inames_is_final=True,
                 depends_on=frozenset(depends),
                 # Final, so that loopy adds nothing to it. Its single-writer
                 # heuristic makes an instruction depend on the only writer of
@@ -1394,6 +1582,7 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
         insns = count_insns + insns
 
     merged = _nest_domains(_merge_domains(domains))
+    _refuse_redefined_inames(merged, term)
     insns = _restore_narrower_domains(insns, own_domains, merged)
 
     args, array_args, value_args, outputs = _arguments(
@@ -1444,7 +1633,7 @@ def _reduction_inames(term: Term, builder: _Builder) -> dict[str, tuple[str, ...
     out: dict[str, tuple[str, ...]] = {}
     for stmt in term.stmts:
         for position, reduction in enumerate(reductions_of(stmt.expr)):
-            renaming = builder.reduction_rename(reduction)
+            renaming = builder.reduction_rename(reduction, stmt.id)
             out[f"{stmt.id}:{position}"] = tuple(
                 renaming.get(name, name) for name in reduction.inames
             )

@@ -173,6 +173,12 @@ def in_bounds_facts(term: Term, owner: str) -> list[Fact]:
     reported in bounds from the sum, where ``r >= 1``, with the direct read of
     ``x[-1]`` gone from the ledger. The domains of one access are therefore
     gathered into one obligation, about the union of the cells they reach.
+
+    A read of the offsets a ragged access is flattened through is an access
+    the source never writes, so its fact says which access it serves:
+    ``off[r + 1], the end of row r that val[r, j] is flattened through, is in
+    bounds ...``, and ``layout`` in its provenance says the same. Without that
+    a refuted one names a read nobody can find in the kernel.
     """
     types = dict(term.params)
     sizes = flow.size_names(term)
@@ -191,14 +197,18 @@ def in_bounds_facts(term: Term, owner: str) -> list[Fact]:
         ):
             if not isinstance(types.get(array), ArrType):
                 continue
-            text = f"{array}[{', '.join(render(i) for i in indices)}]"
+            text = _access_text(array, indices)
             listed.setdefault((array, kind, text), []).append(
                 (tuple(indices), inames, domain)
             )
+        roles = _layout_roles(stmt, term)
         for (array, kind, text), places in listed.items():
             arrtype = types[array]
             indices = places[0][0]
             identifier = f"{owner}:in-bounds:{stmt.id}:{kind}:{text}"
+            role = roles.get((array, kind, text))
+            subject = text if role is None else f"{text}, {role},"
+            layout = {} if role is None else {"layout": role}
             reasons = [
                 _justified_by_type(place[0], arrtype, types) for place in places
             ]
@@ -208,11 +218,15 @@ def in_bounds_facts(term: Term, owner: str) -> list[Fact]:
                     Fact(
                         id=identifier,
                         kind="in-bounds",
-                        statement=f"{text} is in bounds by type ({reason})",
+                        statement=f"{subject} is in bounds by type ({reason})",
                         term=None,
                         status=Status.DECIDED,
                         decided_by="type",
-                        provenance={"rule": "index type", "reason": reason},
+                        provenance={
+                            "rule": "index type",
+                            "reason": reason,
+                            **layout,
+                        },
                         where=stmt.where,
                         owner=owner,
                     )
@@ -238,10 +252,10 @@ def in_bounds_facts(term: Term, owner: str) -> list[Fact]:
                     Fact(
                         id=identifier,
                         kind="in-bounds",
-                        statement=f"{text} is in bounds",
+                        statement=f"{subject} is in bounds",
                         term=None,
                         status=Status.ASSUMED,
-                        provenance={"reason": f"no isl form: {exc}"},
+                        provenance={"reason": f"no isl form: {exc}", **layout},
                         where=stmt.where,
                         owner=owner,
                     )
@@ -252,14 +266,15 @@ def in_bounds_facts(term: Term, owner: str) -> list[Fact]:
                     Fact(
                         id=identifier,
                         kind="in-bounds",
-                        statement=f"{text} is in bounds",
+                        statement=f"{subject} is in bounds",
                         term=None,
                         status=Status.ASSUMED,
                         provenance={
                             "reason": (
                                 "the index is not quasi-affine and its type does "
                                 "not bound it, so isl is not asked"
-                            )
+                            ),
+                            **layout,
                         },
                         where=stmt.where,
                         owner=owner,
@@ -272,7 +287,7 @@ def in_bounds_facts(term: Term, owner: str) -> list[Fact]:
                     id=identifier,
                     kind="in-bounds",
                     statement=(
-                        f"{text} is in bounds for every instance of {stmt.id}"
+                        f"{subject} is in bounds for every instance of {stmt.id}"
                     ),
                     term=Subset(
                         reached,
@@ -284,6 +299,7 @@ def in_bounds_facts(term: Term, owner: str) -> list[Fact]:
                     provenance={
                         "access": text,
                         "statement": stmt.id,
+                        **layout,
                         **(_unnarrowed(stmt) if wide else {}),
                     },
                     where=stmt.where,
@@ -291,6 +307,51 @@ def in_bounds_facts(term: Term, owner: str) -> list[Fact]:
                 )
             )
     return facts
+
+
+def _access_text(array: str, indices: Sequence[Any]) -> str:
+    """``val[r, j]``: an access as the ledger writes it."""
+    return f"{array}[{', '.join(render(i) for i in indices)}]"
+
+
+def _layout_roles(stmt: Any, term: Term) -> dict[tuple[str, str, str], str]:
+    """What each read of the offsets is to the ragged accesses it serves.
+
+    Keyed as :func:`in_bounds_facts` keys an access, ``(array, kind, text)``;
+    the value reads ``the end of row r that val[r, j] is flattened through``,
+    one clause per row end the read is, joined, and opens with ``read
+    directly and as`` when the statement also spells the read itself.
+    """
+    spelled = {
+        (array, kind, _access_text(array, indices))
+        for array, indices, kind, _inames, _domain in flow.source_accesses(
+            stmt, term
+        )
+    }
+    served: dict[tuple[str, str, str], dict[tuple[str, str], list[str]]] = {}
+    for access, read, end, row in flow.offsets_reads(stmt, term):
+        key = (read[0], read[2], _access_text(read[0], read[1]))
+        origin = _access_text(access[0], access[1])
+        origins = served.setdefault(key, {}).setdefault((end, render(row)), [])
+        if origin not in origins:
+            origins.append(origin)
+    out: dict[tuple[str, str, str], str] = {}
+    for key, ends in served.items():
+        clauses = [
+            f"the {end} of row {row} that {_listed(origins)} "
+            f"{'is' if len(origins) == 1 else 'are'} flattened through"
+            for (end, row), origins in ends.items()
+        ]
+        role = _listed(clauses)
+        out[key] = f"read directly and as {role}" if key in spelled else role
+    return out
+
+
+def _listed(items: Sequence[str]) -> str:
+    """``a``, ``a and b``, ``a, b and c``."""
+    if len(items) < 3:
+        return " and ".join(items)
+    return f"{', '.join(items[:-1])} and {items[-1]}"
 
 
 def _unnarrowed(stmt: Any) -> dict[str, Any]:
