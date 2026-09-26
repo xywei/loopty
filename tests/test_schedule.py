@@ -918,12 +918,11 @@ def refused(step) -> IllegalCast:
 
 
 def collapsed() -> IllegalCast:
-    """A draft that sends every ``i`` to 0, which no shipped cast does."""
+    """The refusal of a map that sends every ``i`` to 0."""
     schedule = Schedule(ht.jacobi_term())
-    draft = schedule._draft()
-    draft.constraints["S0"] = ["y1 = 0"]
-    draft.overridden["S0"] = {"i"}
-    return refused(lambda: schedule._commit(draft, "flatten(i)"))
+    return refused(
+        lambda: schedule.affine("{ [t, i] -> [t2, i2] : t2 = t and i2 = 0 }")
+    )
 
 
 def test_a_refused_cast_carries_its_message_as_the_reason() -> None:
