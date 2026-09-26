@@ -1852,6 +1852,41 @@ def test_a_slotted_object_the_body_only_reads_is_not_state() -> None:
     assert render(stmt.expr) == "x[i]*1.0"
 
 
+class _Redeclared(_Slotted):
+    """A subclass that declares its base's slot again: two cells named count."""
+
+    __slots__ = ("count",)
+
+
+def test_a_slot_declared_again_and_a_hidden_dict_entry_are_cells_too() -> None:
+    # Python keeps one member descriptor per declaring class, so the base's
+    # count is still there under the subclass's; and an instance __dict__ can
+    # hold an entry a slot's name hides. A write to either changes state that
+    # state.count does not show.
+    redeclared = _Redeclared()
+    mixed = _Mixed()
+    base_count = _Slotted.__dict__["count"]
+
+    def through_the_base(y: Arr[Fin[1], Real]):  # noqa: F821
+        base_count.__set__(redeclared, 5.0)
+        y[0] = redeclared.count
+
+    def into_the_dict(y: Arr[Fin[1], Real]):  # noqa: F821
+        mixed.__dict__["count"] = 3.0
+        y[0] = mixed.count
+
+    with pytest.raises(
+        TraceError,
+        match=r"'redeclared\._Slotted\.count' is unbound before the trace and 5\.0",
+    ):
+        term_of(through_the_base)
+    with pytest.raises(
+        TraceError,
+        match=r"\"mixed\.__dict__\['count'\]\" is unbound before the trace and 3\.0",
+    ):
+        term_of(into_the_dict)
+
+
 def test_a_write_into_the_offsets_of_a_ragged_array_is_refused() -> None:
     rows = Arr.ragged([1, 2], values=np.zeros(3))
 

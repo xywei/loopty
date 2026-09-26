@@ -642,8 +642,9 @@ with a pair of statement instances.
   `state.count += 1` on a global or closure-held one traced, and a write into
   the offsets of a global ragged array went unseen. Every slot named along the
   class's MRO is read (a private one by its mangled name, an unset one as
-  unbound), and the offsets are copied as a second buffer, named
-  `rows.offsets` in the message.
+  unbound, a base's slot that a subclass declares again as `Base.x`, and a
+  `__dict__` entry a slot's name hides as `__dict__['x']`), and the offsets
+  are copied as a second buffer, named `rows.offsets` in the message.
 
 ### Changed
 

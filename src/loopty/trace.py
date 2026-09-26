@@ -1275,21 +1275,22 @@ def _user_object(value: Any, own: _Own | None = None) -> bool:
 
 
 def _attributes(value: Any) -> dict[str, Any] | None:
-    """The attributes ``value`` keeps, in its ``__dict__`` and in its slots.
+    """The attributes ``value`` keeps, in its slots and in its ``__dict__``.
 
     Every slot named along the class's MRO is read through the member
     descriptor its class defines, under its mangled name when it is private
     (``__slots__ = ("__n",)`` in ``class Box`` keeps ``_Box__n``), and one that
-    is not set is left out. ``None`` when the object keeps attributes in
-    neither place, as an ``object()`` or a number does.
+    is not set is left out. Each descriptor is a cell of its own, so a slot a
+    subclass declares again does not hide its base's: the base's is kept as
+    ``Base.x``, and an entry of the ``__dict__`` that a slot's name hides as
+    ``__dict__['x']``. Which name a cell gets depends on the classes alone, not
+    on which cells are set, so two snapshots name the same cells alike.
+    ``None`` when the object keeps attributes in neither place, as an
+    ``object()`` or a number does.
     """
     out: dict[str, Any] = {}
     found = False
-    try:
-        out.update(vars(value))
-        found = True
-    except TypeError:
-        pass
+    declared: set[str] = set()
     for cls in type(value).__mro__:
         slots = cls.__dict__.get("__slots__")
         if slots is None:
@@ -1302,10 +1303,21 @@ def _attributes(value: Any) -> dict[str, Any] | None:
             descriptor = cls.__dict__.get(name)
             if not isinstance(descriptor, MemberDescriptorType):
                 continue
+            key = name if name not in declared else f"{cls.__qualname__}.{name}"
+            declared.add(name)
             try:
-                out.setdefault(name, descriptor.__get__(value, cls))
+                out.setdefault(key, descriptor.__get__(value, cls))
             except AttributeError:
                 continue
+    try:
+        entries = vars(value)
+    except TypeError:
+        pass
+    else:
+        found = True
+        for name, item in entries.items():
+            key = name if name not in declared else f"__dict__[{name!r}]"
+            out.setdefault(key, item)
     return out if found else None
 
 
