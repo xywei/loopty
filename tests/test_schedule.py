@@ -462,6 +462,26 @@ def test_tagging_a_piece_of_an_exact_reduction_in_parallel_is_rejected() -> None
     assert "reassociates an exact reduction" in str(caught.value)
 
 
+def test_vectorizing_a_piece_of_an_exact_reduction_is_rejected() -> None:
+    # vec runs no order, as ilp runs none (#57), so a vec tag on the loop of a
+    # reduction asks the accumulation's permission to be reassociated, as an
+    # ilp tag does. loopy cannot build this one in any case (a vec loop in a
+    # ragged fiber, and a reduction over a vec loop); the cast is asked first.
+    exact = Schedule(ht.spmv_term(exactness="exact")).split(
+        "j", 2, inner="j_in", outer="j_out"
+    )
+    for tag in ("vec", "ilp"):
+        with pytest.raises(IllegalCast) as caught:
+            exact.tag(j_in=tag)
+        assert "reassociates an exact reduction" in str(caught.value)
+    loose = Schedule(ht.spmv_term(exactness="reassoc")).split(
+        "j", 2, inner="j_in", outer="j_out"
+    )
+    tagged = loose.tag(j_in="vec")
+    assert tagged.reassociated == frozenset({"y"})
+    assert not tagged.buildable[0]
+
+
 def test_exactness_is_read_off_the_reduction_being_transformed() -> None:
     # Two reductions write ``y``: one exact, one approx. Asking the array what
     # its exactness is has two answers, and the one that matters is the one
