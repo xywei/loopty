@@ -1149,10 +1149,13 @@ def test_a_reduction_across_two_local_axes_is_refused(plain_opencl) -> None:
 def test_an_unrolled_reduction_loop_is_a_sequence_as_loopy_reads_it(
     plain_opencl,
 ) -> None:
-    # loopy unrolls an ``ilp`` loop and sums over it in order. Beside a local
-    # axis that is a reduction partly in parallel, which loopy refuses and the
-    # check used to pass; beside an untagged loop it is all in sequence, which
-    # loopy builds and the check used to refuse.
+    # loopy unrolls an ``ilp`` loop and, when it realizes a reduction, counts
+    # it as a sequence. Beside a local axis that is a reduction partly in
+    # parallel, which loopy refuses and the check used to pass. Beside an
+    # untagged loop it passes that stage, and loopy then privatizes the
+    # accumulator along it and refuses the instruction that initializes it,
+    # under some string hash seeds and not others; it is refused for that.
+    # ``unr`` unrolls the sum in order and builds.
     from loopty.schedule import Schedule
 
     lp = plain_opencl
@@ -1164,7 +1167,12 @@ def test_an_unrolled_reduction_loop_is_a_sequence_as_loopy_reads_it(
     with pytest.raises(Exception, match="both parallel and sequential"):
         generated(lp, mixed)
 
-    unrolled = split.tag(ii="ilp")
+    for privatized in (split.tag(ii="ilp"), Schedule(total8).tag(i="ilp")):
+        ok, reason = privatized.buildable
+        assert not ok
+        assert "on an ilp axis" in reason and "Tag it unr instead" in reason
+
+    unrolled = split.tag(ii="unr")
     assert unrolled.buildable == (True, "")
     assert generated(lp, unrolled)
 

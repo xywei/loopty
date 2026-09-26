@@ -802,13 +802,18 @@ with a pair of statement instances.
   `buildable` and then failed in code generation; each is a `refuted`
   `buildable` fact now, with its cause in words. A reduction's loops are
   classified with loopy's own tag classes, as `realize_reduction` classifies
-  them, so an `ilp` loop, which loopy unrolls, is a sequence: split with its
-  other half on a local axis it is refused, as loopy refuses it, and split
-  with the other half untagged it is buildable, where it used to be refused.
-  The extent is asked of the loop's bounds with `static_max_of_pw_aff(...,
-  constants_only=True)`, as loopy asks it. The tests generate the code with
-  loopy's plain OpenCL target and see loopy's own error for each; note 11 of
-  `docs/loopy-notes.md` has the table.
+  them, so an `ilp` loop, which loopy unrolls, is a sequence, and split with
+  its other half on a local axis it is refused, as loopy refuses it. A
+  reduction over an `ilp` loop is refused on its own account as well: loopy
+  privatizes the accumulator along the loop and then refuses the instruction
+  that initializes it, under some string hash seeds and not others. Split
+  with its other half untagged it used to be refused as partly parallel,
+  which it is not, and a reduction over one `ilp` loop was not refused at
+  all; `unr` unrolls the sum in order and builds. The extent is asked of the
+  loop's bounds with `static_max_of_pw_aff(..., constants_only=True)`, as
+  loopy asks it. The tests generate the code with loopy's plain OpenCL target
+  and see loopy's own error for each; note 11 of `docs/loopy-notes.md` has the
+  table.
 - A tile or an interchange that orders a loop outside a loop its domain is
   nested in is a `refuted` `buildable` fact. loopy nests a ragged fiber's
   domain inside its row, and the loops below a statement at a shallower depth

@@ -874,17 +874,18 @@ def _unbuildable_reason(draft: _Draft) -> str | None:
 def _reduction_role(tag: str | None) -> str:
     """How loopy realizes a reduction over a loop with this tag.
 
-    ``"local"``, ``"sequential"``, ``"unrolled"`` or ``"refused"``, as
-    ``loopy.transform.realize_reduction`` classifies a reduction's inames, and
-    read off loopy's own tag classes so that the two cannot drift apart: an
-    untagged loop is summed in sequence, and so is one loopy unrolls (``unr``,
-    ``ilp``), which is told apart only so that a reason can say so; a local
-    axis (``l.*``) is summed in a tree across the work items of a group; and a
-    reduction over any other concurrent axis (a group axis ``g.*``,
-    ``ilp.seq``, ``vec``) is not generated at all. The checker reads
-    ``ilp`` differently, as an order-free loop (:data:`PARALLEL_TAG_PREFIXES`),
-    which is what makes it ask an accumulation's permission to be reassociated
-    before a reduction loop is tagged so; loopy unrolls it, in order.
+    ``"local"``, ``"sequential"``, ``"unrolled"``, ``"ilp"`` or ``"refused"``,
+    as ``loopy.transform.realize_reduction`` classifies a reduction's inames,
+    and read off loopy's own tag classes so that the two cannot drift apart:
+    an untagged loop is summed in sequence, and so is one loopy unrolls
+    (``unr``, and ``ilp``, whose accumulator loopy also privatizes, which is
+    why it is told apart); a local axis (``l.*``) is summed in a tree across
+    the work items of a group; and a reduction over any other concurrent axis
+    (a group axis ``g.*``, ``ilp.seq``, ``vec``) is not generated at all. The
+    checker reads ``ilp`` differently, as an order-free loop
+    (:data:`PARALLEL_TAG_PREFIXES`), which is what makes it ask an
+    accumulation's permission to be reassociated before a reduction loop is
+    tagged so.
     """
     from loopy.kernel.data import (
         ConcurrentTag,
@@ -895,7 +896,9 @@ def _reduction_role(tag: str | None) -> str:
     )
 
     parsed = parse_tag(tag)
-    if isinstance(parsed, UnrollTag | UnrolledIlpTag):
+    if isinstance(parsed, UnrolledIlpTag):
+        return "ilp"
+    if isinstance(parsed, UnrollTag):
         return "unrolled"
     if isinstance(parsed, LocalInameTagBase):
         return "local"
@@ -913,16 +916,28 @@ def _reduction_reason(draft: _Draft, key: str, inames: Sequence[str]) -> str | N
     two local axes, then a concurrent axis that is not a local one. A
     reduction is generated only when every loop of it is sequential, or when
     it is one loop, on a local axis.
+
+    One more is asked after those, because loopy meets it later, when it
+    privatizes the temporaries of an ``ilp`` loop: a reduction over an
+    ``ilp`` loop has its accumulator privatized along that loop, and whether
+    loopy then accepts the instruction that initializes it outside the loop
+    changes from one run to the next with Python's string hash seed (the same
+    kernel was refused under some seeds and built under others, in 2025.2). A
+    fact that holds only on some runs is not a fact, so it is refused; ``unr``
+    unrolls the sum in order and builds.
     """
     accumulated = draft.reduction_info.get(key, (key, ""))[0]
     roles = {name: _reduction_role(draft.tags.get(name)) for name in inames}
     local = sorted(name for name, role in roles.items() if role == "local")
     sequential = sorted(
-        name for name, role in roles.items() if role in ("sequential", "unrolled")
+        name
+        for name, role in roles.items()
+        if role in ("sequential", "unrolled", "ilp")
     )
     refused = sorted(name for name, role in roles.items() if role == "refused")
+    privatized = sorted(name for name, role in roles.items() if role == "ilp")
     if local and sequential:
-        unrolled = [name for name in sequential if roles[name] == "unrolled"]
+        unrolled = [n for n in sequential if roles[n] in ("unrolled", "ilp")]
         how = (
             f" (loopy unrolls {', '.join(unrolled)}, which is a sequence)"
             if unrolled
@@ -950,6 +965,14 @@ def _reduction_reason(draft: _Draft, key: str, inames: Sequence[str]) -> str | N
             "group, on a local axis (l.*): a group axis, ilp.seq or vec on the "
             "loop of a reduction is refused. Put it on a local axis instead, or "
             "put the axis on a loop of the statement"
+        )
+    if privatized:
+        return (
+            f"the reduction into {accumulated} runs over {', '.join(privatized)} "
+            "on an ilp axis, and loopy privatizes the accumulator along it and "
+            "then accepts or refuses the instruction that initializes it outside "
+            "the loop depending on Python's string hash seed, so the code cannot "
+            "be counted on. Tag it unr instead, which unrolls the sum in order"
         )
     return None
 

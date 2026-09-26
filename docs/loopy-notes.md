@@ -341,7 +341,8 @@ a.dom)`, on a single sum, and on a sum inside a statement loop:
 | outer reduction `i` on `l.0`, `j` sequential | builds | buildable |
 | `j` split, the inner half on `l.0` | "contains both parallel and sequential inames" | refused |
 | `j` split, the inner half on `l.0`, the outer on `ilp` | the same | refused, the same |
-| `j` split, the inner half on `ilp` | builds | buildable |
+| `j` split, the inner half on `ilp` (or `j` on `ilp`) | builds under some string hash seeds; under others "touched variable that (for privatization, e.g. as performed for ILP) required iname(s) ..." | refused |
+| `j` split, the inner half on `unr` | builds | buildable |
 | a reduction on `g.0`, `ilp.seq` or `vec` | "the only form of parallelism supported by reductions is 'local'" | refused |
 | a reduction split, both halves on `l.*` | "contains more than one parallel iname" | refused |
 | a reduction on `l.0` over a symbolic extent (`Fin[i + 1]`, `i < n`) | "a numeric maximum was not found" | refused |
@@ -368,7 +369,16 @@ sequence, a local axis in a tree across a group, and any other concurrent axis
 not at all. So `ilp` is a sequence here, although the checker counts it as an
 order-free loop and asks an accumulation's permission before a reduction loop
 is tagged with it. A reduction is generated when all of its loops are
-sequential, or when it is one loop on a local axis. That one then needs its
+sequential, or when it is one loop on a local axis.
+
+An `ilp` loop meets one more stage afterwards: loopy privatizes the
+temporaries written in it along the loop, a reduction's accumulator among
+them, and then refuses the instruction that initializes the accumulator outside
+the loop. Or does not: the same kernel was refused under some values of
+`PYTHONHASHSEED` and built under others, which points at an order loopy takes
+from a set. A `buildable` fact that holds on some runs is not one, so a
+reduction over an `ilp` loop is refused; `unr` unrolls the sum in order, and
+builds under every seed tried. A local reduction then needs its
 extent, and the extent of every local axis of the statement around it, to have
 a numeric maximum, because loopy keeps the partial sums in an array in local
 memory whose shape is fixed when the code is generated (`_get_int_iname_size`);
