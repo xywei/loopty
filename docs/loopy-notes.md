@@ -1,6 +1,6 @@
 # Notes on loopy and islpy
 
-Eleven interactions with loopty's dependencies that cost real debugging time, each
+Twelve interactions with loopty's dependencies that cost real debugging time, each
 with the local workaround and the reason it is local. No upstream issues were
 filed: these are notes so that the next person meets the answer instead of the
 symptom.
@@ -328,3 +328,33 @@ fiber. The rows marked "not checked" are limits the check does not know yet
 (issue #35); a schedule that hits one passes `buildable` and fails in code
 generation.
 
+## 12. loopy adds loops to an instruction whose loops are not final
+
+**Symptom.** A statement that reads what an inner loop writes, beside that loop,
+
+```python
+for r in y.dom:
+    for j in a.dom[r]:
+        y[r] = y[r] + a[r, j]
+    z[r] = z[r] + y[r]
+```
+
+lowers and runs, with a `LoopyWarning` that "the iname(s) 'j' on instruction
+'S1' was/were automatically added", and computes the wrong `z`: the sum of the
+partial sums of each row rather than the row's total. A copy `z[r] = y[r]`
+before the inner loop gets `y[r]` after all but the last update. A later loop of
+its own (`for q in z.dom: z[q] = z[q] + y[q]`) and a ragged inner loop went
+wrong the same way before statements at two depths lowered at all.
+
+**Cause.** `lp.make_kernel` adds loops to every instruction whose
+`within_inames` are not marked final: for each variable the instruction reads,
+the loops of the instructions that write it, less the loops those writers'
+subscripts name. `y[r] = y[r] + a[r, j]` runs in `r` and `j` and names `r`, so
+every reader of `y` is put inside the loop over `j`. It then runs once per `j`,
+and not at all in a row whose loop over `j` is empty.
+
+**Local fix.** Each statement's instruction is created with
+`within_inames_is_final=True`: its loops are the loops around it in the source,
+which `lower_generic` knows and loopy has nothing to add to. So are those of the
+instructions that assign ragged bounds (`cnt_r_init`), which sit in the row loop
+and the loops around it.

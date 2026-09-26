@@ -839,6 +839,99 @@ def test_a_ragged_and_a_dense_inner_loop_share_their_row_loop() -> None:
     assert list(out["c"]) == counts
 
 
+@kernel
+def total_after_inner(
+    a: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A statement after the inner loop that reads what the loop accumulates."""
+    for r in y.dom:
+        for j in a.dom[r]:
+            y[r] = y[r] + a[r, j]
+        z[r] = z[r] + y[r]
+
+
+@kernel
+def copy_before_inner(
+    a: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A statement before the inner loop that reads what the loop then updates."""
+    for r in y.dom:
+        z[r] = y[r]
+        for j in a.dom[r]:
+            y[r] = y[r] + a[r, j]
+
+
+@kernel
+def total_in_a_later_loop(
+    a: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The same total, read by a loop of its own after the nest."""
+    for r in y.dom:
+        for j in a.dom[r]:
+            y[r] = y[r] + a[r, j]
+    for q in z.dom:
+        z[q] = z[q] + y[q]
+
+
+@kernel
+def total_after_ragged(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A statement after a ragged inner loop that reads what the loop sums."""
+    for r in y.dom:
+        for j in val.dom[r]:
+            y[r] = y[r] + val[r, j]
+        z[r] = z[r] + y[r]
+
+
+def test_a_statement_that_reads_the_inner_loop_stays_outside_it() -> None:
+    # loopy adds to an instruction whose loops are not final the loops of the
+    # instructions that write what it reads, less those the writer's subscripts
+    # name: the statement reading ``y[r]`` went into the loop over ``j``. It ran
+    # once per ``j``, which gave ``z`` the sum of the partial sums, and the
+    # copy before the loop saw ``y[r]`` after all but the last update.
+    a = np.arange(12.0).reshape(3, 4)
+    totals = 1.0 + a.sum(axis=1)
+    for fn, z in (
+        (total_after_inner, 10.0 + totals),
+        (copy_before_inner, np.ones(3)),
+    ):
+        arguments = {"a": a, "y": np.ones(3), "z": np.full(3, 10.0)}
+        want = native(fn, **arguments)
+        out = run(fn.trace(), **arguments)
+        assert np.allclose(out["y"], totals), fn.__name__
+        assert np.allclose(out["z"], z), (fn.__name__, out["z"])
+        assert np.allclose(out["z"], want["z"]), fn.__name__
+
+
+def test_a_loop_that_reads_an_earlier_nest_stays_out_of_its_inner_loop() -> None:
+    # The same inference, on shapes that lowered before statements at two
+    # depths did: a later loop of its own, and a ragged inner loop.
+    a = np.arange(12.0).reshape(3, 4)
+    arguments = {"a": a, "y": np.ones(3), "z": np.full(3, 10.0)}
+    out = run(total_in_a_later_loop.trace(), **arguments)
+    assert np.allclose(out["z"], 11.0 + a.sum(axis=1))
+
+    counts = [2, 0, 3]
+    out = run(
+        total_after_ragged.trace(),
+        cnt=np.array(counts),
+        val=Arr.ragged(counts, values=[1.0, 2.0, 3.0, 4.0, 5.0]),
+        y=np.ones(3),
+        z=np.full(3, 10.0),
+    )
+    assert np.allclose(out["z"], [14.0, 11.0, 23.0])
+
+
 def test_one_name_for_two_different_loops_is_refused_by_name() -> None:
     # A term built by hand can use ``j`` inside ``r`` in one statement and on
     # its own in another, which no cut can make one loop. loopy refused it with

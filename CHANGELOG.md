@@ -602,6 +602,16 @@ with a pair of statement instances.
   example lowers to the code it lowered to before. One name for two
   different loops, which only a term built by hand can have, is refused with a
   `LoweringError` naming the loop. See note 10 in `docs/loopy-notes.md`.
+- A statement that reads what an inner loop writes stays outside that loop.
+  loopy adds to an instruction whose loops are not final the loops of every
+  instruction that writes what it reads, less those the writer's subscripts
+  name, so `z[r] = z[r] + y[r]` after the loop over `j` that accumulates
+  `y[r]` ran once per `j`, and a copy of `y[r]` before that loop saw all but
+  the last update. A later loop that reads a nest's result, and a statement
+  after a ragged inner loop, computed the wrong values the same way before
+  this batch; the differential test refuted them, and `LoopyExecutor.run`
+  returned them. The loops of every instruction the lowering writes are now
+  final. See note 12 in `docs/loopy-notes.md`.
 - An inner reduction bounded by an expression affine in an outer reduction's
   binder (`reduce_sum(a[i, j] for j in Fin[i + 1])` inside a sum over `i`) is a
   triangle, not a ragged fiber. The inner domain names the binder as a

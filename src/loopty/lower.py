@@ -1372,6 +1372,10 @@ def _count_inits(
                         expression=value,
                         id=insn_id,
                         within_inames=frozenset(enclosing),
+                        # The row loop and the loops around it, and none that
+                        # loopy would infer from a writer of the counts; see
+                        # the statements' instructions in lower_generic.
+                        within_inames_is_final=True,
                         temp_var_type=lp.Optional(np.dtype(np.int32)),
                     )
                 )
@@ -1472,6 +1476,14 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
                 expression=body,
                 id=insn_id,
                 within_inames=frozenset(stmt.inames),
+                # Final too: these are every loop around the statement, and no
+                # others. Left open, loopy adds to an instruction the loops of
+                # every instruction that writes what it reads, less the loops
+                # the writer's subscripts name, so ``z[r] = z[r] + y[r]`` after
+                # the loop over ``j`` that accumulates ``y[r]`` was put inside
+                # that loop, ran once per ``j``, and never ran for a row whose
+                # loop over ``j`` is empty. See note 12 in docs/loopy-notes.md.
+                within_inames_is_final=True,
                 depends_on=frozenset(depends),
                 # Final, so that loopy adds nothing to it. Its single-writer
                 # heuristic makes an instruction depend on the only writer of
