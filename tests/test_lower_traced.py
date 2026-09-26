@@ -901,6 +901,8 @@ def test_the_nested_axis_loopty_refuses_is_one_loopy_cannot_build(monkeypatch):
     # Measured, not guessed: loopy's plain OpenCL target stands in for the
     # pyopencl one, which cannot be built without pyopencl, and code generation
     # is all that is asked of it.
+    import warnings
+
     lp = pytest.importorskip("loopy")
     from loopty import lower
     from loopty.schedule import Schedule
@@ -913,7 +915,12 @@ def test_the_nested_axis_loopty_refuses_is_one_loopy_cannot_build(monkeypatch):
     )
     outer = Schedule(lower_total8, target="opencl").tag(i="l.0")
     assert outer.buildable == (True, "")
-    assert "get_local_id" in lp.generate_code_v2(outer.kernel).device_code()
+    with warnings.catch_warnings():
+        # Every work item stores the finished sum into ``s[0]``, the same
+        # value, and loopy says so the first time it generates the code.
+        warnings.simplefilter("ignore", lp.diagnostic.WriteRaceConditionWarning)
+        code = lp.generate_code_v2(outer.kernel).device_code()
+    assert "get_local_id" in code
 
     inner = Schedule(lower_total8, target="opencl").tag(j="l.0")
     ok, reason = inner.buildable
