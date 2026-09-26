@@ -1783,7 +1783,9 @@ def _scalar_assumptions(term: Term, declared: set[str]) -> isl.BasicSet | None:
     when that domain names everything the array's shape does. So ``off[0]``
     of ``off: Arr[Fin[n + 1], Nat]``, written outside any loop, went unchecked
     until a ``Nat`` scalar made ``n`` a parameter of the assumption, and was
-    then refused for ``n = -1``, which no array has.
+    then refused for ``n = -1``. The contract refuses the one argument that
+    would make it so, an ``off`` of no cells
+    (:func:`loopty.contract.sizes_not_negative`).
     """
     from loopty.contract import sort_bound
 

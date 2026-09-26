@@ -46,9 +46,11 @@ the same two questions, against the sizes the arrays of the call determine,
 and asks one more: an integral scalar has to be stored as an integer, because
 neither run can use ``1.0`` as an index.
 
-Nothing here checks array *shapes*; see ``docs/loopy-notes.md`` for why lowering
-has to declare some arrays without one, and the README's status list for the
-consequence.
+Nothing here checks array *shapes* against each other; see
+``docs/loopy-notes.md`` for why lowering has to declare some arrays without
+one, and the README's status list for the consequence. One thing about a shape
+is checked, because the facts rest on it: an axis written ``Fin[n + 1]`` is
+never shorter than a non-negative ``n`` allows (:func:`sizes_not_negative`).
 """
 
 from __future__ import annotations
@@ -75,6 +77,7 @@ __all__ = [
     "ragged_arguments",
     "resolve_sizes",
     "scalar_parameters",
+    "sizes_not_negative",
     "sort_bound",
 ]
 
@@ -330,6 +333,55 @@ def axis_extents(
         for size, extent in _axis_extents_of(supplied[name], typ)
         if not isinstance(size, prim.Variable | int | np.integer)
     )
+
+
+def sizes_not_negative(
+    types: Mapping[str, Any], supplied: Mapping[str, Any]
+) -> None:
+    """Refuse an array shorter than its type allows for any value of its sizes.
+
+    A size counts cells, so it is never negative, and every fact about a
+    kernel is decided with its sizes non-negative; the lowering tells loopy so
+    too (:func:`loopty.lower._scalar_assumptions`). An axis written as an
+    expression in one size, ``Fin[n + 1]``, then has a least extent, and an
+    argument with fewer cells there stands for a negative ``n``:
+    :func:`resolve_sizes` leaves such an ``n`` unresolved, and loopy reads
+    ``n = -1`` off an empty ``off``, where ``off[n]`` is the cell in front of
+    it. So that argument is refused here, naming the size it would make
+    negative.
+    """
+    from lanky.terms import evaluate, free_variables, render
+
+    for name, typ in types.items():
+        value = supplied.get(name)
+        if not isinstance(typ, ArrType) or value is None:
+            continue
+        for size, extent in _axis_extents_of(value, typ):
+            if isinstance(size, prim.Variable | int | np.integer):
+                continue
+            try:
+                free = free_variables(size)
+            except Exception:
+                continue
+            if len(free) != 1 or not _linear(size):
+                continue
+            (size_name,) = free
+            try:
+                offset = evaluate(size, {size_name: 0})
+                slope = evaluate(size, {size_name: 1}) - offset
+            except Exception:
+                continue
+            if not isinstance(slope, int | np.integer) or slope == 0:
+                continue
+            if (extent - offset) % slope or (extent - offset) // slope >= 0:
+                continue
+            raise ValueError(
+                f"{name} has {extent} cells along an axis its type says is "
+                f"{render(size)} long, which would make the size {size_name} "
+                f"{(extent - offset) // slope}. A size counts cells and is never "
+                "negative, and every fact about the kernel is decided with its "
+                "sizes non-negative, so the argument is too short for its type"
+            )
 
 
 def _linear(expr: Any) -> bool:
@@ -725,6 +777,7 @@ def check_arguments(
     """
     disjoint_arguments(supplied)
     ragged_arguments(types, supplied, offsets_args)
+    sizes_not_negative(types, supplied)
     sizes = resolve_sizes(types, supplied)
     extents = axis_extents(types, supplied)
     element_types(types, supplied, sizes, extents)
