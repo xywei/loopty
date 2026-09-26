@@ -22,6 +22,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import islpy as isl
 import numpy as np
 import pytest
 
@@ -403,7 +404,7 @@ def test_the_wave_demo_prints_the_rejections_then_every_agreement() -> None:
     assert "pressure: difference" in result.stdout
     assert "velocity: difference" in result.stdout
     assert result.stdout.count("-> tested") == 4
-    assert "mod 2" in result.stdout
+    assert "[a, b_step]" in result.stdout
     assert "matches the hand-written recurrence: True" in result.stdout
 
 
@@ -457,6 +458,25 @@ def test_the_time_first_diamond_is_accepted_and_agrees_bit_for_bit() -> None:
         want_pressure, want_velocity = module.reference(pressure, velocity)
         assert np.array_equal(out["pressure"], want_pressure), (nt, nx)
         assert np.array_equal(out["velocity"], want_velocity), (nt, nx)
+
+
+def test_the_wave_diamond_compiles_to_loops_with_no_parity_test() -> None:
+    # The image of the diamond is the points where a + b is even. loopy looped
+    # over every b and tested the parity inside the innermost loop,
+    # "if (-b - a + 2 * ((b + a) / 2) == 0)", so half of its iterations did
+    # nothing. The kernel now counts b's steps, b = 2*b_step - a: its domain
+    # has no holes, the code has no parity test, and it still agrees with the
+    # hand recurrence bit for bit, at sizes of both parities (the test above).
+    from loopty.executor import emit_code
+
+    module = _module("wavefront_acoustic")
+    for nt, nx in [(3, 4), (5, 7), (16, 32)]:
+        schedule = module.diamond_schedule(nt, nx)
+        assert schedule.strides == {"b": "2*b_step - a"}
+        (domain,) = schedule.kernel.default_entrypoint.domains
+        assert domain.get_var_names(isl.dim_type.set) == ["a", "b_step"]
+        assert domain.dim(isl.dim_type.div) == 0
+        assert "== 0" not in emit_code(schedule)
 
 
 def test_tiling_the_wave_diamond_cuts_the_same_step_dependence() -> None:

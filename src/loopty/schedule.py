@@ -104,10 +104,12 @@ map (see :func:`_affine_kernel`): the new domain is the image isl computes, with
 the parity as an existentially quantified constraint, and each old iname becomes
 the quasi-affine expression isl gives for the inverse, ``floor((a + b)/2)``.
 loopy 2025.2 generates correct code for that kernel, and for one tiled after
-it. It enumerates the image's bounding loops and tests the parity with an
-``if`` inside the innermost one rather than stepping by two, so half the
-iterations of that loop do nothing. The answer is recorded in
-``docs/loopy-notes.md``.
+it, but it enumerates the image's bounding loops and tests the parity with an
+``if`` inside the innermost one, so half the iterations of that loop do
+nothing. The kernel code is generated from therefore counts the steps of such
+a loop instead, ``b = 2*b_step - a`` (see :func:`_stepped` and
+:attr:`Schedule.strides`), and meets only the points of the image. The answer
+is recorded in ``docs/loopy-notes.md``, note 13.
 """
 
 from __future__ import annotations
@@ -1206,6 +1208,11 @@ class Schedule:
         self._sizes = dict(sizes or {})
         self._lowering: Lowering = lower_generic(self._term, target)
         self._kernel = self._lowering.kernel
+        #: The kernel code is generated from: :attr:`_kernel`, which the steps
+        #: transform, with its loops over a lattice counted (see
+        #: :func:`_stepped`), and those loops' expressions.
+        self._code = self._kernel
+        self._strides: dict[str, str] = {}
 
         stmt_ids = tuple(stmt.id for stmt in self._term.stmts)
         self._layout = _Layout(
@@ -1326,14 +1333,34 @@ class Schedule:
 
     @property
     def kernel(self) -> Any:
-        """The loopy kernel as transformed so far.
+        """The loopy kernel as transformed so far, the one code is made from.
+
+        A loop whose domain has holes, such as the image of the diamond,
+        runs over a counter of its steps rather than over the loop the checker
+        knows, once a step has set the nest; :attr:`strides` names each such
+        loop, and every other loop of :attr:`order` is the kernel's loop of
+        that name.
 
         ``None`` once a step could not be written as a loopy kernel at all,
         which only :meth:`affine` can cause; the schedule's ``buildable`` fact
         says why, and :meth:`require_buildable` refuses before anything reads
         this.
         """
-        return self._kernel
+        return self._code
+
+    @property
+    def strides(self) -> dict[str, str]:
+        """The loops :attr:`kernel` steps through, and how.
+
+        Each loop of :attr:`order` whose values are a lattice given the loops
+        outside it, with the expression of the counter it is written as:
+        ``{"b": "2*b_step - a"}`` after the diamond ``(t, i) -> (t + i, t -
+        i)``, whose image is the points where ``a + b`` is even. The kernel
+        loops over ``b_step`` and meets only those points, where loopy alone
+        would loop over ``b`` and test the parity at each. Empty when there is
+        no such loop; see :func:`_stepped`.
+        """
+        return dict(self._strides)
 
     @property
     def lowering(self) -> Lowering:
@@ -1877,7 +1904,8 @@ class Schedule:
         ``monotone`` fact, refuted with the pair of instances and the array
         cell between them). It need not be unimodular: the image of the diamond
         above is only the points of equal parity, and the kernel is rewritten
-        over that image, as the module docstring describes.
+        over that image, and loops over it without visiting the holes, as the
+        module docstring describes.
 
         What the kernel rewrite cannot express, such as loops that more than
         one loopy domain defines, is a ``refuted`` ``buildable`` fact with the
@@ -2070,6 +2098,9 @@ class Schedule:
             draft.kernel,
             _with_priority,
             _nests(layout, draft.order, draft.tags).values(),
+        )
+        other._code, other._strides = _stepped(
+            other._kernel, draft.order, draft.tags
         )
         other._reassoc = frozenset(draft.reassoc)
         other._reductions = dict(draft.reductions)
@@ -2595,3 +2626,211 @@ def _as_set(domain: Any) -> isl.Set:
     if isinstance(domain, isl.BasicSet):
         return isl.Set.from_basic_set(domain)
     return domain
+
+
+# {{{ loops over a lattice
+
+
+def _ranked(names: Sequence[str], order: Sequence[str]) -> list[str]:
+    """``names`` outermost first: in ``order``, then the rest as they come."""
+    rank = {name: k for k, name in enumerate(order)}
+    return sorted(
+        names, key=lambda name: (rank.get(name, len(order)), names.index(name))
+    )
+
+
+def _stride_of(domain: Any, name: str, inner: Sequence[str]) -> tuple[int, Any]:
+    """The stride of ``name`` in ``domain`` given its outer loops, and its offset.
+
+    The loops inside it are projected out first, so that the offset is an
+    affine function of the parameters and the loops outside it only; isl's
+    ``get_stride_info`` would otherwise express it in any of the others.
+    """
+    projected = _as_set(domain)
+    for other in inner:
+        dims = projected.get_var_names(isl.dim_type.set)
+        if other in dims:
+            projected = projected.project_out(
+                isl.dim_type.set, dims.index(other), 1
+            )
+    info = projected.get_stride_info(
+        projected.get_var_names(isl.dim_type.set).index(name)
+    )
+    return info.get_stride().to_python(), info.get_offset()
+
+
+def _stepped(
+    kernel: Any, order: Sequence[str], tags: Mapping[str, str]
+) -> tuple[Any, dict[str, str]]:
+    """``kernel`` with each loop over a lattice written as a count of steps.
+
+    The image of a map that is not unimodular has holes: the diamond's is the
+    points where ``a + b`` is even, which isl states as an existentially
+    quantified constraint. loopy loops over such a domain's bounding box and
+    tests the constraint with an ``if`` in the innermost loop, so that half
+    the iterations of that loop do nothing (note 13 of
+    ``docs/loopy-notes.md``). Here every loop is asked, outermost first,
+    whether isl finds a stride for it given the loops outside it: ``b`` steps
+    by 2 from ``-a``. Such a loop is replaced by a counter, ``b = 2*b_step -
+    a``, in the domain (whose preimage has no holes left) and in every
+    instruction, and the new loop runs over the counter. For fixed values of
+    the loops outside it, the counter and the loop it replaces increase
+    together and meet the same points, so the kernel runs the same instances
+    in the same order: the change of variables is the one the order the
+    checker approved already fixes, and isl confirms, for each loop, that the
+    new domain maps back onto the old one exactly.
+
+    Done last, on the kernel code is generated from, and not in the kernel
+    later steps transform: a tile of ``b`` splits the loop the checker knows,
+    not the counter. A loop is left as loopy has it when it carries a tag
+    (a hardware axis is not a loop loopy steps through), is the loop of a
+    reduction, is named by another domain as a parameter (a fiber nested in
+    it), or has a stride whose offset involves a loop that does not run
+    around every instruction in it.
+
+    Returns the kernel, and for each loop replaced the expression it became,
+    as text: ``{"b": "2*b_step - a"}``.
+    """
+    if kernel is None:
+        return None, {}
+    from loopy.match import parse_stack_match
+    from loopy.symbolic import (
+        RuleAwareSubstitutionMapper,
+        SubstitutionRuleMappingContext,
+        aff_to_expr,
+        get_dependencies,
+    )
+    from pymbolic.mapper.substitutor import make_subst_func
+
+    entry = kernel.default_entrypoint
+    within: dict[str, set[str]] = {}
+    folded: set[str] = set()
+    for insn in entry.instructions:
+        for name in insn.within_inames:
+            within.setdefault(name, set()).add(insn.id)
+        folded |= set(insn.reduction_inames())
+    nested: set[str] = set()
+    for domain in entry.domains:
+        nested |= set(domain.get_var_names(isl.dim_type.param))
+    fresh = entry.get_var_name_generator()
+    domains = list(entry.domains)
+    substitution: dict[str, Any] = {}
+    renamed: dict[str, str] = {}
+    shown: dict[str, str] = {}
+    for position, domain in enumerate(domains):
+        params = set(domain.get_var_names(isl.dim_type.param))
+        ranked = _ranked(list(domain.get_var_names(isl.dim_type.set)), order)
+        for k, name in enumerate(ranked):
+            if name in tags or name not in within or name in folded | nested:
+                continue
+            try:
+                stride, offset = _stride_of(domain, name, ranked[k + 1 :])
+            except isl.Error:  # pragma: no cover - isl finds no stride
+                continue
+            if stride <= 1:
+                continue
+            around = {
+                renamed.get(outer, outer)
+                for outer in ranked[:k]
+                if within[name] <= within.get(outer, set())
+            }
+            value = aff_to_expr(offset)
+            if not set(get_dependencies(value)) - params <= around:
+                continue
+            counter = fresh(f"{name}_step")
+            value = stride * prim.Variable(counter) + value
+            counted = _counted(domain, name, counter, value)
+            if counted is None:
+                continue
+            domain = counted
+            substitution[name] = value
+            renamed[name] = counter
+            shown[name] = _stepped_text(stride, counter, offset)
+        domains[position] = domain
+    if not renamed:
+        return kernel, {}
+    insns = [
+        insn.copy(
+            within_inames=frozenset(renamed.get(n, n) for n in insn.within_inames)
+        )
+        if insn.within_inames & set(renamed)
+        else insn
+        for insn in entry.instructions
+    ]
+    priority = frozenset(
+        tuple(renamed.get(name, name) for name in nest)
+        for nest in entry.loop_priority
+    )
+    entry = entry.copy(domains=domains, instructions=insns, loop_priority=priority)
+    context = SubstitutionRuleMappingContext(
+        entry.substitutions, entry.get_var_name_generator()
+    )
+    mapper = RuleAwareSubstitutionMapper(
+        context, make_subst_func(substitution), within=parse_stack_match(None)
+    )
+    entry = context.finish_kernel(
+        mapper.map_kernel(entry, map_args=False, map_tvs=False)
+    )
+    return kernel.with_kernel(entry), shown
+
+
+def _counted(domain: Any, name: str, counter: str, value: Any) -> Any:
+    """``domain`` over ``counter`` in place of ``name``, where ``name = value``.
+
+    The preimage of the domain under the change of variables, which isl
+    confirms maps back onto the domain exactly. ``None`` when it does not, or
+    is not one basic set.
+    """
+    from loopy.symbolic import aff_from_expr
+
+    before = _as_set(domain)
+    names = list(before.get_var_names(isl.dim_type.set))
+    space = before.get_space().set_dim_name(
+        isl.dim_type.set, names.index(name), counter
+    )
+    try:
+        listed = isl.AffList.alloc(space.get_ctx(), len(names))
+        for other in names:
+            listed = listed.add(
+                aff_from_expr(space, value if other == name else prim.Variable(other))
+            )
+        function = isl.MultiAff.from_aff_list(
+            space.map_from_domain_and_range(before.get_space()), listed
+        )
+        after = before.preimage_multi_aff(function).coalesce()
+        if not after.apply(isl.Map.from_multi_aff(function)).is_equal(before):
+            return None  # pragma: no cover - isl's stride holds by construction
+    except isl.Error:  # pragma: no cover - defensive against isl declining
+        return None
+    if after.n_basic_set() != 1:  # pragma: no cover - a preimage of a basic set
+        return None
+    (out,) = after.get_basic_sets()
+    return out
+
+
+def _stepped_text(stride: int, counter: str, offset: Any) -> str:
+    """``2*b_step - a``: a loop as its counter, the way a reader writes it."""
+    from loopy.symbolic import aff_to_expr
+
+    if offset.dim(isl.dim_type.div) or offset.get_denominator_val().to_python() != 1:
+        return f"{stride}*{counter} + {aff_to_expr(offset)}"
+    terms = [(stride, counter)]
+    for kind in (isl.dim_type.in_, isl.dim_type.param):
+        for k in range(offset.dim(kind)):
+            coefficient = offset.get_coefficient_val(kind, k).to_python()
+            if coefficient:
+                terms.append((coefficient, offset.get_dim_name(kind, k)))
+    out = ""
+    for coefficient, name in terms:
+        magnitude = "" if abs(coefficient) == 1 else f"{abs(coefficient)}*"
+        if not out:
+            out = f"{'-' if coefficient < 0 else ''}{magnitude}{name}"
+        else:
+            out += f" {'-' if coefficient < 0 else '+'} {magnitude}{name}"
+    constant = offset.get_constant_val().to_python()
+    if constant:
+        out += f" {'-' if constant < 0 else '+'} {abs(constant)}"
+    return out
+
+
+# }}}

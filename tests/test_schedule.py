@@ -20,6 +20,7 @@ from lanky.prelude import Nat, Real
 
 import hand_terms as ht
 from loopty import Arr, Fin, reduce_sum, when
+from loopty.executor import emit_code
 from loopty.lower import reductions_of
 from loopty.schedule import IllegalCast, Schedule, parallel_tag
 
@@ -645,12 +646,15 @@ def test_the_diamond_is_accepted_and_the_stencil_still_computes() -> None:
     ]
     assert schedule.buildable == (True, "")
 
-    # The kernel loops over the image, which has holes: isl states it with the
-    # parity as an existentially quantified constraint, and the old loops are
-    # floor divisions of the new ones.
+    # The image has holes: it is the points where a + b is even. The kernel
+    # loops over a and over a count of b's steps, b = 2*b_step - a, so its
+    # domain has none left, and the code tests no parity: loopy alone looped
+    # over every b and tested (a + b) mod 2 at each, wasting half of them.
+    assert schedule.strides == {"b": "2*b_step - a"}
     (domain,) = schedule.kernel.default_entrypoint.domains
-    assert domain.get_var_names(isl.dim_type.set) == ["a", "b"]
-    assert "mod 2" in str(domain)
+    assert domain.get_var_names(isl.dim_type.set) == ["a", "b_step"]
+    assert domain.dim(isl.dim_type.div) == 0
+    assert "== 0" not in emit_code(schedule)
 
     # loopy generates correct code for it, bit for bit, at every size.
     for nt, nx in STENCIL_SIZES:
@@ -701,6 +705,11 @@ def test_tiling_the_diamond_is_legal_for_the_stencil_and_computes() -> None:
     )
     assert schedule.order == ("a_outer", "b_outer", "a_inner", "b_inner")
     assert [fact.status.value for fact in schedule.facts()] == ["decided"] * 4
+    # The tile splits the loops the checker knows, and the loop that is left
+    # with the holes is the innermost one, which steps by two from a_inner.
+    assert schedule.strides == {"b_inner": "2*b_inner_step - a_inner"}
+    domains = schedule.kernel.default_entrypoint.domains
+    assert all(domain.dim(isl.dim_type.div) == 0 for domain in domains)
     for nt, nx in [*STENCIL_SIZES, (17, 23), (32, 32)]:
         u = _jacobi_input(nt, nx)
         out = run(schedule, u=u.copy())
@@ -746,6 +755,8 @@ def test_skew_is_the_affine_map_that_keeps_the_loop_names(monkeypatch) -> None:
     (theirs,) = affine.kernel.default_entrypoint.domains
     assert mine.is_equal(theirs)
     assert "t < i" in str(mine)
+    # A unimodular map leaves no holes, so there is nothing to step over.
+    assert skewed.strides == affine.strides == {}
 
 
 def test_a_skewed_loop_keeps_its_tag_in_the_kernel() -> None:
@@ -1234,6 +1245,49 @@ def test_retargeting_replays_an_affine_step() -> None:
     assert other.history == schedule.history
     assert other.order == ("a", "b")
     assert all(fact.provenance["target"] == "c-source" for fact in other.facts())
+
+
+def test_only_a_loop_the_kernel_steps_through_is_counted() -> None:
+    # A tagged loop is not a loop loopy steps through (a hardware axis, or a
+    # loop it unrolls), so it keeps its holes; a loop inside a tagged one
+    # still steps, from an offset the tagged loop gives.
+    diamond = Schedule(ht.jacobi_term()).affine(DIAMOND)
+    assert diamond.tag(b="unr").strides == {}
+    assert diamond.tag(a="unr").strides == {"b": "2*b_step - a"}
+    # The schedule's own loops are still a and b; only the kernel counts.
+    assert diamond.order == ("a", "b")
+    assert "b_step" in diamond.kernel.default_entrypoint.all_inames()
+
+
+def every_other(
+    x: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """Double the even cells: a guard whose congruence narrows the domain."""
+    for i in x.dom:
+        with when(i % 2 == 0):
+            y[i] = 2.0 * x[i]
+
+
+def test_a_loop_a_guard_narrows_to_a_congruence_steps_over_it_too() -> None:
+    # The counting is about the domain, not about affine: a guard that keeps
+    # the even i puts (i) mod 2 = 0 in the domain, and once a step has set the
+    # nest, the loop left with the holes counts its steps. The identity
+    # schedule leaves loopy its own nest, so it is left alone.
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(every_other, evaluate_annotations(every_other))
+    assert Schedule(term).strides == {}
+    split = Schedule(term, sizes={"n": 10}).split("i", 4)
+    assert split.strides == {"i_inner": "2*i_inner_step"}
+    for n in (1, 2, 7, 10):
+        x = np.arange(n, dtype=np.float64)
+        out = run(split, x=x, y=np.full(n, -1.0))
+        want = np.full(n, -1.0)
+        want[::2] = 2.0 * x[::2]
+        assert np.array_equal(out["y"], want), n
 
 
 # }}}

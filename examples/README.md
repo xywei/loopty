@@ -297,7 +297,7 @@ Schedule(acoustic).affine('{ [t, i] -> [a, b] : a = i + t and b = i - t }') ->
 
 accepted: Schedule(acoustic, target='c').affine({ [t, i] -> [a = t + i, b = t - i] })
   loop nest: a b
-  loopy domain: [nt, nx] -> { [a, b] : (a + b) mod 2 = 0 and b >= -a and 4 - 2nx + a <= b <= -2 + a and b <= -4 + 2nt - a }
+  loopy domain: [nt, nx] -> { [a, b_step] : b_step >= 0 and 2 - nx + a <= b_step < a and b_step <= -2 + nt }
   decided  isl  affine({ [t, i] -> [a = t + i, b = t - i] }) renames the instances of acoustic one for one
   decided  isl  the order after affine({ [t, i] -> [a = t + i, b = t - i] }) runs every dependence of acoustic forward
 
