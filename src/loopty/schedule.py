@@ -2367,8 +2367,12 @@ _EXACTNESS_ORDER = ("exact", "reassoc", "approx")
 
 
 def _element_exactness(term: Term, name: str) -> str:
-    """The exactness class of an array's element type."""
-    for param, typ in term.params:
+    """The exactness class of an array's element type.
+
+    A program's temporaries are arrays with element sorts too
+    (:attr:`loopty.term.Term.temporaries`), and are asked like parameters.
+    """
+    for param, typ in (*term.params, *term.temporaries):
         if param != name:
             continue
         dtype = getattr(typ, "dtype", typ)

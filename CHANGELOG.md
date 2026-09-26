@@ -172,6 +172,19 @@ with a pair of statement instances.
   domain, and a `dir()` or frame probe all trace to one iteration's value and
   are refuted. The demos' ledgers carry
   one more row per kernel, and their transcripts are regenerated.
+- **A term may state its offsets** (`Term.offsets`, `Term.offsets_of`). The
+  offsets a counts family's rows are read through were always read off the
+  names of the term's parameters, which is right for a kernel and wrong for a
+  program, whose parameters are named by the program: `solve(cnt, col, val, x,
+  y, off)` would have indexed `spmv`'s rows through `scan`'s output `off`,
+  which `spmv` never declared, and its contract would have refused a zeroed
+  `off`. A program's term states the family's offsets as each call's kernel
+  reads them, in the program's names, or `None` for the array's own; the
+  lowering, the access collector, the interpreter and the sampled inputs of
+  the faithfulness fact all ask `Term.offsets_of`, and an added offsets
+  argument avoids every name the term has (`off_cnt_`). `Term.where` places a
+  program's facts at the program, and `Term.array_types` is the parameters'
+  and temporaries' types together.
 
 ### Fixed
 

@@ -312,3 +312,179 @@ def test_a_loop_bounded_only_through_an_inner_one_keeps_its_projection() -> None
 
 
 # }}}
+
+
+# {{{ temporaries, and offsets a term states
+
+
+def _through_temporary(temporaries, params=None):
+    """``t[i] = x[i]`` and then, in a loop of its own, ``y[j] = t[j]``."""
+    import islpy as isl
+    import pymbolic.primitives as prim
+
+    from loopty.term import Access, ArrType, Stmt, Term
+
+    V = prim.Variable
+    vector = ArrType(axes=(V("n"),), dtype=np.dtype(np.float64), ragged=(False,))
+    stmts = tuple(
+        Stmt(
+            id=f"S{k}",
+            inames=(iname,),
+            domain=isl.Set(f"[n] -> {{ [{iname}] : 0 <= {iname} < n }}"),
+            assignee=Access(target, (V(iname),)),
+            expr=prim.Subscript(V(source), (V(iname),)),
+            kind="assign",
+            guard=None,
+            where=f"hand.py:{k + 1}",
+            order=(k, 0),
+        )
+        for k, (source, target, iname) in enumerate(
+            (("x", "t", "i"), ("t", "y", "j"))
+        )
+    )
+    return Term(
+        name="through",
+        params=params or (("x", vector), ("y", vector)),
+        sizes=("n",),
+        stmts=stmts,
+        post=None,
+        temporaries=temporaries,
+    )
+
+
+def _vector(size="n"):
+    import pymbolic.primitives as prim
+
+    from loopty.term import ArrType
+
+    return ArrType(
+        axes=(prim.Variable(size),), dtype=np.dtype(np.float64), ragged=(False,)
+    )
+
+
+def test_a_temporary_is_declared_in_the_kernel_and_passed_by_nobody() -> None:
+    term = _through_temporary((("t", _vector()),))
+    lowering = lower_generic(term)
+    entry = lowering.kernel.default_entrypoint
+    assert lowering.temporaries == ("t",)
+    assert lowering.array_args == ("x", "y")
+    assert lowering.outputs == ("y",)
+    assert "t" not in {arg.name for arg in entry.args}
+    assert entry.temporary_variables["t"].address_space == lp.AddressSpace.PRIVATE
+    # A Real temporary counts in the contraction pin as a Real argument does.
+    assert lowering.contraction
+    x = np.arange(5.0)
+    y = np.zeros(5)
+    run(term, x=x, y=y)
+    assert list(y) == list(x)
+
+
+def test_a_temporary_lives_in_global_memory_on_opencl() -> None:
+    # Built without lowering for the device, which would import pyopencl: the
+    # C target's host code never allocates a global temporary, and the
+    # PyOpenCL host code does (docs/loopy-notes.md, note 14).
+    from loopty.lower import _temporary
+
+    term = _through_temporary((("t", _vector()),))
+    temporary = _temporary(term, "t", _vector(), "opencl", {"n"})
+    assert temporary.address_space == lp.AddressSpace.GLOBAL
+    assert _temporary(term, "t", _vector(), "c", {"n"}).address_space == (
+        lp.AddressSpace.PRIVATE
+    )
+
+
+def test_a_ragged_temporary_is_refused() -> None:
+    import pymbolic.primitives as prim
+
+    from loopty.lower import _temporary
+    from loopty.term import ArrType
+
+    ragged = ArrType(
+        axes=(prim.Variable("n"), prim.Variable("x")),
+        dtype=np.dtype(np.float64),
+        ragged=(False, True),
+    )
+    term = _through_temporary(())
+    with pytest.raises(LoweringError, match="no offsets"):
+        _temporary(term, "t", ragged, "c", {"n", "x"})
+
+
+def test_a_temporary_sized_by_nothing_else_is_refused() -> None:
+    term = _through_temporary((("t", _vector("p")),))
+    with pytest.raises(LoweringError, match="sized by p"):
+        lower_generic(term)
+
+
+def test_an_exact_temporary_pins_contraction_off() -> None:
+    from lanky.prelude import Real
+
+    from loopty.term import ArrType
+    from loopty.tolerance import output_class
+
+    exact = ArrType(axes=_vector().axes, dtype=Real.exact, ragged=(False,))
+    term = _through_temporary((("t", exact),))
+    assert output_class(term, "t") == "exact"
+    assert not lower_generic(term).contraction
+
+
+def test_offsets_stated_as_none_are_an_argument_of_a_fresh_name() -> None:
+    import islpy as isl
+    import pymbolic.primitives as prim
+
+    from loopty.term import Access, ArrType, Stmt, Term
+
+    V = prim.Variable
+    real = np.dtype(np.float64)
+    counts = ArrType(axes=(V("n"),), dtype=np.dtype(np.int64), ragged=(False,))
+    ragged = ArrType(axes=(V("n"), V("cnt")), dtype=real, ragged=(False, True))
+    term = Term(
+        name="rowsum",
+        params=(("cnt", counts), ("val", ragged), ("off_cnt", _vector())),
+        sizes=("n",),
+        stmts=(
+            Stmt(
+                id="S0",
+                inames=("r",),
+                domain=isl.Set("[n] -> { [r] : 0 <= r < n }"),
+                assignee=Access("off_cnt", (V("r"),)),
+                expr=prim.Subscript(V("val"), (V("r"), 0))
+                + prim.Subscript(V("cnt"), (V("r"),)),
+                kind="assign",
+                guard=None,
+                where="hand.py:1",
+            ),
+        ),
+        post=None,
+        offsets=(("cnt", None),),
+    )
+    # Left to the names, ``off_cnt`` would be the offsets; stated as None, it
+    # is an ordinary array, and the added offsets argument avoids its name.
+    assert term.offsets_of("cnt") is None
+    assert lower_generic(term).ragged == {"val": "off_cnt_"}
+
+
+def test_a_kernels_term_still_finds_its_offsets_by_name() -> None:
+    from loopty.term import Term
+
+    counts = _vector()
+    term = Term(
+        name="k",
+        params=(("cnt", counts), ("cnt_off", counts)),
+        sizes=("n",),
+        stmts=(),
+        post=None,
+    )
+    assert term.offsets_of("cnt") == "cnt_off"
+    assert term.offsets_of("other") is None
+    stated = Term(
+        name="k",
+        params=term.params,
+        sizes=term.sizes,
+        stmts=(),
+        post=None,
+        offsets=(("cnt", "elsewhere"),),
+    )
+    assert stated.offsets_of("cnt") == "elsewhere"
+
+
+# }}}

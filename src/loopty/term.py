@@ -100,6 +100,7 @@ def declared_offsets(params: Iterable[tuple[str, Any]], counts: str) -> str | No
 
 def declared_layout(
     params: Iterable[tuple[str, Any]],
+    stated: Iterable[tuple[str, str | None]] = (),
 ) -> dict[str, tuple[str | None, str | None]]:
     """The arguments each ragged parameter is indexed through, as lowering does.
 
@@ -111,6 +112,10 @@ def declared_layout(
     it, and a ragged parameter that declares neither is left out: it has only
     its own layout.
 
+    ``stated`` is a term's :attr:`Term.offsets`: the offsets of a counts family
+    the term states rather than leaves to the parameter names, which it wins
+    over. A program's term states them, see :mod:`loopty.compose`.
+
     This is the layout the lowered kernel reads, because those are the
     arguments it is handed, and the one the native run and the interpreter read
     too, so that a kernel that writes its counts or its offsets means one thing
@@ -118,6 +123,7 @@ def declared_layout(
     """
     listed = tuple(params)
     types = dict(listed)
+    overrides = dict(stated)
     out: dict[str, tuple[str | None, str | None]] = {}
     for name, typ in listed:
         if not isinstance(typ, ArrType) or not any(typ.ragged):
@@ -127,7 +133,10 @@ def declared_layout(
         if axis != 1 or len(typ.axes) != 2 or not isinstance(size, prim.Variable):
             continue
         counts = size.name if isinstance(types.get(size.name), ArrType) else None
-        offsets = declared_offsets(listed, size.name)
+        if size.name in overrides:
+            offsets = overrides[size.name]
+        else:
+            offsets = declared_offsets(listed, size.name)
         if counts is None and offsets is None:
             continue
         out[name] = (counts, offsets)
@@ -272,6 +281,24 @@ class Term:
     out of a domain parameter, has to be told what was allocated instead of
     guessing from the spelling. A term written by hand leaves it empty and is
     read by spelling, which is what :data:`COUNT_PARAM_REFLECTED` is for.
+
+    Three fields are empty for a kernel's term and filled in for a program's
+    (:mod:`loopty.compose`), which is one term made of several kernels':
+
+    * ``temporaries`` are the arrays the term writes and reads that are not
+      parameters, each with its type: an array a program makes for itself,
+      which the lowering declares as a loopy temporary rather than an
+      argument, so nobody passes it.
+    * ``offsets`` states the offsets array each counts family is indexed
+      through, as ``(counts, offsets)``, with ``None`` for the array's own
+      offsets, which lowering adds as an argument. A kernel leaves this to the
+      names of its parameters (:func:`declared_offsets`); a program cannot,
+      because its parameters are named by the program and not by the kernels
+      whose layout they carry, and a program parameter called ``off`` is not
+      the offsets of a kernel that declares none. See :meth:`offsets_of`.
+    * ``where`` is ``file:line`` of the definition when the term is not one
+      kernel's statements, for the facts about the whole term; a kernel's term
+      leaves it empty, and those facts point at its first statement.
     """
 
     name: str
@@ -280,11 +307,34 @@ class Term:
     stmts: tuple[Stmt, ...]
     post: Expression | None
     reflected: tuple[tuple[str, Expression], ...] = ()
+    temporaries: tuple[tuple[str, ArrType], ...] = ()
+    offsets: tuple[tuple[str, str | None], ...] = ()
+    where: str = ""
 
     @property
     def param_names(self) -> tuple[str, ...]:
         """Parameter names, in signature order."""
         return tuple(name for name, _ in self.params)
+
+    @property
+    def array_types(self) -> dict[str, ArrType]:
+        """The type of every array the term touches: parameters and temporaries."""
+        out = {name: typ for name, typ in self.params if isinstance(typ, ArrType)}
+        out.update(self.temporaries)
+        return out
+
+    def offsets_of(self, counts: str) -> str | None:
+        """The offsets array the rows over ``counts`` are indexed through.
+
+        What :attr:`offsets` states for the family, when it states anything,
+        and otherwise the parameter :func:`declared_offsets` finds by name.
+        ``None`` means the array's own offsets, an argument the lowering adds
+        and nothing in the term can name.
+        """
+        stated = dict(self.offsets)
+        if counts in stated:
+            return stated[counts]
+        return declared_offsets(self.params, counts)
 
     @property
     def reflections(self) -> Any:
@@ -299,6 +349,7 @@ class Term:
 
         table = Reflections()
         table.reserve(self.param_names)
+        table.reserve(name for name, _ in self.temporaries)
         table.reserve(self.sizes)
         for stmt in self.stmts:
             table.reserve(stmt.inames)

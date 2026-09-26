@@ -255,7 +255,9 @@ def sample_arguments(
             raise _NoSample(f"the row lengths {counts_name} of {name} are negative")
         values = _draw(typ.dtype, (int(lengths.sum()),), sizes, rng)
         arguments[name] = Arr.ragged(lengths, values=values)
-    for name, (_counts, offsets) in declared_layout(term.params).items():
+    for name, (_counts, offsets) in declared_layout(
+        term.params, term.offsets
+    ).items():
         drawn = arguments.get(offsets) if offsets else None
         layout = arguments.get(name)
         if not isinstance(drawn, Arr) or not isinstance(layout, Arr):
