@@ -53,6 +53,7 @@ decided                           type           spmv.py:112  spmv           x[c
 decided                           isl            spmv.py:112  spmv           distinct instances of S0 write distinct cells of y
 decided                           type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
 tested                            interpreter    spmv.py:102  spmv           the traced term computes what the body computes
+assumed under scan:postcondition  -              spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
 ...
 19 facts: 2 assumed, 14 decided, 3 tested
 ```
@@ -63,13 +64,19 @@ and here it was settled by the *type*: the entries of `col` are points of
 `Fin[m]` and `x` has `m` cells, so the shape of the data discharges it and isl
 is never called.
 
-And look at the last row, the one fact that is about the trace rather than
-about the term. Every other row is a claim about what tracing recorded; this
+And look at the `interpreter` row, the one fact that is about the trace rather
+than about the term. Every other row is a claim about what tracing recorded; this
 one checks that the record is the body. The term is run by an interpreter of
 its own, with numpy semantics, and compared with the body run natively, on the
 file's example inputs and on inputs drawn from the declared types. A body that
 kept state where tracing does not look would be refuted here, with the input
 and the first cell that differs.
+
+The last row belongs to `solve`, the `@program` that runs `scan` and then
+`spmv`. It restates `scan`'s postcondition in the program's scope, and rests on
+`scan`'s own postcondition fact, which the row names:
+`assumed under scan:postcondition`. Nothing has established that fact yet, and
+the restatement is worth no more than it.
 
 And a transformation is a cast, checked before it is applied:
 
@@ -219,7 +226,9 @@ end to end; the edges are sharp.
 - `@program` restates a callee's postcondition as a fact in scope, which rests
   on the callee's own fact (lanky's `rests_on`, so the row reads
   `assumed under scan:postcondition`), but no rule consumes postconditions as
-  hypotheses yet, so "facts travel" is bookkeeping.
+  hypotheses yet, so "facts travel" is bookkeeping. A callee imported from
+  another file has its fact in that file's ledger, so `lanky check` counts the
+  id as an assumption and names it in an `UNRESOLVED` line.
 - Only a two-axis (row, fiber) ragged array lowers. A deeper dependent sum
   raises.
 - A reduction nested in another one cannot take its bound from the outer
