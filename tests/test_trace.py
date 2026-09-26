@@ -1620,6 +1620,33 @@ def test_a_data_guard_is_recorded_as_unnarrowed_too() -> None:
     assert stmt.unnarrowed == (("x[i] > 0.0", "reads an array or is not affine"),)
 
 
+def test_a_guard_the_trace_can_evaluate_is_a_constant() -> None:
+    # A condition on values the trace knows, a module constant say, reaches
+    # when as a bool. True leaves every instance writing, which is what the
+    # domain says, so nothing is listed; False leaves none, and is listed.
+    order = 2
+
+    def higher(y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when((order > 1) & (i + 1 < y.dom.size)):
+                y[i] = 1.0
+
+    def never(y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(order > 3):
+                y[i] = 1.0
+
+    (stmt,) = term_of(higher).stmts
+    assert stmt.unnarrowed == ()
+    assert stmt.domain.is_equal(
+        isl.Set("[n] -> { [i] : 0 <= i < n - 1 }").align_params(stmt.domain.get_space())
+    )
+    (stmt,) = term_of(never).stmts
+    assert stmt.unnarrowed == (
+        ("False", "is the constant False, which is not stated to isl"),
+    )
+
+
 def test_a_reduction_condition_against_a_real_scalar_is_refused() -> None:
     # A reduction keeps its condition only in its domain, so a condition the
     # domain cannot state is refused rather than dropped.

@@ -598,11 +598,11 @@ with a pair of statement instances.
   (`Nat`, `Int`, `Fin[...]`); any other conjunct is left to the statement's
   guard predicate, evaluated at run time, and the domain over-approximates the
   instances that write. `Stmt.unnarrowed` lists the conjuncts a domain leaves
-  out (this one, a data guard, a `!=`), each with the reason, and the
-  in-bounds, disjointness and ordering facts stated over such a domain carry
-  the list under `unnarrowed` in their provenance: proved, they hold for the
-  instances that write too; refuted, the witness may be an instance the guard
-  masks. A reduction condition that compares with a `Real` scalar is refused,
+  out (this one, a data guard, a `!=`, a guard the trace already found
+  `False`), each with the reason, and the in-bounds, disjointness and ordering
+  facts stated over such a domain carry the list under `unnarrowed` in their
+  provenance: proved, they hold for the instances that write too; refuted, the
+  witness may be an instance the guard masks. A reduction condition that compares with a `Real` scalar is refused,
   as a condition its domain cannot state already was. `with when(i < a):` with
   `a: Nat` narrows the domain as before.
 - A `when` guard whose value is an integer rather than a truth value is

@@ -1802,6 +1802,9 @@ _NOT_AFFINE = "reads an array or is not affine"
 #: Why a conjunct comparing with ``!=`` is not a constraint.
 _UNEQUAL = "compares with '!=', which is not a convex set of points"
 
+#: Why a guard that is already false is not a constraint.
+_FALSE = "is the constant False, which is not stated to isl"
+
 
 def constraints_of(
     condition: Any, tracer: Tracer | None = None, bound: Collection[str] = ()
@@ -1849,6 +1852,10 @@ def _conjuncts(
     """
     if condition is None:
         return []
+    if isinstance(condition, bool | np.bool_):
+        # A guard the trace computed, from values it knows: true leaves every
+        # instance of the loop nest writing, which is what the domain says.
+        return [] if condition else [(condition, None, _FALSE)]
     if isinstance(condition, prim.LogicalAnd):
         return [
             piece
