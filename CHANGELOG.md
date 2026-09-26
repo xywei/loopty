@@ -625,13 +625,16 @@ with a pair of statement instances.
   author's alone) are never a library's, so a kernel installed into
   site-packages by a non-editable install has its `print()` refused, the
   helpers of its package followed and their module state copied, and the
-  objects of its classes compared, as a kernel in a source tree does. loopty's
-  dependencies are machinery whatever directory they come from, and so is the
-  standard library, by name where its code is where the standard library is (a
-  `colorsys.py` of the author's next to the kernel is the author's). Another
-  installed package is a library's for a kernel outside it, and its call
-  locations are passed over rather than disabled for good, so that a kernel of
-  its own traced later is watched.
+  objects of its classes compared, as a kernel in a source tree does. The
+  package is read off the module's `__package__` too, so a kernel file that
+  `lanky check` imports by path under a name of its own, or that `python -m`
+  runs as `__main__`, keeps the package it sits in. loopty's dependencies are
+  machinery whatever directory they come from, and so is the standard library,
+  by name where its code is where the standard library is (a `colorsys.py` of
+  the author's next to the kernel is the author's). Another installed package
+  is a library's for a kernel outside it, and its call locations are passed
+  over rather than disabled for good, so that a kernel of its own traced later
+  is watched.
 - The outside-state snapshot reads an object's slots along with its
   `__dict__`, and a ragged `Arr`'s offsets along with its values. An object of
   the kernel author's class with `__slots__` was not copied at all, so

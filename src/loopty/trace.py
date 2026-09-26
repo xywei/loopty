@@ -1175,6 +1175,11 @@ def _own_of(function: Any) -> _Own | None:
     The package is the top-level one, or, when that is a namespace package
     (a directory several distributions install into, with no ``__init__``),
     the first regular package below it, which is the kernel author's alone.
+    It is read off the module's ``__package__`` as well as its name, because
+    a module can sit in a package without being named after it: ``lanky
+    check`` imports a file under a name of its own (``lanky_checked_kernels``)
+    and gives it the package the file is in, and ``python -m`` runs a module
+    of a package as ``__main__``.
     """
     if isinstance(function, MethodType):
         function = function.__func__
@@ -1182,9 +1187,23 @@ def _own_of(function: Any) -> _Own | None:
     if not module:
         return None
     code = getattr(function, "__code__", None)
-    if _machinery_module(module, getattr(code, "co_filename", None)):
+    filename = getattr(code, "co_filename", None)
+    if _machinery_module(module, filename):
         return _Own(module, None)
-    parts = module.split(".")
+    dotted = module
+    parent = function.__globals__.get("__package__")
+    if (
+        isinstance(parent, str)
+        and parent
+        and module != parent
+        and not module.startswith(parent + ".")
+    ):
+        dotted = f"{parent}.{module.rpartition('.')[2]}"
+    parts = dotted.split(".")
+    if _machinery_module(parts[0], filename):
+        # A file checked from inside one of loopty's dependencies is its
+        # own module there, and the rest of the package stays machinery.
+        return _Own(module, None)
     package = parts[0]
     for depth in range(1, len(parts) + 1):
         package = ".".join(parts[:depth])

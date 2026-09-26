@@ -2083,6 +2083,64 @@ def test_a_namespace_package_is_not_all_the_kernels(site_packages) -> None:
         term_of(module.chatty)
 
 
+def test_an_installed_kernel_file_checked_by_path_keeps_its_package(
+    site_packages,
+) -> None:
+    # lanky check imports the file as lanky_checked_kernels, a name of its own,
+    # and gives it the package it sits in; the kernel's own code is that
+    # package, as it is when the package imports the file.
+    import os
+
+    from lanky.check import import_path
+
+    from loopty.trace import _own_of
+
+    load = site_packages(
+        {
+            "installed_checked/__init__.py": "",
+            "installed_checked/helpers.py": """\
+    SEEN = []
+
+
+    def note(value):
+        SEEN.append(value)
+        return value
+
+
+    def shout(value):
+        print(value)
+        return value
+    """,
+            "installed_checked/kernels.py": _HEADER
+            + """
+    from .helpers import note, shout
+
+
+    def noted(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
+        for i in y.dom:
+            y[i] = note(x[i])
+
+
+    def shouted(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
+        for i in y.dom:
+            y[i] = shout(x[i])
+    """,
+        }
+    )
+    package = load("installed_checked")
+    checked = import_path(os.path.join(os.path.dirname(package.__file__), "kernels.py"))
+    assert checked.__name__ == "lanky_checked_kernels"
+    assert _own_of(checked.noted).package == "installed_checked"
+    with pytest.raises(TraceError, match="changed the global list 'SEEN'"):
+        term_of(checked.noted)
+    with pytest.raises(TraceError, match=r"calls print\(\) at helpers.py:"):
+        term_of(checked.shouted)
+    # python -m runs a module of the package as __main__, in the package.
+    namespace = {"__name__": "__main__", "__package__": "installed_checked"}
+    exec("def body():\n    pass\n", namespace)
+    assert _own_of(namespace["body"]).package == "installed_checked"
+
+
 def test_library_code_is_decided_by_module() -> None:
     import logging
 
