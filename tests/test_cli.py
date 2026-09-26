@@ -235,6 +235,60 @@ def test_target_retargets_every_schedule_rather_than_ignoring_the_flag(
     assert "difference" not in out
 
 
+DEVICE = '''
+"""A schedule written for a device: one work group per cell."""
+
+from __future__ import annotations
+
+import numpy as np
+from lanky.prelude import Real
+
+from loopty import Arr, Fin, kernel
+from loopty.schedule import Schedule
+
+
+@kernel
+def scale(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
+    """Twice x, into y."""
+    for i in y.dom:
+        y[i] = 2.0 * x[i]
+
+
+sched = Schedule(scale, target="opencl").tag(i="g.0")
+
+
+def example_inputs():
+    return {"x": Arr.from_numpy(np.arange(8, dtype=np.float64)), "y": Arr.zeros(8)}
+'''
+
+
+def test_target_c_on_a_device_schedule_says_c_has_no_hardware_axes(
+    tmp_path, capsys, plain_opencl
+) -> None:
+    """``--target c`` replays a device schedule against C, and C has no axes.
+
+    The retargeted schedule used to be buildable, and the run then failed
+    inside loopy with a ``RuntimeError`` (#47). Now the refuted ``buildable``
+    fact is reported before anything is compiled, with its reason under it.
+    """
+    path = write_fixture(tmp_path, DEVICE)
+    code = main(["run", str(path), "--target", "c"])
+    out = capsys.readouterr().out
+    assert code == 1
+    (limit,) = [
+        line.split("not buildable for the c target: ", 1)[1]
+        for line in out.splitlines()
+        if "not buildable for the c target: " in line
+    ]
+    assert limit.startswith("the tag i='g.0' puts a loop on a hardware axis")
+    lines, header = refutation_block(out, "scale at fixture.py:")
+    assert lines[header].endswith(
+        "c code can be generated for scale after tag(i='g.0')"
+    )
+    assert lines[header + 1] == f"  {limit}"
+    assert "difference" not in out
+
+
 def test_without_target_a_schedule_keeps_the_one_it_was_written_for(
     tmp_path, capsys
 ) -> None:

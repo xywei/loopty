@@ -209,12 +209,17 @@ end to end; the edges are sharp.
   replace them, refuses one that misses or merges an instance or runs a
   dependence backwards, and rewrites the kernel over the map's image; `skew` is
   that method with a particular map.
-- The target-capability check: a parallel tag inside a data-dependent (ragged)
-  loop bound, a hardware axis on a reduction nested in another, a reduction
-  loopy will not realize (partly in parallel and partly in sequence, across two
-  local axes, on a group axis, or on a local axis whose extent has no numeric
-  maximum), or a loop ordered outside a loop loopy nests it inside, is
-  reported as a `refuted` `buildable` fact and raises `UnbuildableSchedule`
+- The target-capability check: a concurrent tag (a hardware axis, `ilp` or
+  `vec`) inside a data-dependent (ragged) loop bound or its domain, a hardware
+  axis on a reduction nested in another, a reduction loopy will not realize
+  (partly in parallel and partly in sequence, across two local axes, on a
+  group axis, or on a local axis whose extent has no numeric maximum), a
+  hardware axis loopy will not assign (numbered past an unused one, shared by
+  two loops of one statement, missing from an instruction the kernel runs
+  beside it, or `l.auto`), an `unr`, `ilp` or `vec` loop whose length is not a
+  number, a temporary a `vec` loop cannot hold, a loop ordered outside a loop
+  loopy nests it inside, or a hardware axis on the C target, which has none,
+  is reported as a `refuted` `buildable` fact and raises `UnbuildableSchedule`
   when something asks for code. It is asked of the schedule as it stands after
   every step, so an interchange can make a tiled ragged loop buildable again.
 - Lowering to loopy, including a ragged axis as a flat buffer plus offsets, and

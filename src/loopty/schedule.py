@@ -5,9 +5,10 @@ A transformation is untrusted. ``.split``, ``.tile``, ``.interchange``,
 transform and then hand the result to a small checker, which asks isl two
 questions: is the reindexing a bijection on statement instances, and is the new
 execution order monotone on the dependence relation? Parallel inames (``g.*``,
-``l.*``) carry no order, so they are dropped from the order before the second
-question is asked. This is the de Bruijn criterion applied to scheduling: any
-Python transformation is admissible because its output is checked, not its code.
+``l.*``, ``ilp``, ``vec``) carry no order, so they are dropped from the order
+before the second question is asked. This is the de Bruijn criterion applied
+to scheduling: any Python transformation is admissible because its output is
+checked, not its code.
 
 Three things have to be written down for those two questions to be askable.
 
@@ -60,12 +61,16 @@ inside a loop whose bound comes from an array, which is exactly what a CSR
 inner loop is, and it will not generate a reduction whose inames are partly
 parallel and partly sequential. The others known are about reductions too (a
 hardware axis on one nested in another, a reduction on a group axis or across
-two local axes, a local axis whose extent has no numeric maximum) and about
-order (a loop put outside a loop loopy nests it inside, which loopy cannot
-run in that order). None is a wrong verdict about the cast, and none used to
-be reported: the casts were all ``DECIDED`` and loopy then threw during code
-generation, several steps away from the line that caused it, or ran a nest of
-its own choosing.
+two local axes, a local axis whose extent has no numeric maximum), about
+hardware axes (numbered from 0 with none left out, one loop of an instruction
+per axis, every instruction on every axis the kernel uses), about loops loopy
+writes out (``unr``, ``ilp`` and ``vec`` need a length that is a number when
+the code is generated), about order (a loop put outside a loop loopy nests it
+inside, which loopy cannot run in that order), and about the target itself
+(the C target has no hardware axes). None is a wrong verdict about the cast,
+and none used to be reported: the casts were all ``DECIDED`` and loopy then
+threw during code generation, several steps away from the line that caused
+it, or ran a nest of its own choosing.
 
 So every accepted step is asked a third question, this one about the target
 rather than about meaning, and its answer is a fact of kind ``buildable``
@@ -128,6 +133,7 @@ from loopty.lower import (
     Lowering,
     _plain,
     _reduction_nesting,
+    _sanitize,
     is_reserved,
     lower_generic,
     reductions_of,
@@ -142,8 +148,11 @@ __all__ = [
 ]
 
 #: Iname tags that impose no order: two instances differing only in such an
-#: iname may run in either order, or at the same time.
-PARALLEL_TAG_PREFIXES = ("g.", "l.", "ilp")
+#: iname may run in either order, or at the same time. ``ilp`` and ``vec`` are
+#: among them although neither is launched in parallel: loopy runs such a loop
+#: around each instruction of its body separately (unrolled, or in vectors),
+#: so two statements of the loop no longer interleave as the source wrote.
+PARALLEL_TAG_PREFIXES = ("g.", "l.", "ilp", "vec")
 
 
 def parallel_tag(tag: str) -> bool:
@@ -775,14 +784,84 @@ def data_dependent_inames(
     return frozenset(out)
 
 
+def _loopy_tag(tag: Any) -> Any:
+    """loopy's own reading of a tag, whether it is given as text or not."""
+    from loopy.kernel.data import parse_tag
+
+    return parse_tag(tag)
+
+
+def _hardware_axis(tag: Any) -> bool:
+    """Is ``tag`` a group or a local axis (``g.*``, ``l.*``), as loopy reads it?
+
+    Not ``vec``, which loopy counts among its hardware tags too: a vectorized
+    loop runs in one work item, and neither the C target's lack of axes nor
+    the numbering of a grid is about it.
+    """
+    from loopy.kernel.data import GroupInameTag, LocalInameTagBase
+
+    return isinstance(_loopy_tag(tag), GroupInameTag | LocalInameTagBase)
+
+
+def _concurrent(tag: Any) -> bool:
+    """Is ``tag`` one of loopy's concurrent tags: a hardware axis, ilp or vec?
+
+    This is loopy's own class (``ConcurrentTag``), which its check for a
+    loop whose extent is read out of an array asks. It names the tags
+    :func:`parallel_tag` names by their text, read as loopy reads them.
+    """
+    from loopy.kernel.data import ConcurrentTag
+
+    return isinstance(_loopy_tag(tag), ConcurrentTag)
+
+
+def _shown_tag(draft: _Draft, name: str, tag: Any) -> str:
+    """The tag on a loop as the schedule was given it (``ilp``, not ``ilp.unr``)."""
+    return draft.tags.get(name, str(tag))
+
+
+def _kernel_tags(draft: _Draft) -> dict[str, tuple[Any, ...]]:
+    """The tags of every loop of the draft's kernel, as loopy holds them.
+
+    Read off the kernel rather than off :attr:`_Draft.tags`, so that a loop is
+    asked about under the name it has now, after whatever renamed it.
+    """
+    entry = draft.kernel.default_entrypoint
+    return {
+        name: tuple(iname.tags)
+        for name, iname in sorted(entry.inames.items())
+        if iname.tags
+    }
+
+
+def _statement_of(draft: _Draft, insn_id: str) -> str | None:
+    """The term statement an instruction of the kernel is, if it is one.
+
+    The others assign a ragged row's length (:func:`loopty.lower._count_inits`),
+    which the term has no statement for.
+    """
+    statements = {_sanitize(stmt_id): stmt_id for stmt_id in draft.coords}
+    return statements.get(insn_id)
+
+
+def _instruction_text(draft: _Draft, insn_id: str) -> str:
+    """An instruction of the kernel, in the words of the term."""
+    statement = _statement_of(draft, insn_id)
+    if statement is not None:
+        return f"statement {statement}"
+    return f"the instruction {insn_id}, which reads the length of a ragged row,"
+
+
 def _unbuildable_reason(draft: _Draft) -> str | None:
     """Why loopy could not generate code for this draft, or ``None``.
 
     Limits of loopy 2025.2, all measured rather than guessed, in the order
     they are asked:
 
-    * a parallel tag inside a ragged fiber: a device run of the design's spmv
-      schedule fails on it;
+    * a concurrent tag (a hardware axis, ``ilp`` or ``vec``) inside a ragged
+      fiber, or on a loop loopy defines in one domain with a fiber's length:
+      a device run of the design's spmv schedule fails on it (see
+      :func:`_ragged_reason`);
     * a hardware axis on a reduction nested in another: code generation for a
       double sum with its inner reduction on a local axis fails ("instruction
       ... does not use all local hw axes");
@@ -793,26 +872,33 @@ def _unbuildable_reason(draft: _Draft) -> str | None:
       other concurrent axis, a group axis above all;
     * a local axis whose extent has no numeric maximum, where a reduction on
       a local axis needs one (see :func:`_extent_reason`);
+    * loopy's rules for sharing and numbering hardware axes: an axis loopy is
+      asked to choose (``l.auto``), two loops of one instruction on one axis,
+      an instruction that runs on fewer axes than the kernel uses, and an axis
+      numbered past an unused one (see :func:`_axis_reason`);
+    * an unrolled or vectorized loop whose length is not a number when the
+      code is generated (see :func:`_unroll_reason`), and a temporary a
+      vectorized loop cannot hold as a vector (see :func:`_vector_reason`);
     * a loop ordered outside a loop loopy nests it inside, which loopy cannot
-      run in that order (see :func:`_nest_reason`).
+      run in that order (see :func:`_nest_reason`);
+    * what the target itself cannot do: the C target has no hardware axes,
+      and no vector types for a temporary (see :func:`_target_reason`).
 
-    Note 11 of ``docs/loopy-notes.md`` has the table of what loopy says to
-    each, and note 6 the loop orders.
+    The target's own limit comes last, because it is the one limit that
+    :meth:`Schedule.retarget` removes; every other is loopy's on every target,
+    and is said first so that retargeting does not merely trade one refusal
+    for the next.
+
+    Notes 11 and 14 of ``docs/loopy-notes.md`` have the tables of what loopy
+    says to each, and note 6 the loop orders.
     """
-    parallel = {name for name, tag in draft.tags.items() if parallel_tag(tag)}
-    inside = sorted(parallel & draft.data_dependent)
-    if inside:
-        names = ", ".join(inside)
-        return (
-            f"the parallel tag on {names} sits inside a loop whose bound comes "
-            "from an array (a ragged fiber), and loopy will not put a hardware "
-            "axis in a domain with a data-dependent parameter. Parallelize an "
-            "enclosing loop with a size known at launch instead, such as the "
-            "rows of a CSR product"
-        )
+    reason = _ragged_reason(draft)
+    if reason is not None:
+        return reason
+    hardware = {name for name, tag in draft.tags.items() if _hardware_axis(tag)}
     nested = sorted(
         name
-        for name in parallel
+        for name in hardware
         if draft.reductions.get(name) in draft.nested_in
     )
     if nested:
@@ -840,7 +926,92 @@ def _unbuildable_reason(draft: _Draft) -> str | None:
         reason = _extent_reason(draft, key, inames)
         if reason is not None:
             return reason
-    return _nest_reason(draft)
+    for check in (
+        _axis_reason,
+        _unroll_reason,
+        _vector_reason,
+        _nest_reason,
+        _target_reason,
+    ):
+        reason = check(draft)
+        if reason is not None:
+            return reason
+    return None
+
+
+def _ragged_reason(draft: _Draft) -> str | None:
+    """A concurrent loop in a domain whose extent is read out of an array.
+
+    loopy refuses any concurrent loop (``ConcurrentTag``: a hardware axis,
+    ``ilp`` or ``vec``) in a domain that names a temporary as a parameter
+    (``check_for_data_dependent_parallel_bounds``), and a ragged row's length
+    is such a temporary: it is assigned inside the row loop and bounds the
+    fiber. Two loops are caught by that, and asked in turn. A ragged fiber
+    itself, whose extent is the row's length: a hardware axis there cannot be
+    launched, since the number of work items is not known when the kernel
+    starts, and ``ilp`` and ``vec`` are refused alike. And a loop between the
+    row and its fiber (``i`` in ``for r: for i in x.dom: for j in
+    val.dom[r]``), which is not ragged at all and which the lowering defines in
+    one domain with the fiber, ``[r, nl_cnt_r] -> { [i, j] }``: loopy reads
+    its domain, not its extent, and refuses it the same way. The second is
+    read off the kernel's domains, as loopy reads them.
+    """
+    concurrent = {name for name, tag in draft.tags.items() if _concurrent(tag)}
+    inside = sorted(concurrent & draft.data_dependent)
+    if inside:
+        names = ", ".join(inside)
+        if all(_hardware_axis(draft.tags[name]) for name in inside):
+            return (
+                f"the parallel tag on {names} sits inside a loop whose bound "
+                "comes from an array (a ragged fiber), and loopy will not put "
+                "a hardware axis in a domain with a data-dependent parameter. "
+                "Parallelize an enclosing loop with a size known at launch "
+                "instead, such as the rows of a CSR product"
+            )
+        tags = ", ".join(f"{name}={draft.tags[name]!r}" for name in inside)
+        return (
+            f"the tag {tags} makes a loop inside a ragged fiber concurrent, "
+            "and loopy will not run a concurrent loop (a hardware axis, ilp or "
+            "vec) in a domain with a data-dependent parameter, which the "
+            "fiber's is: its bound comes from an array. Leave the fiber's loop "
+            "sequential, and put an enclosing loop with a size known at launch "
+            "on a hardware axis instead, such as the rows of a CSR product"
+        )
+    if draft.kernel is None:
+        return None
+    entry = draft.kernel.default_entrypoint
+    temporaries = set(entry.temporary_variables)
+    tags = _kernel_tags(draft)
+    for domain in entry.domains:
+        if not set(domain.get_var_names(isl.dim_type.param)) & temporaries:
+            continue
+        loops = [
+            name
+            for name in domain.get_var_names(isl.dim_type.set)
+            if any(_concurrent(tag) for tag in tags.get(name, ()))
+        ]
+        if not loops:
+            continue
+        name = loops[0]
+        fibers = [
+            other
+            for other in domain.get_var_names(isl.dim_type.set)
+            if other != name and other in draft.data_dependent
+        ]
+        beside = f", beside the ragged fiber {fibers[0]}" if fibers else ""
+        shown = _shown_tag(
+            draft, name, next(tag for tag in tags[name] if _concurrent(tag))
+        )
+        return (
+            f"the tag {name}={shown!r} makes the loop {name} concurrent, and "
+            f"loopy defines {name} in one domain with the length of a ragged "
+            f"row{beside}, which is read out of an array inside the row's "
+            "loop; loopy will not run a concurrent loop (a hardware axis, ilp "
+            "or vec) in a domain with a data-dependent parameter. Put the axis "
+            f"on the row's loop or one outside it instead, or leave {name} "
+            "sequential"
+        )
+    return None
 
 
 def _reduction_role(tag: str | None) -> str:
@@ -857,7 +1028,7 @@ def _reduction_role(tag: str | None) -> str:
     checker reads ``ilp`` differently, as an order-free loop
     (:data:`PARALLEL_TAG_PREFIXES`), which is what makes it ask an
     accumulation's permission to be reassociated before a reduction loop is
-    tagged so.
+    tagged so, and ``vec`` too.
     """
     from loopy.kernel.data import (
         ConcurrentTag,
@@ -1113,6 +1284,401 @@ def _nest_reason(draft: _Draft) -> str | None:
     return None
 
 
+def _axis_reason(draft: _Draft) -> str | None:
+    """A hardware axis loopy will not assign as the schedule asks, or ``None``.
+
+    loopy has four rules about the axes of a kernel that the casts cannot
+    see, asked here in the order loopy meets them, each off the kernel's own
+    instructions and tags:
+
+    * ``l.auto`` asks loopy to choose a local axis, which it does only inside
+      its own transforms (``precompute``, ``buffer_array``); a kernel that
+      still has one is refused when loopy prepares it for code generation;
+    * one loop of an instruction per axis (``check_for_double_use_of_hw_axes``),
+      and ``vec`` counts as an axis there: two loops of one statement on
+      ``l.0`` are refused, and the loop of a reduction is one of its
+      statement's, because the sum runs inside the statement's loops (the
+      instruction loopy names is then the accumulator's initialization);
+    * every instruction runs on every group and local axis the kernel uses
+      (``check_for_unused_hw_axes``): a statement beside a loop on ``g.0``
+      that runs in no loop on ``g.0`` is refused, and so is a sum whose
+      accumulator is set up and updated outside the loop on that axis, as a
+      sum beside another on a local axis is. loopy names a remedy,
+      ``add_inames_for_unused_hw_axes``, which runs the instruction once per
+      work item, all of them writing one cell; loopty does not apply it;
+    * the axes of each kind are numbered from 0 up with none left out, over
+      the whole kernel (``get_grid_sizes_for_insn_ids``): ``l.1`` needs a
+      loop on ``l.0``.
+
+    Which loops an instruction of a reduction runs in follows
+    ``loopy.transform.realize_reduction``: a sum's own instructions run in the
+    statement's loops, its own, and those of the sums around it; the
+    statement's instruction runs in its loops and on the axis of every sum in
+    it that is summed on a local axis, since that sum's result is read by
+    every work item of the group.
+    """
+    if draft.kernel is None:
+        return None
+    from loopy.kernel.data import (
+        AutoLocalInameTagBase,
+        GroupInameTag,
+        LocalInameTag,
+        UniqueInameTag,
+        VectorizeTag,
+    )
+
+    entry = draft.kernel.default_entrypoint
+    tags = _kernel_tags(draft)
+
+    auto = sorted(
+        name
+        for name, found in tags.items()
+        if any(isinstance(tag, AutoLocalInameTagBase) for tag in found)
+    )
+    if auto:
+        return (
+            f"the tag l.auto on {', '.join(auto)} asks loopy to choose a local "
+            "axis, and loopy chooses one only inside its own transforms "
+            "(precompute, buffer_array); a kernel that still has one is "
+            "refused when loopy prepares it for code generation. Name the "
+            "axis, as l.0 does"
+        )
+
+    order = {name: k for k, name in enumerate(draft.order)}
+
+    def nest_order(name: str) -> tuple[int, str]:
+        return (order.get(name, len(order)), name)
+
+    for insn in entry.instructions:
+        summed = set(insn.reduction_inames())
+        loops = sorted(set(insn.within_inames) | summed, key=nest_order)
+        seen: dict[Any, str] = {}
+        for name in loops:
+            for tag in tags.get(name, ()):
+                if not isinstance(tag, UniqueInameTag):
+                    continue
+                first = seen.setdefault(tag.key, name)
+                if first == name:
+                    continue
+                shown = _shown_tag(draft, name, tag)
+                what = _instruction_text(draft, insn.id)
+                rule = (
+                    "loopy vectorizes one loop of an instruction at most"
+                    if isinstance(tag, VectorizeTag)
+                    else "loopy runs one loop of an instruction on each hardware "
+                    "axis"
+                )
+                why = (
+                    "; the loop of a sum is one of its statement's, because "
+                    "the sum runs inside the statement's loops"
+                    if {first, name} & summed
+                    else ""
+                )
+                return (
+                    f"{what} runs in two loops tagged {shown}, {first} and "
+                    f"{name}, and {rule}{why}. Put one of the two on another "
+                    "axis, or leave it sequential"
+                )
+
+    grid_tags = (GroupInameTag, LocalInameTag)
+
+    def axes(names: Iterable[str]) -> set[Any]:
+        return {
+            tag.key
+            for name in names
+            for tag in tags.get(name, ())
+            if isinstance(tag, grid_tags)
+        }
+
+    grid: dict[Any, tuple[Any, str]] = {}
+    for name in sorted(tags, key=nest_order):
+        for tag in tags[name]:
+            if isinstance(tag, grid_tags):
+                grid.setdefault(tag.key, (tag, name))
+    for insn in entry.instructions:
+        base = set(insn.within_inames)
+        sums: dict[str, list[str]] = {}
+        for name in sorted(insn.reduction_inames(), key=nest_order):
+            sums.setdefault(draft.reductions.get(name, name), []).append(name)
+        what = _instruction_text(draft, insn.id)
+        local = {
+            name
+            for names in sums.values()
+            for name in names
+            if any(isinstance(tag, LocalInameTag) for tag in tags.get(name, ()))
+        }
+        runs = [(what, None, base | local)]
+        for key, names in sums.items():
+            around: list[str] = []
+            outer = draft.nested_in.get(key)
+            while outer is not None:
+                around.extend(sums.get(outer, ()))
+                outer = draft.nested_in.get(outer)
+            runs.append(
+                (
+                    f"the sum over {', '.join(names)} in {what}",
+                    names,
+                    base | set(names) | set(around),
+                )
+            )
+        for subject, over, loops in runs:
+            missing = [key for key in grid if key not in axes(loops)]
+            if not missing:
+                continue
+            tag, loop = grid[missing[0]]
+            kind = "group" if isinstance(tag, GroupInameTag) else "local"
+            shown = _shown_tag(draft, loop, tag)
+            why = (
+                "loopy sets up and updates a sum's accumulator in instructions "
+                "of their own, which run in the loops of the statement and of "
+                "the sums around it, and it generates code only when every "
+                "instruction of a kernel runs on every hardware axis the kernel "
+                "uses"
+                if over
+                else "loopy generates code only when every instruction of a "
+                "kernel runs on every hardware axis the kernel uses"
+            )
+            statement = _statement_of(draft, insn.id)
+            remedy = (
+                f"put a loop of statement {statement} on {shown} as well"
+                if statement is not None
+                else "put the axis on the row's loop or one outside it"
+            )
+            return (
+                f"{subject} runs in no loop on {shown}, the {kind} axis {loop} "
+                f"is on: {why}. Leave {loop} sequential, or {remedy}"
+            )
+
+    for kind, cls, letter in (
+        ("group", GroupInameTag, "g"),
+        ("local", LocalInameTag, "l"),
+    ):
+        numbers: dict[int, str] = {}
+        for name in sorted(tags, key=nest_order):
+            for tag in tags[name]:
+                if isinstance(tag, cls):
+                    numbers.setdefault(tag.axis, name)
+        for axis in range(max(numbers, default=-1) + 1):
+            if axis in numbers:
+                continue
+            above = min(number for number in numbers if number > axis)
+            return (
+                f"the loop {numbers[above]} is on the {kind} axis "
+                f"{letter}.{above}, and no loop of the kernel is on "
+                f"{letter}.{axis}: loopy numbers the {kind} axes of a kernel "
+                "from 0 up, with none left out. Use "
+                f"{letter}.{axis} first"
+            )
+    return None
+
+
+def _has_numeric_length(kernel: Any, iname: str) -> bool:
+    """Does ``iname`` run a number of times known when the code is generated?
+
+    Asked as loopy asks it before it unrolls or vectorizes a loop
+    (``generate_unroll_loop`` and ``generate_vectorize_loop`` in
+    ``loopy.codegen.loop``): of the loop's bounds with every size and every
+    other loop projected out, which isl cannot bound when a size is free
+    (``unbounded optimum``, raised from inside code generation, naming no
+    loop). A triangle ``j < i + 1`` inside ``i < 8`` has one: at most 8.
+    """
+    from loopy.diagnostic import StaticValueFindingError
+    from loopy.isl_helpers import static_max_of_pw_aff
+
+    entry = kernel.default_entrypoint
+    try:
+        size = entry.get_iname_bounds(iname, constants_only=True).size
+        static_max_of_pw_aff(size, constants_only=True)
+    except (isl.Error, StaticValueFindingError):
+        return False
+    return True
+
+
+def _extent_text(kernel: Any, iname: str) -> str:
+    """The extent of ``iname`` in words, as its bounds give it."""
+    from loopy.symbolic import pw_aff_to_expr
+
+    size = kernel.default_entrypoint.get_iname_bounds(iname).size
+    try:
+        return f"at most {pw_aff_to_expr(size)}"
+    except Exception:  # noqa: BLE001 - a piecewise extent is shown as isl has it
+        return f"at most {size}"
+
+
+def _unroll_reason(draft: _Draft) -> str | None:
+    """An unrolled or vectorized loop without a numeric length, or ``None``.
+
+    loopy writes out the body of a loop tagged ``unr`` or ``ilp`` once per
+    iteration, and vectorizes a loop tagged ``vec`` into vectors of a fixed
+    length, or unrolls it where it cannot; each needs the number of
+    iterations as a number when the code is generated (see
+    :func:`_has_numeric_length`). A loop over ``Fin[n]`` with ``n`` free has
+    none, on any target and whether it is a statement's loop or a reduction's.
+    Split by a fixed factor, the inner half has one, and builds.
+    """
+    if draft.kernel is None:
+        return None
+    from loopy.kernel.data import UnrolledIlpTag, UnrollTag, VectorizeTag
+
+    for name, found in _kernel_tags(draft).items():
+        unrolled = [
+            tag
+            for tag in found
+            if isinstance(tag, UnrollTag | UnrolledIlpTag | VectorizeTag)
+        ]
+        if not unrolled or _has_numeric_length(draft.kernel, name):
+            continue
+        shown = _shown_tag(draft, name, unrolled[0])
+        how = (
+            "vectorizes a loop tagged vec into vectors of a length fixed when "
+            "the code is generated, or unrolls it where it cannot"
+            if isinstance(unrolled[0], VectorizeTag)
+            else f"unrolls a loop tagged {shown}, writing its body out once per "
+            "iteration"
+        )
+        extent = (
+            "read out of an array (a ragged fiber)"
+            if name in draft.data_dependent
+            else _extent_text(draft.kernel, name)
+        )
+        return (
+            f"the loop {name} is tagged {shown}, and loopy {how}, so the number "
+            f"of its iterations has to be a number when the code is generated; "
+            f"the extent of {name} is {extent}, which no number bounds while "
+            "the sizes it names are free. Split it by a fixed factor and tag "
+            f"the inner loop instead, as split({name!r}, 4) makes one of "
+            "length 4, or declare the extent as a number (Fin[8] rather than "
+            "Fin[n])"
+        )
+    return None
+
+
+def _vector_reason(draft: _Draft) -> str | None:
+    """A temporary a vectorized loop cannot hold as a vector, or ``None``.
+
+    loopy keeps a temporary written inside a ``vec`` loop as a vector along
+    it. Two temporaries cannot be one, and code generation fails on them (a
+    ``TypeError`` from inside loopy, in 2025.2), on every target:
+
+    * the length of a ragged row read inside the loop, which bounds the loop
+      over the row's fiber, and a loop bound is one number;
+    * the partial sums of a reduction on a local axis inside the loop, which
+      loopy keeps in an array in local memory.
+
+    Both were measured on loops over ``Fin[8]``; over ``Fin[n]`` the loop has
+    no length to vectorize by, which :func:`_unroll_reason` says first. A
+    sequential sum in a ``vec`` loop builds on OpenCL; on C it is
+    :func:`_target_reason`'s.
+    """
+    if draft.kernel is None:
+        return None
+    from loopy.kernel.data import LocalInameTagBase, VectorizeTag
+
+    entry = draft.kernel.default_entrypoint
+    tags = _kernel_tags(draft)
+    vectorized = {
+        name
+        for name, found in tags.items()
+        if any(isinstance(tag, VectorizeTag) for tag in found)
+    }
+    bounds = {
+        name
+        for domain in entry.domains
+        for name in domain.get_var_names(isl.dim_type.param)
+    } & set(entry.temporary_variables)
+    for insn in entry.instructions:
+        loops = sorted(vectorized & set(insn.within_inames))
+        if not loops:
+            continue
+        if set(insn.assignee_var_names()) & bounds:
+            return (
+                f"the length of a ragged row is read inside the loop {loops[0]}, "
+                "which is tagged vec, and loopy cannot generate code for it: it "
+                "keeps a temporary written inside a vec loop as a vector along "
+                "it, and the row's length bounds the loop over its fiber, "
+                f"which needs one number. Leave {loops[0]} sequential, or "
+                "unroll it (unr) instead"
+            )
+        local = sorted(
+            name
+            for name in insn.reduction_inames()
+            if any(isinstance(tag, LocalInameTagBase) for tag in tags.get(name, ()))
+        )
+        if local:
+            what = _instruction_text(draft, insn.id)
+            return (
+                f"the sum over {', '.join(local)} in {what} runs on a local "
+                f"axis inside the loop {loops[0]}, which is tagged vec, and "
+                "loopy cannot generate code for it: it keeps the partial sums "
+                "of a reduction on a local axis in an array in local memory, "
+                "and a temporary written inside a vec loop as a vector along "
+                f"it. Leave {loops[0]} sequential, or unroll it (unr) instead"
+            )
+    return None
+
+
+#: The targets whose code runs in one thread, with no hardware axes.
+_C_TARGETS = ("c", "c-source")
+
+
+def _target_reason(draft: _Draft) -> str | None:
+    """What the target cannot do at all, or ``None``.
+
+    The C targets have no hardware axes: loopy's C code runs in one thread,
+    and code generation for a loop on ``g.*`` or ``l.*`` stops with "plain C
+    does not have group hw axes" (or local). Nor do they have vector types:
+    loopy keeps a temporary written inside a ``vec`` loop, the accumulator of
+    a sum in the loop, as a vector along it, and its C code generator does not
+    know how to declare one. A ``vec`` loop that writes no temporary is only
+    unrolled, and builds. (The one other temporary, the length of a ragged
+    row, cannot be a vector on any target; :func:`_vector_reason` says so.)
+
+    Asked last (see :func:`_unbuildable_reason`): it is the one limit that
+    retargeting to OpenCL removes.
+    """
+    if draft.target not in _C_TARGETS or draft.kernel is None:
+        return None
+    from loopy.kernel.data import VectorizeTag
+
+    tags = _kernel_tags(draft)
+    hardware = [
+        (name, tag)
+        for name, found in tags.items()
+        for tag in found
+        if _hardware_axis(tag)
+    ]
+    if hardware:
+        order = {name: k for k, name in enumerate(draft.order)}
+        hardware.sort(key=lambda pair: (order.get(pair[0], len(order)), pair[0]))
+        shown = ", ".join(
+            f"{name}={_shown_tag(draft, name, tag)!r}" for name, tag in hardware
+        )
+        return (
+            f"the tag {shown} puts a loop on a hardware axis, and the C target "
+            "has none: loopy's C code runs in one thread, with no groups or "
+            "work items to spread a loop over. Retarget to opencl, or leave the "
+            "loop sequential"
+        )
+    vectorized = {
+        name
+        for name, found in tags.items()
+        if any(isinstance(tag, VectorizeTag) for tag in found)
+    }
+    for insn in draft.kernel.default_entrypoint.instructions:
+        loops = sorted(vectorized & set(insn.within_inames))
+        if not loops or not insn.reduction_inames():
+            continue
+        what = _instruction_text(draft, insn.id)
+        return (
+            f"the loop {loops[0]} is tagged vec, and loopy keeps a temporary "
+            f"written inside it, the accumulator of the sum in {what}, as a "
+            "vector along it; the C target has no vector types to declare it "
+            f"with. Leave {loops[0]} sequential, unroll it (unr), or retarget "
+            "to opencl"
+        )
+    return None
+
+
 # }}}
 
 
@@ -1169,6 +1735,9 @@ class _Draft:
     #: Reduction key -> the key of the reduction it is nested in, for every
     #: reduction that is nested in another; see :func:`_unbuildable_reason`.
     nested_in: dict[str, str] = field(default_factory=dict)
+    #: The target the schedule is written for; what it cannot do at all is
+    #: asked last (see :func:`_target_reason`).
+    target: str = "c"
 
 
 def _transformed(kernel: Any, transform: Any, *args: Any, **kwargs: Any) -> Any:
@@ -1302,6 +1871,7 @@ class Schedule:
             reassoc=set(self._reassoc),
             data_dependent=set(self._data_dependent),
             nested_in=dict(self._nested_in),
+            target=self._target,
         )
 
     @property

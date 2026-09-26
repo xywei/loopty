@@ -1125,7 +1125,37 @@ def _forget_params(domain: isl.Set, params: Sequence[str]) -> isl.Set:
     return domain
 
 
-def _depth_cuts(term: Term) -> dict[str, frozenset[int]]:
+def _shared_loops(stmt: Stmt, other: Stmt) -> int:
+    """How many loops, outermost first, two statements have in common."""
+    shared = 0
+    for mine, theirs in zip(stmt.inames, other.inames, strict=False):
+        if mine != theirs:
+            break
+        shared += 1
+    return shared
+
+
+def _ragged_rows(
+    stmt: Stmt, ragged_bounds: Mapping[str, tuple[str, str]]
+) -> dict[str, int]:
+    """The ragged row lengths bounding ``stmt``, each with its row's position.
+
+    A row length is assigned inside its row loop, so the statement's domain
+    has to be cut after that loop: see :func:`_statement_domains`. Only the
+    lengths whose row is one of the statement's loops are listed.
+    """
+    inames = tuple(stmt.inames)
+    params = set(_domain_params(_domain_over(stmt.domain, inames)))
+    return {
+        param: inames.index(row)
+        for param, (_counts, row) in ragged_bounds.items()
+        if param in params and row in inames
+    }
+
+
+def _depth_cuts(
+    term: Term, ragged_bounds: Mapping[str, tuple[str, str]] | None = None
+) -> dict[str, frozenset[int]]:
     """Where each statement's domain is cut so that every loop is defined once.
 
     loopy defines an iname in exactly one domain, and a statement's domain is
@@ -1139,6 +1169,16 @@ def _depth_cuts(term: Term) -> dict[str, frozenset[int]]:
     ``{ [r] }`` and ``[r] -> { [j] }``, the first merges with the other
     statement's domain, and the nest is the one the source wrote.
 
+    A statement bounded by a ragged row length is cut after the row loop as
+    well, because the length is assigned inside it (``ragged_bounds``, see
+    :func:`_statement_domains`). Every cut is then passed on to each statement
+    that has the loops up to it and more loops beyond: two statements that
+    share the loops ``r`` and ``i``, one of which goes on into a fiber of row
+    ``r``, have to be cut alike after ``r``, or the one cut there defines ``r``
+    in ``{ [r] }`` and ``i`` in ``[r] -> { [i] }`` while the other defines both
+    in ``{ [r, i] }``, and no two of those domains merge. Passing a cut on can
+    call for another, so it is repeated until nothing changes.
+
     A traced term gives every loop an iname of its own (a second ``for r`` is
     ``r_0``), so agreeing on a name is agreeing on a loop. A statement whose
     loops need no cut keeps its single domain, as every statement did before.
@@ -1148,13 +1188,25 @@ def _depth_cuts(term: Term) -> dict[str, frozenset[int]]:
         for other in term.stmts:
             if other is stmt:
                 continue
-            shared = 0
-            for mine, theirs in zip(stmt.inames, other.inames, strict=False):
-                if mine != theirs:
-                    break
-                shared += 1
+            shared = _shared_loops(stmt, other)
             if 0 < shared < len(stmt.inames):
                 cuts[stmt.id].add(shared - 1)
+        rows = _ragged_rows(stmt, ragged_bounds or {})
+        if rows and max(rows.values()) < len(stmt.inames) - 1:
+            cuts[stmt.id].add(max(rows.values()))
+    changed = True
+    while changed:
+        changed = False
+        for stmt in term.stmts:
+            for other in term.stmts:
+                if other is stmt:
+                    continue
+                shared = _shared_loops(stmt, other)
+                for cut in sorted(cuts[stmt.id]):
+                    if cut < shared and cut < len(other.inames) - 1:
+                        if cut not in cuts[other.id]:
+                            cuts[other.id].add(cut)
+                            changed = True
     return {key: frozenset(value) for key, value in cuts.items()}
 
 
@@ -1219,11 +1271,7 @@ def _statement_domains(
     full = _domain_over(stmt.domain, inames)
     params = set(_domain_params(full))
     present = [p for p in ragged_bounds if p in params]
-    rows = {
-        param: inames.index(ragged_bounds[param][1])
-        for param in present
-        if ragged_bounds[param][1] in inames
-    }
+    rows = _ragged_rows(stmt, ragged_bounds)
     positions = set(cuts)
     if rows:
         positions.add(max(rows.values()))
@@ -1255,6 +1303,13 @@ def _refuse_redefined_inames(domains: Sequence[isl.Set], term: Term) -> None:
     such as ``j`` inside ``r`` in one statement and on its own in another.
     loopy would refuse it with a bare ``RuntimeError`` about a generated
     domain; this names the loop and the two domains.
+
+    Which of the two it is is read off the term. Every statement that has the
+    loop has the same loops around it when the name is one loop, as it always
+    is in a traced term, and then the name is not the problem, and asking for a
+    rename would send the reader after one that does not exist: the refusal
+    says instead that the lowering could not give the loop one domain, and
+    which statements share it.
     """
     defined: dict[str, isl.Set] = {}
     for domain in domains:
@@ -1262,6 +1317,24 @@ def _refuse_redefined_inames(domains: Sequence[isl.Set], term: Term) -> None:
             earlier = defined.setdefault(iname, domain)
             if earlier is domain:
                 continue
+            nests = {
+                tuple(stmt.inames[: list(stmt.inames).index(iname) + 1])
+                for stmt in term.stmts
+                if iname in stmt.inames
+            }
+            if len(nests) == 1:
+                users = ", ".join(
+                    stmt.id for stmt in term.stmts if iname in stmt.inames
+                )
+                raise LoweringError(
+                    f"{term.name} could not be lowered: the loop {iname}, which "
+                    f"{users} share, came out of the lowering in two domains, "
+                    f"{earlier} and {domain}, and loopy defines each loop in "
+                    "one. This is a limit of loopty's lowering, which could not "
+                    "cut the statements' domains alike, and not of the kernel; "
+                    "moving the statements that differ into loops of their "
+                    "own avoids it."
+                )
             raise LoweringError(
                 f"{term.name} uses the loop variable {iname} for two different "
                 f"loops, whose domains {earlier} and {domain} cannot be one "
@@ -1476,7 +1549,7 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
     #: domain is widened by :func:`_merge_domains` can get it back as a
     #: predicate; see :func:`_restore_narrower_domains`.
     own_domains: dict[str, list[isl.Set]] = {}
-    cuts = _depth_cuts(term)
+    cuts = _depth_cuts(term, ragged_bounds)
 
     for stmt in term.stmts:
         if not isinstance(stmt, Stmt):  # pragma: no cover - defensive

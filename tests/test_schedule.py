@@ -123,7 +123,43 @@ def test_running_a_loop_that_carries_a_dependence_in_parallel_is_rejected() -> N
 def test_a_parallel_tag_is_what_makes_an_iname_unordered() -> None:
     assert parallel_tag("g.0")
     assert parallel_tag("l.1")
+    assert parallel_tag("ilp")
+    assert parallel_tag("vec")
     assert not parallel_tag("unr")
+
+
+def carried_across_statements(
+    y: Arr[Fin[9], Real],
+    z: Arr[Fin[8], Real],
+):
+    """``S0`` of iteration ``i + 1`` reads what ``S1`` of iteration ``i`` wrote."""
+    for i in z.dom:
+        z[i] = y[i]
+        y[i + 1] = z[i] + 1.0
+
+
+def test_a_vectorized_loop_that_carries_a_dependence_is_rejected() -> None:
+    # loopy runs a vec loop around each instruction separately, as it runs an
+    # ilp loop, so S0 runs for every i before S1 runs for any. vec kept its
+    # place in the order, the cast was decided, and the compiled y and z
+    # disagreed with the body's (#57).
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(
+        carried_across_statements, evaluate_annotations(carried_across_statements)
+    )
+    for tag in ("vec", "ilp"):
+        with pytest.raises(IllegalCast) as caught:
+            Schedule(term).tag(i=tag)
+        message = str(caught.value)
+        assert message.startswith(f"tag(i='{tag}') illegal: instance S1[i=")
+        assert "read by S0[i=" in message
+    unrolled = Schedule(term).tag(i="unr")
+    y = np.zeros(9)
+    out = run(unrolled, y=y, z=np.zeros(8))
+    assert np.array_equal(out["y"], np.arange(9.0))
 
 
 def gated_by_the_next(
@@ -289,7 +325,10 @@ def test_a_row_that_stores_its_own_start_first_can_still_run_in_parallel() -> No
         evaluate_annotations(offsets_stored_then_row_sums),
     )
     tagged = Schedule(term, sizes={"n": 4}).tag(r="l.0")
-    assert [fact.status.value for fact in tagged.facts()] == ["decided"] * 2
+    casts = [fact for fact in tagged.facts() if fact.kind != "buildable"]
+    assert [fact.status.value for fact in casts] == ["decided"] * 2
+    # Legal, and not for the C target, which has no hardware axes (#47).
+    assert "the C target has none" in tagged.buildable[1]
 
 
 def scan_then_row_sums(
@@ -368,7 +407,13 @@ def test_split_then_tag_is_accepted_when_nothing_depends_on_the_order() -> None:
     assert split.order == ("i_out", "i_in", "j")
     tagged = split.tag(i_out="g.0")
     assert tagged.tags == {"i_out": "g.0"}
-    assert [fact.status.value for fact in tagged.facts()] == ["decided"] * 4
+    casts = [fact for fact in tagged.facts() if fact.kind != "buildable"]
+    assert [fact.status.value for fact in casts] == ["decided"] * 4
+    # The casts are about meaning; the target is another question, and on C,
+    # which has no hardware axes, the answer is no (#47).
+    (buildable,) = [fact for fact in tagged.facts() if fact.kind == "buildable"]
+    assert buildable.status.value == "refuted"
+    assert "the C target has none" in buildable.provenance["reason"]
 
     a = np.arange(8, dtype=np.float64).reshape(2, 4)
     b = np.zeros((4, 2))
@@ -496,26 +541,7 @@ def test_two_schedules_of_one_kernel_keep_their_facts_apart() -> None:
     assert len(ledger) == 8
 
 
-def plain_opencl(monkeypatch) -> None:
-    """Lower for loopy's plain OpenCL target, which needs no pyopencl.
-
-    Code generation is all that is asked of it, as in
-    ``tests/test_lower_traced.py``.
-    """
-    import loopy as lp
-
-    from loopty import lower
-
-    plain = lower.target_for
-    monkeypatch.setattr(
-        lower,
-        "target_for",
-        lambda target="c": lp.OpenCLTarget() if target == "opencl" else plain(target),
-    )
-
-
-def test_the_target_is_part_of_the_key(monkeypatch) -> None:
-    plain_opencl(monkeypatch)
+def test_the_target_is_part_of_the_key(plain_opencl) -> None:
     term = ht.transpose_term()
     assert Schedule(term).key == "transpose[c]"
     on_c = Schedule(term).split("i", 4)
@@ -1329,8 +1355,10 @@ def test_a_reduction_split_across_parallel_and_sequential_inames_is_reported():
     assert "in parallel" in reason and "in sequence" in reason
 
 
-def test_a_schedule_the_target_can_build_says_so_and_carries_no_extra_fact():
-    schedule = Schedule(ht.spmv_term()).tag(r="g.0")
+def test_a_schedule_the_target_can_build_says_so_and_carries_no_extra_fact(
+    plain_opencl,
+):
+    schedule = Schedule(ht.spmv_term(), target="opencl").tag(r="g.0")
     assert schedule.buildable == (True, "")
     assert not [f for f in schedule.facts() if f.kind == "buildable"]
     schedule.require_buildable()

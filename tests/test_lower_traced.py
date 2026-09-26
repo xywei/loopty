@@ -932,6 +932,94 @@ def test_a_loop_that_reads_an_earlier_nest_stays_out_of_its_inner_loop() -> None
     assert np.allclose(out["z"], [14.0, 11.0, 23.0])
 
 
+@kernel
+def fiber_then_other_in_a_loop_of_the_row(
+    x: Arr[Fin[m], Real],  # noqa: F821
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+):
+    """A ragged fiber in a dense loop of its row, beside a statement of that loop."""
+    for r in y.dom:
+        for i in x.dom:
+            for j in val.dom[r]:
+                y[r] = y[r] + x[i] * val[r, j]
+            z[r, i] = 1.0
+
+
+def fiber_arguments() -> dict:
+    counts = [2, 0, 3]
+    return {
+        "x": np.array([1.0, 10.0]),
+        "cnt": np.array(counts),
+        "val": Arr.ragged(counts, values=[1.0, 2.0, 3.0, 4.0, 5.0]),
+        "y": np.zeros(3),
+        "z": np.zeros((3, 2)),
+    }
+
+
+def test_a_fiber_beside_a_statement_in_a_loop_of_its_row_lowers_and_runs() -> None:
+    # The statement inside the fiber was cut after its row, where the row's
+    # length is assigned, and the one beside the fiber was not, so ``r`` came
+    # out in ``{ [r] }`` and in ``{ [r, i] }``, and lowering refused the kernel
+    # for using ``r`` for two loops, which it does not (#53).
+    from loopty.executor import LoopyExecutor
+    from loopty.schedule import Schedule
+
+    fn = fiber_then_other_in_a_loop_of_the_row
+    want = native(fn, **fiber_arguments())
+    out = run(fn.trace(), **fiber_arguments())
+    assert np.allclose(out["y"], [33.0, 0.0, 132.0])
+    assert np.array_equal(out["z"], np.ones((3, 2)))
+    assert np.allclose(out["y"], want["y"])
+
+    arrays = {
+        name: value if isinstance(value, Arr) else Arr.from_numpy(value)
+        for name, value in fiber_arguments().items()
+    }
+    fact = LoopyExecutor().differential(fn, Schedule(fn), arrays)
+    assert fact.status.value == "tested", fact.provenance
+
+
+def test_every_statement_sharing_a_cut_loop_is_cut_alike() -> None:
+    from loopty.lower import lower_generic
+
+    domains = lower_generic(
+        fiber_then_other_in_a_loop_of_the_row.trace(), "c"
+    ).kernel.default_entrypoint.domains
+    shapes = {
+        tuple(domain.get_var_names(isl.dim_type.set)): set(
+            domain.get_var_names(isl.dim_type.param)
+        )
+        for domain in domains
+    }
+    assert set(shapes) == {("r",), ("i",), ("j",)}
+    assert "r" in shapes[("i",)]
+    assert {"r", "i"} <= shapes[("j",)]
+
+
+def test_a_loop_the_lowering_cannot_define_once_is_not_blamed_on_its_name(
+    monkeypatch,
+) -> None:
+    # Were a nest ever cut unalike again, the refusal says so, rather than
+    # asking for a rename that does not exist: every statement that has ``r``
+    # has the same loops around it, so ``r`` is one loop.
+    from loopty import lower
+
+    monkeypatch.setattr(
+        lower,
+        "_depth_cuts",
+        lambda term, bounds=None: {stmt.id: frozenset() for stmt in term.stmts},
+    )
+    with pytest.raises(lower.LoweringError) as caught:
+        lower.lower_generic(fiber_then_other_in_a_loop_of_the_row.trace(), "c")
+    message = str(caught.value)
+    assert "the loop r, which S0, S1 share, came out of the lowering in two" in message
+    assert "a limit of loopty's lowering" in message
+    assert "name of its own" not in message
+
+
 def test_one_name_for_two_different_loops_is_refused_by_name() -> None:
     # A term built by hand can use ``j`` inside ``r`` in one statement and on
     # its own in another, which no cut can make one loop. loopy refused it with
@@ -1019,22 +1107,14 @@ def test_a_ragged_fiber_nested_in_another_sum_is_still_one() -> None:
     assert "ragged fiber" in reason
 
 
-def test_the_nested_axis_loopty_refuses_is_one_loopy_cannot_build(monkeypatch):
+def test_the_nested_axis_loopty_refuses_is_one_loopy_cannot_build(plain_opencl):
     # Measured, not guessed: loopy's plain OpenCL target stands in for the
-    # pyopencl one, which cannot be built without pyopencl, and code generation
-    # is all that is asked of it.
+    # pyopencl one (see the fixture in conftest.py).
     import warnings
 
-    lp = pytest.importorskip("loopy")
-    from loopty import lower
     from loopty.schedule import Schedule
 
-    plain = lower.target_for
-    monkeypatch.setattr(
-        lower,
-        "target_for",
-        lambda target="c": lp.OpenCLTarget() if target == "opencl" else plain(target),
-    )
+    lp = plain_opencl
     outer = Schedule(lower_total8, target="opencl").tag(i="l.0")
     assert outer.buildable == (True, "")
     with warnings.catch_warnings():
@@ -1083,25 +1163,6 @@ def rows_of_eight(a: Arr[Fin[n], Fin[8], Real], y: Arr[Fin[n], Real]):  # noqa: 
     """Rows of a fixed length, and any number of them."""
     for i in y.dom:
         y[i] = reduce_sum(a[i, j] for j in a.dom[i])
-
-
-@pytest.fixture
-def plain_opencl(monkeypatch):
-    """loopy's plain OpenCL target, as the nested-axis test above uses it.
-
-    It stands in for the pyopencl one, which cannot be built without
-    pyopencl, and code generation is all that is asked of it.
-    """
-    lp = pytest.importorskip("loopy")
-    from loopty import lower
-
-    plain = lower.target_for
-    monkeypatch.setattr(
-        lower,
-        "target_for",
-        lambda target="c": lp.OpenCLTarget() if target == "opencl" else plain(target),
-    )
-    return lp
 
 
 def generated(lp, schedule) -> str:

@@ -56,7 +56,8 @@ is legal and **not buildable**, and the demo prints both halves of that. Every
 cast is `decided`: nothing is reordered that carries a dependence. Code
 generation is refused, on a device as much as on C, because loopy will not put a
 hardware axis inside a loop whose bound comes from an array, and a CSR row is
-exactly such a loop. That refusal is a `refuted` fact of kind `buildable`
+exactly such a loop. (C has no hardware axes at all, and says so for the rows
+alone; the reason printed is the limit a device has too.) That refusal is a `refuted` fact of kind `buildable`
 decided by `loopy-target`, carried beside the decided casts; `docs/device-runs.md`
 has the measurement it comes from and `docs/loopy-notes.md` the details.
 

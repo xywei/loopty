@@ -159,6 +159,51 @@ def test_a_native_refusal_is_a_refuted_agreement_rather_than_raised() -> None:
     assert np.array_equal(arrays["y"].numpy(), np.zeros(4))
 
 
+def test_a_kernel_run_on_opencl_records_opencl(plain_opencl, monkeypatch) -> None:
+    # A kernel given in place of a schedule is run on the executor's target,
+    # and the fact read its target off the object, which has none, and said
+    # "c" (#56). CI has no device, so the device run is the native one.
+    def device_run(self, obj, /, *args, **kwargs):
+        copies = {
+            name: Arr.from_numpy(value.numpy().copy())
+            if isinstance(value, Arr)
+            else value
+            for name, value in kwargs.items()
+        }
+        doubled(**copies)
+        return {"y": copies["y"].numpy()}
+
+    monkeypatch.setattr(LoopyExecutor, "run", device_run)
+    arrays = {"x": Arr.from_numpy(np.arange(4.0)), "y": Arr.zeros(4)}
+    fact = LoopyExecutor(target="opencl").differential(doubled, doubled, arrays)
+    assert fact.status.value == "tested"
+    assert fact.provenance["target"] == "opencl"
+    assert fact.id == "agreement:doubled[opencl]"
+
+
+@pytest.mark.filterwarnings("ignore:Bitwise inversion:DeprecationWarning")
+def test_a_refused_kernel_run_on_opencl_records_opencl(plain_opencl) -> None:
+    # The same for the refusal a native TraceError makes: no run is made, and
+    # the fact names the target the run would have been made on.
+    arrays = {"x": Arr.from_numpy(np.arange(4.0)), "y": Arr.zeros(4)}
+    fact = LoopyExecutor(target="opencl").differential(flipped, flipped, arrays)
+    assert fact.status.value == "refuted"
+    assert fact.provenance["target"] == "opencl"
+    assert fact.id == "agreement:flipped[opencl]"
+
+
+def test_the_agreement_of_a_run_names_the_target_it_is_given() -> None:
+    term = ht.axpy_term()
+    z = np.arange(3.0)
+    assert agreement(term, term, {"z": z}, {"z": z}).provenance["target"] == "c"
+    on_device = agreement(term, term, {"z": z}, {"z": z}, target="opencl")
+    assert on_device.provenance["target"] == "opencl"
+    assert on_device.id == f"agreement:{term.name}[opencl]"
+    # A schedule's own target is the default, as it always was.
+    schedule = Schedule(term)
+    assert agreement(term, schedule, {"z": z}, {"z": z}).provenance["target"] == "c"
+
+
 def test_an_agreement_fact_is_named_after_the_schedule_that_ran() -> None:
     arrays = {
         "a": 2.0,
