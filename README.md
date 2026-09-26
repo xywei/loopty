@@ -191,6 +191,11 @@ end to end; the edges are sharp.
   offsets it is flattened through, when the kernel declares them, are accesses
   like any other: in-bounds obligations, and dependences every cast is checked
   against.
+- One meaning for a kernel that writes its own layout. The native run and the
+  term interpreter read a ragged array through the counts and offsets the
+  kernel declares, as the kernel has left them, which is what the lowered code
+  does with the arguments it is handed; the contract checks that they are the
+  array's own layout when the run starts.
 - `IslOracle`: `Empty`, `Subset`, `Bijective`, `Monotone`, each refutation with a
   witness.
 - `Schedule`: `tag`, `split`, `interchange`, `prioritize`, `tile`, `skew`,
@@ -263,6 +268,12 @@ end to end; the edges are sharp.
   is.
 - An index expression isl cannot express widens the footprint to the whole
   array. That is sound, but it can reject a legal schedule.
+- The in-bounds fact of a ragged access `val[r, j]` is decided against the
+  row's length, and assumes the offsets lay every row out inside the flat
+  buffer, which the contract checks when a run starts. A kernel that writes
+  its counts or its offsets can break that during the run; the native run
+  checks every cell it reads through them and raises `IndexError`, and the
+  ledger does not see it.
 - `Schedule.affine` and maps whose image has holes. The diamond
   `(t, i) -> (t + i, t - i)` reaches only the points of equal parity, and
   loopy's own `map_domain` refuses it, so loopty rewrites the kernel over the

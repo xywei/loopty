@@ -793,6 +793,20 @@ with a pair of statement instances.
 - A skewed loop keeps its tag in the kernel. The skew went through
   `lp.map_domain` and back, which dropped it: a loop the schedule checked as
   a local axis ran one iteration at a time.
+- A kernel that writes its counts or its offsets means one thing however it
+  runs. The native run and the term interpreter read a ragged array through
+  the counts and offsets the kernel declares, as the kernel has left them
+  (`Arr.through`, `loopty.term.declared_layout`), which is what the lowered
+  kernel does with the arguments it is handed. They followed the array's own
+  offsets instead: row sums followed by `off[r + 1] = ends[r]` computed
+  `[3, 3, 15]` natively and `[3, 2, 9]` compiled, and only the differential
+  run noticed. Every read through the declared layout is checked against the
+  flat buffer, since rewritten offsets can point anywhere. The contract checks
+  a declared offsets argument against the ragged argument on the native path
+  too, as it did on the compiled one, so the two layouts agree when a run
+  starts, and the faithfulness fact's samples pass the drawn array's offsets
+  for such a parameter, where they drew them at random and would now be
+  refused.
 
 ### Changed
 

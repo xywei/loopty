@@ -28,6 +28,10 @@ does. Its reading of the term is literal:
 * A reduction adds its terms in the order the native ``reduce_sum`` does:
   lexicographically over its binders, the order of a generator's nested
   ``for`` clauses, with Python's :func:`sum`, starting from ``0``.
+* A ragged array is read and written through the counts and offsets the
+  kernel declares, as the statements before have left them
+  (:meth:`loopty.arr.Arr.through`), which is how the native run and the
+  lowered kernel index it too.
 
 What the interpreter does not do is guess. A construct it has no numpy meaning
 for, a domain it cannot enumerate at the given sizes, or a loop bound that reads
@@ -49,7 +53,7 @@ from lanky.terms import Abs, render
 
 from loopty.arr import Arr
 from loopty.contract import integral_sort, resolve_sizes
-from loopty.term import Access, ArrType, Reduction, Term
+from loopty.term import Access, ArrType, Reduction, Term, declared_layout
 from loopty.trace import accesses_in
 
 __all__ = ["InterpretError", "TooLarge", "interpret"]
@@ -169,6 +173,13 @@ class _Run:
                 self.arrays[name] = _storage(value, typ, name in written)
             else:
                 self.scalars[name] = value
+        for name, (counts, offsets) in declared_layout(term.params).items():
+            array = self.arrays[name]
+            if array.is_ragged:
+                self.arrays[name] = array.through(
+                    self.arrays.get(counts) if counts else None,
+                    self.arrays.get(offsets) if offsets else None,
+                )
         self.sizes = resolve_sizes(dict(term.params), arguments)
         self.reflected = dict(term.reflected)
         for parameter, expr in term.reflected:
