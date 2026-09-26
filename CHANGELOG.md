@@ -602,9 +602,10 @@ with a pair of statement instances.
   `False`), each with the reason, and the in-bounds, disjointness and ordering
   facts stated over such a domain carry the list under `unnarrowed` in their
   provenance: proved, they hold for the instances that write too; refuted, the
-  witness may be an instance the guard masks. A reduction condition that compares with a `Real` scalar is refused,
-  as a condition its domain cannot state already was. `with when(i < a):` with
-  `a: Nat` narrows the domain as before.
+  witness may be an instance the guard masks. A reduction condition that
+  compares with a `Real` scalar is refused, as a condition its domain cannot
+  state already was. `with when(i < a):` with `a: Nat` narrows the domain as
+  before.
 - A `when` guard whose value is an integer rather than a truth value is
   refused with a `TraceError` that names the fix, on a native run as well as
   under tracing. `~` on a Python bool is bitwise (`~True` is `-2`, `~False` is
