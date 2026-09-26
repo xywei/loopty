@@ -549,6 +549,16 @@ def statement_accesses(stmt: Stmt, term: Term) -> tuple[_Access, ...]:
     possible for four collectors to disagree about what a statement reads, and
     the offsets read was, for a while, known to the lowering alone.
     """
+    return tuple(_with_offsets_reads(source_accesses(stmt, term), term))
+
+
+def source_accesses(stmt: Stmt, term: Term) -> tuple[_Access, ...]:
+    """The accesses of :func:`statement_accesses` that the source spells.
+
+    Everything but the reads of the offsets a ragged access is flattened
+    through, which the layout adds (see :func:`offsets_reads`). Rules ask
+    :func:`statement_accesses`; this is for saying where an access came from.
+    """
     from lanky.terms import structurally_equal
 
     from loopty.trace import accesses_in, reductions_in
@@ -587,7 +597,33 @@ def statement_accesses(stmt: Stmt, term: Term) -> tuple[_Access, ...]:
                 out.append(
                     (access.array, access.indices, "read", inames, reduction.domain)
                 )
-    return tuple(_with_offsets_reads(out, term))
+    return tuple(out)
+
+
+def offsets_reads(
+    stmt: Stmt, term: Term
+) -> tuple[tuple[_Access, _Access, str, Any], ...]:
+    """Each read of the offsets that a ragged access of ``stmt`` makes, and why.
+
+    One entry ``(access, read, end, row)`` per read :func:`_offsets_reads`
+    lists: the ragged access as the source spells it, the read of the offsets
+    as :func:`statement_accesses` lists it, ``"start"`` for ``off[r]`` or
+    ``"end"`` for ``off[r + 1]``, and the row ``r`` whose ends those are, the
+    row that ``val[r, j]`` is flattened through. The source never writes those
+    reads, so an obligation about one is stated with the access it serves; see
+    :func:`loopty.typing.in_bounds_facts`.
+    """
+    out: list[tuple[_Access, _Access, str, Any]] = []
+    for access in source_accesses(stmt, term):
+        array, indices, _kind, inames, domain = access
+        reads = _offsets_reads(term, array, indices, inames, domain)
+        if not reads:
+            continue
+        start, end = reads
+        row = start[1][0]
+        out.append((access, start, "start", row))
+        out.append((access, end, "end", row))
+    return tuple(out)
 
 
 def _offsets_reads(
