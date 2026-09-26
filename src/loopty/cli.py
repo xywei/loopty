@@ -46,6 +46,17 @@ keeps the target it was written for and an unscheduled kernel gets ``"c"``.
 A schedule the checker accepts but the target cannot generate code for is
 reported before anything is compiled, from the ``buildable`` fact the schedule
 carries; see :mod:`loopty.schedule`.
+
+What a refutation prints
+------------------------
+
+The ledger is printed after the runs, and every ``REFUTED`` fact in it is then
+repeated under the table the way ``lanky check`` repeats it, with lanky's own
+:func:`lanky.cli.refutation_lines` underneath: the counterexample when there is
+one, the fact's ``reason`` (the limit a ``buildable`` fact hits, or the outputs
+a compiled run disagreed on), or a line saying nothing was recorded. The
+command then exits 1, as it does when a kernel cannot be scheduled, a schedule
+cannot be retargeted, or a run raises.
 """
 
 from __future__ import annotations
@@ -233,6 +244,7 @@ class RunVerb:
     def run(self, args: Any, /) -> int:
         """Run the verb; returns the process exit code."""
         from lanky.check import import_path
+        from lanky.cli import refutation_lines
         from lanky.ledger import Ledger, Status
         from lanky.plugins import registry
 
@@ -301,7 +313,17 @@ class RunVerb:
                     print(f"  ran {name} on the {schedule.target} target")
                     continue
                 fact = executor.differential(native, schedule, inputs)
-            except (IllegalCast, RuntimeError, ValueError, TypeError) as exc:
+            except (
+                IllegalCast,
+                RuntimeError,
+                ValueError,
+                TypeError,
+                # What a body raises on the inputs it was given, a cell that is
+                # not there or a division by zero, as ``loopty.faithful`` counts
+                # them: the file's to fix, and said as plainly as the rest.
+                IndexError,
+                ArithmeticError,
+            ) as exc:
                 print(f"  {type(exc).__name__}: {exc}")
                 failures += 1
                 continue
@@ -319,9 +341,16 @@ class RunVerb:
             print(ledger.render())
         if args.json_out:
             Path(args.json_out).write_text(ledger.to_json(), encoding="utf-8")
+        # The same block ``lanky check`` prints, through lanky's own printer:
+        # what explains each refutation belongs under its line, and not only
+        # in the JSON ledger.
         refuted = ledger.by_status(Status.REFUTED)
+        if refuted:
+            print()
         for fact in refuted:
-            print(f"REFUTED {fact.owner}: {fact.statement}")
+            print(f"REFUTED {fact.owner} at {fact.where}: {fact.statement}")
+            for line in refutation_lines(fact):
+                print(f"  {line}")
         return 1 if refuted or failures else 0
 
     # lanky's Verb protocol calls ``run``; ``loopty run`` used to call the verb

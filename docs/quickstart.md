@@ -104,10 +104,13 @@ and the entries on lanes reorders nothing that carries a dependence. What it
 cannot survive is code generation, on a device as much as on C, because loopy
 will not put a hardware axis inside a loop whose bound comes from an array, and
 a CSR row is exactly such a loop. The schedule says so itself, as a `refuted`
-fact of kind `buildable` decided by `loopy-target` with the limit in words, and
-raises `UnbuildableSchedule` if anything asks it for code. `docs/device-runs.md`
-is where that was measured; `spmv.rows_parallel()`, one row per work group, is
-the schedule for this shape that does build and did run.
+fact of kind `buildable` decided by `loopy-target` with the limit in words as
+its reason, and raises `UnbuildableSchedule` if anything asks it for code. The
+demo builds it only when `main()` runs; a file that built it at the top level
+would make `loopty run` exit 1, with the limit printed again under the fact's
+`REFUTED` line, the way `lanky check` prints what refutes any fact.
+`docs/device-runs.md` is where that was measured; `spmv.rows_parallel()`, one
+row per work group, is the schedule for this shape that does build and did run.
 
 ### Check it
 
@@ -350,12 +353,13 @@ transpose at the bottom is split and interchanged, and both steps are cast facts
   re-check. The in-bounds fact for `u[t, i - 1]` turns `refuted`, `lanky check`
   prints `6 facts: 1 assumed, 4 decided, 1 refuted` and then
   `REFUTED jacobi at ...: u[t, i - 1] is in bounds for every instance of S0`
-  with the cell that escapes under it, `witness: (0, -1)`, and it exits 1. The
-  JSON has the witness too, and with its coordinates named,
-  `"witness_text": "[a0=0, a1=-1]"`, with the isl question beside it. The
-  faithfulness fact turns `assumed`: the body now reads in front of `u` on
-  every input, natively as well, so there was nothing to compare, and its
-  reason says so.
+  with the cell that escapes under it, first as isl's tuple,
+  `witness: (0, -1)`, then named, at the sizes isl read it off at:
+  `cells u[t, i - 1] reaches are cells u has, except [a0=0, a1=-1] at [nt=2, nx=2]`.
+  It exits 1. The JSON has the same cell as `witness_text`, with the isl
+  question beside it. The faithfulness fact turns `assumed`: the body now
+  reads in front of `u` on every input, natively as well, so there was nothing
+  to compare, and its reason says so.
 - Hide some state from the tracer. In the stencil, keep a count in a list of
   lists: `acc = [[0.0]]` before the loops, `acc[0][0] += 1.0` at the top of
   the inner loop, and divide by `acc[0][0]` instead of by 2. Tracing looks one

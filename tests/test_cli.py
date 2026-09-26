@@ -83,6 +83,15 @@ def write_fixture(tmp_path, body: str = FIXTURE):
     return path
 
 
+def refutation_block(out: str, prefix: str) -> tuple[list[str], int]:
+    """The lines of ``out``, and the index of the one ``REFUTED {prefix}...`` line."""
+    lines = out.splitlines()
+    (header,) = [
+        k for k, line in enumerate(lines) if line.startswith(f"REFUTED {prefix}")
+    ]
+    return lines, header
+
+
 def test_version_is_printed_without_a_verb(capsys) -> None:
     assert main(["--version"]) == 0
     assert "loopty" in capsys.readouterr().out
@@ -266,7 +275,8 @@ def test_check_refuses_a_loop_carried_name_and_prints_the_fix(
     The body used to trace to ``y[0] = 0.0 + x[i]`` and the ledger decided
     facts about that. Now tracing refuses it, the kernel's one fact is the
     refuted ``trace`` fact, and the message that names the fix is printed under
-    it rather than left in the JSON.
+    it rather than left in the JSON: the line right under ``REFUTED`` is the
+    error, with no counterexample line and no ``no witness recorded``.
     """
     from lanky.cli import main as lanky_main
 
@@ -275,8 +285,10 @@ def test_check_refuses_a_loop_carried_name_and_prints_the_fix(
     code = lanky_main(["check", str(path), "--json", str(out_path)])
     out = capsys.readouterr().out
     assert code == 1
-    assert "REFUTED running_sum" in out
-    assert "TraceError" in out
+    lines, header = refutation_block(out, "running_sum at ")
+    assert lines[header + 1].startswith("  TraceError: ")
+    assert "counterexample" not in out
+    assert "no witness recorded" not in out
     assert "carries 's'" in out
     assert "reduce_sum" in out
     assert "indexed cell" in out
@@ -284,6 +296,93 @@ def test_check_refuses_a_loop_carried_name_and_prints_the_fix(
     assert [(fact["kind"], fact["status"]) for fact in facts] == [
         ("trace", "refuted")
     ]
+    assert "counterexample" not in facts[0]["provenance"]
+    assert facts[0]["provenance"]["reason"].startswith("TraceError: ")
+
+
+OUT_OF_BOUNDS = '''
+"""A read one past the end, and a loop that writes one cell over and over."""
+
+from __future__ import annotations
+
+from lanky.prelude import Real
+
+from loopty import Arr, Fin, kernel
+
+
+@kernel
+def shift(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):
+    for i in u.dom:
+        v[i] = u[i + 1]
+
+
+@kernel
+def collide(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
+    for i in x.dom:
+        y[0] = x[i]
+'''
+
+
+def test_check_prints_the_witness_of_an_isl_refutation_under_its_line(
+    tmp_path, capsys
+) -> None:
+    """What isl refuted is explained under the ``REFUTED`` line, in words.
+
+    The isl oracle recorded the cell that escapes, and the two instances that
+    write one cell, as ``witness`` and ``witness_text``, which lanky does not
+    print, and no ``reason``, which it does. So both lines came out bare. Now
+    the reason names the question and the labelled witness.
+    """
+    from lanky.cli import main as lanky_main
+
+    path = write_fixture(tmp_path, OUT_OF_BOUNDS)
+    out_path = tmp_path / "ledger.json"
+    code = lanky_main(["check", str(path), "--json", str(out_path)])
+    out = capsys.readouterr().out
+    assert code == 1
+    lines, header = refutation_block(out, "shift at ")
+    assert lines[header].endswith("u[i + 1] is in bounds for every instance of S0")
+    facts = json.loads(out_path.read_text(encoding="utf-8"))
+    refuted = {fact["owner"]: fact for fact in facts if fact["status"] == "refuted"}
+    assert [f["owner"] for f in facts if f["status"] == "refuted"] == [
+        "shift",
+        "collide",
+    ]
+    escapes = refuted["shift"]
+    reason = escapes["provenance"]["reason"]
+    assert reason.startswith("cells u[i + 1] reaches are cells u has, except [a0=")
+    assert escapes["provenance"]["witness_text"] in reason
+    assert f"  {reason}" in lines[header + 1 : header + 3]
+
+    lines, header = refutation_block(out, "collide at ")
+    assert lines[header].endswith("distinct instances of S0 write distinct cells of y")
+    reason = refuted["collide"]["provenance"]["reason"]
+    assert " is one of the pairs of S0 instances writing the same cell" in reason
+    assert reason.startswith("[s=0, d0=")
+    assert f"  {reason}" in lines[header + 1 : header + 3]
+
+
+def test_run_reports_a_body_that_reads_past_the_end_instead_of_a_traceback(
+    tmp_path, capsys
+) -> None:
+    # The native run of ``shift`` raises IndexError on its example input. The
+    # command reported the errors it expected by name and stopped with a
+    # traceback on this one.
+    body = OUT_OF_BOUNDS + (
+        "\n\ndef example_inputs():\n"
+        "    import numpy as np\n\n"
+        "    return {\n"
+        '        "shift": {"u": np.arange(4.0), "v": np.zeros(4)},\n'
+        '        "collide": {"x": np.arange(4.0), "y": np.zeros(4)},\n'
+        "    }\n"
+    )
+    path = write_fixture(tmp_path, body)
+    code = main(["run", str(path)])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "  IndexError: " in out
+    # The other kernel in the file still ran, and agreed.
+    assert "  y: difference 0 " in out
 
 
 def test_run_reports_a_loop_carried_name_instead_of_a_traceback(
@@ -297,3 +396,96 @@ def test_run_reports_a_loop_carried_name_instead_of_a_traceback(
     assert "TraceError" in out
     assert "reduce_sum" in out
     assert "difference" not in out
+
+
+def test_run_prints_what_refuted_a_run_under_its_line(tmp_path, capsys) -> None:
+    """``loopty run`` prints the block ``lanky check`` prints under ``REFUTED``.
+
+    The compiled run follows the term, which doubles ``x``; the Python body the
+    fixture compares it with triples it. The agreement fact is refuted, and
+    what is printed under its line is lanky's own
+    :func:`lanky.cli.refutation_lines` of the fact: its reason, naming the
+    output that disagreed. ``loopty run`` used to print the bare line.
+    """
+    from types import SimpleNamespace
+
+    from lanky.cli import refutation_lines
+
+    body = FIXTURE.replace("y[...] = 2.0 * x", "y[...] = 3.0 * x")
+    path = write_fixture(tmp_path, body)
+    out_path = tmp_path / "ledger.json"
+    code = main(["run", str(path), "--json", str(out_path)])
+    out = capsys.readouterr().out
+    assert code == 1
+    lines, header = refutation_block(out, "scale at fixture.py:1: ")
+    assert lines[header].endswith(
+        "the scheduled run of scale agrees with the native run to the accuracy "
+        "its types state"
+    )
+    assert lines[header - 1] == ""
+
+    facts = json.loads(out_path.read_text(encoding="utf-8"))
+    (fact,) = [fact for fact in facts if fact["kind"] == "agreement"]
+    # The cell nearest to failing is the one whose difference is the largest
+    # multiple of its own allowance: 7 against 21, allowed 1e-6 * (21 + 1).
+    assert fact["provenance"]["reason"] == (
+        "y differs from the native run: difference 7, allowed 2.2e-05 (approx)"
+    )
+    # ``refutation_lines`` reads nothing but the provenance.
+    expected = refutation_lines(SimpleNamespace(provenance=fact["provenance"]))
+    assert lines[header + 1 : header + 1 + len(expected)] == [
+        f"  {line}" for line in expected
+    ]
+    assert "no witness recorded" not in out
+
+
+UNBUILDABLE = '''
+"""A ragged row sum with a hardware axis inside the row: legal, not buildable."""
+
+from __future__ import annotations
+
+from lanky.prelude import Nat, Real
+
+from loopty import Arr, Fin, kernel, reduce_sum
+from loopty.schedule import Schedule
+
+
+@kernel
+def rowsum(
+    cnt: Arr[Fin[n], Nat], val: Arr[Fin[n], Fin[cnt], Real], y: Arr[Fin[n], Real]
+):
+    for r in y.dom:
+        y[r] = reduce_sum(val[r, j] for j in val.dom[r])
+
+
+sched = Schedule(rowsum).split("j", 32, inner="j_in", outer="j_out").tag(
+    j_in="l.0"
+)
+'''
+
+
+def test_run_prints_why_a_schedule_cannot_be_built_under_its_line(
+    tmp_path, capsys
+) -> None:
+    """The refuted ``buildable`` fact's reason is printed under its line.
+
+    The limit was printed where the schedule is reported, and the fact carried
+    it as ``detail`` alone, so the ``REFUTED`` line at the bottom had nothing
+    under it.
+    """
+    path = write_fixture(tmp_path, UNBUILDABLE)
+    code = main(["run", str(path)])
+    out = capsys.readouterr().out
+    assert code == 1
+    (limit,) = [
+        line.split("not buildable for the c target: ", 1)[1]
+        for line in out.splitlines()
+        if "not buildable for the c target: " in line
+    ]
+    assert "ragged fiber" in limit
+    lines, header = refutation_block(out, "rowsum at fixture.py:")
+    assert lines[header].endswith(
+        "c code can be generated for rowsum after tag(j_in='l.0')"
+    )
+    assert lines[header + 1] == f"  {limit}"
+    assert "no witness recorded" not in out

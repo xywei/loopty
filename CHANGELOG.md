@@ -510,12 +510,39 @@ with a pair of statement instances.
   `for i in x.dom: y[i] = x[i]` traced over an iname `i0` on 3.13 and `i` on
   3.12.
 - `lanky check` prints the error of a kernel that cannot be traced under its
-  `REFUTED` line: the `trace` fact carries it as its `reason`, next to an empty
-  `counterexample`, which is lanky's form for a closed claim refuted at no
-  assignment in particular. The fix a `TraceError` names used to reach only the
-  JSON ledger. `loopty run` reports such a kernel as one it cannot schedule,
-  naming the error, and exits 1, where it used to stop with a traceback from
-  the search for kernels.
+  `REFUTED` line: the `trace` fact carries it as its `reason`, and no
+  `counterexample`, because it is refuted at no assignment in particular (an
+  empty one, there only to get the reason printed, is gone now that lanky
+  prints a reason without one). The fix a `TraceError` names used to reach only
+  the JSON ledger. `loopty run` reports such a kernel as one it cannot
+  schedule, naming the error, and exits 1, where it used to stop with a
+  traceback from the search for kernels.
+- A refuted cast fact carries its explanation as `reason`, which lanky prints
+  under its `REFUTED` line: the message of the `IllegalCast` it is raised with,
+  or, for a `buildable` fact, the limit the target hits, which is also
+  `UnbuildableSchedule.reason`. It had it as `detail` alone, which only the
+  JSON ledger shows, so the block under the line read `no witness recorded`
+  for a fact with no witness (`exactness`, `buildable`) and was empty for a
+  `bijective` or `monotone` fact with one. `detail` stays, in the oracle's
+  words, and `witness` is recorded whenever isl gives one.
+- A fact the isl oracle refutes (an access out of bounds, two instances
+  writing one cell) carries a `reason` that names the question and the
+  labelled witness at its sizes, which lanky prints under its `REFUTED` line:
+  `cells u[i + 1] reaches are cells u has, except [a0=1] at [n=1]`. Nothing was
+  printed under the line, because lanky counts the oracle's `witness` as what
+  explains a refutation and prints neither it nor `witness_text`.
+- What refuted a fact is printed under its `REFUTED` line by `loopty run` as by
+  `lanky check`. `loopty run` printed the bare line; it now prints lanky's own
+  block (`lanky.cli.refutation_lines`) under each one, and the line itself as
+  lanky does, `REFUTED owner at where: statement`, after a blank line. A
+  refuted `agreement` fact names each output that disagreed, and by how much
+  against its allowance (or its shape and the native run's, when the two
+  differ), as its `reason`, where the block used to read `no witness
+  recorded`.
+- `loopty run` reports a body that raises `IndexError` or an `ArithmeticError`
+  on its example inputs (a read past the end, a division by zero) by name, as
+  it reports the other errors a run stops with, goes on to the file's other
+  kernels, and exits 1. It stopped with a traceback.
 - The schedule checker and the typing rules see the reads a ragged access makes
   through its offsets. `val[r, j]` is `val[off[r] + j]` once lowered, and row
   `r` ends at `off[r + 1]`, but neither read is in the body, so only the

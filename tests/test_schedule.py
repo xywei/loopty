@@ -468,3 +468,113 @@ def test_a_schedule_the_target_can_build_says_so_and_carries_no_extra_fact():
 
 
 # }}}
+
+
+# {{{ what a refuted cast fact says
+
+
+def refused(step) -> IllegalCast:
+    """The refusal ``step()`` raises."""
+    with pytest.raises(IllegalCast) as caught:
+        step()
+    return caught.value
+
+
+def collapsed() -> IllegalCast:
+    """A draft that sends every ``i`` to 0, which no shipped cast does."""
+    schedule = Schedule(ht.jacobi_term())
+    draft = schedule._draft()
+    draft.constraints["S0"] = ["y1 = 0"]
+    draft.overridden["S0"] = {"i"}
+    return refused(lambda: schedule._commit(draft, "flatten(i)"))
+
+
+def test_a_refused_cast_carries_its_message_as_the_reason() -> None:
+    # lanky prints a refuted fact's ``reason`` under its REFUTED line, and a
+    # cast fact used to carry its explanation as ``detail`` alone, which only
+    # the JSON ledger shows. The reason is the message of the IllegalCast, so
+    # the fact and the exception say the same thing.
+    stencil = Schedule(ht.jacobi_term(), sizes={"nt": 16, "nx": 16})
+    exact = Schedule(ht.spmv_term(exactness="exact"))
+    refusals = {
+        "monotone": refused(lambda: stencil.tile("t", "i", 8, 8)),
+        "bijective": collapsed(),
+        "realize": refused(lambda: exact.realize("y", tree=True)),
+        "tag": refused(
+            lambda: exact.split("j", 2, inner="j_in", outer="j_out").tag(
+                j_in="l.0"
+            )
+        ),
+    }
+    for exc in refusals.values():
+        assert exc.fact.status.value == "refuted"
+        assert exc.fact.provenance["reason"] == str(exc)
+        # ``detail`` stays, in the oracle's own words.
+        assert exc.fact.provenance["detail"]
+    assert refusals["monotone"].fact.provenance["reason"].endswith(
+        "scheduled earlier (at nt=16, nx=16, as hinted)"
+    )
+
+
+def test_a_refused_cast_carries_a_witness_exactly_when_isl_gave_one() -> None:
+    stencil = Schedule(ht.jacobi_term(), sizes={"nt": 16, "nx": 16})
+    backwards = refused(lambda: stencil.tile("t", "i", 8, 8))
+    assert backwards.fact.provenance["witness"] == backwards.witness
+    (source_id, _), (sink_id, _), params = backwards.fact.provenance["witness"]
+    assert source_id == sink_id == "S0"
+    assert params == {"nt": 16, "nx": 16}
+
+    flattened = collapsed()
+    first, second = flattened.fact.provenance["witness"]
+    assert first != second
+    assert flattened.fact.provenance["witness"] == flattened.witness
+
+    # Exactness is not a question for isl, so there is no point to show.
+    exact = Schedule(ht.spmv_term(exactness="exact"))
+    tree = refused(lambda: exact.realize("y", tree=True))
+    assert tree.witness is None
+    assert "witness" not in tree.fact.provenance
+
+
+def test_a_schedule_the_target_cannot_build_gives_the_limit_as_the_reason() -> None:
+    schedule = (
+        Schedule(ht.spmv_term())
+        .split("j", 32, inner="j_in", outer="j_out")
+        .tag(j_in="l.0")
+    )
+    (fact,) = [f for f in schedule.facts() if f.kind == "buildable"]
+    assert fact.provenance["reason"] == schedule.buildable[1]
+    assert "witness" not in fact.provenance
+    # A decided fact is explained by nothing, because nothing needs explaining.
+    assert all(
+        "reason" not in f.provenance for f in schedule.facts() if f is not fact
+    )
+
+
+def test_lanky_prints_the_reason_of_every_refuted_cast_fact() -> None:
+    # What ``lanky check`` and ``loopty run`` print under a REFUTED line. The
+    # exactness and buildable facts used to come out as ``no witness
+    # recorded``, and the others with nothing under them at all.
+    from lanky.cli import refutation_lines
+
+    stencil = Schedule(ht.jacobi_term(), sizes={"nt": 16, "nx": 16})
+    exact = Schedule(ht.spmv_term(exactness="exact"))
+    unbuildable = (
+        Schedule(ht.spmv_term())
+        .split("j", 32, inner="j_in", outer="j_out")
+        .tag(j_in="l.0")
+    )
+    facts = [
+        refused(lambda: stencil.tile("t", "i", 8, 8)).fact,
+        collapsed().fact,
+        refused(lambda: exact.realize("y", tree=True)).fact,
+        *[f for f in unbuildable.facts() if f.kind == "buildable"],
+    ]
+    assert len(facts) == 4
+    for fact in facts:
+        lines = refutation_lines(fact)
+        assert fact.provenance["reason"] in lines
+        assert "no witness recorded" not in lines
+
+
+# }}}
