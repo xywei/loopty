@@ -324,6 +324,42 @@ def test_an_infinity_where_a_finite_value_was_expected_is_reported_as_one() -> N
     )
 
 
+def test_nans_of_either_sign_and_complex_infinities_are_judged_by_the_cell() -> None:
+    # A NaN's sign is not the kernel's to keep (see disagreement), and a
+    # complex cell with an infinite part used to crash the report the way a
+    # real infinity did.
+    negative_nan = -np.array([np.nan])[0]
+    assert np.signbit(negative_nan)
+    term = doubled.trace()
+    for exactness_term in (term, doubled_exact.trace()):
+        fact = agreement(
+            exactness_term,
+            Schedule(exactness_term),
+            {"y": np.array([np.nan, 1.0])},
+            {"y": np.array([negative_nan, 1.0])},
+        )
+        assert fact.status.value == "tested", exactness_term.name
+    inf = complex(np.inf, 0.0)
+    for got, want, verdict in (
+        ([inf, 1 + 1j], [inf, 1 + 1j], "tested"),
+        ([complex(np.nan, 1.0)], [complex(np.nan, 1.0)], "tested"),
+        ([complex(np.nan, 1.0)], [complex(np.nan, 2.0)], "refuted"),
+        ([complex(1.0, np.inf)], [1 + 0j], "refuted"),
+        ([inf, 1 + 1j], [inf, 1 + 2j], "refuted"),
+    ):
+        fact = agreement(
+            term, Schedule(term), {"y": np.array(got)}, {"y": np.array(want)}
+        )
+        assert fact.status.value == verdict, (got, want)
+        detail = fact.provenance["outputs"]["y"]
+        assert not np.isnan(detail["difference"]), (got, want)
+        assert np.isfinite(detail["tolerance"]), (got, want)
+    # The real mismatch is the one reported, beside an infinity that agrees.
+    got, want = np.array([inf, 1 + 1j]), np.array([inf, 1 + 2j])
+    fact = agreement(term, Schedule(term), {"y": got}, {"y": want})
+    assert fact.provenance["outputs"]["y"]["difference"] == 1.0
+
+
 def test_outputs_of_different_integer_widths_still_agree_by_value() -> None:
     # loopy writes a Nat output as int32, and the native run fills whatever the
     # caller passed; the comparison is in the type both promote to.

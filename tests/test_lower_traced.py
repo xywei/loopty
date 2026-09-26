@@ -990,6 +990,35 @@ def test_a_ragged_fiber_inside_a_statement_loop_is_still_one() -> None:
     assert data_dependent_inames(rows_and_lengths.trace()) == frozenset({"j"})
 
 
+@kernel
+def ragged_inside_a_sum(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    b: Arr[Fin[p], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A ragged sum nested in a dense one, and the other way round."""
+    for r in y.dom:
+        y[r] = reduce_sum(
+            reduce_sum(val[r, j] * b[k] for j in val.dom[r]) for k in b.dom
+        ) + reduce_sum(
+            reduce_sum(val[r, i] * b[q] for q in b.dom) for i in val.dom[r]
+        )
+
+
+def test_a_ragged_fiber_nested_in_another_sum_is_still_one() -> None:
+    # The enclosing binder is no longer data; the row length beside it still
+    # is, and the ragged reason comes first.
+    from loopty.schedule import Schedule, data_dependent_inames
+
+    assert data_dependent_inames(ragged_inside_a_sum.trace()) == frozenset(
+        {"j", "i"}
+    )
+    ok, reason = Schedule(ragged_inside_a_sum).tag(j="l.0").buildable
+    assert not ok
+    assert "ragged fiber" in reason
+
+
 def test_the_nested_axis_loopty_refuses_is_one_loopy_cannot_build(monkeypatch):
     # Measured, not guessed: loopy's plain OpenCL target stands in for the
     # pyopencl one, which cannot be built without pyopencl, and code generation
