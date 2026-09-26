@@ -496,26 +496,7 @@ def test_two_schedules_of_one_kernel_keep_their_facts_apart() -> None:
     assert len(ledger) == 8
 
 
-def plain_opencl(monkeypatch) -> None:
-    """Lower for loopy's plain OpenCL target, which needs no pyopencl.
-
-    Code generation is all that is asked of it, as in
-    ``tests/test_lower_traced.py``.
-    """
-    import loopy as lp
-
-    from loopty import lower
-
-    plain = lower.target_for
-    monkeypatch.setattr(
-        lower,
-        "target_for",
-        lambda target="c": lp.OpenCLTarget() if target == "opencl" else plain(target),
-    )
-
-
-def test_the_target_is_part_of_the_key(monkeypatch) -> None:
-    plain_opencl(monkeypatch)
+def test_the_target_is_part_of_the_key(plain_opencl) -> None:
     term = ht.transpose_term()
     assert Schedule(term).key == "transpose[c]"
     on_c = Schedule(term).split("i", 4)

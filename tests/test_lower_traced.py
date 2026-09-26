@@ -1019,22 +1019,14 @@ def test_a_ragged_fiber_nested_in_another_sum_is_still_one() -> None:
     assert "ragged fiber" in reason
 
 
-def test_the_nested_axis_loopty_refuses_is_one_loopy_cannot_build(monkeypatch):
+def test_the_nested_axis_loopty_refuses_is_one_loopy_cannot_build(plain_opencl):
     # Measured, not guessed: loopy's plain OpenCL target stands in for the
-    # pyopencl one, which cannot be built without pyopencl, and code generation
-    # is all that is asked of it.
+    # pyopencl one (see the fixture in conftest.py).
     import warnings
 
-    lp = pytest.importorskip("loopy")
-    from loopty import lower
     from loopty.schedule import Schedule
 
-    plain = lower.target_for
-    monkeypatch.setattr(
-        lower,
-        "target_for",
-        lambda target="c": lp.OpenCLTarget() if target == "opencl" else plain(target),
-    )
+    lp = plain_opencl
     outer = Schedule(lower_total8, target="opencl").tag(i="l.0")
     assert outer.buildable == (True, "")
     with warnings.catch_warnings():
@@ -1083,25 +1075,6 @@ def rows_of_eight(a: Arr[Fin[n], Fin[8], Real], y: Arr[Fin[n], Real]):  # noqa: 
     """Rows of a fixed length, and any number of them."""
     for i in y.dom:
         y[i] = reduce_sum(a[i, j] for j in a.dom[i])
-
-
-@pytest.fixture
-def plain_opencl(monkeypatch):
-    """loopy's plain OpenCL target, as the nested-axis test above uses it.
-
-    It stands in for the pyopencl one, which cannot be built without
-    pyopencl, and code generation is all that is asked of it.
-    """
-    lp = pytest.importorskip("loopy")
-    from loopty import lower
-
-    plain = lower.target_for
-    monkeypatch.setattr(
-        lower,
-        "target_for",
-        lambda target="c": lp.OpenCLTarget() if target == "opencl" else plain(target),
-    )
-    return lp
 
 
 def generated(lp, schedule) -> str:
