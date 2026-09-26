@@ -184,3 +184,30 @@ def first_rows(
     """A domain whose bound is a scalar of the call, which could be negative."""
     for i in w.dom:
         w[i] = x[i]
+
+
+@kernel
+def rows_from_one(
+    f: Arr[Where[i: Fin[n], j: Fin[n], (j < i) & (i >= 1)], Real],
+    y: Arr[Fin[n], Real],
+):
+    """A statement at the first depth, over rows that start at ``i = 1``.
+
+    The strict triangle has the same points, and its rows start at ``i = 0``.
+    """
+    for i in f.dom:
+        y[i - 1] = y[i - 1] + 1.0
+        for j in f.dom[i]:
+            f[i, j] = 2.0
+
+
+@kernel
+def row_sizes(
+    f: Arr[Where[i: Fin[n], j: Fin[n], j < i], Real],
+    y: Arr[Fin[n], Real],
+):
+    """The size of a fiber, which is the declared binder's bound, ``n``."""
+    for i in f.dom:
+        y[i] = f.dom[i].size * 1.0
+        for j in f.dom[i]:
+            f[i, j] = 1.0

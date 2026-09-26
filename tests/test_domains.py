@@ -312,6 +312,8 @@ def test_the_interpreter_runs_a_term_over_domains() -> None:
         "far_pairs",
         "after_a_short_piece",
         "first_rows",
+        "rows_from_one",
+        "row_sizes",
     ],
 )
 def test_the_trace_of_a_kernel_over_a_domain_is_faithful(name: str) -> None:
@@ -437,6 +439,48 @@ def test_a_size_a_bound_runs_up_to_is_a_whole_number_and_not_negative() -> None:
     w = Arr.zeros(K.first_rows.arg_types["w"].domain, n=5, k=3)
     K.first_rows(3, x, w)
     assert w.cells().tolist() == [0.0, 1.0, 2.0]
+
+
+def test_a_native_run_is_over_the_declared_domain_whatever_the_spelling() -> None:
+    """The points are the contract's; the loops and sizes are the declared ones.
+
+    ``rows_from_one`` declares rows from ``i = 1`` and reads ``y[i - 1]`` in
+    the loop over them, in bounds by its facts; the strict triangle has the
+    same points and a row at ``i = 0``. ``row_sizes`` reads
+    ``f.dom[i].size``, which is ``n`` for the declared triangle and ``i`` for
+    ``Sigma[a: Fin[n], Fin[a]]``. Either argument runs as the declared domain
+    does, natively and compiled, and gets the writes back in its own layout.
+    """
+    from loopty.executor import LoopyExecutor
+
+    a, b = Var("a"), Var("b")
+    strict = Where[a : Fin[n], b : Fin[n], b < a]
+    for storage in ("box", "packed"):
+        f = Arr.zeros(strict, n=4, storage=storage)
+        y = Arr.zeros(Fin[4])
+        K.rows_from_one(f, y)
+        assert y.numpy().tolist() == [1.0, 1.0, 1.0, 0.0]
+        assert f.cells().tolist() == [2.0] * 6 and f.domain.domain == strict
+        arguments = {
+            "f": Arr.zeros(strict, n=4, storage=storage),
+            "y": Arr.zeros(Fin[4]),
+        }
+        fact = LoopyExecutor().differential(
+            K.rows_from_one, Schedule(K.rows_from_one), arguments
+        )
+        assert fact.status is Status.TESTED, fact.provenance
+        f = Arr.zeros(Sigma[a : Fin[n], Fin[a]], n=4, storage=storage)
+        y = Arr.zeros(Fin[4])
+        K.row_sizes(f, y)
+        assert y.numpy().tolist() == [4.0] * 4
+        arguments = {
+            "f": Arr.zeros(Sigma[a : Fin[n], Fin[a]], n=4, storage=storage),
+            "y": Arr.zeros(Fin[4]),
+        }
+        fact = LoopyExecutor().differential(
+            K.row_sizes, Schedule(K.row_sizes), arguments
+        )
+        assert fact.status is Status.TESTED, fact.provenance
 
 
 def test_a_scalar_the_domain_names_is_a_size_of_the_call() -> None:

@@ -344,9 +344,10 @@ end to end; the edges are sharp.
   traced. A size a binder's bound runs up to is never negative, so a scalar
   that makes one negative is refused. Natively, an array over a domain
   enumerates its points with isl when it is built and checks each access
-  against them in Python, and a compiled run addresses the declared domain's
-  layout, so an argument stored the other way, or over the same points in
-  another box, is copied into it and back.
+  against them in Python. A run, native or compiled, is over the declared
+  domain, its loops, its sizes and its layout, so an argument over the same
+  points written otherwise, or stored the other way, is copied into it and
+  back.
 - A reduction nested in another one cannot take its bound from the outer
   binder when that bound is not affine:
   `reduce_sum(reduce_sum(val[q, j] for j in val.dom[q]) for q in val.dom)` is

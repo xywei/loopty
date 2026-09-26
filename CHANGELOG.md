@@ -207,12 +207,16 @@ with a pair of statement instances.
   `kernel.arg_types[name].domain`); it is indexed at the domain's points and
   refuses any other cell, and `Arr.cells()` reads it in one order whatever its
   layout, which is what the contract, the differential test and the
-  faithfulness fact compare. A compiled kernel addresses the declared
-  domain's layout at the call's sizes, and the executor copies an argument
-  into it and back when its storage differs, or its box does (the strict
-  triangle written `Sigma[a: Fin[n], Fin[a]]` has the declared points in an
-  `n x (n - 1)` box); it also passes the sizes the call determines to a
-  kernel whose flat buffers give loopy none (note 14 in `docs/loopy-notes.md`).
+  faithfulness fact compare. A run is over the declared domain whatever the
+  argument's spelling: natively, an argument written otherwise is copied into
+  an array over the declared domain for the call, since `L.dom[i].size` is
+  the binder's bound and `L.dom` runs binder by binder, and a compiled kernel
+  addresses the declared domain's layout at the call's sizes, the executor
+  copying an argument into it and back when its storage differs, or its box
+  does (the strict triangle written `Sigma[a: Fin[n], Fin[a]]` has the
+  declared points in an `n x (n - 1)` box). The executor also passes the
+  sizes the call determines to a kernel whose flat buffers give loopy none
+  (note 14 in `docs/loopy-notes.md`).
   A box extent that can be negative at some size, `n - 1` at `n = 0`, is
   neither a shape nor part of where a piece starts, since the domain is empty
   there and its box has no cells: isl decides which extents are never
