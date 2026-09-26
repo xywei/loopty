@@ -192,10 +192,11 @@ class Arr:
         is a placeholder (:class:`loopty.compose.ProgramValue`), and what comes
         back is the placeholder of a new array, which the program's term keeps
         as a temporary, zeroed where it is made. Its element sort there is the
-        one the kernels it is passed to declare. ``dtype`` is the native run's,
-        and the program's term is refused when the native array would hold
-        integers where those kernels declare reals, since the native run would
-        truncate what the compiled one keeps.
+        one the kernels it is passed to declare, stored as the lowering stores
+        it. For a sort of reals the native array has to have that dtype too,
+        or one run truncates or rounds what the other keeps: a ``dtype`` given
+        is checked when the term is built, and one left to ``other`` when the
+        compiled program is run (:func:`loopty.contract.inherited_storage`).
         """
         hook = getattr(type(other), "_loopty_zeros_like", None)
         if hook is not None:

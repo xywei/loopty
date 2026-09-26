@@ -223,10 +223,13 @@ with a pair of statement instances.
   OpenCL, because loopy's C host code never allocates a global temporary (note
   14 in `docs/loopy-notes.md`). `Lowering.temporaries` names them, and a
   temporary's element sort counts in the exactness class and the contraction
-  pin as a parameter's does. A ragged one is refused, and so is one that
-  natively holds integers where the kernels it is passed to declare reals,
-  since the native run would truncate what the compiled one keeps
-  (`Arr.zeros_like(c, dtype=np.float64)` is the fix).
+  pin as a parameter's does. A ragged one is refused. A temporary of reals
+  has to be stored natively as the compiled one is, or one run truncates or
+  rounds what the other keeps: a `dtype` given to `Arr.zeros_like` has to be
+  `float64`, checked when the term is built, and one left to the parameter
+  it copies is checked when the compiled program runs
+  (`Term.temporaries_like`, `contract.inherited_storage`), refusing an
+  integer or a `float32` `u` for `f = Arr.zeros_like(u)`.
 - **A term may state its offsets** (`Term.offsets`, `Term.offsets_of`). The
   offsets a counts family's rows are read through were always read off the
   names of the term's parameters, which is right for a kernel and wrong for a

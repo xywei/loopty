@@ -49,7 +49,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from loopty.contract import check_arguments
+from loopty.contract import check_arguments, inherited_storage
 from loopty.term import Term
 from loopty.tolerance import (
     TOLERANCE,
@@ -245,6 +245,7 @@ class LoopyExecutor:
         names = [name for name, _ in term.params]
         supplied = {**dict(zip(names, args, strict=False)), **kwargs}
         check_arguments(dict(term.params), supplied, lowering.ragged)
+        inherited_storage(dict(term.temporaries), term.temporaries_like, supplied)
         call = _call_arguments(term, lowering, args, kwargs)
         call, empty = _pad_empty_arrays(call, lowering)
         if target_name == "opencl":
@@ -372,6 +373,7 @@ class LoopyExecutor:
         # which is exactly what hides an alias between two of them, and the
         # native run would otherwise be the first thing to meet a bad index.
         check_arguments(dict(term.params), args, lowering.ragged)
+        inherited_storage(dict(term.temporaries), term.temporaries_like, args)
         native = dict(reference or {})
         if native:
             missing = [name for name in lowering.outputs if name not in native]

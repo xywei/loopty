@@ -282,7 +282,7 @@ class Term:
     guessing from the spelling. A term written by hand leaves it empty and is
     read by spelling, which is what :data:`COUNT_PARAM_REFLECTED` is for.
 
-    Three fields are empty for a kernel's term and filled in for a program's
+    Four fields are empty for a kernel's term and filled in for a program's
     (:mod:`loopty.compose`), which is one term made of several kernels':
 
     * ``temporaries`` are the arrays the term writes and reads that are not
@@ -299,6 +299,11 @@ class Term:
     * ``where`` is ``file:line`` of the definition when the term is not one
       kernel's statements, for the facts about the whole term; a kernel's term
       leaves it empty, and those facts point at its first statement.
+    * ``temporaries_like`` pairs a temporary with the parameter whose dtype it
+      has natively, ``(f, u)`` for ``f = Arr.zeros_like(u)`` given no dtype.
+      Natively that dtype is whatever ``u`` is called with, so it is checked
+      when the compiled term is run
+      (:func:`loopty.contract.inherited_storage`).
     """
 
     name: str
@@ -310,6 +315,7 @@ class Term:
     temporaries: tuple[tuple[str, ArrType], ...] = ()
     offsets: tuple[tuple[str, str | None], ...] = ()
     where: str = ""
+    temporaries_like: tuple[tuple[str, str], ...] = ()
 
     @property
     def param_names(self) -> tuple[str, ...]:

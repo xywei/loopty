@@ -293,10 +293,12 @@ end to end; the edges are sharp.
   element sort for it, and every call has to read a ragged family's rows
   through the same offsets; a loop in the body whose trip count is an
   argument (a host loop) is refused, and so is an array made like a ragged
-  one. On the C target a temporary is a
-  variable-length array on the stack of the call, which bounds its size (note
-  14 in `docs/loopy-notes.md`); on OpenCL it is a global temporary, which is
-  generated but, like every device path, not run from a development machine.
+  one. A temporary of reals made like a parameter, `Arr.zeros_like(u)`, has
+  `u`'s dtype natively, so the compiled program refuses a `u` not stored as
+  `float64`. On the C target a temporary is a variable-length array on the
+  stack of the call, which bounds its size (note 14 in `docs/loopy-notes.md`);
+  on OpenCL it is a global temporary, which is generated but, like every
+  device path, not run from a development machine.
 - Only a two-axis (row, fiber) ragged array lowers. A deeper dependent sum
   raises.
 - A reduction nested in another one cannot take its bound from the outer

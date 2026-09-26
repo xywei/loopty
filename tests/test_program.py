@@ -880,31 +880,62 @@ def test_a_default_is_refused() -> None:
     assert list(x.numpy()) == [2.0, 4.0]
 
 
-def test_an_array_made_to_hold_integers_where_reals_go_is_refused() -> None:
-    # zeros_like(c) is an integer array natively, which truncates halve's
-    # halves; the compiled temporary is Real and would not.
+def test_a_temporary_of_reals_is_stored_as_the_compiled_one_is() -> None:
+    # zeros_like(c) is natively an array of c's dtype. For an integer c that
+    # truncates halve's halves, which the compiled temporary, a Real stored as
+    # float64, keeps: the compiled run refuses the call, naming the dtype.
     @program
     def halves(c, y):
         f = Arr.zeros_like(c)
         halve(c, f)
         pair(f, y)
 
-    with pytest.raises(TraceError, match="natively holds integers"):
-        halves.trace()
+    assert halves.term.temporaries_like == (("f", "c"),)
+    counts = np.array([1, 2, 3], dtype=np.int64)
+    with pytest.raises(ValueError, match="c is stored as int64"):
+        LoopyExecutor().run(halves, c=counts.copy(), y=Arr.zeros(3))
+    inputs = {"c": Arr.from_numpy(counts.copy()), "y": Arr.zeros(3)}
+    with pytest.raises(ValueError, match="give that Arr.zeros_like dtype=float64"):
+        LoopyExecutor().differential(halves, Schedule(halves), inputs)
+    # A c the contract accepts as whole floats makes a float64 f natively too.
+    fact = LoopyExecutor().differential(
+        halves,
+        Schedule(halves),
+        {"c": Arr.from_numpy(counts.astype(np.float64)), "y": Arr.zeros(3)},
+    )
+    assert fact.status.value == "tested", fact.provenance
 
+    # So does a Real u stored as float32, whose f would round what the
+    # compiled f keeps.
+    with pytest.raises(ValueError, match="u is stored as float32"):
+        LoopyExecutor().run(
+            burgers, u=np.zeros(4, dtype=np.float32), rhs=Arr.zeros(4)
+        )
+
+    # A dtype given is the native array's, and checked when the term is built.
     @program
     def real_halves(c, y):
         f = Arr.zeros_like(c, dtype=np.float64)
         halve(c, f)
         pair(f, y)
 
-    counts = Arr.from_numpy(np.array([1, 2, 3], dtype=np.int64))
-    inputs = {"c": counts, "y": Arr.zeros(3)}
+    assert real_halves.term.temporaries_like == ()
     fact = LoopyExecutor().differential(real_halves, Schedule(real_halves), inputs)
     assert fact.status.value == "tested", fact.provenance
     y = Arr.zeros(3)
     real_halves(inputs["c"], y)
     assert list(y.numpy()) == [0.5, 1.0, 1.5]
+
+    for dtype in (np.int64, np.float32):
+
+        @program
+        def other_dtype(c, y):
+            f = Arr.zeros_like(c, dtype=dtype)
+            halve(c, f)
+            pair(f, y)
+
+        with pytest.raises(TraceError, match="Pass Arr.zeros_like dtype=float64"):
+            other_dtype.trace()
 
 
 def test_an_array_made_like_a_made_array_is_laid_out_as_the_first() -> None:

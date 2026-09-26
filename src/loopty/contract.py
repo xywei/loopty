@@ -55,7 +55,7 @@ never shorter than a non-negative ``n`` allows (:func:`sizes_not_negative`).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 import numpy as np
@@ -73,8 +73,10 @@ __all__ = [
     "disjoint_arguments",
     "element_bound",
     "element_types",
+    "inherited_storage",
     "integral_sort",
     "ragged_arguments",
+    "real_storage",
     "resolve_sizes",
     "scalar_parameters",
     "sizes_not_negative",
@@ -382,6 +384,60 @@ def sizes_not_negative(
                 "negative, and every fact about the kernel is decided with its "
                 "sizes non-negative, so the argument is too short for its type"
             )
+
+
+def real_storage(sort: Any) -> np.dtype | None:
+    """The dtype a value of a sort of reals is stored in, or ``None``.
+
+    ``Real``, exact or not, is double precision, as the lowering declares it
+    (:func:`loopty.lower.numpy_dtype`); a numpy floating dtype is itself. An
+    integral sort and anything else give ``None``: they are not asked here.
+    """
+    if integral_sort(sort):
+        return None
+    base = _base_sort(sort)
+    if isinstance(base, np.dtype):
+        return base if base.kind == "f" else None
+    if isinstance(base, type) and issubclass(base, np.floating):
+        return np.dtype(base)
+    if base is float or getattr(base, "name", None) == "Real":
+        return np.dtype(np.float64)
+    return None
+
+
+def inherited_storage(
+    temporaries: Mapping[str, Any],
+    like: Iterable[tuple[str, str]],
+    supplied: Mapping[str, Any],
+) -> None:
+    """Refuse a parameter whose dtype a program's temporary of reals inherits.
+
+    ``Arr.zeros_like(u)`` in a program's body is natively an array of ``u``'s
+    dtype, whatever ``u`` is called with, and in the compiled program it is a
+    temporary of the element sort its kernels declare, stored as that sort is
+    (:attr:`loopty.term.Term.temporaries_like` lists them). An integer ``u``
+    makes the native one truncate every real written into it, and a
+    ``float32`` one rounds it, where the compiled one does neither, so the
+    two runs would compute two things; the call is refused, naming the dtype
+    to pass. A temporary of an integral sort is not asked.
+    """
+    for temporary, name in like:
+        typ = temporaries.get(temporary)
+        want = real_storage(getattr(typ, "dtype", None))
+        value = supplied.get(name)
+        if want is None or value is None:
+            continue
+        got = np.asarray(value.numpy() if isinstance(value, Arr) else value).dtype
+        if got == want:
+            continue
+        raise ValueError(
+            f"the argument {name} is stored as {got}, and the program makes "
+            f"{temporary} with Arr.zeros_like from it, which natively is an "
+            f"array of {got} too; the kernels {temporary} is passed to declare "
+            f"its elements {typ.dtype}, which the compiled program stores as "
+            f"{want}, so the two runs would compute {temporary} differently. "
+            f"Pass {name} as {want}, or give that Arr.zeros_like dtype={want}"
+        )
 
 
 def _linear(expr: Any) -> bool:
