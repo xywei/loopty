@@ -374,6 +374,13 @@ transpose at the bottom is split and interchanged, and both steps are cast facts
   the input, the first cell that differs and both values:
   `counterexample: {'input': 'example_inputs()', 'cell': 'u[1, 7]', 'body': 0.125, 'term': 1.0}`.
 - Ask for a tiling before the skew in your own kernel and read the witness.
+- Ask for the diamond instead of the skew:
+  `Schedule(jacobi).affine("{ [t, i] -> [a, b] : a = t + i and b = t - i }")`,
+  then `.tile("a", "b", 4, 4)`. For the stencil both are accepted and compute
+  what the untiled kernel computes, though the map reaches only the points
+  where `a` and `b` have the same parity. Write the map with `i + t` first and
+  read the witness; `examples/wavefront_acoustic.py` does both for a pair of
+  statements, where the tiling is refused.
 - Add `--json out.json` to `lanky check` and read the provenance: the witness,
   the isl question, and the rendered explanation are all in there.
 - `uv run loopty run examples/spmv.py --emit-code` to see the C.

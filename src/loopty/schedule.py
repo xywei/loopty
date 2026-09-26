@@ -1,13 +1,13 @@
 """Schedules: loop transformations as casts, checked one at a time.
 
 A transformation is untrusted. ``.split``, ``.tile``, ``.interchange``,
-``.skew``, ``.tag`` and ``.realize`` apply the corresponding loopy transform and
-then hand the result to a small checker, which asks isl two questions: is the
-reindexing a bijection on statement instances, and is the new execution order
-monotone on the dependence relation? Parallel inames (``g.*``, ``l.*``) carry no
-order, so they are dropped from the order before the second question is asked.
-This is the de Bruijn criterion applied to scheduling: any Python transformation
-is admissible because its output is checked, not its code.
+``.skew``, ``.affine``, ``.tag`` and ``.realize`` apply the corresponding loopy
+transform and then hand the result to a small checker, which asks isl two
+questions: is the reindexing a bijection on statement instances, and is the new
+execution order monotone on the dependence relation? Parallel inames (``g.*``,
+``l.*``) carry no order, so they are dropped from the order before the second
+question is asked. This is the de Bruijn criterion applied to scheduling: any
+Python transformation is admissible because its output is checked, not its code.
 
 Three things have to be written down for those two questions to be askable.
 
@@ -20,7 +20,11 @@ and ``loopty.oracle``'s primitives apply directly.
 *A reindexing map per transformation.* Splitting replaces a coordinate by two
 related ones, skewing shifts one by another, and interchanging and tagging change
 no coordinate at all: they change only the order. Each transformation states its
-map, and isl decides whether it is a bijection on the instances that exist.
+map as an isl map from the loops it replaces to the loops that replace them, and
+isl decides whether it is a bijection on the instances that exist. ``.affine``
+takes that map from the caller, so split, tile and skew are three ways of
+writing particular affine maps, and the diamond ``(t, i) -> (t + i, t - i)`` is
+a fourth that none of them can write.
 
 *An order as a map into logical time.* The time of an instance is
 ``[c_0, i_0, c_1, i_1, ..., c_k]``: the loop values interleaved with constants
@@ -62,6 +66,25 @@ decided by ``loopy-target``. A schedule that fails it still exists, still
 carries its ``DECIDED`` cast facts, and still reports what it is: the refusal
 happens when something asks for code (see :class:`UnbuildableSchedule`), which
 is the moment the claim actually matters.
+
+Maps whose image has holes
+--------------------------
+
+An affine map need not be unimodular. The diamond ``(t, i) -> (t + i, t - i)``
+has determinant ``-2``: its image is only the points whose two coordinates have
+the same parity, and ``t`` is ``(a + b) / 2`` there, not an integer affine
+expression of the new loops. The checker does not care, because isl reasons
+about that image exactly. loopy does: ``lp.map_domain`` and
+``lp.affine_map_inames`` both solve for each old iname with a unit coefficient
+and refuse this map. So the kernel is rewritten here instead, from the same isl
+map (see :func:`_affine_kernel`): the new domain is the image isl computes, with
+the parity as an existentially quantified constraint, and each old iname becomes
+the quasi-affine expression isl gives for the inverse, ``floor((a + b)/2)``.
+loopy 2025.2 generates correct code for that kernel, and for one tiled after
+it. It enumerates the image's bounding loops and tests the parity with an
+``if`` inside the innermost one rather than stepping by two, so half the
+iterations of that loop do nothing. The answer is recorded in
+``docs/loopy-notes.md``.
 """
 
 from __future__ import annotations
@@ -81,6 +104,7 @@ from loopty.lower import (
     Lowering,
     _plain,
     _reduction_nesting,
+    is_reserved,
     lower_generic,
     reductions_of,
 )
@@ -266,17 +290,19 @@ def _time_map(
 def _step_map(
     layout_old: _Layout,
     layout_new: _Layout,
-    constraints: dict[str, list[str]] | None = None,
-    overridden: dict[str, set[str]] | None = None,
+    mappings: Mapping[str, isl.Map] | None = None,
 ) -> isl.Map:
     """The reindexing map of one transformation.
 
-    Coordinates that keep their name are equated automatically, which makes an
-    interchange or a tag the identity and keeps the interesting part of a split
-    or a skew down to the one or two constraints the caller states.
+    ``mappings`` gives each statement the transformation renames its map,
+    from the loops it replaces to the loops that replace them (see
+    :func:`_reindexing` and :meth:`Schedule._reindex_into`); a transformation
+    that renames nothing gives none. Coordinates a statement's map does not
+    touch are equated by name, which makes an interchange or a tag the
+    identity and leaves every statement outside the mapped loops as it was;
+    the mapped ones are lifted into the uniform space by :func:`_lift`.
     """
-    constraints = constraints or {}
-    overridden = overridden or {}
+    mappings = mappings or {}
     source = layout_old.dims("x")
     target = layout_new.dims("y", suffix="_")
     out: isl.Map | None = None
@@ -284,21 +310,175 @@ def _step_map(
         old = layout_old.coords[stmt_id]
         new = layout_new.coords[stmt_id]
         index = layout_old.index(stmt_id)
+        mapping = mappings.get(stmt_id)
+        inputs = () if mapping is None else _dim_names(mapping, isl.dim_type.in_)
         pieces = [f"s = {index}", f"s_ = {index}"]
-        for position, name in enumerate(new):
-            if name in overridden.get(stmt_id, set()):
+        for name in old:
+            if name in inputs:
                 continue
-            if name in old:
-                pieces.append(f"y{position} = x{old.index(name)}")
+            pieces.append(f"y{new.index(name)} = x{old.index(name)}")
         pieces += [f"y{k} = 0" for k in range(len(new), layout_new.width)]
         pieces += [f"x{k} = 0" for k in range(len(old), layout_old.width)]
-        pieces += constraints.get(stmt_id, [])
         piece = isl.Map(
             f"{{ [{source}] -> [{target}] : {' and '.join(pieces)} }}"
         )
+        if mapping is not None:
+            piece = piece.intersect(
+                _lift(mapping, old, new, layout_old, layout_new)
+            )
         out = piece if out is None else out.union(piece)
     assert out is not None
     return out.coalesce()
+
+
+def _lift(
+    mapping: isl.Map,
+    old: Sequence[str],
+    new: Sequence[str],
+    layout_old: _Layout,
+    layout_new: _Layout,
+) -> isl.Map:
+    """``mapping`` between one statement's coordinates, in the uniform space.
+
+    The coordinates it reads are picked out of the old instance, it is applied
+    to them, and what it produces is placed at the new instance's coordinates
+    of those names; every other coordinate is left free, for
+    :func:`_step_map` to equate. isl matches spaces by the number of
+    dimensions and not by their names, so the caller's map is used as it
+    stands, parameters included.
+    """
+    inputs = _dim_names(mapping, isl.dim_type.in_)
+    outputs = _dim_names(mapping, isl.dim_type.out)
+    source = layout_old.dims("x")
+    target = layout_new.dims("y", suffix="_")
+    picked = ", ".join(f"x{old.index(name)}" for name in inputs)
+    placed = ", ".join(f"y{new.index(name)}" for name in outputs)
+    # A name on both sides of an isl map is an equality, so these two select
+    # and place coordinates without a constraint being written.
+    select = isl.Map(f"{{ [{source}] -> [{picked}] }}")
+    place = isl.Map(f"{{ [{placed}] -> [{target}] }}")
+    return select.apply_range(mapping).apply_range(place)
+
+
+def _dim_names(mapping: isl.Map, kind: Any) -> tuple[str, ...]:
+    """The names of one tuple of ``mapping``; every dimension has to have one."""
+    names = mapping.get_var_names(kind)
+    if any(not name for name in names):
+        side = "input" if kind == isl.dim_type.in_ else "output"
+        raise ValueError(
+            f"every {side} dimension of {mapping} has to be named, because the "
+            "names are the loops it maps"
+        )
+    return tuple(names)
+
+
+def _inherited(mapping: isl.Map) -> dict[str, set[str]]:
+    """For each new loop, the old loops its value is a function of.
+
+    Read off the map as isl writes it as a function: a tile's outer and inner
+    halves of ``t`` involve ``t`` alone, a skewed ``i`` involves ``i`` and
+    ``t``, and a diamond coordinate involves both. A map that is a function
+    only on the instances, and not everywhere, is taken to make every new loop
+    depend on every old one, which only over-approximates.
+    """
+    inputs = _dim_names(mapping, isl.dim_type.in_)
+    outputs = _dim_names(mapping, isl.dim_type.out)
+    try:
+        function = isl.PwMultiAff.from_map(mapping)
+    except isl.Error:
+        return {name: set(inputs) for name in outputs}
+    out: dict[str, set[str]] = {}
+    for k, name in enumerate(outputs):
+        value = function.get_pw_aff(k)
+        out[name] = {
+            old
+            for position, old in enumerate(inputs)
+            if value.involves_dims(isl.dim_type.in_, position, 1)
+        }
+    return out
+
+
+def _part(mapping: isl.Map, inside: Sequence[str]) -> isl.Map | None:
+    """The part of ``mapping`` over the loops ``inside``, or ``None``.
+
+    A statement that runs in some of a map's loops and not the others can take
+    the map only when the map is that part side by side with the rest: the
+    new loops whose values depend on ``inside`` alone, as a map of ``inside``,
+    next to every other new loop as a map of the other old ones. A tile is two
+    splits side by side, so a statement in only one of its loops is split, as
+    ``split_iname`` splits it in the kernel. A skew or a diamond mixes its
+    loops and has no such part, and neither has a map isl cannot write as a
+    function (see :func:`_inherited`).
+    """
+    inputs = _dim_names(mapping, isl.dim_type.in_)
+    outputs = _dim_names(mapping, isl.dim_type.out)
+    inherited = _inherited(mapping)
+    mine = [name for name in outputs if inherited[name] <= set(inside)]
+    if not mine:
+        return None
+    others = [name for name in inputs if name not in inside]
+    theirs = [name for name in outputs if name not in mine]
+
+    def restricted(ins: Sequence[str], outs: Sequence[str]) -> isl.Map:
+        # The map with the other inputs existentially quantified and the other
+        # outputs projected out, in the order the names are given.
+        pick_in = _picking(len(inputs), [inputs.index(name) for name in ins])
+        pick_out = _picking(len(outputs), [outputs.index(name) for name in outs])
+        return pick_in.reverse().apply_range(mapping).apply_range(pick_out)
+
+    part = restricted(inside, mine)
+    whole = restricted((*inside, *others), (*mine, *theirs))
+    if not whole.is_equal(part.flat_product(restricted(others, theirs))):
+        return None
+    for k, name in enumerate(inside):
+        part = part.set_dim_name(isl.dim_type.in_, k, name)
+    for k, name in enumerate(mine):
+        part = part.set_dim_name(isl.dim_type.out, k, name)
+    return part
+
+
+def _reindexing(
+    inputs: Sequence[str], outputs: Sequence[str], constraints: Sequence[str]
+) -> isl.Map:
+    """The map from the loops ``inputs`` to the loops ``outputs``.
+
+    ``constraints`` name the inputs ``a0, a1, ...`` and the outputs ``b0, b1,
+    ...``, and the real names are put on afterwards. That is what lets an
+    output keep the name of the input it replaces (a skewed ``i`` is still
+    ``i``), which the isl syntax would read as an equality, and it keeps a
+    loop variable that happens to be spelled like an isl keyword out of the
+    text.
+    """
+    source = ", ".join(f"a{k}" for k in range(len(inputs)))
+    target = ", ".join(f"b{k}" for k in range(len(outputs)))
+    out = isl.Map(f"{{ [{source}] -> [{target}] : {' and '.join(constraints)} }}")
+    for k, name in enumerate(inputs):
+        out = out.set_dim_name(isl.dim_type.in_, k, name)
+    for k, name in enumerate(outputs):
+        out = out.set_dim_name(isl.dim_type.out, k, name)
+    return out
+
+
+def _as_map(mapping: Any) -> isl.Map:
+    """What ``affine`` was given, as an isl map: a map, a basic map, or text."""
+    if isinstance(mapping, str):
+        try:
+            return isl.Map(mapping)
+        except isl.Error as exc:
+            raise ValueError(f"{mapping!r} is not an isl map: {exc}") from exc
+    if isinstance(mapping, isl.BasicMap):
+        return isl.Map.from_basic_map(mapping)
+    if isinstance(mapping, isl.Map):
+        return mapping
+    if isinstance(mapping, isl.UnionMap):
+        raise TypeError(
+            "affine() takes one map for every statement in the loops it names, "
+            "not a union of maps per statement: loopy gives the statements of a "
+            "loop one domain, so they cannot be moved separately"
+        )
+    raise TypeError(
+        f"affine() takes an isl map or its text, not {type(mapping).__name__}"
+    )
 
 
 # }}}
@@ -691,6 +871,8 @@ class _Draft:
     coords: dict[str, tuple[str, ...]]
     order: list[str]
     tags: dict[str, str]
+    #: The loopy kernel, or ``None`` once a step could not be written as one;
+    #: see :attr:`Schedule.kernel`.
     kernel: Any
     #: Reduction iname -> the key of the reduction it belongs to. A term may
     #: have two reductions writing the same array with different exactness, so
@@ -698,15 +880,29 @@ class _Draft:
     reductions: dict[str, str] = field(default_factory=dict)
     #: Reduction key -> ``(accumulated array, exactness class)``.
     reduction_info: dict[str, tuple[str, str]] = field(default_factory=dict)
-    constraints: dict[str, list[str]] = field(default_factory=dict)
-    overridden: dict[str, set[str]] = field(default_factory=dict)
+    #: The step's reindexing of each statement it renames, from the loops it
+    #: replaces to the loops that replace them: the step's own map, or the part
+    #: of it over a statement's loops; see :meth:`Schedule._reindex_into`.
+    mappings: dict[str, isl.Map] = field(default_factory=dict)
     reassoc: set[str] = field(default_factory=set)
     #: Loop variables whose extent comes from an array; see
     #: :func:`data_dependent_inames`. A split passes the property to both halves.
     data_dependent: set[str] = field(default_factory=set)
+    #: Why the step could not be written as a loopy kernel, when it could not.
+    unbuildable: str | None = None
     #: Reduction key -> the key of the reduction it is nested in, for every
     #: reduction that is nested in another; see :func:`_unbuildable_reason`.
     nested_in: dict[str, str] = field(default_factory=dict)
+
+
+def _transformed(kernel: Any, transform: Any, *args: Any, **kwargs: Any) -> Any:
+    """``transform(kernel, ...)``, or ``None`` when there is no kernel left.
+
+    A schedule whose kernel could not be rewritten (see :func:`_affine_kernel`)
+    keeps being checked, so that its casts and its ``buildable`` fact say what
+    it is, but there is nothing for a later loopy transform to act on.
+    """
+    return None if kernel is None else transform(kernel, *args, **kwargs)
 
 
 class Schedule:
@@ -854,7 +1050,13 @@ class Schedule:
 
     @property
     def kernel(self) -> Any:
-        """The loopy kernel as transformed so far."""
+        """The loopy kernel as transformed so far.
+
+        ``None`` once a step could not be written as a loopy kernel at all,
+        which only :meth:`affine` can cause; the schedule's ``buildable`` fact
+        says why, and :meth:`require_buildable` refuses before anything reads
+        this.
+        """
         return self._kernel
 
     @property
@@ -993,7 +1195,7 @@ class Schedule:
                 )
             draft.reassoc.add(accumulated)
         draft.tags.update(inames)
-        draft.kernel = lp.tag_inames(draft.kernel, dict(inames))
+        draft.kernel = _transformed(draft.kernel, lp.tag_inames, dict(inames))
         text = "tag(" + ", ".join(f"{k}={v!r}" for k, v in inames.items()) + ")"
         return self._commit(draft, text, ("tag", (), dict(inames)))
 
@@ -1011,54 +1213,161 @@ class Schedule:
             return self._split_reduction(iname, factor, inner, outer)
         if iname not in self._order:
             raise ValueError(f"{iname!r} is not an iname of {self._term.name}")
+        _check_factor(factor)
         draft = self._draft()
-        self._split_into(draft, iname, factor, inner, outer)
-        draft.kernel = lp.split_iname(
-            draft.kernel, iname, factor, inner_iname=inner, outer_iname=outer
-        )
         text = f"split({iname}, {factor})"
+        self._reindex_into(
+            draft,
+            _reindexing(
+                (iname,),
+                (outer, inner),
+                [f"a0 = {factor} * b0 + b1", f"0 <= b1 < {factor}"],
+            ),
+            text,
+        )
+        position = draft.order.index(iname)
+        draft.order[position : position + 1] = [outer, inner]
+        draft.kernel = _transformed(
+            draft.kernel,
+            lp.split_iname,
+            iname,
+            factor,
+            inner_iname=inner,
+            outer_iname=outer,
+        )
         return self._commit(
             draft, text, ("split", (iname, factor), {"inner": inner, "outer": outer})
         )
 
-    def _split_into(
-        self, draft: _Draft, iname: str, factor: int, inner: str, outer: str
-    ) -> None:
-        """The bookkeeping of a split, shared with :meth:`tile`.
+    def _reindex_into(self, draft: _Draft, mapping: isl.Map, text: str) -> None:
+        """Record ``mapping`` as the draft's reindexing, and rename its loops.
 
-        The constraint relates the *new* coordinates, at their positions in the
-        draft, to the *old* one at its position before this schedule step began.
-        Tiling splits twice in one step, so the two sides are numbered in
-        different layouts and reading both positions off the same tuple would
-        silently mean something else.
+        ``mapping`` goes from the loops it replaces to the loops that replace
+        them, by name. Every statement that runs in those loops gets the
+        outputs in place of the inputs, as one block where the first input
+        was: the coordinates of an instance are a canonical order, not the
+        loop order, which each transformation sets for itself. A statement in
+        some of the loops and not the others gets the part of the map over its
+        own loops when the map has one (see :func:`_part`), as a statement in
+        one of two tiled loops is split and not tiled, and is refused when the
+        map mixes its loops, because the map has no meaning for it then. An
+        output spelled like a loop, a size, an array or another name of the
+        kernel that the map does not replace is refused too, since it would
+        make two things one.
+
+        A loop whose extent comes from an array passes that property to each
+        new loop whose value depends on it (see :func:`_inherited`): both
+        halves of a split ragged loop, and neither half of the dense loop it
+        is tiled with.
         """
-        if factor < 1:
-            raise ValueError(f"a split factor must be positive, not {factor}")
+        if mapping.has_tuple_name(isl.dim_type.in_) or mapping.has_tuple_name(
+            isl.dim_type.out
+        ):
+            raise ValueError(
+                f"{text}: a map with a named tuple, such as S0[t, i], would "
+                "move one statement and not the others, and loopy gives the "
+                "statements of a loop one domain; name the loops only"
+            )
+        inputs = _dim_names(mapping, isl.dim_type.in_)
+        outputs = _dim_names(mapping, isl.dim_type.out)
+        if not inputs:
+            raise ValueError(f"{text}: the map names no loop to replace")
+        for side, names in (("input", inputs), ("output", outputs)):
+            doubled = sorted({name for name in names if names.count(name) > 1})
+            if doubled:
+                raise ValueError(
+                    f"{text}: {', '.join(doubled)} is named twice among the "
+                    f"map's {side}s"
+                )
+        folded = [name for name in inputs if name in draft.reductions]
+        if folded:
+            raise ValueError(
+                f"{text}: {', '.join(folded)} is the loop of a reduction, which "
+                "runs inside one statement instance and has no instances to "
+                "rename; split it instead"
+            )
+        unknown = [name for name in inputs if name not in draft.order]
+        if unknown:
+            raise ValueError(
+                f"{text}: not loops of {self._term.name}: {', '.join(unknown)}"
+            )
+        self._check_new_names(draft, outputs, inputs, text)
+        foreign = sorted(
+            set(mapping.get_var_names(isl.dim_type.param))
+            - set(self._params)
+            - set(self._term.sizes)
+        )
+        if foreign:
+            raise ValueError(
+                f"{text}: the map's parameters {', '.join(foreign)} are not "
+                f"sizes of {self._term.name}"
+            )
+        mappings: dict[str, isl.Map] = {}
         for stmt_id, coords in list(draft.coords.items()):
-            if iname not in coords:
+            inside = [name for name in inputs if name in coords]
+            if not inside:
                 continue
-            was = self._layout.coords[stmt_id]
-            if iname not in was:  # pragma: no cover - defensive
-                raise ValueError(f"{iname!r} is not a coordinate of {stmt_id}")
-            source = was.index(iname)
-            position = coords.index(iname)
-            draft.coords[stmt_id] = (
-                *coords[:position],
-                outer,
-                inner,
-                *coords[position + 1 :],
-            )
-            draft.constraints.setdefault(stmt_id, []).extend(
-                [
-                    f"y{position} * {factor} + y{position + 1} = x{source}",
-                    f"0 <= y{position + 1} < {factor}",
-                ]
-            )
-        position = draft.order.index(iname)
-        draft.order[position : position + 1] = [outer, inner]
-        if iname in draft.data_dependent:
-            draft.data_dependent.discard(iname)
-            draft.data_dependent.update((outer, inner))
+            own = mapping
+            if len(inside) != len(inputs):
+                part = _part(mapping, inside)
+                if part is None:
+                    outside = [name for name in inputs if name not in coords]
+                    raise ValueError(
+                        f"{text}: {stmt_id} runs in {', '.join(inside)} but not "
+                        f"in {', '.join(outside)}, and the map mixes them, so it "
+                        "has no part that moves the loops of that statement alone"
+                    )
+                own = part
+            first = min(coords.index(name) for name in inside)
+            kept = [name for name in coords if name not in inside]
+            new = _dim_names(own, isl.dim_type.out)
+            draft.coords[stmt_id] = (*kept[:first], *new, *kept[first:])
+            mappings[stmt_id] = own
+        dependent = draft.data_dependent & set(inputs)
+        if dependent:
+            inherited = _inherited(mapping)
+            draft.data_dependent -= set(inputs)
+            draft.data_dependent |= {
+                name for name in outputs if inherited[name] & dependent
+            }
+        draft.mappings = mappings
+
+    def _check_new_names(
+        self,
+        draft: _Draft,
+        names: Sequence[str],
+        replaced: Sequence[str],
+        text: str,
+    ) -> None:
+        """Refuse a new loop name that generated code cannot use as one.
+
+        It has to be an identifier C does not reserve, and it may not be the
+        name of anything else in the kernel: a loop or a reduction loop that
+        stays, a size, an array, a domain parameter, or an argument or
+        temporary the lowering added (the offsets of a ragged array, say).
+        Taking one of those would make two things one, which loopy and isl
+        otherwise report from inside. The loops being replaced may be reused.
+        """
+        entry = self._lowering.kernel.default_entrypoint
+        taken = (
+            set(draft.order)
+            | set(draft.reductions)
+            | set(self._params)
+            | set(self._term.sizes)
+            | {name for name, _ in self._term.params}
+            | (set(entry.all_variable_names()) - set(entry.all_inames()))
+        ) - set(replaced)
+        for name in names:
+            if not name.isidentifier() or is_reserved(name):
+                raise ValueError(
+                    f"{text}: {name!r} cannot name a loop in generated code"
+                )
+            if name in taken:
+                raise ValueError(
+                    f"{text}: the new loop {name!r} would share its name with "
+                    f"a loop, a size, an array or another name of "
+                    f"{self._term.name}"
+                )
 
     def _split_reduction(
         self, iname: str, factor: int, inner: str, outer: str
@@ -1070,19 +1379,29 @@ class Schedule:
         pieces still run in order. Tagging the inner piece parallel is what
         reassociates, and that is checked in :meth:`tag`.
         """
+        _check_factor(factor)
         draft = self._draft()
+        text = f"split({iname}, {factor})"
+        if inner == outer:
+            raise ValueError(f"{text}: {inner} is named twice among the new loops")
+        self._check_new_names(draft, (outer, inner), (iname,), text)
         key = draft.reductions.pop(iname)
         draft.reductions[inner] = key
         draft.reductions[outer] = key
         if iname in draft.data_dependent:
             draft.data_dependent.discard(iname)
             draft.data_dependent.update((inner, outer))
-        draft.kernel = lp.split_iname(
-            draft.kernel, iname, factor, inner_iname=inner, outer_iname=outer
+        draft.kernel = _transformed(
+            draft.kernel,
+            lp.split_iname,
+            iname,
+            factor,
+            inner_iname=inner,
+            outer_iname=outer,
         )
         return self._commit(
             draft,
-            f"split({iname}, {factor})",
+            text,
             ("split", (iname, factor), {"inner": inner, "outer": outer}),
         )
 
@@ -1091,7 +1410,10 @@ class Schedule:
 
         With two names this is the familiar interchange; with more it is a
         permutation. The instances are untouched, so the bijection is trivial and
-        the whole question is whether the dependences still run forward.
+        the whole question is whether the dependences still run forward. As an
+        affine map it is the identity, with a new order; :meth:`affine` given
+        the permutation of the loops that keeps their names makes the same
+        cast, and this is the spelling that leaves the kernel alone.
         """
         return self._reorder(
             inames, f"interchange({', '.join(inames)})", "interchange"
@@ -1124,27 +1446,53 @@ class Schedule:
 
         One cast, not three: the tiles are what the user asked for, so the
         witness of a rejection names the tiling and not the interchange inside
-        it.
+        it. The reindexing is one affine map, the two splits side by side,
+        and the kernel is split with loopy's own ``split_iname``, whose loop
+        bounds loopy knows how to simplify.
         """
         for iname in (first, second):
             if iname not in self._order:
                 raise ValueError(f"{iname!r} is not an iname of {self._term.name}")
+        if first == second:
+            raise ValueError(f"tile() needs two different loops, not {first!r} twice")
+        for factor in (first_factor, second_factor):
+            _check_factor(factor)
         draft = self._draft()
-        names = {}
-        for iname, factor in ((first, first_factor), (second, second_factor)):
-            inner, outer = f"{iname}_inner", f"{iname}_outer"
-            names[iname] = (outer, inner)
-            self._split_into(draft, iname, factor, inner, outer)
-            draft.kernel = lp.split_iname(
-                draft.kernel, iname, factor, inner_iname=inner, outer_iname=outer
+        text = f"tile({first},{second},{first_factor},{second_factor})"
+        outer_first, inner_first = f"{first}_outer", f"{first}_inner"
+        outer_second, inner_second = f"{second}_outer", f"{second}_inner"
+        self._reindex_into(
+            draft,
+            _reindexing(
+                (first, second),
+                (outer_first, inner_first, outer_second, inner_second),
+                [
+                    f"a0 = {first_factor} * b0 + b1",
+                    f"0 <= b1 < {first_factor}",
+                    f"a1 = {second_factor} * b2 + b3",
+                    f"0 <= b3 < {second_factor}",
+                ],
+            ),
+            text,
+        )
+        for iname, factor, outer, inner in (
+            (first, first_factor, outer_first, inner_first),
+            (second, second_factor, outer_second, inner_second),
+        ):
+            position = draft.order.index(iname)
+            draft.order[position : position + 1] = [outer, inner]
+            draft.kernel = _transformed(
+                draft.kernel,
+                lp.split_iname,
+                iname,
+                factor,
+                inner_iname=inner,
+                outer_iname=outer,
             )
-        outer_first, inner_first = names[first]
-        outer_second, inner_second = names[second]
         wanted = [outer_first, outer_second, inner_first, inner_second]
         positions = sorted(draft.order.index(iname) for iname in wanted)
         for position, iname in zip(positions, wanted, strict=True):
             draft.order[position] = iname
-        text = f"tile({first},{second},{first_factor},{second_factor})"
         return self._commit(
             draft,
             text,
@@ -1159,25 +1507,92 @@ class Schedule:
         tiling legal is visible in the map: the dependence vectors it adds to
         every instance are exactly what stops a tile boundary from running a sink
         before its source.
+
+        A skew is the affine map ``(by, iname) -> (by, iname + factor * by)``
+        with both loops keeping their names, and it is checked and applied to
+        the kernel exactly as :meth:`affine` would apply that map. The loop
+        order is unchanged.
         """
         if iname not in self._order or by not in self._order:
             raise ValueError(f"not inames of {self._term.name}: {iname}, {by}")
+        if iname == by:
+            raise ValueError(f"skew() needs two different loops, not {iname!r} twice")
         draft = self._draft()
-        for stmt_id, coords in draft.coords.items():
-            if iname not in coords or by not in coords:
-                continue
-            position, other = coords.index(iname), coords.index(by)
-            draft.constraints.setdefault(stmt_id, []).append(
-                f"y{position} = x{position} + {factor} * x{other}"
-            )
-            draft.overridden.setdefault(stmt_id, set()).add(iname)
-        draft.kernel = _skew_kernel(draft.kernel, iname, by, factor)
         text = f"skew({iname}, by={by!r}" + (
             f", factor={factor})" if factor != 1 else ")"
         )
+        mapping = _reindexing(
+            (by, iname), (by, iname), ["b0 = a0", f"b1 = a1 + {factor} * a0"]
+        )
+        self._reindex_into(draft, mapping, text)
+        self._affine_into(draft, mapping)
         return self._commit(
             draft, text, ("skew", (iname,), {"by": by, "factor": factor})
         )
+
+    def affine(self, mapping: Any) -> Schedule:
+        """Reindex loops along an injective affine map, checked like every cast.
+
+        ``mapping`` is an isl map, or its text, from loops of the kernel to the
+        loops that replace them, by name::
+
+            schedule.affine("{ [t, i] -> [a, b] : a = t + i and b = t - i }")
+
+        Every statement that runs in the loops named on the left gets the loops
+        named on the right instead, which take the places of the old ones in
+        the loop order (one for one when there are as many; as one block where
+        the first was otherwise). A statement in only some of those loops gets
+        the part of the map over them, when the map is that part side by side
+        with the rest, and is refused otherwise. A new loop may keep the name
+        of one it replaces, which is how :meth:`skew` is this method with a
+        particular map, and its parameters, if any, are sizes of the kernel.
+
+        The map is untrusted like any other transformation. It has to be
+        defined on every instance and send no two of them to one point (the
+        ``bijective`` fact, refuted with the instance it misses or the pair it
+        merges), and the new order has to run every dependence forward (the
+        ``monotone`` fact, refuted with the pair of instances and the array
+        cell between them). It need not be unimodular: the image of the diamond
+        above is only the points of equal parity, and the kernel is rewritten
+        over that image, as the module docstring describes.
+
+        What the kernel rewrite cannot express, such as loops that more than
+        one loopy domain defines, is a ``refuted`` ``buildable`` fact with the
+        reason, and the schedule then has no kernel.
+        """
+        mapping = _as_map(mapping)
+        text = f"affine({mapping})"
+        draft = self._draft()
+        self._reindex_into(draft, mapping, text)
+        inputs = _dim_names(mapping, isl.dim_type.in_)
+        outputs = _dim_names(mapping, isl.dim_type.out)
+        tagged = sorted(name for name in inputs if name in draft.tags)
+        if tagged:
+            raise ValueError(
+                f"{text}: {', '.join(tagged)} carries a tag; apply the map "
+                "before tagging the loops it makes"
+            )
+        positions = sorted(draft.order.index(name) for name in inputs)
+        if len(outputs) == len(inputs):
+            for position, name in zip(positions, outputs, strict=True):
+                draft.order[position] = name
+        else:
+            kept = [name for name in draft.order if name not in inputs]
+            first = positions[0]
+            draft.order = [*kept[:first], *outputs, *kept[first:]]
+        self._affine_into(draft, mapping)
+        return self._commit(draft, text, ("affine", (mapping,), {}))
+
+    def _affine_into(self, draft: _Draft, mapping: isl.Map) -> None:
+        """Rewrite the draft's kernel along ``mapping``, or record why not."""
+        if draft.kernel is None:
+            return
+        kernel, reason = _affine_kernel(draft.kernel, mapping)
+        if reason is None:
+            draft.kernel = kernel
+        else:
+            draft.kernel = None
+            draft.unbuildable = reason
 
     def realize(self, var: str, tree: bool = True) -> Schedule:
         """Realize an accumulation, optionally as a reduction tree.
@@ -1254,14 +1669,16 @@ class Schedule:
         layout = _Layout(
             stmt_ids=self._layout.stmt_ids, coords=dict(draft.coords)
         )
-        step = _step_map(
-            self._layout, layout, draft.constraints, draft.overridden
-        ).intersect_domain(self._instances)
+        step = _step_map(self._layout, layout, draft.mappings)
 
         position = len(self._history)
         facts: list[Any] = []
 
-        verdict = isl_oracle.is_bijective(step)
+        # Defined on every instance, and one for one there: a map that misses
+        # an instance drops it from the program as surely as one that merges
+        # two, and only a caller's map (``affine``) can do either.
+        verdict = isl_oracle.is_bijection_on(step, self._instances)
+        step = step.intersect_domain(self._instances)
         message = (
             ""
             if verdict.ok
@@ -1325,8 +1742,10 @@ class Schedule:
         other._reindex = reindex
         other._order = list(draft.order)
         other._tags = dict(draft.tags)
-        other._kernel = _with_priority(
-            draft.kernel, _nests(layout, draft.order, draft.tags).values()
+        other._kernel = _transformed(
+            draft.kernel,
+            _with_priority,
+            _nests(layout, draft.order, draft.tags).values(),
         )
         other._reassoc = frozenset(draft.reassoc)
         other._reductions = dict(draft.reductions)
@@ -1334,7 +1753,9 @@ class Schedule:
         other._data_dependent = frozenset(draft.data_dependent)
         # The cast is legal; whether the target can build it is a separate
         # question, asked once per step and recorded either way.
-        reason = self._unbuildable or _unbuildable_reason(draft)
+        reason = (
+            self._unbuildable or draft.unbuildable or _unbuildable_reason(draft)
+        )
         other._unbuildable = reason
         if reason is not None and self._unbuildable is None:
             facts.append(
@@ -1499,8 +1920,9 @@ class Schedule:
         ``reason`` falls back on its ``detail``, so none is left without one.
 
         ``witness`` is recorded when isl gave one, which is for the two
-        questions about meaning: a pair of instances that shows a reindexing is
-        not one for one, or the dependence a new order runs backwards.
+        questions about meaning: an instance a reindexing misses, or a pair of
+        instances that shows it is not one for one, or the dependence a new
+        order runs backwards.
         Exactness and buildability are not questions for isl, and their facts
         have none.
         """
@@ -1593,41 +2015,217 @@ def _element_exactness(term: Term, name: str) -> str:
     return "approx"
 
 
-def _skew_kernel(kernel: Any, iname: str, by: str, factor: int) -> Any:
-    """Apply a skew to the loopy kernel with ``lp.map_domain``.
+def _check_factor(factor: int) -> None:
+    """A split or tile factor has to be a positive integer."""
+    if factor < 1:
+        raise ValueError(f"a split factor must be positive, not {factor}")
 
-    loopy takes the reindexing as an isl map, which is the same object the
-    checker reasons about, so the two cannot drift apart. isl will not let one
-    map mention a name twice, so every iname of the domain is renamed on the way
-    through and renamed back afterwards.
+
+class _Inexpressible(ValueError):
+    """A reindexing the kernel rewrite cannot write for loopy, and why."""
+
+
+def _affine_kernel(kernel: Any, mapping: isl.Map) -> tuple[Any, str | None]:
+    """The loopy kernel reindexed along ``mapping``, or why it cannot be.
+
+    ``lp.map_domain`` would be the obvious call, and it is what the skew used
+    to make. It solves the map for each old iname and accepts only an equation
+    with a unit coefficient, so it refuses every map that is not unimodular,
+    the diamond among them ("No suitable equation for 't' found"), and some
+    that are, depending on the order in which isl eliminates. The same rewrite
+    is done here from what isl says about the map directly:
+
+    * the domain that defines the mapped loops becomes its image under the
+      map (the identity on its other loops), which isl states exactly, with an
+      existentially quantified constraint where the image has holes;
+    * a domain nested in it, which names mapped loops as parameters (the fiber
+      of a ragged loop, the domain of a reduction), becomes its image too, with
+      the new loops as its parameters;
+    * each old loop variable is replaced, in every instruction, by the
+      quasi-affine expression of the new ones that isl gives for the inverse on
+      that domain, such as ``floor((a + b)/2)``, which is exact on the image.
+
+    The map is the same object the checker reasons about, so the two cannot
+    drift apart. What cannot be written this way comes back as the reason, and
+    the kernel unchanged: loops that no one domain defines, an image that is
+    not one basic set, an inverse that is piecewise, or an instruction in some
+    of the mapped loops and not the others.
     """
-    entry = kernel.default_entrypoint
-    domain = entry.get_inames_domain(frozenset([iname, by]))
-    names = list(domain.get_var_names(isl.dim_type.set))
-    params = list(domain.get_var_names(isl.dim_type.param))
-    fresh = [f"{name}__skew" for name in names]
-    constraints = []
-    for old, new in zip(names, fresh, strict=True):
-        if old == iname:
-            constraints.append(f"{new} = {old} + {factor} * {by}")
-        else:
-            constraints.append(f"{new} = {old}")
-    head = f"[{', '.join(params)}] -> " if params else ""
-    text = (
-        f"{head}{{ [{', '.join(names)}] -> [{', '.join(fresh)}] : "
-        f"{' and '.join(constraints)} }}"
+    from loopy.match import parse_stack_match
+    from loopy.symbolic import (
+        RuleAwareSubstitutionMapper,
+        SubstitutionRuleMappingContext,
+        pw_aff_to_expr,
     )
-    # loopy refuses to remap an iname a loop priority mentions. The priority is
-    # reinstated by the caller once the new nest has been checked, so dropping it
-    # here loses nothing.
-    kernel = kernel.with_kernel(entry.copy(loop_priority=frozenset()))
-    # A ``BasicMap``, and it has to be one: loopy's ``_find_aff_subst_from_map``
-    # refuses anything else. loopy then asks it whether it is bijective, which
-    # islpy 2025 answers by converting it to a Map and warns that it will stop
-    # doing so in 2026. There is no spelling of this call that avoids the
-    # warning from here; it is filtered in pyproject and recorded in
-    # ``docs/loopy-notes.md``, and it is the second reason for the islpy pin.
-    kernel = lp.map_domain(kernel, isl.BasicMap(text))
-    for old, new in zip(names, fresh, strict=True):
-        kernel = lp.rename_iname(kernel, new, old)
-    return kernel
+    from pymbolic.mapper.substitutor import make_subst_func
+
+    inputs = _dim_names(mapping, isl.dim_type.in_)
+    outputs = _dim_names(mapping, isl.dim_type.out)
+    mapped = set(inputs)
+    loops = ", ".join(inputs)
+    entry = kernel.default_entrypoint
+
+    homes = [
+        k
+        for k, domain in enumerate(entry.domains)
+        if mapped & set(domain.get_var_names(isl.dim_type.set))
+    ]
+    if len(homes) != 1 or not mapped <= set(
+        entry.domains[homes[0]].get_var_names(isl.dim_type.set)
+    ):
+        return kernel, (
+            f"the loops {loops} are not all defined by one loopy domain, and "
+            "the kernel is rewritten along a map only in the domain that "
+            "defines every loop the map replaces"
+        )
+    home = homes[0]
+    try:
+        domains = list(entry.domains)
+        domains[home] = _image(entry.domains[home], mapping)
+        for k, domain in enumerate(entry.domains):
+            if k != home and mapped & set(domain.get_var_names(isl.dim_type.param)):
+                domains[k] = _image_of_params(domain, mapping)
+        inverse = _inverse(mapping, entry.domains[home])
+        substitution = {}
+        for k, name in enumerate(inputs):
+            piece = inverse.get_pw_aff(k).coalesce()
+            if piece.n_piece() != 1:
+                raise _Inexpressible(
+                    f"the inverse of the map is piecewise in {name} ({piece}), "
+                    "and a loop variable is replaced by one expression"
+                )
+            substitution[name] = pw_aff_to_expr(piece)
+    except _Inexpressible as exc:
+        return kernel, str(exc)
+    except isl.Error as exc:
+        return kernel, f"isl could not rewrite the kernel along the map: {exc}"
+
+    insns = []
+    for insn in entry.instructions:
+        inside = mapped & insn.within_inames
+        if inside and inside != mapped:
+            return kernel, (
+                f"instruction {insn.id} runs in {', '.join(sorted(inside))} "
+                f"and not in all of {loops}"
+            )
+        if inside:
+            insn = insn.copy(
+                within_inames=(insn.within_inames - mapped) | set(outputs)
+            )
+        insns.append(insn)
+    # loopy's own transforms refuse to remap an iname a loop priority
+    # mentions, and the old priority names loops that no longer exist. The
+    # caller sets the priority to the nest it has just checked.
+    entry = entry.copy(
+        domains=domains, instructions=insns, loop_priority=frozenset()
+    )
+    context = SubstitutionRuleMappingContext(
+        entry.substitutions, entry.get_var_name_generator()
+    )
+    mapper = RuleAwareSubstitutionMapper(
+        context, make_subst_func(substitution), within=parse_stack_match(None)
+    )
+    entry = context.finish_kernel(
+        mapper.map_kernel(entry, map_args=False, map_tvs=False)
+    )
+    return kernel.with_kernel(entry), None
+
+
+def _picking(count: int, positions: Sequence[int]) -> isl.Map:
+    """The map that keeps the dimensions at ``positions`` of a ``count``-tuple.
+
+    Placeholder names, so that a loop variable spelled like an isl keyword
+    never reaches the parser; isl matches the tuple by its length.
+    """
+    source = ", ".join(f"d{k}" for k in range(count))
+    target = ", ".join(f"d{k}" for k in positions)
+    return isl.Map(f"{{ [{source}] -> [{target}] }}")
+
+
+def _alongside(mapping: isl.Map, count: int) -> isl.Map:
+    """``mapping`` on the first dimensions, the identity on ``count`` more."""
+    if not count:
+        return mapping
+    rest = ", ".join(f"r{k}" for k in range(count))
+    return mapping.flat_product(isl.Map(f"{{ [{rest}] -> [{rest}] }}"))
+
+
+def _one_basic_set(image: isl.Set, before: Any) -> isl.BasicSet:
+    """``image`` as the basic set loopy wants a domain to be."""
+    pieces = image.coalesce().get_basic_sets()
+    if len(pieces) != 1:
+        raise _Inexpressible(
+            f"the image of the domain {before} is {image}, which is not one "
+            "basic set, and loopy wants each domain to be one"
+        )
+    return pieces[0]
+
+
+def _image(domain: Any, mapping: isl.Map) -> isl.BasicSet:
+    """The domain that defines the mapped loops, moved along ``mapping``."""
+    inputs = _dim_names(mapping, isl.dim_type.in_)
+    outputs = _dim_names(mapping, isl.dim_type.out)
+    names = list(domain.get_var_names(isl.dim_type.set))
+    rest = [name for name in names if name not in inputs]
+    positions = [names.index(name) for name in (*inputs, *rest)]
+    image = (
+        _as_set(domain)
+        .apply(_picking(len(names), positions))
+        .apply(_alongside(mapping, len(rest)))
+    )
+    for k, name in enumerate((*outputs, *rest)):
+        image = image.set_dim_name(isl.dim_type.set, k, name)
+    return _one_basic_set(image, domain)
+
+
+def _image_of_params(domain: Any, mapping: isl.Map) -> isl.BasicSet:
+    """A domain nested in the mapped loops, with the new loops as parameters.
+
+    The mapped loops are moved from its parameters to the front of its own
+    dimensions (a mapped loop it does not name is added, unconstrained), the
+    map is applied to them, and the loops that replace them are moved back to
+    the parameters, which is where loopy reads the nesting from.
+    """
+    inputs = _dim_names(mapping, isl.dim_type.in_)
+    outputs = _dim_names(mapping, isl.dim_type.out)
+    own = list(domain.get_var_names(isl.dim_type.set))
+    moved = _as_set(domain)
+    for name in inputs:
+        if name not in moved.get_var_names(isl.dim_type.param):
+            moved = moved.add_dims(isl.dim_type.param, 1)
+            moved = moved.set_dim_name(
+                isl.dim_type.param, moved.dim(isl.dim_type.param) - 1, name
+            )
+    for k, name in enumerate(inputs):
+        position = moved.get_var_names(isl.dim_type.param).index(name)
+        moved = moved.move_dims(isl.dim_type.set, k, isl.dim_type.param, position, 1)
+    image = moved.apply(_alongside(mapping, len(own)))
+    for name in outputs:
+        last = image.dim(isl.dim_type.param)
+        image = image.move_dims(isl.dim_type.param, last, isl.dim_type.set, 0, 1)
+        image = image.set_dim_name(isl.dim_type.param, last, name)
+    for k, name in enumerate(own):
+        image = image.set_dim_name(isl.dim_type.set, k, name)
+    return _one_basic_set(image, domain)
+
+
+def _inverse(mapping: isl.Map, domain: Any) -> isl.PwMultiAff:
+    """The old loops as functions of the new ones, on the loops that exist.
+
+    Restricted to the domain first, because a map need only be one for one
+    on the instances: ``(i, j) -> 10 i + j`` merges points, and is invertible
+    wherever ``j`` stays below 10.
+    """
+    inputs = _dim_names(mapping, isl.dim_type.in_)
+    names = list(domain.get_var_names(isl.dim_type.set))
+    reached = _as_set(domain).apply(
+        _picking(len(names), [names.index(name) for name in inputs])
+    )
+    return isl.PwMultiAff.from_map(mapping.intersect_domain(reached).reverse())
+
+
+def _as_set(domain: Any) -> isl.Set:
+    """A loopy domain, which is a basic set, as a set."""
+    if isinstance(domain, isl.BasicSet):
+        return isl.Set.from_basic_set(domain)
+    return domain

@@ -34,10 +34,9 @@ classifiers = [
 ]
 dependencies = [
     "numpy",
-    # islpy 2026 removed methods loopy 2025.2 still calls (Aff.is_equal in
-    # simplify_pw_aff, BasicMap.is_bijective in map_domain), so code generation
-    # for a tiled loop nest and the skew transform both fail against it. Drop
-    # the ceiling once a loopy release supports islpy 2026.
+    # islpy 2026 removed a method loopy 2025.2 still calls (Aff.is_equal in
+    # simplify_pw_aff), so code generation for a tiled loop nest fails against
+    # it. Drop the ceiling once a loopy release supports islpy 2026.
     "islpy<2026",
     "loopy",
     "pymbolic",
@@ -95,20 +94,16 @@ select = ["E", "F", "I", "UP", "W"]
 testpaths = ["tests"]
 addopts = "-ra"
 # Deprecations are errors, so that one of ours cannot hide in the noise of a
-# run that compiles C. The three exceptions are loopy's own and cannot be avoided
-# from here; all are recorded in docs/loopy-notes.md.
+# run that compiles C. The two exceptions are loopy's own and cannot be avoided
+# from here; both are recorded in docs/loopy-notes.md.
 #   * loopy 2025.2 builds its C toolchain with codepy's deprecated
 #     `Toolchain.copy`, inside `ExecutableCTarget.__init__`, before loopty is
 #     given anything to hold.
-#   * `lp.map_domain` (which the skew uses) requires an `isl.BasicMap` and then
-#     asks it `is_bijective`, which islpy answers by converting implicitly.
-#     Passing a `Map` instead is refused by loopy's own `_find_aff_subst_from_map`.
 #   * `simplify_pw_aff` asks `Aff.is_equal` during code generation for a loop
 #     with a piecewise bound. Hidden behind loopy's persistent codegen cache on
 #     a warm machine; a cold CI runner always reaches it.
 filterwarnings = [
     "error::DeprecationWarning",
     "ignore:'GCCToolchain.copy' is deprecated:DeprecationWarning",
-    "ignore:BasicMap.is_bijective with implicit conversion:DeprecationWarning",
     "ignore:Aff.is_equal with implicit conversion:DeprecationWarning",
 ]

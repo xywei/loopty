@@ -114,10 +114,12 @@ message states, because which violating pair isl picks depends on them.
   way in, and a `col` entry of `-1` or of `m` is a `ValueError` naming the cell
   rather than an address outside `x`.
 - **Transformations are casts with witnesses.** Every `split`, `tile`,
-  `interchange`, `skew` and `realize` states its reindexing as an isl map, is
-  checked for bijectivity on statement instances, and is checked for monotonicity
-  on the dependence relation. A failure prints two instances and the array cell
-  between them, before any code is generated.
+  `interchange`, `skew` and `realize` states its reindexing as an isl map, and
+  `affine` takes the map from you, any injective affine one, the diamond
+  `(t, i) -> (t + i, t - i)` included. Each is checked for bijectivity on
+  statement instances and for monotonicity on the dependence relation. A failure
+  prints two instances and the array cell between them, before any code is
+  generated.
 - **Reassociation is visible in the type.** Splitting an accumulation and summing
   the pieces is not free on floating point. A trace reads the accumulation's
   class off what it sums, `realize("y", tree=True)` is what lowers it to
@@ -192,8 +194,12 @@ end to end; the edges are sharp.
 - `IslOracle`: `Empty`, `Subset`, `Bijective`, `Monotone`, each refutation with a
   witness.
 - `Schedule`: `tag`, `split`, `interchange`, `prioritize`, `tile`, `skew`,
-  `realize`, each checked as a cast, each emitting its fact; `retarget`, which
-  replays every step against another loopy target and re-checks it.
+  `affine`, `realize`, each checked as a cast, each emitting its fact;
+  `retarget`, which replays every step against another loopy target and
+  re-checks it. `affine(map)` takes an isl map from loops to the loops that
+  replace them, refuses one that misses or merges an instance or runs a
+  dependence backwards, and rewrites the kernel over the map's image; `skew` is
+  that method with a particular map.
 - The target-capability check: a parallel tag inside a data-dependent (ragged)
   loop bound, a hardware axis on a reduction nested in another, or a reduction
   split across parallel and sequential inames, is reported as a `refuted`
@@ -257,6 +263,19 @@ end to end; the edges are sharp.
   is.
 - An index expression isl cannot express widens the footprint to the whole
   array. That is sound, but it can reject a legal schedule.
+- `Schedule.affine` and maps whose image has holes. The diamond
+  `(t, i) -> (t + i, t - i)` reaches only the points of equal parity, and
+  loopy's own `map_domain` refuses it, so loopty rewrites the kernel over the
+  image itself. loopy then generates correct code, bit for bit against the
+  native run for the stencil and the acoustic pair, and for the stencil tiled
+  in diamond coordinates, but it tests the parity with an `if` in the innermost
+  loop instead of stepping by two, so half of that loop's iterations do
+  nothing. A map moves every statement in its
+  loops the same way, so the per-statement time offset a diamond tiling of
+  `examples/wavefront_acoustic.py` needs is out of reach, and the tiling is
+  refused with a witness. A map the rewrite cannot write for loopy, such as one
+  over a row and the ragged fiber inside it, is a `refuted` `buildable` fact.
+  See note 13 in `docs/loopy-notes.md`.
 - `realize(var, tree=True)` checks and marks the reassociation; the reduction
   tree itself comes from splitting and tagging the reduction iname, which is
   checked separately and not verified on the C target.

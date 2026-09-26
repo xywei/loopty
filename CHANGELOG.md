@@ -76,6 +76,34 @@ with a pair of statement instances.
 - **`Schedule.retarget(target)`**. The same transformations replayed against
   another loopy target, with every cast checked again and the buildability
   question re-asked, rather than relabelled.
+- **`Schedule.affine(map)`**. A cast along any injective affine map, given as
+  an isl map, or its text, from loops of the kernel to the loops that replace
+  them: `affine("{ [t, i] -> [a, b] : a = t + i and b = t - i }")`. It is
+  checked as every cast is: the map has to be defined on every statement
+  instance and one for one there (a `bijective` fact, refuted with the
+  instance it misses or the two it merges), and the new order has to run every
+  dependence forward (a `monotone` fact, refuted with the pair of instances and
+  the array cell between them). The new loops take the places of the old ones
+  in the loop order. The map need not be unimodular. loopy's `map_domain` and
+  `affine_map_inames` both refuse the diamond, whose image is only the points
+  of equal parity, so loopty rewrites the kernel from the same isl map: the
+  domain becomes its image, with the parity as an existentially quantified
+  constraint, a domain nested in the mapped loops follows with the new loops as
+  its parameters, and each old loop variable becomes the quasi-affine inverse
+  isl gives, `floor((a + b)/2)`. That answers the question the spike asked:
+  loopy 2025.2 generates correct code for a non-unimodular image, bit for bit
+  on the stencil (against its reference, untiled and tiled in diamond
+  coordinates) and on the acoustic pair (against the native run), with the
+  parity tested inside the innermost loop rather than stepped over. A map the rewrite cannot write for loopy (loops no one domain
+  defines, an image that is not one basic set, a piecewise inverse) is a
+  `refuted` `buildable` fact, and the schedule has no kernel from then on. A
+  map moves every statement in its loops alike; a map per statement is
+  refused. `examples/wavefront_acoustic.py` tries the diamond three ways: with
+  space first it is refused with a witness, with time first it is accepted and
+  runs, and tiling it is refused, because the pair needs a time offset between
+  its statements. Note 13 in `docs/loopy-notes.md` has the details, and
+  `loopty.oracle.is_bijection_on` is the totality-and-bijectivity question the
+  first fact asks.
 - **Execution** (`loopty.executor`). `LoopyExecutor` runs a kernel, a schedule or
   a term through `lp.ExecutableCTarget` on numpy or `Arr` arguments, and
   `differential()` compares the compiled run against the Python body at the
@@ -745,6 +773,26 @@ with a pair of statement instances.
   it an FMA instruction. `tests/test_contraction.py` compiles the emitted
   source by hand to show it, and on hardware with FMA runs it. See note 9 in
   `docs/loopy-notes.md`.
+- `tile(second, first, ...)`, with the loop that comes second in the nest
+  named first, is a tiling like the other: `skew("i", by="t").tile("i", "t",
+  4, 4)` and a transpose's `tile("j", "i", 2, 2)` used to be refused as "not
+  single-valued", because the second split was written against the position
+  the first split had already moved.
+- A statement in one of two tiled loops and not the other, such as the clear
+  of a row before a loop over its ragged fiber, is split by its own loop and
+  checked, as `split_iname` splits it in the kernel. The two splits of a tile
+  are one map now, and a map applies to a statement in only some of its loops
+  when it is that statement's part side by side with the rest; a skew or a
+  diamond mixes its loops, and a statement in only one of them is refused
+  with a `ValueError` naming it.
+- A split of a reduction loop into a name the kernel already uses (a loop, a
+  size, an array) is refused with a `ValueError`, like the split of any other
+  loop, where it reached isl's "non-unique var name" from inside loopy; so is
+  a new loop named like an argument the lowering adds, such as a ragged
+  array's offsets.
+- A skewed loop keeps its tag in the kernel. The skew went through
+  `lp.map_domain` and back, which dropped it: a loop the schedule checked as
+  a local axis ran one iteration at a time.
 
 ### Changed
 
@@ -796,9 +844,24 @@ with a pair of statement instances.
   test and the faithfulness fact both read, so that the fact needs no loopy.
   `loopty.executor` still exports `TOLERANCE`, and `exactness_of_output`.
 - `islpy` is pinned below 2026. loopy 2025.2 calls `Aff.is_equal` during code
-  generation for a tiled loop nest and `BasicMap.is_bijective` in `map_domain`,
-  and islpy 2026 removed both. Drop the ceiling once a loopy release supports
-  islpy 2026.
+  generation for a tiled loop nest, and islpy 2026 removed it. (loopy's
+  `map_domain` calls `BasicMap.is_bijective`, which islpy 2026 removed too, but
+  loopty no longer calls `map_domain`.) Drop the ceiling once a loopy release
+  supports islpy 2026.
+- **`skew`, `split` and `tile` are affine maps.** Each states its reindexing as
+  an isl map from the loops it replaces to the loops that replace them, and one
+  builder turns that map into the step the checker asks about; each used to
+  write its constraints in the checker's padded coordinates by hand. `skew` is
+  `affine` with a map that keeps both names, and its kernel goes through the
+  same rewrite rather than `lp.map_domain`; `split` and `tile` still split the
+  kernel with loopy's `split_iname`. A `skew` or `tile` of a loop with itself,
+  and a new loop that would share its name with another loop, a size or an
+  array, are refused with a `ValueError` naming the problem, where they used to
+  fail from inside isl or loopy.
+- `BasicMap.is_bijective with implicit conversion` is no longer exempt from the
+  suite's deprecation errors: it was raised by `lp.map_domain`, which nothing
+  in loopty calls now. The one test that calls it, to pin that loopy refuses
+  the diamond, silences it locally.
 - `lanky>=0.1.0.dev0` is a dependency, resolved from a sibling checkout by
   `[tool.uv.sources]` during development.
 - **A program's restatement of a callee's postcondition rests on the callee's
@@ -830,6 +893,6 @@ with a pair of statement instances.
   `val[off[r] + j]`, is therefore reported `assumed` with the reason in its
   provenance, never `decided`; the ragged spelling `val[r, j]` is decided. See
   the module docstring of `loopty/flow.py`.
-- The test suite treats `DeprecationWarning` as an error. Three exemptions are
+- The test suite treats `DeprecationWarning` as an error. Two exemptions are
   loopy's own and are listed in `pyproject.toml` and `tests/conftest.py`, with
   the reasons in `docs/loopy-notes.md`.
