@@ -536,8 +536,9 @@ with a pair of statement instances.
   block (`lanky.cli.refutation_lines`) under each one, and the line itself as
   lanky does, `REFUTED owner at where: statement`, after a blank line. A
   refuted `agreement` fact names each output that disagreed, and by how much
-  against its allowance, as its `reason`, where the block used to read `no
-  witness recorded`.
+  against its allowance (or its shape and the native run's, when the two
+  differ), as its `reason`, where the block used to read `no witness
+  recorded`.
 - The schedule checker and the typing rules see the reads a ragged access makes
   through its offsets. `val[r, j]` is `val[off[r] + j]` once lowered, and row
   `r` ends at `off[r + 1]`, but neither read is in the body, so only the

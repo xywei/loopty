@@ -260,6 +260,12 @@ def test_agreement_on_arrays_of_different_shapes_is_a_refutation() -> None:
         term, Schedule(term), {"z": np.zeros(3)}, {"z": np.zeros(4)}
     )
     assert fact.status.value == "refuted"
+    # The difference is recorded as infinite, which says nothing on a screen;
+    # the reason lanky prints names the two shapes instead.
+    assert fact.provenance["outputs"]["z"]["difference"] == float("inf")
+    assert fact.provenance["reason"] == (
+        "z has shape (3,), and the native run's has shape (4,)"
+    )
 
 
 def test_emit_code_returns_something_a_person_can_read() -> None:
