@@ -434,6 +434,32 @@ def _refutation(question: IslQuestion, verdict: Verdict) -> str:
     return f"{question.description}, except {labelled}{at}"
 
 
+def _wider_lines(unnarrowed: Any) -> list[str]:
+    """What a refutation over a domain a guard left wide adds to its reason.
+
+    ``unnarrowed`` is what :mod:`loopty.typing` records: a list of
+    ``{"conjunct", "why"}`` for a fact about one statement, or a dictionary of
+    such lists by statement for the ordering fact, which is about all of
+    them. Nothing when it is empty, which is the case of a guard stated whole.
+    """
+    if not unnarrowed:
+        return []
+    listed: list[tuple[str, dict[str, str]]] = []
+    if isinstance(unnarrowed, dict):
+        for statement, entries in unnarrowed.items():
+            listed.extend((f" in {statement}", entry) for entry in entries)
+    else:
+        listed.extend(("", entry) for entry in unnarrowed)
+    lines = [
+        "the domain is wider than the instances that write: a guard conjunct "
+        "isl cannot state is left out of it, so the witness may be an "
+        "instance the guard masks, which writes nothing. Left out:"
+    ]
+    for where, entry in listed:
+        lines.append(f"  {entry['conjunct']}{where}, which {entry['why']}")
+    return lines
+
+
 # }}}
 
 
@@ -477,6 +503,14 @@ class IslOracle:
         Returns ``None`` to decline a fact whose term is not an isl question,
         which is how a fact merely *named* like one is passed on to the next
         oracle rather than silently failed.
+
+        A fact stated over a domain a guard left wide (``unnarrowed`` in its
+        provenance, see :mod:`loopty.typing`) is decided as it stands, because
+        a wider domain is a harder obligation. Refuted, its witness may be an
+        instance the guard masks, which writes nothing, so its reason says so
+        and names each conjunct left out and why (see :func:`_wider_lines`):
+        read without it, a refuted in-bounds fact is taken for an access that
+        does go out of bounds.
         """
         question = getattr(fact, "term", None)
         if not isinstance(question, IslQuestion):
@@ -498,7 +532,12 @@ class IslOracle:
             witness_params=dict(verdict.parameters or {}),
             detail=verdict.detail,
             question=type(question).__name__.lower(),
-            reason=_refutation(question, verdict),
+            reason="\n".join(
+                [
+                    _refutation(question, verdict),
+                    *_wider_lines(fact.provenance.get("unnarrowed")),
+                ]
+            ),
         )
 
     # The primitives, also exposed as methods so that a plugin holding only the

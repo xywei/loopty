@@ -522,3 +522,80 @@ def test_every_schedule_of_one_kernel_keeps_its_facts_in_the_ledger(tmp_path) ->
 
 
 # }}}
+
+
+# {{{ a refutation over a domain a guard left wide (#40)
+
+
+CLIPPED = '''
+"""A guard that compares with a Real scalar, which isl cannot state."""
+
+from __future__ import annotations
+
+from lanky.prelude import Real
+
+from loopty import Arr, Fin, kernel, when
+
+
+@kernel
+def clipped(a: Real, x: Arr[Fin[m], Real], y: Arr[Fin[n], Real]):
+    for i in y.dom:
+        with when((i < a) & (a < x.dom.size)):
+            y[i] = x[i]
+
+
+@kernel
+def stated(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):
+    for i in u.dom:
+        with when(i + 1 <= u.dom.size):
+            v[i] = u[i + 1]
+'''
+
+
+def test_check_says_a_witness_may_be_one_the_guard_masks(tmp_path, capsys) -> None:
+    """The conjuncts a domain leaves out are printed under the ``REFUTED`` line.
+
+    ``x[i]`` is refuted at an ``i >= m``, which the guard masks for every real
+    ``a``. The provenance said so under ``unnarrowed``, and the screen did
+    not, so the refutation read as an out-of-bounds read. ``stated`` is
+    refuted over a domain its guard narrowed whole, and says nothing more.
+    """
+    from lanky.cli import main as lanky_main
+
+    path = write_fixture(tmp_path, CLIPPED)
+    out_path = tmp_path / "ledger.json"
+    code = lanky_main(["check", str(path), "--json", str(out_path)])
+    out = capsys.readouterr().out
+    assert code == 1
+    lines, header = refutation_block(out, "clipped at ")
+    assert lines[header].endswith("x[i] is in bounds for every instance of S0")
+    block = lines[header + 1 : header + 6]
+    assert block[0].startswith("  witness: ")
+    assert block[1].startswith("  cells x[i] reaches are cells x has, except")
+    assert block[2].startswith("  the domain is wider than the instances that write")
+    assert block[3] == (
+        "    i < a, which compares with the scalar a of sort Real, which is not "
+        "a loop variable, a size or a scalar of an integral sort (Nat, Int, "
+        "Fin[...]), and isl would read every name of a constraint as an integer"
+    )
+    assert block[4].startswith("    a < m, which compares with the scalar a")
+
+    lines, header = refutation_block(out, "stated at ")
+    assert lines[header].endswith("u[i + 1] is in bounds for every instance of S0")
+    assert lines[header + 2].startswith("  cells u[i + 1] reaches are cells u has")
+    assert "the domain is wider" not in "\n".join(lines[header:])
+
+    facts = json.loads(out_path.read_text(encoding="utf-8"))
+    refuted = [fact for fact in facts if fact["status"] == "refuted"]
+    assert [fact["owner"] for fact in refuted] == ["clipped", "stated"]
+    # A decided fact over the same wide domain carries its note in the
+    # provenance only, and needs nothing on the screen.
+    decided = [
+        fact
+        for fact in facts
+        if fact["owner"] == "clipped" and fact["status"] == "decided"
+    ]
+    assert any("unnarrowed" in fact["provenance"] for fact in decided)
+
+
+# }}}
