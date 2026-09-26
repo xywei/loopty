@@ -239,6 +239,107 @@ def test_agreement_on_arrays_of_different_shapes_is_a_refutation() -> None:
     assert fact.status.value == "refuted"
 
 
+# {{{ values that are not finite, and the bits of an exact output
+
+
+@kernel
+def doubled(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """``y = 2 x``, over ``Real``, which is ``approx``."""
+    for i in y.dom:
+        y[i] = 2.0 * x[i]
+
+
+@kernel
+def doubled_exact(
+    x: Arr[Fin[n], Real.exact],  # noqa: F821
+    y: Arr[Fin[n], Real.exact],  # noqa: F821
+):
+    """``y = 2 x``, compared bit for bit."""
+    for i in y.dom:
+        y[i] = 2.0 * x[i]
+
+
+def test_an_infinity_both_runs_compute_is_agreement_not_a_crash() -> None:
+    # ``|inf - inf|`` is NaN and a NaN is within no allowance, so the cell used
+    # to disagree, and the search for the worst cell then took the argmin of an
+    # empty selection and raised ValueError out of ``differential``.
+    arrays = {"x": Arr.from_numpy(np.array([1.0, np.inf])), "y": Arr.zeros(2)}
+    fact = executor().differential(doubled, Schedule(doubled), arrays)
+    assert fact.status.value == "tested", fact.provenance
+    detail = fact.provenance["outputs"]["y"]
+    # The report is about the finite cell: 2.0 against 2.0.
+    assert detail["difference"] == 0.0
+    assert detail["tolerance"] == pytest.approx(
+        TOLERANCE["approx"] * (2.0 + TOLERANCE_FLOOR)
+    )
+
+
+def test_a_nan_both_runs_compute_in_an_exact_output_is_agreement() -> None:
+    # ``np.array_equal`` without ``equal_nan`` refuted this with "difference
+    # nan": the kernel is right, and so is the comparison of every other bit.
+    arrays = {
+        "x": Arr.from_numpy(np.array([np.nan, 1.0, -0.0])),
+        "y": Arr.zeros(3),
+    }
+    fact = executor().differential(doubled_exact, Schedule(doubled_exact), arrays)
+    assert fact.status.value == "tested", fact.provenance
+    assert fact.provenance["outputs"]["y"]["exactness"] == "exact"
+
+
+def test_an_exact_output_is_compared_by_its_bits() -> None:
+    # The docstring always said bits; the comparison was value equality, which
+    # takes -0.0 for 0.0.
+    term = doubled_exact.trace()
+    got, want = np.array([1.0, 0.0]), np.array([1.0, -0.0])
+    fact = agreement(term, Schedule(term), {"y": got}, {"y": want})
+    assert fact.status.value == "refuted"
+    assert fact.provenance["outputs"]["y"]["difference"] == 0.0
+
+
+def test_a_finite_value_where_an_infinity_was_expected_is_a_refutation() -> None:
+    # The allowance of an infinite expected value is ``eps * inf``, which used
+    # to excuse any value at all, the infinity of the other sign included.
+    term = doubled.trace()
+    for got in (1.0, -np.inf, np.nan):
+        fact = agreement(
+            term,
+            Schedule(term),
+            {"y": np.array([2.0, got])},
+            {"y": np.array([2.0, np.inf])},
+        )
+        assert fact.status.value == "refuted", got
+        detail = fact.provenance["outputs"]["y"]
+        assert detail["difference"] == np.inf and detail["tolerance"] == 0.0
+
+
+def test_an_infinity_where_a_finite_value_was_expected_is_reported_as_one() -> None:
+    term = doubled.trace()
+    got, want = np.array([2.0, np.inf]), np.array([2.0, 4.0])
+    fact = agreement(term, Schedule(term), {"y": got}, {"y": want})
+    assert fact.status.value == "refuted"
+    detail = fact.provenance["outputs"]["y"]
+    assert detail["difference"] == np.inf
+    assert detail["tolerance"] == pytest.approx(
+        TOLERANCE["approx"] * (4.0 + TOLERANCE_FLOOR)
+    )
+
+
+def test_outputs_of_different_integer_widths_still_agree_by_value() -> None:
+    # loopy writes a Nat output as int32, and the native run fills whatever the
+    # caller passed; the comparison is in the type both promote to.
+    term = doubled_exact.trace()
+    fact = agreement(
+        term,
+        Schedule(term),
+        {"y": np.array([1, 2], dtype=np.int32)},
+        {"y": np.array([1, 2], dtype=np.int64)},
+    )
+    assert fact.status.value == "tested"
+
+
+# }}}
+
+
 def test_emit_code_returns_something_a_person_can_read() -> None:
     code = emit_code(Schedule(ht.jacobi_term()).skew("i", by="t"))
     assert "void jacobi" in code

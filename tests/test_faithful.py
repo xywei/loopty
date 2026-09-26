@@ -475,6 +475,20 @@ def test_an_approx_output_is_compared_at_its_tolerance() -> None:
     assert disagreement(np.zeros(2), np.zeros(3), "approx").all()
 
 
+def test_an_expected_infinity_has_no_allowance() -> None:
+    # ``eps * (|inf| + FLOOR)`` is infinite, and every difference is within
+    # it: a finite value, and the infinity of the other sign, used to agree.
+    want = np.array([np.inf, np.inf, np.inf, -np.inf, 1.0])
+    got = np.array([np.inf, 1.0, -np.inf, 1e308, np.inf])
+    for exactness in ("approx", "reassoc"):
+        assert list(disagreement(got, want, exactness)) == [
+            False, True, True, True, True,
+        ]
+    want = np.array([complex(np.inf, 0.0), complex(np.inf, 0.0)])
+    got = np.array([complex(np.inf, 0.0), complex(1.0, 0.0)])
+    assert list(disagreement(got, want, "approx")) == [False, True]
+
+
 def test_a_complex_cell_with_a_nan_part_matches_part_by_part() -> None:
     # np.isnan of a complex is true when either part is, which used to let a
     # NaN real part excuse any imaginary part.
