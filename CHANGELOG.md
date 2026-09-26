@@ -89,10 +89,10 @@ with a pair of statement instances.
   constraint, a domain nested in the mapped loops follows with the new loops as
   its parameters, and each old loop variable becomes the quasi-affine inverse
   isl gives, `floor((a + b)/2)`. That answers the question the spike asked:
-  loopy 2025.2 generates correct code for a non-unimodular image, and for a
-  tiling of it, bit for bit against the native run on the stencil and on the
-  acoustic pair, with the parity tested inside the innermost loop rather than
-  stepped over. A map the rewrite cannot write for loopy (loops no one domain
+  loopy 2025.2 generates correct code for a non-unimodular image, bit for bit
+  on the stencil (against its reference, untiled and tiled in diamond
+  coordinates) and on the acoustic pair (against the native run), with the
+  parity tested inside the innermost loop rather than stepped over. A map the rewrite cannot write for loopy (loops no one domain
   defines, an image that is not one basic set, a piecewise inverse) is a
   `refuted` `buildable` fact, and the schedule has no kernel from then on. A
   map moves every statement in its loops alike; a map per statement is
@@ -615,6 +615,26 @@ with a pair of statement instances.
   wider column by the shape of the line and fails on a line that is gone. The
   abridged ledger in `README.md`, whose rows say they are verbatim, was kept
   so by hand, and its rule of dashes was not.
+- `tile(second, first, ...)`, with the loop that comes second in the nest
+  named first, is a tiling like the other: `skew("i", by="t").tile("i", "t",
+  4, 4)` and a transpose's `tile("j", "i", 2, 2)` used to be refused as "not
+  single-valued", because the second split was written against the position
+  the first split had already moved.
+- A statement in one of two tiled loops and not the other, such as the clear
+  of a row before a loop over its ragged fiber, is split by its own loop and
+  checked, as `split_iname` splits it in the kernel. The two splits of a tile
+  are one map now, and a map applies to a statement in only some of its loops
+  when it is that statement's part side by side with the rest; a skew or a
+  diamond mixes its loops, and a statement in only one of them is refused
+  with a `ValueError` naming it.
+- A split of a reduction loop into a name the kernel already uses (a loop, a
+  size, an array) is refused with a `ValueError`, like the split of any other
+  loop, where it reached isl's "non-unique var name" from inside loopy; so is
+  a new loop named like an argument the lowering adds, such as a ragged
+  array's offsets.
+- A skewed loop keeps its tag in the kernel. The skew went through
+  `lp.map_domain` and back, which dropped it: a loop the schedule checked as
+  a local axis ran one iteration at a time.
 
 ### Changed
 

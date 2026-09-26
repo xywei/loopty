@@ -285,19 +285,19 @@ def _time_map(
 def _step_map(
     layout_old: _Layout,
     layout_new: _Layout,
-    mapping: isl.Map | None = None,
+    mappings: Mapping[str, isl.Map] | None = None,
 ) -> isl.Map:
     """The reindexing map of one transformation.
 
-    ``mapping`` is the transformation's own map, from the loops it replaces to
-    the loops that replace them (see :func:`_reindexing`), or ``None`` for one
-    that renames nothing. Coordinates it does not touch are equated by name,
-    which makes an interchange or a tag the identity and leaves every
-    statement outside the mapped loops as it was; the statements inside them
-    get ``mapping`` itself, lifted into the uniform space by
-    :func:`_lift`.
+    ``mappings`` gives each statement the transformation renames its map,
+    from the loops it replaces to the loops that replace them (see
+    :func:`_reindexing` and :meth:`Schedule._reindex_into`); a transformation
+    that renames nothing gives none. Coordinates a statement's map does not
+    touch are equated by name, which makes an interchange or a tag the
+    identity and leaves every statement outside the mapped loops as it was;
+    the mapped ones are lifted into the uniform space by :func:`_lift`.
     """
-    inputs = () if mapping is None else _dim_names(mapping, isl.dim_type.in_)
+    mappings = mappings or {}
     source = layout_old.dims("x")
     target = layout_new.dims("y", suffix="_")
     out: isl.Map | None = None
@@ -305,10 +305,11 @@ def _step_map(
         old = layout_old.coords[stmt_id]
         new = layout_new.coords[stmt_id]
         index = layout_old.index(stmt_id)
-        mapped = bool(inputs) and inputs[0] in old
+        mapping = mappings.get(stmt_id)
+        inputs = () if mapping is None else _dim_names(mapping, isl.dim_type.in_)
         pieces = [f"s = {index}", f"s_ = {index}"]
         for name in old:
-            if mapped and name in inputs:
+            if name in inputs:
                 continue
             pieces.append(f"y{new.index(name)} = x{old.index(name)}")
         pieces += [f"y{k} = 0" for k in range(len(new), layout_new.width)]
@@ -316,8 +317,7 @@ def _step_map(
         piece = isl.Map(
             f"{{ [{source}] -> [{target}] : {' and '.join(pieces)} }}"
         )
-        if mapped:
-            assert mapping is not None
+        if mapping is not None:
             piece = piece.intersect(
                 _lift(mapping, old, new, layout_old, layout_new)
             )
@@ -391,6 +391,45 @@ def _inherited(mapping: isl.Map) -> dict[str, set[str]]:
             if value.involves_dims(isl.dim_type.in_, position, 1)
         }
     return out
+
+
+def _part(mapping: isl.Map, inside: Sequence[str]) -> isl.Map | None:
+    """The part of ``mapping`` over the loops ``inside``, or ``None``.
+
+    A statement that runs in some of a map's loops and not the others can take
+    the map only when the map is that part side by side with the rest: the
+    new loops whose values depend on ``inside`` alone, as a map of ``inside``,
+    next to every other new loop as a map of the other old ones. A tile is two
+    splits side by side, so a statement in only one of its loops is split, as
+    ``split_iname`` splits it in the kernel. A skew or a diamond mixes its
+    loops and has no such part, and neither has a map isl cannot write as a
+    function (see :func:`_inherited`).
+    """
+    inputs = _dim_names(mapping, isl.dim_type.in_)
+    outputs = _dim_names(mapping, isl.dim_type.out)
+    inherited = _inherited(mapping)
+    mine = [name for name in outputs if inherited[name] <= set(inside)]
+    if not mine:
+        return None
+    others = [name for name in inputs if name not in inside]
+    theirs = [name for name in outputs if name not in mine]
+
+    def restricted(ins: Sequence[str], outs: Sequence[str]) -> isl.Map:
+        # The map with the other inputs existentially quantified and the other
+        # outputs projected out, in the order the names are given.
+        pick_in = _picking(len(inputs), [inputs.index(name) for name in ins])
+        pick_out = _picking(len(outputs), [outputs.index(name) for name in outs])
+        return pick_in.reverse().apply_range(mapping).apply_range(pick_out)
+
+    part = restricted(inside, mine)
+    whole = restricted((*inside, *others), (*mine, *theirs))
+    if not whole.is_equal(part.flat_product(restricted(others, theirs))):
+        return None
+    for k, name in enumerate(inside):
+        part = part.set_dim_name(isl.dim_type.in_, k, name)
+    for k, name in enumerate(mine):
+        part = part.set_dim_name(isl.dim_type.out, k, name)
+    return part
 
 
 def _reindexing(
@@ -798,10 +837,10 @@ class _Draft:
     reductions: dict[str, str] = field(default_factory=dict)
     #: Reduction key -> ``(accumulated array, exactness class)``.
     reduction_info: dict[str, tuple[str, str]] = field(default_factory=dict)
-    #: The step's reindexing, from the loops it replaces to the loops that
-    #: replace them, or ``None`` when it renames no instance; see
-    #: :meth:`Schedule._reindex_into`.
-    mapping: isl.Map | None = None
+    #: The step's reindexing of each statement it renames, from the loops it
+    #: replaces to the loops that replace them: the step's own map, or the part
+    #: of it over a statement's loops; see :meth:`Schedule._reindex_into`.
+    mappings: dict[str, isl.Map] = field(default_factory=dict)
     reassoc: set[str] = field(default_factory=set)
     #: Loop variables whose extent comes from an array; see
     #: :func:`data_dependent_inames`. A split passes the property to both halves.
@@ -1151,9 +1190,13 @@ class Schedule:
         outputs in place of the inputs, as one block where the first input
         was: the coordinates of an instance are a canonical order, not the
         loop order, which each transformation sets for itself. A statement in
-        some of the loops and not the others is refused, because the map has
-        no meaning for it; so is an output spelled like a loop, a size or an
-        array the map does not replace, which would make two things one.
+        some of the loops and not the others gets the part of the map over its
+        own loops when the map has one (see :func:`_part`), as a statement in
+        one of two tiled loops is split and not tiled, and is refused when the
+        map mixes its loops, because the map has no meaning for it then. An
+        output spelled like a loop, a size, an array or another name of the
+        kernel that the map does not replace is refused too, since it would
+        make two things one.
 
         A loop whose extent comes from an array passes that property to each
         new loop whose value depends on it (see :func:`_inherited`): both
@@ -1191,23 +1234,7 @@ class Schedule:
             raise ValueError(
                 f"{text}: not loops of {self._term.name}: {', '.join(unknown)}"
             )
-        taken = (
-            set(draft.order)
-            | set(draft.reductions)
-            | set(self._params)
-            | set(self._term.sizes)
-            | {name for name, _ in self._term.params}
-        ) - set(inputs)
-        for name in outputs:
-            if not name.isidentifier() or is_reserved(name):
-                raise ValueError(
-                    f"{text}: {name!r} cannot name a loop in generated code"
-                )
-            if name in taken:
-                raise ValueError(
-                    f"{text}: the new loop {name!r} would share its name with "
-                    f"a loop, a size or an array of {self._term.name}"
-                )
+        self._check_new_names(draft, outputs, inputs, text)
         foreign = sorted(
             set(mapping.get_var_names(isl.dim_type.param))
             - set(self._params)
@@ -1218,19 +1245,27 @@ class Schedule:
                 f"{text}: the map's parameters {', '.join(foreign)} are not "
                 f"sizes of {self._term.name}"
             )
+        mappings: dict[str, isl.Map] = {}
         for stmt_id, coords in list(draft.coords.items()):
             inside = [name for name in inputs if name in coords]
             if not inside:
                 continue
+            own = mapping
             if len(inside) != len(inputs):
-                outside = [name for name in inputs if name not in coords]
-                raise ValueError(
-                    f"{text}: {stmt_id} runs in {', '.join(inside)} but not in "
-                    f"{', '.join(outside)}, and the map needs all of them"
-                )
-            first = min(coords.index(name) for name in inputs)
-            kept = [name for name in coords if name not in inputs]
-            draft.coords[stmt_id] = (*kept[:first], *outputs, *kept[first:])
+                part = _part(mapping, inside)
+                if part is None:
+                    outside = [name for name in inputs if name not in coords]
+                    raise ValueError(
+                        f"{text}: {stmt_id} runs in {', '.join(inside)} but not "
+                        f"in {', '.join(outside)}, and the map mixes them, so it "
+                        "has no part that moves the loops of that statement alone"
+                    )
+                own = part
+            first = min(coords.index(name) for name in inside)
+            kept = [name for name in coords if name not in inside]
+            new = _dim_names(own, isl.dim_type.out)
+            draft.coords[stmt_id] = (*kept[:first], *new, *kept[first:])
+            mappings[stmt_id] = own
         dependent = draft.data_dependent & set(inputs)
         if dependent:
             inherited = _inherited(mapping)
@@ -1238,7 +1273,44 @@ class Schedule:
             draft.data_dependent |= {
                 name for name in outputs if inherited[name] & dependent
             }
-        draft.mapping = mapping
+        draft.mappings = mappings
+
+    def _check_new_names(
+        self,
+        draft: _Draft,
+        names: Sequence[str],
+        replaced: Sequence[str],
+        text: str,
+    ) -> None:
+        """Refuse a new loop name that generated code cannot use as one.
+
+        It has to be an identifier C does not reserve, and it may not be the
+        name of anything else in the kernel: a loop or a reduction loop that
+        stays, a size, an array, a domain parameter, or an argument or
+        temporary the lowering added (the offsets of a ragged array, say).
+        Taking one of those would make two things one, which loopy and isl
+        otherwise report from inside. The loops being replaced may be reused.
+        """
+        entry = self._lowering.kernel.default_entrypoint
+        taken = (
+            set(draft.order)
+            | set(draft.reductions)
+            | set(self._params)
+            | set(self._term.sizes)
+            | {name for name, _ in self._term.params}
+            | (set(entry.all_variable_names()) - set(entry.all_inames()))
+        ) - set(replaced)
+        for name in names:
+            if not name.isidentifier() or is_reserved(name):
+                raise ValueError(
+                    f"{text}: {name!r} cannot name a loop in generated code"
+                )
+            if name in taken:
+                raise ValueError(
+                    f"{text}: the new loop {name!r} would share its name with "
+                    f"a loop, a size, an array or another name of "
+                    f"{self._term.name}"
+                )
 
     def _split_reduction(
         self, iname: str, factor: int, inner: str, outer: str
@@ -1250,7 +1322,12 @@ class Schedule:
         pieces still run in order. Tagging the inner piece parallel is what
         reassociates, and that is checked in :meth:`tag`.
         """
+        _check_factor(factor)
         draft = self._draft()
+        text = f"split({iname}, {factor})"
+        if inner == outer:
+            raise ValueError(f"{text}: {inner} is named twice among the new loops")
+        self._check_new_names(draft, (outer, inner), (iname,), text)
         key = draft.reductions.pop(iname)
         draft.reductions[inner] = key
         draft.reductions[outer] = key
@@ -1267,7 +1344,7 @@ class Schedule:
         )
         return self._commit(
             draft,
-            f"split({iname}, {factor})",
+            text,
             ("split", (iname, factor), {"inner": inner, "outer": outer}),
         )
 
@@ -1407,9 +1484,11 @@ class Schedule:
         Every statement that runs in the loops named on the left gets the loops
         named on the right instead, which take the places of the old ones in
         the loop order (one for one when there are as many; as one block where
-        the first was otherwise). A new loop may keep the name of one it
-        replaces, which is how :meth:`skew` is this method with a particular
-        map, and its parameters, if any, are sizes of the kernel.
+        the first was otherwise). A statement in only some of those loops gets
+        the part of the map over them, when the map is that part side by side
+        with the rest, and is refused otherwise. A new loop may keep the name
+        of one it replaces, which is how :meth:`skew` is this method with a
+        particular map, and its parameters, if any, are sizes of the kernel.
 
         The map is untrusted like any other transformation. It has to be
         defined on every instance and send no two of them to one point (the
@@ -1533,7 +1612,7 @@ class Schedule:
         layout = _Layout(
             stmt_ids=self._layout.stmt_ids, coords=dict(draft.coords)
         )
-        step = _step_map(self._layout, layout, draft.mapping)
+        step = _step_map(self._layout, layout, draft.mappings)
 
         position = len(self._history)
         facts: list[Any] = []
@@ -1869,7 +1948,7 @@ def _affine_kernel(kernel: Any, mapping: isl.Map) -> tuple[Any, str | None]:
     ``lp.map_domain`` would be the obvious call, and it is what the skew used
     to make. It solves the map for each old iname and accepts only an equation
     with a unit coefficient, so it refuses every map that is not unimodular,
-    the diamond among them ("No suitable equation for 'i' found"), and some
+    the diamond among them ("No suitable equation for 't' found"), and some
     that are, depending on the order in which isl eliminates. The same rewrite
     is done here from what isl says about the map directly:
 

@@ -81,6 +81,29 @@ def test_skewing_first_makes_the_tiling_legal_and_it_still_computes() -> None:
     assert np.allclose(out["u"], ht.jacobi_reference(u))
 
 
+def test_tiling_two_loops_named_in_the_other_order_is_a_tiling_too() -> None:
+    # The second loop named first puts its tiles outside. Both splits used to
+    # be written against the positions the coordinates had before either of
+    # them, and the second one read the first one's position: the tiling came
+    # out "not single-valued" and was refused although it is a bijection.
+    tiled = Schedule(ht.jacobi_term(), sizes={"nt": 8, "nx": 8}).skew(
+        "i", by="t"
+    ).tile("i", "t", 4, 4)
+    assert tiled.order == ("i_outer", "t_outer", "i_inner", "t_inner")
+    assert [fact.status.value for fact in tiled.facts()] == ["decided"] * 4
+    for nt, nx in [(3, 3), (7, 9), (13, 4), (16, 16)]:
+        u = np.zeros((nt, nx))
+        u[0] = np.random.default_rng(nt * nx).standard_normal(nx)
+        out = run(tiled, u=u.copy())
+        assert np.array_equal(out["u"], ht.jacobi_reference(u)), (nt, nx)
+
+    transposed = Schedule(ht.transpose_term()).tile("j", "i", 2, 2)
+    assert transposed.order == ("j_outer", "i_outer", "j_inner", "i_inner")
+    a = np.arange(15, dtype=np.float64).reshape(3, 5)
+    out = run(transposed, a=a, b=np.zeros((5, 3)))
+    assert np.array_equal(out["b"], a.T)
+
+
 def test_a_rejected_step_leaves_the_schedule_it_came_from_intact() -> None:
     schedule = Schedule(ht.jacobi_term(), sizes={"nt": 16, "nx": 16})
     with pytest.raises(IllegalCast):
@@ -369,6 +392,19 @@ def test_a_new_loop_cannot_take_the_name_of_another_one() -> None:
         Schedule(ht.transpose_term()).split("i", 4, outer="n")
 
 
+def test_a_split_reduction_loop_cannot_take_another_name_either() -> None:
+    # A reduction loop is split without a reindexing map, and used to reach
+    # isl's "non-unique var name" from inside loopy's split_iname.
+    with pytest.raises(ValueError, match="share its name"):
+        Schedule(ht.spmv_term()).split("j", 4, inner="r")
+    with pytest.raises(ValueError, match="share its name"):
+        Schedule(ht.spmv_term()).split("j", 4, outer="n")
+    with pytest.raises(ValueError, match="named twice"):
+        Schedule(ht.spmv_term()).split("j", 4, inner="k", outer="k")
+    with pytest.raises(ValueError, match="must be positive"):
+        Schedule(ht.spmv_term()).split("j", 0)
+
+
 def test_skewing_or_tiling_a_loop_by_itself_is_refused() -> None:
     schedule = Schedule(ht.jacobi_term())
     with pytest.raises(ValueError, match="two different loops"):
@@ -533,6 +569,17 @@ def test_skew_is_the_affine_map_that_keeps_the_loop_names(monkeypatch) -> None:
     assert "t < i" in str(mine)
 
 
+def test_a_skewed_loop_keeps_its_tag_in_the_kernel() -> None:
+    # The skew keeps the loop's name, so it keeps the loop's tag: the schedule
+    # says i is a local axis, and so does the kernel it builds. Through
+    # lp.map_domain and back the tag was lost, and the kernel ran the loop
+    # the schedule had checked as parallel one iteration at a time.
+    schedule = Schedule(ht.jacobi_term()).tag(i="l.0").skew("i", by="t")
+    assert schedule.tags == {"i": "l.0"}
+    (tag,) = schedule.kernel.default_entrypoint.inames["i"].tags
+    assert type(tag).__name__ == "LocalInameTag"
+
+
 def test_a_permutation_that_keeps_the_names_is_an_interchange() -> None:
     mapping = isl.Map("{ [i, j] -> [j2, i2] : j2 = j and i2 = i }")
     mapping = mapping.set_dim_name(isl.dim_type.out, 0, "j")
@@ -629,6 +676,89 @@ def test_only_the_loops_a_ragged_loop_becomes_keep_its_extent_from_data() -> Non
     assert schedule.skew("j", by="r")._data_dependent == {"j"}
     diamond = schedule.affine("{ [r, j] -> [a, b] : a = r + j and b = r - j }")
     assert diamond._data_dependent == {"a", "b"}
+
+
+def ragged_row_totals(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """Row sums with the row cleared first: one statement outside the fiber."""
+    for r in y.dom:
+        y[r] = 0.0
+        for j in val.dom[r]:
+            y[r] = y[r] + val[r, j]
+
+
+def _row_totals_run(schedule: Schedule) -> np.ndarray:
+    from loopty.arr import Arr as RuntimeArr
+
+    counts = [2, 0, 3, 1, 4]
+    out = run(
+        schedule,
+        cnt=RuntimeArr.from_numpy(np.array(counts, dtype=np.int64)),
+        val=RuntimeArr.ragged(counts, values=np.arange(1.0, 11.0)),
+        y=np.full(5, 99.0),
+    )
+    return out["y"]
+
+
+def test_a_statement_in_one_of_two_tiled_loops_is_split_by_its_own_loop() -> None:
+    # S0 clears the row and runs in r only; S1 runs in r and in the fiber. A
+    # tile is two splits side by side, so S0 takes the split of r and S1 the
+    # whole tile, which is what loopy's split_iname does to the two
+    # instructions.
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(ragged_row_totals, evaluate_annotations(ragged_row_totals))
+    want = np.array([3.0, 0.0, 3.0 + 4.0 + 5.0, 6.0, 7.0 + 8.0 + 9.0 + 10.0])
+    tiled = Schedule(term, sizes={"n": 5}).tile("r", "j", 2, 2)
+    assert tiled.order == ("r_outer", "j_outer", "r_inner", "j_inner")
+    assert [fact.status.value for fact in tiled.facts()] == ["decided"] * 2
+    assert tiled._layout.coords["S0"] == ("r_outer", "r_inner")
+    # The fiber's bound is read in the row loop, so loopy cannot run j_outer
+    # outside r_inner and would pick a nest of its own (issue #41). Run the
+    # tiles with both halves of the row outside, an order it can keep.
+    rows_first = tiled.interchange("r_inner", "j_outer")
+    assert rows_first.order == ("r_outer", "r_inner", "j_outer", "j_inner")
+    assert np.array_equal(_row_totals_run(rows_first), want)
+
+    # An affine map that is two maps side by side is taken apart the same way;
+    # its kernel is out of reach, because the row and the fiber are two loopy
+    # domains, and says so.
+    apart = Schedule(term, sizes={"n": 5}).affine(
+        "[n] -> { [r, j] -> [q, k] : q = n - 1 - r and k = j }"
+    )
+    assert apart._layout.coords["S0"] == ("q",)
+    assert [f.status.value for f in apart.facts()] == ["decided", "decided", "refuted"]
+    assert "one loopy domain" in apart.buildable[1]
+
+    # A skew mixes the two loops: S0 has no j to shift, and the skew has no
+    # part over r alone that means anything for it.
+    with pytest.raises(ValueError, match="not in j, and the map mixes them"):
+        Schedule(term, sizes={"n": 5}).skew("j", by="r")
+    with pytest.raises(ValueError, match="S0 runs in r but not in j"):
+        Schedule(term, sizes={"n": 5}).affine(
+            "{ [r, j] -> [a, b] : a = r + j and b = r - j }"
+        )
+
+
+def test_a_new_loop_cannot_take_a_name_the_lowering_added() -> None:
+    # The offsets of a ragged array are an argument the lowering adds, not one
+    # of the term's names; a loop called that would be one name for two things.
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(ragged_row_totals, evaluate_annotations(ragged_row_totals))
+    schedule = Schedule(term, sizes={"n": 5})
+    (offsets,) = schedule.lowering.ragged.values()
+    with pytest.raises(ValueError, match="share its name"):
+        schedule.affine(f"{{ [r] -> [{offsets}] : {offsets} = r }}")
+    with pytest.raises(ValueError, match="share its name"):
+        schedule.split("r", 2, inner=offsets)
 
 
 @pytest.mark.parametrize(
