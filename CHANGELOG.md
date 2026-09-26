@@ -923,6 +923,66 @@ with a pair of statement instances.
   raised but returned, as a `refuted` agreement fact with the refusal as its
   reason and no outputs, the way the faithfulness fact counts it, so
   `loopty run` prints it under the fact's `REFUTED` line.
+- A hardware axis on the C target is a `refuted` `buildable` fact (#47): loopy's
+  C code runs in one thread, and code generation stopped with "plain C does not
+  have local hw axes" (or group) for a schedule the check had passed, including
+  one retargeted to C by `loopty run --target c`. So is a `vec` loop that keeps
+  a sum's accumulator in it, which C has no vector types for. The target's own
+  limit is asked after every other, since it is the one `retarget("opencl")`
+  removes; the spmv demo's device schedule, written for `"c"`, keeps its
+  ragged-fiber reason, and its transcript is unchanged. The tests that tagged
+  loops on `"c"` for the casts' sake assert the refuted fact beside the decided
+  casts, or run on loopy's plain OpenCL target, now a shared `plain_opencl`
+  fixture.
+- An `unr`, `ilp` or `vec` loop whose length is not a number when the code is
+  generated is a `refuted` `buildable` fact (#48). loopy writes such a loop
+  out, and a loop over `Fin[n]` with `n` free failed inside isl with
+  "unbounded optimum", naming no loop. The length is asked as loopy asks it,
+  of the loop's bounds with every size and every other loop projected out, so
+  a triangle inside a fixed extent builds, and the reason names the split that
+  makes a loop of fixed length. The check for a hardware axis on a nested
+  reduction no longer counts `ilp` as one; such a loop is refused for the
+  privatization note 11 describes instead.
+- The check knows loopy's rules for hardware axes (#55): the axes of a kind are
+  numbered from 0 with none left out (`l.1` alone was "local axis 0 unused"),
+  an instruction has one loop per axis, `vec` included, with a sum's loop
+  counted as one of its statement's ("instruction 'S0' has multiple inames
+  tagged 'l.0'"), and every instruction runs on every group and local axis the
+  kernel uses, a sum's accumulator and a ragged row's length among them ("does
+  not use all local hw axes"). `l.auto`, which loopy assigns only inside its
+  own transforms, is refused too. Each is read off the kernel's own
+  instructions and tags after every step.
+- The same comparison with loopy's code generation, over every tag and pair of
+  tags on a set of small kernels, found three more, now refused: a concurrent
+  loop (`ilp` and `vec` as well as a hardware axis) on a ragged fiber, or on a
+  dense loop the lowering defines in one domain with a fiber, which loopy
+  refuses in any domain with a data-dependent parameter; a `vec` loop in which
+  a ragged row's length is read, or around a sum on a local axis, which failed
+  with a `TypeError` inside loopy. `tests/test_buildable.py` asks each case of
+  the schedule and of loopy, with loopy's caches off; note 14 of
+  `docs/loopy-notes.md` has the table.
+- A ragged fiber inside a dense loop of its row lowers beside a statement of
+  that loop (#53). The statement in the fiber was cut after its row, where the
+  row's length is assigned, and the one beside the fiber was not, so the row
+  loop came out in two domains and the kernel was refused for using `r` for
+  two loops, which it does not. Every cut is now passed on to the statements
+  that share the loops up to it, and the kernel lowers and agrees with its
+  body. A loop the lowering still cannot define once is refused as a limit of
+  the lowering, not blamed on its name, when every statement that has it has
+  the same loops around it.
+- The agreement fact of a kernel or a term run by `LoopyExecutor.differential`
+  records the target the run was made on (#56). It read the target off the
+  object, which a kernel does not carry, so a run on OpenCL was recorded, and
+  named, as `[c]`. `agreement` takes the target as a keyword, defaulting to the
+  schedule's.
+- A loop tagged `vec` carries no order, as one tagged `ilp` does not (#57).
+  loopy runs such a loop around each instruction of its body separately, so
+  two statements of the loop no longer interleave, and `vec` kept its place in
+  the order the checker asks about: `tag(i="vec")` on a loop whose second
+  statement feeds the first statement of the next iteration was a decided
+  cast, and the compiled run disagreed with the body. It is refused with the
+  witness `ilp` gets, and a `vec` tag on a reduction's loop asks the
+  accumulation's permission to be reassociated, as `ilp` does.
 
 ### Changed
 
