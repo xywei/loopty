@@ -1,6 +1,6 @@
 # Notes on loopy and islpy
 
-Nine interactions with loopty's dependencies that cost real debugging time, each
+Eleven interactions with loopty's dependencies that cost real debugging time, each
 with the local workaround and the reason it is local. No upstream issues were
 filed: these are notes so that the next person meets the answer instead of the
 symptom.
@@ -238,7 +238,93 @@ lowered with `-ffp-contract=off` in its build options on the C target, which
 both GCC and clang honour and which comes after any flag of the toolchain's, and
 with the target's pragma in the source: `#pragma STDC FP_CONTRACT OFF` for C,
 which clang honours and GCC ignores, and the OpenCL one for OpenCL. A kernel
-whose outputs are all `approx` or `reassoc` is left to the compiler. C emitted
-with `--emit-code` for an exact kernel carries the pragma; compiling it with GCC
-in a GNU dialect still needs the flag.
+whose outputs are all `approx` or `reassoc` is left to the compiler.
+
+The flag pins the build loopty runs, and not the source `loopty run
+--emit-code` prints, which someone may compile by hand. GCC in a GNU dialect
+contracts by default whenever `-march` or `-mfma` gives it the instruction, and
+it ignores the standard pragma, so the C for an exact kernel also carries GCC's
+own spelling of the flag, behind a guard that keeps it from other compilers:
+
+```c
+#pragma STDC FP_CONTRACT OFF
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC optimize ("fp-contract=off")
+#endif
+```
+
+GCC documents the `optimize` pragma as meant for debugging. Here it asks for
+less optimization rather than more, and for exactly what the flag asks.
+`tests/test_contraction.py` compiles the emitted source with `gcc -std=gnu99
+-O2 -mfma`: the approx kernel's assembly has a fused multiply-add and the exact
+one's has none. On hardware with FMA it also builds both with `-march=native`
+and calls them, and the exact one keeps the native run's bits.
+
+## 10. One domain per loop, and a statement after an inner loop
+
+**Symptom.** A dense kernel with statements at two depths of one loop,
+
+```python
+for r in y.dom:
+    for j in a.dom[r]:
+        y[r] = y[r] + a[r, j]
+    z[r] = 1.0
+```
+
+failed to lower with `RuntimeError: domain '[n] -> { [r] : ... }' redefines
+iname 'r' that is part of a previous domain`, from `lp.make_kernel`, so the
+executor, `Schedule` and `loopty run` all failed with it. So did two inner loops
+side by side in one outer loop.
+
+**Cause.** loopy defines an iname in exactly one domain. Each statement
+contributed its domain over every loop around it, `{ [r, j] }` for the first
+statement and `{ [r] }` for the second, and `_merge_domains` merges only domains
+over the same inames. A ragged inner loop already had its domain split into an
+outer `{ [r] }` and an inner `{ [j] }` (the row length is assigned inside the
+`r` loop, see `_statement_domains`), which is why the same shape with a ragged
+inner loop worked.
+
+**Local fix.** `lower._depth_cuts` finds, for each statement, the loops at which
+another statement leaves its nest, and the statement's domain is cut there
+into a domain per stretch of loops: `{ [r] }` and `[r] -> { [j] }`, the first
+merging with the other statement's. An outer stretch drops the constraints that
+mention an inner loop instead of projecting the inner loop out
+(`_outer_part`): projecting `j` out of `0 <= j < m` leaves `m >= 1`, and a loop
+over `r` that ran only when the inner loop has an iteration would skip every
+statement after that inner loop. Nothing is lost by dropping, because the
+innermost stretch keeps every constraint. Constraints on the sizes alone go
+too, so the loop over `r` is the same set in both statements and carries no
+predicate. A statement no other one leaves keeps its single domain, so the code
+generated for every kernel that lowered before is what it was. What is left, one
+name for two different loops in a term built by hand, is refused with a
+`LoweringError` naming the loop.
+
+## 11. Hardware axes on reductions
+
+What loopy 2025.2 generates code for, measured with its plain OpenCL target on
+a double sum `reduce_sum(reduce_sum(a[i, j] for j in Fin[i + 1]) for i in
+a.dom)` and on a sum inside a statement loop:
+
+| schedule | loopy | loopty's `buildable` |
+|---|---|---|
+| inner reduction `j` on `l.0`, outer `i` sequential | "instruction 'S0_i_init' does not use all local hw axes" | refused: a hardware axis on a nested reduction |
+| `i` on `l.0`, `j` on `l.1` | the same | refused, the same |
+| outer reduction `i` on `l.0`, `j` sequential | builds | buildable |
+| `j` split, the inner half on `l.0` | "contains both parallel and sequential inames" | refused |
+| a reduction on `g.0` | "the only form of parallelism supported by reductions is 'local'" | not checked |
+| a reduction split, both halves on `l.*` | "contains more than one parallel iname" | not checked |
+| a local axis over a symbolic extent | "a numeric maximum was not found" | not checked |
+
+The first row is the nested case: loopy sets and updates the enclosing
+reduction's accumulator outside the inner reduction's loop, in instructions
+that do not run on its axis, and generates code only when every instruction
+uses every local axis. `schedule._unbuildable_reason` refuses a parallel tag on
+a nested reduction's iname with that reason. It used to be refused only by
+accident, as a ragged fiber: the inner domain names the outer binder `i` as a
+parameter, and every parameter that was not a size counted as data read out of
+an array. An enclosing binder, or a loop of the statement, is not data now, so
+a bound affine in one is a triangle, and a reduction over it is not a ragged
+fiber. The rows marked "not checked" are limits the check does not know yet
+(issue #35); a schedule that hits one passes `buildable` and fails in code
+generation.
 

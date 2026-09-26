@@ -176,9 +176,10 @@ end to end; the edges are sharp.
   `realize`, each checked as a cast, each emitting its fact; `retarget`, which
   replays every step against another loopy target and re-checks it.
 - The target-capability check: a parallel tag inside a data-dependent (ragged)
-  loop bound, or a reduction split across parallel and sequential inames, is
-  reported as a `refuted` `buildable` fact and raises `UnbuildableSchedule` when
-  something asks for code.
+  loop bound, a hardware axis on a reduction nested in another, or a reduction
+  split across parallel and sequential inames, is reported as a `refuted`
+  `buildable` fact and raises `UnbuildableSchedule` when something asks for
+  code.
 - Lowering to loopy, including a ragged axis as a flat buffer plus offsets, and
   running on `lp.ExecutableCTarget`. Every argument of `LoopyExecutor.run` is
   an argument of the kernel; the target is chosen by the schedule

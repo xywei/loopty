@@ -66,11 +66,13 @@ with a pair of statement instances.
 - **A target-capability check** (`loopty.schedule`). Legal and buildable are
   different questions, and a step that passes the first can still fail the
   second. A parallel tag inside a loop whose bound comes from an array (a ragged
-  fiber), or a reduction split across parallel and sequential inames, produces a
-  `refuted` fact of kind `buildable` decided by `loopy-target` with the limit in
-  words, and `UnbuildableSchedule` is raised as soon as anything asks the
-  schedule for code. Both limits were measured on real devices; see
-  `docs/device-runs.md`. The design's own spmv device schedule is the case.
+  fiber), a hardware axis on a reduction nested in another, or a reduction split
+  across parallel and sequential inames, produces a `refuted` fact of kind
+  `buildable` decided by `loopy-target` with the limit in words, and
+  `UnbuildableSchedule` is raised as soon as anything asks the schedule for
+  code. The first and the last were measured on real devices, see
+  `docs/device-runs.md`, and the second in loopy's code generation, see note 11
+  in `docs/loopy-notes.md`. The design's own spmv device schedule is the case.
 - **`Schedule.retarget(target)`**. The same transformations replayed against
   another loopy target, with every cast checked again and the buildability
   question re-asked, rather than relabelled.
@@ -587,6 +589,66 @@ with a pair of statement instances.
   wider column by the shape of the line and fails on a line that is gone. The
   abridged ledger in `README.md`, whose rows say they are verbatim, was kept
   so by hand, and its rule of dashes was not.
+- A kernel with statements at two depths of one loop lowers and runs: `z[r] =
+  1.0` after a dense loop over `j` that writes `y[r]`, or before it, and two
+  inner loops side by side in one outer loop. loopy defines each iname in one
+  domain, each statement contributed its domain over every loop around it, and
+  loopy refused the second domain that defined `r` with a bare `RuntimeError`
+  that the executor, `Schedule` and `loopty run` passed on. A statement's
+  domain is now cut after every loop at which another statement leaves its
+  nest, as a ragged one already was at its row, and an outer stretch drops the
+  constraints of the loops inside it rather than projecting them out, so the
+  loop over `r` does not wait for the inner loop to have an iteration. Every
+  example lowers to the code it lowered to before. One name for two
+  different loops, which only a term built by hand can have, is refused with a
+  `LoweringError` naming the loop. See note 10 in `docs/loopy-notes.md`.
+- An inner reduction bounded by an expression affine in an outer reduction's
+  binder (`reduce_sum(a[i, j] for j in Fin[i + 1])` inside a sum over `i`) is a
+  triangle, not a ragged fiber. The inner domain names the binder as a
+  parameter, and `data_dependent_inames` counted every parameter that was not a
+  size as data read out of an array; an enclosing binder, or a loop of the
+  statement, is not. A parallel tag on a reduction nested in another is
+  refused as unbuildable with its own reason, the limit loopy actually has
+  (the enclosing reduction's accumulator is set outside the inner loop, by
+  instructions that do not run on its axis), where it used to be refused only
+  by accident, as a ragged fiber, and not at all when the inner bound was a
+  size. See note 11 in `docs/loopy-notes.md`, which also lists three limits
+  the check does not know yet.
+- A term built by hand that holds one `Reduction` object in two statements
+  lowers and runs. The lowering planned a reduction's inames by the object's
+  identity, so the second statement's plan replaced the first's, both
+  instructions reduced over one iname, and loopy stopped with a `CycleError`.
+  A plan now belongs to a reduction in a statement, as if each statement had
+  its own copy.
+- The differential test judges each cell by `loopty.tolerance.disagreement`,
+  the comparison the faithfulness fact makes. An infinity both runs computed
+  agrees, where `|inf - inf|` was NaN and the search for the worst cell then
+  raised `ValueError` out of `differential`; a NaN both runs computed in an
+  `exact` output agrees, where it was refuted; and `exact` compares bits, so
+  `-0.0` against `0.0` is a difference, as the docstring always said. The
+  `difference ... within ...` line reports the closest finite cell, or `inf`
+  for a disagreeing cell that is not finite, and outputs of different integer
+  widths are compared in the type both promote to.
+- An expected value that is not finite has no allowance in
+  `loopty.tolerance.disagreement`: `eps_class * (|inf| + 1)` is infinite, so a
+  finite value, or the infinity of the other sign, agreed with an expected
+  infinity under `approx` and `reassoc`. This is the comparison of the
+  faithfulness fact as well as of the differential test.
+- The in-bounds fact of a read of the offsets a ragged access is flattened
+  through says which access it serves: `off[r + 1], the end of row r that
+  val[r, j] is flattened through, is in bounds ...`, with `layout` in its
+  provenance saying the same, and `read directly and as ...` when the kernel
+  also reads it itself. The source never writes those reads, so a refuted one
+  used to name a read nobody could find in the kernel. No example declares its
+  offsets, so no transcript changes.
+- The C of a kernel with an `exact` output carries GCC's own pragma,
+  `#pragma GCC optimize ("fp-contract=off")` behind a guard that keeps it from
+  other compilers, beside the standard one GCC ignores. The build loopty runs
+  was pinned by `-ffp-contract=off`; the source `loopty run --emit-code` prints
+  was not, and GCC in a GNU dialect contracts by default whenever `-march` gives
+  it an FMA instruction. `tests/test_contraction.py` compiles the emitted
+  source by hand to show it, and on hardware with FMA runs it. See note 9 in
+  `docs/loopy-notes.md`.
 
 ### Changed
 
