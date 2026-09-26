@@ -356,6 +356,34 @@ space to a flat address, and "addresses each cell exactly once" is bijectivity,
 which is the same question the schedule checker asks of a reindexing. The
 transpose at the bottom is split and interchanged, and both steps are cast facts.
 
+## A domain that is not a box, as a fourth file
+
+`examples/pairs.py` stores one value per pair of particles, the points of the
+lower triangle, in an array whose type is that triangle:
+`f: Arr[Where[i: Fin[n], j: Fin[n], j < i], Real]`. `Where` takes binders,
+which Python reads as slices, and then the comparisons that cut their box;
+`f.dom` runs over `i` and `f.dom[i]` over the `j` below it. An array for it is
+built over the kernel's declared domain, with its sizes by name and a layout:
+
+```python
+TRIANGLE = pairs.arg_types["f"].domain
+f = Arr.zeros(TRIANGLE, n=6, storage="packed")
+```
+
+```console
+$ uv run python examples/pairs.py
+6 particles, 15 pairs
+f box: 36 cells for 15 pairs
+f packed: 15 cells for 15 pairs, and a table of row starts [0, 0, 1, 3, 6, 10]
+...
+```
+
+The ledger decides every in-bounds obligation over the triangle itself, not
+over the box: the column read `f[k, p]` under `k > p` is in, and `f[p, p]`
+would be out. The layout is a schedule step, `Schedule(pairs).pack("f")`, that
+changes no fact; `loopty run` compiles both layouts and compares each with the
+native run.
+
 ## What to try next
 
 - Break something. Change the stencil's guard from `i > 0` to `i >= 0` and
@@ -384,6 +412,10 @@ transpose at the bottom is split and interchanged, and both steps are cast facts
   where `a` and `b` have the same parity. Write the map with `i + t` first and
   read the witness; `examples/wavefront_acoustic.py` does both for a pair of
   statements, where the tiling is refused.
+- In `examples/pairs.py`, change the column's condition from `k > p` to
+  `k >= p` and re-check. `f[k, p]` now reaches the diagonal, which is a cell of
+  the box and not of the triangle, and the fact is `refuted` with the witness
+  on it.
 - Add `--json out.json` to `lanky check` and read the provenance: the witness,
   the isl question, and the rendered explanation are all in there.
 - `uv run loopty run examples/spmv.py --emit-code` to see the C.
@@ -400,6 +432,7 @@ transpose at the bottom is split and interchanged, and both steps are cast facts
 |---|---|
 | index types, layouts, isl sets | `src/loopty/idx.py` |
 | runtime arrays, dense and ragged | `src/loopty/arr.py` |
+| polyhedral domains, their layouts | `src/loopty/domain.py` |
 | the Term IR | `src/loopty/term.py` |
 | tracing a body | `src/loopty/trace.py` |
 | footprints and dependences | `src/loopty/flow.py` |
@@ -416,7 +449,7 @@ transcripts, are in [device-runs.md](device-runs.md) and under
 debugging time, and the local workarounds for them, are in
 [loopy-notes.md](loopy-notes.md).
 
-All five demos, with every console block regenerated mechanically by
+All six demos, with every console block regenerated mechanically by
 `scripts/refresh_example_outputs.py`, are in
 [../examples/README.md](../examples/README.md). The blocks in *this* file come
 from the same script, some of them elided where marked with `...`; run the

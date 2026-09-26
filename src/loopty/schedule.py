@@ -1199,12 +1199,17 @@ class Schedule:
         kernel: Any,
         target: str = "c",
         sizes: dict[str, int] | None = None,
+        *,
+        _layouts: dict[str, str] | None = None,
     ) -> None:
         self._source = kernel
         self._term = _term_of(kernel)
         self._target = target
         self._sizes = dict(sizes or {})
-        self._lowering: Lowering = lower_generic(self._term, target)
+        #: The layout of each array over a domain that is not boxed; only
+        #: :meth:`pack` sets it, so that the steps say how every array is kept.
+        self._layouts = dict(_layouts or {})
+        self._lowering: Lowering = lower_generic(self._term, target, self._layouts)
         self._kernel = self._lowering.kernel
 
         stmt_ids = tuple(stmt.id for stmt in self._term.stmts)
@@ -1916,6 +1921,44 @@ class Schedule:
         else:
             draft.kernel = None
             draft.unbuildable = reason
+
+    def pack(self, *arrays: str) -> Schedule:
+        """Store arrays over a polyhedral domain packed, a row at a time.
+
+        An array over ``Where[...]``, ``Sigma[...]`` or a union is boxed unless
+        a schedule says otherwise: the box of its binders, with the cells
+        outside the domain wasted. Packed, its cells are kept in lexicographic
+        order and ``L[i, j]`` is read through a table of row starts,
+        ``L[off_L[i] + j]`` (see :mod:`loopty.domain`), which the executor
+        computes from the domain and passes in.
+
+        Not a cast: no instance moves, the facts are about cells and not
+        about where they are kept, and the step emits none. The schedule is
+        lowered again from its kernel with the arrays packed, and every step
+        so far is replayed, so each one is checked again against the kernel
+        that stores them so. A domain with a row that is not an interval
+        cannot be packed and is refused when it is lowered.
+        """
+        if not arrays:
+            raise ValueError("pack() names the arrays to store packed")
+        for name in arrays:
+            if name not in self._lowering.storage:
+                raise ValueError(
+                    f"pack({name!r}): {name} is not an array over a Where, Sigma "
+                    f"or union domain of {self._term.name}, and a dense or "
+                    "ragged array is stored one way"
+                )
+        layouts = {**self._layouts, **dict.fromkeys(arrays, "packed")}
+        out = Schedule(
+            self._source, target=self._target, sizes=self._sizes, _layouts=layouts
+        )
+        for method, args, kwargs in self._steps:
+            out = getattr(out, method)(*args, **kwargs)
+        out = out._clone()
+        out._steps = (*out._steps, ("pack", tuple(arrays), {}))
+        out._history = (*out._history, f"pack({', '.join(arrays)})")
+        out._examples = None if self._examples is None else dict(self._examples)
+        return out
 
     def realize(self, var: str, tree: bool = True) -> Schedule:
         """Realize an accumulation, optionally as a reduction tree.
