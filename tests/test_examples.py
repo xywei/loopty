@@ -307,6 +307,29 @@ def test_the_stencil_demo_prints_the_rejection_then_the_agreement() -> None:
     assert "matches the hand-written sweep: True" in result.stdout
 
 
+def test_the_stencil_in_diamond_coordinates_agrees_with_the_native_run() -> None:
+    # The README's answer for the stencil, against the traced kernel's own
+    # body rather than a numpy reference: the diamond, and rectangles in it,
+    # which are the diamonds of diamond tiling. The approx tolerance allows
+    # rounding; the difference is none.
+    from loopty.executor import LoopyExecutor
+    from loopty.schedule import Schedule
+
+    module = _module("stencil_skew")
+    diamond = Schedule(module.jacobi, sizes={"nt": 16, "nx": 16}).affine(
+        "{ [t, i] -> [a, b] : a = t + i and b = t - i }"
+    )
+    for schedule in (diamond, diamond.tile("a", "b", 4, 4)):
+        assert [f.status.value for f in schedule.facts()] == ["decided"] * len(
+            schedule.facts()
+        )
+        fact = LoopyExecutor().differential(
+            module.jacobi, schedule, module.example_inputs()
+        )
+        assert fact.status.value == "tested", schedule
+        assert fact.provenance["outputs"]["u"]["difference"] == 0.0, schedule
+
+
 # }}}
 
 

@@ -247,8 +247,9 @@ in a GNU dialect still needs the flag.
 ## 10. loopy's affine transforms refuse a map that is not unimodular
 
 **Symptom.** `lp.map_domain(kernel, isl.BasicMap("{ [t, i] -> [a, b] : a = t +
-i and b = t - i }"))` raises `LoopyError: No suitable equation for 'i' found`,
-and `lp.affine_map_inames(kernel, "t, i", "a, b", ["a = t + i", "b = t - i"])`
+i and b = t - i }"))` raises `LoopyError: No suitable equation for 't' found`
+(or for `'i'`: which old iname it tries first follows the order of a Python
+set, so it changes with the hash seed), and `lp.affine_map_inames(kernel, "t, i", "a, b", ["a = t + i", "b = t - i"])`
 raises `RuntimeError: division with remainder in linear solve for 't'`. The
 map is a bijection of the integer points onto its image, and it is the diamond
 of diamond tiling.
@@ -261,8 +262,8 @@ only the points whose two coordinates have the same parity, and on that image
 `t = (a + b) / 2`, which is exact there and not an integer affine expression.
 `map_domain` can also refuse a map whose inverse is integer affine, depending on
 the order in which isl eliminates the other variables: the embedding
-`(t, i) -> (t + i, t - i, t)` fails the same way for `i`, although `i` is its
-first coordinate minus its third.
+`(t, i) -> (t + i, t - i, t)` fails the same way, for `t` or for `i`, although
+`t` is its third coordinate and `i` its first minus its third.
 
 **Local fix.** `schedule._affine_kernel` does the rewrite from the same isl map
 without solving anything. The domain that defines the mapped loops becomes its
