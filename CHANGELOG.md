@@ -225,6 +225,12 @@ with a pair of statement instances.
   argument avoids every name the term has (`off_cnt_`). `Term.where` places a
   program's facts at the program, and `Term.array_types` is the parameters'
   and temporaries' types together.
+- **A sixth demo**, `examples/composition.py`: a Burgers flux and its
+  divergence, composed by a program through an array it makes, which runs
+  natively, prints its term and the one kernel loopy generates for it (with
+  `double f[n];` declared inside), and agrees compiled. `examples/spmv.py`
+  gives its `solve` program example inputs, so `loopty run` compiles it too;
+  the transcripts are regenerated.
 
 ### Fixed
 

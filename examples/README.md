@@ -1,6 +1,6 @@
 # The loopty demos
 
-Five files, each of which runs three ways. Every console block below is a
+Six files, each of which runs three ways. Every console block below is a
 snapshot of real output, not prose about it, and it is produced mechanically:
 
 ```console
@@ -23,6 +23,7 @@ marked with `...` is an excerpt and the lines it keeps are checked verbatim.
 | `wavefront_acoustic.py` | two coupled statements in one acoustic-wave nest: a rectangular tiling refused with a witness that crosses them, the skew that makes it a legal wavefront block, and the diamond map, accepted and run, whose tiling is refused |
 | `reshape_layouts.py` | `Fin[n * m]` as `Fin[n] x Fin[m]`, one buffer read in two layouts, and a transpose split and interchanged |
 | `p2p.py` | the near field of a fast multipole method: a two-level interaction list flattened into one ragged level, with the self-interaction guarded by `when` |
+| `composition.py` | two kernels composed by a program and lowered as one loopy kernel, with the intermediate a temporary of it and the edge between the kernels found in the footprints |
 
 Run them with `uv run` from the repository root:
 
@@ -136,13 +137,21 @@ assumed under scan:postcondition  -              spmv.py:115  solve          aft
 
 The scheduled `spmv` and the unscheduled `scan` are both compiled and compared
 with their own Python bodies. `scan` is integer arithmetic, so its tolerance is
-zero; `y` is compared at the accuracy its exactness class states.
+zero; `y` is compared at the accuracy its exactness class states. So is
+`solve`, the program: its term is `scan`'s statements followed by `spmv`'s, in
+call order, lowered as one kernel and compared with the program run natively,
+both outputs at once. The two calls share only `cnt`, which both read, so
+nothing orders one loop after the other; `composition.py` below has a program
+whose second kernel reads what its first wrote.
 
 ```console
 $ uv run loopty run examples/spmv.py
 spmv: Schedule(spmv, target='c').split(j, 2).realize('y', tree=True)
   y: difference 5.55e-17 within 1.48e-06 (approx) -> tested
 scan: Schedule(scan, target='c')
+  off: difference 0 within 0 (exact) -> tested
+solve: Schedule(solve, target='c')
+  y: difference 0 within 1e-06 (approx) -> tested
   off: difference 0 within 0 (exact) -> tested
 
 STATUS   BY     WHERE        OWNER  STATEMENT
@@ -154,8 +163,9 @@ decided  isl    spmv.py:112  spmv   the order after realize('y', tree=True) runs
 decided  isl    spmv.py:112  spmv   the accumulation into y is reassociated by realize('y', tree=True), s...
 tested   loopy  spmv.py:112  spmv   the scheduled run of spmv agrees with the native run to the accuracy ...
 tested   loopy  spmv.py:79   scan   the scheduled run of scan agrees with the native run to the accuracy ...
+tested   loopy  spmv.py:115  solve  the scheduled run of solve agrees with the native run to the accuracy...
 
-7 facts: 5 decided, 2 tested
+8 facts: 5 decided, 3 tested
 ```
 
 ## stencil_skew.py
@@ -362,6 +372,101 @@ decided  isl    wavefront_acoustic.py:102  acoustic  the order after affine({ [t
 tested   loopy  wavefront_acoustic.py:102  acoustic  the scheduled run of acoustic agrees with the native run to the accur...
 
 8 facts: 6 decided, 2 tested
+```
+
+## composition.py
+
+A Burgers right-hand side in two kernels, `flux` and then `divergence`, and the
+program that runs them, `burgers_rhs`. The flux goes into an array the program
+makes with `Arr.zeros_like(u)`.
+
+Lowered one kernel at a time, that array is an output of `flux` and an input of
+`divergence`: a public argument of both, declared two ways. The program's term
+is one term, the two kernels' statements in call order in the program's names,
+and the array is one of its temporaries: declared inside the one kernel loopy
+generates, zeroed where the program made it (`f.zeros`), and passed by nobody.
+Nothing declares that `divergence` needs `flux`; the `f` one writes and the
+other reads is one array of the term, so the dependence is in the footprints
+and orders the two loops. The loops are not fused. That is a cast over this
+term, still to come, and this run is what it will be checked against.
+
+### python examples/composition.py
+
+```console
+$ uv run python examples/composition.py
+native: the program agrees with the numpy slices: True
+
+the term of burgers_rhs(u, rhs):
+  temporary f: 1 axis, element Real
+  f.zeros        over i_0 from composition.py:79
+  flux.S0        over j   from composition.py:65
+  divergence.S0  over i   from composition.py:73
+
+#include <stdint.h>
+#include <stdbool.h>
+
+void burgers_rhs(int32_t const n, double const *__restrict__ u, double *__restrict__ rhs)
+{
+  double f[n];
+
+  for (int32_t i_0 = 0; i_0 <= -1 + n; ++i_0)
+    f[i_0] = (double) (0.0);
+  for (int32_t j = 0; j <= -1 + n; ++j)
+    f[j] = 0.5 * u[j] * u[j];
+  for (int32_t i = 1; i <= -2 + n; ++i)
+    if (i > 0 && i + 1 < n)
+      rhs[i] = (-1.0 * (f[1 + i] + -1.0 * f[-1 + i])) / 2.0;
+}
+
+  rhs: difference 0 within 1e-06 (approx) -> tested
+```
+
+### lanky check examples/composition.py
+
+The two kernels' obligations. The program adds no row: neither kernel states
+a postcondition for it to restate.
+
+```console
+$ uv run lanky check examples/composition.py
+STATUS   BY           WHERE              OWNER       STATEMENT
+-------  -----------  -----------------  ----------  ------------------------------------------------------
+decided  isl          composition.py:65  flux        f[j] is in bounds for every instance of S0
+decided  isl          composition.py:65  flux        u[j] is in bounds for every instance of S0
+decided  isl          composition.py:65  flux        distinct instances of S0 write distinct cells of f
+decided  isl          composition.py:61  flux        the source order runs every dependence forward in time
+tested   interpreter  composition.py:61  flux        the traced term computes what the body computes
+decided  isl          composition.py:73  divergence  rhs[i] is in bounds for every instance of S0
+decided  isl          composition.py:73  divergence  f[i + 1] is in bounds for every instance of S0
+decided  isl          composition.py:73  divergence  f[i - 1] is in bounds for every instance of S0
+decided  isl          composition.py:73  divergence  distinct instances of S0 write distinct cells of rhs
+decided  isl          composition.py:68  divergence  the source order runs every dependence forward in time
+tested   interpreter  composition.py:68  divergence  the traced term computes what the body computes
+
+11 facts: 9 decided, 2 tested
+```
+
+### loopty run examples/composition.py
+
+Each kernel alone, and then the program as one kernel. On the C target the
+temporary is a variable-length array on the stack of the call; see note 14 in
+`../docs/loopy-notes.md`.
+
+```console
+$ uv run loopty run examples/composition.py
+flux: Schedule(flux, target='c')
+  f: difference 0 within 1e-06 (approx) -> tested
+divergence: Schedule(divergence, target='c')
+  rhs: difference 0 within 1e-06 (approx) -> tested
+burgers_rhs: Schedule(burgers_rhs, target='c')
+  rhs: difference 0 within 1e-06 (approx) -> tested
+
+STATUS  BY     WHERE              OWNER        STATEMENT
+------  -----  -----------------  -----------  ------------------------------------------------------------------------
+tested  loopy  composition.py:65  flux         the scheduled run of flux agrees with the native run to the accuracy ...
+tested  loopy  composition.py:73  divergence   the scheduled run of divergence agrees with the native run to the acc...
+tested  loopy  composition.py:76  burgers_rhs  the scheduled run of burgers_rhs agrees with the native run to the ac...
+
+3 facts: 3 tested
 ```
 
 ## reshape_layouts.py and p2p.py
