@@ -246,6 +246,59 @@ def test_a_refuted_fact_says_what_refutes_it_as_its_reason() -> None:
     assert refuted(bare) == "point (5,) is in the first set but not in the second"
 
 
+def test_a_refutation_over_a_wide_domain_names_what_was_left_out() -> None:
+    # A domain a guard left wide over-approximates the instances that write,
+    # so a witness may be one the guard masks. The provenance said so, and the
+    # reason lanky prints did not (#40). One statement's list, and the
+    # ordering fact's lists by statement, read the same way; a fact decided
+    # over such a domain needs nothing, and gets nothing.
+    from lanky.cli import refutation_lines
+    from lanky.ledger import Fact, Status
+
+    from loopty.oracle import Empty, Subset
+
+    escapes = Subset(
+        isl.Set("[n] -> { [a] : a = n and n = 3 }"),
+        isl.Set("[n] -> { [a] : 0 <= a < n }"),
+        description="cells x[i] reaches are cells x has",
+        labels=("a0",),
+    )
+    masked = {"conjunct": "flag[i] != 0", "why": "reads an array or is not affine"}
+    wide = Fact(
+        id="x",
+        kind="in-bounds",
+        statement="s",
+        term=escapes,
+        provenance={"unnarrowed": [masked]},
+    )
+    refuted = IslOracle().establish(wide)
+    assert refuted.status is Status.REFUTED
+    lines = refuted.provenance["reason"].splitlines()
+    assert lines[0] == "cells x[i] reaches are cells x has, except [a0=3] at [n=3]"
+    assert lines[1].startswith("the domain is wider than the instances that write")
+    assert lines[2] == "  flag[i] != 0, which reads an array or is not affine"
+    assert refutation_lines(refuted)[-3:] == lines
+
+    by_statement = Fact(
+        id="y",
+        kind="ordering",
+        statement="s",
+        term=Empty(isl.Set("{ [i] : i = 1 }"), labels=("i",)),
+        provenance={"unnarrowed": {"S1": [masked]}},
+    )
+    lines = IslOracle().establish(by_statement).provenance["reason"].splitlines()
+    assert lines[-1] == "  flag[i] != 0 in S1, which reads an array or is not affine"
+
+    decided = Fact(
+        id="z",
+        kind="in-bounds",
+        statement="s",
+        term=Empty(isl.Set("{ [i] : 1 = 0 }")),
+        provenance={"unnarrowed": [masked]},
+    )
+    assert "reason" not in IslOracle().establish(decided).provenance
+
+
 def test_a_fact_isl_decides_has_no_reason() -> None:
     from lanky.ledger import Fact, Status
 

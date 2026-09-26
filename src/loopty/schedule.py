@@ -37,7 +37,10 @@ rejected.
 
 The order checked is also the order imposed: every accepted step sets loopy's
 loop priority to the nest it just checked, so the generated code runs the nest
-the checker approved rather than one loopy chose for itself.
+the checker approved rather than one loopy chose for itself. loopy takes a
+priority as a preference, though, and drops one it cannot keep; a nest it
+cannot keep is therefore refused as unbuildable (below), rather than left for
+loopy to replace with a nest nobody checked.
 
 A rejected cast raises :class:`IllegalCast` carrying ``witness``, the pair of
 statement instances the transformation would reorder. That is the difference
@@ -55,17 +58,37 @@ code for. loopy 2025.2 has such limits, two of which the design's own spmv
 device schedule walks into: it will not put a hardware axis (``g.*``, ``l.*``)
 inside a loop whose bound comes from an array, which is exactly what a CSR
 inner loop is, and it will not generate a reduction whose inames are partly
-parallel and partly sequential. A third is a hardware axis on a reduction
-nested in another one. None is a wrong verdict about the cast, and none used to
+parallel and partly sequential. The others known are about reductions too (a
+hardware axis on one nested in another, a reduction on a group axis or across
+two local axes, a local axis whose extent has no numeric maximum) and about
+order (a loop put outside a loop loopy nests it inside, which loopy cannot
+run in that order). None is a wrong verdict about the cast, and none used to
 be reported: the casts were all ``DECIDED`` and loopy then threw during code
-generation, several steps away from the line that caused it.
+generation, several steps away from the line that caused it, or ran a nest of
+its own choosing.
 
 So every accepted step is asked a third question, this one about the target
 rather than about meaning, and its answer is a fact of kind ``buildable``
 decided by ``loopy-target``. A schedule that fails it still exists, still
 carries its ``DECIDED`` cast facts, and still reports what it is: the refusal
 happens when something asks for code (see :class:`UnbuildableSchedule`), which
-is the moment the claim actually matters.
+is the moment the claim actually matters. The question is about the schedule
+as it stands, so it is asked again after every step, and a later step can put
+right what an earlier one broke: an interchange that puts a row loop back
+outside its fiber makes a tiled ragged loop buildable again, and the schedule
+then carries no ``buildable`` fact, as any buildable schedule does. A kernel
+the rewrite of :meth:`Schedule.affine` could not write stays unwritten.
+
+Fact ids
+--------
+
+A fact's id names the schedule it is about, precisely enough to tell it from
+every other schedule of the kernel: the kernel, the target, and every step up
+to the one the fact is about, with every argument it was given
+(:attr:`Schedule.key`). Two schedules of one kernel in one file therefore keep
+their facts apart in a ledger, which keeps one fact per id, while two that
+share their first steps share the facts about those steps, which are the same
+claims.
 
 Maps whose image has holes
 --------------------------
@@ -755,11 +778,26 @@ def data_dependent_inames(
 def _unbuildable_reason(draft: _Draft) -> str | None:
     """Why loopy could not generate code for this draft, or ``None``.
 
-    Three limits of loopy 2025.2, all measured rather than guessed: a device
-    run of the design's spmv schedule fails on the first, applying loopy's own
-    ``split_reduction_outward`` remedy to it then fails on the third, and code
-    generation for a double sum with its inner reduction on a local axis fails
-    on the second ("instruction ... does not use all local hw axes").
+    Limits of loopy 2025.2, all measured rather than guessed, in the order
+    they are asked:
+
+    * a parallel tag inside a ragged fiber: a device run of the design's spmv
+      schedule fails on it;
+    * a hardware axis on a reduction nested in another: code generation for a
+      double sum with its inner reduction on a local axis fails ("instruction
+      ... does not use all local hw axes");
+    * the three ways loopy refuses to realize a reduction, asked as it asks
+      them (see :func:`_reduction_reason`): partly on a local axis and partly
+      in sequence (applying loopy's own ``split_reduction_outward`` remedy to
+      the spmv schedule fails on this one), across two local axes, and on any
+      other concurrent axis, a group axis above all;
+    * a local axis whose extent has no numeric maximum, where a reduction on
+      a local axis needs one (see :func:`_extent_reason`);
+    * a loop ordered outside a loop loopy nests it inside, which loopy cannot
+      run in that order (see :func:`_nest_reason`).
+
+    Note 11 of ``docs/loopy-notes.md`` has the table of what loopy says to
+    each, and note 6 the loop orders.
     """
     parallel = {name for name, tag in draft.tags.items() if parallel_tag(tag)}
     inside = sorted(parallel & draft.data_dependent)
@@ -795,17 +833,283 @@ def _unbuildable_reason(draft: _Draft) -> str | None:
     for iname, key in draft.reductions.items():
         by_reduction.setdefault(key, []).append(iname)
     for key, inames in sorted(by_reduction.items()):
-        accumulated = draft.reduction_info.get(key, (key, ""))[0]
-        tagged = sorted(name for name in inames if name in parallel)
-        untagged = sorted(name for name in inames if name not in parallel)
-        if tagged and untagged:
+        reason = _reduction_reason(draft, key, inames)
+        if reason is not None:
+            return reason
+    for key, inames in sorted(by_reduction.items()):
+        reason = _extent_reason(draft, key, inames)
+        if reason is not None:
+            return reason
+    return _nest_reason(draft)
+
+
+def _reduction_role(tag: str | None) -> str:
+    """How loopy realizes a reduction over a loop with this tag.
+
+    ``"local"``, ``"sequential"``, ``"unrolled"``, ``"ilp"`` or ``"refused"``,
+    as ``loopy.transform.realize_reduction`` classifies a reduction's inames,
+    and read off loopy's own tag classes so that the two cannot drift apart:
+    an untagged loop is summed in sequence, and so is one loopy unrolls
+    (``unr``, and ``ilp``, whose accumulator loopy also privatizes, which is
+    why it is told apart); a local axis (``l.*``) is summed in a tree across
+    the work items of a group; and a reduction over any other concurrent axis
+    (a group axis ``g.*``, ``ilp.seq``, ``vec``) is not generated at all. The
+    checker reads ``ilp`` differently, as an order-free loop
+    (:data:`PARALLEL_TAG_PREFIXES`), which is what makes it ask an
+    accumulation's permission to be reassociated before a reduction loop is
+    tagged so.
+    """
+    from loopy.kernel.data import (
+        ConcurrentTag,
+        LocalInameTagBase,
+        UnrolledIlpTag,
+        UnrollTag,
+        parse_tag,
+    )
+
+    parsed = parse_tag(tag)
+    if isinstance(parsed, UnrolledIlpTag):
+        return "ilp"
+    if isinstance(parsed, UnrollTag):
+        return "unrolled"
+    if isinstance(parsed, LocalInameTagBase):
+        return "local"
+    if isinstance(parsed, ConcurrentTag):
+        return "refused"
+    return "sequential"
+
+
+def _reduction_reason(draft: _Draft, key: str, inames: Sequence[str]) -> str | None:
+    """Why loopy would refuse to realize one reduction, or ``None``.
+
+    Asked in the order loopy asks (``map_reduction`` in
+    ``loopy.transform.realize_reduction``), so that the reason is the error
+    loopy would raise: part of it on a local axis and part in sequence, then
+    two local axes, then a concurrent axis that is not a local one. A
+    reduction is generated only when every loop of it is sequential, or when
+    it is one loop, on a local axis.
+
+    One more is asked after those, because loopy meets it later, when it
+    privatizes the temporaries of an ``ilp`` loop: a reduction over an
+    ``ilp`` loop has its accumulator privatized along that loop, and whether
+    loopy then accepts the instruction that initializes it outside the loop
+    changes from one run to the next with Python's string hash seed (the same
+    kernel was refused under some seeds and built under others, in 2025.2). A
+    fact that holds only on some runs is not a fact, so it is refused; ``unr``
+    unrolls the sum in order and builds.
+    """
+    accumulated = draft.reduction_info.get(key, (key, ""))[0]
+    roles = {name: _reduction_role(draft.tags.get(name)) for name in inames}
+    local = sorted(name for name, role in roles.items() if role == "local")
+    sequential = sorted(
+        name
+        for name, role in roles.items()
+        if role in ("sequential", "unrolled", "ilp")
+    )
+    refused = sorted(name for name, role in roles.items() if role == "refused")
+    privatized = sorted(name for name, role in roles.items() if role == "ilp")
+    if local and sequential:
+        unrolled = [n for n in sequential if roles[n] in ("unrolled", "ilp")]
+        how = (
+            f" (loopy unrolls {', '.join(unrolled)}, which is a sequence)"
+            if unrolled
+            else ""
+        )
+        return (
+            f"the reduction into {accumulated} runs over {', '.join(local)} "
+            f"in parallel and {', '.join(sequential)} in sequence{how}, and "
+            "loopy generates code only for a reduction whose inames are all one "
+            "or all the other. loopty has no split_reduction transform to offer "
+            "as the remedy"
+        )
+    if len(local) > 1:
+        return (
+            f"the reduction into {accumulated} runs over {', '.join(local)} on "
+            f"{len(local)} local axes, and loopy sums a reduction across one "
+            "local axis at most, and only when that axis is the whole of it. "
+            "loopty has no split_reduction transform to offer as the remedy"
+        )
+    if refused:
+        tags = ", ".join(f"{name}={draft.tags[name]!r}" for name in refused)
+        return (
+            f"the reduction into {accumulated} runs over {tags}, and loopy "
+            "runs a reduction in parallel only across the work items of a "
+            "group, on a local axis (l.*): a group axis, ilp.seq or vec on the "
+            "loop of a reduction is refused. Put it on a local axis instead, or "
+            "put the axis on a loop of the statement"
+        )
+    if privatized:
+        return (
+            f"the reduction into {accumulated} runs over {', '.join(privatized)} "
+            "on an ilp axis, and loopy privatizes the accumulator along it and "
+            "then accepts or refuses the instruction that initializes it outside "
+            "the loop depending on Python's string hash seed, so the code cannot "
+            "be counted on. Tag it unr instead, which unrolls the sum in order"
+        )
+    return None
+
+
+def _extent_reason(draft: _Draft, key: str, inames: Sequence[str]) -> str | None:
+    """A reduction on a local axis whose partial sums loopy cannot size.
+
+    loopy sums a reduction on a local axis as a tree, over an array in local
+    memory with one cell per work item of every local axis the statement runs
+    on: the reduction's own, and those of the statement's loops around it
+    (``map_reduction_local`` in ``loopy.transform.realize_reduction``). The
+    shape of that array has to be a number when the code is generated, so
+    each of those extents needs a numeric maximum over every value of the
+    sizes. loopy looks for it with ``static_max_of_pw_aff(...,
+    constants_only=True)`` on the loop's bounds, and this asks it the same way:
+    ``y[i] = reduce_sum(a[i, j] for j in Fin[i + 1])`` with ``j`` on ``l.0``
+    has none while ``n`` is free, and has 8 in a kernel over ``Fin[8]``.
+    """
+    if draft.kernel is None:
+        return None
+    local = [n for n in inames if _reduction_role(draft.tags.get(n)) == "local"]
+    if not local:
+        return None
+    statement = key.rsplit(":", 1)[0]
+    around = [
+        name
+        for name in draft.coords.get(statement, ())
+        if _reduction_role(draft.tags.get(name)) == "local"
+    ]
+    accumulated = draft.reduction_info.get(key, (key, ""))[0]
+    for name in (*local, *around):
+        extent = _unbounded_extent(draft.kernel, name)
+        if extent is None:
+            continue
+        whose = (
+            f"the reduction into {accumulated} runs over {name} on a local axis"
+            if name in local
+            else f"the reduction into {accumulated} runs on a local axis inside "
+            f"the loop {name}, which is on a local axis too"
+        )
+        return (
+            f"{whose}, and loopy sums such a reduction in local memory, in an "
+            "array with a cell per work item whose shape has to be a number "
+            f"when the code is generated; the extent of {name} is {extent}, "
+            "which no number bounds while the sizes it names are free. Declare "
+            "that extent as a number (Fin[8] rather than Fin[n]), or run the "
+            "reduction in sequence"
+        )
+    return None
+
+
+def _unbounded_extent(kernel: Any, iname: str) -> str | None:
+    """The extent of ``iname`` when it has no numeric maximum, or ``None``.
+
+    Asked as ``loopy.transform.realize_reduction`` asks it, of the size in the
+    loop's bounds: the extent over every value of the sizes and of the loops
+    around it.
+    """
+    from loopy.diagnostic import StaticValueFindingError
+    from loopy.isl_helpers import static_max_of_pw_aff
+    from loopy.symbolic import pw_aff_to_expr
+
+    size = kernel.default_entrypoint.get_iname_bounds(iname).size
+    try:
+        static_max_of_pw_aff(size, constants_only=True)
+    except StaticValueFindingError:
+        try:
+            return f"at most {pw_aff_to_expr(size)}"
+        except Exception:  # noqa: BLE001 - a piecewise extent is shown as isl has it
+            return f"at most {size}"
+    return None
+
+
+def _enclosing_loops(kernel: Any) -> dict[str, dict[str, str]]:
+    """For each loop of ``kernel``, the loops loopy nests it inside, and why.
+
+    Read off loopy's own ``find_loop_nest_around_map``, the nesting both of
+    its schedulers keep to, so that the two cannot drift apart. loopy nests a
+    loop inside another for one of two reasons. A domain that names a loop as
+    a parameter is defined inside that loop, with every loop it defines: a
+    ragged fiber's domain names its row, and so does the inner domain of a
+    nest another statement leaves (note 10 of ``docs/loopy-notes.md``). And a
+    loop whose instructions are some of another loop's, and not all of them,
+    runs inside it, whatever the domains say: ``k`` in ``w[r + 1, k] = w[r, k]
+    + reduce_sum(val[r, j] for j in val.dom[r])`` shares one domain with ``r``
+    and is still nested in it, because the length of row ``r`` is assigned in
+    ``r`` and outside ``k``. The loops a loop is nested in are these, and the
+    ones those are nested in, in turn, each with the reason in words.
+    """
+    from loopy.schedule import find_loop_nest_around_map
+
+    entry = kernel.default_entrypoint
+    direct = find_loop_nest_around_map(entry)
+    named: dict[str, set[str]] = {}
+    for domain in entry.domains:
+        params = set(domain.get_var_names(isl.dim_type.param))
+        for name in domain.get_var_names(isl.dim_type.set):
+            named.setdefault(name, set()).update(params)
+    insns = entry.iname_to_insns()
+
+    def why(inner: str, outer: str) -> str:
+        if outer in named.get(inner, ()):
             return (
-                f"the reduction into {accumulated} runs over {', '.join(tagged)} "
-                f"in parallel and {', '.join(untagged)} in sequence, and loopy "
-                "generates code only for a reduction whose inames are all one or "
-                "all the other. loopty has no split_reduction transform to offer "
-                "as the remedy"
+                f"the domain of {inner} names {outer}, as a ragged fiber's "
+                "names its row"
             )
+        others = ", ".join(sorted(insns[outer] - insns[inner]))
+        return f"{outer} runs every instruction {inner} runs, and {others} as well"
+
+    out: dict[str, dict[str, str]] = {}
+    for name in sorted(direct):
+        reached: dict[str, str] = {}
+        pending = [(outer, why(name, outer)) for outer in sorted(direct[name])]
+        while pending:
+            current, reason = pending.pop(0)
+            if current in reached:
+                continue
+            reached[current] = reason
+            pending.extend(
+                (outer, f"{reason}, and {current} is nested in {outer} in turn")
+                for outer in sorted(direct.get(current, ()))
+            )
+        out[name] = reached
+    return out
+
+
+def _nest_reason(draft: _Draft) -> str | None:
+    """A loop ordered outside a loop loopy nests it inside, or ``None``.
+
+    loopy keeps a nesting of its own (see :func:`_enclosing_loops`): a ragged
+    fiber inside its row, because the row's length is read there, the loops
+    of a statement that another statement leaves inside the loops around it
+    (note 10 of ``docs/loopy-notes.md``), and a statement loop inside the row
+    of a ragged reduction in it, because the row's length is assigned outside
+    the statement loop. The loop priority :func:`_with_priority` sets is only
+    a preference, and loopy drops it when the two disagree ("Cannot satisfy
+    constraint that iname ... must be nested within ...") and runs a nest of
+    its own choosing, which the cast facts did not check and which can run a
+    dependence backwards. A tile of a ragged fiber with its row orders
+    ``j_outer`` before ``r_inner``, and an interchange can put the fiber
+    before the row outright.
+
+    Read off the kernel after the step and asked of each statement's ordered
+    loops, which is the nest the priority states; a parallel loop has no
+    place in it. Checking loopy's own linearized nest against the order would
+    be the complete answer, and would cost a scheduling pass per step.
+    """
+    if draft.kernel is None:
+        return None
+    around = _enclosing_loops(draft.kernel)
+    layout = _Layout(stmt_ids=tuple(draft.coords), coords=dict(draft.coords))
+    for nest in _nests(layout, draft.order, draft.tags).values():
+        for position, loop in enumerate(nest):
+            for inner in nest[position + 1 :]:
+                why = around.get(loop, {}).get(inner)
+                if why is None:
+                    continue
+                return (
+                    f"the loop {loop} is ordered outside {inner}, but loopy "
+                    f"nests it inside {inner}: {why}. So loopy cannot run the "
+                    "order that was checked: it would drop the loop priority "
+                    "and run a nest of its own choosing, which the cast facts "
+                    f"say nothing about. Order {inner} outside {loop}, as "
+                    f"interchange({inner!r}, {loop!r}) does"
+                )
     return None
 
 
@@ -1119,6 +1423,26 @@ class Schedule:
         """The example inputs recorded with :meth:`example`, if any."""
         return None if self._examples is None else dict(self._examples)
 
+    @property
+    def key(self) -> str:
+        """The schedule, as the ids of its facts name it.
+
+        The kernel's name, the target in brackets, and every step as it was
+        called, with every argument it was given::
+
+            spmv[c].split('j', 2, inner='j_in', outer='j_out').realize('y', tree=True)
+
+        The steps are the recipes :meth:`retarget` replays, so two schedules
+        with one key are one schedule. :attr:`history` and the repr are for
+        reading and leave out what does not change the text (``split(j, 2)``
+        does not name its halves), which two different schedules can differ
+        in. The id of a cast fact is ``cast:`` and this key up to the step it
+        is about, then its kind; that of the agreement a run of the schedule
+        records (:func:`loopty.executor.agreement`) is ``agreement:`` and the
+        whole key.
+        """
+        return _key(self._term.name, self._target, self._steps)
+
     def __repr__(self) -> str:
         steps = "".join(f".{step}" for step in self._history)
         return f"Schedule({self._term.name}, target={self._target!r}){steps}"
@@ -1134,8 +1458,34 @@ class Schedule:
         ones are the interesting case: they remove the iname from the order, so
         tagging a loop that carries a dependence is rejected here rather than
         producing a race at run time.
+
+        A name that is neither a loop nor the loop of a reduction, and a tag
+        loopy cannot read, are refused with a ``ValueError`` before anything
+        else, as :meth:`split` refuses an unknown loop. loopy's own
+        ``tag_inames`` refuses both too, but it is not asked once a step has
+        left the schedule with no kernel (see :attr:`kernel`), and the steps
+        after that one are still checked, so that their facts say what the
+        schedule is.
         """
+        from loopy.kernel.data import parse_tag
+
         draft = self._draft()
+        unknown = [
+            name
+            for name in inames
+            if name not in draft.order and name not in draft.reductions
+        ]
+        if unknown:
+            listed = ", ".join(repr(name) for name in unknown)
+            verb = "is not an iname" if len(unknown) == 1 else "are not inames"
+            raise ValueError(f"{listed} {verb} of {self._term.name}")
+        for name, tag in inames.items():
+            try:
+                parse_tag(tag)
+            except ValueError as exc:
+                raise ValueError(
+                    f"tag({name}={tag!r}): loopy cannot read the tag: {exc}"
+                ) from exc
         for name, tag in inames.items():
             if name not in draft.reductions or not parallel_tag(tag):
                 continue
@@ -1161,8 +1511,9 @@ class Schedule:
                         status="refuted",
                         witness=None,
                         detail=f"the accumulation into {accumulated} is exact",
-                        position=len(self._history),
+                        step=("tag", (), dict(inames)),
                         reason=message,
+                        about=accumulated,
                     ),
                 )
             draft.reassoc.add(accumulated)
@@ -1590,8 +1941,9 @@ class Schedule:
                 status="refuted",
                 witness=None,
                 detail=f"the accumulation into {var} is exact",
-                position=len(self._history),
+                step=("realize", (var,), {"tree": tree}),
                 reason=message,
+                about=var,
             )
             raise IllegalCast(message, witness=None, fact=fact)
         draft = self._draft()
@@ -1631,19 +1983,19 @@ class Schedule:
         self,
         draft: _Draft,
         text: str,
-        recipe: tuple[str, tuple, dict] | None = None,
+        recipe: tuple[str, tuple, dict],
     ) -> Schedule:
         """Check one transformation and return the schedule it produces.
 
         ``recipe`` is how the transformation would be written in Python, as
-        ``(method, args, kwargs)``, kept so that :meth:`retarget` can replay it.
+        ``(method, args, kwargs)``, kept so that :meth:`retarget` can replay it,
+        and so that the facts about this step name it (see :attr:`key`).
         """
         layout = _Layout(
             stmt_ids=self._layout.stmt_ids, coords=dict(draft.coords)
         )
         step = _step_map(self._layout, layout, draft.mappings)
 
-        position = len(self._history)
         facts: list[Any] = []
 
         # Defined on every instance, and one for one there: a map that misses
@@ -1664,7 +2016,7 @@ class Schedule:
                 status="decided" if verdict.ok else "refuted",
                 witness=verdict.witness,
                 detail=verdict.detail,
-                position=position,
+                step=recipe,
                 reason=message,
             )
         )
@@ -1701,7 +2053,7 @@ class Schedule:
                 status="refuted" if refused else "decided",
                 witness=witness,
                 detail=overall.detail if bad is None else bad[2],
-                position=position,
+                step=recipe,
                 reason=message,
             )
         )
@@ -1724,25 +2076,35 @@ class Schedule:
         other._reduction_info = dict(draft.reduction_info)
         other._data_dependent = frozenset(draft.data_dependent)
         # The cast is legal; whether the target can build it is a separate
-        # question, asked once per step and recorded either way.
-        reason = (
-            self._unbuildable or draft.unbuildable or _unbuildable_reason(draft)
-        )
+        # question, about the schedule as it now stands, so it is asked again
+        # at every step. A kernel the rewrite could not write stays unwritten;
+        # anything else is read off the draft, and a later step can put right
+        # what an earlier one broke, such as an order loopy cannot keep.
+        if draft.kernel is None:
+            reason = draft.unbuildable or self._unbuildable
+        else:
+            reason = _unbuildable_reason(draft)
         other._unbuildable = reason
-        if reason is not None and self._unbuildable is None:
-            facts.append(
-                self._fact(
-                    "buildable",
-                    f"{self._target} code can be generated for "
-                    f"{self._term.name} after {text}",
-                    status="refuted",
-                    witness=None,
-                    detail=reason,
-                    position=position,
-                    oracle="loopy-target",
-                    reason=reason,
+        earlier = self._facts
+        if reason != self._unbuildable:
+            # The one ``buildable`` fact a schedule carries is about its
+            # current reason, and is the fact ``require_buildable`` raises
+            # with, so it goes when the reason goes or changes.
+            earlier = tuple(fact for fact in earlier if fact.kind != "buildable")
+            if reason is not None:
+                facts.append(
+                    self._fact(
+                        "buildable",
+                        f"{self._target} code can be generated for "
+                        f"{self._term.name} after {text}",
+                        status="refuted",
+                        witness=None,
+                        detail=reason,
+                        step=recipe,
+                        oracle="loopy-target",
+                        reason=reason,
+                    )
                 )
-            )
         for accumulated in sorted(set(draft.reassoc) - set(self._reassoc)):
             facts.append(
                 self._fact(
@@ -1752,14 +2114,13 @@ class Schedule:
                     status="decided",
                     witness=None,
                     detail=f"exactness of {accumulated} lowered to reassoc",
-                    position=position,
+                    step=recipe,
+                    about=accumulated,
                 )
             )
         other._history = (*self._history, text)
-        other._steps = (
-            (*self._steps, recipe) if recipe is not None else self._steps
-        )
-        other._facts = (*self._facts, *facts)
+        other._steps = (*self._steps, recipe)
+        other._facts = (*earlier, *facts)
         return other
 
     def _first_violation(
@@ -1872,11 +2233,19 @@ class Schedule:
         status: str,
         witness: Any,
         detail: str,
-        position: int,
+        step: tuple[str, tuple, dict],
         oracle: str = "isl",
         reason: str = "",
+        about: str = "",
     ) -> Any:
         """One ledger entry for one question about one step.
+
+        ``step`` is the step's recipe, ``(method, args, kwargs)``, and the
+        fact's id is :attr:`key` with it as the last step: the steps up to
+        this one, and not a count of them, because two schedules of one kernel
+        both have a first step and keep facts in one ledger. ``about`` tells
+        apart two facts of one kind about one step, such as the exactness of
+        two accumulations one ``tag`` reassociates, and is the array's name.
 
         ``oracle`` is who answered: ``isl`` for the two questions about meaning,
         ``loopy-target`` for the one about what the backend can generate.
@@ -1910,8 +2279,10 @@ class Schedule:
             provenance["witness"] = witness
         if status == "refuted":
             provenance["reason"] = reason or detail
+        suffix = f":{about}" if about else ""
         return Fact(
-            id=f"cast:{self._term.name}:{position}:{kind}",
+            id=f"cast:{_key(self._term.name, self._target, (*self._steps, step))}"
+            f":{kind}{suffix}",
             kind=kind,
             statement=statement,
             term=None,
@@ -1925,6 +2296,29 @@ class Schedule:
     def facts(self) -> tuple:
         """The cast facts accumulated by the transformations applied so far."""
         return self._facts
+
+
+def _key(name: str, target: str, steps: Sequence[tuple[str, tuple, dict]]) -> str:
+    """``spmv[c].split('j', 2, inner='j_in', outer='j_out')``: :attr:`Schedule.key`."""
+    return f"{name}[{target}]" + "".join(f".{_call_text(step)}" for step in steps)
+
+
+def _call_text(step: tuple[str, tuple, dict]) -> str:
+    """One recipe as the call it is, every argument written out.
+
+    An isl map, which is what :meth:`Schedule.affine` records, is written as
+    its text, which is what ``affine`` also accepts.
+    """
+    method, args, kwargs = step
+
+    def shown(value: Any) -> str:
+        if isinstance(value, isl.Map | isl.BasicMap):
+            return repr(str(value))
+        return repr(value)
+
+    parts = [shown(arg) for arg in args]
+    parts += [f"{name}={shown(value)}" for name, value in kwargs.items()]
+    return f"{method}({', '.join(parts)})"
 
 
 def _sizes_text(params: dict[str, int], hint: dict[str, int]) -> str:

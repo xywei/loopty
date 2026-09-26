@@ -16,7 +16,7 @@ import pytest
 from lanky.prelude import Nat, Real
 
 import hand_terms as ht
-from loopty import Arr, Fin, kernel
+from loopty import Arr, Fin, kernel, when
 from loopty import sum as reduce_sum
 from loopty.executor import (
     TOLERANCE,
@@ -128,6 +128,50 @@ def test_a_disagreement_is_refuted_rather_than_raised() -> None:
     fact = executor().differential(wrong, schedule, arrays)
     assert fact.status.value == "refuted"
     assert not fact.provenance["outputs"]["z"]["agree"]
+
+
+@kernel
+def flipped(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """``~`` on a Python bool is bitwise, so natively this guard is an integer."""
+    for i in y.dom:
+        with when(~(i > 0)):
+            y[i] = x[i]
+
+
+@pytest.mark.filterwarnings("ignore:Bitwise inversion:DeprecationWarning")
+def test_a_native_refusal_is_a_refuted_agreement_rather_than_raised() -> None:
+    # The native TraceError came out of ``differential``, so the run recorded
+    # nothing, while the faithfulness fact counts the same refusal as a
+    # disagreement (#44). Python warns about ~ on a bool, which this suite
+    # makes an error, and a user's run does not.
+    arrays = {"x": Arr.from_numpy(np.arange(4.0)), "y": Arr.zeros(4)}
+    schedule = Schedule(flipped)
+    fact = executor().differential(flipped, schedule, arrays)
+    assert fact.kind == "agreement"
+    assert fact.status.value == "refuted"
+    assert fact.id == f"agreement:{schedule.key}"
+    assert fact.provenance["error"].startswith("TraceError: the guard of")
+    reason = fact.provenance["reason"]
+    assert reason.startswith("the body, run natively, is refused")
+    assert "'i <= 0' for '~(i > 0)'" in reason
+    assert fact.provenance["outputs"] == {}
+    # The caller's arrays are untouched: neither run wrote into them.
+    assert np.array_equal(arrays["y"].numpy(), np.zeros(4))
+
+
+def test_an_agreement_fact_is_named_after_the_schedule_that_ran() -> None:
+    arrays = {
+        "a": 2.0,
+        "x": np.arange(4, dtype=np.float64),
+        "y": np.ones(4),
+        "z": np.zeros(4),
+    }
+    split = Schedule(ht.axpy_term()).split("i", 2)
+    fact = executor().differential(axpy_reference, split, arrays)
+    assert fact.id == f"agreement:{split.key}"
+    assert fact.id != executor().differential(
+        axpy_reference, Schedule(ht.axpy_term()), arrays
+    ).id
 
 
 def test_the_exactness_class_of_an_output_is_the_weakest_of_three() -> None:

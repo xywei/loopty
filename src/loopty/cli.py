@@ -57,11 +57,24 @@ one, the fact's ``reason`` (the limit a ``buildable`` fact hits, or the outputs
 a compiled run disagreed on), or a line saying nothing was recorded. The
 command then exits 1, as it does when a kernel cannot be scheduled, a schedule
 cannot be retargeted, or a run raises.
+
+A run that raises, whatever it raises, is reported by the exception's type and
+message, the kernel counts as failed, and the file's other kernels are still
+run; so is a file's ``example_inputs()`` that raises, and code generation that
+fails under ``--emit-code``. A body that tracing refuses natively (a ``when``
+guard whose native value is an integer) is a refuted agreement fact instead,
+with the refusal as its reason; see
+:meth:`loopty.executor.LoopyExecutor.differential`.
+
+Every schedule keeps its own facts in the ledger, however many schedules of one
+kernel the file has, because a fact's id names the schedule it is about (see
+:attr:`loopty.schedule.Schedule.key`).
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 from pathlib import Path
 from typing import Any
 
@@ -249,7 +262,7 @@ class RunVerb:
         from lanky.plugins import registry
 
         from loopty.executor import LoopyExecutor, emit_code
-        from loopty.schedule import IllegalCast, Schedule
+        from loopty.schedule import Schedule
         from loopty.trace import TraceError
 
         target = getattr(args, "target", None)
@@ -291,6 +304,7 @@ class RunVerb:
         # target it runs on, so this only makes the executor insist on it.
         executor = LoopyExecutor(target=target)
         ledger = Ledger()
+        runs: dict[str, int] = {}
         for schedule in schedules:
             name = _name_of(schedule)
             print(f"{name}: {schedule!r}")
@@ -300,33 +314,36 @@ class RunVerb:
             if not ok:
                 print(f"  not buildable for the {schedule.target} target: {reason}")
                 continue
-            if args.emit_code:
-                print(emit_code(schedule))
-            inputs = schedule.examples or example_inputs(module, name)
-            if inputs is None:
-                print(f"  no example inputs for {name}; add {EXAMPLE_FUNCTION}()")
-                continue
             try:
+                if args.emit_code:
+                    print(emit_code(schedule))
+                inputs = schedule.examples or example_inputs(module, name)
+                if inputs is None:
+                    print(f"  no example inputs for {name}; add {EXAMPLE_FUNCTION}()")
+                    continue
                 native = _native(schedule)
                 if native is None:
                     executor.run(schedule, **inputs)
                     print(f"  ran {name} on the {schedule.target} target")
                     continue
                 fact = executor.differential(native, schedule, inputs)
-            except (
-                IllegalCast,
-                RuntimeError,
-                ValueError,
-                TypeError,
-                # What a body raises on the inputs it was given, a cell that is
-                # not there or a division by zero, as ``loopty.faithful`` counts
-                # them: the file's to fix, and said as plainly as the rest.
-                IndexError,
-                ArithmeticError,
-            ) as exc:
+            except Exception as exc:  # noqa: BLE001 - reported, as every failure is
+                # Whatever a run raises is the file's to fix: a cell that is not
+                # there, a division by zero, a KeyError of the body's own or of
+                # its example_inputs(), or a refusal of the compiled half. It is
+                # said by type and message, the kernel counts as failed, and
+                # the file's other kernels still run. A native TraceError is
+                # not among them: it comes back from ``differential`` as a
+                # refuted agreement fact.
                 print(f"  {type(exc).__name__}: {exc}")
                 failures += 1
                 continue
+            runs[fact.id] = runs.get(fact.id, 0) + 1
+            if runs[fact.id] > 1:
+                # Two schedules with one key are one schedule, but a file may
+                # run it twice, on two sets of inputs: each run keeps its fact,
+                # so that a refuted one is not replaced by a later tested one.
+                fact = dataclasses.replace(fact, id=f"{fact.id}#{runs[fact.id]}")
             ledger.add(fact)
             outputs = fact.provenance.get("outputs", {})
             for output, detail in outputs.items():

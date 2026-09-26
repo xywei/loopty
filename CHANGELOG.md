@@ -847,6 +847,82 @@ with a pair of statement instances.
   row, so from the loop's second iteration on the two summed rows of
   different lengths; with the rewrite first in the body, loopy could not
   schedule the kernel at all.
+- The target-capability check knows the other reductions loopy 2025.2 will not
+  realize, and asks about the ones it knew the way loopy does. A reduction on a
+  group axis (or on `ilp.seq` or `vec`), a reduction split with both halves on
+  local axes, and a reduction on a local axis whose extent has no numeric
+  maximum (`reduce_sum(a[i, j] for j in Fin[i + 1])` with `j` on `l.0` and `n`
+  free), or inside a statement loop on a local axis that has none, passed
+  `buildable` and then failed in code generation; each is a `refuted`
+  `buildable` fact now, with its cause in words. A reduction's loops are
+  classified with loopy's own tag classes, as `realize_reduction` classifies
+  them, so an `ilp` loop, which loopy unrolls, is a sequence, and split with
+  its other half on a local axis it is refused, as loopy refuses it. A
+  reduction over an `ilp` loop is refused on its own account as well: loopy
+  privatizes the accumulator along the loop and then refuses the instruction
+  that initializes it, under some string hash seeds and not others. Split
+  with its other half untagged it used to be refused as partly parallel,
+  which it is not, and a reduction over one `ilp` loop was not refused at
+  all; `unr` unrolls the sum in order and builds. The extent is asked of the
+  loop's bounds with `static_max_of_pw_aff(..., constants_only=True)`, as
+  loopy asks it. The tests generate the code with loopy's plain OpenCL target
+  and see loopy's own error for each; note 11 of `docs/loopy-notes.md` has the
+  table.
+- A tile or an interchange that orders a loop outside a loop loopy nests it
+  inside is a `refuted` `buildable` fact. loopy nests a ragged fiber's domain
+  inside its row, the loops below a statement at a shallower depth inside the
+  loops around them, and a statement loop inside the row of a ragged
+  reduction in its body, and when the loop priority disagrees it drops the
+  priority and runs a nest of its own choosing, which the cast facts did not
+  check: `tile("r", "j", 2, 2)` on the ragged recurrence `w[r + 1, j] = w[r,
+  j] + val[r, j]` was decided and compiled to code that ran the dependence
+  backwards, and so was `tile("r", "k", 2, 2)` on `w[r + 1, k] = w[r, k] +
+  reduce_sum(val[r, j] for j in val.dom[r])`. The nesting is read after every
+  step with loopy's own `find_loop_nest_around_map`, and the reason names the
+  two loops, why loopy nests one in the other, and the interchange that puts
+  them right. Buildability is now asked of the schedule as it stands rather
+  than kept once lost, so that interchange makes the tiled schedule buildable
+  again, and the schedule then carries no `buildable` fact; a schedule's one
+  `buildable` fact is about its current reason. A kernel `affine` could not
+  write stays unwritten. See note 6 in `docs/loopy-notes.md`.
+- Two schedules of one kernel in one file keep their own facts in the ledger.
+  A cast fact's id named the kernel and the position of the step
+  (`cast:spmv:0:bijective`), and an agreement fact's the kernel alone, so the
+  second schedule's facts replaced the first's in `loopty run`'s ledger. The
+  ids now name the schedule: `Schedule.key` is the kernel, the target and
+  every step with every argument it was given
+  (`spmv[c].split('j', 2, inner='j_in', outer='j_out')`), a cast fact's id is
+  `cast:`, the key up to its step, and its kind, and an agreement's is
+  `agreement:` and the whole key. Two schedules that begin alike share the
+  facts about those steps, which are the same claims, and a schedule run twice
+  from one file, on two sets of inputs, keeps both agreements (`#2`). Two
+  exactness facts of one step, when one tag reassociates two accumulations,
+  are told apart by the array. `examples/wavefront_acoustic.py` runs the
+  diamond under `loopty run` beside the wavefront block, which it left to
+  `python` for this reason, and its transcript is regenerated.
+- A fact the isl oracle refutes over a domain a guard left wide says so in its
+  reason, which `lanky check` (and `loopty check`) prints under its `REFUTED`
+  line: the domain is wider than the instances that write, so the witness may
+  be an instance the guard masks, and each conjunct left out is named with the
+  reason it was left out. It was in the provenance and the JSON ledger only,
+  so a refuted in-bounds fact read as an out-of-bounds read. A fact refuted
+  over a domain its guard narrowed whole, and a decided one, say nothing more.
+- `Schedule.tag` refuses a name that is neither a loop nor the loop of a
+  reduction, and a tag loopy cannot read, with a `ValueError`, before anything
+  else. loopy's `tag_inames` was the only check, and it is not asked once a
+  step has left the schedule with no kernel, so such a tag was accepted there
+  with a decided `bijective` and `monotone` fact; on a schedule with a kernel
+  the unknown name was loopy's `LoopyError`.
+- `loopty run` reports whatever a run raises by its type and message, counts
+  the kernel as failed, goes on to the file's other kernels, and exits 1. Only
+  the errors it expected were reported (`IndexError`, `ArithmeticError`,
+  `ValueError` and a few more); a body's `KeyError` ended the command with a
+  traceback. So is an error in the file's `example_inputs()`, or in code
+  generation under `--emit-code`, which were not inside what a run reports at
+  all. A native `TraceError` in `LoopyExecutor.differential` is not
+  raised but returned, as a `refuted` agreement fact with the refusal as its
+  reason and no outputs, the way the faithfulness fact counts it, so
+  `loopty run` prints it under the fact's `REFUTED` line.
 
 ### Changed
 

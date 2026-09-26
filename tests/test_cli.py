@@ -489,3 +489,221 @@ def test_run_prints_why_a_schedule_cannot_be_built_under_its_line(
     )
     assert lines[header + 1] == f"  {limit}"
     assert "no witness recorded" not in out
+
+
+# {{{ two schedules of one kernel (#36)
+
+
+def test_every_schedule_of_one_kernel_keeps_its_facts_in_the_ledger(tmp_path) -> None:
+    """Three schedules of ``scale``: two different ones, and the first again.
+
+    The facts were named by the kernel and the position of the step, so the
+    second schedule's facts replaced the first's, and one agreement fact was
+    left for three runs. Now each schedule's facts are its own; the third,
+    which is the first again, shares its cast facts, which are the same
+    claims, and keeps its own agreement, since it ran on inputs of its own.
+    """
+    body = FIXTURE + (
+        '\nother = Schedule(scale).split("i", 2)\n'
+        'again = Schedule(scale).split("i", 4).example('
+        "x=np.ones(8), y=np.zeros(8))\n"
+    )
+    path = write_fixture(tmp_path, body)
+    out_path = tmp_path / "ledger.json"
+    assert main(["run", str(path), "--json", str(out_path)]) == 0
+    facts = json.loads(out_path.read_text(encoding="utf-8"))
+    kinds = [fact["kind"] for fact in facts]
+    assert kinds.count("bijective") == kinds.count("monotone") == 2
+    agreements = [fact["id"] for fact in facts if fact["kind"] == "agreement"]
+    four = "agreement:scale[c].split('i', 4, inner='i_inner', outer='i_outer')"
+    two = "agreement:scale[c].split('i', 2, inner='i_inner', outer='i_outer')"
+    assert agreements == [four, two, f"{four}#2"]
+    assert len({fact["id"] for fact in facts}) == len(facts) == 7
+
+
+# }}}
+
+
+# {{{ what a run raises (#44)
+
+
+RAISES = FIXTURE.replace(
+    "scale = Scale()",
+    '''scale = Scale()
+
+
+class Broken(Scale):
+    """A body that raises an error of its own on the file's inputs."""
+
+    __name__ = "broken"
+    term = Term(
+        name="broken",
+        params=Scale.term.params,
+        sizes=Scale.term.sizes,
+        stmts=Scale.term.stmts,
+        post=None,
+    )
+
+    def __call__(self, x, y):
+        raise KeyError("no entry for this input")
+
+
+broken = Broken()''',
+).replace(
+    'sched = Schedule(scale).split("i", 4)',
+    'first = Schedule(broken)\nsched = Schedule(scale).split("i", 4)',
+)
+
+
+def test_run_reports_any_error_a_body_raises_and_goes_on(tmp_path, capsys) -> None:
+    # A KeyError of the body's own ended the command with a traceback, and
+    # the kernels after it in the file were not run.
+    path = write_fixture(tmp_path, RAISES)
+    code = main(["run", str(path)])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "  KeyError: 'no entry for this input'" in out
+    # The next schedule in the file still ran, and agreed.
+    assert "  y: difference 0 " in out
+
+
+def test_run_reports_an_example_inputs_that_raises(tmp_path, capsys) -> None:
+    # The file's own example_inputs() was called outside what a run reports,
+    # so an error in it ended the command with a traceback.
+    body = FIXTURE.replace(
+        'return {"x": np.arange(8, dtype=np.float64), "y": np.zeros(8)}',
+        'raise KeyError("no inputs here")',
+    )
+    code = main(["run", str(write_fixture(tmp_path, body))])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "  KeyError: 'no inputs here'" in out
+
+
+FLIPPED = '''
+"""A guard that is an integer natively: ~ on a Python bool is bitwise."""
+
+from __future__ import annotations
+
+import numpy as np
+from lanky.prelude import Real
+
+from loopty import Arr, Fin, kernel, when
+
+
+@kernel
+def flipped(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
+    for i in y.dom:
+        with when(~(i > 0)):
+            y[i] = x[i]
+
+
+def example_inputs():
+    return {"x": Arr.from_numpy(np.arange(4.0)), "y": Arr.zeros(4)}
+'''
+
+
+@pytest.mark.filterwarnings("ignore:Bitwise inversion:DeprecationWarning")
+def test_run_prints_a_native_refusal_as_a_refuted_agreement(tmp_path, capsys):
+    """The run's agreement is refuted with the refusal, as the trace fact is.
+
+    ``differential`` raised the native TraceError, which ``loopty run`` then
+    reported as an error with no fact in the ledger.
+    """
+    path = write_fixture(tmp_path, FLIPPED)
+    out_path = tmp_path / "ledger.json"
+    code = main(["run", str(path), "--json", str(out_path)])
+    out = capsys.readouterr().out
+    assert code == 1
+    lines, header = refutation_block(out, "flipped at fixture.py:")
+    assert lines[header].endswith(
+        "the scheduled run of flipped agrees with the native run to the accuracy "
+        "its types state"
+    )
+    assert lines[header + 1].startswith("  the body, run natively, is refused")
+    assert "'i <= 0' for '~(i > 0)'" in out
+    facts = json.loads(out_path.read_text(encoding="utf-8"))
+    (fact,) = [fact for fact in facts if fact["kind"] == "agreement"]
+    assert fact["status"] == "refuted"
+    assert fact["provenance"]["error"].startswith("TraceError: ")
+    assert fact["provenance"]["outputs"] == {}
+
+
+# }}}
+
+
+# {{{ a refutation over a domain a guard left wide (#40)
+
+
+CLIPPED = '''
+"""A guard that compares with a Real scalar, which isl cannot state."""
+
+from __future__ import annotations
+
+from lanky.prelude import Real
+
+from loopty import Arr, Fin, kernel, when
+
+
+@kernel
+def clipped(a: Real, x: Arr[Fin[m], Real], y: Arr[Fin[n], Real]):
+    for i in y.dom:
+        with when((i < a) & (a < x.dom.size)):
+            y[i] = x[i]
+
+
+@kernel
+def stated(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):
+    for i in u.dom:
+        with when(i + 1 <= u.dom.size):
+            v[i] = u[i + 1]
+'''
+
+
+def test_check_says_a_witness_may_be_one_the_guard_masks(tmp_path, capsys) -> None:
+    """The conjuncts a domain leaves out are printed under the ``REFUTED`` line.
+
+    ``x[i]`` is refuted at an ``i >= m``, which the guard masks for every real
+    ``a``. The provenance said so under ``unnarrowed``, and the screen did
+    not, so the refutation read as an out-of-bounds read. ``stated`` is
+    refuted over a domain its guard narrowed whole, and says nothing more.
+    """
+    from lanky.cli import main as lanky_main
+
+    path = write_fixture(tmp_path, CLIPPED)
+    out_path = tmp_path / "ledger.json"
+    code = lanky_main(["check", str(path), "--json", str(out_path)])
+    out = capsys.readouterr().out
+    assert code == 1
+    lines, header = refutation_block(out, "clipped at ")
+    assert lines[header].endswith("x[i] is in bounds for every instance of S0")
+    block = lines[header + 1 : header + 6]
+    assert block[0].startswith("  witness: ")
+    assert block[1].startswith("  cells x[i] reaches are cells x has, except")
+    assert block[2].startswith("  the domain is wider than the instances that write")
+    assert block[3] == (
+        "    i < a, which compares with the scalar a of sort Real, which is not "
+        "a loop variable, a size or a scalar of an integral sort (Nat, Int, "
+        "Fin[...]), and isl would read every name of a constraint as an integer"
+    )
+    assert block[4].startswith("    a < m, which compares with the scalar a")
+
+    lines, header = refutation_block(out, "stated at ")
+    assert lines[header].endswith("u[i + 1] is in bounds for every instance of S0")
+    assert lines[header + 2].startswith("  cells u[i + 1] reaches are cells u has")
+    assert "the domain is wider" not in "\n".join(lines[header:])
+
+    facts = json.loads(out_path.read_text(encoding="utf-8"))
+    refuted = [fact for fact in facts if fact["status"] == "refuted"]
+    assert [fact["owner"] for fact in refuted] == ["clipped", "stated"]
+    # A decided fact over the same wide domain carries its note in the
+    # provenance only, and needs nothing on the screen.
+    decided = [
+        fact
+        for fact in facts
+        if fact["owner"] == "clipped" and fact["status"] == "decided"
+    ]
+    assert any("unnarrowed" in fact["provenance"] for fact in decided)
+
+
+# }}}

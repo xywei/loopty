@@ -336,13 +336,17 @@ tested   interpreter  wavefront_acoustic.py:90   acoustic  the traced term compu
 
 ### loopty run examples/wavefront_acoustic.py
 
-Two outputs this time, and both are compared with the native run. The diamond
-is run by the first command only: two schedules of one kernel in one file
-would share the ids of their facts in this ledger (issue #36).
+Two schedules of one kernel, the wavefront block and the diamond, with two
+outputs each, all compared with the native run. Each schedule keeps its own
+facts in the one ledger, because a fact's id names the schedule it is about
+and not only the kernel.
 
 ```console
 $ uv run loopty run examples/wavefront_acoustic.py
 acoustic: Schedule(acoustic, target='c').skew(i, by='t').tile(t,i,4,8)
+  pressure: difference 0 within 1e-06 (approx) -> tested
+  velocity: difference 0 within 1e-06 (approx) -> tested
+acoustic: Schedule(acoustic, target='c').affine({ [t, i] -> [a = t + i, b = t - i] })
   pressure: difference 0 within 1e-06 (approx) -> tested
   velocity: difference 0 within 1e-06 (approx) -> tested
 
@@ -353,8 +357,11 @@ decided  isl    wavefront_acoustic.py:102  acoustic  the order after skew(i, by=
 decided  isl    wavefront_acoustic.py:102  acoustic  tile(t,i,4,8) renames the instances of acoustic one for one
 decided  isl    wavefront_acoustic.py:102  acoustic  the order after tile(t,i,4,8) runs every dependence of acoustic forward
 tested   loopy  wavefront_acoustic.py:102  acoustic  the scheduled run of acoustic agrees with the native run to the accur...
+decided  isl    wavefront_acoustic.py:102  acoustic  affine({ [t, i] -> [a = t + i, b = t - i] }) renames the instances of...
+decided  isl    wavefront_acoustic.py:102  acoustic  the order after affine({ [t, i] -> [a = t + i, b = t - i] }) runs eve...
+tested   loopy  wavefront_acoustic.py:102  acoustic  the scheduled run of acoustic agrees with the native run to the accur...
 
-5 facts: 4 decided, 1 tested
+8 facts: 6 decided, 2 tested
 ```
 
 ## reshape_layouts.py and p2p.py

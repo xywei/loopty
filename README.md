@@ -210,10 +210,13 @@ end to end; the edges are sharp.
   dependence backwards, and rewrites the kernel over the map's image; `skew` is
   that method with a particular map.
 - The target-capability check: a parallel tag inside a data-dependent (ragged)
-  loop bound, a hardware axis on a reduction nested in another, or a reduction
-  split across parallel and sequential inames, is reported as a `refuted`
-  `buildable` fact and raises `UnbuildableSchedule` when something asks for
-  code.
+  loop bound, a hardware axis on a reduction nested in another, a reduction
+  loopy will not realize (partly in parallel and partly in sequence, across two
+  local axes, on a group axis, or on a local axis whose extent has no numeric
+  maximum), or a loop ordered outside a loop loopy nests it inside, is
+  reported as a `refuted` `buildable` fact and raises `UnbuildableSchedule`
+  when something asks for code. It is asked of the schedule as it stands after
+  every step, so an interchange can make a tiled ragged loop buildable again.
 - Lowering to loopy, including a ragged axis as a flat buffer plus offsets, and
   running on `lp.ExecutableCTarget`. Every argument of `LoopyExecutor.run` is
   an argument of the kernel; the target is chosen by the schedule
@@ -299,9 +302,10 @@ end to end; the edges are sharp.
 - The accumulation convention: a traced `y[r] += ...` under a parallel iname is
   reported as a disjointness refutation, which is the conservative reading. The
   `reassoc` fact is what should license it and nothing consumes that yet.
-- The target-capability check knows two limits of loopy 2025.2 and no others, so
-  it is a list rather than a model of what the backend can do. A schedule it
-  passes can still fail in code generation for a reason nobody has met yet.
+- The target-capability check knows the limits of loopy 2025.2 listed in notes 6
+  and 11 of `docs/loopy-notes.md` and no others, so it is a list rather than a
+  model of what the backend can do. A schedule it passes can still fail in code
+  generation for a reason nobody has met yet.
 - A kernel called with a zero-length *shape-bearing* argument (a matrix with no
   rows at all) cannot run on the C target: loopy cannot pass an empty array, and
   the workaround that rescues the empty flat buffer of a ragged axis cannot be

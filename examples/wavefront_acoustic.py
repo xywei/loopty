@@ -58,9 +58,9 @@ Run this file three ways.
     the dependences.
 
 ``loopty run examples/wavefront_acoustic.py``
-    Compiles the skewed and tiled schedule and compares it with the native run.
-    The diamond is left to the first command: two schedules of one kernel in
-    one file would share the ids of their facts in the ledger (issue #36).
+    Compiles the skewed and tiled schedule, and the diamond, and compares each
+    with the native run; each keeps its own facts in the ledger, since a fact's
+    id names the schedule it is about, and not only the kernel.
 
 A fourth, ``python examples/wavefront_acoustic.py --bench``, times the untiled
 and the wavefront-blocked kernels at a larger size. It is a measurement, not a
@@ -199,11 +199,12 @@ def rejected_diamond_tiling(nt: int = NT, nx: int = NX) -> tuple[str, tuple]:
     raise AssertionError("tiling the diamond should be illegal for this pair")
 
 
-#: What ``loopty run`` compiles and compares. The rejected casts live in
-#: :func:`rejected_tiling`, :func:`rejected_diamond` and
-#: :func:`rejected_diamond_tiling`, where the exception is the answer, and the
-#: diamond itself in :func:`diamond_schedule`, which :func:`main` runs.
+#: What ``loopty run`` compiles and compares: the wavefront block and the
+#: diamond. The rejected casts live in :func:`rejected_tiling`,
+#: :func:`rejected_diamond` and :func:`rejected_diamond_tiling`, where the
+#: exception is the answer.
 blocked = wavefront_schedule().example(**initial())
+diamond = diamond_schedule().example(**initial())
 
 
 def example_inputs() -> dict:

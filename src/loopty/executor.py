@@ -357,6 +357,15 @@ class LoopyExecutor:
         The kernel's arguments are ``args`` and nothing else; the scheduled run
         is on the schedule's target, which has to be the executor's when the
         executor names one.
+
+        A :class:`~loopty.trace.TraceError` from the native run is not raised
+        but returned, as a ``refuted`` agreement fact with the refusal as its
+        ``reason``, and the scheduled run is not made: the body is refused for
+        its spelling (a ``when`` guard whose native value is an integer, say),
+        whatever the input, so there is nothing to compare the compiled run
+        with. The faithfulness fact counts the same refusal as a disagreement
+        (:mod:`loopty.faithful`). Anything else the body raises is the input's
+        or the body's, and is raised.
         """
         term, _lowered, lowering, _target = _resolve(schedule, self.target)
         # Before the copies: ``_copy`` gives every argument a buffer of its own,
@@ -382,7 +391,12 @@ class LoopyExecutor:
         if not native:
             native_args = {name: _copy(value) for name, value in args.items()}
             if callable(kernel):
-                kernel(**native_args)
+                from loopty.trace import TraceError
+
+                try:
+                    kernel(**native_args)
+                except TraceError as exc:
+                    return _refused_agreement(term, schedule, exc)
                 native_args = {
                     name: (
                         value.numpy()
@@ -494,8 +508,6 @@ def agreement(term: Term, schedule: Any, got: dict, want: dict) -> Any:
     anyone can read (``outputs`` records it as infinite). The numbers of every
     output, agreeing or not, are in ``outputs``.
     """
-    from lanky.ledger import Fact, Status
-
     details: dict[str, Any] = {}
     disagreements: list[str] = []
     for name, want_array in want.items():
@@ -519,16 +531,57 @@ def agreement(term: Term, schedule: Any, got: dict, want: dict) -> Any:
             f"{difference:.3g}, allowed {tolerance:.3g} ({exactness})"
         )
     ok = not disagreements
-    history = tuple(getattr(schedule, "history", ()))
-    provenance: dict[str, Any] = {
-        "outputs": details,
-        "schedule": history,
-        "target": getattr(schedule, "target", "c"),
-    }
+    provenance = _agreement_provenance(schedule, details)
     if not ok:
         provenance["reason"] = "\n".join(disagreements)
+    return _agreement_fact(term, schedule, ok, provenance)
+
+
+def _refused_agreement(term: Term, schedule: Any, error: Exception) -> Any:
+    """The agreement fact of a run whose native half is refused.
+
+    ``refuted``, with the refusal as its ``reason`` and ``error``, and no
+    outputs, because nothing was compared: a
+    :class:`~loopty.trace.TraceError` refuses the body for its spelling,
+    whatever the input, which is a disagreement between the body and what
+    the compiled run computes, and not an input to skip.
+    """
+    text = f"{type(error).__name__}: {error}"
+    provenance = _agreement_provenance(schedule, {})
+    provenance["error"] = text
+    provenance["reason"] = (
+        f"the body, run natively, is refused, so there is no native run for "
+        f"the scheduled run to agree with. {text}"
+    )
+    return _agreement_fact(term, schedule, False, provenance)
+
+
+def _agreement_provenance(schedule: Any, details: dict[str, Any]) -> dict[str, Any]:
+    """What every agreement fact records beside its verdict."""
+    return {
+        "outputs": details,
+        "schedule": tuple(getattr(schedule, "history", ())),
+        "target": getattr(schedule, "target", "c"),
+    }
+
+
+def _agreement_fact(
+    term: Term, schedule: Any, ok: bool, provenance: dict[str, Any]
+) -> Any:
+    """The agreement fact itself, named after the schedule that was run.
+
+    Its id is ``agreement:`` and the schedule's
+    :attr:`~loopty.schedule.Schedule.key`, so that two schedules of one kernel
+    run from one file keep two facts in the ledger; a kernel or a term run
+    without a schedule is named by its name and target alone.
+    """
+    from lanky.ledger import Fact, Status
+
+    key = getattr(schedule, "key", None)
+    if not isinstance(key, str):
+        key = f"{term.name}[{provenance['target']}]"
     return Fact(
-        id=f"agreement:{term.name}",
+        id=f"agreement:{key}",
         kind="agreement",
         statement=(
             f"the scheduled run of {term.name} agrees with the native run "
