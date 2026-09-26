@@ -60,9 +60,11 @@ cannot be retargeted, or a run raises.
 
 A run that raises, whatever it raises, is reported by the exception's type and
 message, the kernel counts as failed, and the file's other kernels are still
-run. A body that tracing refuses natively (a ``when`` guard whose native value
-is an integer) is a refuted agreement fact instead, with the refusal as its
-reason; see :meth:`loopty.executor.LoopyExecutor.differential`.
+run; so is a file's ``example_inputs()`` that raises, and code generation that
+fails under ``--emit-code``. A body that tracing refuses natively (a ``when``
+guard whose native value is an integer) is a refuted agreement fact instead,
+with the refusal as its reason; see
+:meth:`loopty.executor.LoopyExecutor.differential`.
 
 Every schedule keeps its own facts in the ledger, however many schedules of one
 kernel the file has, because a fact's id names the schedule it is about (see
@@ -312,13 +314,13 @@ class RunVerb:
             if not ok:
                 print(f"  not buildable for the {schedule.target} target: {reason}")
                 continue
-            if args.emit_code:
-                print(emit_code(schedule))
-            inputs = schedule.examples or example_inputs(module, name)
-            if inputs is None:
-                print(f"  no example inputs for {name}; add {EXAMPLE_FUNCTION}()")
-                continue
             try:
+                if args.emit_code:
+                    print(emit_code(schedule))
+                inputs = schedule.examples or example_inputs(module, name)
+                if inputs is None:
+                    print(f"  no example inputs for {name}; add {EXAMPLE_FUNCTION}()")
+                    continue
                 native = _native(schedule)
                 if native is None:
                     executor.run(schedule, **inputs)
@@ -327,11 +329,12 @@ class RunVerb:
                 fact = executor.differential(native, schedule, inputs)
             except Exception as exc:  # noqa: BLE001 - reported, as every failure is
                 # Whatever a run raises is the file's to fix: a cell that is not
-                # there, a division by zero, a KeyError of the body's own, or a
-                # refusal of the compiled half. It is said by type and message,
-                # the kernel counts as failed, and the file's other kernels
-                # still run. A native TraceError is not among them: it comes
-                # back from ``differential`` as a refuted agreement fact.
+                # there, a division by zero, a KeyError of the body's own or of
+                # its example_inputs(), or a refusal of the compiled half. It is
+                # said by type and message, the kernel counts as failed, and
+                # the file's other kernels still run. A native TraceError is
+                # not among them: it comes back from ``differential`` as a
+                # refuted agreement fact.
                 print(f"  {type(exc).__name__}: {exc}")
                 failures += 1
                 continue

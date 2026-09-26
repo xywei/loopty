@@ -863,7 +863,9 @@ with a pair of statement instances.
   the kernel as failed, goes on to the file's other kernels, and exits 1. Only
   the errors it expected were reported (`IndexError`, `ArithmeticError`,
   `ValueError` and a few more); a body's `KeyError` ended the command with a
-  traceback. A native `TraceError` in `LoopyExecutor.differential` is not
+  traceback. So is an error in the file's `example_inputs()`, or in code
+  generation under `--emit-code`, which were not inside what a run reports at
+  all. A native `TraceError` in `LoopyExecutor.differential` is not
   raised but returned, as a `refuted` agreement fact with the refusal as its
   reason and no outputs, the way the faithfulness fact counts it, so
   `loopty run` prints it under the fact's `REFUTED` line.

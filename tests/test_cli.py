@@ -567,6 +567,19 @@ def test_run_reports_any_error_a_body_raises_and_goes_on(tmp_path, capsys) -> No
     assert "  y: difference 0 " in out
 
 
+def test_run_reports_an_example_inputs_that_raises(tmp_path, capsys) -> None:
+    # The file's own example_inputs() was called outside what a run reports,
+    # so an error in it ended the command with a traceback.
+    body = FIXTURE.replace(
+        'return {"x": np.arange(8, dtype=np.float64), "y": np.zeros(8)}',
+        'raise KeyError("no inputs here")',
+    )
+    code = main(["run", str(write_fixture(tmp_path, body))])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "  KeyError: 'no inputs here'" in out
+
+
 FLIPPED = '''
 """A guard that is an integer natively: ~ on a Python bool is bitwise."""
 
