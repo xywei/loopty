@@ -847,9 +847,9 @@ with a pair of statement instances.
   diamond under `loopty run` beside the wavefront block, which it left to
   `python` for this reason, and its transcript is regenerated.
 - A fact the isl oracle refutes over a domain a guard left wide says so in its
-  reason, which `lanky check` and `loopty run` print under its `REFUTED` line:
-  the domain is wider than the instances that write, so the witness may be an
-  instance the guard masks, and each conjunct left out is named with the
+  reason, which `lanky check` (and `loopty check`) prints under its `REFUTED`
+  line: the domain is wider than the instances that write, so the witness may
+  be an instance the guard masks, and each conjunct left out is named with the
   reason it was left out. It was in the provenance and the JSON ledger only,
   so a refuted in-bounds fact read as an out-of-bounds read. A fact refuted
   over a domain its guard narrowed whole, and a decided one, say nothing more.
