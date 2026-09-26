@@ -517,6 +517,14 @@ with a pair of statement instances.
   the JSON ledger. `loopty run` reports such a kernel as one it cannot
   schedule, naming the error, and exits 1, where it used to stop with a
   traceback from the search for kernels.
+- A refuted cast fact carries its explanation as `reason`, which lanky prints
+  under its `REFUTED` line: the message of the `IllegalCast` it is raised with,
+  or, for a `buildable` fact, the limit the target hits, which is also
+  `UnbuildableSchedule.reason`. It had it as `detail` alone, which only the
+  JSON ledger shows, so the block under the line read `no witness recorded`
+  for a fact with no witness (`exactness`, `buildable`) and was empty for a
+  `bijective` or `monotone` fact with one. `detail` stays, in the oracle's
+  words, and `witness` is recorded whenever isl gives one.
 - The schedule checker and the typing rules see the reads a ragged access makes
   through its offsets. `val[r, j]` is `val[off[r] + j]` once lowered, and row
   `r` ends at `off[r + 1]`, but neither read is in the body, so only the

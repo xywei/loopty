@@ -126,8 +126,8 @@ message states, because which violating pair isl picks depends on them.
   transformation can preserve the meaning of a program and still be one the
   backend cannot generate. Every accepted step is asked whether the target can
   build it, and a failure is a `refuted` fact of kind `buildable` decided by
-  `loopy-target`, with the limit in words, rather than a `LoopyError` thrown
-  from inside code generation several steps later.
+  `loopy-target`, with the limit in words as its reason, rather than a
+  `LoopyError` thrown from inside code generation several steps later.
 - **The reference implementation is the kernel.** The same body runs on numpy
   under plain `python` and traces to the term loopy compiles, so the differential
   test compares a program with itself rather than with a second implementation.
@@ -340,8 +340,9 @@ term is interpreted on its own and compared with the native run.
 **Transformations are casts.** Each states a reindexing map, which isl checks for
 bijectivity, and a new execution order, which isl checks for monotonicity on the
 dependence relation. Failure is an `IllegalCast` carrying the witness and the
-refuted fact. Casts that change floating-point semantics mark the result's
-exactness class instead of being refused.
+refuted fact, whose reason is the exception's message. Casts that change
+floating-point semantics mark the result's exactness class instead of being
+refused.
 
 **loopty is a lanky plugin.** It registers a *theory* (`KernelTheory`, which
 turns a kernel into facts), an *oracle* (`IslOracle`, trust class
