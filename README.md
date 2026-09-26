@@ -201,7 +201,9 @@ end to end; the edges are sharp.
   `loopty check FILE`, and `lanky run FILE` through the entry point.
   `--target` retargets every schedule in the file, re-checking its casts, and
   says so by name when one cannot be retargeted; without it each schedule keeps
-  the target it was written for.
+  the target it was written for. A refuted fact is repeated under the ledger
+  with what explains it, the block `lanky check` prints (a compiled run that
+  disagrees names the outputs and by how much), and the command exits 1.
 
 **Partial.**
 

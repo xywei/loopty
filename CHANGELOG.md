@@ -525,6 +525,13 @@ with a pair of statement instances.
   for a fact with no witness (`exactness`, `buildable`) and was empty for a
   `bijective` or `monotone` fact with one. `detail` stays, in the oracle's
   words, and `witness` is recorded whenever isl gives one.
+- What refuted a fact is printed under its `REFUTED` line by `loopty run` as by
+  `lanky check`. `loopty run` printed the bare line; it now prints lanky's own
+  block (`lanky.cli.refutation_lines`) under each one, and the line itself as
+  lanky does, `REFUTED owner at where: statement`, after a blank line. A
+  refuted `agreement` fact names each output that disagreed, and by how much
+  against its allowance, as its `reason`, where the block used to read `no
+  witness recorded`.
 - The schedule checker and the typing rules see the reads a ragged access makes
   through its offsets. `val[r, j]` is `val[off[r] + j]` once lowered, and row
   `r` ends at `off[r + 1]`, but neither read is in the body, so only the

@@ -311,3 +311,96 @@ def test_run_reports_a_loop_carried_name_instead_of_a_traceback(
     assert "TraceError" in out
     assert "reduce_sum" in out
     assert "difference" not in out
+
+
+def test_run_prints_what_refuted_a_run_under_its_line(tmp_path, capsys) -> None:
+    """``loopty run`` prints the block ``lanky check`` prints under ``REFUTED``.
+
+    The compiled run follows the term, which doubles ``x``; the Python body the
+    fixture compares it with triples it. The agreement fact is refuted, and
+    what is printed under its line is lanky's own
+    :func:`lanky.cli.refutation_lines` of the fact: its reason, naming the
+    output that disagreed. ``loopty run`` used to print the bare line.
+    """
+    from types import SimpleNamespace
+
+    from lanky.cli import refutation_lines
+
+    body = FIXTURE.replace("y[...] = 2.0 * x", "y[...] = 3.0 * x")
+    path = write_fixture(tmp_path, body)
+    out_path = tmp_path / "ledger.json"
+    code = main(["run", str(path), "--json", str(out_path)])
+    out = capsys.readouterr().out
+    assert code == 1
+    lines, header = refutation_block(out, "scale at fixture.py:1: ")
+    assert lines[header].endswith(
+        "the scheduled run of scale agrees with the native run to the accuracy "
+        "its types state"
+    )
+    assert lines[header - 1] == ""
+
+    facts = json.loads(out_path.read_text(encoding="utf-8"))
+    (fact,) = [fact for fact in facts if fact["kind"] == "agreement"]
+    # The cell nearest to failing is the one whose difference is the largest
+    # multiple of its own allowance: 7 against 21, allowed 1e-6 * (21 + 1).
+    assert fact["provenance"]["reason"] == (
+        "y differs from the native run: difference 7, allowed 2.2e-05 (approx)"
+    )
+    # ``refutation_lines`` reads nothing but the provenance.
+    expected = refutation_lines(SimpleNamespace(provenance=fact["provenance"]))
+    assert lines[header + 1 : header + 1 + len(expected)] == [
+        f"  {line}" for line in expected
+    ]
+    assert "no witness recorded" not in out
+
+
+UNBUILDABLE = '''
+"""A ragged row sum with a hardware axis inside the row: legal, not buildable."""
+
+from __future__ import annotations
+
+from lanky.prelude import Nat, Real
+
+from loopty import Arr, Fin, kernel, reduce_sum
+from loopty.schedule import Schedule
+
+
+@kernel
+def rowsum(
+    cnt: Arr[Fin[n], Nat], val: Arr[Fin[n], Fin[cnt], Real], y: Arr[Fin[n], Real]
+):
+    for r in y.dom:
+        y[r] = reduce_sum(val[r, j] for j in val.dom[r])
+
+
+sched = Schedule(rowsum).split("j", 32, inner="j_in", outer="j_out").tag(
+    j_in="l.0"
+)
+'''
+
+
+def test_run_prints_why_a_schedule_cannot_be_built_under_its_line(
+    tmp_path, capsys
+) -> None:
+    """The refuted ``buildable`` fact's reason is printed under its line.
+
+    The limit was printed where the schedule is reported, and the fact carried
+    it as ``detail`` alone, so the ``REFUTED`` line at the bottom had nothing
+    under it.
+    """
+    path = write_fixture(tmp_path, UNBUILDABLE)
+    code = main(["run", str(path)])
+    out = capsys.readouterr().out
+    assert code == 1
+    (limit,) = [
+        line.split("not buildable for the c target: ", 1)[1]
+        for line in out.splitlines()
+        if "not buildable for the c target: " in line
+    ]
+    assert "ragged fiber" in limit
+    lines, header = refutation_block(out, "rowsum at fixture.py:")
+    assert lines[header].endswith(
+        "c code can be generated for rowsum after tag(j_in='l.0')"
+    )
+    assert lines[header + 1] == f"  {limit}"
+    assert "no witness recorded" not in out

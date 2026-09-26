@@ -231,6 +231,29 @@ def test_a_reference_covering_every_output_is_accepted() -> None:
     assert fact.status.value == "tested"
 
 
+def test_a_refuted_agreement_names_the_outputs_that_disagree_as_its_reason() -> None:
+    # lanky prints a refuted fact's ``reason`` under its REFUTED line, and so
+    # does ``loopty run``; without one, the line under a refuted agreement said
+    # ``no witness recorded``. Only the outputs that disagree are named.
+    term = ht.two_output_term()
+    want = {"y": np.full(4, 2.0), "z": np.full(4, 3.0)}
+    got = {"y": want["y"].copy(), "z": want["z"] + 0.5}
+    fact = agreement(term, Schedule(term), got, want)
+    assert fact.status.value == "refuted"
+    assert fact.provenance["reason"] == (
+        "z differs from the native run: difference 0.5, allowed 4e-06 (approx)"
+    )
+
+    both = {"y": want["y"] - 1.0, "z": want["z"] + 0.5}
+    lines = agreement(term, Schedule(term), both, want).provenance["reason"]
+    assert [line.split(" ", 1)[0] for line in lines.splitlines()] == ["y", "z"]
+
+    same = {name: value.copy() for name, value in want.items()}
+    agreed = agreement(term, Schedule(term), same, want)
+    assert agreed.status.value == "tested"
+    assert "reason" not in agreed.provenance
+
+
 def test_agreement_on_arrays_of_different_shapes_is_a_refutation() -> None:
     term = ht.axpy_term()
     fact = agreement(

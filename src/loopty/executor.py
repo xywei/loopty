@@ -452,7 +452,12 @@ def _compare(
 
 
 def agreement(term: Term, schedule: Any, got: dict, want: dict) -> Any:
-    """The fact recording whether two runs of a kernel agree."""
+    """The fact recording whether two runs of a kernel agree.
+
+    A refuted one says which outputs disagreed as its ``reason``, one line per
+    output, which is what lanky prints under its ``REFUTED`` line; the numbers
+    of every output, agreeing or not, are in ``outputs``.
+    """
     from lanky.ledger import Fact, Status
 
     details: dict[str, Any] = {}
@@ -468,6 +473,19 @@ def agreement(term: Term, schedule: Any, got: dict, want: dict) -> Any:
             "agree": agree,
         }
     history = tuple(getattr(schedule, "history", ()))
+    provenance: dict[str, Any] = {
+        "outputs": details,
+        "schedule": history,
+        "target": getattr(schedule, "target", "c"),
+    }
+    if not ok:
+        provenance["reason"] = "\n".join(
+            f"{name} differs from the native run: difference "
+            f"{detail['difference']:.3g}, allowed {detail['tolerance']:.3g} "
+            f"({detail['exactness']})"
+            for name, detail in details.items()
+            if not detail["agree"]
+        )
     return Fact(
         id=f"agreement:{term.name}",
         kind="agreement",
@@ -478,11 +496,7 @@ def agreement(term: Term, schedule: Any, got: dict, want: dict) -> Any:
         term=None,
         status=Status.TESTED if ok else Status.REFUTED,
         decided_by="loopy",
-        provenance={
-            "outputs": details,
-            "schedule": history,
-            "target": getattr(schedule, "target", "c"),
-        },
+        provenance=provenance,
         where=term.stmts[0].where if term.stmts else "",
         owner=term.name,
     )
