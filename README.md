@@ -308,10 +308,17 @@ end to end; the edges are sharp.
 - The accumulation convention: a traced `y[r] += ...` under a parallel iname is
   reported as a disjointness refutation, which is the conservative reading. The
   `reassoc` fact is what should license it and nothing consumes that yet.
-- The target-capability check knows the limits of loopy 2025.2 listed in notes 6
-  and 11 of `docs/loopy-notes.md` and no others, so it is a list rather than a
-  model of what the backend can do. A schedule it passes can still fail in code
-  generation for a reason nobody has met yet.
+- The target-capability check knows the limits of loopy 2025.2 listed in notes
+  6, 11 and 14 of `docs/loopy-notes.md` and no others, so it is a list rather
+  than a model of what the backend can do. A schedule it passes can still fail
+  in code generation for a reason nobody has met yet.
+- The casts drop a loop on a hardware axis from the order they check, as if
+  the other loops ordered its instances. loopy runs the axis as the launch
+  grid and synchronizes nothing across work items through global memory, so a
+  dependence between two work items passes the casts and is either a race
+  loopy does not see (the stencil's `jacobi` with `i` on `g.0`, across
+  iterations of `t`) or a global barrier loopy asks for. See note 14 in
+  `docs/loopy-notes.md`.
 - A kernel called with a zero-length *shape-bearing* argument (a matrix with no
   rows at all) cannot run on the C target: loopy cannot pass an empty array, and
   the workaround that rescues the empty flat buffer of a ragged axis cannot be

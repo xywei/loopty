@@ -405,7 +405,8 @@ uses every local axis. `schedule._unbuildable_reason` refuses a hardware axis
 (`g.*`, `l.*`) on a nested reduction's iname with that reason. It used to count
 `ilp` as one, which loopy unrolls rather than launching; an `ilp` loop of a
 nested reduction is refused for the privatization below instead, and `unr`
-builds. The general rule this row is one case of is note 14's third. It used to be refused only by
+builds. This row is one case of the general rule in note 14, that every
+instruction runs on every axis the kernel uses. It used to be refused only by
 accident, as a ragged fiber: the inner domain names the outer binder `i` as a
 parameter, and every parameter that was not a size counted as data read out of
 an array. An enclosing binder, or a loop of the statement, is not data now, so
@@ -600,3 +601,16 @@ for `"c"` so that the demo needs no device, keeps its ragged-fiber reason.
 check passes can fail for a reason nobody has met. The dense loop between a
 row and its fiber could be given a domain of its own by the lowering, which
 would make it a loop a device can run; that is not done.
+
+One class is known and not asked, because it is about the casts rather than
+the target. The casts drop a loop on `g.*` or `l.*` from the order they check,
+as if the loops around it ordered its instances, but loopy runs a hardware
+axis as the launch grid, outside every loop, and synchronizes nothing across
+work items through global memory. A dependence between two work items passes
+the casts, and loopy either misses it, since its barrier check asks only about
+dependences between two instructions (`jacobi` in `examples/stencil_skew.py`
+with `i` on `g.0` or `l.0`: each work item reads what its neighbour wrote at
+the previous `t`, with no barrier between them), or refuses it with
+`MissingBarrierError` ("requires synchronization by a global barrier", for
+the acoustic pair with `i` on `g.0`). Both are `decided` casts and `buildable`
+schedules.
