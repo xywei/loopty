@@ -345,6 +345,29 @@ leaves keeps its single domain, and the code generated for every example is
 what it was. What is left, one name for two different loops in a term built by
 hand, is refused with a `LoweringError` naming the loop.
 
+**Cut alike (2026-09-26).** A statement bounded by a ragged row's length is cut
+after the row loop too, because the length is assigned there, and that cut has
+to be shared. In
+
+```python
+for r in y.dom:
+    for i in x.dom:
+        for j in val.dom[r]:
+            y[r] = y[r] + x[i] * val[r, j]
+        z[r, i] = 1.0
+```
+
+the statement in the fiber was cut after `r` and after `i`, and the one beside
+the fiber, which leaves no nest, not at all: `r` came out in `{ [r] }` and in
+`{ [r, i] }`, which do not merge, and the kernel was refused for using `r` for
+two loops, which it does not. `_depth_cuts` now counts the row's cut among the
+others and passes every cut on to each statement that has the loops up to it
+and more beyond, until nothing changes, so the second statement is cut after
+`r` as well. The refusal that is left reads the term before it blames a name:
+when every statement that has the loop has the same loops around it, the name
+is one loop, and the message says the lowering could not give it one domain
+instead of asking for a rename.
+
 A statement beside an inner loop also has to stay out of it, which is note 12.
 
 ## 11. Hardware axes on reductions
