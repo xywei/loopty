@@ -154,9 +154,19 @@ end to end; the edges are sharp.
   next, when an array is used whole (`y[:] = ...`, `x * 2`, a numpy function of
   it), when a reduction's `if` clause is not a bound isl can state, when the
   trace changes Python state outside the arrays (a global, a closure variable,
-  an object's attribute, a list, dict, set or numpy array they hold, or the
-  same in a helper the body calls), and when the body prints, reads input,
-  opens a file or draws a random number.
+  an object's attribute or slot, a list, dict, set or numpy array they hold, a
+  ragged array's offsets, or the same in a helper the body calls), and when the
+  body prints, reads input, opens a file or draws a random number. The
+  kernel's own module and package count as its code wherever they are
+  installed, site-packages included.
+- `when` guards narrow a statement's isl domain where isl can state them: an
+  affine comparison of loop variables, sizes and scalars of an integral sort.
+  A guard that reads an array, compares with `!=`, or compares with a `Real`
+  scalar is evaluated at run time only, the statement lists it in
+  `Stmt.unnarrowed`, and the facts stated over its domain say so in their
+  provenance. A guard has to be a truth value: one that is an integer, which
+  is what `~(i > 0)` is natively (`~` on a Python bool is bitwise), is a
+  `TraceError` on a native run as well as under tracing.
 - The faithfulness fact. For each kernel, the traced term is run by an
   interpreter (`loopty.interpret`: statement by statement in source order over
   each statement's isl domain, expressions evaluated with numpy's arithmetic,
@@ -259,8 +269,9 @@ end to end; the edges are sharp.
   a reduction by its iname in the kernel (`split("j_0", 2)`), which
   `Lowering.reduction_inames` lists.
 - The trace-time refusals of hidden state look one level below a name: into
-  the containers and the objects it holds, and the containers those objects
-  hold. `acc[0][0] += 1`, `holder.inner.s = ...`, a `deque`, a loop over a
+  the containers and the objects it holds (their `__dict__` and their slots),
+  the buffers of the arrays it holds (both of a ragged one), and the containers
+  those objects hold. `acc[0][0] += 1`, `holder.inner.s = ...`, a `deque`, a loop over a
   generator that wraps a domain, and a `dir()` probe trace without an error,
   and the `trace-faithful` fact is what refutes them. That fact is a test, not
   a proof: it compares the runs on the inputs it tries, so hidden state no such

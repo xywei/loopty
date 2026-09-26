@@ -587,6 +587,54 @@ with a pair of statement instances.
   wider column by the shape of the line and fails on a line that is gone. The
   abridged ledger in `README.md`, whose rows say they are verbatim, was kept
   so by hand, and its rule of dashes was not.
+- A `when` guard that compares with a `Real` scalar no longer narrows the
+  statement's isl domain. isl reads every name of a constraint as an integer,
+  so `with when(i < a):` with `a: Real` made `a` an integer parameter of the
+  domain, and at `a = 2.5` the compiled kernel disagreed with the native run
+  (the differential test was refuted by 1.0 at a cell), while the faithfulness
+  fact was left `assumed` because the interpreter would not fix a parameter at
+  a value that is not an integer. A comparison is a constraint only when every
+  name in it is a loop variable, a size, or a scalar of an integral sort
+  (`Nat`, `Int`, `Fin[...]`); any other conjunct is left to the statement's
+  guard predicate, evaluated at run time, and the domain over-approximates the
+  instances that write. `Stmt.unnarrowed` lists the conjuncts a domain leaves
+  out (this one, a data guard, a `!=`), each with the reason, and the
+  in-bounds, disjointness and ordering facts stated over such a domain carry
+  the list under `unnarrowed` in their provenance: proved, they hold for the
+  instances that write too; refuted, the witness may be an instance the guard
+  masks. A reduction condition that compares with a `Real` scalar is refused,
+  as a condition its domain cannot state already was. `with when(i < a):` with
+  `a: Nat` narrows the domain as before.
+- A `when` guard whose value is an integer rather than a truth value is
+  refused with a `TraceError` that names the fix, on a native run as well as
+  under tracing. `~` on a Python bool is bitwise (`~True` is `-2`, `~False` is
+  `-1`, both true), so `with when(~(i > 0)):` on a loop variable wrote every
+  cell natively while the trace recorded `not (i > 0)` and the compiled kernel
+  wrote one; `&` or `|` with an integer operand is bitwise in the same way. The
+  fix is the complement written as a comparison (`i <= 0`), and an explicit
+  comparison (`k != 0`) for an integer. A data comparison is a numpy `bool_`,
+  on which `~` is logical, and is not affected. The faithfulness fact counts a
+  `TraceError` from the native run as a disagreement, not as an input the body
+  refuses, so such a kernel is `refuted` with the refusal as its reason instead
+  of `assumed` for want of an input that ran.
+- Which code is a library's, for the trace-time refusals of hidden state, is
+  decided by module. The kernel's own module and the top-level package holding
+  it are never a library's, so a kernel installed into site-packages by a
+  non-editable install has its `print()` refused, the helpers of its package
+  followed and their module state copied, and the objects of its classes
+  compared, as a kernel in a source tree does. loopty's dependencies and the
+  standard library are machinery whatever directory they come from; another
+  installed package is a library's for a kernel outside it, and its call
+  locations are passed over rather than disabled for good, so that a kernel of
+  its own traced later is watched.
+- The outside-state snapshot reads an object's slots along with its
+  `__dict__`, and a ragged `Arr`'s offsets along with its values. An object of
+  the kernel author's class with `__slots__` was not copied at all, so
+  `state.count += 1` on a global or closure-held one traced, and a write into
+  the offsets of a global ragged array went unseen. Every slot named along the
+  class's MRO is read (a private one by its mangled name, an unset one as
+  unbound), and the offsets are copied as a second buffer, named
+  `rows.offsets` in the message.
 
 ### Changed
 
