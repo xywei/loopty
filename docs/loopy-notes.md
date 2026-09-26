@@ -1,6 +1,6 @@
 # Notes on loopy and islpy
 
-Nine interactions with loopty's dependencies that cost real debugging time, each
+Ten interactions with loopty's dependencies that cost real debugging time, each
 with the local workaround and the reason it is local. No upstream issues were
 filed: these are notes so that the next person meets the answer instead of the
 symptom.
@@ -90,11 +90,13 @@ the shape-bearing ones, and the call reaches loopy's `TypeError`.
 
 **The pin.** loopy 2025.2 calls two islpy methods that islpy 2026.2.2 removed:
 `Aff.is_equal`, in `simplify_pw_aff` during code generation for a tiled loop
-nest, and `BasicMap.is_bijective`, in `map_domain`, which is what the skew uses.
-With islpy 2026 installed the whole stencil demo fails with an `AttributeError`
-raised from inside loopy. `pyproject.toml` therefore carries `islpy<2026` with
-that reason beside it. Drop the ceiling when a loopy release supports islpy
-2026, not before.
+nest, and `BasicMap.is_bijective`, in `map_domain`. With islpy 2026 installed
+the whole stencil demo fails with an `AttributeError` raised from inside loopy.
+`pyproject.toml` therefore carries `islpy<2026` with that reason beside it.
+Drop the ceiling when a loopy release supports islpy 2026, not before. The skew
+used to go through `map_domain`; since it became an affine map rewritten by
+loopty itself (note 10), nothing in loopty calls `map_domain`, and only the
+first method holds the pin.
 
 **The second consequence, which is easy to miss.** islpy 2025.x publishes no
 cp314 wheels, so the pin also pins the interpreter: a machine whose only Python
@@ -103,31 +105,31 @@ is 3.14 cannot install loopty at all. `.github/workflows/ci.yml` runs 3.12 and
 a uv-provisioned CPython 3.13 rather than the host's 3.14. If the pin moves, the
 interpreter matrix moves with it.
 
-## 5. Three deprecation warnings that are loopy's, not loopty's
+## 5. Two deprecation warnings that are loopy's, not loopty's
 
 The test suite turns `DeprecationWarning` into an error so that one of loopty's
-own cannot hide in the noise of a run that compiles C. Three exemptions are listed
+own cannot hide in the noise of a run that compiles C. Two exemptions are listed
 in `pyproject.toml` and again in `tests/conftest.py` (the second because a `-W`
 on the command line overrides the ini file):
 
 * `'GCCToolchain.copy' is deprecated`. loopy builds its C toolchain with
   codepy's deprecated `Toolchain.copy` inside `ExecutableCTarget.__init__`,
   before loopty is handed anything. Unreachable from here.
-* `BasicMap.is_bijective with implicit conversion of self to Map is
-  deprecated`. `lp.map_domain`, which the skew uses, requires an
-  `isl.BasicMap` (its `_find_aff_subst_from_map` raises `RuntimeError` for
-  anything else) and then asks that BasicMap whether it is bijective. There is
-  no spelling of the call from loopty that avoids the warning. This is the same
-  method as in note 4, so it disappears when the pin does.
 * `Aff.is_equal with implicit conversion of self to PwAff is deprecated`.
   Raised from `simplify_pw_aff` while loopy generates code for a loop whose
   bound is a piecewise affine expression, which a tiled or split loop always
-  has. The other method from note 4. It is the one that hides: loopy keeps a
+  has. The method from note 4. It is the one that hides: loopy keeps a
   persistent code-generation cache under the user cache directory, and on a
   machine that has generated the kernel before, code generation is skipped and
   the warning never fires. A fresh CI runner has no cache and fails eight tests
   on it. To see what CI sees, run the suite with `XDG_CACHE_HOME` pointed at an
   empty directory.
+
+There used to be a third, `BasicMap.is_bijective with implicit conversion of
+self to Map is deprecated`, raised by `lp.map_domain`: it requires an
+`isl.BasicMap` and then asks it whether it is bijective. It went with the call
+(note 10), and the one test that still calls `map_domain`, to pin that loopy
+refuses the diamond, silences it locally.
 
 ## 6. loopy's own loop-nest choice is not the term's
 
@@ -242,3 +244,54 @@ whose outputs are all `approx` or `reassoc` is left to the compiler. C emitted
 with `--emit-code` for an exact kernel carries the pragma; compiling it with GCC
 in a GNU dialect still needs the flag.
 
+## 10. loopy's affine transforms refuse a map that is not unimodular
+
+**Symptom.** `lp.map_domain(kernel, isl.BasicMap("{ [t, i] -> [a, b] : a = t +
+i and b = t - i }"))` raises `LoopyError: No suitable equation for 'i' found`,
+and `lp.affine_map_inames(kernel, "t, i", "a, b", ["a = t + i", "b = t - i"])`
+raises `RuntimeError: division with remainder in linear solve for 't'`. The
+map is a bijection of the integer points onto its image, and it is the diamond
+of diamond tiling.
+
+**Cause.** Both transforms rewrite the instructions by solving the map for each
+old iname as an affine function of the new ones, and both accept only a solution
+with integer coefficients (`map_domain` looks for an equality in which the old
+iname has coefficient 1 or -1). The diamond has determinant -2: its image is
+only the points whose two coordinates have the same parity, and on that image
+`t = (a + b) / 2`, which is exact there and not an integer affine expression.
+`map_domain` can also refuse a map whose inverse is integer affine, depending on
+the order in which isl eliminates the other variables: the embedding
+`(t, i) -> (t + i, t - i, t)` fails the same way for `i`, although `i` is its
+first coordinate minus its third.
+
+**Local fix.** `schedule._affine_kernel` does the rewrite from the same isl map
+without solving anything. The domain that defines the mapped loops becomes its
+image under the map, which isl states exactly, with the parity as an
+existentially quantified constraint: `[nt, nx] -> { [a, b] : (a + b) mod 2 = 0
+and ... }`. A domain nested in those loops, which names them as parameters (a
+ragged fiber, or the domain of a reduction), becomes its image too, with the
+new loops as its parameters. Each old loop variable is replaced in every
+instruction by the quasi-affine expression isl gives for the inverse on that
+domain, `t = floor((a + b)/2)` and `i = floor((a + b)/2) - b`, which is exact on
+the image. `Schedule.affine` goes through it, and so does `Schedule.skew`,
+which is the affine map `(t, i) -> (t, i + t)` with both names kept; the tiling
+after a skew or a diamond is still loopy's own `split_iname`.
+
+**What loopy makes of it.** loopy 2025.2 generates correct code for the image:
+the stencil, the coupled acoustic pair, and the stencil tiled in `(a, b)` all
+agree with the native run bit for bit, at sizes of both parities. What it
+generates is the image's bounding loops with the parity tested by an `if`
+inside the innermost one, `if (-b - a + 2 * ((b + a) / 2) == 0)`, not a loop
+that steps by two, so half the iterations of that loop do nothing. A kernel
+that has to be fast in diamond coordinates would want the stride, which neither
+loopy nor this rewrite produces.
+
+**The limits of the fix.** A map applies to every statement in its loops,
+because loopy gives the statements of a loop one domain, so a map per statement
+(a time offset between two statements, which diamond tiling of the acoustic pair
+needs) is refused. isl decides the casts of any map whatever the kernel looks
+like; when the rewrite cannot write one for loopy (loops that no one domain
+defines, such as a row and the ragged fiber inside it, an image that is not one
+basic set, or a piecewise inverse), the schedule carries a `refuted`
+`buildable` fact with the reason, and no kernel, rather than an error from
+loopy.
