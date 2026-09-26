@@ -188,7 +188,9 @@ with a pair of statement instances.
   nothing shows equal are refused. Its loops, reduction binders and reflected
   parameters get names no earlier call has; its statements are named after the
   call (`scan.S1`, and `step@2.S0` in a second call of `step`) and keep their
-  own `file:line`. A program called by a program is recorded in place.
+  own `file:line`. A program called by a program is recorded in place, and
+  its kernels' postconditions are restated in the calling program's scope
+  too (`Program.callees` follows the programs a body names).
   Dependences across kernels are not declared: an array one call writes and a
   later call reads is one array of the term, so the edge is in the
   footprints, the lowering orders the instructions by it, and a

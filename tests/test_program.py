@@ -175,6 +175,31 @@ def bump_one(x: Arr[Fin[n + 1], Real]):  # noqa: F821
 
 
 @kernel
+def count_up(f: Arr[Fin[n], np.float32]):  # noqa: F821
+    """``1e8 + i``, which a float32 cell rounds to a multiple of eight."""
+    for i in f.dom:
+        f[i] = 1e8 + i
+
+
+@kernel
+def count_down(
+    u: Arr[Fin[n], np.float32],  # noqa: F821
+    f: Arr[Fin[n], np.float32],  # noqa: F821
+    y: Arr[Fin[n], np.float32],  # noqa: F821
+):
+    """``f - 1e8``, plus ``u``."""
+    for i in y.dom:
+        y[i] = f[i] - 1e8 + u[i]
+
+
+@kernel
+def clear(off: Arr[Fin[n], Nat]) -> all(off[r] == 0 for r in Fin[n]):  # noqa: F821
+    """Zero every cell, and say so."""
+    for r in off.dom:
+        off[r] = 0
+
+
+@kernel
 def halve(c: Arr[Fin[n], Nat], f: Arr[Fin[n], Real]):  # noqa: F821
     """Half of every count, which is a real."""
     for i in c.dom:
@@ -220,6 +245,18 @@ def twice(x):
 def outer(u, rhs):
     """A program that calls a program."""
     burgers(u, rhs)
+
+
+@program
+def clears(off):
+    """A program with one callee that states a postcondition."""
+    clear(off)
+
+
+@program
+def wraps_clears(off):
+    """A program whose only call is to a program."""
+    clears(off)
 
 
 def burgers_inputs(size: int = 8) -> dict:
@@ -448,6 +485,32 @@ def test_the_interpreter_runs_a_programs_term() -> None:
         for name, value in native.items():
             if isinstance(value, Arr):
                 assert np.array_equal(interpreted[name].numpy(), value.numpy()), name
+
+
+def test_the_interpreter_stores_a_temporary_as_both_runs_do() -> None:
+    # f is float32 natively and compiled, so 1e8 + 1 is rounded to 1e8 in it,
+    # and y comes out u. A float64 f in the interpreter kept the 1.
+    from loopty.interpret import interpret
+
+    @program
+    def round_trip(u, y):
+        f = Arr.zeros_like(u)
+        count_up(f)
+        count_down(u, f, y)
+
+    def make() -> dict:
+        return {
+            "u": Arr.from_numpy(np.array([1.0, 3.0], dtype=np.float32)),
+            "y": Arr.zeros(2, dtype=np.float32),
+        }
+
+    native, interpreted = make(), make()
+    round_trip(**native)
+    interpret(round_trip.term, interpreted)
+    assert list(native["y"].numpy()) == [1.0, 3.0]
+    assert np.array_equal(interpreted["y"].numpy(), native["y"].numpy())
+    fact = LoopyExecutor().differential(round_trip, Schedule(round_trip), make())
+    assert fact.status.value == "tested", fact.provenance
 
 
 def test_the_array_made_is_shaped_like_what_it_was_made_like() -> None:
@@ -973,6 +1036,21 @@ def test_a_program_that_writes_no_parameter_is_refused() -> None:
 
     with pytest.raises(TraceError, match="writes none of its parameters"):
         keeps_it.trace()
+
+
+def test_a_program_restates_the_postconditions_of_a_program_it_calls() -> None:
+    # wraps_clears's term is clear's statements, recorded in place through
+    # clears, and so is its restatement of clear's postcondition.
+    from loopty.typing import postcondition_id
+
+    assert [stmt.id for stmt in wraps_clears.term.stmts] == ["clear.S0"]
+    assert wraps_clears.callees() == (clear,)
+    (fact,) = wraps_clears.facts()
+    assert fact.statement.startswith("after clear(...) in wraps_clears")
+    assert fact.rests_on == (postcondition_id(clear.qualname),)
+    assert [f.statement for f in clears.facts()] == [
+        fact.statement.replace("wraps_clears", "clears")
+    ]
 
 
 def test_the_native_run_is_not_refused() -> None:

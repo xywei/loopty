@@ -541,17 +541,28 @@ class Program(_Decorated):
         return self._term
 
     def callees(self) -> tuple[Kernel, ...]:
-        """The kernels this program's body names.
+        """The kernels this program's body names, and those of the programs it names.
 
         Read off the code object's global references, which is enough for the
-        straight-line composition a program is, and needs no AST pass.
+        straight-line composition a program is, and needs no AST pass. A
+        program the body calls has its calls recorded in place in this
+        program's term (:mod:`loopty.compose`), so its kernels are this
+        program's callees too, and their postconditions are restated here.
         """
-        globals_ = getattr(self.fn, "__globals__", {})
-        out = []
-        for name in self.fn.__code__.co_names:
-            value = globals_.get(name)
-            if isinstance(value, Kernel) and value not in out:
-                out.append(value)
+        out: list[Kernel] = []
+        seen = {id(self)}
+
+        def visit(program: Program) -> None:
+            globals_ = getattr(program.fn, "__globals__", {})
+            for name in program.fn.__code__.co_names:
+                value = globals_.get(name)
+                if isinstance(value, Kernel) and value not in out:
+                    out.append(value)
+                elif isinstance(value, Program) and id(value) not in seen:
+                    seen.add(id(value))
+                    visit(value)
+
+        visit(self)
         return tuple(out)
 
     def facts(self) -> tuple[Fact, ...]:

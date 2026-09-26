@@ -52,7 +52,7 @@ import pymbolic.primitives as prim
 from lanky.terms import Abs, evaluate, render
 
 from loopty.arr import Arr
-from loopty.contract import integral_sort, resolve_sizes
+from loopty.contract import integral_sort, real_storage, resolve_sizes
 from loopty.term import Access, ArrType, Reduction, Term, declared_layout
 from loopty.trace import accesses_in
 
@@ -203,7 +203,10 @@ class _Run:
 
         Zeros, which is what the statement that begins its life writes anyway
         (:mod:`loopty.compose`); the interpreter runs that statement like any
-        other.
+        other. A sort of reals is stored as the lowering and the native
+        ``Arr.zeros_like`` store it (:func:`loopty.contract.real_storage`),
+        ``float32`` for ``np.float32``, so that what is written into it is
+        rounded here as it is in both runs.
         """
         if any(typ.ragged):
             raise InterpretError(f"the temporary {name} is ragged")
@@ -214,7 +217,10 @@ class _Run:
                 f"the temporary {name} has no shape at the sizes "
                 f"{dict(self.sizes)}: {exc}"
             ) from exc
-        dtype = np.int64 if integral_sort(typ.dtype) else np.float64
+        if integral_sort(typ.dtype):
+            dtype = np.dtype(np.int64)
+        else:
+            dtype = real_storage(typ.dtype) or np.dtype(np.float64)
         return Arr(np.zeros(shape, dtype=dtype))
 
     # {{{ running
