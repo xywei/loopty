@@ -182,7 +182,7 @@ became a cycle through the loop, the bound and the rewrite. Because the bound
 is computed once, a statement that needs it after that array has been
 rewritten would see the old row length, so `lower_generic` refuses that order
 with a `LoweringError`. It refuses the same stale length across the iterations
-of a loop inside the row that holds both a rewrite of the array and a
+of a loop inside the row that holds both a rewrite of the row's cell and a
 statement bounded by it, since the body reads the length where the loop over
 the fiber starts, once per iteration of that loop, and the kernel once per
 row. The collector lists the bound's read too, on every

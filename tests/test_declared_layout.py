@@ -268,6 +268,20 @@ def fiber_then_count_in_a_loop_of_the_row(
             cnt[r] = 1
 
 
+def sums_then_next_count_in_a_loop_of_the_row(
+    x: Arr[Fin[m], Real],  # noqa: F821
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """Sum row ``r`` once per ``i``, and clear the length of the next row."""
+    for r in y.dom:
+        for i in x.dom:
+            y[r] = y[r] + x[i] + reduce_sum(val[r, j] for j in val.dom[r])
+            with when(r + 1 < y.dom.size):
+                cnt[r + 1] = 0
+
+
 def count_grown_inside_its_own_fiber(
     cnt: Arr[Fin[n], Nat],  # noqa: F821
     val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
@@ -319,7 +333,29 @@ def test_a_length_rewritten_in_a_loop_of_its_row_is_not_lowered(
     message = str(caught.value)
     assert message.startswith(f"statement {user} is bounded by the row length ")
     assert "once per row, before the loop over i" in message
-    assert f"{writer} rewrites cnt inside that loop" in message
+    assert f"{writer} rewrites that row's cnt inside that loop" in message
+
+
+def test_the_next_row_s_length_rewritten_in_a_loop_of_the_row_is_lowered() -> None:
+    # ``cnt[r + 1]`` is not the length of row ``r``, which stays what it was
+    # for every ``i``, and both runs read the new one when row ``r + 1``
+    # starts. Only a write that can reach the row's own cell is refused.
+    pytest.importorskip("loopy")
+    from lanky.ledger import Status
+
+    from loopty.executor import LoopyExecutor
+
+    kernel = Kernel(sums_then_next_count_in_a_loop_of_the_row)
+    arguments = row_loop_input()
+    kernel(**arguments)
+    assert arguments["y"].numpy().tolist() == [8.0, 2.0, 2.0]
+    try:
+        fact = LoopyExecutor().differential(kernel, kernel, row_loop_input())
+    except Exception as exc:  # pragma: no cover - depends on the local toolchain
+        if "compil" in str(exc).lower() or isinstance(exc, OSError):
+            pytest.skip(f"the C toolchain path is unusable here: {exc}")
+        raise
+    assert fact.status is Status.TESTED, fact.provenance
 
 
 def test_a_length_rewritten_inside_the_loop_it_bounds_is_read_once() -> None:

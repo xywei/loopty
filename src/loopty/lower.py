@@ -49,7 +49,13 @@ from loopy.symbolic import Reduction as LoopyReduction
 from loopy.symbolic import set_to_cond_expr
 from pymbolic.mapper import Mapper
 
-from loopty.flow import bounds_dimension, ragged_bound_params, statement_accesses
+from loopty.flow import (
+    access_relation,
+    bounds_dimension,
+    counts_families,
+    ragged_bound_params,
+    statement_accesses,
+)
 from loopty.term import (
     COUNT_PARAM,
     COUNT_PARAM_REFLECTED,
@@ -1363,9 +1369,9 @@ def _refuse_bounds_rewritten_in_a_loop(
     The lowered kernel computes the length of row ``r`` once per row, in the
     loop over ``r`` (:func:`_count_inits`). The body reads it where the loop
     over the row's fiber starts, once per iteration of every loop around that
-    one. The two agree unless a statement rewrites the array the length is
-    read from inside a loop that sits between the two and also encloses a
-    statement bounded by it::
+    one. The two agree unless a statement rewrites the cell the length is read
+    from inside a loop that sits between the two and also encloses a statement
+    bounded by it::
 
         for r in y.dom:
             for i in x.dom:
@@ -1376,18 +1382,25 @@ def _refuse_bounds_rewritten_in_a_loop(
     lowered kernel one of the old. :func:`lower_generic` refuses the rewrite
     that comes between two statements in the body's order; this is the same
     stale length across the iterations of a loop the two share, whichever of
-    them comes first in the body, and it is refused the same way. A rewrite
-    inside the loop over the fiber itself is not refused: that loop reads its
-    bound once, when it starts, in the body as in the lowered kernel.
+    them comes first in the body, and it is refused the same way. Two rewrites
+    are not refused. One inside the loop over the fiber itself: that loop reads
+    its bound once, when it starts, in the body as in the lowered kernel. And
+    one of another row's cell (:func:`_writes_its_row`): ``cnt[r + 1] = 0``
+    inside row ``r`` changes a length that both runs read when row ``r + 1``
+    starts.
 
     ``uses`` maps a bound's instruction to each statement bounded by it, with
     how many of the statement's loops enclose the start of the loop the bound
     bounds (:func:`_loops_before_fiber`, or every loop for a sum).
     """
     rows = {insn.id: len(insn.within_inames) for insn in count_insns}
+    families = set(counts_families(term))
     for count_id, users in uses.items():
         source = count_reads[count_id]
         row = rows[count_id]
+        # ``cnt[r]``, or ``off[r]`` and ``off[r + 1]`` when the counts are not
+        # a parameter (see _count_inits).
+        shifts = (0,) if source in families else (0, 1)
         for writer in term.stmts:
             if writer.assignee.array != source:
                 continue
@@ -1399,16 +1412,42 @@ def _refuse_bounds_rewritten_in_a_loop(
                     shared += 1
                 if min(shared, fiber) <= row:
                     continue
+                if not _writes_its_row(writer, row, shifts):
+                    continue
                 loop = user.inames[row]
                 raise LoweringError(
                     f"statement {user.id} is bounded by the row length "
                     f"{count_params[count_id]}, which is computed from {source} "
                     f"once per row, before the loop over {loop}; {writer.id} "
-                    f"rewrites {source} inside that loop, so from its second "
-                    f"iteration on {user.id} would see the old length where the "
-                    f"body reads the new one. Rewrite {source} outside the loop "
-                    f"over {loop}, or in a kernel of its own."
+                    f"rewrites that row's {source} inside that loop, so from its "
+                    f"second iteration on {user.id} would see the old length "
+                    "where the body reads the new one. Rewrite it outside the "
+                    f"loop over {loop}, or in a kernel of its own."
                 )
+
+
+def _writes_its_row(writer: Stmt, row: int, shifts: Sequence[int]) -> bool:
+    """Can ``writer`` write a cell its own row's length is read from?
+
+    The row is ``writer``'s loop variable at depth ``row - 1``, and the cells
+    are that variable plus each of ``shifts``: ``cnt[r]``, or ``off[r]`` and
+    ``off[r + 1]``. Asked of the statement's domain, so a write a guard masks
+    where isl can state the guard is not counted. An index isl cannot state
+    reaches every cell (:func:`loopty.flow.access_relation`), so the answer
+    errs towards a refusal.
+    """
+    indices = tuple(writer.assignee.indices)
+    if len(indices) != 1:
+        return True
+    written = access_relation(writer.inames, writer.domain, indices)
+    source = ", ".join(writer.inames)
+    iname = writer.inames[row - 1]
+    for shift in shifts:
+        cell = isl.Map(f"{{ [{source}] -> [{iname} + {shift}] }}")
+        cell = cell.align_params(written.get_space())
+        if not written.align_params(cell.get_space()).intersect(cell).is_empty():
+            return True
+    return False
 
 
 def lower_generic(term: Term, target: str = "c") -> Lowering:
