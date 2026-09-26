@@ -313,7 +313,17 @@ class RunVerb:
                     print(f"  ran {name} on the {schedule.target} target")
                     continue
                 fact = executor.differential(native, schedule, inputs)
-            except (IllegalCast, RuntimeError, ValueError, TypeError) as exc:
+            except (
+                IllegalCast,
+                RuntimeError,
+                ValueError,
+                TypeError,
+                # What a body raises on the inputs it was given, a cell that is
+                # not there or a division by zero, as ``loopty.faithful`` counts
+                # them: the file's to fix, and said as plainly as the rest.
+                IndexError,
+                ArithmeticError,
+            ) as exc:
                 print(f"  {type(exc).__name__}: {exc}")
                 failures += 1
                 continue

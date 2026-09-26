@@ -362,6 +362,29 @@ def test_check_prints_the_witness_of_an_isl_refutation_under_its_line(
     assert f"  {reason}" in lines[header + 1 : header + 3]
 
 
+def test_run_reports_a_body_that_reads_past_the_end_instead_of_a_traceback(
+    tmp_path, capsys
+) -> None:
+    # The native run of ``shift`` raises IndexError on its example input. The
+    # command reported the errors it expected by name and stopped with a
+    # traceback on this one.
+    body = OUT_OF_BOUNDS + (
+        "\n\ndef example_inputs():\n"
+        "    import numpy as np\n\n"
+        "    return {\n"
+        '        "shift": {"u": np.arange(4.0), "v": np.zeros(4)},\n'
+        '        "collide": {"x": np.arange(4.0), "y": np.zeros(4)},\n'
+        "    }\n"
+    )
+    path = write_fixture(tmp_path, body)
+    code = main(["run", str(path)])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "  IndexError: " in out
+    # The other kernel in the file still ran, and agreed.
+    assert "  y: difference 0 " in out
+
+
 def test_run_reports_a_loop_carried_name_instead_of_a_traceback(
     tmp_path, capsys
 ) -> None:

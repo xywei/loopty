@@ -539,6 +539,10 @@ with a pair of statement instances.
   against its allowance (or its shape and the native run's, when the two
   differ), as its `reason`, where the block used to read `no witness
   recorded`.
+- `loopty run` reports a body that raises `IndexError` or an `ArithmeticError`
+  on its example inputs (a read past the end, a division by zero) by name, as
+  it reports the other errors a run stops with, goes on to the file's other
+  kernels, and exits 1. It stopped with a traceback.
 - The schedule checker and the typing rules see the reads a ragged access makes
   through its offsets. `val[r, j]` is `val[off[r] + j]` once lowered, and row
   `r` ends at `off[r + 1]`, but neither read is in the body, so only the
