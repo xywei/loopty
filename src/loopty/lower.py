@@ -49,7 +49,7 @@ from loopy.symbolic import Reduction as LoopyReduction
 from loopy.symbolic import set_to_cond_expr
 from pymbolic.mapper import Mapper
 
-from loopty.flow import ragged_bound_params, statement_accesses
+from loopty.flow import bounds_dimension, ragged_bound_params, statement_accesses
 from loopty.term import (
     COUNT_PARAM,
     COUNT_PARAM_REFLECTED,
@@ -1332,6 +1332,85 @@ def _count_inits(
     return insns, ids, reads
 
 
+def _loops_before_fiber(loops: isl.Set, param: str) -> int:
+    """How many loops of a statement enclose the first loop ``param`` bounds.
+
+    ``loops`` is the statement's domain over its loop variables. A loop over a
+    ragged fiber reads its bound where it starts, once per iteration of the
+    loops around it, so those are the loops across whose iterations the body
+    sees a row length change. When ``param`` bounds none of them, all of them
+    count.
+    """
+    index = loops.find_dim_by_name(isl.dim_type.param, param)
+    total = loops.dim(isl.dim_type.set)
+    if index < 0:
+        return total
+    for position in range(total):
+        if bounds_dimension(loops, position, index):
+            return position
+    return total
+
+
+def _refuse_bounds_rewritten_in_a_loop(
+    term: Term,
+    count_insns: Sequence[Any],
+    count_params: Mapping[str, str],
+    count_reads: Mapping[str, str],
+    uses: Mapping[str, Sequence[tuple[Stmt, int]]],
+) -> None:
+    """Refuse a row length that a loop inside its row would read stale.
+
+    The lowered kernel computes the length of row ``r`` once per row, in the
+    loop over ``r`` (:func:`_count_inits`). The body reads it where the loop
+    over the row's fiber starts, once per iteration of every loop around that
+    one. The two agree unless a statement rewrites the array the length is
+    read from inside a loop that sits between the two and also encloses a
+    statement bounded by it::
+
+        for r in y.dom:
+            for i in x.dom:
+                y[r] = y[r] + x[i] + reduce_sum(val[r, j] for j in val.dom[r])
+                cnt[r] = 1
+
+    From the second ``i`` on, the body sums a row of the new length and the
+    lowered kernel one of the old. :func:`lower_generic` refuses the rewrite
+    that comes between two statements in the body's order; this is the same
+    stale length across the iterations of a loop the two share, whichever of
+    them comes first in the body, and it is refused the same way. A rewrite
+    inside the loop over the fiber itself is not refused: that loop reads its
+    bound once, when it starts, in the body as in the lowered kernel.
+
+    ``uses`` maps a bound's instruction to each statement bounded by it, with
+    how many of the statement's loops enclose the start of the loop the bound
+    bounds (:func:`_loops_before_fiber`, or every loop for a sum).
+    """
+    rows = {insn.id: len(insn.within_inames) for insn in count_insns}
+    for count_id, users in uses.items():
+        source = count_reads[count_id]
+        row = rows[count_id]
+        for writer in term.stmts:
+            if writer.assignee.array != source:
+                continue
+            for user, fiber in users:
+                shared = 0
+                for mine, theirs in zip(user.inames, writer.inames, strict=False):
+                    if mine != theirs:
+                        break
+                    shared += 1
+                if min(shared, fiber) <= row:
+                    continue
+                loop = user.inames[row]
+                raise LoweringError(
+                    f"statement {user.id} is bounded by the row length "
+                    f"{count_params[count_id]}, which is computed from {source} "
+                    f"once per row, before the loop over {loop}; {writer.id} "
+                    f"rewrites {source} inside that loop, so from its second "
+                    f"iteration on {user.id} would see the old length where the "
+                    f"body reads the new one. Rewrite {source} outside the loop "
+                    f"over {loop}, or in a kernel of its own."
+                )
+
+
 def lower_generic(term: Term, target: str = "c") -> Lowering:
     """Lower ``term``, keeping the map from term statements to instructions.
 
@@ -1472,19 +1551,27 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
         first_use: dict[str, str] = {}
         rewritten: dict[str, str] = {}
         writers: dict[str, list[str]] = {}
+        uses: dict[str, list[tuple[Stmt, int]]] = {}
         for stmt in term.stmts:
             insn = by_id[insn_ids[stmt.id]]
+            loops = _domain_over(stmt.domain, stmt.inames)
             needed = {
                 count_ids[param]
-                for param in _domain_params(_domain_over(stmt.domain, stmt.inames))
+                for param in _domain_params(loops)
                 if param in count_ids
             }
+            for count_id in needed:
+                uses.setdefault(count_id, []).append(
+                    (stmt, _loops_before_fiber(loops, count_params[count_id]))
+                )
             for reduction in reductions_of(stmt.expr):
-                needed |= {
-                    count_ids[param]
-                    for param in _domain_params(reduction.domain)
-                    if param in count_ids
-                }
+                for param in _domain_params(reduction.domain):
+                    if param in count_ids:
+                        needed.add(count_ids[param])
+                        # A sum is evaluated inside every loop of its statement.
+                        uses.setdefault(count_ids[param], []).append(
+                            (stmt, len(stmt.inames))
+                        )
             stale = sorted(needed & rewritten.keys())
             if stale:
                 count_id = stale[0]
@@ -1515,6 +1602,9 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
             if needed:
                 by_id[insn.id] = insn.copy(depends_on=insn.depends_on | needed)
             writers.setdefault(written, []).append(insn.id)
+        _refuse_bounds_rewritten_in_a_loop(
+            term, count_insns, count_params, count_reads, uses
+        )
         insns = [by_id[insn.id] for insn in insns]
         # A bound no statement needs keeps the heuristic, as before.
         count_insns = [

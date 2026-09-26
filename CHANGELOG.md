@@ -840,7 +840,13 @@ with a pair of statement instances.
   too, as it did on the compiled one, so the two layouts agree when a run
   starts, and the faithfulness fact's samples pass the drawn array's offsets
   for such a parameter, where they drew them at random and would now be
-  refused.
+  refused. One case still had two meanings, and lowering now refuses it: a
+  loop inside row `r` that both rewrites `cnt` and holds a statement bounded
+  by `cnt[r]`. The body reads the length where the loop over the fiber
+  starts, once per iteration of that loop, and the lowered kernel once per
+  row, so from the loop's second iteration on the two summed rows of
+  different lengths; with the rewrite first in the body, loopy could not
+  schedule the kernel at all.
 
 ### Changed
 

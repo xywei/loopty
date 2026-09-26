@@ -228,6 +228,125 @@ def test_the_compiled_and_the_native_run_give_one_meaning(fn, ends) -> None:
     assert fact.status is Status.TESTED, fact.provenance
 
 
+def sums_then_count_in_a_loop_of_the_row(
+    x: Arr[Fin[m], Real],  # noqa: F821
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """Sum row ``r`` once per ``i``, and set its length to one after each sum."""
+    for r in y.dom:
+        for i in x.dom:
+            y[r] = y[r] + x[i] + reduce_sum(val[r, j] for j in val.dom[r])
+            cnt[r] = 1
+
+
+def count_then_sums_in_a_loop_of_the_row(
+    x: Arr[Fin[m], Real],  # noqa: F821
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """Set the length of row ``r`` to one, then sum it, once per ``i``."""
+    for r in y.dom:
+        for i in x.dom:
+            cnt[r] = 1
+            y[r] = y[r] + x[i] + reduce_sum(val[r, j] for j in val.dom[r])
+
+
+def fiber_then_count_in_a_loop_of_the_row(
+    x: Arr[Fin[m], Real],  # noqa: F821
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A loop over the fiber of row ``r`` once per ``i``, then its length set."""
+    for r in y.dom:
+        for i in x.dom:
+            for j in val.dom[r]:
+                y[r] = y[r] + x[i] * val[r, j]
+            cnt[r] = 1
+
+
+def count_grown_inside_its_own_fiber(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The length of row ``r`` grown by one inside the loop that it bounds."""
+    for r in y.dom:
+        for j in val.dom[r]:
+            y[r] = y[r] + val[r, j]
+            cnt[r] = cnt[r] + 1
+
+
+def row_loop_input() -> dict:
+    return {
+        "x": Arr.from_numpy(np.ones(2)),
+        "cnt": Arr.from_numpy(np.array(COUNTS, dtype=np.int64)),
+        "val": Arr.ragged(COUNTS, values=np.arange(1.0, 7.0)),
+        "y": Arr.zeros(3),
+    }
+
+
+@pytest.mark.parametrize(
+    ("fn", "user", "writer", "native"),
+    [
+        (sums_then_count_in_a_loop_of_the_row, "S0", "S1", [6.0, 8.0, 21.0]),
+        (count_then_sums_in_a_loop_of_the_row, "S1", "S0", [4.0, 8.0, 10.0]),
+        (fiber_then_count_in_a_loop_of_the_row, "S0", "S1", [4.0, 6.0, 19.0]),
+    ],
+)
+def test_a_length_rewritten_in_a_loop_of_its_row_is_not_lowered(
+    fn, user, writer, native
+) -> None:
+    # The body reads the length of row ``r`` where the loop over its fiber
+    # starts, once per ``i``; the lowered kernel computed it once per row. So
+    # from the second ``i`` on the native run summed one entry and the
+    # compiled one the whole row: the first kernel's ``y`` came out 11 apart,
+    # and only the differential run said so. The writer first in the body
+    # left loopy with an order it could not schedule, and the loop over the
+    # fiber inside ``i`` was refused for an unrelated reason (#53).
+    pytest.importorskip("loopy")
+    from loopty.lower import LoweringError, lower_generic
+
+    arguments = row_loop_input()
+    Kernel(fn)(**arguments)
+    assert arguments["y"].numpy().tolist() == native
+    assert arguments["cnt"].numpy().tolist() == [1, 1, 1]
+    with pytest.raises(LoweringError) as caught:
+        lower_generic(term_of(fn))
+    message = str(caught.value)
+    assert message.startswith(f"statement {user} is bounded by the row length ")
+    assert "once per row, before the loop over i" in message
+    assert f"{writer} rewrites cnt inside that loop" in message
+
+
+def test_a_length_rewritten_inside_the_loop_it_bounds_is_read_once() -> None:
+    # The loop over ``val.dom[r]`` reads its bound when it starts, natively as
+    # compiled, so growing ``cnt[r]`` inside it adds no iteration to it.
+    pytest.importorskip("loopy")
+    from lanky.ledger import Status
+
+    from loopty.executor import LoopyExecutor
+
+    arguments = row_loop_input()
+    del arguments["x"]
+    kernel = Kernel(count_grown_inside_its_own_fiber)
+    kernel(**arguments)
+    assert arguments["y"].numpy().tolist() == [3.0, 3.0, 15.0]
+    assert arguments["cnt"].numpy().tolist() == [4, 2, 6]
+    arguments = row_loop_input()
+    del arguments["x"]
+    try:
+        fact = LoopyExecutor().differential(kernel, kernel, arguments)
+    except Exception as exc:  # pragma: no cover - depends on the local toolchain
+        if "compil" in str(exc).lower() or isinstance(exc, OSError):
+            pytest.skip(f"the C toolchain path is unusable here: {exc}")
+        raise
+    assert fact.status is Status.TESTED, fact.provenance
+
+
 def test_samples_pass_the_offsets_of_the_ragged_array_they_draw() -> None:
     # A call has to pass them so, and a native run that refuses a sample says
     # nothing about the term.
