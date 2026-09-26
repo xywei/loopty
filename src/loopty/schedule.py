@@ -1607,10 +1607,10 @@ def _privatized_reason(draft: _Draft) -> str | None:
             shown = _shown_tag(draft, name, privatizing[name])
             if isinstance(privatizing[name], VectorizeTag):
                 what = (
-                    "loopy cannot generate code for it: it keeps a temporary "
-                    "written inside a vec loop as a vector along it, and the "
-                    "row's length bounds the loop over its fiber, which needs "
-                    "one number"
+                    "loopy cannot generate working code for it: it keeps a "
+                    "temporary written inside a vec loop as a vector along it, "
+                    "and the row's length bounds the loop over its fiber, which "
+                    "needs one number"
                 )
             else:
                 what = (
