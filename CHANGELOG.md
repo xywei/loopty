@@ -621,10 +621,11 @@ with a pair of statement instances.
   of `assumed` for want of an input that ran.
 - Which code is a library's, for the trace-time refusals of hidden state, is
   decided by module. The kernel's own module and the top-level package holding
-  it are never a library's, so a kernel installed into site-packages by a
-  non-editable install has its `print()` refused, the helpers of its package
-  followed and their module state copied, and the objects of its classes
-  compared, as a kernel in a source tree does. loopty's dependencies and the
+  it (below a namespace package, the first regular package, which is the
+  author's alone) are never a library's, so a kernel installed into
+  site-packages by a non-editable install has its `print()` refused, the
+  helpers of its package followed and their module state copied, and the
+  objects of its classes compared, as a kernel in a source tree does. loopty's dependencies and the
   standard library are machinery whatever directory they come from; another
   installed package is a library's for a kernel outside it, and its call
   locations are passed over rather than disabled for good, so that a kernel of

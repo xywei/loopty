@@ -1161,14 +1161,31 @@ class _Own:
 
 
 def _own_of(function: Any) -> _Own | None:
-    """The kernel code of ``function``: its module, and the package holding it."""
+    """The kernel code of ``function``: its module, and the package holding it.
+
+    The package is the top-level one, or, when that is a namespace package
+    (a directory several distributions install into, with no ``__init__``),
+    the first regular package below it, which is the kernel author's alone.
+    """
     if isinstance(function, MethodType):
         function = function.__func__
-    namespace = getattr(function, "__globals__", None)
-    module = namespace.get("__name__") if isinstance(namespace, dict) else None
-    if not isinstance(module, str) or not module:
+    module = _module_of_function(function)
+    if not module:
         return None
-    package = None if _machinery_module(module) else module.partition(".")[0]
+    if _machinery_module(module):
+        return _Own(module, None)
+    parts = module.split(".")
+    package = parts[0]
+    for depth in range(1, len(parts) + 1):
+        package = ".".join(parts[:depth])
+        found = sys.modules.get(package)
+        namespace = (
+            found is not None
+            and getattr(found, "__file__", None) is None
+            and hasattr(found, "__path__")
+        )
+        if not namespace:
+            break
     return _Own(module, package)
 
 

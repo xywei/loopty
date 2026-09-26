@@ -2018,6 +2018,44 @@ def test_another_installed_package_is_still_a_library(site_packages) -> None:
         term_of(loud)
 
 
+def test_a_namespace_package_is_not_all_the_kernels(site_packages) -> None:
+    # Two distributions install into one namespace directory; the kernel's own
+    # package is the regular package below it, and the other is a library.
+    load = site_packages(
+        {
+            "installed_ns/alpha/__init__.py": "",
+            "installed_ns/alpha/kernels.py": _HEADER
+            + """
+    from installed_ns.beta import shout
+
+
+    def relayed(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
+        for i in y.dom:
+            y[i] = shout(x[i])
+
+
+    def chatty(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
+        for i in y.dom:
+            print(i)
+            y[i] = x[i]
+    """,
+            "installed_ns/beta/__init__.py": """\
+    def shout(value):
+        print(value)
+        return value
+    """,
+        }
+    )
+    from loopty.trace import _own_of
+
+    module = load("installed_ns.alpha.kernels")
+    assert _own_of(module.relayed).package == "installed_ns.alpha"
+    (stmt,) = term_of(module.relayed).stmts
+    assert render(stmt.expr) == "x[i]"
+    with pytest.raises(TraceError, match=r"calls print\(\) at kernels.py:"):
+        term_of(module.chatty)
+
+
 def test_library_code_is_decided_by_module() -> None:
     from loopty.trace import _library, _Own
 
