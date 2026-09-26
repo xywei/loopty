@@ -45,6 +45,7 @@ a claim about one cell rather than about an average.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -59,6 +60,7 @@ from loopty.tolerance import (
 )
 
 if TYPE_CHECKING:
+    from loopty.domain import Fixed
     from loopty.lower import Lowering
 
 __all__ = [
@@ -124,19 +126,53 @@ def _copy(value: Any) -> Any:
     return value
 
 
+def _declared_layouts(
+    term: Term, lowering: Lowering, supplied: Mapping[str, Any]
+) -> dict[str, Fixed]:
+    """The declared domain of every array argument over one, at the call's sizes.
+
+    The layout the lowering addresses such an array through: its box, the
+    starts of a union's pieces and the table of rows are the *declared*
+    domain's, which the argument need not share. The contract asks only for
+    the same points, so ``Sigma[a: Fin[n], Fin[a]]`` passes for the strict
+    triangle ``Where[i: Fin[n], j: Fin[n], j < i]``, whose box is wider.
+    """
+    from loopty.arr import Arr
+    from loopty.contract import resolve_sizes
+
+    if not lowering.storage:
+        return {}
+    types = dict(term.params)
+    sizes = resolve_sizes(types, supplied)
+    out: dict[str, Fixed] = {}
+    for name in lowering.storage:
+        value = supplied.get(name)
+        if not (isinstance(value, Arr) and value.domain is not None):
+            continue
+        domain = types[name].domain
+        out[name] = domain.fixed({size: sizes[size] for size in domain.size_names()})
+    return out
+
+
 def _call_arguments(
-    term: Term, lowering: Lowering, args: tuple, kwargs: dict
+    term: Term,
+    lowering: Lowering,
+    args: tuple,
+    kwargs: dict,
+    layouts: Mapping[str, Fixed] | None = None,
 ) -> dict[str, np.ndarray]:
     """Match positional and keyword arguments to the term's parameters.
 
     A ragged :class:`~loopty.arr.Arr` supplies two arguments, its flat values and
     its offsets, which is the same splitting the lowering did to the type. An
     array over a polyhedral domain supplies its values in the layout the
-    lowering chose for it (:attr:`loopty.lower.Lowering.storage`), converted
-    from its own when the two differ, and the table of row starts when that
-    layout is ``packed``. Such a kernel is also given every size the call
-    determines that it takes as a value argument, since a flat buffer has no
-    shape for loopy to read a size off.
+    lowering chose for it (:attr:`loopty.lower.Lowering.storage`) over the
+    declared domain at the call's sizes (``layouts``, see
+    :func:`_declared_layouts`), converted from its own when the two differ,
+    and the table of row starts and the starts of its pieces that the
+    lowering takes as arguments. Such a kernel is also given every size the
+    call determines that it takes as a value argument, since a flat buffer
+    has no shape for loopy to read a size off.
     """
     from loopty.arr import Arr
     from loopty.contract import resolve_sizes
@@ -145,20 +181,31 @@ def _call_arguments(
     supplied: dict[str, Any] = dict(zip(names, args, strict=False))
     for key, value in kwargs.items():
         supplied[key] = value
+    if layouts is None:
+        layouts = _declared_layouts(term, lowering, supplied)
 
     dtypes = {
         arg.name: arg.dtype.numpy_dtype
         for arg in lowering.kernel.default_entrypoint.args
         if arg.dtype is not None
     }
+    shapeless = {
+        arg.name
+        for arg in lowering.kernel.default_entrypoint.args
+        if getattr(arg, "shape", "missing") is None
+    }
     out: dict[str, np.ndarray] = {}
     for name, value in supplied.items():
         if isinstance(value, Arr) and value.domain is not None:
             storage = lowering.storage.get(name, "box")
-            out[name] = _as_numpy(value.stored(storage), dtypes.get(name))
+            layout = layouts[name]
+            buffer = value.stored(storage, layout)
+            if name in shapeless:
+                buffer = buffer.reshape(-1)
+            out[name] = _as_numpy(buffer, dtypes.get(name))
             table = lowering.tables.get(name)
             if table is not None:
-                out[table] = _as_numpy(value.table(), dtypes.get(table))
+                out[table] = _as_numpy(layout.table(), dtypes.get(table))
             continue
         if isinstance(value, Arr) and value.is_ragged:
             offsets = lowering.ragged.get(name)
@@ -168,6 +215,10 @@ def _call_arguments(
             out[name] = _as_numpy(value, dtypes.get(name))
         else:
             out[name] = value
+    for argument, (array, piece) in lowering.bases.items():
+        layout = layouts[array]
+        packed = lowering.storage[array] == "packed"
+        out[argument] = (layout.table_bases if packed else layout.box_bases)[piece]
     if lowering.storage:
         sizes = resolve_sizes(dict(term.params), supplied)
         for name in lowering.value_args:
@@ -262,7 +313,8 @@ class LoopyExecutor:
         names = [name for name, _ in term.params]
         supplied = {**dict(zip(names, args, strict=False)), **kwargs}
         check_arguments(dict(term.params), supplied, lowering.ragged)
-        call = _call_arguments(term, lowering, args, kwargs)
+        layouts = _declared_layouts(term, lowering, supplied)
+        call = _call_arguments(term, lowering, args, kwargs, layouts)
         call, empty = _pad_empty_arrays(call, lowering)
         if target_name == "opencl":
             out = self._run_opencl(kernel, lowering, call)
@@ -276,7 +328,7 @@ class LoopyExecutor:
             # caller comparing outputs sees the array it passed in.
             if name in out:
                 out[name] = original
-        self._write_back(supplied, out, lowering.storage)
+        self._write_back(supplied, out, lowering.storage, layouts)
         for name in out:
             # An output over a domain is its cells, whatever layout it ran in.
             if name in lowering.storage:
@@ -304,7 +356,10 @@ class LoopyExecutor:
 
     @staticmethod
     def _write_back(
-        supplied: dict, results: dict, storage: dict[str, str] | None = None
+        supplied: dict,
+        results: dict,
+        storage: dict[str, str] | None = None,
+        layouts: Mapping[str, Fixed] | None = None,
     ) -> None:
         """Copy the outputs into the arrays the caller handed in.
 
@@ -321,16 +376,18 @@ class LoopyExecutor:
         an output is written back here, cast to the caller's dtype the way any
         assignment into it would be.
 
-        An array over a domain ran in the layout ``storage`` names for it, and
+        An array over a domain ran in the layout ``storage`` names for it over
+        the declared domain (``layouts``, see :func:`_declared_layouts`), and
         loads its values at its points from that buffer into its own layout.
         """
         from loopty.arr import Arr
 
         storage = storage or {}
+        layouts = layouts or {}
         for name, value in results.items():
             given = supplied.get(name)
             if isinstance(given, Arr) and given.domain is not None:
-                given.load(storage.get(name, "box"), value)
+                given.load(storage.get(name, "box"), value, layouts.get(name))
             elif isinstance(given, Arr):
                 given.numpy()[...] = np.asarray(value).reshape(given.numpy().shape)
             elif isinstance(given, np.ndarray) and given is not value:

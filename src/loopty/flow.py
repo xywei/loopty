@@ -394,11 +394,13 @@ def cell_set(
     has the cell.
     """
     if arrtype.domain is not None:
-        if names is None:
-            names = tuple(f"a{k}" for k in range(arrtype.ndim))
-        return arrtype.domain.isl_set(tuple(names))
+        # The domain names its own dimensions when none are given, none of
+        # them one of its sizes (see loopty.domain.dimension_names).
+        return arrtype.domain.isl_set(None if names is None else tuple(names))
     if names is None:
-        names = tuple(f"a{k}" for k in range(len(arrtype.axes)))
+        from loopty.domain import dimension_names
+
+        names = dimension_names(len(arrtype.axes), _names_in(arrtype.axes))
     bounds: list[Any] = []
     for axis, (size, ragged) in enumerate(
         zip(arrtype.axes, arrtype.ragged, strict=True)

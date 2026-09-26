@@ -480,24 +480,39 @@ class Arr:
             raise TypeError("only an array over a domain has cells in its order")
         return self._domain.gather(self._values, self._storage or "box")
 
-    def stored(self, storage: str) -> np.ndarray:
-        """This array's values in the buffer of ``storage``: its own, or a copy."""
+    def stored(self, storage: str, layout: Fixed | None = None) -> np.ndarray:
+        """This array's values in the buffer of ``storage``: its own, or a copy.
+
+        ``layout`` is the domain at sizes whose box or table of rows the buffer
+        follows, this array's own by default. A compiled run passes the
+        declared domain at the call's sizes, which has the same points (the
+        contract saw to that) and may still have another box: the same
+        triangle written ``Sigma[a: Fin[n], Fin[a]]`` spans ``n x (n - 1)``.
+        The buffer is the array's own only when both its layout and its
+        storage are the ones asked for.
+        """
         if self._domain is None:
             raise TypeError("only an array over a domain has a layout to choose")
-        if storage == self._storage:
+        layout = self._domain if layout is None else layout
+        if storage == self._storage and layout.same_layout(self._domain):
             return self._values
-        return self._domain.scatter(self.cells(), _storage(storage))
+        return layout.scatter(self.cells(), _storage(storage))
 
-    def load(self, storage: str, buffer: Any) -> None:
-        """Write into this array what a buffer of ``storage`` holds at the points."""
+    def load(self, storage: str, buffer: Any, layout: Fixed | None = None) -> None:
+        """Write into this array what a buffer of ``storage`` holds at the points.
+
+        ``layout`` is the domain at sizes the buffer follows, as in
+        :meth:`stored`; the values are read from it at the points and written
+        into this array's own layout.
+        """
         if self._domain is None:
             raise TypeError("only an array over a domain has a layout to load")
+        layout = self._domain if layout is None else layout
         buffer = np.asarray(buffer)
-        if storage == self._storage and buffer.size == self._values.size:
+        if storage == self._storage and layout.same_layout(self._domain):
             self._values[...] = buffer.reshape(self._values.shape)
             return
-        shape = self._domain.storage_shape(storage)
-        values = self._domain.gather(buffer.reshape(shape), storage)
+        values = layout.gather(buffer.reshape(layout.storage_shape(storage)), storage)
         self._domain.scatter(values, self._storage or "box", into=self._values)
 
     def table(self) -> np.ndarray:

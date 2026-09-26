@@ -41,6 +41,13 @@ a union's pieces follow one another in a flat buffer, each boxed, at a base that
 is a sum of the boxes before it. Packed, ``L[i, j]`` is ``L[off_L[i] + j]``
 through a table of row starts that the executor computes from the domain and
 passes in, as it passes a ragged array's offsets.
+
+An extent of a box can be negative at some sizes, ``n - 1`` at ``n = 0`` for
+``Sigma[i: Fin[n], Fin[i]]``, where the domain is empty and its box has no
+cells. Such an extent is no shape and no part of a base: a single domain whose
+box has one is a flat buffer addressed row-major (:func:`box_is_shape`), and a
+piece after one starts at a value argument the executor computes
+(:meth:`_Builder.piece_base`), since a term would put it a cell or more away.
 """
 
 from __future__ import annotations
@@ -439,7 +446,11 @@ class Lowering:
     ``storage`` says, for every array over a polyhedral domain, which layout
     it is stored in, ``"box"`` or ``"packed"`` (:mod:`loopty.domain`), and
     ``tables`` names the argument holding the table of row starts of each
-    packed one, which the executor computes and passes.
+    packed one, which the executor computes and passes. ``bases`` maps a
+    value argument to the ``(array, piece)`` whose start it holds, for a piece
+    of a union whose start is not a term of the sizes (see
+    :meth:`_Builder.piece_base`); the executor computes that too, in the
+    array's layout.
     """
 
     term: Term
@@ -454,6 +465,7 @@ class Lowering:
     contraction: bool = True
     storage: dict[str, str] = field(default_factory=dict)
     tables: dict[str, str] = field(default_factory=dict)
+    bases: dict[str, tuple[str, int]] = field(default_factory=dict)
 
     @property
     def name(self) -> str:
@@ -724,6 +736,9 @@ class _Builder:
         #: the table of row starts of each packed one; see Lowering.
         self.storage = _storage_plan(term, layouts)
         self.tables: dict[str, str] = {}
+        #: The value arguments holding where a piece of a union starts, where
+        #: that is not a term of the sizes; see :meth:`piece_base`.
+        self.bases: dict[str, tuple[str, int]] = {}
         self.extra_domains: list[isl.Set] = []
         self.extra_args: list[Any] = []
         self.value_args: list[str] = []
@@ -885,15 +900,63 @@ class _Builder:
         boxes = [tuple(_plain(extent) for extent in piece.box()) for piece in pieces]
         if self.storage[name] == "box":
             if not union:
-                return prim.Subscript(variable, rest)
-            base = _total(_volume(box) for box in boxes[:position])
+                if box_is_shape(domain):
+                    return prim.Subscript(variable, rest)
+                # A flat buffer, addressed row-major in the box: the address
+                # of a point is the same term, and no extent is a shape.
+                return prim.Subscript(variable, (linearize(rest, boxes[0]),))
+            base = self.piece_base(name, position, boxes, "box")
             flat = _plus(base, linearize(rest, boxes[position]))
             return prim.Subscript(variable, (flat,))
         rows = [box[:-1] for box in boxes]
-        base = _total(_volume(box) for box in rows[:position])
+        base = self.piece_base(name, position, rows, "packed")
         entry = _plus(base, linearize(rest[:-1], rows[position]) if rest[:-1] else 0)
         start = prim.Subscript(prim.Variable(self.table_for(name)), (entry,))
         return prim.Subscript(variable, (_plus(start, rest[-1]),))
+
+    def piece_base(
+        self, name: str, position: int, boxes: Sequence[Sequence[Any]], storage: str
+    ) -> Any:
+        """Where piece ``position`` of the union ``name`` starts in its buffer.
+
+        ``boxes`` are the boxes the pieces take up in it: the whole box of each
+        for ``"box"``, and the box of its rows for the table of ``"packed"``.
+        The start is the sum of the volumes of the boxes before it, which is a
+        term of the sizes when every extent in them is non-negative at every
+        size (:meth:`loopty.domain.Polyhedron.extents_never_negative`). One that
+        can be negative belongs to a piece that is empty at those sizes and
+        takes up no cells, which the term would not say (``(n - 1) * (n - 1)``
+        is ``1`` at ``n = 0``), so the start is then a value argument the
+        executor computes from the domain at the call's sizes, as it computes
+        the table (:attr:`loopty.domain.Fixed.box_bases` and
+        :attr:`~loopty.domain.Fixed.table_bases`).
+        """
+        if position == 0:
+            return 0
+        domain = self.arr_types[name].domain
+        known = True
+        for piece, box in zip(domain.pieces[:position], boxes, strict=False):
+            known = known and all(piece.extents_never_negative()[: len(box)])
+        if known:
+            return _total(_volume(box) for box in boxes[:position])
+        for argument, key in self.bases.items():
+            if key == (name, position):
+                return prim.Variable(argument)
+        argument = self.fresh_argument(f"base_{name}_{position}")
+        self.bases[argument] = (name, position)
+        return prim.Variable(argument)
+
+    def fresh_argument(self, base: str) -> str:
+        """``base``, suffixed while it is a name the kernel already uses."""
+        taken = set(dict(self.term.params)) | set(self.term.sizes)
+        taken |= {iname for stmt in self.term.stmts for iname in stmt.inames}
+        taken |= {symbol for symbol, _ in self.term.reflected}
+        taken |= {arg.name for arg in self.extra_args}
+        taken |= set(self.bases)
+        candidate = base
+        while candidate in taken:
+            candidate = f"{candidate}_"
+        return candidate
 
     def table_for(self, name: str) -> str:
         """The argument holding the table of row starts of a packed array.
@@ -904,13 +967,7 @@ class _Builder:
         """
         if name in self.tables:
             return self.tables[name]
-        taken = set(dict(self.term.params)) | set(self.term.sizes)
-        taken |= {iname for stmt in self.term.stmts for iname in stmt.inames}
-        taken |= {symbol for symbol, _ in self.term.reflected}
-        taken |= {arg.name for arg in self.extra_args}
-        candidate = f"off_{name}"
-        while candidate in taken:
-            candidate = f"{candidate}_"
+        candidate = self.fresh_argument(f"off_{name}")
         self.extra_args.append(
             lp.GlobalArg(
                 candidate,
@@ -1128,6 +1185,20 @@ def _storage_plan(
             )
         plan[name] = storage
     return plan
+
+
+def box_is_shape(domain: Any) -> bool:
+    """Whether a single domain stored boxed is an array of the box's shape.
+
+    It is when every extent of its box is non-negative at every size
+    (:meth:`loopty.domain.Polyhedron.extents_never_negative`). Otherwise a
+    size at which an extent is negative, ``n - 1`` at ``n = 0``, would give
+    the array a negative shape, where the argument, whose domain is empty
+    there, has a box of no cells; such a domain is a flat buffer instead,
+    addressed row-major through the same extents, which differ from the
+    argument's only where there is no point to address.
+    """
+    return not isinstance(domain, Union) and all(domain.extents_never_negative())
 
 
 def _refuse_packed_without_interval_rows(term: Term, builder: _Builder) -> None:
@@ -1884,6 +1955,7 @@ def lower_generic(
         contraction=contraction,
         storage=dict(builder.storage),
         tables=dict(builder.tables),
+        bases=dict(builder.bases),
     )
 
 
@@ -2244,6 +2316,7 @@ def _arguments(
             "(docs/loopy-notes.md, note 1)"
         )
     provided = {arg.name for arg in builder.extra_args} | set(builder.ragged.values())
+    provided |= set(builder.bases)
     known_inames = {iname for stmt in term.stmts for iname in stmt.inames}
     for stmt in term.stmts:
         for reduction in reductions_of(stmt.expr):
@@ -2277,14 +2350,18 @@ def _arguments(
     # Sizes first: an array's shape may only mention names that are arguments.
     for name in sorted(sizes):
         declare_value(name, np.dtype(np.int32))
+    # Then where a piece of a union starts, where that is not a term of them.
+    for name in sorted(builder.bases):
+        declare_value(name, np.dtype(np.int32))
 
     def shape_of(typ: ArrType, ragged: bool, name: str) -> tuple[Any, ...] | None:
         if ragged:
             return None
         if typ.domain is not None:
-            # Only a single domain in a box has a shape; a union, or packed
-            # rows, is a flat buffer of a length no loop bound states.
-            if isinstance(typ.domain, Union) or builder.storage[name] != "box":
+            # Only a single domain in a box has a shape, and only when no
+            # extent of the box can be negative (box_is_shape); a union, or
+            # packed rows, is a flat buffer of a length no loop bound states.
+            if builder.storage[name] != "box" or not box_is_shape(typ.domain):
                 return None
             shape = tuple(_plain(extent) for extent in typ.domain.box())
         else:

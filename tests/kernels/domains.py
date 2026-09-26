@@ -3,12 +3,13 @@
 The lower triangle as ``Where``, the triangle with its diagonal as ``Sigma``, a
 band, a union of two pieces, and the edge cases the tests pin: an access that
 is a cell of the box and not of the domain, a fiber taken at a point outside
-the domain, and a domain whose rows skip columns.
+the domain, a domain whose rows skip columns, and boxes whose extents are
+negative at small sizes.
 """
 
 from __future__ import annotations
 
-from lanky.prelude import Nat, Real
+from lanky.prelude import Int, Nat, Real
 
 from loopty import Arr, Fin, Sigma, Where, kernel, reduce_sum
 
@@ -141,3 +142,45 @@ def total(
     """One reduction over both axes of the triangle, one a fiber of the other."""
     for r in s.dom:
         s[r] = reduce_sum(f[i, j] for i in f.dom for j in f.dom[i])
+
+
+@kernel
+def far_pairs(
+    t: Arr[Sigma[i: Fin[n], Fin[i - 1]], Real],
+    x: Arr[Fin[n], Real],
+):
+    """Pairs at least two apart, whose box ``n x (n - 2)`` has no shape at ``n = 1``."""
+    for i in t.dom:
+        for j in t.dom[i]:
+            t[i, j] = x[i] - x[j]
+
+
+@kernel
+def after_a_short_piece(
+    u: Arr[
+        Where[i: Fin[n - 1], j: Fin[n - 1], j <= i] + Sigma[i: Fin[m], Fin[i + 1]],
+        Real,
+    ],
+    z: Arr[Fin[m], Real],
+):
+    """A piece after one whose box, ``(n - 1) x (n - 1)``, is one cell at ``n = 0``.
+
+    That piece is empty at ``n = 0``, and the second starts at the first cell.
+    """
+    for i in u.dom[1]:
+        for j in u.dom[1, i]:
+            u[1, i, j] = z[i] * 10.0 + z[j]
+    for i in u.dom[0]:
+        for j in u.dom[0, i]:
+            u[0, i, j] = u[0, i, j] + 1.0
+
+
+@kernel
+def first_rows(
+    k: Int,
+    x: Arr[Fin[n], Real],
+    w: Arr[Where[i: Fin[k], i < n], Real],
+):
+    """A domain whose bound is a scalar of the call, which could be negative."""
+    for i in w.dom:
+        w[i] = x[i]

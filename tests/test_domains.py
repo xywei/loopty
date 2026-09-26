@@ -309,6 +309,9 @@ def test_the_interpreter_runs_a_term_over_domains() -> None:
         "later_rows",
         "offset_rows",
         "total",
+        "far_pairs",
+        "after_a_short_piece",
+        "first_rows",
     ],
 )
 def test_the_trace_of_a_kernel_over_a_domain_is_faithful(name: str) -> None:
@@ -415,6 +418,27 @@ def test_an_argument_over_the_same_points_written_otherwise_is_accepted() -> Non
     assert f[3, 1] == 8.0
 
 
+def test_a_size_a_bound_runs_up_to_is_a_whole_number_and_not_negative() -> None:
+    with pytest.raises(ValueError, match="never negative"):
+        Arr.zeros(Fin[n] + Fin[m], n=-1, m=3)
+    with pytest.raises(ValueError, match="is an integer"):
+        Arr.zeros(TRIANGLE, n=2.5)
+    # A size only a constraint names is no extent, and may be negative.
+    rows = K.offset_rows.arg_types["w"].domain
+    assert Arr.zeros(rows, n=3, k=-1).domain.count == 3
+    # A scalar of the call can be negative where an array's extent cannot: at
+    # k = -1 the declared domain is as empty as the argument's, and the
+    # contract still refuses the size.
+    a = Var("a")
+    x = Arr.from_numpy(np.arange(5.0))
+    empty = Arr.zeros(Where[a : Fin[n], a < 0], n=5)
+    with pytest.raises(ValueError, match="never negative"):
+        K.first_rows(-1, x, empty)
+    w = Arr.zeros(K.first_rows.arg_types["w"].domain, n=5, k=3)
+    K.first_rows(3, x, w)
+    assert w.cells().tolist() == [0.0, 1.0, 2.0]
+
+
 def test_a_scalar_the_domain_names_is_a_size_of_the_call() -> None:
     domain = K.offset_rows.arg_types["w"].domain
     x = Arr.from_numpy(np.arange(5.0))
@@ -431,11 +455,13 @@ def test_a_scalar_the_domain_names_is_a_size_of_the_call() -> None:
 # {{{ lowering and the C target
 
 
-def _arguments(name: str, storage: str, seed: int = 0) -> dict:
+def _arguments(
+    name: str, storage: str, seed: int = 0, sizes: dict | None = None
+) -> dict:
     """Inputs for one of the kernels, its arrays over domains stored so."""
     rng = np.random.default_rng(seed)
     kernel = getattr(K, name)
-    sizes = {"n": 5, "m": 3, "k": 2}
+    sizes = {"n": 5, "m": 3, "k": 2, **(sizes or {})}
     out: dict = {}
     for param, typ in kernel.arg_types.items():
         if not hasattr(typ, "domain"):
@@ -483,6 +509,41 @@ def test_each_kind_runs_on_the_c_target_and_agrees_with_the_native_run(
     assert fact.status is Status.TESTED, fact.provenance
 
 
+def test_an_argument_in_another_box_runs_compiled_in_the_declared_one() -> None:
+    """The contract asks for the declared points, and the layout is the declared one.
+
+    ``Sigma[a: Fin[n], Fin[a]]`` is the strict triangle in an ``n x (n - 1)``
+    box, and a union whose first piece is written ``Where[a: Fin[n + 2], a <
+    n]`` puts its second piece two cells later than ``Fin[n] + Fin[m]`` does.
+    A compiled run addresses the declared domain's box, so the argument is
+    copied into it and back, in either layout.
+    """
+    from loopty.executor import LoopyExecutor
+
+    a, b = Var("a"), Var("b")
+    x = Arr.from_numpy(np.arange(1.0, 5.0))
+    want = Arr.zeros(TRIANGLE, n=4)
+    K.pairs(x, want, Arr.zeros(Fin[4]))
+    triangles = (
+        Sigma[a : Fin[n], Fin[a]],
+        Where[a : Fin[n + 1], b : Fin[n], (b < a) & (a < n)],
+    )
+    for domain in triangles:
+        for storage in ("box", "packed"):
+            for schedule in (Schedule(K.pairs), Schedule(K.pairs).pack("f")):
+                f = Arr.zeros(domain, n=4, storage=storage)
+                LoopyExecutor().run(schedule, x=x, f=f, e=Arr.zeros(Fin[4]))
+                assert np.array_equal(f.cells(), want.cells()), (domain, storage)
+    xs = Arr.from_numpy(np.arange(1.0, 4.0))
+    z = Arr.from_numpy(np.arange(10.0, 12.0))
+    for storage in ("box", "packed"):
+        for schedule in (Schedule(K.two_pieces), Schedule(K.two_pieces).pack("u")):
+            wide = Where[a : Fin[n + 2], a < n] + Fin[m]
+            u = Arr.zeros(wide, n=3, m=2, storage=storage)
+            LoopyExecutor().run(schedule, u=u, x=xs, z=z)
+            assert u.cells().tolist() == [2.0, 4.0, 6.0, 11.0, 12.0], storage
+
+
 def test_the_run_writes_back_into_the_callers_layout_and_answers_cells() -> None:
     from loopty.executor import LoopyExecutor
 
@@ -502,6 +563,84 @@ def test_the_packed_triangle_is_read_through_its_table_of_row_starts() -> None:
     assert "off_f" not in boxed
     assert "f[off_f[i] + j]" in packed
     assert "f[off_f[k] + p]" in packed
+
+
+def test_an_extent_that_can_be_negative_is_found_by_isl() -> None:
+    assert TRIANGLE.extents_never_negative() == (True, True)
+    # The strict triangle as a sum spans n x (n - 1), which is -1 at n = 0.
+    assert Sigma[i : Fin[n], Fin[i]].extents_never_negative() == (True, False)
+    assert Where[i : Fin[n + m], j : Fin[n - m]].extents_never_negative() == (
+        True,
+        False,
+    )
+
+
+@pytest.mark.parametrize("size", [0, 1, 4])
+@pytest.mark.parametrize("storage", ["box", "packed"])
+@pytest.mark.parametrize("pack", [False, True])
+def test_a_piece_after_an_empty_one_starts_where_the_domain_says(
+    size: int, storage: str, pack: bool
+) -> None:
+    """At ``n = 0`` the first piece is empty, and its box term is not.
+
+    ``(n - 1) * (n - 1)`` is one cell there, and ``n - 1`` rows, so a start
+    read off the terms would put the second piece a cell, or a row of the
+    table, away from where the argument has it: past the end of the buffer
+    for its last cell.
+    """
+    from loopty.executor import LoopyExecutor, emit_code
+
+    kernel = K.after_a_short_piece
+    schedule = Schedule(kernel).pack("u") if pack else Schedule(kernel)
+    arguments = _arguments("after_a_short_piece", storage, sizes={"n": size, "m": 3})
+    fact = LoopyExecutor().differential(kernel, schedule, arguments)
+    assert fact.status is Status.TESTED, fact.provenance
+    # The start is an argument the executor computes, not a term of n.
+    assert "base_u_1" in emit_code(schedule)
+
+
+@pytest.mark.parametrize("size", [1, 2, 5])
+@pytest.mark.parametrize("storage", ["box", "packed"])
+@pytest.mark.parametrize("pack", [False, True])
+def test_a_box_whose_extent_can_be_negative_is_a_flat_buffer(
+    size: int, storage: str, pack: bool
+) -> None:
+    """``Sigma[i: Fin[n], Fin[i - 1]]`` spans ``n x (n - 2)``, no shape at ``n = 1``."""
+    from loopty.executor import LoopyExecutor
+
+    kernel = K.far_pairs
+    schedule = Schedule(kernel).pack("t") if pack else Schedule(kernel)
+    arguments = _arguments("far_pairs", storage, sizes={"n": size})
+    fact = LoopyExecutor().differential(kernel, schedule, arguments)
+    assert fact.status is Status.TESTED, fact.provenance
+    # The triangle's box, n x n, stays an array of that shape.
+    shape = schedule.lowering.kernel.default_entrypoint.arg_dict["t"].shape
+    assert shape is None
+    boxed = Schedule(K.pairs).lowering.kernel.default_entrypoint.arg_dict["f"]
+    assert boxed.shape is not None
+
+
+def test_the_dimension_names_of_a_domain_are_none_of_its_sizes() -> None:
+    """A size called ``a1`` or ``x`` is not taken for a dimension of that name."""
+    a1, x = Var("a1"), Var("x")
+    assert Arr.zeros(Where[i : Fin[a1], j : Fin[a1], j < i], a1=4).domain.count == 6
+    assert not Where[i : Fin[x], j : Fin[x], j % 2 == 0].rows_are_intervals()
+
+    def named(f: Arr[Where[i : Fin[a1], j : Fin[a1], j < i], Real]):  # noqa: F821
+        for r in f.dom:
+            for c in f.dom[r]:
+                f[r, c] = 1.0
+
+    def dense(y: Arr[Fin[a0], Real]):  # noqa: F821
+        for r in y.dom:
+            y[r] = 1.0
+
+    for body in (named, dense):
+        term = trace(body, evaluate_annotations(body))
+        facts = settled(rules.facts_for(term, owner=body.__name__))
+        in_bounds = [fact for fact in facts if fact.kind == "in-bounds"]
+        assert in_bounds
+        assert all(fact.status is Status.DECIDED for fact in in_bounds), body
 
 
 def test_pack_is_a_step_of_the_schedule() -> None:

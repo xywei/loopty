@@ -755,8 +755,11 @@ def domain_arguments(
     the domain's, and so is an array over other points: the compiled run would
     read it through a box or a table of rows that is not its own, and the
     in-bounds facts are about the declared domain. The sizes the domain names
-    have to be determined by the call, by its arrays or its scalars. The other
-    way round is refused too: an array over a domain passed for a parameter
+    have to be determined by the call, by its arrays or its scalars, and a size
+    a binder's bound runs up to has to be non-negative, as the facts and the
+    layouts assume it is (a scalar can be negative where an array's extent
+    cannot). The other way round is refused too: an array over a domain passed
+    for a parameter
     whose type is a box, or ragged rows, has cells that type does not have.
     """
     from loopty.domain import fixed_set, same_points
@@ -799,6 +802,17 @@ def domain_arguments(
                 "have those names"
             )
         fixed = {size: sizes[size] for size in needed}
+        negative = sorted(
+            size for size in typ.domain.extent_names() if fixed[size] < 0
+        )
+        if negative:
+            raise ValueError(
+                f"the call gives {negative[0]} = {fixed[negative[0]]}, a size a "
+                f"bound of the domain {typ.domain} of {name} runs up to. Such a "
+                "size is an extent and is never negative: the in-bounds facts "
+                "and the layouts are stated with it non-negative, as a loop "
+                "nest's sizes are"
+            )
         same, witness = same_points(
             fixed_set(typ.domain, fixed), value.domain.isl_points()
         )

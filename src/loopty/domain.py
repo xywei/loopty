@@ -61,7 +61,7 @@ A union stores its pieces one after another, each in the array's layout.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -78,6 +78,7 @@ __all__ = [
     "Sigma",
     "Union",
     "Where",
+    "dimension_names",
     "fixed_set",
     "index_domain",
     "is_domain",
@@ -390,6 +391,19 @@ class Polyhedron:
         mentioned |= _names(self.constraints)
         return frozenset(mentioned - set(self.names))
 
+    def extent_names(self) -> frozenset[str]:
+        """The sizes a binder's bound mentions: extents, never negative.
+
+        The isl set assumes them non-negative, as a loop nest's does (see
+        :func:`_assembled`), and :class:`Fixed` and the contract refuse a
+        negative one, so the assumption is a checked one. It is also what lets
+        :meth:`extents_never_negative` tell the box extents a lowering can use
+        as they are from the ones it cannot.
+        """
+        return frozenset(
+            _names([bound for _name, bound in self.binders]) - set(self.names)
+        )
+
     def _axis_of(self, prop: Any) -> int:
         """The last axis a constraint names, or ``-1`` when it names none."""
         mentioned = _names(prop)
@@ -422,6 +436,32 @@ class Polyhedron:
                 corner[name] = extents[earlier] - 1 if slope > 0 else 0
             extents.append(substitute(bound, corner) if corner else bound)
         return tuple(extents)
+
+    def extents_never_negative(self) -> tuple[bool, ...]:
+        """Whether each extent of :meth:`box` is non-negative at every size.
+
+        Asked of isl, with the sizes a bound mentions non-negative
+        (:meth:`extent_names`). ``Sigma[i: Fin[n], Fin[i]]`` spans ``n x (n -
+        1)``, and at ``n = 0`` its second extent is ``-1``: the domain is
+        empty there, and :class:`Fixed` keeps a box of no cells, but a term
+        read as it is would make a shape of ``-1`` and put the piece after it
+        one cell early. :mod:`loopty.lower` uses an extent as a term only
+        where this says it may.
+        """
+        extents = self.extent_names()
+        out: list[bool] = []
+        for extent in self.box():
+            if isinstance(extent, int | np.integer):
+                out.append(int(extent) >= 0)
+                continue
+            names = sorted(_names(extent))
+            text = _isl_text(extent, {})
+            assumed = [f"{name} >= 0" for name in names if name in extents]
+            negative = " and ".join([f"{text} < 0", *assumed])
+            head = f"[{', '.join(names)}] -> " if names else ""
+            below = isl.Set(f"{head}{{ : {negative} }}")
+            out.append(bool(below.is_empty()))
+        return tuple(out)
 
     # }}}
 
@@ -472,7 +512,9 @@ class Polyhedron:
         over (see the module docstring).
         """
         count = self.ndim if upto is None else upto + 1
-        names = tuple(names) if names is not None else _default_names(count)
+        if names is None:
+            names = dimension_names(count, self.size_names())
+        names = tuple(names)
         pieces, params, sizes = self.constraint_texts(names, upto)
         return isl.Set(_assembled(names[:count], [(pieces, sizes)], params))
 
@@ -513,15 +555,21 @@ class Polyhedron:
         stored that way. Asked of isl for every size at once: the points
         between two points of a row have to be points too.
         """
-        names = _default_names(self.ndim)
+        # One more name than the axes, for the other point of the row, and
+        # none of them a size's.
+        *names, other = dimension_names(self.ndim + 1, self.size_names())
         domain = self.isl_set(names)
         prefix = ", ".join(names[:-1])
         head = f"{prefix}, " if prefix else ""
         last = names[-1]
         params = domain.get_var_names(isl.dim_type.param)
         space = f"[{', '.join(params)}] -> " if params else ""
-        up = isl.Map(f"{space}{{ [{head}{last}] -> [{head}x] : x >= {last} }}")
-        down = isl.Map(f"{space}{{ [{head}{last}] -> [{head}x] : x <= {last} }}")
+        up = isl.Map(
+            f"{space}{{ [{head}{last}] -> [{head}{other}] : {other} >= {last} }}"
+        )
+        down = isl.Map(
+            f"{space}{{ [{head}{last}] -> [{head}{other}] : {other} <= {last} }}"
+        )
         up = up.align_params(domain.get_space())
         down = down.align_params(domain.get_space())
         below = up.intersect_range(domain).domain()
@@ -604,9 +652,18 @@ class Union:
             out |= piece.size_names()
         return out
 
+    def extent_names(self) -> frozenset[str]:
+        """The sizes a bound of a piece mentions (:meth:`Polyhedron.extent_names`)."""
+        out: frozenset[str] = frozenset()
+        for piece in self.pieces:
+            out |= piece.extent_names()
+        return out
+
     def isl_set(self, names: Sequence[str] | None = None) -> isl.Set:
         """The exact set of points ``(p, x)``, over dimensions ``names``."""
-        names = tuple(names) if names is not None else _default_names(self.ndim)
+        if names is None:
+            names = dimension_names(self.ndim, self.size_names())
+        names = tuple(names)
         disjuncts: list[tuple[list[str], set[str]]] = []
         params: set[str] = set()
         for position, piece in enumerate(self.pieces):
@@ -636,9 +693,18 @@ class Union:
         return hash(("Union", self.pieces))
 
 
-def _default_names(count: int) -> tuple[str, ...]:
-    """``a0``, ``a1``, ...: the dimension names a cell set uses."""
-    return tuple(f"a{k}" for k in range(count))
+def dimension_names(count: int, avoid: Collection[str] = ()) -> tuple[str, ...]:
+    """``a0``, ``a1``, ...: the dimension names a cell set uses, none in ``avoid``.
+
+    A size may be called ``a1`` too, and isl takes a dimension and a size of
+    one name for one variable: ``Where[i: Fin[a1], j: Fin[a1], j < i]`` over
+    dimensions ``a0, a1`` would be cut by ``a1 < a1`` and have no points. So
+    the names move to ``a_0``, ``a__0``, ... until none is a size's.
+    """
+    prefix = "a"
+    while any(f"{prefix}{k}" in avoid for k in range(count)):
+        prefix = f"{prefix}_"
+    return tuple(f"{prefix}{k}" for k in range(count))
 
 
 def _assembled(
@@ -734,6 +800,25 @@ class Fixed:
                 f"the domain {domain} names {', '.join(missing)}, and no size "
                 "was given for it: pass it by name, as in "
                 f"Arr.zeros(domain, {missing[0]}=...)"
+            )
+        for name in sorted(domain.size_names()):
+            value = sizes[name]
+            if isinstance(value, bool | np.bool_) or not isinstance(
+                value, int | np.integer
+            ):
+                raise ValueError(
+                    f"the size {name} of {domain} is {value!r}, and a size is an "
+                    "integer"
+                )
+        negative = sorted(
+            name for name in domain.extent_names() if int(sizes[name]) < 0
+        )
+        if negative:
+            raise ValueError(
+                f"{negative[0]} = {int(sizes[negative[0]])} is a size a bound of "
+                f"{domain} runs up to, and such a size is an extent, never "
+                "negative: the set is stated with it non-negative, as a loop "
+                "nest's is, and the box of a negative extent has no shape"
             )
         self.domain = domain
         self.sizes = {name: int(sizes[name]) for name in sorted(domain.size_names())}
@@ -954,6 +1039,16 @@ class Fixed:
     def isl_points(self) -> isl.Set:
         """The points as an isl set with no parameters: the sizes are fixed."""
         return fixed_set(self.domain, self.sizes)
+
+    def same_layout(self, other: Fixed) -> bool:
+        """Whether ``other`` keeps every cell where this one does, in both layouts.
+
+        The same domain at the same sizes: the boxes are the binders', and the
+        table follows the points and the box of the rows, so equal binders,
+        constraints and sizes are equal layouts. Two domains with the same
+        points and other binders are not, since their boxes differ.
+        """
+        return self.domain == other.domain and self.sizes == other.sizes
 
     def __repr__(self) -> str:
         return f"{self.domain} at {_sizes_text(self.sizes)}"
