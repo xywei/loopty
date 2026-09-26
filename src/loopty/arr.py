@@ -192,12 +192,14 @@ class Arr:
         is a placeholder (:class:`loopty.compose.ProgramValue`), and what comes
         back is the placeholder of a new array, which the program's term keeps
         as a temporary, zeroed where it is made. Its element sort there is the
-        one the kernels it is passed to declare, and ``dtype`` is the native
-        run's alone.
+        one the kernels it is passed to declare. ``dtype`` is the native run's,
+        and the program's term is refused when the native array would hold
+        integers where those kernels declare reals, since the native run would
+        truncate what the compiled one keeps.
         """
         hook = getattr(type(other), "_loopty_zeros_like", None)
         if hook is not None:
-            return hook(other, sys._getframe(1))
+            return hook(other, sys._getframe(1), dtype)
         if isinstance(other, Arr):
             values = np.zeros_like(other.numpy(), dtype=dtype)
             return cls(values, other.offsets.copy()) if other.is_ragged else cls(values)

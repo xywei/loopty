@@ -109,6 +109,78 @@ def pair(x: Arr[Fin[k], Real], y: Arr[Fin[k], Real]):  # noqa: F821
         y[i] = x[i]
 
 
+@kernel
+def poke(i: Fin[n], x: Arr[Fin[n], Real]):  # noqa: F821
+    """Set one cell, whose index is in bounds by its type."""
+    x[i] = 1.0
+
+
+@kernel
+def fill(m: Nat, x: Arr[Fin[m], Real]):  # noqa: F821
+    """Number the cells of an array a scalar sizes."""
+    for i in x.dom:
+        x[i] = 1.0 + i
+
+
+@kernel
+def poke_offsets(i: Fin[n], off: Arr[Fin[n + 1], Nat]):  # noqa: F821
+    """Set one cell, whose index is bounded only through an ``n + 1`` axis."""
+    off[i] = 1
+
+
+@kernel
+def number(perm: Arr[Fin[n], Fin[n]]):  # noqa: F821
+    """Write a permutation, off by one at the end: ``perm[n - 1]`` is ``n``."""
+    for i in perm.dom:
+        perm[i] = i + 1
+
+
+@kernel
+def gather(
+    perm: Arr[Fin[n], Fin[n]],  # noqa: F821
+    x: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """``y[i] = x[perm[i]]``, in bounds by the element type of ``perm``."""
+    for i in y.dom:
+        y[i] = x[perm[i]]
+
+
+@kernel
+def lengthen(cnt: Arr[Fin[n], Nat]):  # noqa: F821
+    """Make every row longer than its storage."""
+    for r in cnt.dom:
+        cnt[r] = cnt[r] + 5
+
+
+@kernel
+def move(off: Arr[Fin[n + 1], Nat]):  # noqa: F821
+    """Move every row start past where its row is stored."""
+    for r in off.dom:
+        off[r] = off[r] + 3
+
+
+@kernel
+def bump_two(x: Arr[Fin[n + 2], Real]):  # noqa: F821
+    """Add one to an array of at least two cells."""
+    for i in x.dom:
+        x[i] = x[i] + 1.0
+
+
+@kernel
+def bump_one(x: Arr[Fin[n + 1], Real]):  # noqa: F821
+    """Add one to an array of at least one cell."""
+    for i in x.dom:
+        x[i] = x[i] + 1.0
+
+
+@kernel
+def halve(c: Arr[Fin[n], Nat], f: Arr[Fin[n], Real]):  # noqa: F821
+    """Half of every count, which is a real."""
+    for i in c.dom:
+        f[i] = 0.5 * c[i]
+
+
 # }}}
 
 
@@ -222,6 +294,37 @@ def test_sizes_are_unified_through_the_arrays_passed() -> None:
     assert fact.status.value == "tested", fact.provenance
 
 
+def test_two_shifted_sizes_are_unified() -> None:
+    # bump_two's x is n + 2 long and bump_one's is n + 1: bump_one's n is the
+    # program's n + 1, which no bare size of either call says on its own.
+    @program
+    def bumps(x):
+        bump_two(x)
+        bump_one(x)
+
+    term = bumps.term
+    assert term.sizes == ("n",)
+    assert str(dict(term.params)["x"].axes[0]) == "n + 2"
+    loop = term.stmt("bump_one.S0").domain
+    assert _same_set(loop, isl.Set("[n] -> { [i] : 0 <= i < n + 2 }"))
+    x = Arr.from_numpy(np.array([1.0, 2.0, 3.0]))
+    fact = LoopyExecutor().differential(bumps, Schedule(bumps), {"x": x})
+    assert fact.status.value == "tested", fact.provenance
+
+    # The other way round, the size of the first call is the one that goes:
+    # its n is the second call's n + 1, and never the other way round, which
+    # would make the second call's n negative for an x of one cell.
+    @program
+    def bumps_back(x):
+        bump_one(x)
+        bump_two(x)
+
+    ((size,),) = {bumps_back.term.sizes}
+    assert str(dict(bumps_back.term.params)["x"].axes[0]) == f"{size} + 2"
+    fact = LoopyExecutor().differential(bumps_back, Schedule(bumps_back), {"x": x})
+    assert fact.status.value == "tested", fact.provenance
+
+
 def test_two_element_sorts_for_one_array_are_refused() -> None:
     # The lowered program declares off once; scan says it holds naturals and
     # scale says reals, and choosing either would change what one of them does.
@@ -322,6 +425,13 @@ def test_an_exact_temporary_is_as_exact_as_an_exact_argument() -> None:
     assert not lower_generic(exact_sum.term).contraction
     with pytest.raises(IllegalCast, match="the accumulation into t is exact"):
         Schedule(exact_sum).realize("t", tree=True)
+    # And the compiled program agrees with the native one bit for bit.
+    x = Arr.from_numpy(np.array([0.1, 0.2, 0.3]))
+    fact = LoopyExecutor().differential(
+        exact_sum, Schedule(exact_sum), {"x": x, "y": Arr.zeros(3)}
+    )
+    assert fact.status.value == "tested", fact.provenance
+    assert fact.provenance["outputs"]["y"]["tolerance"] == 0
 
 
 def test_the_interpreter_runs_a_programs_term() -> None:
@@ -548,6 +658,290 @@ def test_a_callee_that_cannot_be_traced_is_named() -> None:
 
     with pytest.raises(TraceError, match="calls branchy at .*cannot be traced"):
         calls_branchy.trace()
+
+
+@pytest.mark.parametrize(
+    ("body", "said"),
+    [
+        # Natively, poke's contract refuses 7 for a Fin[3]; compiled, the 7 is
+        # no argument, and would be written to x[7].
+        (lambda x: poke(7, x), "depends on n, which is known only when"),
+        (lambda x: poke(1.0, x), r"not an integer.*pass int\(1.0\)"),
+        (lambda x: shift(-1, x), "has to satisfy 0 <= a"),
+        (lambda x: shift(True, x), "not an integer"),
+    ],
+)
+def test_a_number_for_a_scalar_is_checked_against_its_sort(body, said) -> None:
+    def literal(x):
+        body(x)
+
+    literal.__name__ = "literal"
+    with pytest.raises(TraceError, match=said):
+        program(literal).trace()
+
+
+def test_a_number_the_sort_allows_is_substituted() -> None:
+    @program
+    def shifted(x):
+        shift(2, x)
+
+    x = Arr.from_numpy(np.array([1, 2, 3], dtype=np.int64))
+    fact = LoopyExecutor().differential(shifted, Schedule(shifted), {"x": x})
+    assert fact.status.value == "tested", fact.provenance
+
+
+def test_an_index_the_program_is_passed_is_checked_by_its_contract() -> None:
+    @program
+    def pokes(i, x):
+        poke(i, x)
+
+    assert str(dict(pokes.term.params)["i"].bound) == "n"
+    with pytest.raises(ValueError, match="0 <= i < 3"):
+        LoopyExecutor().run(pokes, i=7, x=Arr.zeros(3))
+    x = Arr.zeros(3)
+    LoopyExecutor().run(pokes, i=2, x=x)
+    assert list(x.numpy()) == [0.0, 0.0, 1.0]
+
+
+def test_a_scalar_that_sizes_an_array_sizes_it_in_the_programs_names() -> None:
+    # fill's x is m long, and m is its scalar: in the program, x is as long as
+    # whatever the program passed for m, as the loop over it is. Left in the
+    # callee's name, x's length was nobody's, and a k longer than x ran the
+    # loop past the end of it.
+    @program
+    def numbered(k, x):
+        fill(k, x)
+
+    term = numbered.term
+    assert str(dict(term.params)["x"].axes[0]) == "k"
+    fact = LoopyExecutor().differential(
+        numbered, Schedule(numbered), {"k": 4, "x": Arr.zeros(4)}
+    )
+    assert fact.status.value == "tested", fact.provenance
+    with pytest.raises(ValueError, match="shape mismatch"):
+        LoopyExecutor().run(numbered, k=5, x=Arr.zeros(4))
+
+    @program
+    def five(x):
+        fill(5, x)
+
+    ((_, typ),) = five.term.params
+    assert typ.axes == (5,)
+    x = Arr.zeros(5)
+    LoopyExecutor().run(five, x=x)
+    assert list(x.numpy()) == [1.0, 2.0, 3.0, 4.0, 5.0]
+    with pytest.raises(ValueError, match="shape mismatch"):
+        LoopyExecutor().run(five, x=Arr.zeros(4))
+
+
+def test_a_program_that_returns_something_is_refused() -> None:
+    # Natively it returns the array it made; compiled, it is one kernel, which
+    # returns what it writes into its parameters.
+    @program
+    def made_and_returned(u):
+        f = Arr.zeros_like(u)
+        flux(u, f)
+        return f
+
+    with pytest.raises(TraceError, match="returns <f of the program"):
+        made_and_returned.trace()
+
+    # Called by a program, it hands the caller an array to pass on.
+    @program
+    def passes_it_on(u, rhs):
+        divergence(made_and_returned(u), rhs)
+
+    term = passes_it_on.term
+    assert [name for name, _ in term.temporaries] == ["f"]
+    fact = LoopyExecutor().differential(
+        passes_it_on, Schedule(passes_it_on), burgers_inputs()
+    )
+    assert fact.status.value == "tested", fact.provenance
+
+
+def test_an_index_bounded_through_an_offset_axis_is_checked() -> None:
+    # i: Fin[n] beside off: Arr[Fin[n + 1]] alone. The program's sizes are
+    # lanky's variables, as a kernel's are, so the contract solves n from
+    # off's four cells and holds i below 3, and the lowering can say so.
+    @program
+    def pokes_offsets(i, off):
+        poke_offsets(i, off)
+
+    with pytest.raises(ValueError, match="0 <= i < 3"):
+        LoopyExecutor().run(pokes_offsets, i=100, off=Arr.zeros(4, dtype=np.int64))
+    off = Arr.zeros(4, dtype=np.int64)
+    LoopyExecutor().run(pokes_offsets, i=2, off=off)
+    assert list(off.numpy()) == [0, 0, 1, 0]
+
+
+def test_a_number_is_checked_against_the_programs_sizes() -> None:
+    # fill makes x five cells long, so poke's n is 5 there, and 3 is a point
+    # of Fin[5] and 7 is not.
+    @program
+    def fills_and_pokes(x):
+        fill(5, x)
+        poke(3, x)
+
+    x = Arr.zeros(5)
+    LoopyExecutor().run(fills_and_pokes, x=x)
+    assert list(x.numpy()) == [1.0, 2.0, 3.0, 1.0, 5.0]
+
+    @program
+    def pokes_past(x):
+        fill(5, x)
+        poke(7, x)
+
+    with pytest.raises(TraceError, match="has to satisfy 0 <= i < 5"):
+        pokes_past.trace()
+
+
+@pytest.mark.parametrize(
+    ("body", "said"),
+    [
+        # number writes n into perm[n - 1], and gather reads x[perm[i]] in
+        # bounds by type; natively gather's contract refuses perm.
+        (
+            lambda perm, cnt, col, val, x, y, off: (
+                number(perm),
+                gather(perm, x, y),
+            ),
+            "number at .* writes first, and the elements of perm are declared",
+        ),
+        # lengthen makes the rows longer than val stores them.
+        (
+            lambda perm, cnt, col, val, x, y, off: (
+                lengthen(cnt),
+                spmv(cnt, col, val, x, y),
+            ),
+            "cnt is the row lengths of col",
+        ),
+        # move shifts the row starts spmv_declared reads val through.
+        (
+            lambda perm, cnt, col, val, x, y, off: (
+                move(off),
+                spmv_declared(cnt, off, val, x, y),
+            ),
+            "off is the offsets of the rows of val",
+        ),
+    ],
+)
+def test_contract_data_an_earlier_call_writes_is_refused(body, said) -> None:
+    def writes_then_reads(perm, cnt, col, val, x, y, off):
+        body(perm, cnt, col, val, x, y, off)
+
+    writes_then_reads.__name__ = "writes_then_reads"
+    with pytest.raises(TraceError, match=said) as refused:
+        program(writes_then_reads).trace()
+    assert "nothing would check" in str(refused.value)
+
+
+def test_an_index_array_the_program_makes_is_refused() -> None:
+    # Zeros are no point of Fin[0], and nothing checks them against n.
+    @program
+    def gathers(x, y):
+        perm = Arr.zeros_like(y)
+        gather(perm, x, y)
+
+    with pytest.raises(TraceError, match="the Arr.zeros_like at .* writes first"):
+        gathers.trace()
+
+
+def test_the_native_program_stops_where_the_refused_term_would_not() -> None:
+    # Natively gather's contract refuses the perm number wrote. The term would
+    # run gather on it unchecked and read x[4], which is why it is refused.
+    @program
+    def permuted(perm, x, y):
+        number(perm)
+        gather(perm, x, y)
+
+    perm = Arr.zeros(4, dtype=np.int64)
+    with pytest.raises(ValueError, match=r"perm\[3\] is 4"):
+        permuted(perm, Arr.zeros(4), Arr.zeros(4))
+    with pytest.raises(TraceError, match="nothing would check"):
+        permuted.trace()
+
+
+def test_a_natural_array_an_earlier_call_writes_is_passed_on() -> None:
+    # No fact rests on a Nat cell being non-negative, and off is no layout of
+    # shift's: the both program of the unification test stands.
+    assert [stmt.id for stmt in both.term.stmts] == ["scan.S0", "scan.S1", "shift.S0"]
+
+
+def test_a_default_is_refused() -> None:
+    @program
+    def scaled(x, a=2.0):
+        scale(a, x)
+
+    with pytest.raises(TraceError, match="gives its parameter a the default 2.0"):
+        scaled.trace()
+    # The native run uses it.
+    x = Arr.from_numpy(np.array([1.0, 2.0]))
+    scaled(x)
+    assert list(x.numpy()) == [2.0, 4.0]
+
+
+def test_an_array_made_to_hold_integers_where_reals_go_is_refused() -> None:
+    # zeros_like(c) is an integer array natively, which truncates halve's
+    # halves; the compiled temporary is Real and would not.
+    @program
+    def halves(c, y):
+        f = Arr.zeros_like(c)
+        halve(c, f)
+        pair(f, y)
+
+    with pytest.raises(TraceError, match="natively holds integers"):
+        halves.trace()
+
+    @program
+    def real_halves(c, y):
+        f = Arr.zeros_like(c, dtype=np.float64)
+        halve(c, f)
+        pair(f, y)
+
+    counts = Arr.from_numpy(np.array([1, 2, 3], dtype=np.int64))
+    inputs = {"c": counts, "y": Arr.zeros(3)}
+    fact = LoopyExecutor().differential(real_halves, Schedule(real_halves), inputs)
+    assert fact.status.value == "tested", fact.provenance
+    y = Arr.zeros(3)
+    real_halves(inputs["c"], y)
+    assert list(y.numpy()) == [0.5, 1.0, 1.5]
+
+
+def test_an_array_made_like_a_made_array_is_laid_out_as_the_first() -> None:
+    # g is made like f, which is made like u and given to no kernel: g is u's
+    # length, as it is natively, and so is y, which pair makes g's.
+    @program
+    def chained(u, rhs, y):
+        f = Arr.zeros_like(u)
+        g = Arr.zeros_like(f)
+        flux(u, rhs)
+        pair(g, y)
+
+    term = chained.term
+    assert term.sizes == ("n",)
+    assert str(dict(term.params)["y"].axes[0]) == "n"
+    with pytest.raises(ValueError, match="shape mismatch"):
+        LoopyExecutor().run(chained, u=Arr.zeros(3), rhs=Arr.zeros(3), y=Arr.zeros(4))
+
+
+def test_a_program_that_returns_a_parameter_is_not_refused() -> None:
+    # The compiled program writes y, which is what the native one returns.
+    @program
+    def returns_rhs(u, rhs):
+        burgers(u, rhs)
+        return rhs
+
+    assert [name for name, _ in returns_rhs.term.params] == ["u", "rhs"]
+
+
+def test_a_program_that_writes_no_parameter_is_refused() -> None:
+    @program
+    def keeps_it(u):
+        f = Arr.zeros_like(u)
+        flux(u, f)
+
+    with pytest.raises(TraceError, match="writes none of its parameters"):
+        keeps_it.trace()
 
 
 def test_the_native_run_is_not_refused() -> None:

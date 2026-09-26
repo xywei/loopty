@@ -20,8 +20,13 @@ Three things are decided in composing.
 
 *Names are the program's.* A callee's array and scalar parameters become what
 the program passed: a parameter of the program, an array it made, or, for a
-scalar, a Python number, which is substituted. Its sizes are unified through
-the arrays. A program array has one type, taken from the first call that
+scalar, a Python number, which is substituted. The number is no argument of
+the compiled program, so it is checked against the scalar's sort when the term
+is built, as the callee's contract checks it at the call natively; a ``Fin``
+bounded by a size cannot be checked before the call, and a number for it is
+refused. Its sizes are unified through the arrays, and a scalar that sizes an
+array (``m: Nat`` beside ``x: Arr[Fin[m], Real]``) sizes it in the program's
+names too. A program array has one type, taken from the first call that
 passes it, and every later call has to agree with it, a size of the callee
 standing for whatever the program's size is there: ``scale``'s ``n`` is
 ``scan``'s ``n + 1`` when both are handed ``off``. Two sizes that cannot be
@@ -47,13 +52,27 @@ because there is one lowering. The layout of a ragged parameter is stated on
 the term (:attr:`~loopty.term.Term.offsets`): the offsets each call's kernel
 reads its rows through, which the calls have to agree on.
 
+The compiled program is one call, so its contract checks the program's
+arguments once, when it starts, where natively every kernel's contract checks
+its own when it is called. What a kernel's contract checks of the cells of an
+array (that a ``Fin[m]`` element is a point of ``Fin[m]``, that the counts and
+offsets of a ragged family lay its rows out inside the buffer) is what its
+in-bounds facts rest on, so an array of that kind that an earlier call wrote,
+or that the program made, is refused when it is passed on: nothing would check
+it.
+
 What a program's body may do is pass things to kernels, make arrays with
 ``Arr.zeros_like``, and run Python that touches neither. Reading or writing a
 placeholder, asking it for its domain, computing with it or branching on it is
 refused with a :class:`~loopty.trace.TraceError` naming the fix, and so is a
 loop whose trip count is a parameter: that is a host loop, which a term does
 not have. A ``for`` over ``range(3)`` runs three times and records three calls,
-which is what it does natively.
+which is what it does natively. Three more things are refused: a parameter
+with a default, which the compiled program would be called without; a body
+that returns an array it made, which the compiled program keeps to itself (a
+program called by a program may return one, which the caller then passes on);
+and a program that writes none of its parameters, which would compute nothing
+anybody sees.
 
 The term has no postcondition. Each callee's stays its own, and
 :meth:`loopty.kernel.Program.facts` restates it in the program's scope.
@@ -74,8 +93,9 @@ import islpy as isl
 import numpy as np
 import pymbolic.primitives as prim
 from lanky.prelude import FinType, Refined
-from lanky.terms import init_args, render, structurally_equal
+from lanky.terms import Var, init_args, render, structurally_equal
 
+from loopty.contract import integral_sort, sort_bound
 from loopty.flow import NonAffine, domain_set, expr_text, free_names
 from loopty.term import Access, ArrType, Reduction, Stmt, Term
 from loopty.trace import TraceError
@@ -213,7 +233,9 @@ def _rename_sort(sort: Any, names: Mapping[str, str], exprs: Mapping[str, Any]) 
     returned as it is.
     """
     if isinstance(sort, FinType):
-        return dataclasses.replace(sort, bound=rename_expr(sort.bound, names, exprs))
+        return dataclasses.replace(
+            sort, bound=_tidy(rename_expr(sort.bound, names, exprs))
+        )
     if isinstance(sort, Refined) and dataclasses.is_dataclass(sort):
         return dataclasses.replace(
             sort,
@@ -227,11 +249,45 @@ def _rename_type(typ: Any, names: Mapping[str, str], exprs: Mapping[str, Any]) -
     """An array type or a sort, in the new names."""
     if isinstance(typ, ArrType):
         return ArrType(
-            axes=tuple(rename_expr(axis, names, exprs) for axis in typ.axes),
+            axes=tuple(_tidy(rename_expr(axis, names, exprs)) for axis in typ.axes),
             dtype=_rename_sort(typ.dtype, names, exprs),
             ragged=typ.ragged,
         )
     return _rename_sort(typ, names, exprs)
+
+
+def _tidy(expr: Any) -> Any:
+    """A sum of sums of names and integers as one sum, its integers added up.
+
+    Substituting ``n_0 + 1`` for ``n`` in ``n + 1`` gives ``(n_0 + 1) + 1``,
+    which is ``n_0 + 2``; anything that is not such a sum is left as it is.
+    """
+    if not isinstance(expr, prim.Sum):
+        return expr
+    leaves: list[Any] = []
+
+    def flatten(node: Any) -> None:
+        if isinstance(node, prim.Sum):
+            for child in node.children:
+                flatten(child)
+        else:
+            leaves.append(node)
+
+    flatten(expr)
+
+    def integer(node: Any) -> bool:
+        return isinstance(node, int | np.integer) and not isinstance(node, bool)
+
+    others = [leaf for leaf in leaves if not integer(leaf)]
+    constant = sum(int(leaf) for leaf in leaves if integer(leaf))
+    if not all(isinstance(leaf, prim.Variable) for leaf in others):
+        return expr
+    if not others:
+        return constant
+    out = others[0]
+    for leaf in others[1:]:
+        out = out + leaf
+    return out + constant if constant else out
 
 
 def _names_in(expr: Any) -> list[str]:
@@ -269,6 +325,57 @@ def _same(left: Any, right: Any) -> bool:
     head = f"[{', '.join(params)}] -> " if params else ""
     differ = isl.Set(f"{head}{{ : {first} < {second} or {first} > {second} }}")
     return bool(differ.is_empty())
+
+
+def _shifted(expr: Any) -> tuple[str, int] | None:
+    """``(n, c)`` when ``expr`` is a name plus an integer, ``n + c``, or ``None``.
+
+    ``n`` alone is ``(n, 0)``, and ``n - 1`` is ``(n, -1)``.
+    """
+    if isinstance(expr, prim.Variable):
+        return expr.name, 0
+    if not isinstance(expr, prim.Sum):
+        return None
+    names = [child for child in expr.children if isinstance(child, prim.Variable)]
+    constants = [
+        child
+        for child in expr.children
+        if isinstance(child, int | np.integer) and not isinstance(child, bool)
+    ]
+    if len(names) != 1 or len(names) + len(constants) != len(expr.children):
+        return None
+    return names[0].name, int(sum(constants))
+
+
+def _plus(expr: Any, constant: int) -> Any:
+    """``expr + constant``, with the integers of a sum added up."""
+    if not constant:
+        return expr
+    shifted = _shifted(expr)
+    if shifted is None:
+        return expr + constant
+    name, known = shifted
+    total = known + constant
+    variable = next(node for node in _variables(expr) if node.name == name)
+    return variable + total if total else variable
+
+
+def _variables(expr: Any) -> list[Any]:
+    """The variable nodes of an expression, in the order they occur."""
+    out: list[Any] = []
+
+    def visit(node: Any) -> None:
+        if isinstance(node, prim.Variable):
+            out.append(node)
+        elif isinstance(node, prim.ExpressionNode):
+            for arg in init_args(node):
+                visit(arg)
+        elif isinstance(node, tuple | list):
+            for item in node:
+                visit(item)
+
+    visit(expr)
+    return out
 
 
 def _shown(value: Any) -> str:
@@ -336,9 +443,9 @@ class ProgramValue:
         #: ``None`` for a parameter.
         self.like = like
 
-    def _loopty_zeros_like(self, frame: Any) -> ProgramValue:
+    def _loopty_zeros_like(self, frame: Any, dtype: Any = None) -> ProgramValue:
         """``Arr.zeros_like(self)``, under tracing: a new array of the program."""
-        return self._recorder.make(self, frame)
+        return self._recorder.make(self, frame, dtype)
 
     def _refuse(self, what: str) -> NoReturn:
         program = self._recorder.name
@@ -439,10 +546,12 @@ class _Call:
 
 @dataclass
 class _Made:
-    """One ``Arr.zeros_like`` of the body: the array it made, and where."""
+    """One ``Arr.zeros_like`` of the body: the array it made, where, and the
+    ``dtype`` it was given, which is the native array's alone."""
 
     value: ProgramValue
     where: str
+    dtype: Any = None
 
 
 class _Recorder:
@@ -481,7 +590,7 @@ class _Recorder:
             )
         self.events.append(_Call(kernel, bound, where))
 
-    def make(self, like: ProgramValue, frame: Any) -> ProgramValue:
+    def make(self, like: ProgramValue, frame: Any, dtype: Any = None) -> ProgramValue:
         """Record an array the body makes, named after what it is stored to."""
         stem = _stored_name(frame) or "tmp"
         name = stem
@@ -491,7 +600,7 @@ class _Recorder:
             suffix += 1
         self.taken.add(name)
         value = ProgramValue(self, name, like=like)
-        self.events.append(_Made(value, _where(frame)))
+        self.events.append(_Made(value, _where(frame), dtype))
         return value
 
 
@@ -529,14 +638,57 @@ def trace_program(program: Any) -> Term:
                 "program's term has one argument per named parameter; name "
                 "each one"
             )
+        if parameter.default is not inspect.Parameter.empty:
+            # The body runs against a placeholder for every parameter, so the
+            # term has an argument where the native call may use the default,
+            # and the compiled program called without it has nothing to pass.
+            raise TraceError(
+                f"the program {program.__name__} gives its parameter "
+                f"{parameter.name} the default {parameter.default!r}. Its term "
+                "is one kernel, which is passed every argument, so a call that "
+                "leaves it out natively has no value for it compiled; drop the "
+                "default, or pass the value to the kernel inside the body"
+            )
         names.append(parameter.name)
     recorder = _Recorder(program, names)
     _RECORDERS.append(recorder)
     try:
-        function(*recorder.params)
+        returned = function(*recorder.params)
     finally:
         _RECORDERS.pop()
+    made = _made_in(returned)
+    if made is not None:
+        # A program called by this one may return an array it made, which
+        # this body then passes on; that is recorded above. But the program
+        # whose term this is lowers to one kernel, whose results are what it
+        # writes into its parameters: an array it made is a temporary of that
+        # kernel, and nobody would see it, or compare it with the native one.
+        raise TraceError(
+            f"the program {program.__name__} returns {made!r}. Its term "
+            "lowers to one kernel, whose results are what it writes into its "
+            f"parameters, and {made.name} is a temporary of that kernel, which "
+            "the compiled program keeps to itself; write the result into a "
+            "parameter instead"
+        )
     return _Composer(recorder).term()
+
+
+def _made_in(value: Any) -> ProgramValue | None:
+    """An array the program made, in what its body returns, or ``None``.
+
+    Looked for in tuples, lists and the values of a dictionary, the containers
+    a body returns several results in.
+    """
+    if isinstance(value, ProgramValue):
+        return value if value.like is not None else None
+    if isinstance(value, dict):
+        value = tuple(value.values())
+    if isinstance(value, tuple | list):
+        for item in value:
+            found = _made_in(item)
+            if found is not None:
+                return found
+    return None
 
 
 # }}}
@@ -658,6 +810,9 @@ class _Composer:
         self.slots: list[list[Stmt] | tuple[_Made, int]] = []
         self.reflected: list[tuple[str, Any]] = []
         self.made: dict[str, _Made] = {}
+        #: Every program array something has written so far, with what wrote
+        #: it first: a call, or the ``Arr.zeros_like`` that made it.
+        self.writers: dict[str, str] = {}
         #: How many top-level blocks the statements so far occupy.
         self.blocks = 0
         self.labels: set[str] = set()
@@ -708,9 +863,32 @@ class _Composer:
             and alone.name not in _names_in(other)
         ]
         if not candidates:
-            return False
+            return self.equate_shifted(first, second)
         _, size, value = max(candidates, key=lambda candidate: candidate[0])
         self.eliminate(size, value)
+        return True
+
+    def equate_shifted(self, first: Any, second: Any) -> bool:
+        """Make ``a + c`` equal to ``b + d``, two sizes of the program shifted.
+
+        The size on the side with the smaller shift goes, and becomes the
+        other plus the difference: ``a + 1 = b + 2`` makes ``a`` into ``b + 1``,
+        never ``b`` into ``a - 1``, which a size ``a`` of 0 would make
+        negative. Equal shifts make the sizes equal, and the younger goes.
+        """
+        one, other = _shifted(first), _shifted(second)
+        if one is None or other is None:
+            return False
+        (a, c), (b, d) = one, other
+        if a == b or a not in self.sizes or b not in self.sizes:
+            return False
+        if c == d:
+            younger, older = sorted((a, b), key=self.sizes.index, reverse=True)
+            self.eliminate(younger, Var(older))
+        elif c < d:
+            self.eliminate(a, _plus(Var(b), d - c))
+        else:
+            self.eliminate(b, _plus(Var(a), c - d))
         return True
 
     def eliminate(self, size: str, value: Any) -> None:
@@ -730,14 +908,24 @@ class _Composer:
         for event in self.recorder.events:
             if isinstance(event, _Made):
                 self.made[event.value.name] = event
+                self.writers.setdefault(
+                    event.value.name, f"the Arr.zeros_like at {event.where}"
+                )
                 self.slots.append((event, self.blocks))
                 self.blocks += 1
             else:
                 self.slots.append(self.call(event))
         for name, made in self.made.items():
+            if name not in self.types:
+                continue
+            # Made like an array no kernel was given, it is laid out as that
+            # one is, which is laid out as what it was made like, and so on.
             like = made.value.like
-            if name in self.types and like is not None and like.name in self.types:
+            while like is not None and like.name not in self.types:
+                like = like.like
+            if like is not None:
                 self.shaped_like(name, like.name, made.where)
+            self.stored_like(name, made)
         return self.finish()
 
     # {{{ one call
@@ -761,6 +949,7 @@ class _Composer:
         names: dict[str, str] = {}
         exprs: dict[str, Any] = {}
         arrays: dict[str, str] = {}
+        literals: list[tuple[str, Any]] = []
         for param, typ in term.params:
             value = call.bound[param]
             mine = isinstance(value, ProgramValue) and value._recorder is self.recorder
@@ -795,19 +984,26 @@ class _Composer:
                 self.claim(value.name, "scalar", call, param)
                 names[param] = value.name
             elif _is_number(value):
-                exprs[param] = value.item() if isinstance(value, np.generic) else value
+                number = value.item() if isinstance(value, np.generic) else value
+                self.integral_literal(call, param, typ, number)
+                literals.append((param, typ))
+                exprs[param] = number
             else:
                 self.refuse(
                     call,
                     f"its scalar argument {param} is {value!r}, which is "
                     f"neither a parameter of {self.program} nor a number",
                 )
-        exprs.update(self.unify(call, term, arrays))
+        exprs.update(self.unify(call, term, names, exprs))
         for param, typ in term.params:
             if not isinstance(typ, ArrType) and param in names:
                 renamed = _rename_type(typ, names, exprs)
                 self.settle_type(names[param], renamed, call, param)
+        for param, typ in literals:
+            renamed = _rename_type(_rename_type(typ, names, exprs), {}, self.resolved)
+            self.literal(call, term, param, renamed, exprs[param])
         self.settle_layout(call, term, arrays)
+        self.checked_at_entry(call, term, arrays)
 
         for name in _own_names(term):
             if name not in names and name not in exprs:
@@ -846,6 +1042,10 @@ class _Composer:
                 )
             )
         self.blocks += top
+        for stmt in stmts:
+            self.writers.setdefault(
+                stmt.assignee.array, f"{kernel.__name__} at {call.where}"
+            )
         return stmts
 
     def claim(self, name: str, kind: str, call: _Call, param: str) -> None:
@@ -858,6 +1058,133 @@ class _Composer:
                 f"{name} is {'an' if known == 'array' else 'a'} {known} where "
                 f"{self.origin.get(name, 'another parameter of this call')} is "
                 "given it",
+            )
+
+    def integral_literal(
+        self, call: _Call, param: str, sort: Any, value: Any
+    ) -> None:
+        """Refuse a number for a scalar of an integral sort that is no integer.
+
+        The first half of what :meth:`literal` asks, asked before the number is
+        substituted into the callee's sizes, where ``1.5`` has no meaning.
+        """
+        if not integral_sort(sort):
+            return
+        if isinstance(value, bool) or not isinstance(value, int):
+            self.refuse(
+                call,
+                f"its scalar parameter {param} is declared {sort}, and it is "
+                f"given {value!r}, which is not an integer; a value of an "
+                "integral sort has to be passed as one"
+                + (
+                    f", so pass int({value!r}) if that is what is meant"
+                    if isinstance(value, float) and value.is_integer()
+                    else ""
+                ),
+            )
+
+    def literal(
+        self, call: _Call, term: Term, param: str, sort: Any, value: Any
+    ) -> None:
+        """Check a number passed for a scalar against the sort that declares it.
+
+        A number is substituted into the callee's statements, so it is no
+        argument of the program and its contract never sees it. Natively the
+        callee's own contract checks it at the call, and a typing rule
+        discharged the accesses it indexes on the strength of that check: a
+        ``7`` passed for ``i: Fin[n]`` beside ``x[i]`` would reach C as
+        ``x[7]``. So what the contract asks of a scalar is asked here, when the
+        term is built: a value of an integral sort is an integer stored as one
+        (:meth:`integral_literal`), and it lies in the range its sort states.
+
+        ``sort`` is in the program's names, so ``Fin[n]`` is bounded by
+        whatever ``n`` came to in the program: a number when an array of a
+        fixed length was passed, and a size or a scalar of the program
+        otherwise. That has no value until the program is called, and the
+        number is refused, with the fix: pass it as a parameter of the
+        program, which the contract of the compiled program checks.
+        """
+        if not integral_sort(sort):
+            return
+        base = sort.base if isinstance(sort, Refined) else sort
+        if isinstance(base, FinType) and not isinstance(base.bound, int | np.integer):
+            self.refuse(
+                call,
+                f"its scalar parameter {param} is declared {sort}, and it is "
+                f"given the number {value}. Whether {value} is a point of "
+                f"{sort} depends on {_shown(base.bound)}, which is known only "
+                "when the call is made, and the compiled program is one call, "
+                "whose contract checks its own parameters and nothing else. "
+                f"Pass {value} as a parameter of {self.program}",
+            )
+        low, high = sort_bound(sort, {}) or (None, None)
+        if low is not None and (value < low or (high is not None and value >= high)):
+            allowed = f"{low} <= {param}" + ("" if high is None else f" < {high}")
+            self.refuse(
+                call,
+                f"its scalar parameter {param} is given {value}, which is not "
+                f"a value of {sort}: {param} has to satisfy {allowed}, as the "
+                f"contract of {term.name} would say at the call",
+            )
+
+    def checked_at_entry(
+        self, call: _Call, term: Term, arrays: Mapping[str, str]
+    ) -> None:
+        """Refuse an array whose cells the call's contract checks, once written.
+
+        Natively a kernel's contract checks its arguments when it is called,
+        and two of the checks are about what the cells hold, which the
+        kernel's facts rest on. The cells of an array of a ``Fin[m]`` element
+        sort are points of ``Fin[m]``, so an access indexed by one is in bounds
+        by type, with no test in the generated code. And the counts and the
+        offsets of a ragged family lay its rows out inside its buffer, so an
+        access inside a row is inside the buffer. The compiled program is one
+        call, whose contract checks the program's arguments once, when it
+        starts. An array that an earlier call wrote, or that the program made,
+        holds whatever was written into it by the time this call reads it, and
+        nothing checks that: ``perm[i] = i + 1`` in one kernel is an address
+        past the end of ``x`` in the next one's ``x[perm[i]]``, where the
+        native run is refused by the second kernel's contract. So the program
+        is refused here, when its term is built.
+        """
+        layout: dict[str, str] = {}
+        for owner, typ in term.params:
+            if not isinstance(typ, ArrType):
+                continue
+            for size, ragged in zip(typ.axes, typ.ragged, strict=True):
+                if not ragged or not isinstance(size, prim.Variable):
+                    continue
+                if size.name in arrays:
+                    layout.setdefault(size.name, f"the row lengths of {owner}")
+                offsets = term.offsets_of(size.name)
+                if offsets is not None and offsets in arrays:
+                    layout.setdefault(offsets, f"the offsets of the rows of {owner}")
+        for param, typ in term.params:
+            if not isinstance(typ, ArrType):
+                continue
+            name = arrays[param]
+            writer = self.writers.get(name)
+            if writer is None:
+                continue
+            element = typ.dtype.base if isinstance(typ.dtype, Refined) else typ.dtype
+            if param in layout:
+                what = f"{param} is {layout[param]}"
+                rests = "an access inside a row is inside the buffer"
+            elif isinstance(element, FinType):
+                what = f"the elements of {param} are declared {typ.dtype}"
+                rests = f"an access indexed by a cell of {param} is in bounds by type"
+            else:
+                continue
+            self.refuse(
+                call,
+                f"it is given {name}, which {writer} writes first, and {what}. "
+                f"Natively the contract of {term.name} checks {name} when it is "
+                f"called, and its facts rest on that check: {rests}. The "
+                "compiled program is one call, whose contract checks its "
+                f"arguments when it starts, so nothing would check what "
+                f"{writer} leaves in {name} before {term.name} reads it. Call "
+                f"{term.name} on its own, outside the program, where its "
+                "contract checks it",
             )
 
     def settle_type(self, name: str, typ: Any, call: _Call, param: str) -> None:
@@ -883,7 +1210,11 @@ class _Composer:
             )
 
     def unify(
-        self, call: _Call, term: Term, arrays: Mapping[str, str]
+        self,
+        call: _Call,
+        term: Term,
+        names: Mapping[str, str],
+        exprs: Mapping[str, Any],
     ) -> dict[str, Any]:
         """What each size of the callee is, in the program's sizes.
 
@@ -894,9 +1225,20 @@ class _Composer:
         (:meth:`equate`); two expressions have to be equal as isl sees them,
         or are refused. A size of the callee nothing determines becomes a size
         of the program, under its own name where that is free.
+
+        ``names`` and ``exprs`` are what the call's parameters became: the
+        program's array or scalar for each, or the number passed for a scalar.
+        A scalar parameter can size an array (``m: Nat`` beside
+        ``x: Arr[Fin[m], Real]``), and that axis is the program's scalar, or
+        the number, as it is in the statements' domains.
         """
         params = dict(term.params)
-        sizes = list(term.sizes)
+        arrays = {
+            param: names[param]
+            for param, typ in term.params
+            if isinstance(typ, ArrType)
+        }
+        sizes = [name for name in term.sizes if name not in params]
         for _, typ in term.params:
             if not isinstance(typ, ArrType):
                 continue
@@ -907,7 +1249,7 @@ class _Composer:
                     if name not in params and name not in sizes:
                         sizes.append(name)
         marks = {name: _CALLEE + name for name in sizes}
-        marked = {**marks, **arrays}
+        marked = {**marks, **names}
         bound: dict[str, Any] = {}
         pending: list[tuple[str, int, Any, bool, Any, bool]] = []
         for param, typ in term.params:
@@ -926,7 +1268,7 @@ class _Composer:
                     (
                         param,
                         k,
-                        rename_expr(axis, marked, {}),
+                        rename_expr(axis, marked, exprs),
                         ragged,
                         known.axes[k],
                         known.ragged[k],
@@ -950,15 +1292,18 @@ class _Composer:
                 for name in _names_in(rename_expr(item[2], {}, bound))
                 if name.startswith(_CALLEE)
             )
-            bound[loose] = prim.Variable(self.new_size(loose[len(_CALLEE) :]))
+            bound[loose] = Var(self.new_size(loose[len(_CALLEE) :]))
         for name in sizes:
             if marks[name] not in bound:
-                bound[marks[name]] = prim.Variable(self.new_size(name))
+                bound[marks[name]] = Var(self.new_size(name))
         out = {name: bound[marks[name]] for name in sizes}
         for param, typ in term.params:
             if isinstance(typ, ArrType):
                 self.settle_type(
-                    arrays[param], _rename_type(typ, arrays, out), call, param
+                    arrays[param],
+                    _rename_type(typ, names, {**exprs, **out}),
+                    call,
+                    param,
                 )
         return out
 
@@ -1079,6 +1424,46 @@ class _Composer:
                 f"wants it {_shown(first)} long; nothing says the two agree"
             )
 
+    def stored_like(self, name: str, made: _Made) -> None:
+        """Refuse an array made to hold integers where its kernels put reals.
+
+        ``Arr.zeros_like(c)`` is natively an array of ``c``'s dtype, or of the
+        ``dtype`` it is given, and the program's temporary has the element
+        sort the kernels it is passed to declare. When the native array holds
+        integers and those kernels declare reals, the native run truncates
+        every value a kernel writes into it and the compiled run does not.
+        Which dtype ``c`` has natively is known only when the program runs;
+        the sort its kernels declare it is what is known here, and an array of
+        an integral sort is taken to hold integers.
+        """
+        value: ProgramValue | None = made.value
+        integers: bool | None = None
+        while value is not None:
+            here = self.made.get(value.name) if value.like is not None else None
+            if here is not None and here.dtype is not None:
+                try:
+                    integers = np.dtype(here.dtype).kind in "biu"
+                except TypeError:
+                    integers = None
+                break
+            if value.like is None:
+                typ = self.types.get(value.name)
+                if isinstance(typ, ArrType):
+                    integers = integral_sort(typ.dtype)
+                break
+            value = value.like
+        sort = self.types[name].dtype
+        if not integers or integral_sort(sort):
+            return
+        raise TraceError(
+            f"{self.program} makes {name} at {made.where}, which natively holds "
+            f"integers, and {self.origin[name]} declares its elements {sort}. "
+            f"The native run would truncate every value written into {name}, "
+            "and the compiled program, whose temporary has the declared sort, "
+            "would not; pass Arr.zeros_like a floating dtype, such as "
+            "dtype=np.float64"
+        )
+
     # }}}
 
     def finish(self) -> Term:
@@ -1096,6 +1481,14 @@ class _Composer:
         temporaries = [
             (name, self.types[name]) for name in self.made if name in self.types
         ]
+        if not any(value.name in self.writers for value in self.recorder.params):
+            raise TraceError(
+                f"the program {self.program} writes none of its parameters. Its "
+                "term lowers to one kernel, whose results are what it writes "
+                "into its parameters, so the compiled program would compute "
+                "nothing anybody sees, and comparing it with the native one "
+                "would compare nothing; write the result into a parameter"
+            )
         stmts: list[Stmt] = []
         for slot in self.slots:
             if isinstance(slot, list):
@@ -1141,7 +1534,7 @@ class _Composer:
             id=f"{name}.zeros",
             inames=inames,
             domain=domain_set(inames, typ.axes),
-            assignee=Access(name, tuple(prim.Variable(iname) for iname in inames)),
+            assignee=Access(name, tuple(Var(iname) for iname in inames)),
             expr=0,
             kind="assign",
             guard=None,
