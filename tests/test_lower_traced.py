@@ -818,3 +818,27 @@ def test_an_equality_guard_and_an_equality_condition_lower_and_run() -> None:
     y = Arr.zeros(4)
     run(diagonal, a=square, y=y)
     assert list(y.numpy()) == [0.0, 5.0, 10.0, 15.0]
+
+
+def test_a_guard_against_a_real_scalar_agrees_on_the_c_target() -> None:
+    # The guard used to be a domain constraint, with a an integer parameter of
+    # the compiled kernel, and at a = 2.5 the compiled run disagreed with the
+    # native one by 1.0 at a cell. It is now a predicate on the real a.
+    from loopty.executor import LoopyExecutor
+    from loopty.schedule import Schedule
+
+    @kernel
+    def below(a: Real, y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(i < a):
+                y[i] = 1.0
+
+    fact = LoopyExecutor().differential(
+        below, Schedule(below, target="c"), {"a": 2.5, "y": Arr.zeros(5)}
+    )
+    assert fact.status.value == "tested", fact.provenance
+    y = Arr.zeros(5)
+    run(below, a=2.5, y=y)
+    assert list(y.numpy()) == [1.0, 1.0, 1.0, 0.0, 0.0]
+    (stmt,) = below.term.stmts
+    assert "a" not in stmt.domain.get_var_names(isl.dim_type.param)

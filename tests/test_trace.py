@@ -1554,3 +1554,92 @@ def test_a_global_the_body_creates_is_refused(monkeypatch) -> None:
 
 # }}}
 
+
+
+# {{{ guards isl cannot state as integers
+
+
+def _loop_nest(domain) -> isl.Set:
+    """The one-deep loop nest ``0 <= i < n``, in ``domain``'s parameter space."""
+    return isl.Set("[n] -> { [i] : 0 <= i < n }").align_params(domain.get_space())
+
+
+def test_a_guard_against_a_real_scalar_leaves_the_domain_unnarrowed() -> None:
+    # isl reads every name of a constraint as an integer, so stating i < a
+    # would take a = 2.5 for an integer parameter; the domain and the compiled
+    # kernel then disagreed with the native run.
+    def below(a: Real, y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(i < a):
+                y[i] = 1.0
+
+    (stmt,) = term_of(below).stmts
+    assert "a" not in stmt.domain.get_var_names(isl.dim_type.param)
+    assert stmt.domain.is_equal(_loop_nest(stmt.domain))
+    # The guard itself is kept, and evaluated at run time.
+    assert render(stmt.guard) == "i < a"
+    ((conjunct, why),) = stmt.unnarrowed
+    assert conjunct == "i < a"
+    assert "the scalar a of sort Real" in why
+    assert "isl would read every name of a constraint as an integer" in why
+
+
+def test_the_same_guard_against_an_integral_scalar_still_narrows() -> None:
+    def below(a: Nat, y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(i < a):
+                y[i] = 1.0
+
+    (stmt,) = term_of(below).stmts
+    assert "a" in stmt.domain.get_var_names(isl.dim_type.param)
+    nest = _loop_nest(stmt.domain)
+    assert stmt.domain.is_subset(nest) and not stmt.domain.is_equal(nest)
+    assert stmt.unnarrowed == ()
+
+
+def test_only_the_conjuncts_isl_cannot_state_are_left_out() -> None:
+    def clipped(a: Real, y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when((i < a) & (i + 1 < y.dom.size)):
+                y[i] = 1.0
+
+    (stmt,) = term_of(clipped).stmts
+    assert stmt.domain.is_equal(
+        isl.Set("[n] -> { [i] : 0 <= i < n - 1 }").align_params(stmt.domain.get_space())
+    )
+    assert [conjunct for conjunct, _why in stmt.unnarrowed] == ["i < a"]
+
+
+def test_a_data_guard_is_recorded_as_unnarrowed_too() -> None:
+    def positive(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(x[i] > 0.0):
+                y[i] = x[i]
+
+    (stmt,) = term_of(positive).stmts
+    assert stmt.unnarrowed == (("x[i] > 0.0", "reads an array or is not affine"),)
+
+
+def test_a_reduction_condition_against_a_real_scalar_is_refused() -> None:
+    # A reduction keeps its condition only in its domain, so a condition the
+    # domain cannot state is refused rather than dropped.
+    def partial(a: Real, x: Arr[Fin[n], Real], y: Arr[Fin[1], Real]):  # noqa: F821
+        y[0] = reduce_sum(x[j] for j in x.dom if j < a)
+
+    with pytest.raises(TraceError) as caught:
+        term_of(partial)
+    message = str(caught.value)
+    assert "the condition 'j < a' of the reduction over j" in message
+    assert "compares with the scalar a of sort Real" in message
+    assert "loop variables, sizes and integral scalars" in message
+
+
+def test_a_reduction_condition_against_an_integral_scalar_is_its_domain() -> None:
+    def partial(a: Nat, x: Arr[Fin[n], Real], y: Arr[Fin[1], Real]):  # noqa: F821
+        y[0] = reduce_sum(x[j] for j in x.dom if j < a)
+
+    (reduction,) = reductions_in(term_of(partial).stmts[0].expr)
+    assert "a" in reduction.domain.get_var_names(isl.dim_type.param)
+
+
+# }}}

@@ -41,6 +41,15 @@ is ``DECIDED`` by the type rather than by an oracle.
 parameters. It is emitted as a fact with its term, for whatever oracle can take
 it, and stays ``ASSUMED`` when none can, which is the honest outcome and is
 visible in the ledger rather than lost.
+
+The in-bounds, disjointness and ordering facts are stated over statement
+domains, and a guard narrows a domain only where isl can state it. A conjunct
+it cannot (one that reads an array, compares with ``!=``, or compares with a
+``Real`` scalar, which isl would read as an integer) leaves the domain wider
+than the instances that write, and each such fact lists those conjuncts, with
+the reason, under ``unnarrowed`` in its provenance: proved, it holds for the
+instances that write too; refuted, its witness may be an instance the guard
+masks.
 """
 
 from __future__ import annotations
@@ -256,6 +265,7 @@ def in_bounds_facts(term: Term, owner: str) -> list[Fact]:
                     )
                 )
                 continue
+            wide = any(place[2] is not stmt.loop_domain for place in places)
             facts.append(
                 Fact(
                     id=identifier,
@@ -270,12 +280,35 @@ def in_bounds_facts(term: Term, owner: str) -> list[Fact]:
                         labels=tuple(f"a{k}" for k in range(len(indices))),
                     ),
                     status=Status.ASSUMED,
-                    provenance={"access": text, "statement": stmt.id},
+                    provenance={
+                        "access": text,
+                        "statement": stmt.id,
+                        **(_unnarrowed(stmt) if wide else {}),
+                    },
                     where=stmt.where,
                     owner=owner,
                 )
             )
     return facts
+
+
+def _unnarrowed(stmt: Any) -> dict[str, Any]:
+    """The provenance of a fact stated over a domain its guard left wide.
+
+    A guard conjunct isl cannot state (:attr:`loopty.term.Stmt.unnarrowed`)
+    does not narrow the statement's domain, so the domain over-approximates
+    the instances that write, and a fact about it is about instances the guard
+    masks as well. Proved, it holds for the instances that write all the same;
+    refuted, its witness may be one of the masked ones. The fact records which
+    conjuncts were left out, and why, under ``unnarrowed``.
+    """
+    if not stmt.unnarrowed:
+        return {}
+    return {
+        "unnarrowed": [
+            {"conjunct": conjunct, "why": why} for conjunct, why in stmt.unnarrowed
+        ]
+    }
 
 
 def _is_widened(relation: isl.Map, indices: Sequence[Any]) -> bool:
@@ -334,6 +367,7 @@ def write_disjointness_facts(term: Term, owner: str) -> list[Fact]:
                     "statement": stmt.id,
                     "array": footprint.array,
                     "kind": footprint.kind,
+                    **_unnarrowed(stmt),
                 },
                 where=stmt.where,
                 owner=owner,
@@ -369,6 +403,16 @@ def ordering_facts(term: Term, owner: str, where: str) -> list[Fact]:
                 owner=owner,
             )
         ]
+    # A statement whose guard is only partly stated contributes dependences
+    # from instances that write nothing; see _unnarrowed.
+    provenance: dict[str, Any] = {"dependences": str(deps)}
+    wide = {
+        stmt.id: _unnarrowed(stmt)["unnarrowed"]
+        for stmt in term.stmts
+        if stmt.unnarrowed
+    }
+    if wide:
+        provenance["unnarrowed"] = wide
     return [
         Fact(
             id=f"{owner}:ordering",
@@ -381,7 +425,7 @@ def ordering_facts(term: Term, owner: str, where: str) -> list[Fact]:
                 labels=instance_labels(term),
             ),
             status=Status.ASSUMED,
-            provenance={"dependences": str(deps)},
+            provenance=provenance,
             where=where,
             owner=owner,
         )

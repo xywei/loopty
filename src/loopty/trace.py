@@ -17,8 +17,12 @@ cannot be traced: tracing would have to pick a branch, and the value is not
 known until the kernel runs. A symbolic condition asked for its truth value
 raises :class:`TraceError` naming ``when`` as the fix. Under tracing ``when``
 pushes the condition onto the guard stack, and the statements recorded inside
-carry it and have it intersected into their domain when it is affine, so a
-guarded access is in bounds exactly where it is executed. Under plain
+carry it and have it intersected into their domain where isl can state it, an
+affine comparison of integers (loop variables, sizes, scalars of an integral
+sort), so a guarded access is in bounds exactly where it is executed. Any other
+conjunct is left to the statement's guard, evaluated at run time, and the
+statement records it as leaving its domain wider than the instances that write
+(:attr:`loopty.term.Stmt.unnarrowed`). Under plain
 ``python`` it masks the writes of the block rather than skipping them, which is
 what keeps one body serving as both the specification and the reference run.
 
@@ -101,7 +105,7 @@ from lanky.terms import (
 )
 
 from loopty.arr import Arr, ArrSpec
-from loopty.flow import domain_set, expr_text
+from loopty.flow import domain_set, expr_text, free_names
 from loopty.idx import Reflections
 from loopty.term import Access, ArrType, Reduction, Stmt, Term
 
@@ -443,6 +447,12 @@ class Tracer:
         self.effects: list[tuple[str, str]] = []
         #: The thread running the body; calls on any other are not its effects.
         self.thread = threading.get_ident()
+        #: The names a guard may hand isl as integers: the sizes, the scalar
+        #: parameters of an integral sort (filled in by :func:`trace` from the
+        #: signature), and every loop variable, added as it is made. isl holds
+        #: every name of a constraint as an integer, so a comparison naming
+        #: anything else is not stated as one; see :func:`constraints_of`.
+        self.integers: set[str] = set()
 
     # {{{ loops
 
@@ -462,6 +472,7 @@ class Tracer:
             name = f"{stem}_{suffix}"
             suffix += 1
         self._inames.add(name)
+        self.integers.add(name)
         # An iname and a reflected parameter share one isl space, so neither may
         # take a name the other has.
         self.reflections.reserve((name,))
@@ -662,12 +673,32 @@ class Tracer:
     # }}}
 
     def domain(self) -> Any:
-        """The isl set of the enclosing loop nest, narrowed by affine guards."""
+        """The isl set of the enclosing loop nest, narrowed by the guards.
+
+        Only a comparison isl can state narrows it: an affine one, over loop
+        variables, sizes and scalars of an integral sort (see
+        :func:`constraints_of`). Every other conjunct of the guard is left to
+        the statement's guard predicate, evaluated at run time, and the domain
+        is wider than the instances that write; :meth:`unnarrowed` says which
+        conjuncts, and why.
+        """
         return domain_set(
             self.inames,
             self.bounds,
-            constraints=constraints_of(self.guard()),
+            constraints=constraints_of(self.guard(), self),
             reflections=self.reflections,
+        )
+
+    def unnarrowed(self) -> tuple[tuple[str, str], ...]:
+        """The conjuncts of the open guards that do not narrow :meth:`domain`.
+
+        Each is ``(conjunct, why)``, the conjunct as the body spells it. A
+        statement records them (:attr:`loopty.term.Stmt.unnarrowed`), so that
+        the facts stated over its domain can say that the domain is an
+        over-approximation, and of what.
+        """
+        return tuple(
+            (_shown(part), why) for part, why in _unstated(self.guard(), self)
         )
 
     def loop_domain(self) -> Any:
@@ -726,6 +757,7 @@ class Tracer:
             where=where,
             order=(*self._path, self._position()),
             loop_domain=self.loop_domain() if self.guards else None,
+            unnarrowed=self.unnarrowed(),
         )
         self.stmts.append(stmt)
         return stmt
@@ -1567,35 +1599,136 @@ def _effects_message(name: str, effects: Sequence[tuple[str, str]]) -> str:
 # {{{ guards as isl constraints
 
 
-def constraints_of(condition: Any) -> tuple[str, ...]:
+#: Why a conjunct that reads an array, or is not an affine comparison, is not
+#: a constraint.
+_NOT_AFFINE = "reads an array or is not affine"
+
+#: Why a conjunct comparing with ``!=`` is not a constraint.
+_UNEQUAL = "compares with '!=', which is not a convex set of points"
+
+
+def constraints_of(
+    condition: Any, tracer: Tracer | None = None, bound: Collection[str] = ()
+) -> tuple[str, ...]:
     """Render a guard as isl constraints, dropping what isl cannot express.
 
     A guard narrows the statement's domain, which is what makes
     ``with when(i + 1 < n): u[i + 1] = ...`` provably in bounds. A guard that is
     not quasi-affine (a data-dependent test) is dropped, which widens the domain
     and can only make an obligation harder, never falsely discharge one.
+
+    isl holds every name of a constraint as an integer. With a ``tracer``, a
+    comparison is kept only when every name in it is one the tracer knows to
+    be an integer (:attr:`Tracer.integers`: a loop variable, a size, a scalar
+    of sort ``Nat``, ``Int`` or ``Fin[...]``) or one of the reduction binders
+    in ``bound``. ``i < a`` with ``a : Real`` is dropped: stated to isl it
+    reads ``a`` as an integer parameter, and at ``a = 2.5`` the domain, and
+    the compiled kernel built from it, would disagree with the native run.
+    Without a tracer every name is taken for an integer, which is right for a
+    hand-built guard over sizes and loop variables only.
+    """
+    return tuple(
+        text for _part, text, _why in _conjuncts(condition, tracer, bound) if text
+    )
+
+
+def _unstated(
+    condition: Any, tracer: Tracer | None = None, bound: Collection[str] = ()
+) -> list[tuple[Any, str]]:
+    """The conjuncts :func:`constraints_of` drops, each with the reason."""
+    return [
+        (part, why)
+        for part, text, why in _conjuncts(condition, tracer, bound)
+        if text is None
+    ]
+
+
+def _conjuncts(
+    condition: Any, tracer: Tracer | None, bound: Collection[str]
+) -> list[tuple[Any, str | None, str]]:
+    """``(conjunct, constraint, why)`` for each conjunct of a guard.
+
+    ``constraint`` is the conjunct's isl text, or ``None`` when it cannot be
+    one, and then ``why`` says why.
     """
     if condition is None:
-        return ()
+        return []
     if isinstance(condition, prim.LogicalAnd):
-        out: tuple[str, ...] = ()
-        for child in condition.children:
-            out += constraints_of(child)
-        return out
-    if isinstance(condition, prim.Comparison):
-        try:
-            left = expr_text(condition.left, None, None)
-            right = expr_text(condition.right, None, None)
-        except ValueError:
-            return ()
-        operator = condition.operator
-        if operator == "!=":
-            return ()
-        # isl spells equality with one '='; its parser refuses Python's '=='.
-        if operator == "==":
-            operator = "="
-        return (f"{left} {operator} {right}",)
-    return ()
+        return [
+            piece
+            for child in condition.children
+            for piece in _conjuncts(child, tracer, bound)
+        ]
+    if not isinstance(condition, prim.Comparison):
+        return [(condition, None, _NOT_AFFINE)]
+    try:
+        left = expr_text(condition.left, None, None)
+        right = expr_text(condition.right, None, None)
+    except ValueError:
+        return [(condition, None, _NOT_AFFINE)]
+    operator = condition.operator
+    if operator == "!=":
+        return [(condition, None, _UNEQUAL)]
+    if tracer is not None:
+        known = tracer.integers.union(bound)
+        others = sorted((free_names(left) | free_names(right)) - known)
+        if others:
+            return [(condition, None, _not_integers_text(others, tracer))]
+    # isl spells equality with one '='; its parser refuses Python's '=='.
+    if operator == "==":
+        operator = "="
+    return [(condition, f"{left} {operator} {right}", "")]
+
+
+def _not_integers_text(names: Sequence[str], tracer: Tracer) -> str:
+    """Why a comparison naming ``names`` is not a constraint: isl's are integers."""
+    described = []
+    for name in names:
+        sort = tracer.params.get(name)
+        if name in tracer.params and not isinstance(sort, ArrSpec):
+            described.append(f"the scalar {name} of sort {_sort_text(sort)}")
+        else:
+            described.append(name)
+    listed = " and ".join(described)
+    which = "which is" if len(names) == 1 else "which are"
+    return (
+        f"compares with {listed}, {which} not a loop variable, a size or a "
+        "scalar of an integral sort (Nat, Int, Fin[...]), and isl would read "
+        "every name of a constraint as an integer"
+    )
+
+
+def _sort_text(sort: Any) -> str:
+    """A sort the way a message names it: ``Real``, ``float64``."""
+    if isinstance(sort, type):
+        return sort.__name__
+    return str(sort)
+
+
+def _integer_names(params: Sequence[tuple[str, Any]]) -> set[str]:
+    """The names of a signature that are integers, other than loop variables.
+
+    The sizes an array's axes name, the sizes a ``Fin`` sort names (an element
+    sort ``Fin[m]``, or a scalar's ``i : Fin[n]``), and the scalar parameters
+    of an integral sort (:func:`loopty.contract.integral_sort`). An array
+    parameter is none of them, even where a ragged axis names it as its counts.
+    """
+    from loopty.contract import integral_sort
+
+    arrays = {name for name, typ in params if isinstance(typ, ArrType)}
+    out: set[str] = set()
+    for name, typ in params:
+        if isinstance(typ, ArrType):
+            out |= _free_size_names(typ.axes)
+            sort = typ.dtype
+        else:
+            sort = typ
+            if integral_sort(sort):
+                out.add(name)
+        base = sort.base if isinstance(sort, Refined) else sort
+        if isinstance(base, FinType):
+            out |= _free_size_names([base.bound])
+    return out - arrays
 
 
 # }}}
@@ -2224,10 +2357,11 @@ def lower_reductions(
     every point while the body skips the ones the condition excludes.
     """
     if isinstance(expr, Sum):
-        unstated = _unstated(expr.guard)
+        binders = [var.name for var, _domain in expr.binders]
+        bound = {*(name for name, _bound in enclosing), *binders}
+        unstated = _unstated(expr.guard, tracer, bound)
         if unstated:
-            names = [var.name for var, _domain in expr.binders]
-            raise TraceError(_reduction_condition_message(unstated, names, where))
+            raise TraceError(_reduction_condition_message(unstated, binders, where))
         inames: list[str] = []
         bounds: list[Any] = []
         for var, domain in expr.binders:
@@ -2250,10 +2384,14 @@ def lower_reductions(
             (*tracer.inames, *inames),
             (*tracer.bounds, *bounds),
             constraints=(
-                *constraints_of(tracer.guard()),
+                *constraints_of(tracer.guard(), tracer),
                 *_binder_constraints(enclosing, tracer),
-                *(piece for guard in outer_guards for piece in constraints_of(guard)),
-                *constraints_of(expr.guard),
+                *(
+                    piece
+                    for guard in outer_guards
+                    for piece in constraints_of(guard, tracer, bound)
+                ),
+                *constraints_of(expr.guard, tracer, bound),
             ),
             reflections=tracer.reflections,
         )
@@ -2275,31 +2413,18 @@ def lower_reductions(
     return expr
 
 
-def _unstated(condition: Any) -> list[Any]:
-    """The conjuncts of a condition that :func:`constraints_of` has to drop."""
-    if condition is None:
-        return []
-    if isinstance(condition, prim.LogicalAnd):
-        return [part for child in condition.children for part in _unstated(child)]
-    if constraints_of(condition):
-        return []
-    return [condition]
-
-
 def _reduction_condition_message(
-    parts: Sequence[Any], binders: Sequence[str], where: str
+    parts: Sequence[tuple[Any, str]], binders: Sequence[str], where: str
 ) -> str:
-    """What to say about a reduction condition its domain cannot state."""
-    listed = " and ".join(repr(_shown(part)) for part in parts)
+    """What to say about a reduction condition its domain cannot state.
+
+    ``parts`` are the conjuncts its domain cannot state, each with the reason
+    :func:`constraints_of` gives for dropping it.
+    """
+    listed = " and ".join(repr(_shown(part)) for part, _why in parts)
     at = f" at {where}" if where else ""
-    unequal = any(
-        isinstance(part, prim.Comparison) and part.operator == "!=" for part in parts
-    )
-    why = (
-        "compares with '!=', which is not a convex set of points"
-        if unequal
-        else "reads an array or is not affine"
-    )
+    why = "; ".join(dict.fromkeys(why for _part, why in parts))
+    unequal = any(why == _UNEQUAL for _part, why in parts)
     split = (
         " For '!=', split the sum in two, one over '<' and one over '>'."
         if unequal
@@ -2310,10 +2435,10 @@ def _reduction_condition_message(
         "cannot be a constraint of the reduction's domain, which is the only "
         "place a reduction keeps its condition: the term would sum over every "
         "point, while the body skips the points the condition excludes. isl "
-        "states an affine comparison of loop variables and sizes, and this "
-        f"condition {why}.{split} Otherwise write each term to an indexed cell, "
-        "0.0 where the condition is false and the term under "
-        "'with when(condition):', and sum the cells."
+        "states an affine comparison of loop variables, sizes and integral "
+        f"scalars, and this condition {why}.{split} Otherwise write each term "
+        "to an indexed cell, 0.0 where the condition is false and the term "
+        "under 'with when(condition):', and sum the cells."
     )
 
 
@@ -2618,6 +2743,7 @@ def trace(kernel: Any, arg_types: Any) -> Term:
         else:
             params.append((parameter, annotation))
             arguments.append(Var(parameter))
+    tracer.integers |= _integer_names(params)
 
     _TRACERS.append(tracer)
     watching = _CallWatch.start()

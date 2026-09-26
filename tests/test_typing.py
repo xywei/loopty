@@ -459,3 +459,59 @@ def test_the_offsets_a_sum_reads_through_do_not_hide_a_direct_read() -> None:
 
 
 # }}}
+
+
+# {{{ a guard isl cannot state
+
+
+def test_a_fact_over_a_domain_a_guard_left_wide_says_so() -> None:
+    # i < a with a : Real is not a constraint isl can state, so the domain is
+    # the whole loop nest and the facts about it are about masked instances too.
+    def below(a: Real, y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(i < a):
+                y[i] = 1.0
+
+    _term, facts = facts_of(below)
+    kinds = {fact.kind: fact for fact in facts}
+    (entry,) = kinds["in-bounds"].provenance["unnarrowed"]
+    assert entry["conjunct"] == "i < a"
+    assert "the scalar a of sort Real" in entry["why"]
+    assert kinds["disjoint-writes"].provenance["unnarrowed"] == [entry]
+    assert kinds["ordering"].provenance["unnarrowed"] == {"S0": [entry]}
+    # Wider is harder, never easier: y[i] is still in bounds everywhere.
+    (write,) = [f for f in settled(facts) if f.kind == "in-bounds"]
+    assert write.status is Status.DECIDED
+
+
+def test_a_guard_isl_states_whole_leaves_nothing_to_say() -> None:
+    def below(a: Nat, y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(i < a):
+                y[i] = 1.0
+
+    _term, facts = facts_of(below)
+    assert not any("unnarrowed" in fact.provenance for fact in facts)
+
+
+def test_a_guards_own_read_is_not_over_the_wide_domain() -> None:
+    # The guard's read happens at every point of the loop nest, which is the
+    # domain it is stated over, so nothing about it is over-approximated.
+    def flagged(flag: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(flag[i] > 0.0):
+                y[i] = 1.0
+
+    _term, facts = facts_of(flagged)
+    bounds = {
+        fact.provenance["access"]: fact
+        for fact in facts
+        if fact.kind == "in-bounds"
+    }
+    assert "unnarrowed" not in bounds["flag[i]"].provenance
+    assert bounds["y[i]"].provenance["unnarrowed"] == [
+        {"conjunct": "flag[i] > 0.0", "why": "reads an array or is not affine"}
+    ]
+
+
+# }}}

@@ -20,7 +20,7 @@ import pytest
 from lanky.ledger import Status
 from lanky.prelude import Nat, Real
 
-from loopty import Arr, Fin, reduce_sum
+from loopty import Arr, Fin, reduce_sum, when
 from loopty.faithful import KIND, SIZES, sample_arguments
 from loopty.kernel import Kernel
 from loopty.tolerance import disagreement
@@ -156,6 +156,26 @@ def test_a_frame_probe_is_refuted() -> None:
         y[0] = s
 
     assert_refuted(faithful(counted))
+
+
+# }}}
+
+
+# {{{ guards
+
+
+def test_a_guard_against_a_real_scalar_is_tested() -> None:
+    # The comparison used to be a constraint of the domain, with a an integer
+    # parameter, and the interpreter would not fix a parameter at a drawn
+    # value that is not an integer, so the fact was left assumed.
+    def below(a: Real, y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(i < a):
+                y[i] = 1.0
+
+    fact = faithful(below)
+    assert fact.status is Status.TESTED, fact.provenance
+    assert fact.provenance["compared"] == 3
 
 
 # }}}
