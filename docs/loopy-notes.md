@@ -1,6 +1,6 @@
 # Notes on loopy and islpy
 
-Thirteen interactions with loopty's dependencies that cost real debugging
+Fourteen interactions with loopty's dependencies that cost real debugging
 time, each with the local workaround and the reason it is local. No upstream
 issues were filed: these are notes so that the next person meets the answer
 instead of the symptom.
@@ -130,6 +130,12 @@ self to Map is deprecated`, raised by `lp.map_domain`: it requires an
 `isl.BasicMap` and then asks it whether it is bijective. It went with the call
 (note 13), and the one test that still calls `map_domain`, to pin that loopy
 refuses the diamond, silences it locally.
+
+loopy's code generation for a loop tagged `vec` warns through its own
+`loopy.diagnostic.warn`, which is deprecated ("This function is deprecated and
+will go away in the future"). No loopty schedule in the suite runs a `vec`
+loop; `tests/test_buildable.py` generates code for some, to compare `buildable`
+with loopy, and silences that warning there only.
 
 ## 6. loopy's own loop-nest choice is not the term's
 
@@ -395,8 +401,11 @@ a.dom)`, on a single sum, and on a sum inside a statement loop:
 The first row is the nested case: loopy sets and updates the enclosing
 reduction's accumulator outside the inner reduction's loop, in instructions
 that do not run on its axis, and generates code only when every instruction
-uses every local axis. `schedule._unbuildable_reason` refuses a parallel tag on
-a nested reduction's iname with that reason. It used to be refused only by
+uses every local axis. `schedule._unbuildable_reason` refuses a hardware axis
+(`g.*`, `l.*`) on a nested reduction's iname with that reason. It used to count
+`ilp` as one, which loopy unrolls rather than launching; an `ilp` loop of a
+nested reduction is refused for the privatization below instead, and `unr`
+builds. The general rule this row is one case of is note 14's third. It used to be refused only by
 accident, as a ragged fiber: the inner domain names the outer binder `i` as a
 parameter, and every parameter that was not a size counted as data read out of
 an array. An enclosing binder, or a loop of the statement, is not data now, so
@@ -510,3 +519,73 @@ defines, such as a row and the ragged fiber inside it, an image that is not one
 basic set, or a piecewise inverse), the schedule carries a `refuted`
 `buildable` fact with the reason, and no kernel, rather than an error from
 loopy.
+
+## 14. Hardware axes, unrolled loops and the C target
+
+**Symptom.** A schedule passed `buildable` and loopy then refused to generate
+its code, sometimes from inside isl with a message that names no loop. Found
+by comparing `buildable` with loopy's own code generation over every tag (and
+pair of tags) on a set of small kernels, on the C target and on loopy's plain
+OpenCL target, with loopy's caches off: over three thousand schedules, and no
+disagreement left afterwards but the `ilp` reductions of note 11, which are
+refused on purpose. `tests/test_buildable.py` keeps a case of each row.
+
+| schedule | loopy | loopty's `buildable` |
+|---|---|---|
+| a loop on `g.*` or `l.*`, target `"c"` | "plain C does not have local hw axes" (or group) | refused: the C target has none |
+| a sum's loop on `l.0`, target `"c"` | `NotImplementedError` | refused, the same |
+| `unr`, `ilp` or `vec` on a loop over `Fin[n]`, `n` free | `isl.Error`: "unbounded optimum" | refused: the loop needs a numeric length |
+| the same after `split("i", 4)`, on the inner half | builds | buildable |
+| `unr` on `j` in `Fin[i + 1]`, `i` in `Fin[8]` | builds | buildable: at most 8 |
+| `l.1` with no loop on `l.0` (or `g.1`) | "local axis 0 unused" | refused: axes are numbered from 0 |
+| two loops of one statement on `l.0` (or `g.0`, or `vec`) | "instruction 'S0' has multiple inames tagged 'l.0'" | refused |
+| a statement loop and its sum's loop on `l.0` | "instruction 'S0_j_init' has multiple inames tagged 'l.0'" | refused, the same |
+| a loop on `g.0`, and a statement in a loop of its own beside it | "instruction 'S1' does not use all group hw axes" | refused: every instruction runs on every axis |
+| a sum on `l.0` beside a sequential sum in one statement | "instruction 'S0_j_init' does not use all local hw axes" | refused, the same |
+| `l.auto` | "kernel with automatically-assigned local axes passed to preprocessing" | refused |
+| `vec` on a loop whose statement sums sequentially, target `"c"` | "CFamilyASTBuilder does not understand axis tag" | refused: C has no vector types |
+| the same on OpenCL | builds | buildable |
+| `vec` on a row loop that reads a ragged row's length, or around a sum on `l.0` | `TypeError` from inside loopy | refused |
+| `vec` or `ilp` on a ragged fiber | "Domain number 1 has a data-dependent parameter" | refused |
+| `l.0` on a dense loop between a ragged row and its fiber | the same | refused |
+
+**Cause.** loopy's rules, each met at its own stage of code generation.
+
+* The C targets have no hardware axes, and no vector types for a temporary: a
+  `vec` loop that writes a temporary (a sum's accumulator) keeps it as a vector
+  along the loop. A `vec` loop that writes none is unrolled, and builds.
+* `generate_unroll_loop` and `generate_vectorize_loop` in `loopy.codegen.loop`
+  ask the loop's bounds with every size and every other loop projected out
+  (`get_iname_bounds(iname, constants_only=True)`), and a free size leaves isl
+  nothing to bound.
+* `get_grid_sizes_for_insn_ids` numbers the group and the local axes of a
+  kernel from 0 up and refuses a gap; `check_for_double_use_of_hw_axes` allows
+  one loop per axis (`vec` counts) in an instruction, a local sum's loop
+  counted as one of its statement's; `check_for_unused_hw_axes` asks every
+  instruction to run on every group and local axis the kernel uses. A sum's
+  own instructions run in the statement's loops, its own and those of the sums
+  around it, and the statement's instruction runs on the axis of each of its
+  sums on a local axis, since every work item of the group reads the result.
+  The instruction that assigns a ragged row's length runs in the row loop and
+  the loops around it.
+* `l.auto` is assigned only inside loopy's own transforms (`precompute`,
+  `buffer_array`); preprocessing refuses a kernel that still has one.
+* `check_for_data_dependent_parallel_bounds` refuses any concurrent loop
+  (`ConcurrentTag`: `g.*`, `l.*`, `ilp`, `vec`) in a domain that names a
+  temporary as a parameter, and a ragged row's length is one. The lowering
+  defines a dense loop between the row and its fiber in one domain with the
+  fiber (`[r, nl_cnt_r] -> { [i, j] }`), so that loop is refused too although
+  its own extent is known.
+
+**Local fix.** `schedule._unbuildable_reason` asks each, read off the kernel's
+own instructions, tags and domains after every step, and refuses with the
+cause in words and the remedy: `_axis_reason`, `_unroll_reason`,
+`_vector_reason` and `_target_reason`, and `_ragged_reason` for the last. The
+C target's own limit is asked last of all, because it is the one limit that
+`retarget("opencl")` removes; the design's spmv device schedule, written for
+`"c"` so that the demo needs no device, keeps its ragged-fiber reason.
+
+**The limit of the fix.** Still a table, not a model of loopy: a schedule the
+check passes can fail for a reason nobody has met. The dense loop between a
+row and its fiber could be given a domain of its own by the lowering, which
+would make it a loop a device can run; that is not done.

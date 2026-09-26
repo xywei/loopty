@@ -103,7 +103,10 @@ interesting failure. Every cast is `decided`: putting the rows on work groups
 and the entries on lanes reorders nothing that carries a dependence. What it
 cannot survive is code generation, on a device as much as on C, because loopy
 will not put a hardware axis inside a loop whose bound comes from an array, and
-a CSR row is exactly such a loop. The schedule says so itself, as a `refuted`
+a CSR row is exactly such a loop. (Written for `"c"` so that the demo needs no
+device, it would be refused on C in any case, since C has no hardware axes;
+the check names first the limit that retargeting would not remove.) The
+schedule says so itself, as a `refuted`
 fact of kind `buildable` decided by `loopy-target` with the limit in words as
 its reason, and raises `UnbuildableSchedule` if anything asks it for code. The
 demo builds it only when `main()` runs; a file that built it at the top level

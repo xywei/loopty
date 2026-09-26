@@ -289,7 +289,10 @@ def test_a_row_that_stores_its_own_start_first_can_still_run_in_parallel() -> No
         evaluate_annotations(offsets_stored_then_row_sums),
     )
     tagged = Schedule(term, sizes={"n": 4}).tag(r="l.0")
-    assert [fact.status.value for fact in tagged.facts()] == ["decided"] * 2
+    casts = [fact for fact in tagged.facts() if fact.kind != "buildable"]
+    assert [fact.status.value for fact in casts] == ["decided"] * 2
+    # Legal, and not for the C target, which has no hardware axes (#47).
+    assert "the C target has none" in tagged.buildable[1]
 
 
 def scan_then_row_sums(
@@ -368,7 +371,13 @@ def test_split_then_tag_is_accepted_when_nothing_depends_on_the_order() -> None:
     assert split.order == ("i_out", "i_in", "j")
     tagged = split.tag(i_out="g.0")
     assert tagged.tags == {"i_out": "g.0"}
-    assert [fact.status.value for fact in tagged.facts()] == ["decided"] * 4
+    casts = [fact for fact in tagged.facts() if fact.kind != "buildable"]
+    assert [fact.status.value for fact in casts] == ["decided"] * 4
+    # The casts are about meaning; the target is another question, and on C,
+    # which has no hardware axes, the answer is no (#47).
+    (buildable,) = [fact for fact in tagged.facts() if fact.kind == "buildable"]
+    assert buildable.status.value == "refuted"
+    assert "the C target has none" in buildable.provenance["reason"]
 
     a = np.arange(8, dtype=np.float64).reshape(2, 4)
     b = np.zeros((4, 2))
@@ -1310,8 +1319,10 @@ def test_a_reduction_split_across_parallel_and_sequential_inames_is_reported():
     assert "in parallel" in reason and "in sequence" in reason
 
 
-def test_a_schedule_the_target_can_build_says_so_and_carries_no_extra_fact():
-    schedule = Schedule(ht.spmv_term()).tag(r="g.0")
+def test_a_schedule_the_target_can_build_says_so_and_carries_no_extra_fact(
+    plain_opencl,
+):
+    schedule = Schedule(ht.spmv_term(), target="opencl").tag(r="g.0")
     assert schedule.buildable == (True, "")
     assert not [f for f in schedule.facts() if f.kind == "buildable"]
     schedule.require_buildable()
