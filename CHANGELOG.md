@@ -172,6 +172,46 @@ with a pair of statement instances.
   domain, and a `dir()` or frame probe all trace to one iteration's value and
   are refuted. The demos' ledgers carry
   one more row per kernel, and their transcripts are regenerated.
+- **A program's term, and one loopy kernel for it** (`loopty.compose`).
+  `Program.term` is what the body does run once against placeholders: each
+  kernel call is recorded instead of run, with its arguments by parameter,
+  and the callees' terms follow one another in call order, in the program's
+  names, with no AST pass. A callee's arrays and scalars become what the
+  program passed (a number passed for a scalar is substituted); its sizes are
+  unified through the arrays, a program array having the type of the first
+  call that passes it and every later call having to agree, so that `scale`'s
+  `n` is `scan`'s `n + 1` when both are handed `off`, and two sizes nothing
+  shows equal are refused; its loops, reduction binders and reflected
+  parameters get names no earlier call has; its statements are named after the
+  call (`scan.S1`, and `step@2.S0` in a second call of `step`) and keep their
+  own `file:line`. A program called by a program is recorded in place.
+  Dependences across kernels are not declared: an array one call writes and a
+  later call reads is one array of the term, so the edge is in the
+  footprints, the lowering orders the instructions by it, and a
+  `Schedule(program)` checks casts against it. The term lowers into one
+  kernel whose loops run in call order, which `LoopyExecutor.run` and
+  `.differential` accept like a kernel's, and `loopty run` compiles every
+  program of a file and compares it with its native run in an agreement fact
+  of its own, placed at the program. Fusion is not done. A body that reads,
+  writes, computes with, iterates over or branches on an argument, or hands
+  it to numpy, is refused with a `TraceError` naming the fix, and so are a
+  loop whose trip count is an argument, an array from outside the program,
+  one array for two parameters of a call, an array given for a scalar, a
+  parameter no kernel is given, two element sorts for one array, and two
+  calls reading one ragged family through different offsets.
+- **An array a program makes is a temporary** (`Arr.zeros_like`,
+  `Term.temporaries`). `Arr.zeros_like(u)` is zeros laid out as `u` natively,
+  and inside a program being traced it makes a placeholder, named after the
+  variable it is stored to, which the program's term keeps as a temporary:
+  typed by the kernels it is passed to, shaped like `u`, and zeroed by a
+  statement of its own (`f.zeros`) where the body made it. The lowering
+  declares it as a loopy temporary, not an argument, so the intermediate
+  between two kernels is nobody's argument and has one declaration: private on
+  C, which is a variable-length array on the stack of the call, and global on
+  OpenCL, because loopy's C host code never allocates a global temporary (note
+  14 in `docs/loopy-notes.md`). `Lowering.temporaries` names them, and a
+  temporary's element sort counts in the exactness class and the contraction
+  pin as a parameter's does. A ragged one is refused.
 - **A term may state its offsets** (`Term.offsets`, `Term.offsets_of`). The
   offsets a counts family's rows are read through were always read off the
   names of the term's parameters, which is right for a kernel and wrong for a

@@ -24,6 +24,7 @@ kernel has left them.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -177,6 +178,30 @@ class Arr:
         """
         sizes = cls._concrete_shape(shape)
         return cls(np.zeros(sizes, dtype=dtype))
+
+    @classmethod
+    def zeros_like(cls, other: Any, dtype: Any = None) -> Arr:
+        """An array of zeros laid out as ``other`` is.
+
+        Dense or ragged as ``other`` is, with its own copy of the offsets, and
+        of ``other``'s dtype unless ``dtype`` says otherwise.
+
+        This is how a program makes an array of its own, an intermediate that
+        one kernel writes and the next reads. Inside a
+        :class:`~loopty.kernel.Program` whose term is being built, ``other``
+        is a placeholder (:class:`loopty.compose.ProgramValue`), and what comes
+        back is the placeholder of a new array, which the program's term keeps
+        as a temporary, zeroed where it is made. Its element sort there is the
+        one the kernels it is passed to declare, and ``dtype`` is the native
+        run's alone.
+        """
+        hook = getattr(type(other), "_loopty_zeros_like", None)
+        if hook is not None:
+            return hook(other, sys._getframe(1))
+        if isinstance(other, Arr):
+            values = np.zeros_like(other.numpy(), dtype=dtype)
+            return cls(values, other.offsets.copy()) if other.is_ragged else cls(values)
+        return cls(np.zeros_like(np.asarray(other), dtype=dtype))
 
     @classmethod
     def from_numpy(cls, values: Any, dtype: Any = None) -> Arr:
