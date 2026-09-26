@@ -14,9 +14,18 @@ build contracts nothing on such a machine. clang does contract by default, and
 arm64 has FMA in its baseline, which is where the pin earns its keep. The last
 test makes a compiler here behave that way and shows the difference, on
 hardware that has FMA; elsewhere it skips.
+
+The source ``loopty run --emit-code`` prints travels without those flags, and
+GCC ignores the standard pragma, so an ``exact`` kernel's C also carries GCC's
+own pragma. The tests at the end compile that source by hand, the way a reader
+of it would, in a GNU dialect in which GCC contracts by default.
 """
 
 from __future__ import annotations
+
+import ctypes
+import shutil
+import subprocess
 
 import numpy as np
 import pytest
@@ -177,3 +186,98 @@ def test_on_hardware_with_fma_the_pin_is_what_keeps_the_bits() -> None:
     own = list(lowering.kernel.default_entrypoint.options.build_options or ())
     pinned = compiled(fused_exact, [*contracting, *own], may_skip=False)
     assert np.array_equal(pinned, native["y"])
+
+
+# {{{ the emitted source, compiled by hand
+
+#: A GNU dialect, in which GCC contracts by default, told that the machine has
+#: FMA. Only the assembly is asked for, so the machine need not have it.
+BY_HAND = ["-std=gnu99", "-O2", "-mfma"]
+
+
+def assembly(source: str, tmp_path, flags: list[str]) -> str:
+    """What ``gcc`` makes of ``source``, or a skip when it cannot be asked."""
+    gcc = shutil.which("gcc")
+    if gcc is None:  # pragma: no cover - depends on the local toolchain
+        pytest.skip("no gcc here to compile the emitted source with")
+    path = tmp_path / "emitted.c"
+    path.write_text(source, encoding="utf-8")
+    done = subprocess.run(
+        [gcc, *flags, "-S", "-o", "-", str(path)], capture_output=True, text=True
+    )
+    if done.returncode:  # pragma: no cover - not an x86-64 toolchain, say
+        pytest.skip(f"gcc {' '.join(flags)} cannot compile here: {done.stderr}")
+    return done.stdout
+
+
+def fused(code: str) -> bool:
+    """Does x86-64 assembly use a fused multiply-add instruction?"""
+    return any(op in code for op in ("vfmadd", "vfmsub", "vfnmadd", "vfnmsub"))
+
+
+def test_the_emitted_source_of_an_exact_kernel_keeps_gcc_from_contracting(
+    tmp_path,
+) -> None:
+    from loopty.executor import emit_code
+    from loopty.lower import GCC_NO_CONTRACTION_PRAGMA
+
+    exact = emit_code(fused_exact)
+    assert "#pragma STDC FP_CONTRACT OFF" in exact
+    assert GCC_NO_CONTRACTION_PRAGMA in exact
+    loose = emit_code(fused_approx)
+    assert "GCC optimize" not in loose
+
+    if not fused(assembly(loose, tmp_path, BY_HAND)):
+        pytest.skip(f"gcc {' '.join(BY_HAND)} does not contract a * b + c here")
+    assert not fused(assembly(exact, tmp_path, BY_HAND))
+
+
+def run_by_hand(source: str, name: str, tmp_path, flags: list[str]) -> np.ndarray:
+    """``y`` from ``source`` built by hand into a shared library and called."""
+    gcc = shutil.which("gcc")
+    if gcc is None:  # pragma: no cover - depends on the local toolchain
+        pytest.skip("no gcc here to compile the emitted source with")
+    # The argument order the call below relies on.
+    assert f"void {name}(int32_t const n, double const *__restrict__ a," in source
+    path = tmp_path / f"{name}.c"
+    library = tmp_path / f"{name}.so"
+    path.write_text(source, encoding="utf-8")
+    done = subprocess.run(
+        [gcc, *flags, "-shared", "-fPIC", "-o", str(library), str(path)],
+        capture_output=True,
+        text=True,
+    )
+    if done.returncode:  # pragma: no cover - depends on the local toolchain
+        pytest.skip(f"gcc {' '.join(flags)} cannot build here: {done.stderr}")
+    function = getattr(ctypes.CDLL(str(library)), name)
+    double_p = ctypes.POINTER(ctypes.c_double)
+    function.argtypes = [ctypes.c_int32, double_p, double_p, double_p, double_p]
+    function.restype = None
+    arrays = inputs()
+    function(
+        4, *(arrays[key].ctypes.data_as(double_p) for key in ("a", "b", "c", "y"))
+    )
+    return arrays["y"]
+
+
+def test_on_hardware_with_fma_the_emitted_source_keeps_the_bits(tmp_path) -> None:
+    # The same source, built for this machine in a GNU dialect: on hardware
+    # with FMA, GCC fuses the approx kernel and, told by the pragma, not the
+    # exact one.
+    from loopty.executor import emit_code
+
+    here = ["-std=gnu99", "-O2", "-march=native"]
+    native = {name: value.copy() for name, value in inputs().items()}
+    fused_exact(**native)
+    loose = run_by_hand(emit_code(fused_approx), "fused_approx", tmp_path, here)
+    if np.array_equal(loose, native["y"]):
+        pytest.skip(
+            "gcc -march=native did not fuse a * b + c here, so this machine has "
+            "no FMA to show the difference with"
+        )
+    assert np.array_equal(loose, np.full(4, -(2.0**-60)))
+    pinned = run_by_hand(emit_code(fused_exact), "fused_exact", tmp_path, here)
+    assert np.array_equal(pinned, native["y"])
+
+
+# }}}

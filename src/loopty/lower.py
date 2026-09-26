@@ -62,6 +62,7 @@ from loopty.term import (
 __all__ = [
     "COUNT_PARAM",
     "COUNT_PARAM_REFLECTED",
+    "GCC_NO_CONTRACTION_PRAGMA",
     "NO_CONTRACTION_FLAG",
     "NO_CONTRACTION_PRAGMAS",
     "RESERVED_PREFIX",
@@ -100,17 +101,31 @@ _LANG_VERSION = (2018, 2)
 
 #: The C compiler flag that keeps ``a * b + c`` two roundings, set on a kernel
 #: with an ``exact`` output (see :func:`allows_contraction`). GCC and clang both
-#: take it, and GCC takes nothing else: it ignores the standard pragma below.
-#: loopy compiles with ``-std=c99``, in which GCC does not contract anyway, but
-#: clang does, and the flag says so rather than leaving it to the compiler.
+#: take it, and GCC ignores the standard pragma below. loopy compiles with
+#: ``-std=c99``, in which GCC does not contract anyway, but clang does, and the
+#: flag says so rather than leaving it to the compiler.
 NO_CONTRACTION_FLAG = "-ffp-contract=off"
 
-#: The pragma that asks the same in the source, per target. C99's is honoured by
-#: clang and ignored by GCC, which the flag covers. OpenCL C may contract by
-#: default and has no build option to stop it, so there the pragma is the way.
+#: GCC's own spelling of the flag in the source, behind a guard that keeps it
+#: from any other compiler. The flag pins the build loopty runs; this pins the
+#: source that ``loopty run --emit-code`` prints, which someone may compile by
+#: hand with GCC in a GNU dialect, where GCC contracts by default whenever
+#: ``-march`` gives it an FMA instruction. GCC documents the ``optimize``
+#: pragma as meant for debugging; here it asks for less optimization, not
+#: more, and for exactly the one thing the flag asks for.
+GCC_NO_CONTRACTION_PRAGMA = (
+    "#if defined(__GNUC__) && !defined(__clang__)\n"
+    '#pragma GCC optimize ("fp-contract=off")\n'
+    "#endif"
+)
+
+#: The pragmas that ask the same in the source, per target. C99's is honoured
+#: by clang and ignored by GCC, which :data:`GCC_NO_CONTRACTION_PRAGMA` and the
+#: flag cover. OpenCL C may contract by default and has no build option to stop
+#: it, so there the pragma is the way.
 NO_CONTRACTION_PRAGMAS = {
-    "c": "#pragma STDC FP_CONTRACT OFF",
-    "c-source": "#pragma STDC FP_CONTRACT OFF",
+    "c": f"#pragma STDC FP_CONTRACT OFF\n{GCC_NO_CONTRACTION_PRAGMA}",
+    "c-source": f"#pragma STDC FP_CONTRACT OFF\n{GCC_NO_CONTRACTION_PRAGMA}",
     "opencl": "#pragma OPENCL FP_CONTRACT OFF",
 }
 
