@@ -20,6 +20,14 @@ rather than its own (:meth:`Arr.through`): the counts array its type names
 bounds a row, and a declared offsets array says where a row starts, as they do
 in the lowered kernel, which is handed those arrays and reads them as the
 kernel has left them.
+
+An array over a polyhedral domain (``Arr[Where[i: Fin[n], j: Fin[n], j < i],
+Real]``, a ``Sigma[...]`` or a union of pieces; see :mod:`loopty.domain`) holds
+the domain at its sizes, and is indexed at the domain's points and nowhere
+else: a cell of the bounding box outside the triangle is not a cell of the
+array, whatever the storage keeps there. It is stored in one of two layouts,
+the box or the packed rows, and :meth:`Arr.cells` reads it in one order that
+does not depend on which.
 """
 
 from __future__ import annotations
@@ -30,6 +38,7 @@ from typing import Any
 
 import numpy as np
 
+from loopty.domain import STORAGES, Fixed, index_domain
 from loopty.idx import axis_size
 from loopty.term import ArrType
 
@@ -79,14 +88,19 @@ class Dom:
 
     @property
     def size(self) -> int:
-        """The extent of this axis, given the fixed prefix."""
+        """The extent of this axis, given the fixed prefix.
+
+        Over a domain, the bound of the axis's binder at the prefix, which is
+        what the traced ``.size`` is too; the points it runs over may be
+        fewer, and ``len`` counts those.
+        """
         return self.array._extent(self.prefix)
 
     def __len__(self) -> int:
-        return self.size
+        return len(self.array._fiber(self.prefix))
 
     def __iter__(self) -> Iterator[int]:
-        return iter(range(self.size))
+        return iter(self.array._fiber(self.prefix))
 
     def __getitem__(self, index: int | tuple[int, ...]) -> Dom:
         """The fiber over ``index``: the domain of the next axis.
@@ -101,9 +115,21 @@ class Dom:
             for part in index:
                 fiber = fiber[part]
             return fiber
-        size = self.size
         if not isinstance(index, int | np.integer):
             raise TypeError(f"domain index must be an integer, got {index!r}")
+        domain = self.array.domain
+        if domain is not None:
+            # Over a domain a fiber at a point outside it is empty, as it is in
+            # a trace (see loopty.domain); a piece of a union has to exist.
+            if self.axis + 1 >= self.array.ndim:
+                raise IndexError(
+                    f"{self.array!r} has {self.array.ndim} axes; "
+                    f"there is no axis {self.axis + 1} to take a fiber of"
+                )
+            if domain.union and self.axis == 0:
+                domain.split((int(index),))
+            return Dom(self.array, (*self.prefix, int(index)))
+        size = self.size
         if not 0 <= int(index) < size:
             raise IndexError(f"index {index} out of range for axis of size {size}")
         if self.axis + 1 >= self.array.ndim:
@@ -123,10 +149,13 @@ class Arr:
     Build one with :meth:`zeros`, :meth:`from_numpy`, or :meth:`ragged`. A dense
     array wraps an ``ndarray`` of the same shape; a ragged array wraps a flat
     values buffer plus an offsets array of length ``nrows + 1``, so that row
-    ``r`` is ``values[offsets[r]:offsets[r+1]]``.
+    ``r`` is ``values[offsets[r]:offsets[r+1]]``. An array over a polyhedral
+    domain is built with :meth:`zeros` or :meth:`from_cells` from the domain
+    and its sizes, and wraps the buffer of its layout (see
+    :mod:`loopty.domain`).
     """
 
-    __slots__ = ("_layout", "_offsets", "_values")
+    __slots__ = ("_domain", "_layout", "_offsets", "_storage", "_values")
 
     def __init__(
         self, values: np.ndarray, offsets: np.ndarray | None = None
@@ -165,18 +194,81 @@ class Arr:
             self._values = values
             self._offsets = offsets
         self._layout: tuple[Any, Any] | None = None
+        self._domain: Fixed | None = None
+        self._storage: str | None = None
 
     # -- constructors ----------------------------------------------------
 
     @classmethod
-    def zeros(cls, shape: Any, dtype: Any = np.float64) -> Arr:
-        """A dense array of zeros over ``shape``.
+    def zeros(
+        cls, shape: Any, dtype: Any = np.float64, *, storage: str = "box", **sizes: int
+    ) -> Arr:
+        """An array of zeros over ``shape``.
 
         ``shape`` is an index type or a tuple of them: ``Arr.zeros(Fin[4])`` and
-        ``Arr.zeros((Fin[3], 4))`` both work, as does a plain int.
+        ``Arr.zeros((Fin[3], 4))`` both work, as does a plain int. It may also
+        be a polyhedral domain, ``Where[...]``, ``Sigma[...]`` or a union such
+        as ``Fin[2] + Fin[3]``, with a value for every size it names and the
+        layout to store it in: ``Arr.zeros(triangle, n=4, storage="packed")``.
+        A kernel's declared domain is ``kernel.arg_types[name].domain``.
         """
-        sizes = cls._concrete_shape(shape)
-        return cls(np.zeros(sizes, dtype=dtype))
+        domain = index_domain(shape)
+        if domain is not None:
+            fixed = domain.fixed(sizes)
+            values = np.zeros(fixed.storage_shape(_storage(storage)), dtype=dtype)
+            return cls._over(fixed, storage, values)
+        if sizes:
+            raise TypeError(
+                f"sizes {', '.join(sorted(sizes))} were given for {shape!r}, which "
+                "is not a domain; a shape of index types has its sizes in it"
+            )
+        return cls(np.zeros(cls._concrete_shape(shape), dtype=dtype))
+
+    @classmethod
+    def from_cells(
+        cls,
+        domain: Any,
+        values: Any,
+        dtype: Any = None,
+        *,
+        storage: str = "box",
+        **sizes: int,
+    ) -> Arr:
+        """An array over a domain holding ``values`` at its points.
+
+        ``values`` are in the order of :meth:`cells`, the domain's points in
+        lexicographic order (a union's pieces one after another), whatever the
+        layout: the same values give the same array boxed or packed.
+        """
+        found = index_domain(domain)
+        if found is None:
+            raise TypeError(
+                f"{domain!r} is not a domain: from_cells takes Where[...], "
+                "Sigma[...] or a sum of pieces"
+            )
+        fixed = found.fixed(sizes)
+        flat = np.asarray(values) if dtype is None else np.asarray(values, dtype=dtype)
+        flat = flat.reshape(-1)
+        if flat.size != fixed.count:
+            raise ValueError(
+                f"{flat.size} values for the {fixed.count} points of {fixed!r}"
+            )
+        storage = _storage(storage)
+        return cls._over(fixed, storage, fixed.scatter(flat, storage))
+
+    @classmethod
+    def _over(cls, fixed: Fixed, storage: str, values: np.ndarray) -> Arr:
+        """An array over ``fixed`` whose ``storage`` buffer is ``values``."""
+        storage = _storage(storage)
+        if storage == "packed":
+            fixed.table()  # refuses a domain whose rows are not intervals
+        array = object.__new__(cls)
+        array._values = values
+        array._offsets = None
+        array._layout = None
+        array._domain = fixed
+        array._storage = storage
+        return array
 
     @classmethod
     def from_numpy(cls, values: Any, dtype: Any = None) -> Arr:
@@ -267,11 +359,34 @@ class Arr:
         """
         if self._offsets is None:
             raise TypeError("a dense array has no layout to read through")
-        view = object.__new__(type(self))
-        view._values = self._values
-        view._offsets = self._offsets
+        view = self._shared(type(self))
         view._layout = (counts, offsets)
         return view
+
+    def _shared(self, kind: type[Arr]) -> Arr:
+        """An array of class ``kind`` sharing every buffer and field of this one."""
+        view = object.__new__(kind)
+        for slot in Arr.__slots__:
+            setattr(view, slot, getattr(self, slot))
+        return view
+
+    def _replaced(self, values: np.ndarray) -> Arr:
+        """This array with another buffer of the same shape, as its own layout.
+
+        A ragged view keeps its offsets and drops a declared layout it was
+        read through; an array over a domain keeps its domain and its storage.
+        """
+        if self._domain is not None:
+            return Arr._over(self._domain, self._storage or "box", values)
+        if self._offsets is not None:
+            return Arr(values, self._offsets)
+        return Arr(values)
+
+    def copy(self) -> Arr:
+        """A copy with buffers of its own, following its own layout."""
+        if self._offsets is not None:
+            return Arr(self._values.copy(), self._offsets.copy())
+        return self._replaced(self._values.copy())
 
     @property
     def layout(self) -> tuple[Any, Any] | None:
@@ -333,9 +448,63 @@ class Arr:
         return self._offsets is not None
 
     @property
+    def domain(self) -> Fixed | None:
+        """The polyhedral domain this array is over, at its sizes, or ``None``."""
+        return self._domain
+
+    @property
+    def storage(self) -> str | None:
+        """``"box"`` or ``"packed"`` for an array over a domain, else ``None``."""
+        return self._storage
+
+    @property
+    def sizes(self) -> dict[str, int]:
+        """The sizes of an array's domain, by name: ``{"n": 4}``."""
+        return {} if self._domain is None else dict(self._domain.sizes)
+
+    @property
     def ndim(self) -> int:
         """Number of index axes (2 for a ragged array)."""
+        if self._domain is not None:
+            return self._domain.ndim
         return 2 if self.is_ragged else self._values.ndim
+
+    def cells(self) -> np.ndarray:
+        """The values at the domain's points, in lexicographic order.
+
+        The order of :meth:`loopty.domain.Fixed.points`, the same whichever
+        layout the array is stored in, so two arrays over one domain are
+        compared by comparing these. A dense or ragged array has no domain.
+        """
+        if self._domain is None:
+            raise TypeError("only an array over a domain has cells in its order")
+        return self._domain.gather(self._values, self._storage or "box")
+
+    def stored(self, storage: str) -> np.ndarray:
+        """This array's values in the buffer of ``storage``: its own, or a copy."""
+        if self._domain is None:
+            raise TypeError("only an array over a domain has a layout to choose")
+        if storage == self._storage:
+            return self._values
+        return self._domain.scatter(self.cells(), _storage(storage))
+
+    def load(self, storage: str, buffer: Any) -> None:
+        """Write into this array what a buffer of ``storage`` holds at the points."""
+        if self._domain is None:
+            raise TypeError("only an array over a domain has a layout to load")
+        buffer = np.asarray(buffer)
+        if storage == self._storage and buffer.size == self._values.size:
+            self._values[...] = buffer.reshape(self._values.shape)
+            return
+        shape = self._domain.storage_shape(storage)
+        values = self._domain.gather(buffer.reshape(shape), storage)
+        self._domain.scatter(values, self._storage or "box", into=self._values)
+
+    def table(self) -> np.ndarray:
+        """The table of row starts of the packed layout of this array's domain."""
+        if self._domain is None:
+            raise TypeError("only an array over a domain has a table of rows")
+        return self._domain.table()
 
     @property
     def offsets(self) -> np.ndarray:
@@ -355,8 +524,11 @@ class Arr:
 
         The second entry of a ragged shape is only an envelope. The exact bound
         of row ``r`` is ``counts[r]``, which is what ``dom[r]`` iterates and what
-        the type records.
+        the type records. An array over a domain has the shape of the buffer
+        its layout keeps: the box, or the number of its points.
         """
+        if self._domain is not None:
+            return tuple(int(s) for s in self._values.shape)
         if self._offsets is None:
             return tuple(int(s) for s in self._values.shape)
         counts = self.counts
@@ -373,8 +545,13 @@ class Arr:
 
         A runtime array knows its sizes, so the axes are ints and a ragged
         second axis carries the tuple of counts. A traced array instead names
-        the counts array as the axis, which is the form ``lower`` needs.
+        the counts array as the axis, which is the form ``lower`` needs. An
+        array over a domain has the domain as it was written.
         """
+        if self._domain is not None:
+            return ArrType(
+                axes=(), dtype=self.dtype, ragged=(), domain=self._domain.domain
+            )
         if self._offsets is None:
             return ArrType(
                 axes=self.shape,
@@ -388,6 +565,8 @@ class Arr:
 
     def _extent(self, prefix: tuple[int, ...]) -> int:
         """Extent of the axis after fixing ``prefix``."""
+        if self._domain is not None:
+            return self._domain.bound(prefix)
         if self._offsets is not None:
             if len(prefix) == 0:
                 return int(self._offsets.size - 1)
@@ -399,6 +578,12 @@ class Arr:
                 f"this array has {self._values.ndim} axes, not {len(prefix) + 1}"
             )
         return int(self._values.shape[len(prefix)])
+
+    def _fiber(self, prefix: tuple[int, ...]) -> Any:
+        """The indices the axis after ``prefix`` runs over."""
+        if self._domain is not None:
+            return self._domain.fiber(prefix)
+        return range(self._extent(prefix))
 
     @property
     def dom(self) -> Dom:
@@ -461,7 +646,37 @@ class Arr:
                 )
         return key
 
+    def _domain_address(self, key: Any) -> Any:
+        """Where the point ``key`` is stored, once it is known to be a point.
+
+        An index tuple of every axis, each an integer, and a point of the
+        domain: a cell of the box outside the domain is refused with an
+        ``IndexError``, the exception an index out of range raises, since the
+        type says the array has no such cell.
+        """
+        domain = self._domain
+        assert domain is not None
+        parts = key if isinstance(key, tuple) else (key,)
+        if len(parts) != domain.ndim or not all(
+            isinstance(part, int | np.integer) and not isinstance(part, bool | np.bool_)
+            for part in parts
+        ):
+            raise IndexError(
+                f"an array over {domain!r} is indexed at a point, one integer for "
+                f"each of its {domain.ndim} axes, and not at {key!r}"
+            )
+        point = tuple(int(part) for part in parts)
+        if not domain.contains(point):
+            raise IndexError(
+                f"{list(point)} is not a point of {domain!r}, the domain of this "
+                "array; a cell outside the domain is not one of its cells, "
+                "whatever its storage keeps there"
+            )
+        return domain.address(point, self._storage or "box")
+
     def __getitem__(self, key: Any) -> Any:
+        if self._domain is not None:
+            return self._values[self._domain_address(key)]
         if self._offsets is None:
             return self._values[self._dense_key(key)]
         if isinstance(key, tuple):
@@ -475,6 +690,9 @@ class Arr:
         return self._values[self._row_slice(row)]
 
     def __setitem__(self, key: Any, value: Any) -> None:
+        if self._domain is not None:
+            self._values[self._domain_address(key)] = value
+            return
         if self._offsets is None:
             self._values[self._dense_key(key)] = value
             return
@@ -503,10 +721,24 @@ class Arr:
         return self._extent(())
 
     def __repr__(self) -> str:
+        if self._domain is not None:
+            return (
+                f"Arr({self._domain!r}, storage={self._storage!r}, dtype={self.dtype})"
+            )
         if self._offsets is None:
             return f"Arr(shape={self.shape}, dtype={self.dtype})"
         counts = tuple(int(c) for c in self.counts)
         return f"Arr.ragged(counts={counts}, dtype={self.dtype})"
+
+
+def _storage(storage: str) -> str:
+    """``storage``, once it is known to be a layout; see :mod:`loopty.domain`."""
+    if storage not in STORAGES:
+        raise ValueError(
+            f"an array over a domain is stored {' or '.join(map(repr, STORAGES))}, "
+            f"not {storage!r}"
+        )
+    return storage
 
 
 def _flat(value: Any) -> np.ndarray:
