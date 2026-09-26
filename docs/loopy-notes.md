@@ -528,7 +528,9 @@ by comparing `buildable` with loopy's own code generation over every tag (and
 pair of tags) on a set of small kernels, on the C target and on loopy's plain
 OpenCL target, with loopy's caches off: over three thousand schedules, and no
 disagreement left afterwards but the `ilp` reductions of note 11, which are
-refused on purpose. `tests/test_buildable.py` keeps a case of each row.
+refused on purpose. Code that loopy does generate can still be wrong, which
+only running it shows: the `ilp` row below builds, and its run crashed.
+`tests/test_buildable.py` keeps a case of each row.
 
 | schedule | loopy | loopty's `buildable` |
 |---|---|---|
@@ -545,7 +547,8 @@ refused on purpose. `tests/test_buildable.py` keeps a case of each row.
 | `l.auto` | "kernel with automatically-assigned local axes passed to preprocessing" | refused |
 | `vec` on a loop whose statement sums sequentially, target `"c"` | "CFamilyASTBuilder does not understand axis tag" | refused: C has no vector types |
 | the same on OpenCL | builds | buildable |
-| `vec` on a row loop that reads a ragged row's length, or around a sum on `l.0` | `TypeError` from inside loopy | refused |
+| `vec` on a row loop that reads a ragged row's length, or around a sum on `l.0` | `TypeError` from inside loopy (an `AssertionError`, or OpenCL that does not compile, for some kernels) | refused |
+| `ilp` or `ilp.seq` on a row loop that reads a ragged row's length | builds, and the fiber's loop compares its variable with an array: the C run crashes | refused: the code is wrong |
 | `vec` or `ilp` on a ragged fiber | "Domain number 1 has a data-dependent parameter" | refused |
 | `l.0` on a dense loop between a ragged row and its fiber | the same | refused |
 
@@ -568,6 +571,14 @@ refused on purpose. `tests/test_buildable.py` keeps a case of each row.
   sums on a local axis, since every work item of the group reads the result.
   The instruction that assigns a ragged row's length runs in the row loop and
   the loops around it.
+* `realize_ilp` gives a temporary written inside an `ilp`, `ilp.seq` or `vec`
+  loop a copy per iteration, an array (or a vector) along the loop. A sum's
+  accumulator is then indexed by the loop, and the length of a ragged row is
+  not: it bounds the loop over the fiber, and the bound still reads it by name.
+  Under `ilp` the C code declares `int32_t nl_cnt_r[8]` and loops `for
+  (int32_t j = 0; j <= -1 + nl_cnt_r; ++j)`, which compares `j` with the
+  array's address; the check had passed it, since nothing concurrent sits in
+  the fiber's domain, and the run read past the rows and crashed.
 * `l.auto` is assigned only inside loopy's own transforms (`precompute`,
   `buffer_array`); preprocessing refuses a kernel that still has one.
 * `check_for_data_dependent_parallel_bounds` refuses any concurrent loop
@@ -580,10 +591,10 @@ refused on purpose. `tests/test_buildable.py` keeps a case of each row.
 **Local fix.** `schedule._unbuildable_reason` asks each, read off the kernel's
 own instructions, tags and domains after every step, and refuses with the
 cause in words and the remedy: `_axis_reason`, `_unroll_reason`,
-`_vector_reason` and `_target_reason`, and `_ragged_reason` for the last. The
-C target's own limit is asked last of all, because it is the one limit that
-`retarget("opencl")` removes; the design's spmv device schedule, written for
-`"c"` so that the demo needs no device, keeps its ragged-fiber reason.
+`_privatized_reason` and `_target_reason`, and `_ragged_reason` for the last.
+The C target's own limit is asked last of all, because it is the one limit
+that `retarget("opencl")` removes; the design's spmv device schedule, written
+for `"c"` so that the demo needs no device, keeps its ragged-fiber reason.
 
 **The limit of the fix.** Still a table, not a model of loopy: a schedule the
 check passes can fail for a reason nobody has met. The dense loop between a

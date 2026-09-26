@@ -12,11 +12,13 @@ in a domain whose extent is read out of an array.
 
 The OpenCL cases are generated for loopy's plain OpenCL target, which stands in
 for the pyopencl one (see the ``plain_opencl`` fixture), since code generation
-is all that is asked. Note 11 of ``docs/loopy-notes.md`` has the same table in
+is all that is asked. Note 14 of ``docs/loopy-notes.md`` has the same table in
 words.
 """
 
 from __future__ import annotations
+
+import re
 
 import pytest
 from lanky.prelude import Nat, Real
@@ -134,6 +136,17 @@ def between8(
 
 
 @kernel
+def ragged_rows8(
+    cnt: Arr[Fin[8], Nat],
+    val: Arr[Fin[8], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[8], Real],
+):
+    """The sum of each row of a ragged array with a fixed number of rows."""
+    for r in y.dom:
+        y[r] = reduce_sum(val[r, j] for j in val.dom[r])
+
+
+@kernel
 def row_sums_by_column8(
     x: Arr[Fin[8], Real],
     cnt: Arr[Fin[8], Nat],
@@ -175,6 +188,15 @@ def loopy_says(lp, schedule) -> str | None:
         except Exception as exc:  # noqa: BLE001 - loopy raises anything
             return f"{type(exc).__name__}: {exc}"
     return None
+
+
+def loopy_says_code(lp, schedule) -> str:
+    """The device code loopy generates for the schedule's kernel, caches off."""
+    import warnings
+
+    with warnings.catch_warnings(), lp.CacheMode(False):
+        warnings.simplefilter("ignore", lp.diagnostic.LoopyWarning)
+        return lp.generate_code_v2(schedule.kernel).device_code()
 
 
 def scheduled(fn, target: str, steps) -> Schedule:
@@ -390,6 +412,30 @@ def test_buildable_says_what_loopy_does(plain_opencl, case) -> None:
 
 
 # {{{ what each refusal is for
+
+
+@pytest.mark.parametrize("target", ["c", "opencl"])
+@pytest.mark.parametrize("tag", ["ilp", "ilp.seq"])
+def test_an_ilp_loop_around_a_row_length_is_refused_for_the_code_loopy_writes(
+    plain_opencl, target, tag
+) -> None:
+    # loopy generates this code, and it is wrong: it gives the row's length,
+    # written inside the ilp loop, an array along the loop, and the fiber's
+    # loop still reads the length by its name, so it compares its variable
+    # with the array. The compiled C run read past the rows, and crashed. It
+    # was buildable, since nothing concurrent sits in the fiber's domain.
+    schedule = Schedule(ragged_rows8, target=target).tag(r=tag)
+    ok, reason = schedule.buildable
+    assert not ok
+    assert reason.startswith(
+        "the length of a ragged row is read inside the loop r, which is "
+        f"tagged {tag}, and the code loopy generates for it is wrong"
+    )
+    code = loopy_says_code(plain_opencl, schedule)
+    (length,) = re.findall(r"\b(nl_\w+)\[8\];", code)
+    assert re.search(rf"\bj <= -1 \+ {length};", code), code
+    unrolled = Schedule(ragged_rows8, target=target).tag(r="unr")
+    assert unrolled.buildable == (True, "")
 
 
 def test_retargeting_a_device_schedule_to_c_refuses_its_axes(plain_opencl) -> None:

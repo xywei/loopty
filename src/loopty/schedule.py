@@ -877,8 +877,9 @@ def _unbuildable_reason(draft: _Draft) -> str | None:
       an instruction that runs on fewer axes than the kernel uses, and an axis
       numbered past an unused one (see :func:`_axis_reason`);
     * an unrolled or vectorized loop whose length is not a number when the
-      code is generated (see :func:`_unroll_reason`), and a temporary a
-      vectorized loop cannot hold as a vector (see :func:`_vector_reason`);
+      code is generated (see :func:`_unroll_reason`), and a temporary loopy
+      misreads once it has given an ``ilp`` or ``vec`` loop a copy of it per
+      iteration (see :func:`_privatized_reason`);
     * a loop ordered outside a loop loopy nests it inside, which loopy cannot
       run in that order (see :func:`_nest_reason`);
     * what the target itself cannot do: the C target has no hardware axes,
@@ -929,7 +930,7 @@ def _unbuildable_reason(draft: _Draft) -> str | None:
     for check in (
         _axis_reason,
         _unroll_reason,
-        _vector_reason,
+        _privatized_reason,
         _nest_reason,
         _target_reason,
     ):
@@ -1553,33 +1554,44 @@ def _unroll_reason(draft: _Draft) -> str | None:
     return None
 
 
-def _vector_reason(draft: _Draft) -> str | None:
-    """A temporary a vectorized loop cannot hold as a vector, or ``None``.
+def _privatized_reason(draft: _Draft) -> str | None:
+    """A temporary loopy gives an ``ilp`` or ``vec`` loop and then misreads.
 
-    loopy keeps a temporary written inside a ``vec`` loop as a vector along
-    it. Two temporaries cannot be one, and code generation fails on them (a
-    ``TypeError`` from inside loopy, in 2025.2), on every target:
+    loopy gives a temporary written inside a loop tagged ``ilp`` (or
+    ``ilp.seq``) or ``vec`` a copy per iteration of the loop: an array along
+    it, or for ``vec`` a vector (``privatize_temporaries_with_inames``, from
+    ``realize_ilp``). A sum's accumulator survives that, and two temporaries
+    do not, on any target:
 
-    * the length of a ragged row read inside the loop, which bounds the loop
-      over the row's fiber, and a loop bound is one number;
-    * the partial sums of a reduction on a local axis inside the loop, which
-      loopy keeps in an array in local memory.
+    * the length of a ragged row read inside the loop: it bounds the loop
+      over the row's fiber, and loopy's bound still reads the temporary by its
+      name, as one number, once it has become an array or a vector. Under
+      ``ilp`` loopy generates the code and gets it wrong: the fiber's loop
+      compares its variable with the whole array (``j <= -1 + nl_cnt_r``
+      after ``int32_t nl_cnt_r[8]``), and the C run reads past the row, or
+      crashes. Under ``vec`` code generation fails from inside loopy (a
+      ``TypeError`` or an ``AssertionError``, in 2025.2), or writes OpenCL
+      that reads a vector as the bound and does not compile;
+    * the partial sums of a reduction on a local axis inside a ``vec`` loop,
+      which loopy keeps in an array in local memory (a ``TypeError``). An
+      ``ilp`` loop around one builds.
 
     Both were measured on loops over ``Fin[8]``; over ``Fin[n]`` the loop has
-    no length to vectorize by, which :func:`_unroll_reason` says first. A
-    sequential sum in a ``vec`` loop builds on OpenCL; on C it is
+    no length to unroll or vectorize by, which :func:`_unroll_reason` says
+    first. A sequential sum in a ``vec`` loop builds on OpenCL; on C it is
     :func:`_target_reason`'s.
     """
     if draft.kernel is None:
         return None
-    from loopy.kernel.data import LocalInameTagBase, VectorizeTag
+    from loopy.kernel.data import IlpBaseTag, LocalInameTagBase, VectorizeTag
 
     entry = draft.kernel.default_entrypoint
     tags = _kernel_tags(draft)
-    vectorized = {
-        name
+    privatizing = {
+        name: tag
         for name, found in tags.items()
-        if any(isinstance(tag, VectorizeTag) for tag in found)
+        for tag in found
+        if isinstance(tag, IlpBaseTag | VectorizeTag)
     }
     bounds = {
         name
@@ -1587,32 +1599,50 @@ def _vector_reason(draft: _Draft) -> str | None:
         for name in domain.get_var_names(isl.dim_type.param)
     } & set(entry.temporary_variables)
     for insn in entry.instructions:
-        loops = sorted(vectorized & set(insn.within_inames))
+        loops = sorted(set(privatizing) & set(insn.within_inames))
         if not loops:
             continue
         if set(insn.assignee_var_names()) & bounds:
+            name = loops[0]
+            shown = _shown_tag(draft, name, privatizing[name])
+            if isinstance(privatizing[name], VectorizeTag):
+                what = (
+                    "loopy cannot generate code for it: it keeps a temporary "
+                    "written inside a vec loop as a vector along it, and the "
+                    "row's length bounds the loop over its fiber, which needs "
+                    "one number"
+                )
+            else:
+                what = (
+                    "the code loopy generates for it is wrong: it gives a "
+                    f"temporary written inside a loop tagged {shown} an array "
+                    "along the loop, one cell per iteration, and the loop over "
+                    "the row's fiber still reads the row's length as one "
+                    "number, so it compares its variable with the whole array"
+                )
             return (
-                f"the length of a ragged row is read inside the loop {loops[0]}, "
-                "which is tagged vec, and loopy cannot generate code for it: it "
-                "keeps a temporary written inside a vec loop as a vector along "
-                "it, and the row's length bounds the loop over its fiber, "
-                f"which needs one number. Leave {loops[0]} sequential, or "
-                "unroll it (unr) instead"
+                f"the length of a ragged row is read inside the loop {name}, "
+                f"which is tagged {shown}, and {what}. Leave {name} "
+                "sequential, or unroll it (unr) instead"
             )
+        vectorized = [
+            name for name in loops if isinstance(privatizing[name], VectorizeTag)
+        ]
         local = sorted(
             name
             for name in insn.reduction_inames()
             if any(isinstance(tag, LocalInameTagBase) for tag in tags.get(name, ()))
         )
-        if local:
+        if vectorized and local:
             what = _instruction_text(draft, insn.id)
             return (
                 f"the sum over {', '.join(local)} in {what} runs on a local "
-                f"axis inside the loop {loops[0]}, which is tagged vec, and "
-                "loopy cannot generate code for it: it keeps the partial sums "
-                "of a reduction on a local axis in an array in local memory, "
-                "and a temporary written inside a vec loop as a vector along "
-                f"it. Leave {loops[0]} sequential, or unroll it (unr) instead"
+                f"axis inside the loop {vectorized[0]}, which is tagged vec, "
+                "and loopy cannot generate code for it: it keeps the partial "
+                "sums of a reduction on a local axis in an array in local "
+                "memory, and a temporary written inside a vec loop as a vector "
+                f"along it. Leave {vectorized[0]} sequential, or unroll it "
+                "(unr) instead"
             )
     return None
 
@@ -1631,7 +1661,8 @@ def _target_reason(draft: _Draft) -> str | None:
     a sum in the loop, as a vector along it, and its C code generator does not
     know how to declare one. A ``vec`` loop that writes no temporary is only
     unrolled, and builds. (The one other temporary, the length of a ragged
-    row, cannot be a vector on any target; :func:`_vector_reason` says so.)
+    row, cannot be a vector on any target; :func:`_privatized_reason` says
+    so.)
 
     Asked last (see :func:`_unbuildable_reason`): it is the one limit that
     retargeting to OpenCL removes.

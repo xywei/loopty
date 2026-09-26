@@ -961,6 +961,13 @@ with a pair of statement instances.
   with a `TypeError` inside loopy. `tests/test_buildable.py` asks each case of
   the schedule and of loopy, with loopy's caches off; note 14 of
   `docs/loopy-notes.md` has the table.
+- An `ilp` or `ilp.seq` loop in which a ragged row's length is read is a
+  `refuted` `buildable` fact. loopy generated its code, and the code was wrong:
+  it gives a temporary written inside an `ilp` loop an array along the loop,
+  and the loop over the row's fiber still read the length by its name, so it
+  compared its variable with the array's address. The C run read past the rows
+  and crashed. It had passed the check, since nothing concurrent sits in the
+  fiber's domain; `unr` builds and runs.
 - A ragged fiber inside a dense loop of its row lowers beside a statement of
   that loop (#53). The statement in the fiber was cut after its row, where the
   row's length is assigned, and the one beside the fiber was not, so the row

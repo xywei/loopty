@@ -217,7 +217,8 @@ end to end; the edges are sharp.
   hardware axis loopy will not assign (numbered past an unused one, shared by
   two loops of one statement, missing from an instruction the kernel runs
   beside it, or `l.auto`), an `unr`, `ilp` or `vec` loop whose length is not a
-  number, a temporary a `vec` loop cannot hold, a loop ordered outside a loop
+  number, a temporary loopy misreads once an `ilp` or `vec` loop has a copy of
+  it per iteration (a ragged row's length), a loop ordered outside a loop
   loopy nests it inside, or a hardware axis on the C target, which has none,
   is reported as a `refuted` `buildable` fact and raises `UnbuildableSchedule`
   when something asks for code. It is asked of the schedule as it stands after
