@@ -207,10 +207,20 @@ with a pair of statement instances.
   `kernel.arg_types[name].domain`); it is indexed at the domain's points and
   refuses any other cell, and `Arr.cells()` reads it in one order whatever its
   layout, which is what the contract, the differential test and the
-  faithfulness fact compare. The executor converts between the argument's
-  layout and the lowering's, and passes the sizes the call determines to a
+  faithfulness fact compare. A compiled kernel addresses the declared
+  domain's layout at the call's sizes, and the executor copies an argument
+  into it and back when its storage differs, or its box does (the strict
+  triangle written `Sigma[a: Fin[n], Fin[a]]` has the declared points in an
+  `n x (n - 1)` box); it also passes the sizes the call determines to a
   kernel whose flat buffers give loopy none (note 14 in `docs/loopy-notes.md`).
-  The faithfulness fact draws such arrays from the declared domain. This needs
+  A box extent that can be negative at some size, `n - 1` at `n = 0`, is
+  neither a shape nor part of where a piece starts, since the domain is empty
+  there and its box has no cells: isl decides which extents are never
+  negative, a single domain with another one is a flat buffer, and a piece
+  after one starts at a value argument the executor computes. A size a
+  binder's bound runs up to is a non-negative integer, as the isl set and
+  the boxes assume, and `Arr.zeros` and the contract refuse any other. The
+  faithfulness fact draws such arrays from the declared domain. This needs
   the lanky that has `SumType`.
 - **`Schedule.pack(*arrays)`.** Store arrays over a domain packed. Not a cast:
   no instance moves and no fact is emitted, since a layout says where a cell
@@ -230,6 +240,10 @@ with a pair of statement instances.
 
 ### Fixed
 
+- The cells of a dense array are stated over dimensions none of whose names
+  is a size: over `x: Arr[Fin[a0], Real]` they were `0 <= a0 < a0`, which has
+  no points, and `x[i]` was refuted. The dimensions of a domain's set get the
+  same care (`loopty.domain.dimension_names`).
 - A guard's reads are stated over the loop nest *before* the guard narrowed it
   (`Stmt.loop_domain`), because `when` evaluates its whole condition at every
   point and only masks the write: `when((i + 1 < n) & (flag[i + 1] != 0))`

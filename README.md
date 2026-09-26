@@ -338,10 +338,15 @@ end to end; the edges are sharp.
   and a piece is chosen by a Python integer, never by a loop variable. A
   constraint is a conjunction of comparisons: `!=` and `|` are refused rather
   than widened (write a union instead), and the packed layout refuses a domain
-  whose rows skip columns (a remainder in a constraint). Natively, an array
-  over a domain enumerates its points with isl when it is built and checks
-  each access against them in Python, and a compiled run whose layout is not
-  the argument's copies the array into it and back.
+  whose rows skip columns (a remainder in a constraint). An array over a
+  domain is indexed, and its fibers taken, at quasi-affine expressions of loop
+  variables and sizes; an indirect index such as `L[p[k], j]` is refused when
+  traced. A size a binder's bound runs up to is never negative, so a scalar
+  that makes one negative is refused. Natively, an array over a domain
+  enumerates its points with isl when it is built and checks each access
+  against them in Python, and a compiled run addresses the declared domain's
+  layout, so an argument stored the other way, or over the same points in
+  another box, is copied into it and back.
 - A reduction nested in another one cannot take its bound from the outer
   binder when that bound is not affine:
   `reduce_sum(reduce_sum(val[q, j] for j in val.dom[q]) for q in val.dom)` is
