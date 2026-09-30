@@ -59,10 +59,12 @@ _EXPORTS = {
     "Program": "loopty.kernel",
     "Reduction": "loopty.term",
     "Schedule": "loopty.schedule",
+    "Sigma": "loopty.domain",
     "Stmt": "loopty.term",
     "Term": "loopty.term",
     "TraceError": "loopty.trace",
     "UnbuildableSchedule": "loopty.schedule",
+    "Where": "loopty.domain",
     "facts_for": "loopty.typing",
     "kernel": "loopty.kernel",
     "program": "loopty.kernel",
@@ -89,10 +91,12 @@ __all__ = [
     "Program",
     "Reduction",
     "Schedule",
+    "Sigma",
     "Stmt",
     "Term",
     "TraceError",
     "UnbuildableSchedule",
+    "Where",
     "__version__",
     "facts_for",
     "kernel",
@@ -144,6 +148,7 @@ sys.modules[__name__].__class__ = _Package
 
 if TYPE_CHECKING:
     from loopty.arr import Arr
+    from loopty.domain import Sigma, Where
     from loopty.idx import Fin
     from loopty.kernel import Kernel, Program, kernel, program
     from loopty.oracle import IslOracle

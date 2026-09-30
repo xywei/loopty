@@ -103,12 +103,15 @@ interesting failure. Every cast is `decided`: putting the rows on work groups
 and the entries on lanes reorders nothing that carries a dependence. What it
 cannot survive is code generation, on a device as much as on C, because loopy
 will not put a hardware axis inside a loop whose bound comes from an array, and
-a CSR row is exactly such a loop. The schedule says so itself, as a `refuted`
-fact of kind `buildable` decided by `loopy-target` with the limit in words as
-its reason, and raises `UnbuildableSchedule` if anything asks it for code. The
-demo builds it only when `main()` runs; a file that built it at the top level
-would make `loopty run` exit 1, with the limit printed again under the fact's
-`REFUTED` line, the way `lanky check` prints what refutes any fact.
+a CSR row is exactly such a loop. (Written for `"c"` so that the demo needs no
+device, it would be refused on C in any case, since C has no hardware axes;
+the check names first the limit that retargeting would not remove.) The
+schedule says so itself, as a `refuted` fact of kind `buildable` decided by
+`loopy-target` with the limit in words as its reason, and raises
+`UnbuildableSchedule` if anything asks it for code. The demo builds it only
+when `main()` runs; a file that built it at the top level would make
+`loopty run` exit 1, with the limit printed again under the fact's `REFUTED`
+line, the way `lanky check` prints what refutes any fact.
 `docs/device-runs.md` is where that was measured; `spmv.rows_parallel()`, one
 row per work group, is the schedule for this shape that does build and did run.
 
@@ -370,6 +373,34 @@ space to a flat address, and "addresses each cell exactly once" is bijectivity,
 which is the same question the schedule checker asks of a reindexing. The
 transpose at the bottom is split and interchanged, and both steps are cast facts.
 
+## A domain that is not a box, as a fourth file
+
+`examples/pairs.py` stores one value per pair of particles, the points of the
+lower triangle, in an array whose type is that triangle:
+`f: Arr[Where[i: Fin[n], j: Fin[n], j < i], Real]`. `Where` takes binders,
+which Python reads as slices, and then the comparisons that cut their box;
+`f.dom` runs over `i` and `f.dom[i]` over the `j` below it. An array for it is
+built over the kernel's declared domain, with its sizes by name and a layout:
+
+```python
+TRIANGLE = pairs.arg_types["f"].domain
+f = Arr.zeros(TRIANGLE, n=6, storage="packed")
+```
+
+```console
+$ uv run python examples/pairs.py
+6 particles, 15 pairs
+f box: 36 cells for 15 pairs
+f packed: 15 cells for 15 pairs, and a table of row starts [0, 0, 1, 3, 6, 10]
+...
+```
+
+The ledger decides every in-bounds obligation over the triangle itself, not
+over the box: the column read `f[k, p]` under `k > p` is in, and `f[p, p]`
+would be out. The layout is a schedule step, `Schedule(pairs).pack("f")`, that
+changes no fact; `loopty run` compiles both layouts and compares each with the
+native run.
+
 ## What to try next
 
 - Break something. Change the stencil's guard from `i > 0` to `i >= 0` and
@@ -395,9 +426,15 @@ transpose at the bottom is split and interchanged, and both steps are cast facts
   `Schedule(jacobi).affine("{ [t, i] -> [a, b] : a = t + i and b = t - i }")`,
   then `.tile("a", "b", 4, 4)`. For the stencil both are accepted and compute
   what the untiled kernel computes, though the map reaches only the points
-  where `a` and `b` have the same parity. Write the map with `i + t` first and
-  read the witness; `examples/wavefront_acoustic.py` does both for a pair of
-  statements, where the tiling is refused.
+  where `a` and `b` have the same parity; `.strides` shows the loop that
+  counts its steps over them. Write the map with `i + t` first and read the
+  witness. `examples/wavefront_acoustic.py` does both for a pair of
+  statements, where the tiling is refused until each statement gets a map of
+  its own, named on its tuple: `S0[t, i] -> ...; S1[t, i] -> ...`.
+- In `examples/pairs.py`, change the column's condition from `k > p` to
+  `k >= p` and re-check. `f[k, p]` now reaches the diagonal, which is a cell of
+  the box and not of the triangle, and the fact is `refuted` with the witness
+  on it.
 - Add `--json out.json` to `lanky check` and read the provenance: the witness,
   the isl question, and the rendered explanation are all in there.
 - `uv run loopty run examples/spmv.py --emit-code` to see the C.
@@ -414,6 +451,7 @@ transpose at the bottom is split and interchanged, and both steps are cast facts
 |---|---|
 | index types, layouts, isl sets | `src/loopty/idx.py` |
 | runtime arrays, dense and ragged | `src/loopty/arr.py` |
+| polyhedral domains, their layouts | `src/loopty/domain.py` |
 | the Term IR | `src/loopty/term.py` |
 | tracing a body | `src/loopty/trace.py` |
 | a program's term, composed from its calls | `src/loopty/compose.py` |
@@ -431,7 +469,7 @@ transcripts, are in [device-runs.md](device-runs.md) and under
 debugging time, and the local workarounds for them, are in
 [loopy-notes.md](loopy-notes.md).
 
-All six demos, with every console block regenerated mechanically by
+All seven demos, with every console block regenerated mechanically by
 `scripts/refresh_example_outputs.py`, are in
 [../examples/README.md](../examples/README.md). The blocks in *this* file come
 from the same script, some of them elided where marked with `...`; run the

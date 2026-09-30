@@ -147,8 +147,7 @@ def _storage(value: Any, typ: ArrType, written: bool) -> Arr:
         raise InterpretError(f"an array parameter was given {value!r}")
     buffer = value.numpy()
     if not written and integral_sort(typ.dtype) and buffer.dtype.kind in "fc":
-        whole = np.real(buffer).astype(np.int64)
-        return Arr(whole, value.offsets) if value.is_ragged else Arr(whole)
+        return value._replaced(np.real(buffer).astype(np.int64))
     return value
 
 

@@ -45,6 +45,7 @@ a claim about one cell rather than about an average.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -59,6 +60,7 @@ from loopty.tolerance import (
 )
 
 if TYPE_CHECKING:
+    from loopty.domain import Fixed
     from loopty.lower import Lowering
 
 __all__ = [
@@ -118,36 +120,93 @@ def _copy(value: Any) -> Any:
     from loopty.arr import Arr
 
     if isinstance(value, Arr):
-        if value.is_ragged:
-            return Arr(value.numpy().copy(), value.offsets.copy())
-        return Arr(value.numpy().copy())
+        return value.copy()
     if isinstance(value, np.ndarray):
         return value.copy()
     return value
 
 
+def _declared_layouts(
+    term: Term, lowering: Lowering, supplied: Mapping[str, Any]
+) -> dict[str, Fixed]:
+    """The declared domain of every array argument over one, at the call's sizes.
+
+    The layout the lowering addresses such an array through: its box, the
+    starts of a union's pieces and the table of rows are the *declared*
+    domain's, which the argument need not share. The contract asks only for
+    the same points, so ``Sigma[a: Fin[n], Fin[a]]`` passes for the strict
+    triangle ``Where[i: Fin[n], j: Fin[n], j < i]``, whose box is wider.
+    """
+    from loopty.arr import Arr
+    from loopty.contract import resolve_sizes
+
+    if not lowering.storage:
+        return {}
+    types = dict(term.params)
+    sizes = resolve_sizes(types, supplied)
+    out: dict[str, Fixed] = {}
+    for name in lowering.storage:
+        value = supplied.get(name)
+        if not (isinstance(value, Arr) and value.domain is not None):
+            continue
+        domain = types[name].domain
+        out[name] = domain.fixed({size: sizes[size] for size in domain.size_names()})
+    return out
+
+
 def _call_arguments(
-    term: Term, lowering: Lowering, args: tuple, kwargs: dict
+    term: Term,
+    lowering: Lowering,
+    args: tuple,
+    kwargs: dict,
+    layouts: Mapping[str, Fixed] | None = None,
 ) -> dict[str, np.ndarray]:
     """Match positional and keyword arguments to the term's parameters.
 
     A ragged :class:`~loopty.arr.Arr` supplies two arguments, its flat values and
-    its offsets, which is the same splitting the lowering did to the type.
+    its offsets, which is the same splitting the lowering did to the type. An
+    array over a polyhedral domain supplies its values in the layout the
+    lowering chose for it (:attr:`loopty.lower.Lowering.storage`) over the
+    declared domain at the call's sizes (``layouts``, see
+    :func:`_declared_layouts`), converted from its own when the two differ,
+    and the table of row starts and the starts of its pieces that the
+    lowering takes as arguments. Such a kernel is also given every size the
+    call determines that it takes as a value argument, since a flat buffer
+    has no shape for loopy to read a size off.
     """
     from loopty.arr import Arr
+    from loopty.contract import resolve_sizes
 
     names = [name for name, _ in term.params]
     supplied: dict[str, Any] = dict(zip(names, args, strict=False))
     for key, value in kwargs.items():
         supplied[key] = value
+    if layouts is None:
+        layouts = _declared_layouts(term, lowering, supplied)
 
     dtypes = {
         arg.name: arg.dtype.numpy_dtype
         for arg in lowering.kernel.default_entrypoint.args
         if arg.dtype is not None
     }
+    shapeless = {
+        arg.name
+        for arg in lowering.kernel.default_entrypoint.args
+        if getattr(arg, "shape", "missing") is None
+    }
     out: dict[str, np.ndarray] = {}
     for name, value in supplied.items():
+        if isinstance(value, Arr) and value.domain is not None:
+            storage = lowering.storage.get(name, "box")
+            layout = layouts[name]
+            buffer = value.stored(storage, layout)
+            if name in shapeless:
+                buffer = buffer.reshape(-1)
+            out[name] = _as_numpy(buffer, dtypes.get(name))
+            table = lowering.tables.get(name)
+            if table is not None:
+                out[table] = _as_numpy(layout.table(), dtypes.get(table))
+            continue
         if isinstance(value, Arr) and value.is_ragged:
             offsets = lowering.ragged.get(name)
             if offsets is not None and offsets not in supplied:
@@ -156,6 +215,15 @@ def _call_arguments(
             out[name] = _as_numpy(value, dtypes.get(name))
         else:
             out[name] = value
+    for argument, (array, piece) in lowering.bases.items():
+        layout = layouts[array]
+        packed = lowering.storage[array] == "packed"
+        out[argument] = (layout.table_bases if packed else layout.box_bases)[piece]
+    if lowering.storage:
+        sizes = resolve_sizes(dict(term.params), supplied)
+        for name in lowering.value_args:
+            if name not in out and name in sizes:
+                out[name] = sizes[name]
     return out
 
 
@@ -246,7 +314,8 @@ class LoopyExecutor:
         supplied = {**dict(zip(names, args, strict=False)), **kwargs}
         check_arguments(dict(term.params), supplied, lowering.ragged)
         inherited_storage(dict(term.temporaries), term.temporaries_like, supplied)
-        call = _call_arguments(term, lowering, args, kwargs)
+        layouts = _declared_layouts(term, lowering, supplied)
+        call = _call_arguments(term, lowering, args, kwargs, layouts)
         call, empty = _pad_empty_arrays(call, lowering)
         if target_name == "opencl":
             out = self._run_opencl(kernel, lowering, call)
@@ -260,7 +329,11 @@ class LoopyExecutor:
             # caller comparing outputs sees the array it passed in.
             if name in out:
                 out[name] = original
-        self._write_back(supplied, out)
+        self._write_back(supplied, out, lowering.storage, layouts)
+        for name in out:
+            # An output over a domain is its cells, whatever layout it ran in.
+            if name in lowering.storage:
+                out[name] = supplied[name].cells()
         return out
 
     def _collect(
@@ -283,7 +356,12 @@ class LoopyExecutor:
         return out
 
     @staticmethod
-    def _write_back(supplied: dict, results: dict) -> None:
+    def _write_back(
+        supplied: dict,
+        results: dict,
+        storage: dict[str, str] | None = None,
+        layouts: Mapping[str, Fixed] | None = None,
+    ) -> None:
         """Copy the outputs into the arrays the caller handed in.
 
         Outputs are parameters, so a kernel run is expected to have changed what
@@ -298,12 +376,20 @@ class LoopyExecutor:
         copied on the way in, and the results used to stay in that copy. Such
         an output is written back here, cast to the caller's dtype the way any
         assignment into it would be.
+
+        An array over a domain ran in the layout ``storage`` names for it over
+        the declared domain (``layouts``, see :func:`_declared_layouts`), and
+        loads its values at its points from that buffer into its own layout.
         """
         from loopty.arr import Arr
 
+        storage = storage or {}
+        layouts = layouts or {}
         for name, value in results.items():
             given = supplied.get(name)
-            if isinstance(given, Arr):
+            if isinstance(given, Arr) and given.domain is not None:
+                given.load(storage.get(name, "box"), value, layouts.get(name))
+            elif isinstance(given, Arr):
                 given.numpy()[...] = np.asarray(value).reshape(given.numpy().shape)
             elif isinstance(given, np.ndarray) and given is not value:
                 result = np.asarray(value)
@@ -357,7 +443,9 @@ class LoopyExecutor:
 
         The kernel's arguments are ``args`` and nothing else; the scheduled run
         is on the schedule's target, which has to be the executor's when the
-        executor names one.
+        executor names one. A kernel or a term given in place of a schedule is
+        run on the executor's target, ``"c"`` when it names none, and the fact
+        records the target the run was made on either way.
 
         A :class:`~loopty.trace.TraceError` from the native run is not raised
         but returned, as a ``refuted`` agreement fact with the refusal as its
@@ -368,7 +456,9 @@ class LoopyExecutor:
         (:mod:`loopty.faithful`). Anything else the body raises is the input's
         or the body's, and is raised.
         """
-        term, _lowered, lowering, _target = _resolve(schedule, self.target)
+        from loopty.arr import Arr
+
+        term, _lowered, lowering, target = _resolve(schedule, self.target)
         # Before the copies: ``_copy`` gives every argument a buffer of its own,
         # which is exactly what hides an alias between two of them, and the
         # native run would otherwise be the first thing to meet a bad index.
@@ -398,10 +488,12 @@ class LoopyExecutor:
                 try:
                     kernel(**native_args)
                 except TraceError as exc:
-                    return _refused_agreement(term, schedule, exc)
+                    return _refused_agreement(term, schedule, exc, target=target)
                 native_args = {
                     name: (
-                        value.numpy()
+                        value.cells()
+                        if isinstance(value, Arr) and value.domain is not None
+                        else value.numpy()
                         if hasattr(value, "numpy") and not isinstance(value, np.ndarray)
                         else value
                     )
@@ -414,7 +506,7 @@ class LoopyExecutor:
             native = {name: native_args[name] for name in lowering.outputs}
         scheduled_args = {name: _copy(value) for name, value in args.items()}
         got = self.run(schedule, **scheduled_args)
-        return agreement(term, schedule, got, native)
+        return agreement(term, schedule, got, native, target=target)
 
 
 def exactness_of_output(term: Term, schedule: Any, name: str) -> str:
@@ -500,7 +592,13 @@ def _compare(
     return agree, float(difference[k]), float(allowed[k])
 
 
-def agreement(term: Term, schedule: Any, got: dict, want: dict) -> Any:
+def agreement(
+    term: Term,
+    schedule: Any,
+    got: dict,
+    want: dict,
+    target: str | None = None,
+) -> Any:
     """The fact recording whether two runs of a kernel agree.
 
     A refuted one says which outputs disagreed as its ``reason``, one line per
@@ -509,6 +607,12 @@ def agreement(term: Term, schedule: Any, got: dict, want: dict) -> Any:
     same, since a difference between arrays of two shapes is not a number
     anyone can read (``outputs`` records it as infinite). The numbers of every
     output, agreeing or not, are in ``outputs``.
+
+    ``target`` is the target the scheduled run was made on, which the fact
+    records and names itself after. It defaults to the schedule's, and to
+    ``"c"`` for a kernel or a term, which carries none: a kernel run by
+    ``LoopyExecutor(target="opencl")`` ran on OpenCL, and the executor says
+    so (:meth:`LoopyExecutor.differential` passes the target it resolved).
     """
     details: dict[str, Any] = {}
     disagreements: list[str] = []
@@ -533,23 +637,26 @@ def agreement(term: Term, schedule: Any, got: dict, want: dict) -> Any:
             f"{difference:.3g}, allowed {tolerance:.3g} ({exactness})"
         )
     ok = not disagreements
-    provenance = _agreement_provenance(schedule, details)
+    provenance = _agreement_provenance(schedule, details, target)
     if not ok:
         provenance["reason"] = "\n".join(disagreements)
     return _agreement_fact(term, schedule, ok, provenance)
 
 
-def _refused_agreement(term: Term, schedule: Any, error: Exception) -> Any:
+def _refused_agreement(
+    term: Term, schedule: Any, error: Exception, target: str | None = None
+) -> Any:
     """The agreement fact of a run whose native half is refused.
 
     ``refuted``, with the refusal as its ``reason`` and ``error``, and no
     outputs, because nothing was compared: a
     :class:`~loopty.trace.TraceError` refuses the body for its spelling,
     whatever the input, which is a disagreement between the body and what
-    the compiled run computes, and not an input to skip.
+    the compiled run computes, and not an input to skip. ``target`` is the
+    one the scheduled run would have been made on, as for :func:`agreement`.
     """
     text = f"{type(error).__name__}: {error}"
-    provenance = _agreement_provenance(schedule, {})
+    provenance = _agreement_provenance(schedule, {}, target)
     provenance["error"] = text
     provenance["reason"] = (
         f"the body, run natively, is refused, so there is no native run for "
@@ -558,12 +665,18 @@ def _refused_agreement(term: Term, schedule: Any, error: Exception) -> Any:
     return _agreement_fact(term, schedule, False, provenance)
 
 
-def _agreement_provenance(schedule: Any, details: dict[str, Any]) -> dict[str, Any]:
-    """What every agreement fact records beside its verdict."""
+def _agreement_provenance(
+    schedule: Any, details: dict[str, Any], target: str | None = None
+) -> dict[str, Any]:
+    """What every agreement fact records beside its verdict.
+
+    The target is the one the run was made on when the caller knows it, and
+    otherwise the schedule's, or ``"c"`` for a kernel or a term.
+    """
     return {
         "outputs": details,
         "schedule": tuple(getattr(schedule, "history", ())),
-        "target": getattr(schedule, "target", "c"),
+        "target": target or getattr(schedule, "target", "c"),
     }
 
 

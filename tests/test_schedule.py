@@ -20,6 +20,7 @@ from lanky.prelude import Nat, Real
 
 import hand_terms as ht
 from loopty import Arr, Fin, reduce_sum, when
+from loopty.executor import emit_code
 from loopty.lower import reductions_of
 from loopty.schedule import IllegalCast, Schedule, parallel_tag
 
@@ -123,7 +124,43 @@ def test_running_a_loop_that_carries_a_dependence_in_parallel_is_rejected() -> N
 def test_a_parallel_tag_is_what_makes_an_iname_unordered() -> None:
     assert parallel_tag("g.0")
     assert parallel_tag("l.1")
+    assert parallel_tag("ilp")
+    assert parallel_tag("vec")
     assert not parallel_tag("unr")
+
+
+def carried_across_statements(
+    y: Arr[Fin[9], Real],
+    z: Arr[Fin[8], Real],
+):
+    """``S0`` of iteration ``i + 1`` reads what ``S1`` of iteration ``i`` wrote."""
+    for i in z.dom:
+        z[i] = y[i]
+        y[i + 1] = z[i] + 1.0
+
+
+def test_a_vectorized_loop_that_carries_a_dependence_is_rejected() -> None:
+    # loopy runs a vec loop around each instruction separately, as it runs an
+    # ilp loop, so S0 runs for every i before S1 runs for any. vec kept its
+    # place in the order, the cast was decided, and the compiled y and z
+    # disagreed with the body's (#57).
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(
+        carried_across_statements, evaluate_annotations(carried_across_statements)
+    )
+    for tag in ("vec", "ilp"):
+        with pytest.raises(IllegalCast) as caught:
+            Schedule(term).tag(i=tag)
+        message = str(caught.value)
+        assert message.startswith(f"tag(i='{tag}') illegal: instance S1[i=")
+        assert "read by S0[i=" in message
+    unrolled = Schedule(term).tag(i="unr")
+    y = np.zeros(9)
+    out = run(unrolled, y=y, z=np.zeros(8))
+    assert np.array_equal(out["y"], np.arange(9.0))
 
 
 def gated_by_the_next(
@@ -289,7 +326,10 @@ def test_a_row_that_stores_its_own_start_first_can_still_run_in_parallel() -> No
         evaluate_annotations(offsets_stored_then_row_sums),
     )
     tagged = Schedule(term, sizes={"n": 4}).tag(r="l.0")
-    assert [fact.status.value for fact in tagged.facts()] == ["decided"] * 2
+    casts = [fact for fact in tagged.facts() if fact.kind != "buildable"]
+    assert [fact.status.value for fact in casts] == ["decided"] * 2
+    # Legal, and not for the C target, which has no hardware axes (#47).
+    assert "the C target has none" in tagged.buildable[1]
 
 
 def scan_then_row_sums(
@@ -368,7 +408,13 @@ def test_split_then_tag_is_accepted_when_nothing_depends_on_the_order() -> None:
     assert split.order == ("i_out", "i_in", "j")
     tagged = split.tag(i_out="g.0")
     assert tagged.tags == {"i_out": "g.0"}
-    assert [fact.status.value for fact in tagged.facts()] == ["decided"] * 4
+    casts = [fact for fact in tagged.facts() if fact.kind != "buildable"]
+    assert [fact.status.value for fact in casts] == ["decided"] * 4
+    # The casts are about meaning; the target is another question, and on C,
+    # which has no hardware axes, the answer is no (#47).
+    (buildable,) = [fact for fact in tagged.facts() if fact.kind == "buildable"]
+    assert buildable.status.value == "refuted"
+    assert "the C target has none" in buildable.provenance["reason"]
 
     a = np.arange(8, dtype=np.float64).reshape(2, 4)
     b = np.zeros((4, 2))
@@ -415,6 +461,26 @@ def test_tagging_a_piece_of_an_exact_reduction_in_parallel_is_rejected() -> None
     with pytest.raises(IllegalCast) as caught:
         schedule.tag(j_in="l.0")
     assert "reassociates an exact reduction" in str(caught.value)
+
+
+def test_vectorizing_a_piece_of_an_exact_reduction_is_rejected() -> None:
+    # vec runs no order, as ilp runs none (#57), so a vec tag on the loop of a
+    # reduction asks the accumulation's permission to be reassociated, as an
+    # ilp tag does. loopy cannot build this one in any case (a vec loop in a
+    # ragged fiber, and a reduction over a vec loop); the cast is asked first.
+    exact = Schedule(ht.spmv_term(exactness="exact")).split(
+        "j", 2, inner="j_in", outer="j_out"
+    )
+    for tag in ("vec", "ilp"):
+        with pytest.raises(IllegalCast) as caught:
+            exact.tag(j_in=tag)
+        assert "reassociates an exact reduction" in str(caught.value)
+    loose = Schedule(ht.spmv_term(exactness="reassoc")).split(
+        "j", 2, inner="j_in", outer="j_out"
+    )
+    tagged = loose.tag(j_in="vec")
+    assert tagged.reassociated == frozenset({"y"})
+    assert not tagged.buildable[0]
 
 
 def test_exactness_is_read_off_the_reduction_being_transformed() -> None:
@@ -496,26 +562,7 @@ def test_two_schedules_of_one_kernel_keep_their_facts_apart() -> None:
     assert len(ledger) == 8
 
 
-def plain_opencl(monkeypatch) -> None:
-    """Lower for loopy's plain OpenCL target, which needs no pyopencl.
-
-    Code generation is all that is asked of it, as in
-    ``tests/test_lower_traced.py``.
-    """
-    import loopy as lp
-
-    from loopty import lower
-
-    plain = lower.target_for
-    monkeypatch.setattr(
-        lower,
-        "target_for",
-        lambda target="c": lp.OpenCLTarget() if target == "opencl" else plain(target),
-    )
-
-
-def test_the_target_is_part_of_the_key(monkeypatch) -> None:
-    plain_opencl(monkeypatch)
+def test_the_target_is_part_of_the_key(plain_opencl) -> None:
     term = ht.transpose_term()
     assert Schedule(term).key == "transpose[c]"
     on_c = Schedule(term).split("i", 4)
@@ -645,12 +692,15 @@ def test_the_diamond_is_accepted_and_the_stencil_still_computes() -> None:
     ]
     assert schedule.buildable == (True, "")
 
-    # The kernel loops over the image, which has holes: isl states it with the
-    # parity as an existentially quantified constraint, and the old loops are
-    # floor divisions of the new ones.
+    # The image has holes: it is the points where a + b is even. The kernel
+    # loops over a and over a count of b's steps, b = 2*b_step - a, so its
+    # domain has none left, and the code tests no parity: loopy alone looped
+    # over every b and tested (a + b) mod 2 at each, wasting half of them.
+    assert schedule.strides == {"b": "2*b_step - a"}
     (domain,) = schedule.kernel.default_entrypoint.domains
-    assert domain.get_var_names(isl.dim_type.set) == ["a", "b"]
-    assert "mod 2" in str(domain)
+    assert domain.get_var_names(isl.dim_type.set) == ["a", "b_step"]
+    assert domain.dim(isl.dim_type.div) == 0
+    assert "== 0" not in emit_code(schedule)
 
     # loopy generates correct code for it, bit for bit, at every size.
     for nt, nx in STENCIL_SIZES:
@@ -701,6 +751,11 @@ def test_tiling_the_diamond_is_legal_for_the_stencil_and_computes() -> None:
     )
     assert schedule.order == ("a_outer", "b_outer", "a_inner", "b_inner")
     assert [fact.status.value for fact in schedule.facts()] == ["decided"] * 4
+    # The tile splits the loops the checker knows, and the loop that is left
+    # with the holes is the innermost one, which steps by two from a_inner.
+    assert schedule.strides == {"b_inner": "2*b_inner_step - a_inner"}
+    domains = schedule.kernel.default_entrypoint.domains
+    assert all(domain.dim(isl.dim_type.div) == 0 for domain in domains)
     for nt, nx in [*STENCIL_SIZES, (17, 23), (32, 32)]:
         u = _jacobi_input(nt, nx)
         out = run(schedule, u=u.copy())
@@ -746,6 +801,8 @@ def test_skew_is_the_affine_map_that_keeps_the_loop_names(monkeypatch) -> None:
     (theirs,) = affine.kernel.default_entrypoint.domains
     assert mine.is_equal(theirs)
     assert "t < i" in str(mine)
+    # A unimodular map leaves no holes, so there is nothing to step over.
+    assert skewed.strides == affine.strides == {}
 
 
 def test_a_skewed_loop_keeps_its_tag_in_the_kernel() -> None:
@@ -1202,7 +1259,8 @@ def test_a_new_loop_cannot_take_a_name_the_lowering_added() -> None:
         ("{ [t] -> [u] : u = t }", "share its name"),
         ("{ [t] -> [int] : int = t }", "cannot name a loop"),
         ("[p] -> { [t] -> [a] : a = t + p }", "not sizes of jacobi"),
-        ("{ S0[t, i] -> [a, b] : a = t and b = i }", "named tuple"),
+        ("{ S9[t, i] -> [a, b] : a = t and b = i }", "S9 is not a statement"),
+        ("{ [t, i] -> T[a, b] : a = t and b = i }", "output tuple T is named"),
         ("{ [t, i] -> [a, b] : a = t and b = i", "is not an isl map"),
     ],
 )
@@ -1213,7 +1271,7 @@ def test_affine_refuses_a_map_it_cannot_give_a_meaning(
         Schedule(ht.jacobi_term()).affine(mapping)
 
 
-def test_affine_refuses_reduction_loops_tagged_loops_and_unions() -> None:
+def test_affine_refuses_reduction_loops_tagged_loops_and_non_maps() -> None:
     with pytest.raises(ValueError, match="j is the loop of a reduction"):
         Schedule(ht.spmv_term()).affine("{ [j] -> [k] : k = j }")
     doubled = isl.Map("{ [t, i] -> [a, b] : a = t and b = i }")
@@ -1222,8 +1280,8 @@ def test_affine_refuses_reduction_loops_tagged_loops_and_unions() -> None:
         Schedule(ht.jacobi_term()).affine(doubled)
     with pytest.raises(ValueError, match="carries a tag"):
         Schedule(ht.transpose_term()).tag(i="g.0").affine("{ [i] -> [k] : k = i }")
-    with pytest.raises(TypeError, match="one map for every statement"):
-        Schedule(ht.jacobi_term()).affine(isl.UnionMap(DIAMOND))
+    with pytest.raises(TypeError, match="takes an isl map"):
+        Schedule(ht.jacobi_term()).affine(isl.Set("{ [t, i] }"))
     with pytest.raises(ValueError, match="has to be named"):
         Schedule(ht.jacobi_term()).affine("{ [t, i] -> [t + i, t - i] }")
 
@@ -1234,6 +1292,476 @@ def test_retargeting_replays_an_affine_step() -> None:
     assert other.history == schedule.history
     assert other.order == ("a", "b")
     assert all(fact.provenance["target"] == "c-source" for fact in other.facts())
+
+
+def test_only_a_loop_the_kernel_steps_through_is_counted() -> None:
+    # A tagged loop is not a loop loopy steps through (a hardware axis, or a
+    # loop it unrolls), so it keeps its holes; a loop inside a tagged one
+    # still steps, from an offset the tagged loop gives.
+    diamond = Schedule(ht.jacobi_term()).affine(DIAMOND)
+    assert diamond.tag(b="unr").strides == {}
+    assert diamond.tag(a="unr").strides == {"b": "2*b_step - a"}
+    # The schedule's own loops are still a and b; only the kernel counts.
+    assert diamond.order == ("a", "b")
+    assert "b_step" in diamond.kernel.default_entrypoint.all_inames()
+
+
+def every_other(
+    x: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """Double the even cells: a guard whose congruence narrows the domain."""
+    for i in x.dom:
+        with when(i % 2 == 0):
+            y[i] = 2.0 * x[i]
+
+
+def test_a_loop_a_guard_narrows_to_a_congruence_steps_over_it_too() -> None:
+    # The counting is about the domain, not about affine: a guard that keeps
+    # the even i puts (i) mod 2 = 0 in the domain, and once a step has set the
+    # nest, the loop left with the holes counts its steps. The identity
+    # schedule leaves loopy its own nest, so it is left alone.
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(every_other, evaluate_annotations(every_other))
+    assert Schedule(term).strides == {}
+    split = Schedule(term, sizes={"n": 10}).split("i", 4)
+    assert split.strides == {"i_inner": "2*i_inner_step"}
+    for n in (1, 2, 7, 10):
+        x = np.arange(n, dtype=np.float64)
+        out = run(split, x=x, y=np.full(n, -1.0))
+        want = np.full(n, -1.0)
+        want[::2] = 2.0 * x[::2]
+        assert np.array_equal(out["y"], want), n
+
+
+def _as_loopy_had_it(schedule: Schedule) -> Schedule:
+    """The schedule with the kernel before its loops were counted."""
+    other = schedule._clone()
+    other._code = other._kernel
+    return other
+
+
+def _points(domain: isl.BasicSet, **sizes: int) -> int:
+    """How many points a domain has at these sizes."""
+    out = isl.Set.from_basic_set(domain)
+    for name, value in sizes.items():
+        position = out.get_var_names(isl.dim_type.param).index(name)
+        out = out.fix_val(
+            isl.dim_type.param, position, isl.Val.int_from_si(out.get_ctx(), value)
+        )
+    return out.count_val().to_python()
+
+
+@pytest.mark.parametrize(
+    ("mapping", "then", "strides"),
+    [
+        (DIAMOND, (), {"b": "2*b_step - a"}),
+        # A cut by an odd factor leaves the counted loop an offset that
+        # depends on the loop outside it too.
+        (DIAMOND, ("split", "b", 3), {"b_inner": "2*b_inner_step - a - b_outer"}),
+        (
+            DIAMOND,
+            ("tile", "a", "b", 3, 5),
+            {"b_inner": "2*b_inner_step - a_outer - a_inner - b_outer"},
+        ),
+        (
+            "{ [t, i] -> [a, b] : a = t + i - 7 and b = t - i - 13 }",
+            (),
+            {"b": "2*b_step - a"},
+        ),
+        # Determinant 6: b steps by six.
+        ("{ [t, i] -> [a, b] : a = 2t + i and b = 3i }", (), {"b": "6*b_step - 3*a"}),
+        # Both loops over a lattice, the inner one from the outer's counter.
+        (
+            "{ [t, i] -> [a, b] : a = 3t and b = t + 2i }",
+            (),
+            {"a": "3*a_step", "b": "2*b_step - a_step"},
+        ),
+    ],
+)
+def test_counted_loops_meet_each_instance_once_and_compute_the_same(
+    mapping: str, then: tuple, strides: dict[str, str]
+) -> None:
+    # The differential test of the counting: the kernel loopy was given before
+    # (a loop over every b, with the lattice tested inside it) and the one
+    # with the loop over a lattice counted compute the same, bit for bit, and
+    # match the reference. The counted domain, less anything loopy would test,
+    # has exactly one point per instance, where the other has more.
+    schedule = Schedule(ht.jacobi_term()).affine(mapping)
+    if then:
+        method, *arguments = then
+        schedule = getattr(schedule, method)(*arguments)
+    assert schedule.strides == strides
+    (counted,) = schedule.kernel.default_entrypoint.domains
+    (tested,) = _as_loopy_had_it(schedule).kernel.default_entrypoint.domains
+    assert counted.dim(isl.dim_type.div) == 0
+    assert tested.dim(isl.dim_type.div) > 0
+    nt, nx = 7, 9
+    instances = (nt - 1) * (nx - 2)
+    assert _points(counted, nt=nt, nx=nx) == instances
+    assert _points(tested.remove_divs(), nt=nt, nx=nx) > instances
+    # One kernel's runs together: loopy's C compiler writes every source to
+    # one file, so going back and forth between two kernels makes codepy
+    # rebuild each time, with a warning that its cache has a collision.
+    for built in (schedule, _as_loopy_had_it(schedule)):
+        for nt, nx in [*STENCIL_SIZES, (8, 5)]:
+            u = _jacobi_input(nt, nx)
+            out = run(built, u=u.copy())["u"]
+            assert np.array_equal(out, ht.jacobi_reference(u)), (nt, nx)
+
+
+def test_a_congruence_cut_by_an_odd_factor_steps_from_its_outer_loop() -> None:
+    # i even, cut by 3: i_inner = i - 3*i_outer has the parity of i_outer,
+    # so the counted loop starts from a remainder of the loop outside it.
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(every_other, evaluate_annotations(every_other))
+    split = Schedule(term, sizes={"n": 10}).split("i", 3)
+    ((name, _expression),) = split.strides.items()
+    assert name == "i_inner"
+    for built in (split, _as_loopy_had_it(split)):
+        for n in range(1, 12):
+            x = np.arange(n, dtype=np.float64)
+            want = np.full(n, -1.0)
+            want[::2] = 2.0 * x[::2]
+            out = run(built, x=x, y=np.full(n, -1.0))
+            assert np.array_equal(out["y"], want), n
+
+
+# {{{ a map per statement (#46)
+
+#: The coupled pair's two statements, interleaved: S0 at the even points of
+#: k and S1 at the odd ones, as the source runs them.
+INTERLEAVED = "{ S0[t] -> [k] : k = 2t; S1[t] -> [k] : k = 2t + 1 }"
+
+
+def _coupled_run(schedule: Schedule, n: int) -> None:
+    x = np.random.default_rng(n).standard_normal(n)
+    v = np.random.default_rng(n + 1).standard_normal(n)
+    out = run(schedule, x=x.copy(), v=v.copy())
+    want_x, want_v = ht.coupled_pair_reference(x, v)
+    assert np.array_equal(out["x"], want_x), n
+    assert np.array_equal(out["v"], want_v), n
+
+
+def test_a_map_per_statement_moves_each_statement_by_its_own() -> None:
+    # affine() refused a union of maps: loopy gives the statements of a loop
+    # one domain. The statements keep sharing it, over the union of their
+    # images, and each is predicated on its own points and reads its own
+    # loop variable back from its own inverse.
+    schedule = Schedule(ht.coupled_pair_term(), sizes={"n": 8}).affine(INTERLEAVED)
+    assert schedule.history == (
+        "affine({ S0[t] -> [k = 2t]; S1[t] -> [k = 1 + 2t] })",
+    )
+    assert schedule.order == ("k",)
+    assert schedule._layout.coords == {"S0": ("k",), "S1": ("k",)}
+    assert [(f.kind, f.status.value) for f in schedule.facts()] == [
+        ("bijective", "decided"),
+        ("monotone", "decided"),
+    ]
+    (domain,) = schedule.kernel.default_entrypoint.domains
+    assert domain.is_equal(isl.BasicSet("[n] -> { [k] : 0 <= k <= 2n - 3 }"))
+    insns = {insn.id: insn for insn in schedule.kernel.default_entrypoint.instructions}
+    assert all(len(insns[name].predicates) == 1 for name in ("S0", "S1"))
+    for n in (2, 3, 8, 13):
+        _coupled_run(Schedule(ht.coupled_pair_term()).affine(INTERLEAVED), n)
+
+    # The step is recorded as the union map's text, which affine() takes
+    # back, and retargeting replays it.
+    assert schedule.key == (
+        "coupled_pair[c].affine('{ S0[t] -> [k = 2t]; S1[t] -> [k = 1 + 2t] }')"
+    )
+    again = Schedule(ht.coupled_pair_term()).affine(
+        "{ S0[t] -> [k = 2t]; S1[t] -> [k = 1 + 2t] }"
+    )
+    assert again.key == schedule.key
+    assert schedule.retarget("c-source").history == schedule.history
+
+
+def test_maps_per_statement_are_checked_together_across_the_statements() -> None:
+    # S1 reads the v that S0 writes at the same t, so S1 may not come first.
+    schedule = Schedule(ht.coupled_pair_term(), sizes={"n": 8})
+    with pytest.raises(IllegalCast) as caught:
+        schedule.affine("{ S0[t] -> [k] : k = 2t + 1; S1[t] -> [k] : k = 2t }")
+    assert caught.value.witness == (("S0", {"t": 0}), ("S1", {"t": 0}), {"n": 8})
+    assert caught.value.fact.kind == "monotone"
+    assert "S0[t=0] writes v[1] read by S1[t=0] scheduled earlier" in str(
+        caught.value
+    )
+    # One statement's map that merges its instances, or misses one, is refused
+    # like any map that does, whatever the other statement's does.
+    for merging in (
+        "{ S0[t] -> [k] : k = 0; S1[t] -> [k] : k = 2t + 1 }",
+        "{ S0[t] -> [k] : k = 2t and t < 3; S1[t] -> [k] : k = 2t + 1 }",
+    ):
+        with pytest.raises(IllegalCast) as caught:
+            schedule.affine(merging)
+        assert caught.value.fact.kind == "bijective"
+
+
+def test_maps_per_statement_that_are_one_map_build_that_map_s_kernel() -> None:
+    per_statement = Schedule(ht.coupled_pair_term()).affine(
+        "{ S0[t] -> [k] : k = 2t; S1[t] -> [k] : k = 2t }"
+    )
+    one = Schedule(ht.coupled_pair_term()).affine("{ [t] -> [k] : k = 2t }")
+    assert per_statement.strides == one.strides == {"k": "2*k_step"}
+    (mine,) = per_statement.kernel.default_entrypoint.domains
+    (theirs,) = one.kernel.default_entrypoint.domains
+    assert mine.is_equal(theirs)
+    assert not any(
+        insn.predicates for insn in per_statement.kernel.default_entrypoint.instructions
+    )
+
+
+def test_a_statement_s_own_map_keeps_its_own_narrower_domain() -> None:
+    # S1 runs over one point fewer than S0, which the lowering cuts back with
+    # a predicate; moving S1 one step later adds its image to that.
+    term = ht.narrowed_second_statement_term()
+    shift = "{ S0[i] -> [j] : j = i; S1[i] -> [j] : j = i + 1 }"
+    assert [f.status.value for f in Schedule(term).affine(shift).facts()] == [
+        "decided",
+        "decided",
+    ]
+    for n in (1, 2, 5):
+        a = np.arange(1.0, n + 1.0)
+        out = run(Schedule(term).affine(shift), a=a.copy(), b=np.zeros(n))
+        assert np.array_equal(out["b"], ht.narrowed_reference(a)), n
+
+
+def test_a_row_statement_moves_apart_from_its_fiber_statement() -> None:
+    # The row's length is computed once per row, by an instruction no
+    # statement owns; it moves with the statement whose fiber it bounds.
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(ragged_row_totals, evaluate_annotations(ragged_row_totals))
+    apart = Schedule(term, sizes={"n": 5}).affine(
+        "{ S0[r] -> [q] : q = 2r; S1[r] -> [q] : q = 2r + 1 }"
+    )
+    assert [f.status.value for f in apart.facts()] == ["decided", "decided"]
+    assert apart.buildable == (True, "")
+    want = np.array([3.0, 0.0, 3.0 + 4.0 + 5.0, 6.0, 7.0 + 8.0 + 9.0 + 10.0])
+    assert np.array_equal(_row_totals_run(apart), want)
+
+
+def masked_then_shifted(
+    mask: Arr[Fin[n], Nat],  # noqa: F821
+    x: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+):
+    """Two independent statements, the first under a guard that reads."""
+    for i in x.dom:
+        with when(mask[i] > 0):
+            y[i] = 2.0 * x[i]
+        z[i] = x[i] + 1.0
+
+
+def test_a_statement_s_guard_is_read_only_at_its_own_points() -> None:
+    # S1 runs after every S0, so the shared loop runs over 2n points and S0's
+    # inverse names i = j at the last n, past the end of mask. Its image is
+    # tested before the guard, in one condition, so the guard's read never
+    # gets there: loopy joins separate predicates in no particular order. The
+    # image stays a predicate of its own too, which loopy's bounds check reads.
+    import pymbolic.primitives as prim
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(masked_then_shifted, evaluate_annotations(masked_then_shifted))
+    schedule = Schedule(term).affine(
+        "[n] -> { S0[i] -> [j] : j = i; S1[i] -> [j] : j = i + n }"
+    )
+    assert [f.status.value for f in schedule.facts()] == ["decided", "decided"]
+    insns = {insn.id: insn for insn in schedule.kernel.default_entrypoint.instructions}
+    image, guarded = sorted(insns["S0"].predicates, key=lambda p: "mask" in str(p))
+    assert "mask" not in str(image)
+    assert isinstance(guarded, prim.LogicalAnd)
+    assert guarded.children[0] == image
+    assert "mask" in str(guarded.children[1])
+    for n in (1, 4, 7):
+        mask = np.arange(n) % 2
+        x = np.arange(1.0, n + 1.0)
+        out = run(schedule, mask=mask, x=x, y=np.zeros(n), z=np.zeros(n))
+        assert np.array_equal(out["y"], np.where(mask > 0, 2.0 * x, 0.0)), n
+        assert np.array_equal(out["z"], x + 1.0), n
+
+
+def triangle_then_scaled(
+    a: Arr[Fin[n], Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A sum over a triangle's row, then the sum scaled."""
+    for i in y.dom:
+        y[i] = reduce_sum(a[i, j] for j in Fin[i + 1])
+        z[i] = 2.0 * y[i]
+
+
+def test_a_reduction_nested_in_the_loop_moves_with_its_statement() -> None:
+    # The sum's domain names i as its bound, so it is nested in the loop and
+    # moves along the map of the statement it belongs to, S0's, and not S1's.
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(triangle_then_scaled, evaluate_annotations(triangle_then_scaled))
+    schedule = Schedule(term).affine(
+        "{ S0[i] -> [k] : k = 2i; S1[i] -> [k] : k = 2i + 1 }"
+    )
+    assert [f.status.value for f in schedule.facts()] == ["decided", "decided"]
+    for n in (1, 3, 6):
+        a = np.random.default_rng(n).standard_normal((n, n))
+        want = np.array([sum(a[i, j] for j in range(i + 1)) for i in range(n)])
+        out = run(schedule, a=a, y=np.zeros(n), z=np.zeros(n))
+        assert np.array_equal(out["y"], want), n
+        assert np.array_equal(out["z"], 2.0 * want), n
+
+
+def ragged_two_in_fiber(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+):
+    """Two row sums in one fiber loop."""
+    for r in y.dom:
+        for j in val.dom[r]:
+            y[r] = y[r] + val[r, j]
+            z[r] = z[r] + 2.0 * val[r, j]
+
+
+def test_two_statements_of_one_fiber_cannot_move_by_different_maps() -> None:
+    # The fiber is one loopy domain nested in the row, and the statements in
+    # it would each need one of their own. The casts are decided; the kernel
+    # is out of reach, and says why.
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(ragged_two_in_fiber, evaluate_annotations(ragged_two_in_fiber))
+    schedule = Schedule(term).affine(
+        "{ S0[r] -> [q] : q = 2r; S1[r] -> [q] : q = 2r + 1 }"
+    )
+    assert [f.status.value for f in schedule.facts()] == [
+        "decided",
+        "decided",
+        "refuted",
+    ]
+    ok, reason = schedule.buildable
+    assert not ok
+    assert "holds S0, S1, which move by different maps" in reason
+    assert schedule.kernel is None
+
+
+def ragged_two_fibers(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+):
+    """Two row sums, each in a fiber of its own."""
+    for r in y.dom:
+        for j in val.dom[r]:
+            y[r] = y[r] + val[r, j]
+        for k in val.dom[r]:
+            z[r] = z[r] + 2.0 * val[r, k]
+
+
+def test_two_fibers_of_one_row_cannot_move_by_different_maps() -> None:
+    # Each fiber is a domain of its own, but one instruction computes the
+    # row's length for both, once per row, and it cannot run at the points of
+    # two maps. Moved alike, the two are one map, and the kernel computes.
+    from lanky.terms import evaluate_annotations
+
+    from loopty.arr import Arr as RuntimeArr
+    from loopty.trace import trace
+
+    term = trace(ragged_two_fibers, evaluate_annotations(ragged_two_fibers))
+    apart = Schedule(term).affine(
+        "{ S0[r] -> [q] : q = 2r; S1[r] -> [q] : q = 2r + 1 }"
+    )
+    assert [f.status.value for f in apart.facts()] == ["decided"] * 2 + ["refuted"]
+    ok, reason = apart.buildable
+    assert not ok
+    assert "bounds loops whose statements move by different maps" in reason
+    assert apart.kernel is None
+
+    alike = Schedule(term).affine("{ S0[r] -> [q] : q = r; S1[r] -> [q] : q = r }")
+    assert alike.buildable == (True, "")
+    counts = [2, 0, 3, 1, 4]
+    out = run(
+        alike,
+        cnt=RuntimeArr.from_numpy(np.array(counts, dtype=np.int64)),
+        val=RuntimeArr.ragged(counts, values=np.arange(1.0, 11.0)),
+        y=np.zeros(5),
+        z=np.zeros(5),
+    )
+    want = np.array([3.0, 0.0, 3.0 + 4.0 + 5.0, 6.0, 7.0 + 8.0 + 9.0 + 10.0])
+    assert np.array_equal(out["y"], want)
+    assert np.array_equal(out["z"], 2.0 * want)
+
+
+@pytest.mark.parametrize(
+    ("mapping", "message"),
+    [
+        ("{ S0[t] -> [k] : k = 2t }", "S1 runs in t and is given no map"),
+        (
+            "{ S0[t] -> [k] : k = 2t; S1[t] -> [m] : m = 2t + 1 }",
+            r"the map of S1 takes \[t\] to \[m\] and the map of S0 takes \[t\]",
+        ),
+        (
+            "{ S0[t] -> [k] : k = 2t; [t] -> [k] : k = 2t + 1 }",
+            "some maps name a statement and some do not",
+        ),
+        ("{ S0[t] -> [k] : k = 2t; S2[t] -> [k] : k = 1 }", "S2 is not a statement"),
+        # isl keeps these two maps of S0 apart, since their spaces differ; one
+        # of them used to be dropped without a word, and the step recorded
+        # both.
+        (
+            "{ S0[t] -> [k] : k = 2t; S0[t] -> [k, m, o] : k = t; "
+            "S1[t] -> [k] : k = 2t + 1 }",
+            "S0 is given two maps",
+        ),
+        (
+            "{ [t] -> [k] : k = 2t; [t, u] -> [k] : k = t }",
+            "take or make different numbers of loops",
+        ),
+    ],
+)
+def test_maps_per_statement_have_to_cover_the_loop_alike(
+    mapping: str, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        Schedule(ht.coupled_pair_term()).affine(mapping)
+
+
+def test_maps_per_statement_move_statements_that_run_in_all_their_loops() -> None:
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(ragged_row_totals, evaluate_annotations(ragged_row_totals))
+    with pytest.raises(ValueError, match="S0 runs in r but not in j"):
+        Schedule(term).affine(
+            "{ S0[r, j] -> [q, k] : q = r and k = j; "
+            "S1[r, j] -> [q, k] : q = r and k = j }"
+        )
+    with pytest.raises(ValueError, match="S0 does not run in j"):
+        Schedule(term).affine("{ S0[j] -> [k] : k = j; S1[j] -> [k] : k = j }")
+    with pytest.raises(ValueError, match="have to take the same loops"):
+        Schedule(term).affine(
+            "{ S0[r] -> [q] : q = r; S1[r, j] -> [q, k] : q = r and k = j }"
+        )
+
+
+# }}}
 
 
 # }}}
@@ -1329,8 +1857,10 @@ def test_a_reduction_split_across_parallel_and_sequential_inames_is_reported():
     assert "in parallel" in reason and "in sequence" in reason
 
 
-def test_a_schedule_the_target_can_build_says_so_and_carries_no_extra_fact():
-    schedule = Schedule(ht.spmv_term()).tag(r="g.0")
+def test_a_schedule_the_target_can_build_says_so_and_carries_no_extra_fact(
+    plain_opencl,
+):
+    schedule = Schedule(ht.spmv_term(), target="opencl").tag(r="g.0")
     assert schedule.buildable == (True, "")
     assert not [f for f in schedule.facts() if f.kind == "buildable"]
     schedule.require_buildable()

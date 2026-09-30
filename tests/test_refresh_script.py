@@ -134,14 +134,18 @@ def test_an_excerpt_line_that_is_not_in_the_output_fails(tmp_path) -> None:
         assert document.read_text(encoding="utf-8") == before
 
 
-def test_the_top_level_readme_ledger_is_a_checked_excerpt() -> None:
-    # Its rows say they are verbatim, and they were kept so by hand.
+def test_the_top_level_readme_ledgers_are_checked_excerpts() -> None:
+    # Their rows say they are verbatim, and they were kept so by hand.
     script = _script()
     assert "README.md" in script.DOCUMENTS
     readme = SCRIPT.parent.parent / "README.md"
     blocks = script.blocks_of(readme.read_text(encoding="utf-8").split("\n"))
     ledger = [block for block in blocks if block.command.startswith("lanky check")]
-    assert [block.elided for block in ledger] == [True]
+    assert [block.command for block in ledger] == [
+        "lanky check examples/spmv.py",
+        "lanky check examples/pairs.py",
+    ]
+    assert all(block.elided for block in ledger)
 
 
 def test_ci_checks_the_transcripts() -> None:

@@ -382,7 +382,7 @@ def test_a_temporary_is_declared_in_the_kernel_and_passed_by_nobody() -> None:
 def test_a_temporary_lives_in_global_memory_on_opencl() -> None:
     # Built without lowering for the device, which would import pyopencl: the
     # C target's host code never allocates a global temporary, and the
-    # PyOpenCL host code does (docs/loopy-notes.md, note 14).
+    # PyOpenCL host code does (docs/loopy-notes.md, note 16).
     from loopty.lower import _temporary
 
     term = _through_temporary((("t", _vector()),))

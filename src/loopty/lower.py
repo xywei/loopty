@@ -31,6 +31,23 @@ which reads them: :data:`COUNT_PARAM` is the direct spelling and
 non-affine term ``cnt[r]`` into a fresh isl parameter. Both are recognized, by
 :func:`loopty.flow.ragged_bound_params`, which is also how the access collector
 lists the read the assignment makes; the spellings live in :mod:`loopty.term`.
+
+*An array over a polyhedral domain is stored in the layout the lowering is
+given* (:mod:`loopty.domain`). The domain itself needs nothing: a statement's
+domain already carries the constraints of the fibers it runs over, so the
+triangle is a triangular loop nest. Only the address is the layout's. Boxed, a
+single domain is an array of the box's shape and ``L[i, j]`` is left to loopy;
+a union's pieces follow one another in a flat buffer, each boxed, at a base that
+is a sum of the boxes before it. Packed, ``L[i, j]`` is ``L[off_L[i] + j]``
+through a table of row starts that the executor computes from the domain and
+passes in, as it passes a ragged array's offsets.
+
+An extent of a box can be negative at some sizes, ``n - 1`` at ``n = 0`` for
+``Sigma[i: Fin[n], Fin[i]]``, where the domain is empty and its box has no
+cells. Such an extent is no shape and no part of a base: a single domain whose
+box has one is a flat buffer addressed row-major (:func:`box_is_shape`), and a
+piece after one starts at a value argument the executor computes
+(:meth:`_Builder.piece_base`), since a term would put it a cell or more away.
 """
 
 from __future__ import annotations
@@ -49,6 +66,7 @@ from loopy.symbolic import Reduction as LoopyReduction
 from loopy.symbolic import set_to_cond_expr
 from pymbolic.mapper import Mapper
 
+from loopty.domain import STORAGES, Union
 from loopty.flow import (
     access_relation,
     bounds_dimension,
@@ -56,6 +74,7 @@ from loopty.flow import (
     ragged_bound_params,
     statement_accesses,
 )
+from loopty.idx import linearize
 from loopty.term import (
     COUNT_PARAM,
     COUNT_PARAM_REFLECTED,
@@ -424,6 +443,15 @@ class Lowering:
     compared bit for bit, see :func:`allows_contraction`. ``temporaries``
     names the arrays declared as loopy temporaries, a program's own arrays
     (:attr:`loopty.term.Term.temporaries`), which are nobody's argument.
+
+    ``storage`` says, for every array over a polyhedral domain, which layout
+    it is stored in, ``"box"`` or ``"packed"`` (:mod:`loopty.domain`), and
+    ``tables`` names the argument holding the table of row starts of each
+    packed one, which the executor computes and passes. ``bases`` maps a
+    value argument to the ``(array, piece)`` whose start it holds, for a piece
+    of a union whose start is not a term of the sizes (see
+    :meth:`_Builder.piece_base`); the executor computes that too, in the
+    array's layout.
     """
 
     term: Term
@@ -437,6 +465,9 @@ class Lowering:
     reduction_inames: dict[str, tuple[str, ...]] = field(default_factory=dict)
     contraction: bool = True
     temporaries: tuple[str, ...] = ()
+    storage: dict[str, str] = field(default_factory=dict)
+    tables: dict[str, str] = field(default_factory=dict)
+    bases: dict[str, tuple[str, int]] = field(default_factory=dict)
 
     @property
     def name(self) -> str:
@@ -692,7 +723,9 @@ def _written_arrays(term: Term) -> tuple[str, ...]:
 class _Builder:
     """Mutable scratch space for one lowering; see :func:`lower_generic`."""
 
-    def __init__(self, term: Term, target: str) -> None:
+    def __init__(
+        self, term: Term, target: str, layouts: Mapping[str, str] | None = None
+    ) -> None:
         self.term = term
         self.target = target
         #: Parameters and a program's temporaries alike: an access is lowered
@@ -703,6 +736,13 @@ class _Builder:
         }
         self.written = _written_arrays(term)
         self.ragged: dict[str, str] = {}
+        #: The layout of every array over a domain, and the argument holding
+        #: the table of row starts of each packed one; see Lowering.
+        self.storage = _storage_plan(term, layouts)
+        self.tables: dict[str, str] = {}
+        #: The value arguments holding where a piece of a union starts, where
+        #: that is not a term of the sizes; see :meth:`piece_base`.
+        self.bases: dict[str, tuple[str, int]] = {}
         self.extra_domains: list[isl.Set] = []
         self.extra_args: list[Any] = []
         self.value_args: list[str] = []
@@ -832,6 +872,9 @@ class _Builder:
     def access(self, name: str, indices: tuple[Any, ...]) -> prim.Expression:
         """The flat-storage reference for an index tuple in index-type axes."""
         variable = prim.Variable(name)
+        typ = self.arr_types.get(name)
+        if typ is not None and typ.domain is not None:
+            return self.domain_access(name, typ, indices)
         axis = self.ragged_axis(name)
         if axis is None:
             if not indices:
@@ -845,6 +888,115 @@ class _Builder:
         offsets = self.offsets_for(name)
         flat = prim.Subscript(prim.Variable(offsets), (indices[0],)) + indices[1]
         return prim.Subscript(variable, (flat,))
+
+    def domain_access(
+        self, name: str, typ: ArrType, indices: tuple[Any, ...]
+    ) -> prim.Expression:
+        """The reference into an array over a domain, through its layout.
+
+        See the module docstring: boxed, a single domain is indexed as it is
+        and a union's piece at its base in a flat buffer; packed, through the
+        table of row starts, ``L[off_L[i] + j]``. The piece of a union is a
+        Python integer in every access (the tracer refuses anything else), so
+        its base is a term of the sizes alone.
+        """
+        domain = typ.domain
+        union = isinstance(domain, Union)
+        pieces = domain.pieces if union else (domain,)
+        if union:
+            position = indices[0]
+            if not isinstance(position, int | np.integer):
+                raise LoweringError(
+                    f"{name} is indexed by {position!r} in its piece, and the "
+                    f"piece of the union {domain} is chosen by an integer"
+                )
+            position = int(position)
+            rest = tuple(indices[1:])
+        else:
+            position, rest = 0, tuple(indices)
+        variable = prim.Variable(name)
+        boxes = [tuple(_plain(extent) for extent in piece.box()) for piece in pieces]
+        if self.storage[name] == "box":
+            if not union:
+                if box_is_shape(domain):
+                    return prim.Subscript(variable, rest)
+                # A flat buffer, addressed row-major in the box: the address
+                # of a point is the same term, and no extent is a shape.
+                return prim.Subscript(variable, (linearize(rest, boxes[0]),))
+            base = self.piece_base(name, position, boxes, "box")
+            flat = _plus(base, linearize(rest, boxes[position]))
+            return prim.Subscript(variable, (flat,))
+        rows = [box[:-1] for box in boxes]
+        base = self.piece_base(name, position, rows, "packed")
+        entry = _plus(base, linearize(rest[:-1], rows[position]) if rest[:-1] else 0)
+        start = prim.Subscript(prim.Variable(self.table_for(name)), (entry,))
+        return prim.Subscript(variable, (_plus(start, rest[-1]),))
+
+    def piece_base(
+        self, name: str, position: int, boxes: Sequence[Sequence[Any]], storage: str
+    ) -> Any:
+        """Where piece ``position`` of the union ``name`` starts in its buffer.
+
+        ``boxes`` are the boxes the pieces take up in it: the whole box of each
+        for ``"box"``, and the box of its rows for the table of ``"packed"``.
+        The start is the sum of the volumes of the boxes before it, which is a
+        term of the sizes when every extent in them is non-negative at every
+        size (:meth:`loopty.domain.Polyhedron.extents_never_negative`). One that
+        can be negative belongs to a piece that is empty at those sizes and
+        takes up no cells, which the term would not say (``(n - 1) * (n - 1)``
+        is ``1`` at ``n = 0``), so the start is then a value argument the
+        executor computes from the domain at the call's sizes, as it computes
+        the table (:attr:`loopty.domain.Fixed.box_bases` and
+        :attr:`~loopty.domain.Fixed.table_bases`).
+        """
+        if position == 0:
+            return 0
+        domain = self.arr_types[name].domain
+        known = True
+        for piece, box in zip(domain.pieces[:position], boxes, strict=False):
+            known = known and all(piece.extents_never_negative()[: len(box)])
+        if known:
+            return _total(_volume(box) for box in boxes[:position])
+        for argument, key in self.bases.items():
+            if key == (name, position):
+                return prim.Variable(argument)
+        argument = self.fresh_argument(f"base_{name}_{position}")
+        self.bases[argument] = (name, position)
+        return prim.Variable(argument)
+
+    def fresh_argument(self, base: str) -> str:
+        """``base``, suffixed while it is a name the kernel already uses."""
+        taken = set(dict(self.term.params)) | set(self.term.sizes)
+        taken |= {iname for stmt in self.term.stmts for iname in stmt.inames}
+        taken |= {symbol for symbol, _ in self.term.reflected}
+        taken |= {arg.name for arg in self.extra_args}
+        taken |= set(self.bases)
+        candidate = base
+        while candidate in taken:
+            candidate = f"{candidate}_"
+        return candidate
+
+    def table_for(self, name: str) -> str:
+        """The argument holding the table of row starts of a packed array.
+
+        ``off_<name>``, suffixed while it is a name the kernel already uses, and
+        an ``int32`` argument of no declared shape, which the executor fills
+        from the array's domain (:meth:`loopty.domain.Fixed.table`).
+        """
+        if name in self.tables:
+            return self.tables[name]
+        candidate = self.fresh_argument(f"off_{name}")
+        self.extra_args.append(
+            lp.GlobalArg(
+                candidate,
+                np.dtype(np.int32),
+                shape=None,
+                is_input=True,
+                is_output=False,
+            )
+        )
+        self.tables[name] = candidate
+        return candidate
 
     # }}}
 
@@ -1027,6 +1179,103 @@ class _Builder:
             self.extra_domains.append(to_set((size,), names=(binder.name,)))
 
 
+def _storage_plan(
+    term: Term, layouts: Mapping[str, str] | None
+) -> dict[str, str]:
+    """The layout of every array over a domain: ``"box"`` unless ``layouts`` says.
+
+    ``layouts`` may name only arrays over a domain, and only a layout of
+    :data:`loopty.domain.STORAGES`; anything else is refused, since a dense or
+    ragged array has one layout and no choice to make.
+    """
+    arrays = {name: typ for name, typ in term.params if isinstance(typ, ArrType)}
+    plan = {name: "box" for name, typ in arrays.items() if typ.domain is not None}
+    for name, storage in (layouts or {}).items():
+        if name not in plan:
+            raise LoweringError(
+                f"{name} is not an array over a Where, Sigma or union domain of "
+                f"{term.name}, so it has no layout to choose; a dense or ragged "
+                "array is stored one way"
+            )
+        if storage not in STORAGES:
+            raise LoweringError(
+                f"an array over a domain is stored "
+                f"{' or '.join(map(repr, STORAGES))}, not {storage!r}"
+            )
+        plan[name] = storage
+    return plan
+
+
+def box_is_shape(domain: Any) -> bool:
+    """Whether a single domain stored boxed is an array of the box's shape.
+
+    It is when every extent of its box is non-negative at every size
+    (:meth:`loopty.domain.Polyhedron.extents_never_negative`). Otherwise a
+    size at which an extent is negative, ``n - 1`` at ``n = 0``, would give
+    the array a negative shape, where the argument, whose domain is empty
+    there, has a box of no cells; such a domain is a flat buffer instead,
+    addressed row-major through the same extents, which differ from the
+    argument's only where there is no point to address.
+    """
+    return not isinstance(domain, Union) and all(domain.extents_never_negative())
+
+
+def _refuse_packed_without_interval_rows(term: Term, builder: _Builder) -> None:
+    """Refuse a packed array whose domain has a row that is not an interval.
+
+    The packed layout stores a row as the run from its first column to its
+    last, and addresses ``(r, j)`` as ``table[r] + j``, so a column the row
+    skips (``j % 2 == 0``) would take a cell it does not have. Asked of isl
+    for every size (:meth:`loopty.domain.Polyhedron.rows_are_intervals`).
+    """
+    for name, storage in builder.storage.items():
+        if storage != "packed":
+            continue
+        domain = builder.arr_types[name].domain
+        pieces = domain.pieces if isinstance(domain, Union) else (domain,)
+        for piece in pieces:
+            if piece.rows_are_intervals():
+                continue
+            raise LoweringError(
+                f"{name} of {term.name} is stored packed, a row at a time from "
+                f"its first column, and a row of {piece} is not an interval "
+                "for every size: a constraint with a remainder or a floor "
+                "division skips columns inside a row. Store it boxed."
+            )
+
+
+def _volume(extents: Sequence[Any]) -> Any:
+    """The number of cells of a box, folded where the extents are integers."""
+    total: Any = 1
+    for extent in extents:
+        if isinstance(total, int) and isinstance(extent, int):
+            total *= extent
+        elif isinstance(total, int) and total == 1:
+            total = extent
+        else:
+            total = prim.Product((total, extent))
+    return total
+
+
+def _plus(left: Any, right: Any) -> Any:
+    """``left + right``, folded where either is the integer ``0``."""
+    if isinstance(left, int) and left == 0:
+        return right
+    if isinstance(right, int) and right == 0:
+        return left
+    if isinstance(left, int) and isinstance(right, int):
+        return left + right
+    return prim.Sum((left, right))
+
+
+def _total(terms: Iterator[Any] | Sequence[Any]) -> Any:
+    """The sum of ``terms``, folded as :func:`_plus` folds."""
+    out: Any = 0
+    for term in terms:
+        out = _plus(out, term)
+    return out
+
+
 def _plus_one(size: Any) -> Any:
     """``size + 1``, folded when the size is an integer literal."""
     if isinstance(size, int):
@@ -1144,7 +1393,37 @@ def _forget_params(domain: isl.Set, params: Sequence[str]) -> isl.Set:
     return domain
 
 
-def _depth_cuts(term: Term) -> dict[str, frozenset[int]]:
+def _shared_loops(stmt: Stmt, other: Stmt) -> int:
+    """How many loops, outermost first, two statements have in common."""
+    shared = 0
+    for mine, theirs in zip(stmt.inames, other.inames, strict=False):
+        if mine != theirs:
+            break
+        shared += 1
+    return shared
+
+
+def _ragged_rows(
+    stmt: Stmt, ragged_bounds: Mapping[str, tuple[str, str]]
+) -> dict[str, int]:
+    """The ragged row lengths bounding ``stmt``, each with its row's position.
+
+    A row length is assigned inside its row loop, so the statement's domain
+    has to be cut after that loop: see :func:`_statement_domains`. Only the
+    lengths whose row is one of the statement's loops are listed.
+    """
+    inames = tuple(stmt.inames)
+    params = set(_domain_params(_domain_over(stmt.domain, inames)))
+    return {
+        param: inames.index(row)
+        for param, (_counts, row) in ragged_bounds.items()
+        if param in params and row in inames
+    }
+
+
+def _depth_cuts(
+    term: Term, ragged_bounds: Mapping[str, tuple[str, str]] | None = None
+) -> dict[str, frozenset[int]]:
     """Where each statement's domain is cut so that every loop is defined once.
 
     loopy defines an iname in exactly one domain, and a statement's domain is
@@ -1158,6 +1437,16 @@ def _depth_cuts(term: Term) -> dict[str, frozenset[int]]:
     ``{ [r] }`` and ``[r] -> { [j] }``, the first merges with the other
     statement's domain, and the nest is the one the source wrote.
 
+    A statement bounded by a ragged row length is cut after the row loop as
+    well, because the length is assigned inside it (``ragged_bounds``, see
+    :func:`_statement_domains`). Every cut is then passed on to each statement
+    that has the loops up to it and more loops beyond: two statements that
+    share the loops ``r`` and ``i``, one of which goes on into a fiber of row
+    ``r``, have to be cut alike after ``r``, or the one cut there defines ``r``
+    in ``{ [r] }`` and ``i`` in ``[r] -> { [i] }`` while the other defines both
+    in ``{ [r, i] }``, and no two of those domains merge. Passing a cut on can
+    call for another, so it is repeated until nothing changes.
+
     A traced term gives every loop an iname of its own (a second ``for r`` is
     ``r_0``), so agreeing on a name is agreeing on a loop. A statement whose
     loops need no cut keeps its single domain, as every statement did before.
@@ -1167,13 +1456,25 @@ def _depth_cuts(term: Term) -> dict[str, frozenset[int]]:
         for other in term.stmts:
             if other is stmt:
                 continue
-            shared = 0
-            for mine, theirs in zip(stmt.inames, other.inames, strict=False):
-                if mine != theirs:
-                    break
-                shared += 1
+            shared = _shared_loops(stmt, other)
             if 0 < shared < len(stmt.inames):
                 cuts[stmt.id].add(shared - 1)
+        rows = _ragged_rows(stmt, ragged_bounds or {})
+        if rows and max(rows.values()) < len(stmt.inames) - 1:
+            cuts[stmt.id].add(max(rows.values()))
+    changed = True
+    while changed:
+        changed = False
+        for stmt in term.stmts:
+            for other in term.stmts:
+                if other is stmt:
+                    continue
+                shared = _shared_loops(stmt, other)
+                for cut in sorted(cuts[stmt.id]):
+                    if cut < shared and cut < len(other.inames) - 1:
+                        if cut not in cuts[other.id]:
+                            cuts[other.id].add(cut)
+                            changed = True
     return {key: frozenset(value) for key, value in cuts.items()}
 
 
@@ -1238,11 +1539,7 @@ def _statement_domains(
     full = _domain_over(stmt.domain, inames)
     params = set(_domain_params(full))
     present = [p for p in ragged_bounds if p in params]
-    rows = {
-        param: inames.index(ragged_bounds[param][1])
-        for param in present
-        if ragged_bounds[param][1] in inames
-    }
+    rows = _ragged_rows(stmt, ragged_bounds)
     positions = set(cuts)
     if rows:
         positions.add(max(rows.values()))
@@ -1274,6 +1571,13 @@ def _refuse_redefined_inames(domains: Sequence[isl.Set], term: Term) -> None:
     such as ``j`` inside ``r`` in one statement and on its own in another.
     loopy would refuse it with a bare ``RuntimeError`` about a generated
     domain; this names the loop and the two domains.
+
+    Which of the two it is is read off the term. Every statement that has the
+    loop has the same loops around it when the name is one loop, as it always
+    is in a traced term, and then the name is not the problem, and asking for a
+    rename would send the reader after one that does not exist: the refusal
+    says instead that the lowering could not give the loop one domain, and
+    which statements share it.
     """
     defined: dict[str, isl.Set] = {}
     for domain in domains:
@@ -1281,6 +1585,24 @@ def _refuse_redefined_inames(domains: Sequence[isl.Set], term: Term) -> None:
             earlier = defined.setdefault(iname, domain)
             if earlier is domain:
                 continue
+            nests = {
+                tuple(stmt.inames[: list(stmt.inames).index(iname) + 1])
+                for stmt in term.stmts
+                if iname in stmt.inames
+            }
+            if len(nests) == 1:
+                users = ", ".join(
+                    stmt.id for stmt in term.stmts if iname in stmt.inames
+                )
+                raise LoweringError(
+                    f"{term.name} could not be lowered: the loop {iname}, which "
+                    f"{users} share, came out of the lowering in two domains, "
+                    f"{earlier} and {domain}, and loopy defines each loop in "
+                    "one. This is a limit of loopty's lowering, which could not "
+                    "cut the statements' domains alike, and not of the kernel; "
+                    "moving the statements that differ into loops of their "
+                    "own avoids it."
+                )
             raise LoweringError(
                 f"{term.name} uses the loop variable {iname} for two different "
                 f"loops, whose domains {earlier} and {domain} cannot be one "
@@ -1469,17 +1791,23 @@ def _writes_its_row(writer: Stmt, row: int, shifts: Sequence[int]) -> bool:
     return False
 
 
-def lower_generic(term: Term, target: str = "c") -> Lowering:
+def lower_generic(
+    term: Term, target: str = "c", layouts: Mapping[str, str] | None = None
+) -> Lowering:
     """Lower ``term``, keeping the map from term statements to instructions.
 
     This is :func:`lower` plus bookkeeping. A schedule needs to say *which term
     statement* it would reorder, and an executor needs to know which arguments
     the kernel writes; both are recorded here rather than recovered by matching
     names against generated code.
+
+    ``layouts`` chooses the layout of an array over a polyhedral domain,
+    ``{"L": "packed"}``; every such array is boxed otherwise.
     """
     _refuse_reserved_names(term)
     _refuse_free_name_sorts(term)
-    builder = _Builder(term, target)
+    builder = _Builder(term, target, layouts)
+    _refuse_packed_without_interval_rows(term, builder)
     _refuse_bounds_over_reduction_binders(term, builder)
     builder.plan_reductions()
     expr = builder.expr
@@ -1495,7 +1823,7 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
     #: domain is widened by :func:`_merge_domains` can get it back as a
     #: predicate; see :func:`_restore_narrower_domains`.
     own_domains: dict[str, list[isl.Set]] = {}
-    cuts = _depth_cuts(term)
+    cuts = _depth_cuts(term, ragged_bounds)
 
     for stmt in term.stmts:
         if not isinstance(stmt, Stmt):  # pragma: no cover - defensive
@@ -1718,6 +2046,9 @@ def lower_generic(term: Term, target: str = "c") -> Lowering:
         reduction_inames=_reduction_inames(term, builder),
         contraction=contraction,
         temporaries=tuple(name for name, _ in term.temporaries),
+        storage=dict(builder.storage),
+        tables=dict(builder.tables),
+        bases=dict(builder.bases),
     )
 
 
@@ -2095,6 +2426,7 @@ def _arguments(
             "(docs/loopy-notes.md, note 1)"
         )
     provided = {arg.name for arg in builder.extra_args} | set(builder.ragged.values())
+    provided |= set(builder.bases)
     known_inames = {iname for stmt in term.stmts for iname in stmt.inames}
     for stmt in term.stmts:
         for reduction in reductions_of(stmt.expr):
@@ -2130,11 +2462,22 @@ def _arguments(
     # Sizes first: an array's shape may only mention names that are arguments.
     for name in sorted(sizes):
         declare_value(name, np.dtype(np.int32))
+    # Then where a piece of a union starts, where that is not a term of them.
+    for name in sorted(builder.bases):
+        declare_value(name, np.dtype(np.int32))
 
-    def shape_of(typ: ArrType, ragged: bool) -> tuple[Any, ...] | None:
+    def shape_of(typ: ArrType, ragged: bool, name: str) -> tuple[Any, ...] | None:
         if ragged:
             return None
-        shape = tuple(_plain(size) for size in typ.axes)
+        if typ.domain is not None:
+            # Only a single domain in a box has a shape, and only when no
+            # extent of the box can be negative (box_is_shape); a union, or
+            # packed rows, is a flat buffer of a length no loop bound states.
+            if builder.storage[name] != "box" or not box_is_shape(typ.domain):
+                return None
+            shape = tuple(_plain(extent) for extent in typ.domain.box())
+        else:
+            shape = tuple(_plain(size) for size in typ.axes)
         free: set[str] = set()
         for size in shape:
             free |= {name for name in _names_in(size)}
@@ -2152,7 +2495,7 @@ def _arguments(
             lp.GlobalArg(
                 name,
                 numpy_dtype(typ.dtype),
-                shape=shape_of(typ, ragged),
+                shape=shape_of(typ, ragged, name),
                 is_input=True,
                 is_output=is_output,
             )
@@ -2182,7 +2525,7 @@ def _temporary(
     """The loopy temporary for one of a program's own arrays.
 
     Where it lives depends on the target, because loopy 2025.2 allocates a
-    temporary in global memory on one target and not on the other (note 14 in
+    temporary in global memory on one target and not on the other (note 16 in
     ``docs/loopy-notes.md``). On OpenCL it is a global temporary, which the
     PyOpenCL host code allocates for each call. On C it is private, which the
     C target declares as a variable-length array on the stack of the call
@@ -2221,9 +2564,11 @@ def _names_in(expr: Any) -> set[str]:
     return {node.name for node in walk(expr) if isinstance(node, prim.Variable)}
 
 
-def lower(term: Term, target: str = "c") -> Any:
+def lower(
+    term: Term, target: str = "c", layouts: Mapping[str, str] | None = None
+) -> Any:
     """Build the loopy kernel for ``term`` on ``target``."""
-    return lower_generic(term, target).kernel
+    return lower_generic(term, target, layouts).kernel
 
 
 def _register_term_lowering() -> None:

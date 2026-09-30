@@ -20,9 +20,10 @@ marked with `...` is an excerpt and the lines it keeps are checked verbatim.
 |---|---|
 | `spmv.py` | a ragged sparse product: an indirection in bounds by type, a scan with a postcondition, the theorem that postcondition needs, and a schedule whose reassociation is recorded |
 | `stencil_skew.py` | a rectangular tiling of a Jacobi stencil refused with a witness pair, and the skew that makes the same tiling legal |
-| `wavefront_acoustic.py` | two coupled statements in one acoustic-wave nest: a rectangular tiling refused with a witness that crosses them, the skew that makes it a legal wavefront block, and the diamond map, accepted and run, whose tiling is refused |
+| `wavefront_acoustic.py` | two coupled statements in one acoustic-wave nest: a rectangular tiling refused with a witness that crosses them, the skew that makes it a legal wavefront block, the diamond map, accepted and run, whose tiling is refused, and the diamond with a map per statement, whose tiling is accepted and run |
 | `reshape_layouts.py` | `Fin[n * m]` as `Fin[n] x Fin[m]`, one buffer read in two layouts, and a transpose split and interchanged |
 | `p2p.py` | the near field of a fast multipole method: a two-level interaction list flattened into one ragged level, with the self-interaction guarded by `when` |
+| `pairs.py` | symmetric pair interactions over the lower triangle, an array argument over the domain `Where[i: Fin[n], j: Fin[n], j < i]`, decided in bounds over the exact triangle and run boxed and packed |
 | `composition.py` | two kernels composed by a program and lowered as one loopy kernel, with the intermediate a temporary of it and the edge between the kernels found in the footprints |
 
 Run them with `uv run` from the repository root:
@@ -57,9 +58,11 @@ is legal and **not buildable**, and the demo prints both halves of that. Every
 cast is `decided`: nothing is reordered that carries a dependence. Code
 generation is refused, on a device as much as on C, because loopy will not put a
 hardware axis inside a loop whose bound comes from an array, and a CSR row is
-exactly such a loop. That refusal is a `refuted` fact of kind `buildable`
-decided by `loopy-target`, carried beside the decided casts; `docs/device-runs.md`
-has the measurement it comes from and `docs/loopy-notes.md` the details.
+exactly such a loop. (C has no hardware axes at all, and says so for the rows
+alone; the reason printed is the limit a device has too.) That refusal is a
+`refuted` fact of kind `buildable` decided by `loopy-target`, carried beside
+the decided casts; `docs/device-runs.md` has the measurement it comes from and
+`docs/loopy-notes.md` the details.
 
 ### python examples/spmv.py
 
@@ -254,21 +257,38 @@ wavefront temporal block: rectangular in `(t, i + t)`, a parallelogram in
 `(t, i)`.
 
 Then the diamond, `Schedule.affine("{ [t, i] -> [a, b] : a = t + i and b = t - i }")`.
-The map is not unimodular: its image is only the points of equal parity, which
-the printed loopy domain states as `(a + b) mod 2 = 0`. Written with space
-first, `a = i + t` and `b = i - t`, it is refused, because `S0` at
+The map is not unimodular: its image is only the points of equal parity. Written
+with space first, `a = i + t` and `b = i - t`, it is refused, because `S0` at
 `(t + 1, i - 1)` reads what `S1` wrote at `(t, i)` and the new order runs that
 backwards. Written with time first it is accepted, and the question this demo
 was extended to answer has its answer: loopy generates correct code over that
 image, and both fields agree with the native run bit for bit. loopy's own
 `map_domain` refuses the map, so loopty rewrites the kernel itself, and the
-generated loop tests the parity inside the innermost loop rather than stepping
-by two, so it is correct and not fast (note 13 in `../docs/loopy-notes.md`).
-Tiling the diamond is refused: `S1` at `(t, i + 1)` reads the velocity `S0`
-wrote at `(t, i)`, a distance of `(0, 1)` that the `t - i` direction runs
-backwards. A diamond tiling of this pair needs an offset in time between the two
-statements, and `affine` moves every statement in its loops alike. The module
-docstring has the details.
+loop over `b` counts its steps, `b = 2*b_step - a`, which is why the printed
+loopy domain is over `[a, b_step]` and has no parity left in it: loopy alone
+loops over every `b` and tests the parity inside the innermost loop (note 13 in
+`../docs/loopy-notes.md`). Tiling the diamond is refused: `S1` at `(t, i + 1)`
+reads the velocity `S0` wrote at `(t, i)`, a distance of `(0, 1)` that the
+`t - i` direction runs backwards.
+
+A diamond tiling of this pair needs an offset between the two statements, and
+`affine` takes a map per statement, with each statement named on its tuple:
+
+```python
+OFFSET_DIAMOND = (
+    "{ S0[t, i] -> [a, b] : a = t + i and b = t - i; "
+    "S1[t, i] -> [a, b] : a = t + i and b = t - i + 1 }"
+)
+```
+
+`S1` now sits half a step after `S0` of the same `(t, i)`, which is where a
+staggered scheme keeps its pressure, and every dependence of the pair is
+`(0, 1)`, `(1, 0)` or `(1, 1)` in `(a, b)`. The same four by four tiling is then
+accepted, the two casts are asked of both maps together, and the tiles agree
+with the native run bit for bit. The statements still share the loops over `a`
+and `b`, because loopy gives the statements of a loop one domain: `S0` runs at
+the points where `a + b` is even and `S1` at those where it is odd, so every
+point of the loops is one statement's. The module docstring has the details.
 
 `uv run python examples/wavefront_acoustic.py --bench` times the untiled and the
 wavefront-blocked compiled kernels at a larger size. There is no console block
@@ -307,7 +327,7 @@ Schedule(acoustic).affine('{ [t, i] -> [a, b] : a = i + t and b = i - t }') ->
 
 accepted: Schedule(acoustic, target='c').affine({ [t, i] -> [a = t + i, b = t - i] })
   loop nest: a b
-  loopy domain: [nt, nx] -> { [a, b] : (a + b) mod 2 = 0 and b >= -a and 4 - 2nx + a <= b <= -2 + a and b <= -4 + 2nt - a }
+  loopy domain: [nt, nx] -> { [a, b_step] : b_step >= 0 and 2 - nx + a <= b_step < a and b_step <= -2 + nt }
   decided  isl  affine({ [t, i] -> [a = t + i, b = t - i] }) renames the instances of acoustic one for one
   decided  isl  the order after affine({ [t, i] -> [a = t + i, b = t - i] }) runs every dependence of acoustic forward
 
@@ -316,6 +336,16 @@ accepted: Schedule(acoustic, target='c').affine({ [t, i] -> [a = t + i, b = t - 
 
 Schedule(acoustic, target='c').affine({ [t, i] -> [a = t + i, b = t - i] }).tile('a', 'b', 4, 4) ->
   IllegalCast: tile(a,b,4,4) illegal: instance S0[t=7, i=15] writes velocity[8, 15] read by S1[t=7, i=16] scheduled earlier (at nt=16, nx=32, as hinted)
+
+accepted: Schedule(acoustic, target='c').affine({ S0[t, i] -> [a = t + i, b = t - i]; S1[t, i] -> [a = t + i, b = 1 + t - i] }).tile(a,b,4,4)
+  loop nest: a_outer b_outer a_inner b_inner
+  decided  isl  affine({ S0[t, i] -> [a = t + i, b = t - i]; S1[t, i] -> [a = t + i, b = 1 + t - i] }) renames the instances of acoustic one for one
+  decided  isl  the order after affine({ S0[t, i] -> [a = t + i, b = t - i]; S1[t, i] -> [a = t + i, b = 1 + t - i] }) runs every dependence of acoustic forward
+  decided  isl  tile(a,b,4,4) renames the instances of acoustic one for one
+  decided  isl  the order after tile(a,b,4,4) runs every dependence of acoustic forward
+
+  pressure: difference 0 within 1e-06 (approx) -> tested
+  velocity: difference 0 within 1e-06 (approx) -> tested
 ```
 
 ### lanky check examples/wavefront_acoustic.py
@@ -328,28 +358,28 @@ and both writes at `t + 1` because it keeps `t + 1 < nt`.
 $ uv run lanky check examples/wavefront_acoustic.py
 STATUS   BY           WHERE                      OWNER     STATEMENT
 -------  -----------  -------------------------  --------  ------------------------------------------------------------
-decided  isl          wavefront_acoustic.py:102  acoustic  velocity[t + 1, i] is in bounds for every instance of S0
-decided  isl          wavefront_acoustic.py:102  acoustic  velocity[t, i] is in bounds for every instance of S0
-decided  isl          wavefront_acoustic.py:102  acoustic  pressure[t, i + 1] is in bounds for every instance of S0
-decided  isl          wavefront_acoustic.py:102  acoustic  pressure[t, i] is in bounds for every instance of S0
-decided  isl          wavefront_acoustic.py:105  acoustic  pressure[t + 1, i] is in bounds for every instance of S1
-decided  isl          wavefront_acoustic.py:105  acoustic  pressure[t, i] is in bounds for every instance of S1
-decided  isl          wavefront_acoustic.py:105  acoustic  velocity[t + 1, i] is in bounds for every instance of S1
-decided  isl          wavefront_acoustic.py:105  acoustic  velocity[t + 1, i - 1] is in bounds for every instance of S1
-decided  isl          wavefront_acoustic.py:102  acoustic  distinct instances of S0 write distinct cells of velocity
-decided  isl          wavefront_acoustic.py:105  acoustic  distinct instances of S1 write distinct cells of pressure
-decided  isl          wavefront_acoustic.py:90   acoustic  the source order runs every dependence forward in time
-tested   interpreter  wavefront_acoustic.py:90   acoustic  the traced term computes what the body computes
+decided  isl          wavefront_acoustic.py:111  acoustic  velocity[t + 1, i] is in bounds for every instance of S0
+decided  isl          wavefront_acoustic.py:111  acoustic  velocity[t, i] is in bounds for every instance of S0
+decided  isl          wavefront_acoustic.py:111  acoustic  pressure[t, i + 1] is in bounds for every instance of S0
+decided  isl          wavefront_acoustic.py:111  acoustic  pressure[t, i] is in bounds for every instance of S0
+decided  isl          wavefront_acoustic.py:114  acoustic  pressure[t + 1, i] is in bounds for every instance of S1
+decided  isl          wavefront_acoustic.py:114  acoustic  pressure[t, i] is in bounds for every instance of S1
+decided  isl          wavefront_acoustic.py:114  acoustic  velocity[t + 1, i] is in bounds for every instance of S1
+decided  isl          wavefront_acoustic.py:114  acoustic  velocity[t + 1, i - 1] is in bounds for every instance of S1
+decided  isl          wavefront_acoustic.py:111  acoustic  distinct instances of S0 write distinct cells of velocity
+decided  isl          wavefront_acoustic.py:114  acoustic  distinct instances of S1 write distinct cells of pressure
+decided  isl          wavefront_acoustic.py:99   acoustic  the source order runs every dependence forward in time
+tested   interpreter  wavefront_acoustic.py:99   acoustic  the traced term computes what the body computes
 
 12 facts: 11 decided, 1 tested
 ```
 
 ### loopty run examples/wavefront_acoustic.py
 
-Two schedules of one kernel, the wavefront block and the diamond, with two
-outputs each, all compared with the native run. Each schedule keeps its own
-facts in the one ledger, because a fact's id names the schedule it is about
-and not only the kernel.
+Three schedules of one kernel, the wavefront block, the diamond and the
+diamond tiling, with two outputs each, all compared with the native run. Each
+schedule keeps its own facts in the one ledger, because a fact's id names the
+schedule it is about and not only the kernel.
 
 ```console
 $ uv run loopty run examples/wavefront_acoustic.py
@@ -359,19 +389,114 @@ acoustic: Schedule(acoustic, target='c').skew(i, by='t').tile(t,i,4,8)
 acoustic: Schedule(acoustic, target='c').affine({ [t, i] -> [a = t + i, b = t - i] })
   pressure: difference 0 within 1e-06 (approx) -> tested
   velocity: difference 0 within 1e-06 (approx) -> tested
+acoustic: Schedule(acoustic, target='c').affine({ S0[t, i] -> [a = t + i, b = t - i]; S1[t, i] -> [a = t + i, b = 1 + t - i] }).tile(a,b,4,4)
+  pressure: difference 0 within 1e-06 (approx) -> tested
+  velocity: difference 0 within 1e-06 (approx) -> tested
 
 STATUS   BY     WHERE                      OWNER     STATEMENT
 -------  -----  -------------------------  --------  ------------------------------------------------------------------------
-decided  isl    wavefront_acoustic.py:102  acoustic  skew(i, by='t') renames the instances of acoustic one for one
-decided  isl    wavefront_acoustic.py:102  acoustic  the order after skew(i, by='t') runs every dependence of acoustic for...
-decided  isl    wavefront_acoustic.py:102  acoustic  tile(t,i,4,8) renames the instances of acoustic one for one
-decided  isl    wavefront_acoustic.py:102  acoustic  the order after tile(t,i,4,8) runs every dependence of acoustic forward
-tested   loopy  wavefront_acoustic.py:102  acoustic  the scheduled run of acoustic agrees with the native run to the accur...
-decided  isl    wavefront_acoustic.py:102  acoustic  affine({ [t, i] -> [a = t + i, b = t - i] }) renames the instances of...
-decided  isl    wavefront_acoustic.py:102  acoustic  the order after affine({ [t, i] -> [a = t + i, b = t - i] }) runs eve...
-tested   loopy  wavefront_acoustic.py:102  acoustic  the scheduled run of acoustic agrees with the native run to the accur...
+decided  isl    wavefront_acoustic.py:111  acoustic  skew(i, by='t') renames the instances of acoustic one for one
+decided  isl    wavefront_acoustic.py:111  acoustic  the order after skew(i, by='t') runs every dependence of acoustic for...
+decided  isl    wavefront_acoustic.py:111  acoustic  tile(t,i,4,8) renames the instances of acoustic one for one
+decided  isl    wavefront_acoustic.py:111  acoustic  the order after tile(t,i,4,8) runs every dependence of acoustic forward
+tested   loopy  wavefront_acoustic.py:111  acoustic  the scheduled run of acoustic agrees with the native run to the accur...
+decided  isl    wavefront_acoustic.py:111  acoustic  affine({ [t, i] -> [a = t + i, b = t - i] }) renames the instances of...
+decided  isl    wavefront_acoustic.py:111  acoustic  the order after affine({ [t, i] -> [a = t + i, b = t - i] }) runs eve...
+tested   loopy  wavefront_acoustic.py:111  acoustic  the scheduled run of acoustic agrees with the native run to the accur...
+decided  isl    wavefront_acoustic.py:111  acoustic  affine({ S0[t, i] -> [a = t + i, b = t - i]; S1[t, i] -> [a = t + i, ...
+decided  isl    wavefront_acoustic.py:111  acoustic  the order after affine({ S0[t, i] -> [a = t + i, b = t - i]; S1[t, i]...
+decided  isl    wavefront_acoustic.py:111  acoustic  tile(a,b,4,4) renames the instances of acoustic one for one
+decided  isl    wavefront_acoustic.py:111  acoustic  the order after tile(a,b,4,4) runs every dependence of acoustic forward
+tested   loopy  wavefront_acoustic.py:111  acoustic  the scheduled run of acoustic agrees with the native run to the accur...
 
-8 facts: 6 decided, 2 tested
+13 facts: 10 decided, 3 tested
+```
+
+## pairs.py
+
+`f: Arr[Where[i: Fin[n], j: Fin[n], j < i], Real]` holds one value per pair of
+particles, and nothing else: the triangle is the array's type, not a mask over
+a matrix. One statement writes every pair once, over `f.dom` and `f.dom[i]`,
+and a second sums for every particle its row, `f[p, j]` for `j < p`, and its
+column, `f[k, p]` for `k > p`, which is the half of the symmetry the triangle
+does not store.
+
+Every in-bounds row of the ledger is `decided` by isl over the exact triangle.
+The column read is the one to look at: `(k, p)` is a point of `f` because the
+reduction's condition says `k > p`, and isl is asked about the triangle, not
+about the `n x n` box around it, so `f[p, p]` would be refused although the box
+has the cell (`tests/test_domains.py` pins that).
+
+The two schedules differ in one step. `Schedule(pairs)` keeps `f` in the box of
+its binders, 36 cells for 15 pairs; `Schedule(pairs).pack('f')` keeps the 15
+cells row after row and reads `f[i, j]` as `f[off_f[i] + j]`, through the
+table of row starts the run prints. `pack` is not a cast and adds no fact: a
+layout says where a cell is kept, and every fact is about the cells. Both
+compiled runs agree with the native one, which ran on the same layouts.
+
+### python examples/pairs.py
+
+```console
+$ uv run python examples/pairs.py
+6 particles, 15 pairs
+f box: 36 cells for 15 pairs
+f packed: 15 cells for 15 pairs, and a table of row starts [0, 0, 1, 3, 6, 10]
+energies = [5.402 0.965 3.771 2.404 2.019 0.928]
+dense    = [5.402 0.965 3.771 2.404 2.019 0.928]
+both layouts agree with the dense reference: True
+
+schedule: Schedule(pairs, target='c')
+  f: difference 0 within 1.04e-06 (approx) -> tested
+  e: difference 0 within 1.93e-06 (approx) -> tested
+
+schedule: Schedule(pairs, target='c').pack(f)
+  f: difference 0 within 1.04e-06 (approx) -> tested
+  e: difference 0 within 1.93e-06 (approx) -> tested
+```
+
+### lanky check examples/pairs.py
+
+```console
+$ uv run lanky check examples/pairs.py
+STATUS   BY           WHERE        OWNER  STATEMENT
+-------  -----------  -----------  -----  ------------------------------------------------------
+decided  isl          pairs.py:78  pairs  f[i, j] is in bounds for every instance of S0
+decided  isl          pairs.py:78  pairs  q[i] is in bounds for every instance of S0
+decided  isl          pairs.py:78  pairs  q[j] is in bounds for every instance of S0
+decided  isl          pairs.py:78  pairs  x[i] is in bounds for every instance of S0
+decided  isl          pairs.py:78  pairs  x[j] is in bounds for every instance of S0
+decided  isl          pairs.py:78  pairs  y[i] is in bounds for every instance of S0
+decided  isl          pairs.py:78  pairs  y[j] is in bounds for every instance of S0
+decided  isl          pairs.py:80  pairs  e[p] is in bounds for every instance of S1
+decided  isl          pairs.py:80  pairs  f[p, j] is in bounds for every instance of S1
+decided  isl          pairs.py:80  pairs  f[k, p] is in bounds for every instance of S1
+decided  isl          pairs.py:78  pairs  distinct instances of S0 write distinct cells of f
+decided  isl          pairs.py:80  pairs  distinct instances of S1 write distinct cells of e
+decided  isl          pairs.py:65  pairs  the source order runs every dependence forward in time
+decided  type         pairs.py:80  pairs  the accumulation into e[p] over j is approx
+decided  type         pairs.py:80  pairs  the accumulation into e[p] over k is approx
+tested   interpreter  pairs.py:65  pairs  the traced term computes what the body computes
+
+16 facts: 15 decided, 1 tested
+```
+
+### loopty run examples/pairs.py
+
+```console
+$ uv run loopty run examples/pairs.py
+pairs: Schedule(pairs, target='c')
+  f: difference 0 within 1.04e-06 (approx) -> tested
+  e: difference 0 within 1.93e-06 (approx) -> tested
+pairs: Schedule(pairs, target='c').pack(f)
+  f: difference 0 within 1.04e-06 (approx) -> tested
+  e: difference 0 within 1.93e-06 (approx) -> tested
+
+STATUS  BY     WHERE        OWNER  STATEMENT
+------  -----  -----------  -----  ------------------------------------------------------------------------
+tested  loopy  pairs.py:78  pairs  the scheduled run of pairs agrees with the native run to the accuracy...
+tested  loopy  pairs.py:78  pairs  the scheduled run of pairs agrees with the native run to the accuracy...
+
+2 facts: 2 tested
 ```
 
 ## composition.py
@@ -448,7 +573,7 @@ tested   interpreter  composition.py:68  divergence  the traced term computes wh
 ### loopty run examples/composition.py
 
 Each kernel alone, and then the program as one kernel. On the C target the
-temporary is a variable-length array on the stack of the call; see note 14 in
+temporary is a variable-length array on the stack of the call; see note 16 in
 `../docs/loopy-notes.md`.
 
 ```console

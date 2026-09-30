@@ -101,6 +101,53 @@ The rejection names two real instances of the kernel, not an empty set or a
 failed pattern match. It is the pair a person would find by hand, at sizes the
 message states, because which violating pair isl picks depends on them.
 
+And an array's index set need not be a box. One value per pair of particles is
+an array over the lower triangle, and the triangle is its type:
+
+```python
+@kernel
+def pairs(
+    x: Arr[Fin[n], Real],
+    y: Arr[Fin[n], Real],
+    q: Arr[Fin[n], Real],
+    f: Arr[Where[i: Fin[n], j: Fin[n], j < i], Real],
+    e: Arr[Fin[n], Real],
+):
+    for i in f.dom:
+        for j in f.dom[i]:
+            dx = x[i] - x[j]
+            dy = y[i] - y[j]
+            f[i, j] = q[i] * q[j] / (1.0 + dx * dx + dy * dy)
+    for p in e.dom:
+        e[p] = reduce_sum(f[p, j] for j in f.dom[p]) + reduce_sum(
+            f[k, p] for k in e.dom if k > p
+        )
+```
+
+`Where` takes binders, written as slices, and then the constraints that cut
+their box; `Sigma[i: Fin[n], Fin[i + 1]]` is a sum with affine fibers, and
+`Fin[n] + Fin[m]` a union of pieces. Every in-bounds obligation is decided over
+the exact set:
+
+```console
+$ lanky check examples/pairs.py
+STATUS   BY           WHERE        OWNER  STATEMENT
+-------  -----------  -----------  -----  ------------------------------------------------------
+decided  isl          pairs.py:78  pairs  f[i, j] is in bounds for every instance of S0
+...
+decided  isl          pairs.py:80  pairs  f[p, j] is in bounds for every instance of S1
+decided  isl          pairs.py:80  pairs  f[k, p] is in bounds for every instance of S1
+...
+16 facts: 15 decided, 1 tested
+```
+
+`f[k, p]` is read under `k > p`, which makes `(k, p)` a point of the triangle,
+while `f[p, p]` would be refused although the `n x n` box around the triangle
+has the cell. How `f` is stored is a separate choice that changes no fact:
+`Schedule(pairs)` keeps it in that box, and `Schedule(pairs).pack("f")` keeps
+its cells and no others, row after row, read as `f[off_f[i] + j]` through a
+table of row starts. Both compiled runs agree with the native one.
+
 ## What nothing else does
 
 - **The ragged shape is a type, and it is the *same* type isl reasons about.** A
@@ -118,10 +165,10 @@ message states, because which violating pair isl picks depends on them.
 - **Transformations are casts with witnesses.** Every `split`, `tile`,
   `interchange`, `skew` and `realize` states its reindexing as an isl map, and
   `affine` takes the map from you, any injective affine one, the diamond
-  `(t, i) -> (t + i, t - i)` included. Each is checked for bijectivity on
-  statement instances and for monotonicity on the dependence relation. A failure
-  prints two instances and the array cell between them, before any code is
-  generated.
+  `(t, i) -> (t + i, t - i)` included, or a map per statement. Each is checked
+  for bijectivity on statement instances and for monotonicity on the dependence
+  relation. A failure prints two instances and the array cell between them,
+  before any code is generated.
 - **Reassociation is visible in the type.** Splitting an accumulation and summing
   the pieces is not free on floating point. A trace reads the accumulation's
   class off what it sums, `realize("y", tree=True)` is what lowers it to
@@ -145,6 +192,12 @@ message states, because which violating pair isl picks depends on them.
   That the trace *is* the body is checked too, not assumed: every kernel's
   ledger has a `trace-faithful` fact, the traced term interpreted and compared
   with the native run, bit for bit when the output is `exact`.
+- **The index set of an argument is a type, and not a box.** An array over the
+  lower triangle, a band, a sum with affine fibers or a union of pieces is
+  written as that set, `Arr[Where[i: Fin[n], j: Fin[n], j < i], Real]`, and its
+  in-bounds obligations are decided over the set itself, so a cell of the
+  bounding box outside it is refused. Where the cells are kept is a layout,
+  boxed or packed, chosen by a schedule step, and changes no fact.
 - **It plugs into a proof host.** loopty registers a theory, an isl oracle, an
   executor and a `run` verb with [lanky](https://github.com/xywei/lanky), so a
   residual obligation an oracle cannot decide is an ordinary theorem a person can
@@ -227,13 +280,25 @@ end to end; the edges are sharp.
   re-checks it. `affine(map)` takes an isl map from loops to the loops that
   replace them, refuses one that misses or merges an instance or runs a
   dependence backwards, and rewrites the kernel over the map's image; `skew` is
-  that method with a particular map.
-- The target-capability check: a parallel tag inside a data-dependent (ragged)
-  loop bound, a hardware axis on a reduction nested in another, a reduction
-  loopy will not realize (partly in parallel and partly in sequence, across two
-  local axes, on a group axis, or on a local axis whose extent has no numeric
-  maximum), or a loop ordered outside a loop loopy nests it inside, is
-  reported as a `refuted` `buildable` fact and raises `UnbuildableSchedule`
+  that method with a particular map. A union map whose tuples name statements,
+  `{ S0[t, i] -> [a, b] : ...; S1[t, i] -> [a, b] : ... }`, moves each
+  statement by its own map, checked on the dependences between the statements
+  as well as within each, which is the time offset a diamond tiling of two
+  statements that feed each other needs. A loop over an image with holes, such
+  as the diamond's `b`, counts its steps (`b = 2*b_step - a`,
+  `Schedule.strides`) instead of testing a parity at every `b`.
+- The target-capability check: a concurrent tag (a hardware axis, `ilp` or
+  `vec`) inside a data-dependent (ragged) loop bound or its domain, a hardware
+  axis on a reduction nested in another, a reduction loopy will not realize
+  (partly in parallel and partly in sequence, across two local axes, on a
+  group axis, or on a local axis whose extent has no numeric maximum), a
+  hardware axis loopy will not assign (numbered past an unused one, shared by
+  two loops of one statement, missing from an instruction the kernel runs
+  beside it, or `l.auto`), an `unr`, `ilp` or `vec` loop whose length is not a
+  number, a temporary loopy misreads once an `ilp` or `vec` loop has a copy of
+  it per iteration (a ragged row's length), a loop ordered outside a loop
+  loopy nests it inside, or a hardware axis on the C target, which has none,
+  is reported as a `refuted` `buildable` fact and raises `UnbuildableSchedule`
   when something asks for code. It is asked of the schedule as it stands after
   every step, so an interchange can make a tiled ragged loop buildable again.
 - Lowering to loopy, including a ragged axis as a flat buffer plus offsets, and
@@ -241,13 +306,28 @@ end to end; the edges are sharp.
   an argument of the kernel; the target is chosen by the schedule
   (`Schedule(kernel, target="opencl")`) or by the executor
   (`LoopyExecutor(target="opencl")`).
+- Array arguments over polyhedral domains (`loopty.domain`): `Where[...]`,
+  binders written as slices and then the comparisons that cut their box,
+  joined by `&`; `Sigma[...]`, binders and an unnamed last fiber affine in
+  them; and a union of pieces, `Fin[n] + Fin[m]` (lanky's `SumType`). `.dom`
+  runs binder by binder, `L.dom[i]` over the points the constraints allow at
+  `i` (a fiber at a point outside the domain is empty), and a union's pieces
+  by number, which a trace runs as the Python loop it is. The in-bounds
+  obligations are decided over the exact set. An argument over other points
+  is refused at every entry point, and so is a plain `ndarray`. Both layouts
+  lower and run on the C target: the box of the binders, addressed by loopy,
+  and packed rows through a table of row starts (`Schedule.pack`), which the
+  executor computes from the domain and passes. `Arr.zeros(domain, n=...,
+  storage=...)` and `Arr.from_cells` build such an array, and `Arr.cells()`
+  reads it in one order whatever its layout. `examples/pairs.py` is the demo.
 - The argument contract, enforced at every entry point that runs a kernel
   (compiled, differential and native): two distinct array parameters may not
   share storage, a ragged argument has to agree with the counts array its type
-  names and with any offsets passed alongside it, and a value of a refined sort
-  such as `Fin[m]` has to be one — an array element and a scalar argument
-  alike, and being one means being a finite whole number in range, not merely
-  passing two comparisons. These are the assumptions the typing
+  names and with any offsets passed alongside it, an argument over a domain has
+  to have the declared domain's points at the sizes of the call, and a value
+  of a refined sort such as `Fin[m]` has to be one — an array element and a
+  scalar argument alike, and being one means being a finite whole number in
+  range, not merely passing two comparisons. These are the assumptions the typing
   rules make about a *call* rather than about the term, and a violation is a
   `ValueError` naming the argument. Distinct parameters being disjoint storage
   is the load-bearing one: dependences are computed per array name, so a kernel
@@ -296,11 +376,27 @@ end to end; the edges are sharp.
   one. A temporary of reals made like a parameter, `Arr.zeros_like(u)`, has
   `u`'s dtype natively, so the compiled program refuses a `u` not stored as
   `float64`. On the C target a temporary is a variable-length array on the
-  stack of the call, which bounds its size (note 14 in `docs/loopy-notes.md`);
+  stack of the call, which bounds its size (note 16 in `docs/loopy-notes.md`);
   on OpenCL it is a global temporary, which is generated but, like every
   device path, not run from a development machine.
 - Only a two-axis (row, fiber) ragged array lowers. A deeper dependent sum
   raises.
+- A polyhedral domain is an array's whole index set, so it cannot sit beside
+  a dense axis (`Arr[Fin[k], Where[...], Real]` is refused; write the axis as
+  a binder of the domain). The pieces of a union have the same number of axes,
+  and a piece is chosen by a Python integer, never by a loop variable. A
+  constraint is a conjunction of comparisons: `!=` and `|` are refused rather
+  than widened (write a union instead), and the packed layout refuses a domain
+  whose rows skip columns (a remainder in a constraint). An array over a
+  domain is indexed, and its fibers taken, at quasi-affine expressions of loop
+  variables and sizes; an indirect index such as `L[p[k], j]` is refused when
+  traced. A size a binder's bound runs up to is never negative, so a scalar
+  that makes one negative is refused. Natively, an array over a domain
+  enumerates its points with isl when it is built and checks each access
+  against them in Python. A run, native or compiled, is over the declared
+  domain, its loops, its sizes and its layout, so an argument over the same
+  points written otherwise, or stored the other way, is copied into it and
+  back.
 - A reduction nested in another one cannot take its bound from the outer
   binder when that bound is not affine:
   `reduce_sum(reduce_sum(val[q, j] for j in val.dom[q]) for q in val.dom)` is
@@ -323,26 +419,35 @@ end to end; the edges are sharp.
 - `Schedule.affine` and maps whose image has holes. The diamond
   `(t, i) -> (t + i, t - i)` reaches only the points of equal parity, and
   loopy's own `map_domain` refuses it, so loopty rewrites the kernel over the
-  image itself. loopy then generates correct code, bit for bit against the
-  native run for the stencil and the acoustic pair, and for the stencil tiled
-  in diamond coordinates, but it tests the parity with an `if` in the innermost
-  loop instead of stepping by two, so half of that loop's iterations do
-  nothing. A map moves every statement in its
-  loops the same way, so the per-statement time offset a diamond tiling of
-  `examples/wavefront_acoustic.py` needs is out of reach, and the tiling is
-  refused with a witness. A map the rewrite cannot write for loopy, such as one
-  over a row and the ragged fiber inside it, is a `refuted` `buildable` fact.
-  See note 13 in `docs/loopy-notes.md`.
+  image itself, and the loop left with the holes counts its steps. The code is
+  correct, bit for bit against the native run for the stencil and the acoustic
+  pair, untiled and tiled in diamond coordinates. Statements moved by maps of
+  their own keep sharing their loops, because loopy gives the statements of a
+  loop one domain: the loops run over the union of the images, and each
+  statement tests that a point is its own. For the acoustic pair every point
+  is one statement's; for maps whose images leave holes between them, such as
+  `S0` at `2t` and `S1` at `2t + 1` along the diamond, the loops run over the
+  hull of the union and visit the holes. A map the rewrite cannot write for
+  loopy, such as one over a row and the ragged fiber inside it, or maps that
+  move two statements of one ragged fiber, or of two fibers of one row,
+  differently, is a `refuted` `buildable` fact. See note 13 in `docs/loopy-notes.md`.
 - `realize(var, tree=True)` checks and marks the reassociation; the reduction
   tree itself comes from splitting and tagging the reduction iname, which is
   checked separately and not verified on the C target.
 - The accumulation convention: a traced `y[r] += ...` under a parallel iname is
   reported as a disjointness refutation, which is the conservative reading. The
   `reassoc` fact is what should license it and nothing consumes that yet.
-- The target-capability check knows the limits of loopy 2025.2 listed in notes 6
-  and 11 of `docs/loopy-notes.md` and no others, so it is a list rather than a
-  model of what the backend can do. A schedule it passes can still fail in code
-  generation for a reason nobody has met yet.
+- The target-capability check knows the limits of loopy 2025.2 listed in notes
+  6, 11 and 14 of `docs/loopy-notes.md` and no others, so it is a list rather
+  than a model of what the backend can do. A schedule it passes can still fail
+  in code generation for a reason nobody has met yet.
+- The casts drop a loop on a hardware axis from the order they check, as if
+  the other loops ordered its instances. loopy runs the axis as the launch
+  grid and synchronizes nothing across work items through global memory, so a
+  dependence between two work items passes the casts and is either a race
+  loopy does not see (the stencil's `jacobi` with `i` on `g.0`, across
+  iterations of `t`) or a global barrier loopy asks for. See note 14 in
+  `docs/loopy-notes.md`.
 - A kernel called with a zero-length *shape-bearing* argument (a matrix with no
   rows at all) cannot run on the C target: loopy cannot pass an empty array, and
   the workaround that rescues the empty flat buffer of a ragged axis cannot be
@@ -431,8 +536,9 @@ dependences are plain maps and the checker is a handful of isl calls.
 
 **Index types carry shape.** `Fin[n]` is an index type, `Fin[a*b]` normalizes to
 `Fin[a] x Fin[b]`, and a ragged axis is a dependent sum whose bound is another
-array's entry. `Layout` and `RaggedLayout` are the maps from index space to
-storage.
+array's entry. An array's index set may also be a polyhedral domain, an isl set
+it is compared with exactly. `Layout` and `RaggedLayout` are the maps from index
+space to storage, and a domain's box and its packed rows are two more.
 
 **Evaluate annotations, trace bodies.** No Python parser and no AST pass.
 Annotations are evaluated with lanky's scope, and the body is run once against
@@ -465,7 +571,7 @@ loopty is loop + ty, for types: loops, typed. It follows `loopy`, `sumpy`, and
 
 - [docs/quickstart.md](docs/quickstart.md): the two demos end to end, with the
   output the commands actually print.
-- [examples/README.md](examples/README.md): all six demos, with every console
+- [examples/README.md](examples/README.md): all seven demos, with every console
   block regenerated by `scripts/refresh_example_outputs.py`.
 - [docs/device-runs.md](docs/device-runs.md) and
   [docs/device-runs/](docs/device-runs/): the demos run on real OpenCL devices,

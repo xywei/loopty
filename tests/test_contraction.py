@@ -132,18 +132,12 @@ def test_an_approx_output_leaves_contraction_to_the_compiler() -> None:
     assert "FP_CONTRACT" not in lp.generate_code_v2(lowering.kernel).device_code()
 
 
-def test_the_opencl_source_carries_the_opencl_pragma(monkeypatch) -> None:
+def test_the_opencl_source_carries_the_opencl_pragma(plain_opencl) -> None:
     # OpenCL C has no build option for contraction, so the source says it.
     # loopy's plain OpenCL target stands in for the pyopencl one, which cannot
     # be built without pyopencl and is never imported here.
     from loopty import lower
 
-    plain = lower.target_for
-    monkeypatch.setattr(
-        lower,
-        "target_for",
-        lambda target="c": lp.OpenCLTarget() if target == "opencl" else plain(target),
-    )
     lowering = lower.lower_generic(fused_exact.trace(), "opencl")
     code = lp.generate_code_v2(lowering.kernel).device_code()
     assert "#pragma OPENCL FP_CONTRACT OFF" in code
