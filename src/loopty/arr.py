@@ -275,8 +275,9 @@ class Arr:
     def zeros_like(cls, other: Any, dtype: Any = None) -> Arr:
         """An array of zeros laid out as ``other`` is.
 
-        Dense or ragged as ``other`` is, with its own copy of the offsets, and
-        of ``other``'s dtype unless ``dtype`` says otherwise.
+        Dense or ragged as ``other`` is, with its own copy of the offsets, or
+        over ``other``'s domain in its storage, and of ``other``'s dtype unless
+        ``dtype`` says otherwise.
 
         This is how a program makes an array of its own, an intermediate that
         one kernel writes and the next reads. Inside a
@@ -295,6 +296,8 @@ class Arr:
             return hook(other, sys._getframe(1), dtype)
         if isinstance(other, Arr):
             values = np.zeros_like(other.numpy(), dtype=dtype)
+            if other.domain is not None:
+                return cls._over(other.domain, other.storage or "box", values)
             return cls(values, other.offsets.copy()) if other.is_ragged else cls(values)
         return cls(np.zeros_like(np.asarray(other), dtype=dtype))
 

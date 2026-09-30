@@ -75,7 +75,9 @@ with a default, which the compiled program would be called without; a body
 that returns an array it made, which the compiled program keeps to itself (a
 program called by a program may return one, which the caller then passes on);
 and a program that writes none of its parameters, which would compute nothing
-anybody sees.
+anybody sees. A callee with an array over a polyhedral domain
+(:mod:`loopty.domain`) is refused too, since a domain's sizes are not unified
+across calls.
 
 The term has no postcondition. Each callee's stays its own, and
 :meth:`loopty.kernel.Program.facts` restates it in the program's scope.
@@ -950,6 +952,17 @@ class _Composer:
                 f"{self.program} calls {kernel.__name__} at {call.where}, whose "
                 f"body cannot be traced: {type(exc).__name__}: {exc}"
             ) from exc
+        for param, typ in term.params:
+            if isinstance(typ, ArrType) and typ.domain is not None:
+                self.refuse(
+                    call,
+                    f"its {param} is an array over {typ.domain}, and a "
+                    "program's term composes dense and ragged arrays only: "
+                    "the sizes of a Where, Sigma or union domain are not "
+                    "unified across calls, so the compiled program would not "
+                    "know which cells it has. Compile the kernel on its own; "
+                    "the program still runs natively",
+                )
         label = self.label(kernel.__name__)
         names: dict[str, str] = {}
         exprs: dict[str, Any] = {}

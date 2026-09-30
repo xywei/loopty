@@ -372,8 +372,9 @@ end to end; the edges are sharp.
   rely on it. The kernels an array is passed to have to declare the same
   element sort for it, and every call has to read a ragged family's rows
   through the same offsets; a loop in the body whose trip count is an
-  argument (a host loop) is refused, and so is an array made like a ragged
-  one. A temporary of reals made like a parameter, `Arr.zeros_like(u)`, has
+  argument (a host loop) is refused, and so are an array made like a ragged
+  one and a callee with an array over a `Where`, `Sigma` or union domain. A
+  temporary of reals made like a parameter, `Arr.zeros_like(u)`, has
   `u`'s dtype natively, so the compiled program refuses a `u` not stored as
   `float64`. On the C target a temporary is a variable-length array on the
   stack of the call, which bounds its size (note 16 in `docs/loopy-notes.md`);

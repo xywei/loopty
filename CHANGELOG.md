@@ -321,14 +321,16 @@ with a pair of statement instances.
   one array for two parameters of a call, an array given for a scalar, a
   parameter no kernel is given, a parameter with a default, two element sorts
   for one array, two calls reading one ragged family through different
-  offsets, a body that returns an array it made, and a program that writes
-  none of its parameters. The compiled program's contract checks its
-  arguments once, when it starts, so an array whose cells a callee's contract
-  checks and its in-bounds facts rest on (an element sort `Fin[m]`, the counts
-  or the offsets of a ragged family it reads) is refused when an earlier call
-  wrote it or the program made it: `perm[i] = i + 1` in one kernel would be
-  an address past the end of `x` in the next one's `x[perm[i]]`, where the
-  native run is refused by that kernel's contract.
+  offsets, a body that returns an array it made, a program that writes none
+  of its parameters, and a callee with an array over a `Where`, `Sigma` or
+  union domain, whose sizes are not unified across calls. The compiled
+  program's contract checks its arguments once, when it starts, so an array
+  whose cells a callee's contract checks and its in-bounds facts rest on (an
+  element sort `Fin[m]`, the counts or the offsets of a ragged family it
+  reads) is refused when an earlier call wrote it or the program made it:
+  `perm[i] = i + 1` in one kernel would be an address past the end of `x` in
+  the next one's `x[perm[i]]`, where the native run is refused by that
+  kernel's contract.
 - **An array a program makes is a temporary** (`Arr.zeros_like`,
   `Term.temporaries`). `Arr.zeros_like(u)` is zeros laid out as `u` natively,
   and inside a program being traced it makes a placeholder, named after the
@@ -341,7 +343,9 @@ with a pair of statement instances.
   OpenCL, because loopy's C host code never allocates a global temporary (note
   16 in `docs/loopy-notes.md`). `Lowering.temporaries` names them, and a
   temporary's element sort counts in the exactness class and the contraction
-  pin as a parameter's does. A ragged one is refused. A temporary of reals
+  pin as a parameter's does. A ragged one is refused, and natively
+  `Arr.zeros_like` of an array over a domain is over that domain, in its
+  storage. A temporary of reals
   has to be stored natively as the compiled one is, or one run truncates or
   rounds what the other keeps: a `dtype` given to `Arr.zeros_like` has to be
   `float64`, checked when the term is built, and one left to the parameter

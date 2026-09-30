@@ -16,7 +16,17 @@ import numpy as np
 import pytest
 from lanky.prelude import Nat, Real
 
-from loopty import Arr, Fin, Schedule, TraceError, kernel, program, reduce_sum, when
+from loopty import (
+    Arr,
+    Fin,
+    Schedule,
+    TraceError,
+    Where,
+    kernel,
+    program,
+    reduce_sum,
+    when,
+)
 from loopty.executor import LoopyExecutor
 from loopty.flow import dependences
 from loopty.lower import lower_generic
@@ -204,6 +214,17 @@ def halve(c: Arr[Fin[n], Nat], f: Arr[Fin[n], Real]):  # noqa: F821
     """Half of every count, which is a real."""
     for i in c.dom:
         f[i] = 0.5 * c[i]
+
+
+@kernel
+def triangle(
+    x: Arr[Fin[n], Real],  # noqa: F821
+    f: Arr[Where[i: Fin[n], j: Fin[n], j < i], Real],  # noqa: F821
+):
+    """A value per pair of the lower triangle."""
+    for i in f.dom:
+        for j in f.dom[i]:
+            f[i, j] = x[i] * x[j]
 
 
 # }}}
@@ -999,6 +1020,28 @@ def test_a_temporary_of_reals_is_stored_as_the_compiled_one_is() -> None:
 
         with pytest.raises(TraceError, match="Pass Arr.zeros_like dtype=float64"):
             other_dtype.trace()
+
+
+def test_a_callee_with_an_array_over_a_domain_is_refused() -> None:
+    # The domain's sizes are not unified across calls, so the term would not
+    # know f's cells. Natively the program runs, and zeros_like keeps f's
+    # domain and storage.
+    @program
+    def pairs_of(x, f):
+        triangle(x, f)
+
+    with pytest.raises(TraceError, match="is an array over Where"):
+        pairs_of.trace()
+    domain = triangle.arg_types["f"].domain
+    x = Arr.from_numpy(np.array([1.0, 2.0, 3.0]))
+    for storage in ("box", "packed"):
+        f = Arr.zeros(domain, n=3, storage=storage)
+        pairs_of(x, f)
+        assert list(f.cells()) == [2.0, 3.0, 6.0]
+        made = Arr.zeros_like(f)
+        assert made.domain is not None and made.storage == storage
+        assert made.numpy().shape == f.numpy().shape
+        assert list(made.cells()) == [0.0, 0.0, 0.0]
 
 
 def test_an_array_made_like_a_made_array_is_laid_out_as_the_first() -> None:
