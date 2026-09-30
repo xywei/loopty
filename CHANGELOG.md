@@ -1110,6 +1110,19 @@ with a pair of statement instances.
   cast, and the compiled run disagreed with the body. It is refused with the
   witness `ilp` gets, and a `vec` tag on a reduction's loop asks the
   accumulation's permission to be reassociated, as `ilp` does.
+- A program's restatement of a callee's postcondition rests on that callee's
+  fact, and never on a kernel of the program's own file that shares its name
+  (#42). Kernel fact ids were keyed by the qualified name alone
+  (`scan:postcondition`), so in a file that defines a `scan` and whose
+  program calls `from helpers_scan import scan as helper_scan`, the
+  restatement of the helper's postcondition rested on an id this file's
+  ledger resolved to the local `scan`, a different statement, and no
+  `UNRESOLVED` line said that the real fact is in the helper's ledger. A
+  program that called both kernels got one restatement where it owes two,
+  the second replacing the first. Every fact id of a kernel and a program is
+  now keyed by definition (see Changed), so the restatement names the
+  helper's fact by the id it has in the helper's own ledger, and each callee
+  gets a restatement of its own.
 
 ### Changed
 
@@ -1181,6 +1194,25 @@ with a pair of statement instances.
   the diamond, silences it locally.
 - `lanky>=0.1.0.dev0` is a dependency, resolved from a sibling checkout by
   `[tool.uv.sources]` during development.
+- **Every fact of a kernel or a program is keyed by its definition** (#42).
+  The ids go through `lanky.ledger.fact_id(kind, owner, module, line)`, as a
+  theorem's do: the kind, then the module the file's path gives it under its
+  source root (`lanky.check.module_name`, not the name it was imported
+  under), the qualified name and the line, then what the fact is about.
+  In `examples/spmv.py`, `scan:postcondition` is now
+  `postcondition:spmv.scan@69` and `spmv:in-bounds:S0:write:y[r]` is
+  `in-bounds:spmv.spmv@102:S0:write:y[r]`; a kernel that cannot be traced
+  is `trace:<module>.<name>@<line>` rather than `kernel:<name>:traced`. A
+  program's restatement is
+  `postcondition-in-scope:spmv.solve@115:spmv.scan@69`, naming the callee by
+  its definition too. The one id is the same in the kernel's own file's
+  ledger and in the `rests_on` of a program of another file that calls it.
+  `Kernel` and `Program` carry `module` and `definition`, the typing rules
+  and `faithfulness_fact` take `module=` and `line=`, and
+  `loopty.typing.postcondition_id(owner, module=, line=)` builds the
+  postcondition's id for both sides. Cast and agreement facts keep the ids
+  their schedule's key gives them. The `lanky check` transcripts show the
+  new ids.
 - **A program's restatement of a callee's postcondition rests on the callee's
   fact.** `Program.facts` pointed at the callee's postcondition with a `from`
   entry in the provenance, which lanky had no way to read, so the ledger
@@ -1188,9 +1220,10 @@ with a pair of statement instances.
   lanky's `Fact.rests_on` to the id of that fact, built by the new
   `loopty.typing.postcondition_id`, which the kernel's own postcondition fact
   uses too, so the two cannot drift apart. The ledger names the callee's fact
-  beside the restatement, as in `assumed under scan:postcondition`, counts it
-  in what the restatement is worth, and `lanky check --json` carries
-  `rests_on`, `effective` and `under`. The `from` entry is gone; `callee`
+  beside the restatement, as in `assumed under postcondition:spmv.scan@69`
+  (an id keyed by definition, above), counts it in what the restatement is
+  worth, and `lanky check --json` carries `rests_on`, `effective` and
+  `under`. The `from` entry is gone; `callee`
   stays. The `lanky check` transcripts of `examples/spmv.py` show the new row,
   and this needs the lanky that has `Fact.rests_on`.
 
