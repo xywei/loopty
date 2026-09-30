@@ -1422,7 +1422,9 @@ def test_a_program_restates_the_postconditions_of_a_program_it_calls() -> None:
     assert wraps_clears.callees() == (clear,)
     (fact,) = wraps_clears.facts()
     assert fact.statement.startswith("after clear(...) in wraps_clears")
-    assert fact.rests_on == (postcondition_id(clear.qualname),)
+    assert fact.rests_on == (
+        postcondition_id(clear.qualname, module=clear.module, line=clear.line),
+    )
     assert [f.statement for f in clears.facts()] == [
         fact.statement.replace("wraps_clears", "clears")
     ]
