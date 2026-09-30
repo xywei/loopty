@@ -246,13 +246,25 @@ def test_the_device_schedule_of_spmv_is_legal_and_not_buildable() -> None:
         LoopyExecutor().run(schedule, **module.example_inputs()["spmv"])
 
 
-def test_one_row_per_group_is_the_schedule_that_does_build() -> None:
+def test_one_row_per_group_is_the_schedule_that_does_build(plain_opencl) -> None:
     # The same product with only the rows parallel: the ragged loop stays
-    # sequential, so nothing asks for a hardware axis inside it.
+    # sequential, so nothing asks for a hardware axis inside it. It builds for
+    # a device (loopy's plain OpenCL target stands in for one here), and not
+    # for C, which has no hardware axes at all (#47).
     module = _module("spmv")
-    schedule = module.rows_parallel(target="c")
+    schedule = module.rows_parallel()
+    assert schedule.target == "opencl"
     assert schedule.buildable == (True, "")
     assert [fact.status.value for fact in schedule.facts()] == ["decided"] * 2
+    assert "get_group_id" in plain_opencl.generate_code_v2(
+        schedule.kernel
+    ).device_code()
+
+    on_c = module.rows_parallel(target="c")
+    ok, reason = on_c.buildable
+    assert not ok
+    assert reason.startswith("the tag r='g.0' puts a loop on a hardware axis")
+    assert "Retarget to opencl" in reason
 
 
 # }}}

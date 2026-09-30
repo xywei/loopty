@@ -356,7 +356,9 @@ class LoopyExecutor:
 
         The kernel's arguments are ``args`` and nothing else; the scheduled run
         is on the schedule's target, which has to be the executor's when the
-        executor names one.
+        executor names one. A kernel or a term given in place of a schedule is
+        run on the executor's target, ``"c"`` when it names none, and the fact
+        records the target the run was made on either way.
 
         A :class:`~loopty.trace.TraceError` from the native run is not raised
         but returned, as a ``refuted`` agreement fact with the refusal as its
@@ -367,7 +369,7 @@ class LoopyExecutor:
         (:mod:`loopty.faithful`). Anything else the body raises is the input's
         or the body's, and is raised.
         """
-        term, _lowered, lowering, _target = _resolve(schedule, self.target)
+        term, _lowered, lowering, target = _resolve(schedule, self.target)
         # Before the copies: ``_copy`` gives every argument a buffer of its own,
         # which is exactly what hides an alias between two of them, and the
         # native run would otherwise be the first thing to meet a bad index.
@@ -396,7 +398,7 @@ class LoopyExecutor:
                 try:
                     kernel(**native_args)
                 except TraceError as exc:
-                    return _refused_agreement(term, schedule, exc)
+                    return _refused_agreement(term, schedule, exc, target=target)
                 native_args = {
                     name: (
                         value.numpy()
@@ -412,7 +414,7 @@ class LoopyExecutor:
             native = {name: native_args[name] for name in lowering.outputs}
         scheduled_args = {name: _copy(value) for name, value in args.items()}
         got = self.run(schedule, **scheduled_args)
-        return agreement(term, schedule, got, native)
+        return agreement(term, schedule, got, native, target=target)
 
 
 def exactness_of_output(term: Term, schedule: Any, name: str) -> str:
@@ -498,7 +500,13 @@ def _compare(
     return agree, float(difference[k]), float(allowed[k])
 
 
-def agreement(term: Term, schedule: Any, got: dict, want: dict) -> Any:
+def agreement(
+    term: Term,
+    schedule: Any,
+    got: dict,
+    want: dict,
+    target: str | None = None,
+) -> Any:
     """The fact recording whether two runs of a kernel agree.
 
     A refuted one says which outputs disagreed as its ``reason``, one line per
@@ -507,6 +515,12 @@ def agreement(term: Term, schedule: Any, got: dict, want: dict) -> Any:
     same, since a difference between arrays of two shapes is not a number
     anyone can read (``outputs`` records it as infinite). The numbers of every
     output, agreeing or not, are in ``outputs``.
+
+    ``target`` is the target the scheduled run was made on, which the fact
+    records and names itself after. It defaults to the schedule's, and to
+    ``"c"`` for a kernel or a term, which carries none: a kernel run by
+    ``LoopyExecutor(target="opencl")`` ran on OpenCL, and the executor says
+    so (:meth:`LoopyExecutor.differential` passes the target it resolved).
     """
     details: dict[str, Any] = {}
     disagreements: list[str] = []
@@ -531,23 +545,26 @@ def agreement(term: Term, schedule: Any, got: dict, want: dict) -> Any:
             f"{difference:.3g}, allowed {tolerance:.3g} ({exactness})"
         )
     ok = not disagreements
-    provenance = _agreement_provenance(schedule, details)
+    provenance = _agreement_provenance(schedule, details, target)
     if not ok:
         provenance["reason"] = "\n".join(disagreements)
     return _agreement_fact(term, schedule, ok, provenance)
 
 
-def _refused_agreement(term: Term, schedule: Any, error: Exception) -> Any:
+def _refused_agreement(
+    term: Term, schedule: Any, error: Exception, target: str | None = None
+) -> Any:
     """The agreement fact of a run whose native half is refused.
 
     ``refuted``, with the refusal as its ``reason`` and ``error``, and no
     outputs, because nothing was compared: a
     :class:`~loopty.trace.TraceError` refuses the body for its spelling,
     whatever the input, which is a disagreement between the body and what
-    the compiled run computes, and not an input to skip.
+    the compiled run computes, and not an input to skip. ``target`` is the
+    one the scheduled run would have been made on, as for :func:`agreement`.
     """
     text = f"{type(error).__name__}: {error}"
-    provenance = _agreement_provenance(schedule, {})
+    provenance = _agreement_provenance(schedule, {}, target)
     provenance["error"] = text
     provenance["reason"] = (
         f"the body, run natively, is refused, so there is no native run for "
@@ -556,12 +573,18 @@ def _refused_agreement(term: Term, schedule: Any, error: Exception) -> Any:
     return _agreement_fact(term, schedule, False, provenance)
 
 
-def _agreement_provenance(schedule: Any, details: dict[str, Any]) -> dict[str, Any]:
-    """What every agreement fact records beside its verdict."""
+def _agreement_provenance(
+    schedule: Any, details: dict[str, Any], target: str | None = None
+) -> dict[str, Any]:
+    """What every agreement fact records beside its verdict.
+
+    The target is the one the run was made on when the caller knows it, and
+    otherwise the schedule's, or ``"c"`` for a kernel or a term.
+    """
     return {
         "outputs": details,
         "schedule": tuple(getattr(schedule, "history", ())),
-        "target": getattr(schedule, "target", "c"),
+        "target": target or getattr(schedule, "target", "c"),
     }
 
 
