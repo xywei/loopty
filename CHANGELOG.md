@@ -93,17 +93,64 @@ with a pair of statement instances.
   isl gives, `floor((a + b)/2)`. That answers the question the spike asked:
   loopy 2025.2 generates correct code for a non-unimodular image, bit for bit
   on the stencil (against its reference, untiled and tiled in diamond
-  coordinates) and on the acoustic pair (against the native run), with the
-  parity tested inside the innermost loop rather than stepped over. A map the rewrite cannot write for loopy (loops no one domain
-  defines, an image that is not one basic set, a piecewise inverse) is a
-  `refuted` `buildable` fact, and the schedule has no kernel from then on. A
-  map moves every statement in its loops alike; a map per statement is
-  refused. `examples/wavefront_acoustic.py` tries the diamond three ways: with
-  space first it is refused with a witness, with time first it is accepted and
-  runs, and tiling it is refused, because the pair needs a time offset between
-  its statements. Note 13 in `docs/loopy-notes.md` has the details, and
-  `loopty.oracle.is_bijection_on` is the totality-and-bijectivity question the
-  first fact asks.
+  coordinates) and on the acoustic pair (against the native run). A map the
+  rewrite cannot write for loopy (loops no one domain defines, an image that
+  is not one basic set, a piecewise inverse) is a `refuted` `buildable` fact,
+  and the schedule has no kernel from then on. `examples/wavefront_acoustic.py`
+  tries the diamond four ways: with space first it is refused with a witness,
+  with time first it is accepted and runs, tiling it is refused, because the
+  pair needs an offset between its statements, and tiling it with that offset,
+  a map per statement (below), is accepted and runs. Note 13 in
+  `docs/loopy-notes.md` has the details, and `loopty.oracle.is_bijection_on`
+  is the totality-and-bijectivity question the first fact asks.
+- **A loop over a lattice counts its steps** (`Schedule.strides`). loopy
+  loops over the bounding box of a domain with an existentially quantified
+  constraint and tests the constraint inside the innermost loop, so the
+  diamond's loop over `b` tested the parity of `a + b` at every `b`
+  (`if (-b - a + 2 * ((b + a) / 2) == 0)`) and did nothing at half of them.
+  Once a step has set the nest, the kernel code is generated from asks isl
+  for the stride of each loop given the loops outside it, and replaces a loop
+  that has one by a counter of its steps, `b = 2*b_step - a`, in the domain,
+  whose preimage has no holes left, and in every instruction. The counter and
+  the loop increase together for fixed outer loops, so the instances and their
+  order are the ones the checker approved, and isl confirms for each loop that
+  the new domain maps back onto the old one. It is done on the kernel code is
+  made from, not on the one steps transform, so a later tile still splits the
+  loop the checker knows, and the loop counted after a tile of the diamond is
+  `b_inner`. `Schedule.strides` names each loop replaced and its expression,
+  `{"b": "2*b_step - a"}`. The diamond on the stencil and on the acoustic pair
+  compiles with no parity test and still agrees bit for bit at sizes of both
+  parities, and a guard that narrows a loop to a congruence (`when(i % 2 ==
+  0)`) is stepped over too. A loop with a tag, the loop of a reduction, a loop
+  another domain names, and a loop whose offset involves a loop not around all
+  its instructions keep loopy's test. Every other schedule of the examples
+  generates the code it did (#45).
+- **A map per statement in `Schedule.affine`.** A union map whose input tuples
+  name statements moves each statement by its own map:
+  `affine("{ S0[t, i] -> [a, b] : a = t + i and b = t - i; S1[t, i] -> [a, b] :
+  a = t + i and b = t - i + 1 }")` puts the pressure update of the acoustic
+  pair half a step after the velocity update along the diamond, which is the
+  offset a diamond tiling of the pair needs, and `.tile("a", "b", 4, 4)` after
+  it is accepted where the tiling of the plain diamond is refused. The
+  `bijective` and `monotone` facts are asked of the maps together, over the
+  dependences between the statements as well as within each: `S1` put before
+  the `S0` whose velocity it reads is refused with that pair as the witness.
+  The statements of a loop keep sharing its loops in the kernel, since loopy
+  gives them one domain: the new loops run over the union of the images (its
+  polyhedral hull when the union is not one basic set), each instruction is
+  predicated on its own image and reads its old loops back from its own
+  inverse, and the instruction that computes a ragged row's length moves with
+  the statement whose fiber it bounds. Maps that are all one map build that
+  map's kernel. Every statement in the loops the maps name has to run in all
+  of them and be given a map, the maps have to take the same loops to the
+  same new ones, and a map may not name its output tuple, or a statement the
+  kernel does not have, and a statement may not be given two maps; each is a
+  `ValueError` naming the statement. Two statements of one ragged fiber moved
+  by different maps are a `refuted` `buildable` fact, since the fiber is one
+  loopy domain, and so are two fibers of one row, whose length one instruction
+  computes for both. The diamond tiling of
+  `examples/wavefront_acoustic.py` agrees with the native run bit for bit, and
+  `loopty run` compiles it as a third schedule of the kernel (#46).
 - **Execution** (`loopty.executor`). `LoopyExecutor` runs a kernel, a schedule or
   a term through `lp.ExecutableCTarget` on numpy or `Arr` arguments, and
   `differential()` compares the compiled run against the Python body at the

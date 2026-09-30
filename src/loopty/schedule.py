@@ -109,10 +109,29 @@ map (see :func:`_affine_kernel`): the new domain is the image isl computes, with
 the parity as an existentially quantified constraint, and each old iname becomes
 the quasi-affine expression isl gives for the inverse, ``floor((a + b)/2)``.
 loopy 2025.2 generates correct code for that kernel, and for one tiled after
-it. It enumerates the image's bounding loops and tests the parity with an
-``if`` inside the innermost one rather than stepping by two, so half the
-iterations of that loop do nothing. The answer is recorded in
-``docs/loopy-notes.md``.
+it, but it enumerates the image's bounding loops and tests the parity with an
+``if`` inside the innermost one, so half the iterations of that loop do
+nothing. The kernel code is generated from therefore counts the steps of such
+a loop instead, ``b = 2*b_step - a`` (see :func:`_stepped` and
+:attr:`Schedule.strides`), and meets only the points of the image. The answer
+is recorded in ``docs/loopy-notes.md``, note 13.
+
+A map per statement
+-------------------
+
+Two statements that feed each other in one loop nest often need to move
+differently: the coupled acoustic pair of ``examples/wavefront_acoustic.py``
+tiles in diamonds only once its second statement sits half a step after the
+first. The checker needs nothing new for that, because an instance already
+carries its statement: :func:`_step_map` takes a map per statement, and the
+two questions are asked of the maps together, over every dependence between
+the statements and within each. The kernel does: loopy gives a loop one
+domain, and the statements of a loop have to keep sharing it to keep
+interleaving. So their loops run over the union of the images, and each
+statement is predicated on its own image and uses its own inverse (see
+:func:`_affine_kernel`); for the acoustic pair the images are the points
+where ``a + b`` is even and those where it is odd, and every point of the
+loops is one statement's.
 """
 
 from __future__ import annotations
@@ -492,26 +511,68 @@ def _reindexing(
     return out
 
 
-def _as_map(mapping: Any) -> isl.Map:
-    """What ``affine`` was given, as an isl map: a map, a basic map, or text."""
+def _as_maps(mapping: Any) -> tuple[Any, dict[str, isl.Map] | None]:
+    """What ``affine`` was given: one map for every statement, or one each.
+
+    A map, a basic map, a union map, or the text of any of them. A map whose
+    input tuple is unnamed moves every statement in its loops; maps whose
+    input tuples name statements, ``S0[t, i] -> [a, b]``, move each statement
+    by its own (see :meth:`Schedule.affine`). Returns what the step records,
+    an isl map or union map, and for maps per statement each statement's map
+    with its tuple name taken off, since the checker and the kernel rewrite
+    match loops by name and not by tuple; ``None`` for one map.
+    """
     if isinstance(mapping, str):
         try:
-            return isl.Map(mapping)
+            mapping = isl.UnionMap(mapping)
         except isl.Error as exc:
             raise ValueError(f"{mapping!r} is not an isl map: {exc}") from exc
     if isinstance(mapping, isl.BasicMap):
-        return isl.Map.from_basic_map(mapping)
+        mapping = isl.Map.from_basic_map(mapping)
     if isinstance(mapping, isl.Map):
-        return mapping
-    if isinstance(mapping, isl.UnionMap):
+        mapping = isl.UnionMap.from_map(mapping)
+    if not isinstance(mapping, isl.UnionMap):
         raise TypeError(
-            "affine() takes one map for every statement in the loops it names, "
-            "not a union of maps per statement: loopy gives the statements of a "
-            "loop one domain, so they cannot be moved separately"
+            "affine() takes an isl map, a union of maps per statement, or the "
+            f"text of either, not {type(mapping).__name__}"
         )
-    raise TypeError(
-        f"affine() takes an isl map or its text, not {type(mapping).__name__}"
-    )
+    maps: list[isl.Map] = []
+    mapping.foreach_map(maps.append)
+    if not maps:
+        raise ValueError(f"{mapping} names no loop to replace")
+    for piece in maps:
+        if piece.has_tuple_name(isl.dim_type.out):
+            raise ValueError(
+                f"{mapping}: the output tuple {piece.get_tuple_name(isl.dim_type.out)}"
+                " is named, and a map makes loops, which its output dimensions "
+                "name; leave the tuple unnamed"
+            )
+    named = [piece.has_tuple_name(isl.dim_type.in_) for piece in maps]
+    if not any(named):
+        if len(maps) != 1:
+            raise ValueError(
+                f"{mapping}: these maps take or make different numbers of "
+                "loops, and one map moves every statement in its loops; give "
+                "one map, or name the statement of each"
+            )
+        return maps[0], None
+    if not all(named):
+        raise ValueError(
+            f"{mapping}: some maps name a statement and some do not; name the "
+            "statement of every map, or give one map for every statement"
+        )
+    pieces: dict[str, isl.Map] = {}
+    for piece in maps:
+        stmt_id = piece.get_tuple_name(isl.dim_type.in_)
+        if stmt_id in pieces:
+            # isl keeps maps between different spaces apart, so two maps of
+            # one statement take or make different numbers of loops.
+            raise ValueError(
+                f"{mapping}: {stmt_id} is given two maps, and a statement "
+                "moves by one"
+            )
+        pieces[stmt_id] = piece.reset_tuple_id(isl.dim_type.in_)
+    return mapping, pieces
 
 
 # }}}
@@ -1806,6 +1867,11 @@ class Schedule:
         self._sizes = dict(sizes or {})
         self._lowering: Lowering = lower_generic(self._term, target)
         self._kernel = self._lowering.kernel
+        #: The kernel code is generated from: :attr:`_kernel`, which the steps
+        #: transform, with its loops over a lattice counted (see
+        #: :func:`_stepped`), and those loops' expressions.
+        self._code = self._kernel
+        self._strides: dict[str, str] = {}
 
         stmt_ids = tuple(stmt.id for stmt in self._term.stmts)
         self._layout = _Layout(
@@ -1927,14 +1993,36 @@ class Schedule:
 
     @property
     def kernel(self) -> Any:
-        """The loopy kernel as transformed so far.
+        """The loopy kernel as transformed so far, the one code is made from.
+
+        A loop whose domain has holes, such as the image of the diamond,
+        runs over a counter of its steps rather than over the loop the checker
+        knows, once a step has set the nest; :attr:`strides` names each such
+        loop, and every other loop of :attr:`order` is the kernel's loop of
+        that name. Statements that :meth:`affine` moved by maps of their own
+        share their loops, and each runs at the points of its own image only,
+        which its instruction's predicates state.
 
         ``None`` once a step could not be written as a loopy kernel at all,
         which only :meth:`affine` can cause; the schedule's ``buildable`` fact
         says why, and :meth:`require_buildable` refuses before anything reads
         this.
         """
-        return self._kernel
+        return self._code
+
+    @property
+    def strides(self) -> dict[str, str]:
+        """The loops :attr:`kernel` steps through, and how.
+
+        Each loop of :attr:`order` whose values are a lattice given the loops
+        outside it, with the expression of the counter it is written as:
+        ``{"b": "2*b_step - a"}`` after the diamond ``(t, i) -> (t + i, t -
+        i)``, whose image is the points where ``a + b`` is even. The kernel
+        loops over ``b_step`` and meets only those points, where loopy alone
+        would loop over ``b`` and test the parity at each. Empty when there is
+        no such loop; see :func:`_stepped`.
+        """
+        return dict(self._strides)
 
     @property
     def lowering(self) -> Lowering:
@@ -2163,7 +2251,13 @@ class Schedule:
             draft, text, ("split", (iname, factor), {"inner": inner, "outer": outer})
         )
 
-    def _reindex_into(self, draft: _Draft, mapping: isl.Map, text: str) -> None:
+    def _reindex_into(
+        self,
+        draft: _Draft,
+        mapping: isl.Map,
+        text: str,
+        pieces: Mapping[str, isl.Map] | None = None,
+    ) -> None:
         """Record ``mapping`` as the draft's reindexing, and rename its loops.
 
         ``mapping`` goes from the loops it replaces to the loops that replace
@@ -2179,21 +2273,22 @@ class Schedule:
         kernel that the map does not replace is refused too, since it would
         make two things one.
 
+        ``pieces``, when given, is a map per statement, by statement id, and
+        ``mapping`` is one of them. The statements of a loop share its loops
+        in the kernel before the step and after it, so every map has to take
+        the same loops to the same new ones, and every statement that runs in
+        those loops has to run in all of them and be given a map; anything
+        else is refused, naming the statement.
+
         A loop whose extent comes from an array passes that property to each
         new loop whose value depends on it (see :func:`_inherited`): both
         halves of a split ragged loop, and neither half of the dense loop it
         is tiled with.
         """
-        if mapping.has_tuple_name(isl.dim_type.in_) or mapping.has_tuple_name(
-            isl.dim_type.out
-        ):
-            raise ValueError(
-                f"{text}: a map with a named tuple, such as S0[t, i], would "
-                "move one statement and not the others, and loopy gives the "
-                "statements of a loop one domain; name the loops only"
-            )
         inputs = _dim_names(mapping, isl.dim_type.in_)
         outputs = _dim_names(mapping, isl.dim_type.out)
+        if pieces is not None:
+            self._check_pieces(draft, pieces, inputs, outputs, text)
         if not inputs:
             raise ValueError(f"{text}: the map names no loop to replace")
         for side, names in (("input", inputs), ("output", outputs)):
@@ -2216,8 +2311,13 @@ class Schedule:
                 f"{text}: not loops of {self._term.name}: {', '.join(unknown)}"
             )
         self._check_new_names(draft, outputs, inputs, text)
+        every = [mapping] if pieces is None else list(pieces.values())
         foreign = sorted(
-            set(mapping.get_var_names(isl.dim_type.param))
+            {
+                name
+                for piece in every
+                for name in piece.get_var_names(isl.dim_type.param)
+            }
             - set(self._params)
             - set(self._term.sizes)
         )
@@ -2231,7 +2331,7 @@ class Schedule:
             inside = [name for name in inputs if name in coords]
             if not inside:
                 continue
-            own = mapping
+            own = mapping if pieces is None else pieces[stmt_id]
             if len(inside) != len(inputs):
                 part = _part(mapping, inside)
                 if part is None:
@@ -2249,12 +2349,71 @@ class Schedule:
             mappings[stmt_id] = own
         dependent = draft.data_dependent & set(inputs)
         if dependent:
-            inherited = _inherited(mapping)
+            inherited = {name: set() for name in outputs}
+            for piece in every:
+                for name, olds in _inherited(piece).items():
+                    inherited[name] |= olds
             draft.data_dependent -= set(inputs)
             draft.data_dependent |= {
                 name for name in outputs if inherited[name] & dependent
             }
         draft.mappings = mappings
+
+    def _check_pieces(
+        self,
+        draft: _Draft,
+        pieces: Mapping[str, isl.Map],
+        inputs: Sequence[str],
+        outputs: Sequence[str],
+        text: str,
+    ) -> None:
+        """Refuse maps per statement that the statements' loops cannot take.
+
+        See :meth:`_reindex_into`: the maps name statements of the kernel,
+        take the same loops to the same new ones, and cover every statement
+        that runs in those loops, each of which runs in all of them.
+        """
+        unknown = sorted(set(pieces) - set(draft.coords))
+        if unknown:
+            verb = "is not a statement" if len(unknown) == 1 else "are not statements"
+            raise ValueError(
+                f"{text}: {', '.join(unknown)} {verb} of {self._term.name}"
+            )
+        first = next(iter(pieces))
+        for stmt_id, piece in pieces.items():
+            ins = _dim_names(piece, isl.dim_type.in_)
+            outs = _dim_names(piece, isl.dim_type.out)
+            if (ins, outs) != (tuple(inputs), tuple(outputs)):
+                raise ValueError(
+                    f"{text}: the map of {stmt_id} takes [{', '.join(ins)}] to "
+                    f"[{', '.join(outs)}] and the map of {first} takes "
+                    f"[{', '.join(inputs)}] to [{', '.join(outputs)}]; the "
+                    "statements of one loop share their loops in the kernel, so "
+                    "their maps have to take the same loops to the same new ones"
+                )
+        loops = ", ".join(inputs)
+        for stmt_id, coords in draft.coords.items():
+            inside = [name for name in inputs if name in coords]
+            if not inside:
+                if stmt_id in pieces:
+                    raise ValueError(
+                        f"{text}: {stmt_id} does not run in {loops}, so its map "
+                        "has no loop of it to move"
+                    )
+                continue
+            if len(inside) != len(inputs):
+                outside = [name for name in inputs if name not in coords]
+                raise ValueError(
+                    f"{text}: {stmt_id} runs in {', '.join(inside)} but not in "
+                    f"{', '.join(outside)}, and a map per statement moves "
+                    "statements that run in every loop it names"
+                )
+            if stmt_id not in pieces:
+                raise ValueError(
+                    f"{text}: {stmt_id} runs in {loops} and is given no map; "
+                    "with a map per statement, every statement in the loops "
+                    "the maps name needs one"
+                )
 
     def _check_new_names(
         self,
@@ -2471,6 +2630,25 @@ class Schedule:
         of one it replaces, which is how :meth:`skew` is this method with a
         particular map, and its parameters, if any, are sizes of the kernel.
 
+        The statements of a loop can also move by maps of their own. Name each
+        statement's input tuple, in one union map or its text::
+
+            schedule.affine(
+                "{ S0[t, i] -> [a, b] : a = t + i and b = t - i; "
+                "S1[t, i] -> [a, b] : a = t + i and b = t - i + 1 }"
+            )
+
+        puts ``S1`` half a step after ``S0`` along the diamond, which is what a
+        diamond tiling of a pair of statements that feed each other needs. The
+        statements still share their loops, so every map has to take the same
+        loops to the same new ones, and every statement in those loops has to
+        run in all of them and be given one map, and only one; each of those
+        is a ``ValueError`` naming the statement. The two questions below are
+        asked of the maps together, over the dependences between the
+        statements as well as within each, and the kernel runs the shared
+        loops over the union of the images, each statement at its own points
+        only (see :func:`_affine_kernel`).
+
         The map is untrusted like any other transformation. It has to be
         defined on every instance and send no two of them to one point (the
         ``bijective`` fact, refuted with the instance it misses or the pair it
@@ -2478,16 +2656,18 @@ class Schedule:
         ``monotone`` fact, refuted with the pair of instances and the array
         cell between them). It need not be unimodular: the image of the diamond
         above is only the points of equal parity, and the kernel is rewritten
-        over that image, as the module docstring describes.
+        over that image, and loops over it without visiting the holes, as the
+        module docstring describes.
 
         What the kernel rewrite cannot express, such as loops that more than
         one loopy domain defines, is a ``refuted`` ``buildable`` fact with the
         reason, and the schedule then has no kernel.
         """
-        mapping = _as_map(mapping)
-        text = f"affine({mapping})"
+        recorded, pieces = _as_maps(mapping)
+        mapping = recorded if pieces is None else next(iter(pieces.values()))
+        text = f"affine({recorded})"
         draft = self._draft()
-        self._reindex_into(draft, mapping, text)
+        self._reindex_into(draft, mapping, text, pieces)
         inputs = _dim_names(mapping, isl.dim_type.in_)
         outputs = _dim_names(mapping, isl.dim_type.out)
         tagged = sorted(name for name in inputs if name in draft.tags)
@@ -2504,14 +2684,27 @@ class Schedule:
             kept = [name for name in draft.order if name not in inputs]
             first = positions[0]
             draft.order = [*kept[:first], *outputs, *kept[first:]]
-        self._affine_into(draft, mapping)
-        return self._commit(draft, text, ("affine", (mapping,), {}))
+        self._affine_into(draft, mapping, pieces)
+        return self._commit(draft, text, ("affine", (recorded,), {}))
 
-    def _affine_into(self, draft: _Draft, mapping: isl.Map) -> None:
-        """Rewrite the draft's kernel along ``mapping``, or record why not."""
+    def _affine_into(
+        self,
+        draft: _Draft,
+        mapping: isl.Map,
+        pieces: Mapping[str, isl.Map] | None = None,
+    ) -> None:
+        """Rewrite the draft's kernel along ``mapping``, or record why not.
+
+        ``pieces`` is a map per statement, by statement id, as
+        :meth:`_reindex_into` takes it; the rewrite is told them by the
+        instruction each statement lowered to.
+        """
         if draft.kernel is None:
             return
-        kernel, reason = _affine_kernel(draft.kernel, mapping)
+        if pieces is not None:
+            ids = self._lowering.insn_ids
+            pieces = {ids[stmt_id]: piece for stmt_id, piece in pieces.items()}
+        kernel, reason = _affine_kernel(draft.kernel, mapping, pieces)
         if reason is None:
             draft.kernel = kernel
         else:
@@ -2671,6 +2864,9 @@ class Schedule:
             draft.kernel,
             _with_priority,
             _nests(layout, draft.order, draft.tags).values(),
+        )
+        other._code, other._strides = _stepped(
+            other._kernel, draft.order, draft.tags
         )
         other._reassoc = frozenset(draft.reassoc)
         other._reductions = dict(draft.reductions)
@@ -2907,13 +3103,13 @@ def _key(name: str, target: str, steps: Sequence[tuple[str, tuple, dict]]) -> st
 def _call_text(step: tuple[str, tuple, dict]) -> str:
     """One recipe as the call it is, every argument written out.
 
-    An isl map, which is what :meth:`Schedule.affine` records, is written as
-    its text, which is what ``affine`` also accepts.
+    An isl map or union map, which is what :meth:`Schedule.affine` records,
+    is written as its text, which is what ``affine`` also accepts.
     """
     method, args, kwargs = step
 
     def shown(value: Any) -> str:
-        if isinstance(value, isl.Map | isl.BasicMap):
+        if isinstance(value, isl.Map | isl.BasicMap | isl.UnionMap):
             return repr(str(value))
         return repr(value)
 
@@ -2992,7 +3188,11 @@ class _Inexpressible(ValueError):
     """A reindexing the kernel rewrite cannot write for loopy, and why."""
 
 
-def _affine_kernel(kernel: Any, mapping: isl.Map) -> tuple[Any, str | None]:
+def _affine_kernel(
+    kernel: Any,
+    mapping: isl.Map,
+    pieces: Mapping[str, isl.Map] | None = None,
+) -> tuple[Any, str | None]:
     """The loopy kernel reindexed along ``mapping``, or why it cannot be.
 
     ``lp.map_domain`` would be the obvious call, and it is what the skew used
@@ -3012,17 +3212,33 @@ def _affine_kernel(kernel: Any, mapping: isl.Map) -> tuple[Any, str | None]:
       quasi-affine expression of the new ones that isl gives for the inverse on
       that domain, such as ``floor((a + b)/2)``, which is exact on the image.
 
+    ``pieces``, when given, maps each instruction in the mapped loops to a
+    map of its own, all of them over the loops ``mapping`` names on both
+    sides. Maps that are all one map are that map. Otherwise loopy still
+    gives the new loops one domain, since the statements share them, and the
+    rewrite gives each instruction back its own part of it (see
+    :func:`_shared_image`): the domain is the union of the images, or the
+    polyhedral hull of the union when that is not one basic set, and in each
+    instruction the old loops are replaced by its own inverse, and it is
+    predicated on its own image, such as ``(1 + a + b) mod 2 = 0`` for a
+    statement moved half a step along the diamond. A domain nested in the
+    loops moves along the map of the instructions that run in it, and has to
+    have one, and so does the instruction that computes a ragged row's length
+    for the fiber of those instructions (see :func:`_with_bound_maps`).
+
     The map is the same object the checker reasons about, so the two cannot
     drift apart. What cannot be written this way comes back as the reason, and
     the kernel unchanged: loops that no one domain defines, an image that is
-    not one basic set, an inverse that is piecewise, or an instruction in some
-    of the mapped loops and not the others.
+    not one basic set, an inverse that is piecewise, an instruction in some of
+    the mapped loops and not the others, and, with maps per statement, a
+    nested domain whose instructions move by different maps, a row's length
+    that bounds fibers whose statements do, or an instruction in the loops
+    that is no statement's and bounds none of their loops.
     """
-    from loopy.match import parse_stack_match
+    from loopy.match import Id, parse_stack_match
     from loopy.symbolic import (
         RuleAwareSubstitutionMapper,
         SubstitutionRuleMappingContext,
-        pw_aff_to_expr,
     )
     from pymbolic.mapper.substitutor import make_subst_func
 
@@ -3046,26 +3262,11 @@ def _affine_kernel(kernel: Any, mapping: isl.Map) -> tuple[Any, str | None]:
             "defines every loop the map replaces"
         )
     home = homes[0]
-    try:
-        domains = list(entry.domains)
-        domains[home] = _image(entry.domains[home], mapping)
-        for k, domain in enumerate(entry.domains):
-            if k != home and mapped & set(domain.get_var_names(isl.dim_type.param)):
-                domains[k] = _image_of_params(domain, mapping)
-        inverse = _inverse(mapping, entry.domains[home])
-        substitution = {}
-        for k, name in enumerate(inputs):
-            piece = inverse.get_pw_aff(k).coalesce()
-            if piece.n_piece() != 1:
-                raise _Inexpressible(
-                    f"the inverse of the map is piecewise in {name} ({piece}), "
-                    "and a loop variable is replaced by one expression"
-                )
-            substitution[name] = pw_aff_to_expr(piece)
-    except _Inexpressible as exc:
-        return kernel, str(exc)
-    except isl.Error as exc:
-        return kernel, f"isl could not rewrite the kernel along the map: {exc}"
+    before = entry.domains[home]
+    if pieces is not None:
+        first = next(iter(pieces.values()))
+        if all(piece.is_equal(first) for piece in pieces.values()):
+            mapping, pieces = first, None
 
     insns = []
     for insn in entry.instructions:
@@ -3080,22 +3281,228 @@ def _affine_kernel(kernel: Any, mapping: isl.Map) -> tuple[Any, str | None]:
                 within_inames=(insn.within_inames - mapped) | set(outputs)
             )
         insns.append(insn)
+
+    try:
+        if pieces is not None:
+            pieces = _with_bound_maps(entry, mapped, pieces)
+        domains = list(entry.domains)
+        predicates: dict[str, Any] = {}
+        if pieces is None:
+            domains[home] = _image(before, mapping)
+            substitutions = {None: _substitution(mapping, before)}
+        else:
+            images = {key: _image_set(before, piece) for key, piece in pieces.items()}
+            domains[home], predicates = _shared_image(images, before)
+            substitutions = {
+                key: _substitution(piece, before) for key, piece in pieces.items()
+            }
+        for k, domain in enumerate(entry.domains):
+            if k != home and mapped & set(domain.get_var_names(isl.dim_type.param)):
+                moved = mapping if pieces is None else _governing(entry, domain, pieces)
+                domains[k] = _image_of_params(domain, moved)
+    except _Inexpressible as exc:
+        return kernel, str(exc)
+    except isl.Error as exc:
+        return kernel, f"isl could not rewrite the kernel along the map: {exc}"
+
     # loopy's own transforms refuse to remap an iname a loop priority
     # mentions, and the old priority names loops that no longer exist. The
     # caller sets the priority to the nest it has just checked.
     entry = entry.copy(
         domains=domains, instructions=insns, loop_priority=frozenset()
     )
-    context = SubstitutionRuleMappingContext(
-        entry.substitutions, entry.get_var_name_generator()
-    )
-    mapper = RuleAwareSubstitutionMapper(
-        context, make_subst_func(substitution), within=parse_stack_match(None)
-    )
-    entry = context.finish_kernel(
-        mapper.map_kernel(entry, map_args=False, map_tvs=False)
-    )
+    for key, substitution in substitutions.items():
+        context = SubstitutionRuleMappingContext(
+            entry.substitutions, entry.get_var_name_generator()
+        )
+        mapper = RuleAwareSubstitutionMapper(
+            context,
+            make_subst_func(substitution),
+            within=parse_stack_match(None if key is None else Id(key)),
+        )
+        entry = context.finish_kernel(
+            mapper.map_kernel(entry, map_args=False, map_tvs=False)
+        )
+    if predicates:
+        # Added after the substitution, because they are written in the new
+        # loops already, and a new loop may keep the name of an old one.
+        entry = entry.copy(
+            instructions=[
+                insn.copy(predicates=_first(predicates[insn.id], insn.predicates))
+                if insn.id in predicates
+                else insn
+                for insn in entry.instructions
+            ]
+        )
     return kernel.with_kernel(entry), None
+
+
+def _first(own: Any, others: frozenset[Any]) -> frozenset[Any]:
+    """The predicates ``own`` and ``others``, with ``own`` evaluated first.
+
+    loopy joins an instruction's predicates with ``&&`` in no particular
+    order, and a ``when`` guard among them may read an array. At a point of
+    the shared loops that is another statement's, this instruction's inverse
+    names a loop value it does not have, so each other predicate that could
+    fault there, by reading an array, calling a function or dividing by
+    something that is not a number, becomes ``own and it``, which C
+    evaluates left to right; one that only compares loop variables and sizes
+    is safe anywhere and stays as it is. ``own`` stays a predicate of its
+    own: loopy's bounds check reads the instruction's domain off the
+    predicates it can turn into sets, and skips one it cannot, such as a
+    conjunction with a guard that reads an array.
+    """
+    from loopty.lower import walk
+
+    def could_fault(node: Any) -> bool:
+        if isinstance(node, prim.Subscript | prim.Call):
+            return True
+        return isinstance(
+            node, prim.FloorDiv | prim.Quotient | prim.Remainder
+        ) and not isinstance(node.denominator, int)
+
+    return frozenset(
+        [
+            own,
+            *(
+                prim.LogicalAnd((own, other))
+                if any(could_fault(node) for node in walk(other))
+                else other
+                for other in others
+            ),
+        ]
+    )
+
+
+def _substitution(mapping: isl.Map, domain: Any) -> dict[str, Any]:
+    """Each old loop as the expression of the new ones that ``mapping`` gives."""
+    from loopy.symbolic import pw_aff_to_expr
+
+    inverse = _inverse(mapping, domain)
+    out = {}
+    for k, name in enumerate(_dim_names(mapping, isl.dim_type.in_)):
+        piece = inverse.get_pw_aff(k).coalesce()
+        if piece.n_piece() != 1:
+            raise _Inexpressible(
+                f"the inverse of the map is piecewise in {name} ({piece}), "
+                "and a loop variable is replaced by one expression"
+            )
+        out[name] = pw_aff_to_expr(piece)
+    return out
+
+
+def _shared_image(
+    images: Mapping[str, isl.Set], before: Any
+) -> tuple[isl.BasicSet, dict[str, Any]]:
+    """One domain for loops whose statements move by maps of their own.
+
+    loopy gives a loop one domain, and a statement one set of loops, so two
+    statements that interleave in the new loops have to share them, and the
+    loops have to run over every point either statement has. The domain is
+    the union of the images when isl coalesces it into one basic set, which
+    keeps a lattice both images lie on (the diamond's parity, say) for
+    :func:`_stepped` to step over, and the polyhedral hull of the union
+    otherwise, which only over-approximates. Each instruction whose image is
+    less than that domain gets it back as a predicate, the gist of its image
+    in the domain as loopy writes a condition, as the lowering cuts back a
+    statement a ``when`` narrows; a gist loopy cannot write is refused rather
+    than dropped, since the instruction would then run at points it does not
+    have.
+
+    Returns the domain and the predicate of each instruction that needs one.
+    """
+    from loopy.symbolic import set_to_cond_expr
+
+    union: isl.Set | None = None
+    for image in images.values():
+        union = image if union is None else union.union(image)
+    assert union is not None
+    union = union.coalesce()
+    if union.n_basic_set() == 1:
+        (shared,) = union.get_basic_sets()
+    else:
+        shared = union.polyhedral_hull()
+    wide = _as_set(shared)
+    predicates: dict[str, Any] = {}
+    for key, image in images.items():
+        narrow = image.align_params(wide.get_space())
+        if narrow.is_equal(wide.align_params(narrow.get_space())):
+            continue
+        extra = narrow.gist(wide.align_params(narrow.get_space()))
+        try:
+            predicates[key] = set_to_cond_expr(extra)
+        except Exception as exc:  # noqa: BLE001 - loopy's words for it vary
+            raise _Inexpressible(
+                f"the image of the domain {before} for {key} is {image}, "
+                f"narrower than the domain its loops share, {shared}, and the "
+                f"difference cannot be written as a condition ({exc})"
+            ) from exc
+    return shared, predicates
+
+
+def _with_bound_maps(
+    entry: Any, mapped: set[str], pieces: Mapping[str, isl.Map]
+) -> dict[str, isl.Map]:
+    """``pieces``, with a map for every other instruction in the mapped loops.
+
+    Such an instruction is no statement's: it computes the length of a
+    ragged row, which bounds the fiber of the statements inside it, in the
+    row's loop, once per row. It moves along the map of the statements whose
+    loops it bounds, which is where the checker counts its read, as part of
+    each statement over the loops up to the row, and it has to have one. An
+    instruction that bounds nothing is refused, and so is one whose
+    statements move by different maps.
+    """
+    out = dict(pieces)
+    for insn in entry.instructions:
+        if insn.id in out or not mapped & insn.within_inames:
+            continue
+        written = set(insn.assignee_var_names())
+        bounded = [
+            domain
+            for domain in entry.domains
+            if written & set(domain.get_var_names(isl.dim_type.param))
+        ]
+        if not bounded:
+            raise _Inexpressible(
+                f"instruction {insn.id} runs in {', '.join(sorted(mapped))} "
+                "and belongs to no statement, so it has no map of its own, "
+                "and the statements in those loops move by different maps"
+            )
+        maps = [_governing(entry, domain, pieces) for domain in bounded]
+        if not all(m.is_equal(maps[0]) for m in maps):
+            # Two fibers of one row, whose statements move apart.
+            raise _Inexpressible(
+                f"instruction {insn.id} bounds loops whose statements move by "
+                "different maps, and it runs once per row"
+            )
+        out[insn.id] = maps[0]
+    return out
+
+
+def _governing(entry: Any, domain: Any, pieces: Mapping[str, isl.Map]) -> isl.Map:
+    """The map a domain nested in the mapped loops moves along.
+
+    The one map of the instructions that run in it, as loops or as the loops
+    of a reduction; a domain that holds instructions moving by different maps
+    would have to be two domains, one per map, which is refused.
+    """
+    names = set(domain.get_var_names(isl.dim_type.set))
+    users = [
+        insn.id
+        for insn in entry.instructions
+        if names & (set(insn.within_inames) | set(insn.reduction_inames()))
+    ]
+    if not users:  # pragma: no cover - a domain holds a loop some instruction runs in
+        return next(iter(pieces.values()))
+    maps = [pieces[user] for user in users if user in pieces]
+    if len(maps) != len(users) or not all(m.is_equal(maps[0]) for m in maps):
+        raise _Inexpressible(
+            f"the domain {domain} is nested in the mapped loops and holds "
+            f"{', '.join(users)}, which move by different maps, and loopy "
+            "gives the loops it defines one domain"
+        )
+    return maps[0]
 
 
 def _picking(count: int, positions: Sequence[int]) -> isl.Map:
@@ -3130,6 +3537,11 @@ def _one_basic_set(image: isl.Set, before: Any) -> isl.BasicSet:
 
 def _image(domain: Any, mapping: isl.Map) -> isl.BasicSet:
     """The domain that defines the mapped loops, moved along ``mapping``."""
+    return _one_basic_set(_image_set(domain, mapping), domain)
+
+
+def _image_set(domain: Any, mapping: isl.Map) -> isl.Set:
+    """:func:`_image`, as the set isl computes, one basic set or not."""
     inputs = _dim_names(mapping, isl.dim_type.in_)
     outputs = _dim_names(mapping, isl.dim_type.out)
     names = list(domain.get_var_names(isl.dim_type.set))
@@ -3142,7 +3554,7 @@ def _image(domain: Any, mapping: isl.Map) -> isl.BasicSet:
     )
     for k, name in enumerate((*outputs, *rest)):
         image = image.set_dim_name(isl.dim_type.set, k, name)
-    return _one_basic_set(image, domain)
+    return image
 
 
 def _image_of_params(domain: Any, mapping: isl.Map) -> isl.BasicSet:
@@ -3196,3 +3608,211 @@ def _as_set(domain: Any) -> isl.Set:
     if isinstance(domain, isl.BasicSet):
         return isl.Set.from_basic_set(domain)
     return domain
+
+
+# {{{ loops over a lattice
+
+
+def _ranked(names: Sequence[str], order: Sequence[str]) -> list[str]:
+    """``names`` outermost first: in ``order``, then the rest as they come."""
+    rank = {name: k for k, name in enumerate(order)}
+    return sorted(
+        names, key=lambda name: (rank.get(name, len(order)), names.index(name))
+    )
+
+
+def _stride_of(domain: Any, name: str, inner: Sequence[str]) -> tuple[int, Any]:
+    """The stride of ``name`` in ``domain`` given its outer loops, and its offset.
+
+    The loops inside it are projected out first, so that the offset is an
+    affine function of the parameters and the loops outside it only; isl's
+    ``get_stride_info`` would otherwise express it in any of the others.
+    """
+    projected = _as_set(domain)
+    for other in inner:
+        dims = projected.get_var_names(isl.dim_type.set)
+        if other in dims:
+            projected = projected.project_out(
+                isl.dim_type.set, dims.index(other), 1
+            )
+    info = projected.get_stride_info(
+        projected.get_var_names(isl.dim_type.set).index(name)
+    )
+    return info.get_stride().to_python(), info.get_offset()
+
+
+def _stepped(
+    kernel: Any, order: Sequence[str], tags: Mapping[str, str]
+) -> tuple[Any, dict[str, str]]:
+    """``kernel`` with each loop over a lattice written as a count of steps.
+
+    The image of a map that is not unimodular has holes: the diamond's is the
+    points where ``a + b`` is even, which isl states as an existentially
+    quantified constraint. loopy loops over such a domain's bounding box and
+    tests the constraint with an ``if`` in the innermost loop, so that half
+    the iterations of that loop do nothing (note 13 of
+    ``docs/loopy-notes.md``). Here every loop is asked, outermost first,
+    whether isl finds a stride for it given the loops outside it: ``b`` steps
+    by 2 from ``-a``. Such a loop is replaced by a counter, ``b = 2*b_step -
+    a``, in the domain (whose preimage has no holes left) and in every
+    instruction, and the new loop runs over the counter. For fixed values of
+    the loops outside it, the counter and the loop it replaces increase
+    together and meet the same points, so the kernel runs the same instances
+    in the same order: the change of variables is the one the order the
+    checker approved already fixes, and isl confirms, for each loop, that the
+    new domain maps back onto the old one exactly.
+
+    Done last, on the kernel code is generated from, and not in the kernel
+    later steps transform: a tile of ``b`` splits the loop the checker knows,
+    not the counter. A loop is left as loopy has it when it carries a tag
+    (a hardware axis is not a loop loopy steps through), is the loop of a
+    reduction, is named by another domain as a parameter (a fiber nested in
+    it), or has a stride whose offset involves a loop that does not run
+    around every instruction in it.
+
+    Returns the kernel, and for each loop replaced the expression it became,
+    as text: ``{"b": "2*b_step - a"}``.
+    """
+    if kernel is None:
+        return None, {}
+    from loopy.match import parse_stack_match
+    from loopy.symbolic import (
+        RuleAwareSubstitutionMapper,
+        SubstitutionRuleMappingContext,
+        aff_to_expr,
+        get_dependencies,
+    )
+    from pymbolic.mapper.substitutor import make_subst_func
+
+    entry = kernel.default_entrypoint
+    within: dict[str, set[str]] = {}
+    folded: set[str] = set()
+    for insn in entry.instructions:
+        for name in insn.within_inames:
+            within.setdefault(name, set()).add(insn.id)
+        folded |= set(insn.reduction_inames())
+    nested: set[str] = set()
+    for domain in entry.domains:
+        nested |= set(domain.get_var_names(isl.dim_type.param))
+    fresh = entry.get_var_name_generator()
+    domains = list(entry.domains)
+    substitution: dict[str, Any] = {}
+    renamed: dict[str, str] = {}
+    shown: dict[str, str] = {}
+    for position, domain in enumerate(domains):
+        params = set(domain.get_var_names(isl.dim_type.param))
+        ranked = _ranked(list(domain.get_var_names(isl.dim_type.set)), order)
+        for k, name in enumerate(ranked):
+            if name in tags or name not in within or name in folded | nested:
+                continue
+            try:
+                stride, offset = _stride_of(domain, name, ranked[k + 1 :])
+            except isl.Error:  # pragma: no cover - isl finds no stride
+                continue
+            if stride <= 1:
+                continue
+            around = {
+                renamed.get(outer, outer)
+                for outer in ranked[:k]
+                if within[name] <= within.get(outer, set())
+            }
+            value = aff_to_expr(offset)
+            if not set(get_dependencies(value)) - params <= around:
+                continue
+            counter = fresh(f"{name}_step")
+            value = stride * prim.Variable(counter) + value
+            counted = _counted(domain, name, counter, value)
+            if counted is None:
+                continue
+            domain = counted
+            substitution[name] = value
+            renamed[name] = counter
+            shown[name] = _stepped_text(stride, counter, offset)
+        domains[position] = domain
+    if not renamed:
+        return kernel, {}
+    insns = [
+        insn.copy(
+            within_inames=frozenset(renamed.get(n, n) for n in insn.within_inames)
+        )
+        if insn.within_inames & set(renamed)
+        else insn
+        for insn in entry.instructions
+    ]
+    priority = frozenset(
+        tuple(renamed.get(name, name) for name in nest)
+        for nest in entry.loop_priority
+    )
+    entry = entry.copy(domains=domains, instructions=insns, loop_priority=priority)
+    context = SubstitutionRuleMappingContext(
+        entry.substitutions, entry.get_var_name_generator()
+    )
+    mapper = RuleAwareSubstitutionMapper(
+        context, make_subst_func(substitution), within=parse_stack_match(None)
+    )
+    entry = context.finish_kernel(
+        mapper.map_kernel(entry, map_args=False, map_tvs=False)
+    )
+    return kernel.with_kernel(entry), shown
+
+
+def _counted(domain: Any, name: str, counter: str, value: Any) -> Any:
+    """``domain`` over ``counter`` in place of ``name``, where ``name = value``.
+
+    The preimage of the domain under the change of variables, which isl
+    confirms maps back onto the domain exactly. ``None`` when it does not, or
+    is not one basic set.
+    """
+    from loopy.symbolic import aff_from_expr
+
+    before = _as_set(domain)
+    names = list(before.get_var_names(isl.dim_type.set))
+    space = before.get_space().set_dim_name(
+        isl.dim_type.set, names.index(name), counter
+    )
+    try:
+        listed = isl.AffList.alloc(space.get_ctx(), len(names))
+        for other in names:
+            listed = listed.add(
+                aff_from_expr(space, value if other == name else prim.Variable(other))
+            )
+        function = isl.MultiAff.from_aff_list(
+            space.map_from_domain_and_range(before.get_space()), listed
+        )
+        after = before.preimage_multi_aff(function).coalesce()
+        if not after.apply(isl.Map.from_multi_aff(function)).is_equal(before):
+            return None  # pragma: no cover - isl's stride holds by construction
+    except isl.Error:  # pragma: no cover - defensive against isl declining
+        return None
+    if after.n_basic_set() != 1:  # pragma: no cover - a preimage of a basic set
+        return None
+    (out,) = after.get_basic_sets()
+    return out
+
+
+def _stepped_text(stride: int, counter: str, offset: Any) -> str:
+    """``2*b_step - a``: a loop as its counter, the way a reader writes it."""
+    from loopy.symbolic import aff_to_expr
+
+    if offset.dim(isl.dim_type.div) or offset.get_denominator_val().to_python() != 1:
+        return f"{stride}*{counter} + {aff_to_expr(offset)}"
+    terms = [(stride, counter)]
+    for kind in (isl.dim_type.in_, isl.dim_type.param):
+        for k in range(offset.dim(kind)):
+            coefficient = offset.get_coefficient_val(kind, k).to_python()
+            if coefficient:
+                terms.append((coefficient, offset.get_dim_name(kind, k)))
+    out = ""
+    for coefficient, name in terms:
+        magnitude = "" if abs(coefficient) == 1 else f"{abs(coefficient)}*"
+        if not out:
+            out = f"{'-' if coefficient < 0 else ''}{magnitude}{name}"
+        else:
+            out += f" {'-' if coefficient < 0 else '+'} {magnitude}{name}"
+    constant = offset.get_constant_val().to_python()
+    if constant:
+        out += f" {'-' if constant < 0 else '+'} {abs(constant)}"
+    return out
+
+
+# }}}

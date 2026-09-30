@@ -22,6 +22,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import islpy as isl
 import numpy as np
 import pytest
 
@@ -408,28 +409,37 @@ def test_skewing_the_coupled_wave_makes_the_tile_legal() -> None:
 
 
 def test_the_wave_demo_prints_the_rejections_then_every_agreement() -> None:
-    # Two schedules, the wavefront block and the diamond, and two fields each.
+    # Three schedules, the wavefront block, the diamond and the diamond
+    # tiling, and two fields each.
     result, _ = _invoke("wavefront_acoustic", "python")
     assert result.stdout.count("IllegalCast") == 3
     assert "witness: S1" in result.stdout
     assert "pressure: difference" in result.stdout
     assert "velocity: difference" in result.stdout
-    assert result.stdout.count("-> tested") == 4
-    assert "mod 2" in result.stdout
+    assert result.stdout.count("-> tested") == 6
+    assert "[a, b_step]" in result.stdout
+    assert "S1[t, i] -> [a = t + i, b = 1 + t - i] }).tile(a,b,4,4)" in result.stdout
     assert "matches the hand-written recurrence: True" in result.stdout
 
 
-def test_loopty_run_keeps_the_facts_of_both_wave_schedules() -> None:
-    # The block and the diamond are two schedules of one kernel. Their facts
-    # used to share ids, so the diamond was left out of the file's schedules.
+def test_loopty_run_keeps_the_facts_of_every_wave_schedule() -> None:
+    # The block, the diamond and the diamond tiling are three schedules of one
+    # kernel. Their facts used to share ids, so the diamond was left out of
+    # the file's schedules.
     _result, facts = _invoke("wavefront_acoustic", "run")
     agreements = [fact for fact in facts if fact["kind"] == "agreement"]
     assert [fact["provenance"]["schedule"] for fact in agreements] == [
         ["skew(i, by='t')", "tile(t,i,4,8)"],
         ["affine({ [t, i] -> [a = t + i, b = t - i] })"],
+        [
+            "affine({ S0[t, i] -> [a = t + i, b = t - i]; "
+            "S1[t, i] -> [a = t + i, b = 1 + t - i] })",
+            "tile(a,b,4,4)",
+        ],
     ]
+    assert {fact["status"] for fact in agreements} == {"tested"}
     casts = [fact for fact in facts if fact["kind"] in ("bijective", "monotone")]
-    assert len(casts) == 6
+    assert len(casts) == 10
     assert len({fact["id"] for fact in facts}) == len(facts)
 
 
@@ -471,6 +481,25 @@ def test_the_time_first_diamond_is_accepted_and_agrees_bit_for_bit() -> None:
         assert np.array_equal(out["velocity"], want_velocity), (nt, nx)
 
 
+def test_the_wave_diamond_compiles_to_loops_with_no_parity_test() -> None:
+    # The image of the diamond is the points where a + b is even. loopy looped
+    # over every b and tested the parity inside the innermost loop,
+    # "if (-b - a + 2 * ((b + a) / 2) == 0)", so half of its iterations did
+    # nothing. The kernel now counts b's steps, b = 2*b_step - a: its domain
+    # has no holes, the code has no parity test, and it still agrees with the
+    # hand recurrence bit for bit, at sizes of both parities (the test above).
+    from loopty.executor import emit_code
+
+    module = _module("wavefront_acoustic")
+    for nt, nx in [(3, 4), (5, 7), (16, 32)]:
+        schedule = module.diamond_schedule(nt, nx)
+        assert schedule.strides == {"b": "2*b_step - a"}
+        (domain,) = schedule.kernel.default_entrypoint.domains
+        assert domain.get_var_names(isl.dim_type.set) == ["a", "b_step"]
+        assert domain.dim(isl.dim_type.div) == 0
+        assert "== 0" not in emit_code(schedule)
+
+
 def test_tiling_the_wave_diamond_cuts_the_same_step_dependence() -> None:
     # What the docstring predicted: S0 at (t, i) writes the velocity S1 at
     # (t, i + 1) reads, a distance of (0, 1), which t - i runs backwards. A
@@ -482,6 +511,50 @@ def test_tiling_the_wave_diamond_cuts_the_same_step_dependence() -> None:
     (source_id, source), (sink_id, sink), _params = witness
     assert (source_id, sink_id) == ("S0", "S1")
     assert (sink["t"] - source["t"], sink["i"] - source["i"]) == (0, 1)
+
+
+def test_the_offset_diamond_tiles_the_pair_and_agrees_bit_for_bit() -> None:
+    # The time offset the refusal above asks for, as a map per statement: S1
+    # sits half a step after S0 along the diamond, every dependence becomes
+    # (0, 1), (1, 0) or (1, 1) in (a, b), and the rectangles are legal. affine
+    # refused a map per statement before (#46).
+    from loopty.executor import LoopyExecutor
+    from loopty.schedule import Schedule
+
+    module = _module("wavefront_acoustic")
+    schedule = module.offset_diamond_schedule()
+    assert schedule.order == ("a_outer", "b_outer", "a_inner", "b_inner")
+    assert [fact.status.value for fact in schedule.facts()] == ["decided"] * 4
+    # Against the native run, the fields differ by nothing at all, though the
+    # fact only asks for the approx tolerance.
+    fact = LoopyExecutor().differential(module.acoustic, schedule, module.initial())
+    assert fact.status.value == "tested"
+    outputs = fact.provenance["outputs"]
+    assert {name: outputs[name]["difference"] for name in outputs} == {
+        "pressure": 0,
+        "velocity": 0,
+    }
+    # The two images are the points where a + b is even and those where it is
+    # odd: together, every point of the loops, each of them one statement's.
+    untiled = Schedule(module.acoustic, sizes={"nt": 16, "nx": 32}).affine(
+        module.OFFSET_DIAMOND
+    )
+    (domain,) = untiled.kernel.default_entrypoint.domains
+    assert domain.dim(isl.dim_type.div) == 0
+    for nt, nx in [(2, 3), (3, 4), (5, 7), (9, 33), (16, 32), (17, 9)]:
+        rng = np.random.default_rng(100 * nt + nx)
+        pressure = rng.standard_normal((nt, nx))
+        velocity = rng.standard_normal((nt, nx))
+        want_pressure, want_velocity = module.reference(pressure, velocity)
+        for built in (module.offset_diamond_schedule(nt, nx), untiled):
+            out = LoopyExecutor().run(
+                built,
+                pressure=pressure.copy(),
+                velocity=velocity.copy(),
+                courant=module.COURANT,
+            )
+            assert np.array_equal(out["pressure"], want_pressure), (nt, nx)
+            assert np.array_equal(out["velocity"], want_velocity), (nt, nx)
 
 
 # }}}

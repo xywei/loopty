@@ -116,10 +116,10 @@ message states, because which violating pair isl picks depends on them.
 - **Transformations are casts with witnesses.** Every `split`, `tile`,
   `interchange`, `skew` and `realize` states its reindexing as an isl map, and
   `affine` takes the map from you, any injective affine one, the diamond
-  `(t, i) -> (t + i, t - i)` included. Each is checked for bijectivity on
-  statement instances and for monotonicity on the dependence relation. A failure
-  prints two instances and the array cell between them, before any code is
-  generated.
+  `(t, i) -> (t + i, t - i)` included, or a map per statement. Each is checked
+  for bijectivity on statement instances and for monotonicity on the dependence
+  relation. A failure prints two instances and the array cell between them,
+  before any code is generated.
 - **Reassociation is visible in the type.** Splitting an accumulation and summing
   the pieces is not free on floating point. A trace reads the accumulation's
   class off what it sums, `realize("y", tree=True)` is what lowers it to
@@ -208,7 +208,13 @@ end to end; the edges are sharp.
   re-checks it. `affine(map)` takes an isl map from loops to the loops that
   replace them, refuses one that misses or merges an instance or runs a
   dependence backwards, and rewrites the kernel over the map's image; `skew` is
-  that method with a particular map.
+  that method with a particular map. A union map whose tuples name statements,
+  `{ S0[t, i] -> [a, b] : ...; S1[t, i] -> [a, b] : ... }`, moves each
+  statement by its own map, checked on the dependences between the statements
+  as well as within each, which is the time offset a diamond tiling of two
+  statements that feed each other needs. A loop over an image with holes, such
+  as the diamond's `b`, counts its steps (`b = 2*b_step - a`,
+  `Schedule.strides`) instead of testing a parity at every `b`.
 - The target-capability check: a concurrent tag (a hardware axis, `ilp` or
   `vec`) inside a data-dependent (ragged) loop bound or its domain, a hardware
   axis on a reduction nested in another, a reduction loopy will not realize
@@ -292,16 +298,18 @@ end to end; the edges are sharp.
 - `Schedule.affine` and maps whose image has holes. The diamond
   `(t, i) -> (t + i, t - i)` reaches only the points of equal parity, and
   loopy's own `map_domain` refuses it, so loopty rewrites the kernel over the
-  image itself. loopy then generates correct code, bit for bit against the
-  native run for the stencil and the acoustic pair, and for the stencil tiled
-  in diamond coordinates, but it tests the parity with an `if` in the innermost
-  loop instead of stepping by two, so half of that loop's iterations do
-  nothing. A map moves every statement in its
-  loops the same way, so the per-statement time offset a diamond tiling of
-  `examples/wavefront_acoustic.py` needs is out of reach, and the tiling is
-  refused with a witness. A map the rewrite cannot write for loopy, such as one
-  over a row and the ragged fiber inside it, is a `refuted` `buildable` fact.
-  See note 13 in `docs/loopy-notes.md`.
+  image itself, and the loop left with the holes counts its steps. The code is
+  correct, bit for bit against the native run for the stencil and the acoustic
+  pair, untiled and tiled in diamond coordinates. Statements moved by maps of
+  their own keep sharing their loops, because loopy gives the statements of a
+  loop one domain: the loops run over the union of the images, and each
+  statement tests that a point is its own. For the acoustic pair every point
+  is one statement's; for maps whose images leave holes between them, such as
+  `S0` at `2t` and `S1` at `2t + 1` along the diamond, the loops run over the
+  hull of the union and visit the holes. A map the rewrite cannot write for
+  loopy, such as one over a row and the ragged fiber inside it, or maps that
+  move two statements of one ragged fiber, or of two fibers of one row,
+  differently, is a `refuted` `buildable` fact. See note 13 in `docs/loopy-notes.md`.
 - `realize(var, tree=True)` checks and marks the reassociation; the reduction
   tree itself comes from splitting and tagging the reduction iname, which is
   checked separately and not verified on the C target.
