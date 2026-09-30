@@ -345,13 +345,19 @@ with a pair of statement instances.
   temporary's element sort counts in the exactness class and the contraction
   pin as a parameter's does. A ragged one is refused, and natively
   `Arr.zeros_like` of an array over a domain is over that domain, in its
-  storage. A temporary of reals
-  has to be stored natively as the compiled one is, or one run truncates or
-  rounds what the other keeps: a `dtype` given to `Arr.zeros_like` has to be
-  `float64`, checked when the term is built, and one left to the parameter
-  it copies is checked when the compiled program runs
-  (`Term.temporaries_like`, `contract.inherited_storage`), refusing an
-  integer or a `float32` `u` for `f = Arr.zeros_like(u)`.
+  storage. A temporary of any sort has to be stored natively in a dtype that
+  holds what the compiled one holds (`contract.native_storage`), or one run
+  truncates, rounds or drops what the other keeps: `float64` for `Real`, the
+  dtype itself for a numpy one (`np.float32` rounds, `np.complex128` keeps an
+  imaginary part that a real array drops), `bool` for `Bool`, whose compiled
+  byte holds a truth value as a bool does and on which natively only a bool
+  has a logical `~`, and a signed integer of 32 bits or more for `Nat`, `Int`
+  and `Fin[m]`. A `dtype` given to `Arr.zeros_like` is checked when the term
+  is built, and one left to the parameter it copies when the compiled program
+  runs (`Term.temporaries_like`, `contract.inherited_storage`): an integer or
+  a `float32` `u` is refused for a real `f = Arr.zeros_like(u)`, a real one
+  for a complex or a `Bool` `f`, and a real one for a natural `f` (#71). The
+  interpreter stores a temporary as the native run has to.
 - **A term may state its offsets** (`Term.offsets`, `Term.offsets_of`). The
   offsets a counts family's rows are read through were always read off the
   names of the term's parameters, which is right for a kernel and wrong for a

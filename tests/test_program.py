@@ -14,7 +14,7 @@ import islpy as isl
 import loopy as lp
 import numpy as np
 import pytest
-from lanky.prelude import Nat, Real
+from lanky.prelude import Bool, Nat, Real
 
 from loopty import (
     Arr,
@@ -214,6 +214,56 @@ def halve(c: Arr[Fin[n], Nat], f: Arr[Fin[n], Real]):  # noqa: F821
     """Half of every count, which is a real."""
     for i in c.dom:
         f[i] = 0.5 * c[i]
+
+
+@kernel
+def rotate(u: Arr[Fin[n], Real], f: Arr[Fin[n], np.complex128]):  # noqa: F821
+    """A quarter turn of every entry, which is imaginary."""
+    for i in u.dom:
+        f[i] = 1j * u[i]
+
+
+@kernel
+def square(
+    f: Arr[Fin[n], np.complex128],  # noqa: F821
+    g: Arr[Fin[n], np.complex128],  # noqa: F821
+):
+    """The square of every entry: ``-u * u`` after ``rotate``."""
+    for i in f.dom:
+        g[i] = f[i] * f[i]
+
+
+@kernel
+def mark(u: Arr[Fin[n], Real], b: Arr[Fin[n], Bool]):  # noqa: F821
+    """Which entries are above one."""
+    for i in u.dom:
+        b[i] = u[i] > 1.0
+
+
+@kernel
+def keep_unmarked(
+    b: Arr[Fin[n], Bool],  # noqa: F821
+    u: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """Copy the entries ``mark`` did not mark."""
+    for i in u.dom:
+        with when(~b[i]):
+            y[i] = u[i]
+
+
+@kernel
+def truncate(u: Arr[Fin[n], Real], c: Arr[Fin[n], Nat]):  # noqa: F821
+    """Every entry as a natural number, which drops its fraction."""
+    for i in u.dom:
+        c[i] = u[i]
+
+
+@kernel
+def count(c: Arr[Fin[n], Nat], y: Arr[Fin[n], Real]):  # noqa: F821
+    """Every count, as a real."""
+    for i in c.dom:
+        y[i] = 1.0 * c[i]
 
 
 @kernel
@@ -1020,6 +1070,200 @@ def test_a_temporary_of_reals_is_stored_as_the_compiled_one_is() -> None:
 
         with pytest.raises(TraceError, match="Pass Arr.zeros_like dtype=float64"):
             other_dtype.trace()
+
+
+@pytest.mark.parametrize(
+    ("sort", "storage", "holds", "refused"),
+    [
+        (Real, np.float64, [np.float64], [np.float32, np.int64, np.complex128]),
+        (Real.exact, np.float64, [np.float64], [np.float32]),
+        (np.float32, np.float32, [np.float32], [np.float64]),
+        (np.complex128, np.complex128, [np.complex128], [np.float64, np.complex64]),
+        (complex, np.complex128, [np.complex128], [np.float64]),
+        (Bool, np.bool_, [np.bool_], [np.int8, np.float64]),
+        (Nat, np.int64, [np.int64, np.int32], [np.int16, np.uint64, np.float64]),
+        (Fin[4], np.int64, [np.int64, np.int32], [np.float64, np.bool_]),
+        (np.int32, np.int32, [np.int32], [np.int64]),
+    ],
+)
+def test_every_sort_has_a_native_storage(sort, storage, holds, refused) -> None:
+    # What a native array has to be stored as to hold what the compiled
+    # temporary of the sort holds.
+    from loopty.contract import holds_natively, native_storage
+
+    assert native_storage(sort) == np.dtype(storage)
+    for dtype in holds:
+        assert holds_natively(sort, dtype), dtype
+    for dtype in refused:
+        assert not holds_natively(sort, dtype), dtype
+
+
+def test_a_complex_temporary_is_stored_as_the_compiled_one_is() -> None:
+    # zeros_like(u) of a real u is real natively, so rotate's quarter turn
+    # cannot be stored in it, where the compiled temporary, complex, keeps it:
+    # the compiled run refuses the call, naming the dtype.
+    @program
+    def rotated(u, g):
+        f = Arr.zeros_like(u)
+        rotate(u, f)
+        square(f, g)
+
+    def make() -> dict:
+        return {
+            "u": Arr.from_numpy(np.array([1.0, 2.0, 3.0])),
+            "g": Arr.zeros(3, dtype=np.complex128),
+        }
+
+    assert rotated.term.temporaries_like == (("f", "u"),)
+    with pytest.raises(ValueError, match="u is stored as float64"):
+        LoopyExecutor().run(rotated, **make())
+    with pytest.raises(ValueError, match="give that Arr.zeros_like dtype=complex128"):
+        LoopyExecutor().differential(rotated, Schedule(rotated), make())
+
+    @program
+    def rotated_given(u, g):
+        f = Arr.zeros_like(u, dtype=np.complex128)
+        rotate(u, f)
+        square(f, g)
+
+    assert rotated_given.term.temporaries_like == ()
+    fact = LoopyExecutor().differential(
+        rotated_given, Schedule(rotated_given), make()
+    )
+    assert fact.status.value == "tested", fact.provenance
+    native = make()
+    rotated_given(**native)
+    assert list(native["g"].numpy()) == [-1.0, -4.0, -9.0]
+
+    for dtype in (np.float64, np.complex64):
+
+        @program
+        def other_dtype(u, g):
+            f = Arr.zeros_like(u, dtype=dtype)
+            rotate(u, f)
+            square(f, g)
+
+        with pytest.raises(TraceError, match="Pass Arr.zeros_like dtype=complex128"):
+            other_dtype.trace()
+
+
+def test_a_temporary_of_truth_values_is_a_bool_natively() -> None:
+    # Compiled, b is a byte. Natively only a bool array holds a truth value
+    # with ~ logical on it: ~ on a float refuses, and on an integer is
+    # bitwise, which when refuses. So b is made a bool, or refused.
+    @program
+    def unmarked(u, y):
+        b = Arr.zeros_like(u)
+        mark(u, b)
+        keep_unmarked(b, u, y)
+
+    def make() -> dict:
+        return {"u": Arr.from_numpy(np.array([0.5, 2.0, 1.0])), "y": Arr.zeros(3)}
+
+    assert unmarked.term.temporaries_like == (("b", "u"),)
+    with pytest.raises(TypeError):
+        unmarked(**make())
+    with pytest.raises(ValueError, match="give that Arr.zeros_like dtype=bool"):
+        LoopyExecutor().run(unmarked, **make())
+
+    @program
+    def unmarked_given(u, y):
+        b = Arr.zeros_like(u, dtype=bool)
+        mark(u, b)
+        keep_unmarked(b, u, y)
+
+    native = make()
+    unmarked_given(**native)
+    assert list(native["y"].numpy()) == [0.5, 0.0, 1.0]
+    fact = LoopyExecutor().differential(
+        unmarked_given, Schedule(unmarked_given), make()
+    )
+    assert fact.status.value == "tested", fact.provenance
+
+    @program
+    def unmarked_bytes(u, y):
+        b = Arr.zeros_like(u, dtype=np.int8)
+        mark(u, b)
+        keep_unmarked(b, u, y)
+
+    with pytest.raises(TraceError, match="Pass Arr.zeros_like dtype=bool"):
+        unmarked_bytes.trace()
+
+
+def test_a_temporary_of_naturals_is_an_integer_natively() -> None:
+    # A real u would keep the fraction truncate drops compiled. Any signed
+    # integer of 32 bits or more holds a Nat as the compiled one does.
+    @program
+    def counted(u, y):
+        c = Arr.zeros_like(u)
+        truncate(u, c)
+        count(c, y)
+
+    def make() -> dict:
+        return {"u": Arr.from_numpy(np.array([1.5, 2.0, 0.25])), "y": Arr.zeros(3)}
+
+    assert counted.term.temporaries_like == (("c", "u"),)
+    with pytest.raises(ValueError, match="a signed integer of 32 bits or more"):
+        LoopyExecutor().run(counted, **make())
+
+    for dtype in (np.int64, np.int32):
+
+        @program
+        def counted_given(u, y):
+            c = Arr.zeros_like(u, dtype=dtype)
+            truncate(u, c)
+            count(c, y)
+
+        native = make()
+        counted_given(**native)
+        assert list(native["y"].numpy()) == [1.0, 2.0, 0.0]
+        fact = LoopyExecutor().differential(
+            counted_given, Schedule(counted_given), make()
+        )
+        assert fact.status.value == "tested", fact.provenance
+
+    for dtype in (np.float64, np.int16):
+
+        @program
+        def counted_other(u, y):
+            c = Arr.zeros_like(u, dtype=dtype)
+            truncate(u, c)
+            count(c, y)
+
+        with pytest.raises(TraceError, match="Pass Arr.zeros_like dtype=int64"):
+            counted_other.trace()
+
+
+def test_the_interpreter_stores_a_temporary_of_any_sort_as_natively() -> None:
+    # A complex temporary allocated as reals dropped rotate's quarter turn, and
+    # a Bool one as reals refused ~.
+    from loopty.interpret import interpret
+
+    @program
+    def rotated(u, g):
+        f = Arr.zeros_like(u, dtype=np.complex128)
+        rotate(u, f)
+        square(f, g)
+
+    @program
+    def unmarked(u, y):
+        b = Arr.zeros_like(u, dtype=bool)
+        mark(u, b)
+        keep_unmarked(b, u, y)
+
+    def rotated_inputs() -> dict:
+        u = Arr.from_numpy(np.array([1.0, 2.0]))
+        return {"u": u, "g": Arr.zeros(2, dtype=np.complex128)}
+
+    def unmarked_inputs() -> dict:
+        return {"u": Arr.from_numpy(np.array([0.5, 2.0])), "y": Arr.zeros(2)}
+
+    for prog, make in ((rotated, rotated_inputs), (unmarked, unmarked_inputs)):
+        native, interpreted = make(), make()
+        prog(**native)
+        interpret(prog.term, interpreted)
+        for name, value in native.items():
+            assert np.array_equal(interpreted[name].numpy(), value.numpy()), name
 
 
 def test_a_callee_with_an_array_over_a_domain_is_refused() -> None:

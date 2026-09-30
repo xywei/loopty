@@ -42,10 +42,11 @@ of the term's :attr:`~loopty.term.Term.temporaries`, typed by the kernels it is
 passed to and shaped like ``u``, and zeroed by a statement of its own where the
 body made it, because ``zeros_like`` is zeros. The lowering declares it as a
 loopy temporary rather than an argument, so nobody passes it and nothing
-outside the kernel sees it. Natively it has ``u``'s dtype, which for a
-temporary of reals has to be the dtype the lowering stores it in: a ``dtype``
-given to ``zeros_like`` is checked here, and ``u``'s is checked when the
-compiled program is run (:attr:`~loopty.term.Term.temporaries_like`).
+outside the kernel sees it. Natively it has ``u``'s dtype, which has to hold
+what the compiled temporary holds, whatever its sort
+(:func:`loopty.contract.native_storage`): a ``dtype`` given to
+``zeros_like`` is checked here, and ``u``'s is checked when the compiled
+program is run (:attr:`~loopty.term.Term.temporaries_like`).
 
 *A parameter has one role.* It is an output of the program's term when any
 call writes it, which the lowering reads off the statements, and an input
@@ -100,7 +101,13 @@ import pymbolic.primitives as prim
 from lanky.prelude import FinType, Refined
 from lanky.terms import Var, init_args, render, structurally_equal
 
-from loopty.contract import integral_sort, real_storage, sort_bound
+from loopty.contract import (
+    holds_natively,
+    integral_sort,
+    native_storage,
+    sort_bound,
+    storage_wanted,
+)
 from loopty.flow import NonAffine, domain_set, expr_text, free_names
 from loopty.term import Access, ArrType, Reduction, Stmt, Term
 from loopty.trace import TraceError
@@ -1448,16 +1455,18 @@ class _Composer:
         ``Arr.zeros_like(u)`` is natively an array of ``u``'s dtype, or of the
         ``dtype`` it is given, and the program's temporary has the element
         sort the kernels it is passed to declare, stored as the lowering
-        stores that sort. For a sort of reals the two have to be the same
-        dtype, or the native run truncates (into integers) or rounds (into
-        ``float32``) what the compiled run keeps. A ``dtype`` given, here or to
-        the array it was made like, is checked now. One left to a parameter is
-        whatever the parameter is called with: the pair goes into
-        :attr:`~loopty.term.Term.temporaries_like`, and is checked when the
-        compiled program is run (:func:`loopty.contract.inherited_storage`).
+        stores that sort. The native array has to hold what the compiled one
+        holds (:func:`loopty.contract.native_storage`), or the native run
+        truncates (into integers), rounds (into ``float32``) or drops an
+        imaginary part (into reals) where the compiled run does not. A
+        ``dtype`` given, here or to the array it was made like, is checked
+        now. One left to a parameter is whatever the parameter is called
+        with: the pair goes into :attr:`~loopty.term.Term.temporaries_like`,
+        and is checked when the compiled program is run
+        (:func:`loopty.contract.inherited_storage`).
         """
         sort = self.types[name].dtype
-        want = real_storage(sort)
+        want = native_storage(sort)
         if want is None:
             return
         value: ProgramValue | None = made.value
@@ -1468,14 +1477,15 @@ class _Composer:
                     got = np.dtype(here.dtype)
                 except TypeError:
                     got = None
-                if got == want:
+                if got is not None and holds_natively(sort, got):
                     return
                 raise TraceError(
                     f"{self.program} makes {name} at {made.where} as an array of "
                     f"{got if got is not None else here.dtype!r}, and "
-                    f"{self.origin[name]} declares its elements {sort}, which the "
-                    f"compiled program stores as {want}: the native run would "
-                    f"compute {name} in another dtype than the compiled one. "
+                    f"{self.origin[name]} declares its elements {sort}, which "
+                    f"the native run has to store as {storage_wanted(sort)} to "
+                    f"hold them as the compiled program does: the native run "
+                    f"would compute {name} otherwise than the compiled one. "
                     f"Pass Arr.zeros_like dtype={want}"
                 )
             value = value.like

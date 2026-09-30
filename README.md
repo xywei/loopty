@@ -374,12 +374,15 @@ end to end; the edges are sharp.
   through the same offsets; a loop in the body whose trip count is an
   argument (a host loop) is refused, and so are an array made like a ragged
   one and a callee with an array over a `Where`, `Sigma` or union domain. A
-  temporary of reals made like a parameter, `Arr.zeros_like(u)`, has
-  `u`'s dtype natively, so the compiled program refuses a `u` not stored as
-  `float64`. On the C target a temporary is a variable-length array on the
-  stack of the call, which bounds its size (note 16 in `docs/loopy-notes.md`);
-  on OpenCL it is a global temporary, which is generated but, like every
-  device path, not run from a development machine.
+  temporary made like a parameter, `Arr.zeros_like(u)`, has `u`'s dtype
+  natively, so the compiled program refuses a `u` whose dtype does not hold
+  what the compiled temporary holds: `float64` for `Real`, the dtype itself
+  for a numpy one such as `np.complex128`, `bool` for `Bool`, and a signed
+  integer of 32 bits or more for `Nat`, `Int` and `Fin[m]`. On the C target a
+  temporary is a variable-length array on the stack of the call, which bounds
+  its size (note 16 in `docs/loopy-notes.md`); on OpenCL it is a global
+  temporary, which is generated but, like every device path, not run from a
+  development machine.
 - Only a two-axis (row, fiber) ragged array lowers. A deeper dependent sum
   raises.
 - A polyhedral domain is an array's whole index set, so it cannot sit beside

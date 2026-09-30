@@ -82,14 +82,16 @@ __all__ = [
     "domain_arguments",
     "element_bound",
     "element_types",
+    "holds_natively",
     "inherited_storage",
     "integral_sort",
+    "native_storage",
     "ragged_arguments",
-    "real_storage",
     "resolve_sizes",
     "scalar_parameters",
     "sizes_not_negative",
     "sort_bound",
+    "storage_wanted",
 ]
 
 
@@ -411,23 +413,72 @@ def sizes_not_negative(
             )
 
 
-def real_storage(sort: Any) -> np.dtype | None:
-    """The dtype a value of a sort of reals is stored in, or ``None``.
+def native_storage(sort: Any) -> np.dtype | None:
+    """The dtype a native array of ``sort`` holds values in as the compiled one does.
 
-    ``Real``, exact or not, is double precision, as the lowering declares it
-    (:func:`loopty.lower.numpy_dtype`); a numpy floating dtype is itself. An
-    integral sort and anything else give ``None``: they are not asked here.
+    A program's temporary is stored compiled as the lowering stores its
+    element sort (:func:`loopty.lower.numpy_dtype`), and natively in whatever
+    dtype ``Arr.zeros_like`` gave it. The two runs compute one thing only when
+    the native array holds every value written into it as the compiled one
+    does, which is this dtype:
+
+    * a numpy dtype or scalar type names a storage and is itself:
+      ``np.float32`` rounds, and ``np.complex128`` keeps an imaginary part;
+    * ``Real``, exact or not, and ``float`` are ``float64``, and ``complex``
+      is ``complex128``;
+    * ``Bool`` and ``bool`` are ``bool``. The compiled temporary is a byte,
+      which holds a truth value as a bool does; natively ``~``, ``&`` and
+      ``|`` are logical only on a bool (bitwise on an integer, refused on a
+      float), and ``when`` refuses an integer that is not one;
+    * an integral sort, ``Fin[m]``, ``Nat``, ``Int`` or ``int``, is ``int64``,
+      and any signed integer of 32 bits or more holds it
+      (:func:`holds_natively`): the compiled one is 32 bits wide, and a
+      native argument of such a sort is 64 bits wide as a rule.
+
+    Anything else is ``None``, and is not asked.
     """
-    if integral_sort(sort):
-        return None
     base = _base_sort(sort)
     if isinstance(base, np.dtype):
-        return base if base.kind == "f" else None
-    if isinstance(base, type) and issubclass(base, np.floating):
+        return base
+    if isinstance(base, type) and issubclass(base, np.generic):
         return np.dtype(base)
+    if base is bool or getattr(base, "name", None) == "Bool":
+        return np.dtype(np.bool_)
+    if base is int or integral_sort(base):
+        return np.dtype(np.int64)
     if base is float or getattr(base, "name", None) == "Real":
         return np.dtype(np.float64)
+    if base is complex:
+        return np.dtype(np.complex128)
     return None
+
+
+def holds_natively(sort: Any, dtype: Any) -> bool:
+    """Whether a native array of ``dtype`` holds ``sort`` as the compiled one does.
+
+    The dtype :func:`native_storage` says, or for an integral sort any signed
+    integer of 32 bits or more. A narrower one wraps round where the compiled
+    32-bit one does not. A sort with no storage is not asked.
+    """
+    want = native_storage(sort)
+    if want is None:
+        return True
+    try:
+        got = np.dtype(dtype)
+    except TypeError:
+        return False
+    base = _base_sort(sort)
+    if base is int or integral_sort(base):
+        return got.kind == "i" and got.itemsize >= 4
+    return got == want
+
+
+def storage_wanted(sort: Any) -> str:
+    """How :func:`holds_natively` says the native storage of ``sort``, in words."""
+    base = _base_sort(sort)
+    if base is int or integral_sort(base):
+        return "a signed integer of 32 bits or more"
+    return str(native_storage(sort))
 
 
 def inherited_storage(
@@ -435,32 +486,35 @@ def inherited_storage(
     like: Iterable[tuple[str, str]],
     supplied: Mapping[str, Any],
 ) -> None:
-    """Refuse a parameter whose dtype a program's temporary of reals inherits.
+    """Refuse a parameter whose dtype a program's temporary inherits, if it is wrong.
 
     ``Arr.zeros_like(u)`` in a program's body is natively an array of ``u``'s
     dtype, whatever ``u`` is called with, and in the compiled program it is a
     temporary of the element sort its kernels declare, stored as that sort is
     (:attr:`loopty.term.Term.temporaries_like` lists them). An integer ``u``
-    makes the native one truncate every real written into it, and a
-    ``float32`` one rounds it, where the compiled one does neither, so the
-    two runs would compute two things; the call is refused, naming the dtype
-    to pass. A temporary of an integral sort is not asked.
+    makes the native one truncate every real written into it, a ``float32``
+    one rounds it, and a real one drops the imaginary part of a complex
+    value, where the compiled one does none of these, so the two runs would
+    compute two things; the call is refused, naming the dtype to pass. What
+    each sort has to be stored as natively is :func:`native_storage`.
     """
     for temporary, name in like:
         typ = temporaries.get(temporary)
-        want = real_storage(getattr(typ, "dtype", None))
+        sort = getattr(typ, "dtype", None)
+        want = native_storage(sort)
         value = supplied.get(name)
         if want is None or value is None:
             continue
         got = np.asarray(value.numpy() if isinstance(value, Arr) else value).dtype
-        if got == want:
+        if holds_natively(sort, got):
             continue
         raise ValueError(
             f"the argument {name} is stored as {got}, and the program makes "
             f"{temporary} with Arr.zeros_like from it, which natively is an "
             f"array of {got} too; the kernels {temporary} is passed to declare "
-            f"its elements {typ.dtype}, which the compiled program stores as "
-            f"{want}, so the two runs would compute {temporary} differently. "
+            f"its elements {sort}, which the native run has to store as "
+            f"{storage_wanted(sort)} to hold them as the compiled program does, "
+            f"so the two runs would compute {temporary} differently. "
             f"Pass {name} as {want}, or give that Arr.zeros_like dtype={want}"
         )
 
