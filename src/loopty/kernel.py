@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import functools
 import os
+import sys
 from types import FunctionType, MethodType, ModuleType
 from typing import Any
 
@@ -46,6 +47,7 @@ from lanky.terms import evaluate_annotations
 
 from loopty import typing as rules
 from loopty.arr import Arr, ArrSpec
+from loopty.compose import current_recorder, trace_program
 from loopty.contract import check_arguments, integral_sort
 from loopty.term import (
     ArrType,
@@ -336,7 +338,14 @@ class Kernel(_Decorated):
         trace and the compiled run say. Such an argument is copied into an
         array over the declared domain for the call and copied back after it
         (:meth:`_over_declared_domains`).
+
+        *Inside a program whose term is being built, nothing runs.* The call is
+        recorded, with what it was given, and the program's term is composed
+        from the calls afterwards; see :mod:`loopty.compose`.
         """
+        recorder = current_recorder()
+        if recorder is not None:
+            return recorder.call(self, args, kwargs, sys._getframe(1))
         bound = self._bound(args, kwargs)
         layout = declared_layout(tuple(self.arg_types.items()))
         check_arguments(
@@ -552,10 +561,23 @@ class Kernel(_Decorated):
 
 
 class Program(_Decorated):
-    """A sequence of kernel calls, run natively and recorded.
+    """A sequence of kernel calls: run natively, traced, lowered as one kernel.
 
-    A program is deliberately thin in this release. It runs its body, which
-    calls kernels, which run natively, so ``python file.py`` works end to end.
+    ``python file.py`` runs the body, which calls kernels, which run natively,
+    so a program works end to end without loopy.
+
+    Its :attr:`term` is the kernels it calls, in call order, composed into one
+    term in the program's names (:mod:`loopty.compose`): an array one call
+    writes and the next reads is one array of that term, an array the body
+    makes with :meth:`~loopty.arr.Arr.zeros_like` is a temporary, and the
+    dependences between the calls are in the footprints, as between two
+    statements of one kernel. That term lowers into one loopy kernel whose
+    statements run in call order, so a program can be run compiled
+    (``LoopyExecutor().run(solve, ...)``), scheduled (``Schedule(solve)``)
+    and compared with its native run, which is what ``loopty run`` does with
+    every program in a file. Fusing the calls is not done: it is a cast over
+    this term, and waits for facts that travel.
+
     What it adds to the ledger is bookkeeping rather than reasoning: the
     postcondition of every kernel it calls is restated as a fact *in the scope
     of the program*, which rests on the callee's own fact. That is lanky's
@@ -574,22 +596,60 @@ class Program(_Decorated):
     ledger rather than quietly assumed to be handled.
     """
 
+    def __init__(self, fn: Any) -> None:
+        super().__init__(fn)
+        self._term: Term | None = None
+
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        """Run the body natively; its kernel calls run natively too."""
+        """Run the body natively; its kernel calls run natively too.
+
+        Inside another program whose term is being built, the body runs
+        against that program's placeholders, so its calls are recorded there,
+        in place.
+        """
         return self.fn(*args, **kwargs)
 
+    def trace(self) -> Term:
+        """Run the body against placeholders and compose the calls it makes.
+
+        See :func:`loopty.compose.trace_program`. A body the composition
+        refuses raises :class:`~loopty.trace.TraceError` naming the fix; the
+        native run does not need a term and is not refused.
+        """
+        self._term = trace_program(self)
+        return self._term
+
+    @property
+    def term(self) -> Term:
+        """The program's term, built once and kept."""
+        if self._term is None:
+            self.trace()
+        assert self._term is not None
+        return self._term
+
     def callees(self) -> tuple[Kernel, ...]:
-        """The kernels this program's body names.
+        """The kernels this program's body names, and those of the programs it names.
 
         Read off the code object's global references, which is enough for the
-        straight-line composition a program is, and needs no AST pass.
+        straight-line composition a program is, and needs no AST pass. A
+        program the body calls has its calls recorded in place in this
+        program's term (:mod:`loopty.compose`), so its kernels are this
+        program's callees too, and their postconditions are restated here.
         """
-        globals_ = getattr(self.fn, "__globals__", {})
-        out = []
-        for name in self.fn.__code__.co_names:
-            value = globals_.get(name)
-            if isinstance(value, Kernel) and value not in out:
-                out.append(value)
+        out: list[Kernel] = []
+        seen = {id(self)}
+
+        def visit(program: Program) -> None:
+            globals_ = getattr(program.fn, "__globals__", {})
+            for name in program.fn.__code__.co_names:
+                value = globals_.get(name)
+                if isinstance(value, Kernel) and value not in out:
+                    out.append(value)
+                elif isinstance(value, Program) and id(value) not in seen:
+                    seen.add(id(value))
+                    visit(value)
+
+        visit(self)
         return tuple(out)
 
     def facts(self) -> tuple[Fact, ...]:

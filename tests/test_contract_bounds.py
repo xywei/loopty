@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from lanky.prelude import Real
+from lanky.prelude import Nat, Real
 from lanky.terms import Var
 
 from loopty import Arr, Fin, kernel
@@ -200,3 +200,25 @@ def test_a_floor_divided_axis_is_not_solved_for() -> None:
     # A linear axis is still solved, as before.
     types = {"y": ArrType(axes=(2 * Var("n") + 1,), dtype=Real, ragged=(False,))}
     assert resolve_sizes(types, {"y": np.zeros(7)}) == {"n": 3}
+
+
+def test_an_axis_too_short_for_any_size_is_refused() -> None:
+    # An ``off`` of no cells for ``Fin[n + 1]`` stands for ``n = -1``. Every
+    # fact about the kernel has its sizes non-negative, and so does what the
+    # lowering tells loopy, which then writes ``off[n]`` as ``off[-1]``.
+    from loopty.contract import check_arguments
+
+    @kernel
+    def seed_last(a: Nat, off: Arr[Fin[n + 1], Nat]):  # noqa: F821
+        off[off.dom.size - 1] = a
+
+    types = seed_last.arg_types
+    with pytest.raises(ValueError, match=r"would make the size n -1"):
+        check_arguments(types, {"a": 1, "off": np.zeros(0, dtype=np.int64)})
+    with pytest.raises(ValueError, match=r"would make the size n -1"):
+        seed_last(1, Arr.from_numpy(np.zeros(0, dtype=np.int64)))
+    # One cell is n = 0, which is a size.
+    check_arguments(types, {"a": 1, "off": np.zeros(1, dtype=np.int64)})
+    off = np.zeros(1, dtype=np.int64)
+    LoopyExecutor().run(seed_last, a=4, off=off)
+    assert list(off) == [4]

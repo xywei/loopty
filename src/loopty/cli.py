@@ -31,6 +31,12 @@ something ``loopty run`` can do something with. Each run is compared against the
 kernel's own Python body on the same inputs, and the comparison lands in the
 ledger as a fact with the tolerance its types state.
 
+A program is run the same way. Its term is its kernels' statements in call
+order (:mod:`loopty.compose`), which lowers into one kernel, and that kernel is
+compared with the program's own body run natively, on the inputs the file
+offers under the program's name. A program whose term cannot be built is named
+with the reason, as a kernel that cannot be traced is, and counts as failed.
+
 What ``--target`` means
 -----------------------
 

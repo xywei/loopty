@@ -32,6 +32,7 @@ does not depend on which.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -269,6 +270,37 @@ class Arr:
         array._domain = fixed
         array._storage = storage
         return array
+
+    @classmethod
+    def zeros_like(cls, other: Any, dtype: Any = None) -> Arr:
+        """An array of zeros laid out as ``other`` is.
+
+        Dense or ragged as ``other`` is, with its own copy of the offsets, or
+        over ``other``'s domain in its storage, and of ``other``'s dtype unless
+        ``dtype`` says otherwise.
+
+        This is how a program makes an array of its own, an intermediate that
+        one kernel writes and the next reads. Inside a
+        :class:`~loopty.kernel.Program` whose term is being built, ``other``
+        is a placeholder (:class:`loopty.compose.ProgramValue`), and what comes
+        back is the placeholder of a new array, which the program's term keeps
+        as a temporary, zeroed where it is made. Its element sort there is the
+        one the kernels it is passed to declare, stored as the lowering stores
+        it. The native array has to hold what that one holds, or one run
+        truncates, rounds or drops what the other keeps
+        (:func:`loopty.contract.native_storage`): a ``dtype`` given is checked
+        when the term is built, and one left to ``other`` when the compiled
+        program is run (:func:`loopty.contract.inherited_storage`).
+        """
+        hook = getattr(type(other), "_loopty_zeros_like", None)
+        if hook is not None:
+            return hook(other, sys._getframe(1), dtype)
+        if isinstance(other, Arr):
+            values = np.zeros_like(other.numpy(), dtype=dtype)
+            if other.domain is not None:
+                return cls._over(other.domain, other.storage or "box", values)
+            return cls(values, other.offsets.copy()) if other.is_ragged else cls(values)
+        return cls(np.zeros_like(np.asarray(other), dtype=dtype))
 
     @classmethod
     def from_numpy(cls, values: Any, dtype: Any = None) -> Arr:

@@ -49,10 +49,10 @@ from typing import Any
 import islpy as isl
 import numpy as np
 import pymbolic.primitives as prim
-from lanky.terms import Abs, render
+from lanky.terms import Abs, evaluate, render
 
 from loopty.arr import Arr
-from loopty.contract import integral_sort, resolve_sizes
+from loopty.contract import integral_sort, native_storage, resolve_sizes
 from loopty.term import Access, ArrType, Reduction, Term, declared_layout
 from loopty.trace import accesses_in
 
@@ -172,7 +172,9 @@ class _Run:
                 self.arrays[name] = _storage(value, typ, name in written)
             else:
                 self.scalars[name] = value
-        for name, (counts, offsets) in declared_layout(term.params).items():
+        for name, (counts, offsets) in declared_layout(
+            term.params, term.offsets
+        ).items():
             array = self.arrays[name]
             if array.is_ragged:
                 self.arrays[name] = array.through(
@@ -180,6 +182,8 @@ class _Run:
                     self.arrays.get(offsets) if offsets else None,
                 )
         self.sizes = resolve_sizes(dict(term.params), arguments)
+        for name, typ in term.temporaries:
+            self.arrays[name] = self._temporary(name, typ)
         self.reflected = dict(term.reflected)
         for parameter, expr in term.reflected:
             touched = sorted({a.array for a in accesses_in(expr)} & written)
@@ -192,6 +196,30 @@ class _Run:
         #: The work allowed (see :func:`interpret`) and the work done so far.
         self.limit: int | None = None
         self.spent = 0
+
+    def _temporary(self, name: str, typ: ArrType) -> Arr:
+        """A buffer for one of a program's own arrays, at the arguments' sizes.
+
+        Zeros, which is what the statement that begins its life writes anyway
+        (:mod:`loopty.compose`); the interpreter runs that statement like any
+        other. It is stored as the native ``Arr.zeros_like`` has to store it
+        to hold what the compiled one holds
+        (:func:`loopty.contract.native_storage`): ``float32`` for
+        ``np.float32``, so that what is written into it is rounded here as it
+        is in both runs, ``complex128`` for ``np.complex128``, ``bool`` for
+        ``Bool``, and ``int64`` for an integral sort.
+        """
+        if any(typ.ragged):
+            raise InterpretError(f"the temporary {name} is ragged")
+        try:
+            shape = tuple(int(evaluate(axis, dict(self.sizes))) for axis in typ.axes)
+        except Exception as exc:  # noqa: BLE001 - said as the reason
+            raise InterpretError(
+                f"the temporary {name} has no shape at the sizes "
+                f"{dict(self.sizes)}: {exc}"
+            ) from exc
+        dtype = native_storage(typ.dtype) or np.dtype(np.float64)
+        return Arr(np.zeros(shape, dtype=dtype))
 
     # {{{ running
 

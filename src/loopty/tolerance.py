@@ -82,9 +82,10 @@ def output_class(
     classes = ["exact"]
     if name in reassociated:
         classes.append("reassoc")
-    for param, typ in term.params:
-        if param != name or not isinstance(typ, ArrType):
-            continue
+    # A program's temporaries have element sorts too (see Term.temporaries),
+    # and a Real one is no more exact for being nobody's argument.
+    typ = term.array_types.get(name)
+    if isinstance(typ, ArrType):
         classes.append(element_class(typ.dtype))
     for stmt in term.stmts:
         if stmt.assignee.array != name:

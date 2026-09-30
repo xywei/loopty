@@ -50,7 +50,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from loopty.contract import check_arguments
+from loopty.contract import check_arguments, inherited_storage
 from loopty.term import Term
 from loopty.tolerance import (
     TOLERANCE,
@@ -313,6 +313,7 @@ class LoopyExecutor:
         names = [name for name, _ in term.params]
         supplied = {**dict(zip(names, args, strict=False)), **kwargs}
         check_arguments(dict(term.params), supplied, lowering.ragged)
+        inherited_storage(term.array_types, term.temporaries_like, supplied)
         layouts = _declared_layouts(term, lowering, supplied)
         call = _call_arguments(term, lowering, args, kwargs, layouts)
         call, empty = _pad_empty_arrays(call, lowering)
@@ -462,6 +463,7 @@ class LoopyExecutor:
         # which is exactly what hides an alias between two of them, and the
         # native run would otherwise be the first thing to meet a bad index.
         check_arguments(dict(term.params), args, lowering.ragged)
+        inherited_storage(term.array_types, term.temporaries_like, args)
         native = dict(reference or {})
         if native:
             missing = [name for name in lowering.outputs if name not in native]
@@ -687,6 +689,10 @@ def _agreement_fact(
     :attr:`~loopty.schedule.Schedule.key`, so that two schedules of one kernel
     run from one file keep two facts in the ledger; a kernel or a term run
     without a schedule is named by its name and target alone.
+
+    It is placed at the term's first statement, or at the term's own
+    :attr:`~loopty.term.Term.where` when it has one: a program's term does,
+    since its first statement is some kernel's, perhaps in another file.
     """
     from lanky.ledger import Fact, Status
 
@@ -704,7 +710,7 @@ def _agreement_fact(
         status=Status.TESTED if ok else Status.REFUTED,
         decided_by="loopy",
         provenance=provenance,
-        where=term.stmts[0].where if term.stmts else "",
+        where=term.where or (term.stmts[0].where if term.stmts else ""),
         owner=term.name,
     )
 

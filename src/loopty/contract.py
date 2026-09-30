@@ -54,14 +54,16 @@ the same two questions, against the sizes the arrays of the call determine,
 and asks one more: an integral scalar has to be stored as an integer, because
 neither run can use ``1.0`` as an index.
 
-Nothing here checks array *shapes*; see ``docs/loopy-notes.md`` for why lowering
-has to declare some arrays without one, and the README's status list for the
-consequence.
+Nothing here checks array *shapes* against each other; see
+``docs/loopy-notes.md`` for why lowering has to declare some arrays without
+one, and the README's status list for the consequence. One thing about a shape
+is checked, because the facts rest on it: an axis written ``Fin[n + 1]`` is
+never shorter than a non-negative ``n`` allows (:func:`sizes_not_negative`).
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 import numpy as np
@@ -80,11 +82,16 @@ __all__ = [
     "domain_arguments",
     "element_bound",
     "element_types",
+    "holds_natively",
+    "inherited_storage",
     "integral_sort",
+    "native_storage",
     "ragged_arguments",
     "resolve_sizes",
     "scalar_parameters",
+    "sizes_not_negative",
     "sort_bound",
+    "storage_wanted",
 ]
 
 
@@ -355,6 +362,178 @@ def axis_extents(
         for size, extent in _axis_extents_of(supplied[name], typ)
         if not isinstance(size, prim.Variable | int | np.integer)
     )
+
+
+def sizes_not_negative(
+    types: Mapping[str, Any], supplied: Mapping[str, Any]
+) -> None:
+    """Refuse an array shorter than its type allows for any value of its sizes.
+
+    A size counts cells, so it is never negative, and every fact about a
+    kernel is decided with its sizes non-negative; the lowering tells loopy so
+    too (:func:`loopty.lower._scalar_assumptions`). An axis written as an
+    expression in one size, ``Fin[n + 1]``, then has a least extent, and an
+    argument with fewer cells there stands for a negative ``n``:
+    :func:`resolve_sizes` leaves such an ``n`` unresolved, and loopy reads
+    ``n = -1`` off an empty ``off``, where ``off[n]`` is the cell in front of
+    it. So that argument is refused here, naming the size it would make
+    negative.
+    """
+    from lanky.terms import evaluate, free_variables, render
+
+    for name, typ in types.items():
+        value = supplied.get(name)
+        if not isinstance(typ, ArrType) or value is None:
+            continue
+        for size, extent in _axis_extents_of(value, typ):
+            if isinstance(size, prim.Variable | int | np.integer):
+                continue
+            try:
+                free = free_variables(size)
+            except Exception:
+                continue
+            if len(free) != 1 or not _linear(size):
+                continue
+            (size_name,) = free
+            try:
+                offset = evaluate(size, {size_name: 0})
+                slope = evaluate(size, {size_name: 1}) - offset
+            except Exception:
+                continue
+            if not isinstance(slope, int | np.integer) or slope == 0:
+                continue
+            if (extent - offset) % slope or (extent - offset) // slope >= 0:
+                continue
+            raise ValueError(
+                f"{name} has {extent} cells along an axis its type says is "
+                f"{render(size)} long, which would make the size {size_name} "
+                f"{(extent - offset) // slope}. A size counts cells and is never "
+                "negative, and every fact about the kernel is decided with its "
+                "sizes non-negative, so the argument is too short for its type"
+            )
+
+
+def native_storage(sort: Any) -> np.dtype | None:
+    """The dtype a native array of ``sort`` holds values in as the compiled one does.
+
+    A program's temporary is stored compiled as the lowering stores its
+    element sort (:func:`loopty.lower.numpy_dtype`), and natively in whatever
+    dtype ``Arr.zeros_like`` gave it. The two runs compute one thing only when
+    the native array holds every value written into it as the compiled one
+    does, which is this dtype:
+
+    * a numpy dtype or scalar type names a storage and is itself:
+      ``np.float32`` rounds, and ``np.complex128`` keeps an imaginary part;
+    * ``Real``, exact or not, and ``float`` are ``float64``, and ``complex``
+      is ``complex128``;
+    * ``Bool`` and ``bool`` are ``bool``. The compiled temporary is a byte,
+      which holds a truth value as a bool does; natively ``~``, ``&`` and
+      ``|`` are logical only on a bool (bitwise on an integer, refused on a
+      float), and ``when`` refuses an integer that is not one;
+    * an integral sort, ``Fin[m]``, ``Nat``, ``Int`` or ``int``, is ``int64``,
+      and any signed integer of 32 bits or more holds it
+      (:func:`holds_natively`): the compiled one is 32 bits wide, and a
+      native argument of such a sort is 64 bits wide as a rule.
+
+    Anything else is ``None``, and is not asked.
+    """
+    base = _base_sort(sort)
+    if isinstance(base, np.dtype):
+        return base
+    if isinstance(base, type) and issubclass(base, np.generic):
+        return np.dtype(base)
+    if base is bool or getattr(base, "name", None) == "Bool":
+        return np.dtype(np.bool_)
+    if base is int or integral_sort(base):
+        return np.dtype(np.int64)
+    if base is float or getattr(base, "name", None) == "Real":
+        return np.dtype(np.float64)
+    if base is complex:
+        return np.dtype(np.complex128)
+    return None
+
+
+def holds_natively(sort: Any, dtype: Any) -> bool:
+    """Whether a native array of ``dtype`` holds ``sort`` as the compiled one does.
+
+    The dtype :func:`native_storage` says, or for an integral sort any signed
+    integer of 32 bits or more. A narrower one wraps round where the compiled
+    32-bit one does not. A sort with no storage is not asked.
+    """
+    want = native_storage(sort)
+    if want is None:
+        return True
+    try:
+        got = np.dtype(dtype)
+    except TypeError:
+        return False
+    base = _base_sort(sort)
+    if base is int or integral_sort(base):
+        return got.kind == "i" and got.itemsize >= 4
+    return got == want
+
+
+def storage_wanted(sort: Any) -> str:
+    """How :func:`holds_natively` says the native storage of ``sort``, in words."""
+    base = _base_sort(sort)
+    if base is int or integral_sort(base):
+        return "a signed integer of 32 bits or more"
+    return str(native_storage(sort))
+
+
+def inherited_storage(
+    types: Mapping[str, Any],
+    like: Iterable[tuple[str, str]],
+    supplied: Mapping[str, Any],
+) -> None:
+    """Refuse a parameter whose dtype a program's temporary inherits, if it is wrong.
+
+    ``Arr.zeros_like(u)`` in a program's body is natively an array of ``u``'s
+    dtype, whatever ``u`` is called with, and in the compiled program it is a
+    temporary of the element sort its kernels declare, stored as that sort is
+    (:attr:`loopty.term.Term.temporaries_like` lists them). An integer ``u``
+    makes the native one truncate every real written into it, a ``float32``
+    one rounds it, and a real one drops the imaginary part of a complex
+    value, where the compiled one does none of these, so the two runs would
+    compute two things; the call is refused, naming the dtype to give that
+    ``Arr.zeros_like``. What each sort has to be stored as natively is
+    :func:`native_storage`.
+
+    ``types`` is the type of every array of the term, parameters and
+    temporaries alike (:attr:`loopty.term.Term.array_types`). Passing ``u``
+    in that dtype is named as a fix too, but only when the dtype also holds
+    every value of ``u``'s own element sort: a real ``u`` passed as a bool to
+    make a ``Bool`` temporary of it would be a different ``u``.
+    """
+    for temporary, name in like:
+        sort = getattr(types.get(temporary), "dtype", None)
+        want = native_storage(sort)
+        value = supplied.get(name)
+        if want is None or value is None:
+            continue
+        got = np.asarray(value.numpy() if isinstance(value, Arr) else value).dtype
+        if holds_natively(sort, got):
+            continue
+        fix = f"Give that Arr.zeros_like dtype={want}"
+        own = native_storage(getattr(types.get(name), "dtype", None))
+        if own is not None and np.can_cast(own, want, casting="safe"):
+            fix += f", or pass {name} as {want}"
+        raise ValueError(
+            f"the argument {name} is stored as {got}, and the program makes "
+            f"{temporary} with Arr.zeros_like from it, which natively is an "
+            f"array of {got} too; the kernels {temporary} is passed to declare "
+            f"its elements {_shown_sort(sort)}, which the native run has to "
+            f"store as {storage_wanted(sort)} to hold them as the compiled "
+            f"program does, so the two runs would compute {temporary} "
+            f"differently. {fix}"
+        )
+
+
+def _shown_sort(sort: Any) -> str:
+    """A sort as a message says it: a numpy scalar type by its dtype's name."""
+    if isinstance(sort, type) and issubclass(sort, np.generic):
+        return np.dtype(sort).name
+    return str(sort)
 
 
 def _linear(expr: Any) -> bool:
@@ -863,6 +1042,7 @@ def check_arguments(
     """
     disjoint_arguments(supplied)
     ragged_arguments(types, supplied, offsets_args)
+    sizes_not_negative(types, supplied)
     sizes = resolve_sizes(types, supplied)
     domain_arguments(types, supplied, sizes)
     extents = axis_extents(types, supplied)
