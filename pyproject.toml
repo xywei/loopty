@@ -40,7 +40,7 @@ dependencies = [
     "islpy<2026",
     "loopy",
     "pymbolic",
-    "lanky>=0.1.0.dev0",
+    "lanky>=0.1.0.dev1",
 ]
 
 [project.optional-dependencies]

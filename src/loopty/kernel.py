@@ -21,6 +21,14 @@ file, the same as for a file carrying theorem statements.)
 ``KernelTheory`` is what lanky asks for the facts of such an object; it runs the
 typing rules in :mod:`loopty.typing` over the traced term. Tracing is done once
 and cached, because every fact about a kernel is a fact about the same term.
+
+Every fact a kernel or a program claims is keyed by its definition, through
+:func:`lanky.ledger.fact_id`: the kind, then the module the file's path gives
+it under its source root (:func:`lanky.check.module_name`), the qualified name
+and the line, then what the fact is about. ``scan``'s postcondition in
+``spmv.py`` is ``postcondition:spmv.scan@69`` in that file's ledger and in the
+``rests_on`` of any program that calls it, from that file or from another, and
+a kernel of the same name defined somewhere else has an id of its own.
 """
 
 from __future__ import annotations
@@ -32,7 +40,8 @@ from types import FunctionType, MethodType, ModuleType
 from typing import Any
 
 import numpy as np
-from lanky.ledger import Fact, Status
+from lanky.check import module_name
+from lanky.ledger import Fact, Status, fact_id
 from lanky.plugins import registry
 from lanky.terms import evaluate_annotations
 
@@ -66,6 +75,13 @@ class _Decorated:
     Both keep the original function callable and remember where it was written,
     because a fact's value depends on being able to point at the source line
     that owes it.
+
+    ``module`` is the module name the file's path gives it under its source
+    root (:func:`lanky.check.module_name`), and ``__module__`` only for a
+    function with no file behind it. It is what the facts' ids are keyed by,
+    with ``qualname`` and ``line``, rather than the name the module was
+    imported under, which differs between ``lanky check`` of the file and an
+    import of it from another.
     """
 
     def __init__(self, fn: Any) -> None:
@@ -76,6 +92,19 @@ class _Decorated:
         self.line = code.co_firstlineno
         self.where = f"{os.path.basename(code.co_filename)}:{code.co_firstlineno}"
         self.qualname = getattr(fn, "__qualname__", fn.__name__)
+        self.module = (
+            module_name(code.co_filename) or getattr(fn, "__module__", "") or ""
+        )
+
+    @property
+    def definition(self) -> str:
+        """``spmv.scan@69``: the module, the qualified name and the line.
+
+        It is the part of every fact id that names this object, as
+        :func:`lanky.ledger.fact_id` writes it.
+        """
+        name = f"{self.module}.{self.qualname}" if self.module else self.qualname
+        return f"{name}@{self.line}"
 
     @property
     def annotations(self) -> dict[str, Any]:
@@ -502,7 +531,9 @@ class Kernel(_Decorated):
             error = f"{type(exc).__name__}: {exc}"
             self._facts = (
                 Fact(
-                    id=f"kernel:{self.qualname}:traced",
+                    id=fact_id(
+                        "trace", self.qualname, module=self.module, line=self.line
+                    ),
                     kind="trace",
                     statement=f"{self.qualname} can be traced",
                     term=None,
@@ -516,9 +547,12 @@ class Kernel(_Decorated):
             return self._facts
         from loopty.faithful import faithfulness_fact
 
+        key = {"module": self.module, "line": self.line}
         self._facts = (
-            *rules.facts_for(term, owner=self.qualname, where=self.where),
-            faithfulness_fact(self, term, owner=self.qualname, where=self.where),
+            *rules.facts_for(term, owner=self.qualname, where=self.where, **key),
+            faithfulness_fact(
+                self, term, owner=self.qualname, where=self.where, **key
+            ),
         )
         return self._facts
 
@@ -548,9 +582,11 @@ class Program(_Decorated):
     postcondition of every kernel it calls is restated as a fact *in the scope
     of the program*, which rests on the callee's own fact. That is lanky's
     ``rests_on``, so the ledger names the callee's postcondition beside the
-    restatement (``assumed under scan:postcondition``) and counts it in what
-    the restatement is worth, and a reader can see which claims the program
-    depends on.
+    restatement (``assumed under postcondition:spmv.scan@69``) and counts it
+    in what the restatement is worth, and a reader can see which claims the
+    program depends on. The id names the callee's definition, so a callee
+    imported from another module under another name is named by its own
+    fact there, and never by a kernel of the same name in the program's file.
 
     What it does not do yet is use those postconditions as hypotheses. Carrying
     the scan's recurrence into the in-bounds proof of the product is the
@@ -620,10 +656,19 @@ class Program(_Decorated):
         """One fact per callee postcondition, as a claim in this program's scope.
 
         Each rests on the callee's postcondition fact, named by the id the
-        callee's own facts give it (:func:`loopty.typing.postcondition_id`).
-        When the callee is checked in the same file, that fact is in the same
-        ledger, and the restatement is worth no more than it; when it is not,
-        lanky counts the id it cannot find as an assumption.
+        callee's own facts give it (:func:`loopty.typing.postcondition_id`),
+        which is keyed by the callee's definition: the module its file's path
+        gives it, its qualified name and its line. When the callee is checked
+        in the same file, that fact is in the same ledger, and the
+        restatement is worth no more than it; when it is not, lanky counts the
+        id it cannot find as an assumption and names it under the table, and
+        it is the id the callee's own file's ledger holds. A kernel of the
+        program's file that has the callee's name, as in ``from helpers import
+        scan as helper_scan`` beside a ``scan`` of its own, has an id of its
+        own, and cannot stand in for the callee.
+
+        The restatement's own id names the program and then the callee's
+        definition, so two callees of one name get a restatement each.
         """
         out: list[Fact] = []
         for callee in self.callees():
@@ -637,7 +682,13 @@ class Program(_Decorated):
 
             out.append(
                 Fact(
-                    id=f"program:{self.qualname}:{callee.qualname}:postcondition",
+                    id=fact_id(
+                        "postcondition-in-scope",
+                        self.qualname,
+                        module=self.module,
+                        line=self.line,
+                        detail=callee.definition,
+                    ),
                     kind="postcondition-in-scope",
                     statement=(
                         f"after {callee.__name__}(...) in {self.__name__}: "
@@ -648,7 +699,11 @@ class Program(_Decorated):
                     provenance={"callee": callee.qualname},
                     where=self.where,
                     owner=self.qualname,
-                    rests_on=(rules.postcondition_id(callee.qualname),),
+                    rests_on=(
+                        rules.postcondition_id(
+                            callee.qualname, module=callee.module, line=callee.line
+                        ),
+                    ),
                 )
             )
         return tuple(out)

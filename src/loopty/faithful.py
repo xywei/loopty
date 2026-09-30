@@ -43,7 +43,7 @@ from collections.abc import Iterator, Mapping
 from typing import Any
 
 import numpy as np
-from lanky.ledger import Fact, Status
+from lanky.ledger import Fact, Status, fact_id
 from lanky.prelude import FinType, Refined
 from lanky.terms import evaluate, free_variables
 
@@ -92,15 +92,25 @@ class _NoSample(Exception):
     """A declared type this module cannot draw a value of."""
 
 
-def faithfulness_fact(kernel: Any, term: Term, owner: str, where: str) -> Fact:
+def faithfulness_fact(
+    kernel: Any,
+    term: Term,
+    owner: str,
+    where: str,
+    *,
+    module: str | None = None,
+    line: int | None = None,
+) -> Fact:
     """The ``trace-faithful`` fact of one kernel, established by running it.
 
     ``kernel`` is the decorated kernel, which is called as the native run, and
-    ``term`` its traced term. Nothing here raises: an input that cannot be run
-    is skipped, and anything unexpected leaves the fact ``assumed`` with the
-    error as its reason.
+    ``term`` its traced term. The id is keyed by the kernel's definition,
+    ``owner``, ``module`` and ``line``, as the typing rules key theirs (see
+    :func:`loopty.typing.facts_for`). Nothing here raises: an input that
+    cannot be run is skipped, and anything unexpected leaves the fact
+    ``assumed`` with the error as its reason.
     """
-    identifier = f"{owner}:{KIND}"
+    identifier = fact_id(KIND, owner, module=module, line=line)
     inputs: list[dict[str, Any]] = []
 
     def fact(status: Status, **provenance: Any) -> Fact:

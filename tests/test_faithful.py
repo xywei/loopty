@@ -71,7 +71,8 @@ def test_a_faithful_kernel_is_tested_on_every_sample() -> None:
 def test_the_fact_is_the_last_of_a_kernels_facts() -> None:
     facts = Kernel(axpy).facts()
     assert [fact.kind for fact in facts].count(KIND) == 1
-    assert facts[-1].id.endswith(":trace-faithful")
+    # keyed by the kernel's definition, as every fact of a kernel is
+    assert facts[-1].id.startswith(f"{KIND}:")
 
 
 # }}}
