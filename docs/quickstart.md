@@ -103,12 +103,15 @@ interesting failure. Every cast is `decided`: putting the rows on work groups
 and the entries on lanes reorders nothing that carries a dependence. What it
 cannot survive is code generation, on a device as much as on C, because loopy
 will not put a hardware axis inside a loop whose bound comes from an array, and
-a CSR row is exactly such a loop. The schedule says so itself, as a `refuted`
-fact of kind `buildable` decided by `loopy-target` with the limit in words as
-its reason, and raises `UnbuildableSchedule` if anything asks it for code. The
-demo builds it only when `main()` runs; a file that built it at the top level
-would make `loopty run` exit 1, with the limit printed again under the fact's
-`REFUTED` line, the way `lanky check` prints what refutes any fact.
+a CSR row is exactly such a loop. (Written for `"c"` so that the demo needs no
+device, it would be refused on C in any case, since C has no hardware axes;
+the check names first the limit that retargeting would not remove.) The
+schedule says so itself, as a `refuted` fact of kind `buildable` decided by
+`loopy-target` with the limit in words as its reason, and raises
+`UnbuildableSchedule` if anything asks it for code. The demo builds it only
+when `main()` runs; a file that built it at the top level would make
+`loopty run` exit 1, with the limit printed again under the fact's `REFUTED`
+line, the way `lanky check` prints what refutes any fact.
 `docs/device-runs.md` is where that was measured; `spmv.rows_parallel()`, one
 row per work group, is the schedule for this shape that does build and did run.
 
@@ -409,9 +412,11 @@ native run.
   `Schedule(jacobi).affine("{ [t, i] -> [a, b] : a = t + i and b = t - i }")`,
   then `.tile("a", "b", 4, 4)`. For the stencil both are accepted and compute
   what the untiled kernel computes, though the map reaches only the points
-  where `a` and `b` have the same parity. Write the map with `i + t` first and
-  read the witness; `examples/wavefront_acoustic.py` does both for a pair of
-  statements, where the tiling is refused.
+  where `a` and `b` have the same parity; `.strides` shows the loop that
+  counts its steps over them. Write the map with `i + t` first and read the
+  witness. `examples/wavefront_acoustic.py` does both for a pair of
+  statements, where the tiling is refused until each statement gets a map of
+  its own, named on its tuple: `S0[t, i] -> ...; S1[t, i] -> ...`.
 - In `examples/pairs.py`, change the column's condition from `k > p` to
   `k >= p` and re-check. `f[k, p]` now reaches the diagonal, which is a cell of
   the box and not of the triangle, and the fact is `refuted` with the witness

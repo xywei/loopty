@@ -131,6 +131,12 @@ self to Map is deprecated`, raised by `lp.map_domain`: it requires an
 (note 13), and the one test that still calls `map_domain`, to pin that loopy
 refuses the diamond, silences it locally.
 
+loopy's code generation for a loop tagged `vec` warns through its own
+`loopy.diagnostic.warn`, which is deprecated ("This function is deprecated and
+will go away in the future"). No loopty schedule in the suite runs a `vec`
+loop; `tests/test_buildable.py` generates code for some, to compare `buildable`
+with loopy, and silences that warning there only.
+
 ## 6. loopy's own loop-nest choice is not the term's
 
 Not a bug, but the reason `lower_generic` ends by calling `prioritize_loops`.
@@ -345,6 +351,29 @@ leaves keeps its single domain, and the code generated for every example is
 what it was. What is left, one name for two different loops in a term built by
 hand, is refused with a `LoweringError` naming the loop.
 
+**Cut alike (2026-09-26).** A statement bounded by a ragged row's length is cut
+after the row loop too, because the length is assigned there, and that cut has
+to be shared. In
+
+```python
+for r in y.dom:
+    for i in x.dom:
+        for j in val.dom[r]:
+            y[r] = y[r] + x[i] * val[r, j]
+        z[r, i] = 1.0
+```
+
+the statement in the fiber was cut after `r` and after `i`, and the one beside
+the fiber, which leaves no nest, not at all: `r` came out in `{ [r] }` and in
+`{ [r, i] }`, which do not merge, and the kernel was refused for using `r` for
+two loops, which it does not. `_depth_cuts` now counts the row's cut among the
+others and passes every cut on to each statement that has the loops up to it
+and more beyond, until nothing changes, so the second statement is cut after
+`r` as well. The refusal that is left reads the term before it blames a name:
+when every statement that has the loop has the same loops around it, the name
+is one loop, and the message says the lowering could not give it one domain
+instead of asking for a rename.
+
 A statement beside an inner loop also has to stay out of it, which is note 12.
 
 ## 11. Hardware axes on reductions
@@ -372,8 +401,12 @@ a.dom)`, on a single sum, and on a sum inside a statement loop:
 The first row is the nested case: loopy sets and updates the enclosing
 reduction's accumulator outside the inner reduction's loop, in instructions
 that do not run on its axis, and generates code only when every instruction
-uses every local axis. `schedule._unbuildable_reason` refuses a parallel tag on
-a nested reduction's iname with that reason. It used to be refused only by
+uses every local axis. `schedule._unbuildable_reason` refuses a hardware axis
+(`g.*`, `l.*`) on a nested reduction's iname with that reason. It used to count
+`ilp` as one, which loopy unrolls rather than launching; an `ilp` loop of a
+nested reduction is refused for the privatization below instead, and `unr`
+builds. This row is one case of the general rule in note 14, that every
+instruction runs on every axis the kernel uses. It used to be refused only by
 accident, as a ragged fiber: the inner domain names the outer binder `i` as a
 parameter, and every parameter that was not a size counted as data read out of
 an array. An enclosing binder, or a loop of the statement, is not data now, so
@@ -472,23 +505,157 @@ after a skew or a diamond is still loopy's own `split_iname`.
 **What loopy makes of it.** loopy 2025.2 generates correct code for the image:
 the stencil, the coupled acoustic pair, and the stencil tiled in `(a, b)` all
 agree with the native run bit for bit, at sizes of both parities. What it
-generates is the image's bounding loops with the parity tested by an `if`
-inside the innermost one, `if (-b - a + 2 * ((b + a) / 2) == 0)`, not a loop
-that steps by two, so half the iterations of that loop do nothing. A kernel
-that has to be fast in diamond coordinates would want the stride, which neither
-loopy nor this rewrite produces.
+generates from the image as isl states it is the image's bounding loops with
+the parity tested by an `if` inside the innermost one,
+`if (-b - a + 2 * ((b + a) / 2) == 0)`, not a loop that steps by two, so half
+the iterations of that loop do nothing.
 
-**The limits of the fix.** A map applies to every statement in its loops,
-because loopy gives the statements of a loop one domain, so a map per statement
-(a time offset between two statements, which diamond tiling of the acoustic pair
-needs) is refused. isl decides the casts of any map whatever the kernel looks
-like; when the rewrite cannot write one for loopy (loops that no one domain
-defines, such as a row and the ragged fiber inside it, an image that is not one
-basic set, or a piecewise inverse), the schedule carries a `refuted`
+**The stride.** So the kernel code is generated from states the lattice
+itself (`schedule._stepped`). Once a step has set the nest, every loop is
+asked, outermost first, whether isl finds a stride for it in its domain given
+the loops outside it (`get_stride_info`, with the loops inside it projected
+out). The diamond's `b` steps by 2 from `-a`, so it is replaced by a counter,
+`b = 2*b_step - a`, in the domain, whose preimage has no holes left, and in
+every instruction, and loopy loops over `b_step` with no test:
+`[nt, nx] -> { [a, b_step] : b_step >= 0 and 2 - nx + a <= b_step < a and
+b_step <= -2 + nt }`. For fixed outer loops the counter and the loop increase
+together, so the instances and their order are the ones the checker approved,
+and isl confirms for each loop that the new domain maps back onto the old one.
+It is done on the kernel code is made from and not on the one later steps
+transform, so a tile splits the loop the checker knows, and the loop counted
+after `affine(...).tile("a", "b", 4, 4)` is `b_inner`. `Schedule.strides` names
+each loop replaced and its expression. A loop with a tag, the loop of a
+reduction, a loop another domain names as a parameter, and a loop whose offset
+involves a loop that does not run around all its instructions keep loopy's
+test. A guard that narrows a loop to a congruence (`when(i % 2 == 0)`) is
+stepped over the same way.
+
+**A map per statement.** A time offset between two statements, which diamond
+tiling of the acoustic pair needs, is a map per statement:
+`{ S0[t, i] -> [a, b] : a = t + i and b = t - i; S1[t, i] -> [a, b] : a = t +
+i and b = t - i + 1 }`. isl decides its casts like any other, since an
+instance carries its statement. loopy gives the statements of a loop one
+domain, and the two have to share their loops to interleave, so the rewrite
+keeps one domain for the new loops, the union of the two images when isl
+coalesces it into one basic set and its polyhedral hull otherwise, and
+predicates each instruction on its own image, as the lowering predicates a
+statement a `when` narrows. In each instruction the old loops are replaced by
+its own statement's inverse. For the acoustic pair the images are the points
+where `a + b` is even and those where it is odd, so every point is one
+statement's; the code tests which, `if (-1 * a + -1 * b + 2 * ((a + b) / 2) ==
+0)` for `S0`, and the four by four tiling agrees with the native run bit for
+bit. The length of a ragged row, which an instruction of its own computes in
+the row's loop, moves with the statement whose fiber it bounds.
+
+**The limits of the fix.** Maps whose images leave holes between them, such
+as `S0` at `(2t + i, 2t - i)` and `S1` at `(2t + 1 + i, 2t + 1 - i)`, run over
+the hull of the union, which the stride above does not see: half its points
+belong to neither statement. The statements of a loop have to move from the
+same loops to the same new ones, and two statements of one ragged fiber cannot
+move by different maps, since the fiber is one domain; nor can two fibers of
+one row, since one instruction computes the row's length for both. isl decides
+the casts of any map whatever the kernel looks like; when the rewrite cannot
+write one for loopy (loops that no one domain defines, such as a row and the
+ragged fiber inside it, an image that is not one basic set, a piecewise
+inverse, or the fibers just named), the schedule carries a `refuted`
 `buildable` fact with the reason, and no kernel, rather than an error from
 loopy.
 
-## 14. A flat buffer gives loopy no size to read
+## 14. Hardware axes, unrolled loops and the C target
+
+**Symptom.** A schedule passed `buildable` and loopy then refused to generate
+its code, sometimes from inside isl with a message that names no loop. Found
+by comparing `buildable` with loopy's own code generation over every tag (and
+pair of tags) on a set of small kernels, on the C target and on loopy's plain
+OpenCL target, with loopy's caches off: over three thousand schedules, and no
+disagreement left afterwards but the `ilp` reductions of note 11, which are
+refused on purpose. Code that loopy does generate can still be wrong, which
+only running it shows: the `ilp` row below builds, and its run crashed.
+`tests/test_buildable.py` keeps a case of each row.
+
+| schedule | loopy | loopty's `buildable` |
+|---|---|---|
+| a loop on `g.*` or `l.*`, target `"c"` | "plain C does not have local hw axes" (or group) | refused: the C target has none |
+| a sum's loop on `l.0`, target `"c"` | `NotImplementedError` | refused, the same |
+| `unr`, `ilp` or `vec` on a loop over `Fin[n]`, `n` free | `isl.Error`: "unbounded optimum" | refused: the loop needs a numeric length |
+| the same after `split("i", 4)`, on the inner half | builds | buildable |
+| `unr` on `j` in `Fin[i + 1]`, `i` in `Fin[8]` | builds | buildable: at most 8 |
+| `l.1` with no loop on `l.0` (or `g.1`) | "local axis 0 unused" | refused: axes are numbered from 0 |
+| two loops of one statement on `l.0` (or `g.0`, or `vec`) | "instruction 'S0' has multiple inames tagged 'l.0'" | refused |
+| a statement loop and its sum's loop on `l.0` | "instruction 'S0_j_init' has multiple inames tagged 'l.0'" | refused, the same |
+| a loop on `g.0`, and a statement in a loop of its own beside it | "instruction 'S1' does not use all group hw axes" | refused: every instruction runs on every axis |
+| a sum on `l.0` beside a sequential sum in one statement | "instruction 'S0_j_init' does not use all local hw axes" | refused, the same |
+| `l.auto` | "kernel with automatically-assigned local axes passed to preprocessing" | refused |
+| `vec` on a loop whose statement sums sequentially, target `"c"` | "CFamilyASTBuilder does not understand axis tag" | refused: C has no vector types |
+| the same on OpenCL | builds | buildable |
+| `vec` on a row loop that reads a ragged row's length, or around a sum on `l.0` | `TypeError` from inside loopy (an `AssertionError`, or OpenCL that does not compile, for some kernels) | refused |
+| `ilp` or `ilp.seq` on a row loop that reads a ragged row's length | builds, and the fiber's loop compares its variable with an array: the C run crashes | refused: the code is wrong |
+| `vec` or `ilp` on a ragged fiber | "Domain number 1 has a data-dependent parameter" | refused |
+| `l.0` on a dense loop between a ragged row and its fiber | the same | refused |
+
+**Cause.** loopy's rules, each met at its own stage of code generation.
+
+* The C targets have no hardware axes, and no vector types for a temporary: a
+  `vec` loop that writes a temporary (a sum's accumulator) keeps it as a vector
+  along the loop. A `vec` loop that writes none is unrolled, and builds.
+* `generate_unroll_loop` and `generate_vectorize_loop` in `loopy.codegen.loop`
+  ask the loop's bounds with every size and every other loop projected out
+  (`get_iname_bounds(iname, constants_only=True)`), and a free size leaves isl
+  nothing to bound.
+* `get_grid_sizes_for_insn_ids` numbers the group and the local axes of a
+  kernel from 0 up and refuses a gap; `check_for_double_use_of_hw_axes` allows
+  one loop per axis (`vec` counts) in an instruction, a local sum's loop
+  counted as one of its statement's; `check_for_unused_hw_axes` asks every
+  instruction to run on every group and local axis the kernel uses. A sum's
+  own instructions run in the statement's loops, its own and those of the sums
+  around it, and the statement's instruction runs on the axis of each of its
+  sums on a local axis, since every work item of the group reads the result.
+  The instruction that assigns a ragged row's length runs in the row loop and
+  the loops around it.
+* `realize_ilp` gives a temporary written inside an `ilp`, `ilp.seq` or `vec`
+  loop a copy per iteration, an array (or a vector) along the loop. A sum's
+  accumulator is then indexed by the loop, and the length of a ragged row is
+  not: it bounds the loop over the fiber, and the bound still reads it by name.
+  Under `ilp` the C code declares `int32_t nl_cnt_r[8]` and loops `for
+  (int32_t j = 0; j <= -1 + nl_cnt_r; ++j)`, which compares `j` with the
+  array's address; the check had passed it, since nothing concurrent sits in
+  the fiber's domain, and the run read past the rows and crashed.
+* `l.auto` is assigned only inside loopy's own transforms (`precompute`,
+  `buffer_array`); preprocessing refuses a kernel that still has one.
+* `check_for_data_dependent_parallel_bounds` refuses any concurrent loop
+  (`ConcurrentTag`: `g.*`, `l.*`, `ilp`, `vec`) in a domain that names a
+  temporary as a parameter, and a ragged row's length is one. The lowering
+  defines a dense loop between the row and its fiber in one domain with the
+  fiber (`[r, nl_cnt_r] -> { [i, j] }`), so that loop is refused too although
+  its own extent is known.
+
+**Local fix.** `schedule._unbuildable_reason` asks each, read off the kernel's
+own instructions, tags and domains after every step, and refuses with the
+cause in words and the remedy: `_axis_reason`, `_unroll_reason`,
+`_privatized_reason` and `_target_reason`, and `_ragged_reason` for the last.
+The C target's own limit is asked last of all, because it is the one limit
+that `retarget("opencl")` removes; the design's spmv device schedule, written
+for `"c"` so that the demo needs no device, keeps its ragged-fiber reason.
+
+**The limit of the fix.** Still a table, not a model of loopy: a schedule the
+check passes can fail for a reason nobody has met. The dense loop between a
+row and its fiber could be given a domain of its own by the lowering, which
+would make it a loop a device can run; that is not done.
+
+One class is known and not asked, because it is about the casts rather than
+the target. The casts drop a loop on `g.*` or `l.*` from the order they check,
+as if the loops around it ordered its instances, but loopy runs a hardware
+axis as the launch grid, outside every loop, and synchronizes nothing across
+work items through global memory. A dependence between two work items passes
+the casts, and loopy either misses it, since its barrier check asks only about
+dependences between two instructions (`jacobi` in `examples/stencil_skew.py`
+with `i` on `g.0` or `l.0`: each work item reads what its neighbour wrote at
+the previous `t`, with no barrier between them), or refuses it with
+`MissingBarrierError` ("requires synchronization by a global barrier", for
+the acoustic pair with `i` on `g.0`). Both are `decided` casts and `buildable`
+schedules.
+
+## 15. A flat buffer gives loopy no size to read
 
 **Symptom.** A kernel over a union of pieces, or with an array stored packed
 (see `loopty.domain`), and no dense array whose shape names a size, fails with

@@ -163,10 +163,10 @@ table of row starts. Both compiled runs agree with the native one.
 - **Transformations are casts with witnesses.** Every `split`, `tile`,
   `interchange`, `skew` and `realize` states its reindexing as an isl map, and
   `affine` takes the map from you, any injective affine one, the diamond
-  `(t, i) -> (t + i, t - i)` included. Each is checked for bijectivity on
-  statement instances and for monotonicity on the dependence relation. A failure
-  prints two instances and the array cell between them, before any code is
-  generated.
+  `(t, i) -> (t + i, t - i)` included, or a map per statement. Each is checked
+  for bijectivity on statement instances and for monotonicity on the dependence
+  relation. A failure prints two instances and the array cell between them,
+  before any code is generated.
 - **Reassociation is visible in the type.** Splitting an accumulation and summing
   the pieces is not free on floating point. A trace reads the accumulation's
   class off what it sums, `realize("y", tree=True)` is what lowers it to
@@ -261,13 +261,25 @@ end to end; the edges are sharp.
   re-checks it. `affine(map)` takes an isl map from loops to the loops that
   replace them, refuses one that misses or merges an instance or runs a
   dependence backwards, and rewrites the kernel over the map's image; `skew` is
-  that method with a particular map.
-- The target-capability check: a parallel tag inside a data-dependent (ragged)
-  loop bound, a hardware axis on a reduction nested in another, a reduction
-  loopy will not realize (partly in parallel and partly in sequence, across two
-  local axes, on a group axis, or on a local axis whose extent has no numeric
-  maximum), or a loop ordered outside a loop loopy nests it inside, is
-  reported as a `refuted` `buildable` fact and raises `UnbuildableSchedule`
+  that method with a particular map. A union map whose tuples name statements,
+  `{ S0[t, i] -> [a, b] : ...; S1[t, i] -> [a, b] : ... }`, moves each
+  statement by its own map, checked on the dependences between the statements
+  as well as within each, which is the time offset a diamond tiling of two
+  statements that feed each other needs. A loop over an image with holes, such
+  as the diamond's `b`, counts its steps (`b = 2*b_step - a`,
+  `Schedule.strides`) instead of testing a parity at every `b`.
+- The target-capability check: a concurrent tag (a hardware axis, `ilp` or
+  `vec`) inside a data-dependent (ragged) loop bound or its domain, a hardware
+  axis on a reduction nested in another, a reduction loopy will not realize
+  (partly in parallel and partly in sequence, across two local axes, on a
+  group axis, or on a local axis whose extent has no numeric maximum), a
+  hardware axis loopy will not assign (numbered past an unused one, shared by
+  two loops of one statement, missing from an instruction the kernel runs
+  beside it, or `l.auto`), an `unr`, `ilp` or `vec` loop whose length is not a
+  number, a temporary loopy misreads once an `ilp` or `vec` loop has a copy of
+  it per iteration (a ragged row's length), a loop ordered outside a loop
+  loopy nests it inside, or a hardware axis on the C target, which has none,
+  is reported as a `refuted` `buildable` fact and raises `UnbuildableSchedule`
   when something asks for code. It is asked of the schedule as it stands after
   every step, so an interchange can make a tiled ragged loop buildable again.
 - Lowering to loopy, including a ragged axis as a flat buffer plus offsets, and
@@ -370,26 +382,35 @@ end to end; the edges are sharp.
 - `Schedule.affine` and maps whose image has holes. The diamond
   `(t, i) -> (t + i, t - i)` reaches only the points of equal parity, and
   loopy's own `map_domain` refuses it, so loopty rewrites the kernel over the
-  image itself. loopy then generates correct code, bit for bit against the
-  native run for the stencil and the acoustic pair, and for the stencil tiled
-  in diamond coordinates, but it tests the parity with an `if` in the innermost
-  loop instead of stepping by two, so half of that loop's iterations do
-  nothing. A map moves every statement in its
-  loops the same way, so the per-statement time offset a diamond tiling of
-  `examples/wavefront_acoustic.py` needs is out of reach, and the tiling is
-  refused with a witness. A map the rewrite cannot write for loopy, such as one
-  over a row and the ragged fiber inside it, is a `refuted` `buildable` fact.
-  See note 13 in `docs/loopy-notes.md`.
+  image itself, and the loop left with the holes counts its steps. The code is
+  correct, bit for bit against the native run for the stencil and the acoustic
+  pair, untiled and tiled in diamond coordinates. Statements moved by maps of
+  their own keep sharing their loops, because loopy gives the statements of a
+  loop one domain: the loops run over the union of the images, and each
+  statement tests that a point is its own. For the acoustic pair every point
+  is one statement's; for maps whose images leave holes between them, such as
+  `S0` at `2t` and `S1` at `2t + 1` along the diamond, the loops run over the
+  hull of the union and visit the holes. A map the rewrite cannot write for
+  loopy, such as one over a row and the ragged fiber inside it, or maps that
+  move two statements of one ragged fiber, or of two fibers of one row,
+  differently, is a `refuted` `buildable` fact. See note 13 in `docs/loopy-notes.md`.
 - `realize(var, tree=True)` checks and marks the reassociation; the reduction
   tree itself comes from splitting and tagging the reduction iname, which is
   checked separately and not verified on the C target.
 - The accumulation convention: a traced `y[r] += ...` under a parallel iname is
   reported as a disjointness refutation, which is the conservative reading. The
   `reassoc` fact is what should license it and nothing consumes that yet.
-- The target-capability check knows the limits of loopy 2025.2 listed in notes 6
-  and 11 of `docs/loopy-notes.md` and no others, so it is a list rather than a
-  model of what the backend can do. A schedule it passes can still fail in code
-  generation for a reason nobody has met yet.
+- The target-capability check knows the limits of loopy 2025.2 listed in notes
+  6, 11 and 14 of `docs/loopy-notes.md` and no others, so it is a list rather
+  than a model of what the backend can do. A schedule it passes can still fail
+  in code generation for a reason nobody has met yet.
+- The casts drop a loop on a hardware axis from the order they check, as if
+  the other loops ordered its instances. loopy runs the axis as the launch
+  grid and synchronizes nothing across work items through global memory, so a
+  dependence between two work items passes the casts and is either a race
+  loopy does not see (the stencil's `jacobi` with `i` on `g.0`, across
+  iterations of `t`) or a global barrier loopy asks for. See note 14 in
+  `docs/loopy-notes.md`.
 - A kernel called with a zero-length *shape-bearing* argument (a matrix with no
   rows at all) cannot run on the C target: loopy cannot pass an empty array, and
   the workaround that rescues the empty flat buffer of a ragged axis cannot be

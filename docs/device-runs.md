@@ -163,9 +163,12 @@ What this does and does not mean:
   document is where both limits come from. What that check does *not* do is
   model the backend: it knows these two limits, and the others met later in
   code generation alone (a hardware axis on a reduction nested in another, the
-  other reductions loopy will not realize, and loop orders loopy cannot keep;
-  see notes 11 and 6 in `docs/loopy-notes.md`), and no others, so a schedule
-  it passes can still fail in code generation for a reason nobody has met.
+  other reductions loopy will not realize, loopy's rules for numbering and
+  sharing hardware axes, loops it unrolls or vectorizes without a numeric
+  length, hardware axes on the C target, and loop orders loopy cannot keep;
+  see notes 11, 14 and 6 in `docs/loopy-notes.md`), and no others, so a
+  schedule it passes can still fail in code generation for a reason nobody has
+  met.
 - `examples/spmv.py` keeps this schedule behind `device_schedule()`, whose
   docstring now says what was measured here: it does not run on a device either.
   The demo prints its decided casts and the refused `buildable` fact side by

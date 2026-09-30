@@ -5,9 +5,10 @@ A transformation is untrusted. ``.split``, ``.tile``, ``.interchange``,
 transform and then hand the result to a small checker, which asks isl two
 questions: is the reindexing a bijection on statement instances, and is the new
 execution order monotone on the dependence relation? Parallel inames (``g.*``,
-``l.*``) carry no order, so they are dropped from the order before the second
-question is asked. This is the de Bruijn criterion applied to scheduling: any
-Python transformation is admissible because its output is checked, not its code.
+``l.*``, ``ilp``, ``vec``) carry no order, so they are dropped from the order
+before the second question is asked. This is the de Bruijn criterion applied
+to scheduling: any Python transformation is admissible because its output is
+checked, not its code.
 
 Three things have to be written down for those two questions to be askable.
 
@@ -60,12 +61,16 @@ inside a loop whose bound comes from an array, which is exactly what a CSR
 inner loop is, and it will not generate a reduction whose inames are partly
 parallel and partly sequential. The others known are about reductions too (a
 hardware axis on one nested in another, a reduction on a group axis or across
-two local axes, a local axis whose extent has no numeric maximum) and about
-order (a loop put outside a loop loopy nests it inside, which loopy cannot
-run in that order). None is a wrong verdict about the cast, and none used to
-be reported: the casts were all ``DECIDED`` and loopy then threw during code
-generation, several steps away from the line that caused it, or ran a nest of
-its own choosing.
+two local axes, a local axis whose extent has no numeric maximum), about
+hardware axes (numbered from 0 with none left out, one loop of an instruction
+per axis, every instruction on every axis the kernel uses), about loops loopy
+writes out (``unr``, ``ilp`` and ``vec`` need a length that is a number when
+the code is generated), about order (a loop put outside a loop loopy nests it
+inside, which loopy cannot run in that order), and about the target itself
+(the C target has no hardware axes). None is a wrong verdict about the cast,
+and none used to be reported: the casts were all ``DECIDED`` and loopy then
+threw during code generation, several steps away from the line that caused
+it, or ran a nest of its own choosing.
 
 So every accepted step is asked a third question, this one about the target
 rather than about meaning, and its answer is a fact of kind ``buildable``
@@ -104,10 +109,29 @@ map (see :func:`_affine_kernel`): the new domain is the image isl computes, with
 the parity as an existentially quantified constraint, and each old iname becomes
 the quasi-affine expression isl gives for the inverse, ``floor((a + b)/2)``.
 loopy 2025.2 generates correct code for that kernel, and for one tiled after
-it. It enumerates the image's bounding loops and tests the parity with an
-``if`` inside the innermost one rather than stepping by two, so half the
-iterations of that loop do nothing. The answer is recorded in
-``docs/loopy-notes.md``.
+it, but it enumerates the image's bounding loops and tests the parity with an
+``if`` inside the innermost one, so half the iterations of that loop do
+nothing. The kernel code is generated from therefore counts the steps of such
+a loop instead, ``b = 2*b_step - a`` (see :func:`_stepped` and
+:attr:`Schedule.strides`), and meets only the points of the image. The answer
+is recorded in ``docs/loopy-notes.md``, note 13.
+
+A map per statement
+-------------------
+
+Two statements that feed each other in one loop nest often need to move
+differently: the coupled acoustic pair of ``examples/wavefront_acoustic.py``
+tiles in diamonds only once its second statement sits half a step after the
+first. The checker needs nothing new for that, because an instance already
+carries its statement: :func:`_step_map` takes a map per statement, and the
+two questions are asked of the maps together, over every dependence between
+the statements and within each. The kernel does: loopy gives a loop one
+domain, and the statements of a loop have to keep sharing it to keep
+interleaving. So their loops run over the union of the images, and each
+statement is predicated on its own image and uses its own inverse (see
+:func:`_affine_kernel`); for the acoustic pair the images are the points
+where ``a + b`` is even and those where it is odd, and every point of the
+loops is one statement's.
 """
 
 from __future__ import annotations
@@ -128,6 +152,7 @@ from loopty.lower import (
     Lowering,
     _plain,
     _reduction_nesting,
+    _sanitize,
     is_reserved,
     lower_generic,
     reductions_of,
@@ -142,8 +167,11 @@ __all__ = [
 ]
 
 #: Iname tags that impose no order: two instances differing only in such an
-#: iname may run in either order, or at the same time.
-PARALLEL_TAG_PREFIXES = ("g.", "l.", "ilp")
+#: iname may run in either order, or at the same time. ``ilp`` and ``vec`` are
+#: among them although neither is launched in parallel: loopy runs such a loop
+#: around each instruction of its body separately (unrolled, or in vectors),
+#: so two statements of the loop no longer interleave as the source wrote.
+PARALLEL_TAG_PREFIXES = ("g.", "l.", "ilp", "vec")
 
 
 def parallel_tag(tag: str) -> bool:
@@ -483,26 +511,68 @@ def _reindexing(
     return out
 
 
-def _as_map(mapping: Any) -> isl.Map:
-    """What ``affine`` was given, as an isl map: a map, a basic map, or text."""
+def _as_maps(mapping: Any) -> tuple[Any, dict[str, isl.Map] | None]:
+    """What ``affine`` was given: one map for every statement, or one each.
+
+    A map, a basic map, a union map, or the text of any of them. A map whose
+    input tuple is unnamed moves every statement in its loops; maps whose
+    input tuples name statements, ``S0[t, i] -> [a, b]``, move each statement
+    by its own (see :meth:`Schedule.affine`). Returns what the step records,
+    an isl map or union map, and for maps per statement each statement's map
+    with its tuple name taken off, since the checker and the kernel rewrite
+    match loops by name and not by tuple; ``None`` for one map.
+    """
     if isinstance(mapping, str):
         try:
-            return isl.Map(mapping)
+            mapping = isl.UnionMap(mapping)
         except isl.Error as exc:
             raise ValueError(f"{mapping!r} is not an isl map: {exc}") from exc
     if isinstance(mapping, isl.BasicMap):
-        return isl.Map.from_basic_map(mapping)
+        mapping = isl.Map.from_basic_map(mapping)
     if isinstance(mapping, isl.Map):
-        return mapping
-    if isinstance(mapping, isl.UnionMap):
+        mapping = isl.UnionMap.from_map(mapping)
+    if not isinstance(mapping, isl.UnionMap):
         raise TypeError(
-            "affine() takes one map for every statement in the loops it names, "
-            "not a union of maps per statement: loopy gives the statements of a "
-            "loop one domain, so they cannot be moved separately"
+            "affine() takes an isl map, a union of maps per statement, or the "
+            f"text of either, not {type(mapping).__name__}"
         )
-    raise TypeError(
-        f"affine() takes an isl map or its text, not {type(mapping).__name__}"
-    )
+    maps: list[isl.Map] = []
+    mapping.foreach_map(maps.append)
+    if not maps:
+        raise ValueError(f"{mapping} names no loop to replace")
+    for piece in maps:
+        if piece.has_tuple_name(isl.dim_type.out):
+            raise ValueError(
+                f"{mapping}: the output tuple {piece.get_tuple_name(isl.dim_type.out)}"
+                " is named, and a map makes loops, which its output dimensions "
+                "name; leave the tuple unnamed"
+            )
+    named = [piece.has_tuple_name(isl.dim_type.in_) for piece in maps]
+    if not any(named):
+        if len(maps) != 1:
+            raise ValueError(
+                f"{mapping}: these maps take or make different numbers of "
+                "loops, and one map moves every statement in its loops; give "
+                "one map, or name the statement of each"
+            )
+        return maps[0], None
+    if not all(named):
+        raise ValueError(
+            f"{mapping}: some maps name a statement and some do not; name the "
+            "statement of every map, or give one map for every statement"
+        )
+    pieces: dict[str, isl.Map] = {}
+    for piece in maps:
+        stmt_id = piece.get_tuple_name(isl.dim_type.in_)
+        if stmt_id in pieces:
+            # isl keeps maps between different spaces apart, so two maps of
+            # one statement take or make different numbers of loops.
+            raise ValueError(
+                f"{mapping}: {stmt_id} is given two maps, and a statement "
+                "moves by one"
+            )
+        pieces[stmt_id] = piece.reset_tuple_id(isl.dim_type.in_)
+    return mapping, pieces
 
 
 # }}}
@@ -775,14 +845,84 @@ def data_dependent_inames(
     return frozenset(out)
 
 
+def _loopy_tag(tag: Any) -> Any:
+    """loopy's own reading of a tag, whether it is given as text or not."""
+    from loopy.kernel.data import parse_tag
+
+    return parse_tag(tag)
+
+
+def _hardware_axis(tag: Any) -> bool:
+    """Is ``tag`` a group or a local axis (``g.*``, ``l.*``), as loopy reads it?
+
+    Not ``vec``, which loopy counts among its hardware tags too: a vectorized
+    loop runs in one work item, and neither the C target's lack of axes nor
+    the numbering of a grid is about it.
+    """
+    from loopy.kernel.data import GroupInameTag, LocalInameTagBase
+
+    return isinstance(_loopy_tag(tag), GroupInameTag | LocalInameTagBase)
+
+
+def _concurrent(tag: Any) -> bool:
+    """Is ``tag`` one of loopy's concurrent tags: a hardware axis, ilp or vec?
+
+    This is loopy's own class (``ConcurrentTag``), which its check for a
+    loop whose extent is read out of an array asks. It names the tags
+    :func:`parallel_tag` names by their text, read as loopy reads them.
+    """
+    from loopy.kernel.data import ConcurrentTag
+
+    return isinstance(_loopy_tag(tag), ConcurrentTag)
+
+
+def _shown_tag(draft: _Draft, name: str, tag: Any) -> str:
+    """The tag on a loop as the schedule was given it (``ilp``, not ``ilp.unr``)."""
+    return draft.tags.get(name, str(tag))
+
+
+def _kernel_tags(draft: _Draft) -> dict[str, tuple[Any, ...]]:
+    """The tags of every loop of the draft's kernel, as loopy holds them.
+
+    Read off the kernel rather than off :attr:`_Draft.tags`, so that a loop is
+    asked about under the name it has now, after whatever renamed it.
+    """
+    entry = draft.kernel.default_entrypoint
+    return {
+        name: tuple(iname.tags)
+        for name, iname in sorted(entry.inames.items())
+        if iname.tags
+    }
+
+
+def _statement_of(draft: _Draft, insn_id: str) -> str | None:
+    """The term statement an instruction of the kernel is, if it is one.
+
+    The others assign a ragged row's length (:func:`loopty.lower._count_inits`),
+    which the term has no statement for.
+    """
+    statements = {_sanitize(stmt_id): stmt_id for stmt_id in draft.coords}
+    return statements.get(insn_id)
+
+
+def _instruction_text(draft: _Draft, insn_id: str) -> str:
+    """An instruction of the kernel, in the words of the term."""
+    statement = _statement_of(draft, insn_id)
+    if statement is not None:
+        return f"statement {statement}"
+    return f"the instruction {insn_id}, which reads the length of a ragged row,"
+
+
 def _unbuildable_reason(draft: _Draft) -> str | None:
     """Why loopy could not generate code for this draft, or ``None``.
 
     Limits of loopy 2025.2, all measured rather than guessed, in the order
     they are asked:
 
-    * a parallel tag inside a ragged fiber: a device run of the design's spmv
-      schedule fails on it;
+    * a concurrent tag (a hardware axis, ``ilp`` or ``vec``) inside a ragged
+      fiber, or on a loop loopy defines in one domain with a fiber's length:
+      a device run of the design's spmv schedule fails on it (see
+      :func:`_ragged_reason`);
     * a hardware axis on a reduction nested in another: code generation for a
       double sum with its inner reduction on a local axis fails ("instruction
       ... does not use all local hw axes");
@@ -793,26 +933,34 @@ def _unbuildable_reason(draft: _Draft) -> str | None:
       other concurrent axis, a group axis above all;
     * a local axis whose extent has no numeric maximum, where a reduction on
       a local axis needs one (see :func:`_extent_reason`);
+    * loopy's rules for sharing and numbering hardware axes: an axis loopy is
+      asked to choose (``l.auto``), two loops of one instruction on one axis,
+      an instruction that runs on fewer axes than the kernel uses, and an axis
+      numbered past an unused one (see :func:`_axis_reason`);
+    * an unrolled or vectorized loop whose length is not a number when the
+      code is generated (see :func:`_unroll_reason`), and a temporary loopy
+      misreads once it has given an ``ilp`` or ``vec`` loop a copy of it per
+      iteration (see :func:`_privatized_reason`);
     * a loop ordered outside a loop loopy nests it inside, which loopy cannot
-      run in that order (see :func:`_nest_reason`).
+      run in that order (see :func:`_nest_reason`);
+    * what the target itself cannot do: the C target has no hardware axes,
+      and no vector types for a temporary (see :func:`_target_reason`).
 
-    Note 11 of ``docs/loopy-notes.md`` has the table of what loopy says to
-    each, and note 6 the loop orders.
+    The target's own limit comes last, because it is the one limit that
+    :meth:`Schedule.retarget` removes; every other is loopy's on every target,
+    and is said first so that retargeting does not merely trade one refusal
+    for the next.
+
+    Notes 11 and 14 of ``docs/loopy-notes.md`` have the tables of what loopy
+    says to each, and note 6 the loop orders.
     """
-    parallel = {name for name, tag in draft.tags.items() if parallel_tag(tag)}
-    inside = sorted(parallel & draft.data_dependent)
-    if inside:
-        names = ", ".join(inside)
-        return (
-            f"the parallel tag on {names} sits inside a loop whose bound comes "
-            "from an array (a ragged fiber), and loopy will not put a hardware "
-            "axis in a domain with a data-dependent parameter. Parallelize an "
-            "enclosing loop with a size known at launch instead, such as the "
-            "rows of a CSR product"
-        )
+    reason = _ragged_reason(draft)
+    if reason is not None:
+        return reason
+    hardware = {name for name, tag in draft.tags.items() if _hardware_axis(tag)}
     nested = sorted(
         name
-        for name in parallel
+        for name in hardware
         if draft.reductions.get(name) in draft.nested_in
     )
     if nested:
@@ -840,7 +988,92 @@ def _unbuildable_reason(draft: _Draft) -> str | None:
         reason = _extent_reason(draft, key, inames)
         if reason is not None:
             return reason
-    return _nest_reason(draft)
+    for check in (
+        _axis_reason,
+        _unroll_reason,
+        _privatized_reason,
+        _nest_reason,
+        _target_reason,
+    ):
+        reason = check(draft)
+        if reason is not None:
+            return reason
+    return None
+
+
+def _ragged_reason(draft: _Draft) -> str | None:
+    """A concurrent loop in a domain whose extent is read out of an array.
+
+    loopy refuses any concurrent loop (``ConcurrentTag``: a hardware axis,
+    ``ilp`` or ``vec``) in a domain that names a temporary as a parameter
+    (``check_for_data_dependent_parallel_bounds``), and a ragged row's length
+    is such a temporary: it is assigned inside the row loop and bounds the
+    fiber. Two loops are caught by that, and asked in turn. A ragged fiber
+    itself, whose extent is the row's length: a hardware axis there cannot be
+    launched, since the number of work items is not known when the kernel
+    starts, and ``ilp`` and ``vec`` are refused alike. And a loop between the
+    row and its fiber (``i`` in ``for r: for i in x.dom: for j in
+    val.dom[r]``), which is not ragged at all and which the lowering defines in
+    one domain with the fiber, ``[r, nl_cnt_r] -> { [i, j] }``: loopy reads
+    its domain, not its extent, and refuses it the same way. The second is
+    read off the kernel's domains, as loopy reads them.
+    """
+    concurrent = {name for name, tag in draft.tags.items() if _concurrent(tag)}
+    inside = sorted(concurrent & draft.data_dependent)
+    if inside:
+        names = ", ".join(inside)
+        if all(_hardware_axis(draft.tags[name]) for name in inside):
+            return (
+                f"the parallel tag on {names} sits inside a loop whose bound "
+                "comes from an array (a ragged fiber), and loopy will not put "
+                "a hardware axis in a domain with a data-dependent parameter. "
+                "Parallelize an enclosing loop with a size known at launch "
+                "instead, such as the rows of a CSR product"
+            )
+        tags = ", ".join(f"{name}={draft.tags[name]!r}" for name in inside)
+        return (
+            f"the tag {tags} makes a loop inside a ragged fiber concurrent, "
+            "and loopy will not run a concurrent loop (a hardware axis, ilp or "
+            "vec) in a domain with a data-dependent parameter, which the "
+            "fiber's is: its bound comes from an array. Leave the fiber's loop "
+            "sequential, and put an enclosing loop with a size known at launch "
+            "on a hardware axis instead, such as the rows of a CSR product"
+        )
+    if draft.kernel is None:
+        return None
+    entry = draft.kernel.default_entrypoint
+    temporaries = set(entry.temporary_variables)
+    tags = _kernel_tags(draft)
+    for domain in entry.domains:
+        if not set(domain.get_var_names(isl.dim_type.param)) & temporaries:
+            continue
+        loops = [
+            name
+            for name in domain.get_var_names(isl.dim_type.set)
+            if any(_concurrent(tag) for tag in tags.get(name, ()))
+        ]
+        if not loops:
+            continue
+        name = loops[0]
+        fibers = [
+            other
+            for other in domain.get_var_names(isl.dim_type.set)
+            if other != name and other in draft.data_dependent
+        ]
+        beside = f", beside the ragged fiber {fibers[0]}" if fibers else ""
+        shown = _shown_tag(
+            draft, name, next(tag for tag in tags[name] if _concurrent(tag))
+        )
+        return (
+            f"the tag {name}={shown!r} makes the loop {name} concurrent, and "
+            f"loopy defines {name} in one domain with the length of a ragged "
+            f"row{beside}, which is read out of an array inside the row's "
+            "loop; loopy will not run a concurrent loop (a hardware axis, ilp "
+            "or vec) in a domain with a data-dependent parameter. Put the axis "
+            f"on the row's loop or one outside it instead, or leave {name} "
+            "sequential"
+        )
+    return None
 
 
 def _reduction_role(tag: str | None) -> str:
@@ -857,7 +1090,7 @@ def _reduction_role(tag: str | None) -> str:
     checker reads ``ilp`` differently, as an order-free loop
     (:data:`PARALLEL_TAG_PREFIXES`), which is what makes it ask an
     accumulation's permission to be reassociated before a reduction loop is
-    tagged so.
+    tagged so, and ``vec`` too.
     """
     from loopy.kernel.data import (
         ConcurrentTag,
@@ -1113,6 +1346,431 @@ def _nest_reason(draft: _Draft) -> str | None:
     return None
 
 
+def _axis_reason(draft: _Draft) -> str | None:
+    """A hardware axis loopy will not assign as the schedule asks, or ``None``.
+
+    loopy has four rules about the axes of a kernel that the casts cannot
+    see, asked here in the order loopy meets them, each off the kernel's own
+    instructions and tags:
+
+    * ``l.auto`` asks loopy to choose a local axis, which it does only inside
+      its own transforms (``precompute``, ``buffer_array``); a kernel that
+      still has one is refused when loopy prepares it for code generation;
+    * one loop of an instruction per axis (``check_for_double_use_of_hw_axes``),
+      and ``vec`` counts as an axis there: two loops of one statement on
+      ``l.0`` are refused, and the loop of a reduction is one of its
+      statement's, because the sum runs inside the statement's loops (the
+      instruction loopy names is then the accumulator's initialization);
+    * every instruction runs on every group and local axis the kernel uses
+      (``check_for_unused_hw_axes``): a statement beside a loop on ``g.0``
+      that runs in no loop on ``g.0`` is refused, and so is a sum whose
+      accumulator is set up and updated outside the loop on that axis, as a
+      sum beside another on a local axis is. loopy names a remedy,
+      ``add_inames_for_unused_hw_axes``, which runs the instruction once per
+      work item, all of them writing one cell; loopty does not apply it;
+    * the axes of each kind are numbered from 0 up with none left out, over
+      the whole kernel (``get_grid_sizes_for_insn_ids``): ``l.1`` needs a
+      loop on ``l.0``.
+
+    Which loops an instruction of a reduction runs in follows
+    ``loopy.transform.realize_reduction``: a sum's own instructions run in the
+    statement's loops, its own, and those of the sums around it; the
+    statement's instruction runs in its loops and on the axis of every sum in
+    it that is summed on a local axis, since that sum's result is read by
+    every work item of the group.
+    """
+    if draft.kernel is None:
+        return None
+    from loopy.kernel.data import (
+        AutoLocalInameTagBase,
+        GroupInameTag,
+        LocalInameTag,
+        UniqueInameTag,
+        VectorizeTag,
+    )
+
+    entry = draft.kernel.default_entrypoint
+    tags = _kernel_tags(draft)
+
+    auto = sorted(
+        name
+        for name, found in tags.items()
+        if any(isinstance(tag, AutoLocalInameTagBase) for tag in found)
+    )
+    if auto:
+        return (
+            f"the tag l.auto on {', '.join(auto)} asks loopy to choose a local "
+            "axis, and loopy chooses one only inside its own transforms "
+            "(precompute, buffer_array); a kernel that still has one is "
+            "refused when loopy prepares it for code generation. Name the "
+            "axis, as l.0 does"
+        )
+
+    order = {name: k for k, name in enumerate(draft.order)}
+
+    def nest_order(name: str) -> tuple[int, str]:
+        return (order.get(name, len(order)), name)
+
+    for insn in entry.instructions:
+        summed = set(insn.reduction_inames())
+        loops = sorted(set(insn.within_inames) | summed, key=nest_order)
+        seen: dict[Any, str] = {}
+        for name in loops:
+            for tag in tags.get(name, ()):
+                if not isinstance(tag, UniqueInameTag):
+                    continue
+                first = seen.setdefault(tag.key, name)
+                if first == name:
+                    continue
+                shown = _shown_tag(draft, name, tag)
+                what = _instruction_text(draft, insn.id)
+                rule = (
+                    "loopy vectorizes one loop of an instruction at most"
+                    if isinstance(tag, VectorizeTag)
+                    else "loopy runs one loop of an instruction on each hardware "
+                    "axis"
+                )
+                why = (
+                    "; the loop of a sum is one of its statement's, because "
+                    "the sum runs inside the statement's loops"
+                    if {first, name} & summed
+                    else ""
+                )
+                return (
+                    f"{what} runs in two loops tagged {shown}, {first} and "
+                    f"{name}, and {rule}{why}. Put one of the two on another "
+                    "axis, or leave it sequential"
+                )
+
+    grid_tags = (GroupInameTag, LocalInameTag)
+
+    def axes(names: Iterable[str]) -> set[Any]:
+        return {
+            tag.key
+            for name in names
+            for tag in tags.get(name, ())
+            if isinstance(tag, grid_tags)
+        }
+
+    grid: dict[Any, tuple[Any, str]] = {}
+    for name in sorted(tags, key=nest_order):
+        for tag in tags[name]:
+            if isinstance(tag, grid_tags):
+                grid.setdefault(tag.key, (tag, name))
+    for insn in entry.instructions:
+        base = set(insn.within_inames)
+        sums: dict[str, list[str]] = {}
+        for name in sorted(insn.reduction_inames(), key=nest_order):
+            sums.setdefault(draft.reductions.get(name, name), []).append(name)
+        what = _instruction_text(draft, insn.id)
+        local = {
+            name
+            for names in sums.values()
+            for name in names
+            if any(isinstance(tag, LocalInameTag) for tag in tags.get(name, ()))
+        }
+        runs = [(what, None, base | local)]
+        for key, names in sums.items():
+            around: list[str] = []
+            outer = draft.nested_in.get(key)
+            while outer is not None:
+                around.extend(sums.get(outer, ()))
+                outer = draft.nested_in.get(outer)
+            runs.append(
+                (
+                    f"the sum over {', '.join(names)} in {what}",
+                    names,
+                    base | set(names) | set(around),
+                )
+            )
+        for subject, over, loops in runs:
+            missing = [key for key in grid if key not in axes(loops)]
+            if not missing:
+                continue
+            tag, loop = grid[missing[0]]
+            kind = "group" if isinstance(tag, GroupInameTag) else "local"
+            shown = _shown_tag(draft, loop, tag)
+            why = (
+                "loopy sets up and updates a sum's accumulator in instructions "
+                "of their own, which run in the loops of the statement and of "
+                "the sums around it, and it generates code only when every "
+                "instruction of a kernel runs on every hardware axis the kernel "
+                "uses"
+                if over
+                else "loopy generates code only when every instruction of a "
+                "kernel runs on every hardware axis the kernel uses"
+            )
+            statement = _statement_of(draft, insn.id)
+            remedy = (
+                f"put a loop of statement {statement} on {shown} as well"
+                if statement is not None
+                else "put the axis on the row's loop or one outside it"
+            )
+            return (
+                f"{subject} runs in no loop on {shown}, the {kind} axis {loop} "
+                f"is on: {why}. Leave {loop} sequential, or {remedy}"
+            )
+
+    for kind, cls, letter in (
+        ("group", GroupInameTag, "g"),
+        ("local", LocalInameTag, "l"),
+    ):
+        numbers: dict[int, str] = {}
+        for name in sorted(tags, key=nest_order):
+            for tag in tags[name]:
+                if isinstance(tag, cls):
+                    numbers.setdefault(tag.axis, name)
+        for axis in range(max(numbers, default=-1) + 1):
+            if axis in numbers:
+                continue
+            above = min(number for number in numbers if number > axis)
+            return (
+                f"the loop {numbers[above]} is on the {kind} axis "
+                f"{letter}.{above}, and no loop of the kernel is on "
+                f"{letter}.{axis}: loopy numbers the {kind} axes of a kernel "
+                "from 0 up, with none left out. Use "
+                f"{letter}.{axis} first"
+            )
+    return None
+
+
+def _has_numeric_length(kernel: Any, iname: str) -> bool:
+    """Does ``iname`` run a number of times known when the code is generated?
+
+    Asked as loopy asks it before it unrolls or vectorizes a loop
+    (``generate_unroll_loop`` and ``generate_vectorize_loop`` in
+    ``loopy.codegen.loop``): of the loop's bounds with every size and every
+    other loop projected out, which isl cannot bound when a size is free
+    (``unbounded optimum``, raised from inside code generation, naming no
+    loop). A triangle ``j < i + 1`` inside ``i < 8`` has one: at most 8.
+    """
+    from loopy.diagnostic import StaticValueFindingError
+    from loopy.isl_helpers import static_max_of_pw_aff
+
+    entry = kernel.default_entrypoint
+    try:
+        size = entry.get_iname_bounds(iname, constants_only=True).size
+        static_max_of_pw_aff(size, constants_only=True)
+    except (isl.Error, StaticValueFindingError):
+        return False
+    return True
+
+
+def _extent_text(kernel: Any, iname: str) -> str:
+    """The extent of ``iname`` in words, as its bounds give it."""
+    from loopy.symbolic import pw_aff_to_expr
+
+    size = kernel.default_entrypoint.get_iname_bounds(iname).size
+    try:
+        return f"at most {pw_aff_to_expr(size)}"
+    except Exception:  # noqa: BLE001 - a piecewise extent is shown as isl has it
+        return f"at most {size}"
+
+
+def _unroll_reason(draft: _Draft) -> str | None:
+    """An unrolled or vectorized loop without a numeric length, or ``None``.
+
+    loopy writes out the body of a loop tagged ``unr`` or ``ilp`` once per
+    iteration, and vectorizes a loop tagged ``vec`` into vectors of a fixed
+    length, or unrolls it where it cannot; each needs the number of
+    iterations as a number when the code is generated (see
+    :func:`_has_numeric_length`). A loop over ``Fin[n]`` with ``n`` free has
+    none, on any target and whether it is a statement's loop or a reduction's.
+    Split by a fixed factor, the inner half has one, and builds.
+    """
+    if draft.kernel is None:
+        return None
+    from loopy.kernel.data import UnrolledIlpTag, UnrollTag, VectorizeTag
+
+    for name, found in _kernel_tags(draft).items():
+        unrolled = [
+            tag
+            for tag in found
+            if isinstance(tag, UnrollTag | UnrolledIlpTag | VectorizeTag)
+        ]
+        if not unrolled or _has_numeric_length(draft.kernel, name):
+            continue
+        shown = _shown_tag(draft, name, unrolled[0])
+        how = (
+            "vectorizes a loop tagged vec into vectors of a length fixed when "
+            "the code is generated, or unrolls it where it cannot"
+            if isinstance(unrolled[0], VectorizeTag)
+            else f"unrolls a loop tagged {shown}, writing its body out once per "
+            "iteration"
+        )
+        extent = (
+            "read out of an array (a ragged fiber)"
+            if name in draft.data_dependent
+            else _extent_text(draft.kernel, name)
+        )
+        return (
+            f"the loop {name} is tagged {shown}, and loopy {how}, so the number "
+            f"of its iterations has to be a number when the code is generated; "
+            f"the extent of {name} is {extent}, which no number bounds while "
+            "the sizes it names are free. Split it by a fixed factor and tag "
+            f"the inner loop instead, as split({name!r}, 4) makes one of "
+            "length 4, or declare the extent as a number (Fin[8] rather than "
+            "Fin[n])"
+        )
+    return None
+
+
+def _privatized_reason(draft: _Draft) -> str | None:
+    """A temporary loopy gives an ``ilp`` or ``vec`` loop and then misreads.
+
+    loopy gives a temporary written inside a loop tagged ``ilp`` (or
+    ``ilp.seq``) or ``vec`` a copy per iteration of the loop: an array along
+    it, or for ``vec`` a vector (``privatize_temporaries_with_inames``, from
+    ``realize_ilp``). A sum's accumulator survives that, and two temporaries
+    do not, on any target:
+
+    * the length of a ragged row read inside the loop: it bounds the loop
+      over the row's fiber, and loopy's bound still reads the temporary by its
+      name, as one number, once it has become an array or a vector. Under
+      ``ilp`` loopy generates the code and gets it wrong: the fiber's loop
+      compares its variable with the whole array (``j <= -1 + nl_cnt_r``
+      after ``int32_t nl_cnt_r[8]``), and the C run reads past the row, or
+      crashes. Under ``vec`` code generation fails from inside loopy (a
+      ``TypeError`` or an ``AssertionError``, in 2025.2), or writes OpenCL
+      that reads a vector as the bound and does not compile;
+    * the partial sums of a reduction on a local axis inside a ``vec`` loop,
+      which loopy keeps in an array in local memory (a ``TypeError``). An
+      ``ilp`` loop around one builds.
+
+    Both were measured on loops over ``Fin[8]``; over ``Fin[n]`` the loop has
+    no length to unroll or vectorize by, which :func:`_unroll_reason` says
+    first. A sequential sum in a ``vec`` loop builds on OpenCL; on C it is
+    :func:`_target_reason`'s.
+    """
+    if draft.kernel is None:
+        return None
+    from loopy.kernel.data import IlpBaseTag, LocalInameTagBase, VectorizeTag
+
+    entry = draft.kernel.default_entrypoint
+    tags = _kernel_tags(draft)
+    privatizing = {
+        name: tag
+        for name, found in tags.items()
+        for tag in found
+        if isinstance(tag, IlpBaseTag | VectorizeTag)
+    }
+    bounds = {
+        name
+        for domain in entry.domains
+        for name in domain.get_var_names(isl.dim_type.param)
+    } & set(entry.temporary_variables)
+    for insn in entry.instructions:
+        loops = sorted(set(privatizing) & set(insn.within_inames))
+        if not loops:
+            continue
+        if set(insn.assignee_var_names()) & bounds:
+            name = loops[0]
+            shown = _shown_tag(draft, name, privatizing[name])
+            if isinstance(privatizing[name], VectorizeTag):
+                what = (
+                    "loopy cannot generate working code for it: it keeps a "
+                    "temporary written inside a vec loop as a vector along it, "
+                    "and the row's length bounds the loop over its fiber, which "
+                    "needs one number"
+                )
+            else:
+                what = (
+                    "the code loopy generates for it is wrong: it gives a "
+                    f"temporary written inside a loop tagged {shown} an array "
+                    "along the loop, one cell per iteration, and the loop over "
+                    "the row's fiber still reads the row's length as one "
+                    "number, so it compares its variable with the whole array"
+                )
+            return (
+                f"the length of a ragged row is read inside the loop {name}, "
+                f"which is tagged {shown}, and {what}. Leave {name} "
+                "sequential, or unroll it (unr) instead"
+            )
+        vectorized = [
+            name for name in loops if isinstance(privatizing[name], VectorizeTag)
+        ]
+        local = sorted(
+            name
+            for name in insn.reduction_inames()
+            if any(isinstance(tag, LocalInameTagBase) for tag in tags.get(name, ()))
+        )
+        if vectorized and local:
+            what = _instruction_text(draft, insn.id)
+            return (
+                f"the sum over {', '.join(local)} in {what} runs on a local "
+                f"axis inside the loop {vectorized[0]}, which is tagged vec, "
+                "and loopy cannot generate code for it: it keeps the partial "
+                "sums of a reduction on a local axis in an array in local "
+                "memory, and a temporary written inside a vec loop as a vector "
+                f"along it. Leave {vectorized[0]} sequential, or unroll it "
+                "(unr) instead"
+            )
+    return None
+
+
+#: The targets whose code runs in one thread, with no hardware axes.
+_C_TARGETS = ("c", "c-source")
+
+
+def _target_reason(draft: _Draft) -> str | None:
+    """What the target cannot do at all, or ``None``.
+
+    The C targets have no hardware axes: loopy's C code runs in one thread,
+    and code generation for a loop on ``g.*`` or ``l.*`` stops with "plain C
+    does not have group hw axes" (or local). Nor do they have vector types:
+    loopy keeps a temporary written inside a ``vec`` loop, the accumulator of
+    a sum in the loop, as a vector along it, and its C code generator does not
+    know how to declare one. A ``vec`` loop that writes no temporary is only
+    unrolled, and builds. (The one other temporary, the length of a ragged
+    row, cannot be a vector on any target; :func:`_privatized_reason` says
+    so.)
+
+    Asked last (see :func:`_unbuildable_reason`): it is the one limit that
+    retargeting to OpenCL removes.
+    """
+    if draft.target not in _C_TARGETS or draft.kernel is None:
+        return None
+    from loopy.kernel.data import VectorizeTag
+
+    tags = _kernel_tags(draft)
+    hardware = [
+        (name, tag)
+        for name, found in tags.items()
+        for tag in found
+        if _hardware_axis(tag)
+    ]
+    if hardware:
+        order = {name: k for k, name in enumerate(draft.order)}
+        hardware.sort(key=lambda pair: (order.get(pair[0], len(order)), pair[0]))
+        shown = ", ".join(
+            f"{name}={_shown_tag(draft, name, tag)!r}" for name, tag in hardware
+        )
+        return (
+            f"the tag {shown} puts a loop on a hardware axis, and the C target "
+            "has none: loopy's C code runs in one thread, with no groups or "
+            "work items to spread a loop over. Retarget to opencl, or leave the "
+            "loop sequential"
+        )
+    vectorized = {
+        name
+        for name, found in tags.items()
+        if any(isinstance(tag, VectorizeTag) for tag in found)
+    }
+    for insn in draft.kernel.default_entrypoint.instructions:
+        loops = sorted(vectorized & set(insn.within_inames))
+        if not loops or not insn.reduction_inames():
+            continue
+        what = _instruction_text(draft, insn.id)
+        return (
+            f"the loop {loops[0]} is tagged vec, and loopy keeps a temporary "
+            f"written inside it, the accumulator of the sum in {what}, as a "
+            "vector along it; the C target has no vector types to declare it "
+            f"with. Leave {loops[0]} sequential, unroll it (unr), or retarget "
+            "to opencl"
+        )
+    return None
+
+
 # }}}
 
 
@@ -1169,6 +1827,9 @@ class _Draft:
     #: Reduction key -> the key of the reduction it is nested in, for every
     #: reduction that is nested in another; see :func:`_unbuildable_reason`.
     nested_in: dict[str, str] = field(default_factory=dict)
+    #: The target the schedule is written for; what it cannot do at all is
+    #: asked last (see :func:`_target_reason`).
+    target: str = "c"
 
 
 def _transformed(kernel: Any, transform: Any, *args: Any, **kwargs: Any) -> Any:
@@ -1211,6 +1872,11 @@ class Schedule:
         self._layouts = dict(_layouts or {})
         self._lowering: Lowering = lower_generic(self._term, target, self._layouts)
         self._kernel = self._lowering.kernel
+        #: The kernel code is generated from: :attr:`_kernel`, which the steps
+        #: transform, with its loops over a lattice counted (see
+        #: :func:`_stepped`), and those loops' expressions.
+        self._code = self._kernel
+        self._strides: dict[str, str] = {}
 
         stmt_ids = tuple(stmt.id for stmt in self._term.stmts)
         self._layout = _Layout(
@@ -1307,6 +1973,7 @@ class Schedule:
             reassoc=set(self._reassoc),
             data_dependent=set(self._data_dependent),
             nested_in=dict(self._nested_in),
+            target=self._target,
         )
 
     @property
@@ -1331,14 +1998,36 @@ class Schedule:
 
     @property
     def kernel(self) -> Any:
-        """The loopy kernel as transformed so far.
+        """The loopy kernel as transformed so far, the one code is made from.
+
+        A loop whose domain has holes, such as the image of the diamond,
+        runs over a counter of its steps rather than over the loop the checker
+        knows, once a step has set the nest; :attr:`strides` names each such
+        loop, and every other loop of :attr:`order` is the kernel's loop of
+        that name. Statements that :meth:`affine` moved by maps of their own
+        share their loops, and each runs at the points of its own image only,
+        which its instruction's predicates state.
 
         ``None`` once a step could not be written as a loopy kernel at all,
         which only :meth:`affine` can cause; the schedule's ``buildable`` fact
         says why, and :meth:`require_buildable` refuses before anything reads
         this.
         """
-        return self._kernel
+        return self._code
+
+    @property
+    def strides(self) -> dict[str, str]:
+        """The loops :attr:`kernel` steps through, and how.
+
+        Each loop of :attr:`order` whose values are a lattice given the loops
+        outside it, with the expression of the counter it is written as:
+        ``{"b": "2*b_step - a"}`` after the diamond ``(t, i) -> (t + i, t -
+        i)``, whose image is the points where ``a + b`` is even. The kernel
+        loops over ``b_step`` and meets only those points, where loopy alone
+        would loop over ``b`` and test the parity at each. Empty when there is
+        no such loop; see :func:`_stepped`.
+        """
+        return dict(self._strides)
 
     @property
     def lowering(self) -> Lowering:
@@ -1567,7 +2256,13 @@ class Schedule:
             draft, text, ("split", (iname, factor), {"inner": inner, "outer": outer})
         )
 
-    def _reindex_into(self, draft: _Draft, mapping: isl.Map, text: str) -> None:
+    def _reindex_into(
+        self,
+        draft: _Draft,
+        mapping: isl.Map,
+        text: str,
+        pieces: Mapping[str, isl.Map] | None = None,
+    ) -> None:
         """Record ``mapping`` as the draft's reindexing, and rename its loops.
 
         ``mapping`` goes from the loops it replaces to the loops that replace
@@ -1583,21 +2278,22 @@ class Schedule:
         kernel that the map does not replace is refused too, since it would
         make two things one.
 
+        ``pieces``, when given, is a map per statement, by statement id, and
+        ``mapping`` is one of them. The statements of a loop share its loops
+        in the kernel before the step and after it, so every map has to take
+        the same loops to the same new ones, and every statement that runs in
+        those loops has to run in all of them and be given a map; anything
+        else is refused, naming the statement.
+
         A loop whose extent comes from an array passes that property to each
         new loop whose value depends on it (see :func:`_inherited`): both
         halves of a split ragged loop, and neither half of the dense loop it
         is tiled with.
         """
-        if mapping.has_tuple_name(isl.dim_type.in_) or mapping.has_tuple_name(
-            isl.dim_type.out
-        ):
-            raise ValueError(
-                f"{text}: a map with a named tuple, such as S0[t, i], would "
-                "move one statement and not the others, and loopy gives the "
-                "statements of a loop one domain; name the loops only"
-            )
         inputs = _dim_names(mapping, isl.dim_type.in_)
         outputs = _dim_names(mapping, isl.dim_type.out)
+        if pieces is not None:
+            self._check_pieces(draft, pieces, inputs, outputs, text)
         if not inputs:
             raise ValueError(f"{text}: the map names no loop to replace")
         for side, names in (("input", inputs), ("output", outputs)):
@@ -1620,8 +2316,13 @@ class Schedule:
                 f"{text}: not loops of {self._term.name}: {', '.join(unknown)}"
             )
         self._check_new_names(draft, outputs, inputs, text)
+        every = [mapping] if pieces is None else list(pieces.values())
         foreign = sorted(
-            set(mapping.get_var_names(isl.dim_type.param))
+            {
+                name
+                for piece in every
+                for name in piece.get_var_names(isl.dim_type.param)
+            }
             - set(self._params)
             - set(self._term.sizes)
         )
@@ -1635,7 +2336,7 @@ class Schedule:
             inside = [name for name in inputs if name in coords]
             if not inside:
                 continue
-            own = mapping
+            own = mapping if pieces is None else pieces[stmt_id]
             if len(inside) != len(inputs):
                 part = _part(mapping, inside)
                 if part is None:
@@ -1653,12 +2354,71 @@ class Schedule:
             mappings[stmt_id] = own
         dependent = draft.data_dependent & set(inputs)
         if dependent:
-            inherited = _inherited(mapping)
+            inherited = {name: set() for name in outputs}
+            for piece in every:
+                for name, olds in _inherited(piece).items():
+                    inherited[name] |= olds
             draft.data_dependent -= set(inputs)
             draft.data_dependent |= {
                 name for name in outputs if inherited[name] & dependent
             }
         draft.mappings = mappings
+
+    def _check_pieces(
+        self,
+        draft: _Draft,
+        pieces: Mapping[str, isl.Map],
+        inputs: Sequence[str],
+        outputs: Sequence[str],
+        text: str,
+    ) -> None:
+        """Refuse maps per statement that the statements' loops cannot take.
+
+        See :meth:`_reindex_into`: the maps name statements of the kernel,
+        take the same loops to the same new ones, and cover every statement
+        that runs in those loops, each of which runs in all of them.
+        """
+        unknown = sorted(set(pieces) - set(draft.coords))
+        if unknown:
+            verb = "is not a statement" if len(unknown) == 1 else "are not statements"
+            raise ValueError(
+                f"{text}: {', '.join(unknown)} {verb} of {self._term.name}"
+            )
+        first = next(iter(pieces))
+        for stmt_id, piece in pieces.items():
+            ins = _dim_names(piece, isl.dim_type.in_)
+            outs = _dim_names(piece, isl.dim_type.out)
+            if (ins, outs) != (tuple(inputs), tuple(outputs)):
+                raise ValueError(
+                    f"{text}: the map of {stmt_id} takes [{', '.join(ins)}] to "
+                    f"[{', '.join(outs)}] and the map of {first} takes "
+                    f"[{', '.join(inputs)}] to [{', '.join(outputs)}]; the "
+                    "statements of one loop share their loops in the kernel, so "
+                    "their maps have to take the same loops to the same new ones"
+                )
+        loops = ", ".join(inputs)
+        for stmt_id, coords in draft.coords.items():
+            inside = [name for name in inputs if name in coords]
+            if not inside:
+                if stmt_id in pieces:
+                    raise ValueError(
+                        f"{text}: {stmt_id} does not run in {loops}, so its map "
+                        "has no loop of it to move"
+                    )
+                continue
+            if len(inside) != len(inputs):
+                outside = [name for name in inputs if name not in coords]
+                raise ValueError(
+                    f"{text}: {stmt_id} runs in {', '.join(inside)} but not in "
+                    f"{', '.join(outside)}, and a map per statement moves "
+                    "statements that run in every loop it names"
+                )
+            if stmt_id not in pieces:
+                raise ValueError(
+                    f"{text}: {stmt_id} runs in {loops} and is given no map; "
+                    "with a map per statement, every statement in the loops "
+                    "the maps name needs one"
+                )
 
     def _check_new_names(
         self,
@@ -1875,6 +2635,25 @@ class Schedule:
         of one it replaces, which is how :meth:`skew` is this method with a
         particular map, and its parameters, if any, are sizes of the kernel.
 
+        The statements of a loop can also move by maps of their own. Name each
+        statement's input tuple, in one union map or its text::
+
+            schedule.affine(
+                "{ S0[t, i] -> [a, b] : a = t + i and b = t - i; "
+                "S1[t, i] -> [a, b] : a = t + i and b = t - i + 1 }"
+            )
+
+        puts ``S1`` half a step after ``S0`` along the diamond, which is what a
+        diamond tiling of a pair of statements that feed each other needs. The
+        statements still share their loops, so every map has to take the same
+        loops to the same new ones, and every statement in those loops has to
+        run in all of them and be given one map, and only one; each of those
+        is a ``ValueError`` naming the statement. The two questions below are
+        asked of the maps together, over the dependences between the
+        statements as well as within each, and the kernel runs the shared
+        loops over the union of the images, each statement at its own points
+        only (see :func:`_affine_kernel`).
+
         The map is untrusted like any other transformation. It has to be
         defined on every instance and send no two of them to one point (the
         ``bijective`` fact, refuted with the instance it misses or the pair it
@@ -1882,16 +2661,18 @@ class Schedule:
         ``monotone`` fact, refuted with the pair of instances and the array
         cell between them). It need not be unimodular: the image of the diamond
         above is only the points of equal parity, and the kernel is rewritten
-        over that image, as the module docstring describes.
+        over that image, and loops over it without visiting the holes, as the
+        module docstring describes.
 
         What the kernel rewrite cannot express, such as loops that more than
         one loopy domain defines, is a ``refuted`` ``buildable`` fact with the
         reason, and the schedule then has no kernel.
         """
-        mapping = _as_map(mapping)
-        text = f"affine({mapping})"
+        recorded, pieces = _as_maps(mapping)
+        mapping = recorded if pieces is None else next(iter(pieces.values()))
+        text = f"affine({recorded})"
         draft = self._draft()
-        self._reindex_into(draft, mapping, text)
+        self._reindex_into(draft, mapping, text, pieces)
         inputs = _dim_names(mapping, isl.dim_type.in_)
         outputs = _dim_names(mapping, isl.dim_type.out)
         tagged = sorted(name for name in inputs if name in draft.tags)
@@ -1908,14 +2689,27 @@ class Schedule:
             kept = [name for name in draft.order if name not in inputs]
             first = positions[0]
             draft.order = [*kept[:first], *outputs, *kept[first:]]
-        self._affine_into(draft, mapping)
-        return self._commit(draft, text, ("affine", (mapping,), {}))
+        self._affine_into(draft, mapping, pieces)
+        return self._commit(draft, text, ("affine", (recorded,), {}))
 
-    def _affine_into(self, draft: _Draft, mapping: isl.Map) -> None:
-        """Rewrite the draft's kernel along ``mapping``, or record why not."""
+    def _affine_into(
+        self,
+        draft: _Draft,
+        mapping: isl.Map,
+        pieces: Mapping[str, isl.Map] | None = None,
+    ) -> None:
+        """Rewrite the draft's kernel along ``mapping``, or record why not.
+
+        ``pieces`` is a map per statement, by statement id, as
+        :meth:`_reindex_into` takes it; the rewrite is told them by the
+        instruction each statement lowered to.
+        """
         if draft.kernel is None:
             return
-        kernel, reason = _affine_kernel(draft.kernel, mapping)
+        if pieces is not None:
+            ids = self._lowering.insn_ids
+            pieces = {ids[stmt_id]: piece for stmt_id, piece in pieces.items()}
+        kernel, reason = _affine_kernel(draft.kernel, mapping, pieces)
         if reason is None:
             draft.kernel = kernel
         else:
@@ -2113,6 +2907,9 @@ class Schedule:
             draft.kernel,
             _with_priority,
             _nests(layout, draft.order, draft.tags).values(),
+        )
+        other._code, other._strides = _stepped(
+            other._kernel, draft.order, draft.tags
         )
         other._reassoc = frozenset(draft.reassoc)
         other._reductions = dict(draft.reductions)
@@ -2349,13 +3146,13 @@ def _key(name: str, target: str, steps: Sequence[tuple[str, tuple, dict]]) -> st
 def _call_text(step: tuple[str, tuple, dict]) -> str:
     """One recipe as the call it is, every argument written out.
 
-    An isl map, which is what :meth:`Schedule.affine` records, is written as
-    its text, which is what ``affine`` also accepts.
+    An isl map or union map, which is what :meth:`Schedule.affine` records,
+    is written as its text, which is what ``affine`` also accepts.
     """
     method, args, kwargs = step
 
     def shown(value: Any) -> str:
-        if isinstance(value, isl.Map | isl.BasicMap):
+        if isinstance(value, isl.Map | isl.BasicMap | isl.UnionMap):
             return repr(str(value))
         return repr(value)
 
@@ -2434,7 +3231,11 @@ class _Inexpressible(ValueError):
     """A reindexing the kernel rewrite cannot write for loopy, and why."""
 
 
-def _affine_kernel(kernel: Any, mapping: isl.Map) -> tuple[Any, str | None]:
+def _affine_kernel(
+    kernel: Any,
+    mapping: isl.Map,
+    pieces: Mapping[str, isl.Map] | None = None,
+) -> tuple[Any, str | None]:
     """The loopy kernel reindexed along ``mapping``, or why it cannot be.
 
     ``lp.map_domain`` would be the obvious call, and it is what the skew used
@@ -2454,17 +3255,33 @@ def _affine_kernel(kernel: Any, mapping: isl.Map) -> tuple[Any, str | None]:
       quasi-affine expression of the new ones that isl gives for the inverse on
       that domain, such as ``floor((a + b)/2)``, which is exact on the image.
 
+    ``pieces``, when given, maps each instruction in the mapped loops to a
+    map of its own, all of them over the loops ``mapping`` names on both
+    sides. Maps that are all one map are that map. Otherwise loopy still
+    gives the new loops one domain, since the statements share them, and the
+    rewrite gives each instruction back its own part of it (see
+    :func:`_shared_image`): the domain is the union of the images, or the
+    polyhedral hull of the union when that is not one basic set, and in each
+    instruction the old loops are replaced by its own inverse, and it is
+    predicated on its own image, such as ``(1 + a + b) mod 2 = 0`` for a
+    statement moved half a step along the diamond. A domain nested in the
+    loops moves along the map of the instructions that run in it, and has to
+    have one, and so does the instruction that computes a ragged row's length
+    for the fiber of those instructions (see :func:`_with_bound_maps`).
+
     The map is the same object the checker reasons about, so the two cannot
     drift apart. What cannot be written this way comes back as the reason, and
     the kernel unchanged: loops that no one domain defines, an image that is
-    not one basic set, an inverse that is piecewise, or an instruction in some
-    of the mapped loops and not the others.
+    not one basic set, an inverse that is piecewise, an instruction in some of
+    the mapped loops and not the others, and, with maps per statement, a
+    nested domain whose instructions move by different maps, a row's length
+    that bounds fibers whose statements do, or an instruction in the loops
+    that is no statement's and bounds none of their loops.
     """
-    from loopy.match import parse_stack_match
+    from loopy.match import Id, parse_stack_match
     from loopy.symbolic import (
         RuleAwareSubstitutionMapper,
         SubstitutionRuleMappingContext,
-        pw_aff_to_expr,
     )
     from pymbolic.mapper.substitutor import make_subst_func
 
@@ -2488,26 +3305,11 @@ def _affine_kernel(kernel: Any, mapping: isl.Map) -> tuple[Any, str | None]:
             "defines every loop the map replaces"
         )
     home = homes[0]
-    try:
-        domains = list(entry.domains)
-        domains[home] = _image(entry.domains[home], mapping)
-        for k, domain in enumerate(entry.domains):
-            if k != home and mapped & set(domain.get_var_names(isl.dim_type.param)):
-                domains[k] = _image_of_params(domain, mapping)
-        inverse = _inverse(mapping, entry.domains[home])
-        substitution = {}
-        for k, name in enumerate(inputs):
-            piece = inverse.get_pw_aff(k).coalesce()
-            if piece.n_piece() != 1:
-                raise _Inexpressible(
-                    f"the inverse of the map is piecewise in {name} ({piece}), "
-                    "and a loop variable is replaced by one expression"
-                )
-            substitution[name] = pw_aff_to_expr(piece)
-    except _Inexpressible as exc:
-        return kernel, str(exc)
-    except isl.Error as exc:
-        return kernel, f"isl could not rewrite the kernel along the map: {exc}"
+    before = entry.domains[home]
+    if pieces is not None:
+        first = next(iter(pieces.values()))
+        if all(piece.is_equal(first) for piece in pieces.values()):
+            mapping, pieces = first, None
 
     insns = []
     for insn in entry.instructions:
@@ -2522,22 +3324,228 @@ def _affine_kernel(kernel: Any, mapping: isl.Map) -> tuple[Any, str | None]:
                 within_inames=(insn.within_inames - mapped) | set(outputs)
             )
         insns.append(insn)
+
+    try:
+        if pieces is not None:
+            pieces = _with_bound_maps(entry, mapped, pieces)
+        domains = list(entry.domains)
+        predicates: dict[str, Any] = {}
+        if pieces is None:
+            domains[home] = _image(before, mapping)
+            substitutions = {None: _substitution(mapping, before)}
+        else:
+            images = {key: _image_set(before, piece) for key, piece in pieces.items()}
+            domains[home], predicates = _shared_image(images, before)
+            substitutions = {
+                key: _substitution(piece, before) for key, piece in pieces.items()
+            }
+        for k, domain in enumerate(entry.domains):
+            if k != home and mapped & set(domain.get_var_names(isl.dim_type.param)):
+                moved = mapping if pieces is None else _governing(entry, domain, pieces)
+                domains[k] = _image_of_params(domain, moved)
+    except _Inexpressible as exc:
+        return kernel, str(exc)
+    except isl.Error as exc:
+        return kernel, f"isl could not rewrite the kernel along the map: {exc}"
+
     # loopy's own transforms refuse to remap an iname a loop priority
     # mentions, and the old priority names loops that no longer exist. The
     # caller sets the priority to the nest it has just checked.
     entry = entry.copy(
         domains=domains, instructions=insns, loop_priority=frozenset()
     )
-    context = SubstitutionRuleMappingContext(
-        entry.substitutions, entry.get_var_name_generator()
-    )
-    mapper = RuleAwareSubstitutionMapper(
-        context, make_subst_func(substitution), within=parse_stack_match(None)
-    )
-    entry = context.finish_kernel(
-        mapper.map_kernel(entry, map_args=False, map_tvs=False)
-    )
+    for key, substitution in substitutions.items():
+        context = SubstitutionRuleMappingContext(
+            entry.substitutions, entry.get_var_name_generator()
+        )
+        mapper = RuleAwareSubstitutionMapper(
+            context,
+            make_subst_func(substitution),
+            within=parse_stack_match(None if key is None else Id(key)),
+        )
+        entry = context.finish_kernel(
+            mapper.map_kernel(entry, map_args=False, map_tvs=False)
+        )
+    if predicates:
+        # Added after the substitution, because they are written in the new
+        # loops already, and a new loop may keep the name of an old one.
+        entry = entry.copy(
+            instructions=[
+                insn.copy(predicates=_first(predicates[insn.id], insn.predicates))
+                if insn.id in predicates
+                else insn
+                for insn in entry.instructions
+            ]
+        )
     return kernel.with_kernel(entry), None
+
+
+def _first(own: Any, others: frozenset[Any]) -> frozenset[Any]:
+    """The predicates ``own`` and ``others``, with ``own`` evaluated first.
+
+    loopy joins an instruction's predicates with ``&&`` in no particular
+    order, and a ``when`` guard among them may read an array. At a point of
+    the shared loops that is another statement's, this instruction's inverse
+    names a loop value it does not have, so each other predicate that could
+    fault there, by reading an array, calling a function or dividing by
+    something that is not a number, becomes ``own and it``, which C
+    evaluates left to right; one that only compares loop variables and sizes
+    is safe anywhere and stays as it is. ``own`` stays a predicate of its
+    own: loopy's bounds check reads the instruction's domain off the
+    predicates it can turn into sets, and skips one it cannot, such as a
+    conjunction with a guard that reads an array.
+    """
+    from loopty.lower import walk
+
+    def could_fault(node: Any) -> bool:
+        if isinstance(node, prim.Subscript | prim.Call):
+            return True
+        return isinstance(
+            node, prim.FloorDiv | prim.Quotient | prim.Remainder
+        ) and not isinstance(node.denominator, int)
+
+    return frozenset(
+        [
+            own,
+            *(
+                prim.LogicalAnd((own, other))
+                if any(could_fault(node) for node in walk(other))
+                else other
+                for other in others
+            ),
+        ]
+    )
+
+
+def _substitution(mapping: isl.Map, domain: Any) -> dict[str, Any]:
+    """Each old loop as the expression of the new ones that ``mapping`` gives."""
+    from loopy.symbolic import pw_aff_to_expr
+
+    inverse = _inverse(mapping, domain)
+    out = {}
+    for k, name in enumerate(_dim_names(mapping, isl.dim_type.in_)):
+        piece = inverse.get_pw_aff(k).coalesce()
+        if piece.n_piece() != 1:
+            raise _Inexpressible(
+                f"the inverse of the map is piecewise in {name} ({piece}), "
+                "and a loop variable is replaced by one expression"
+            )
+        out[name] = pw_aff_to_expr(piece)
+    return out
+
+
+def _shared_image(
+    images: Mapping[str, isl.Set], before: Any
+) -> tuple[isl.BasicSet, dict[str, Any]]:
+    """One domain for loops whose statements move by maps of their own.
+
+    loopy gives a loop one domain, and a statement one set of loops, so two
+    statements that interleave in the new loops have to share them, and the
+    loops have to run over every point either statement has. The domain is
+    the union of the images when isl coalesces it into one basic set, which
+    keeps a lattice both images lie on (the diamond's parity, say) for
+    :func:`_stepped` to step over, and the polyhedral hull of the union
+    otherwise, which only over-approximates. Each instruction whose image is
+    less than that domain gets it back as a predicate, the gist of its image
+    in the domain as loopy writes a condition, as the lowering cuts back a
+    statement a ``when`` narrows; a gist loopy cannot write is refused rather
+    than dropped, since the instruction would then run at points it does not
+    have.
+
+    Returns the domain and the predicate of each instruction that needs one.
+    """
+    from loopy.symbolic import set_to_cond_expr
+
+    union: isl.Set | None = None
+    for image in images.values():
+        union = image if union is None else union.union(image)
+    assert union is not None
+    union = union.coalesce()
+    if union.n_basic_set() == 1:
+        (shared,) = union.get_basic_sets()
+    else:
+        shared = union.polyhedral_hull()
+    wide = _as_set(shared)
+    predicates: dict[str, Any] = {}
+    for key, image in images.items():
+        narrow = image.align_params(wide.get_space())
+        if narrow.is_equal(wide.align_params(narrow.get_space())):
+            continue
+        extra = narrow.gist(wide.align_params(narrow.get_space()))
+        try:
+            predicates[key] = set_to_cond_expr(extra)
+        except Exception as exc:  # noqa: BLE001 - loopy's words for it vary
+            raise _Inexpressible(
+                f"the image of the domain {before} for {key} is {image}, "
+                f"narrower than the domain its loops share, {shared}, and the "
+                f"difference cannot be written as a condition ({exc})"
+            ) from exc
+    return shared, predicates
+
+
+def _with_bound_maps(
+    entry: Any, mapped: set[str], pieces: Mapping[str, isl.Map]
+) -> dict[str, isl.Map]:
+    """``pieces``, with a map for every other instruction in the mapped loops.
+
+    Such an instruction is no statement's: it computes the length of a
+    ragged row, which bounds the fiber of the statements inside it, in the
+    row's loop, once per row. It moves along the map of the statements whose
+    loops it bounds, which is where the checker counts its read, as part of
+    each statement over the loops up to the row, and it has to have one. An
+    instruction that bounds nothing is refused, and so is one whose
+    statements move by different maps.
+    """
+    out = dict(pieces)
+    for insn in entry.instructions:
+        if insn.id in out or not mapped & insn.within_inames:
+            continue
+        written = set(insn.assignee_var_names())
+        bounded = [
+            domain
+            for domain in entry.domains
+            if written & set(domain.get_var_names(isl.dim_type.param))
+        ]
+        if not bounded:
+            raise _Inexpressible(
+                f"instruction {insn.id} runs in {', '.join(sorted(mapped))} "
+                "and belongs to no statement, so it has no map of its own, "
+                "and the statements in those loops move by different maps"
+            )
+        maps = [_governing(entry, domain, pieces) for domain in bounded]
+        if not all(m.is_equal(maps[0]) for m in maps):
+            # Two fibers of one row, whose statements move apart.
+            raise _Inexpressible(
+                f"instruction {insn.id} bounds loops whose statements move by "
+                "different maps, and it runs once per row"
+            )
+        out[insn.id] = maps[0]
+    return out
+
+
+def _governing(entry: Any, domain: Any, pieces: Mapping[str, isl.Map]) -> isl.Map:
+    """The map a domain nested in the mapped loops moves along.
+
+    The one map of the instructions that run in it, as loops or as the loops
+    of a reduction; a domain that holds instructions moving by different maps
+    would have to be two domains, one per map, which is refused.
+    """
+    names = set(domain.get_var_names(isl.dim_type.set))
+    users = [
+        insn.id
+        for insn in entry.instructions
+        if names & (set(insn.within_inames) | set(insn.reduction_inames()))
+    ]
+    if not users:  # pragma: no cover - a domain holds a loop some instruction runs in
+        return next(iter(pieces.values()))
+    maps = [pieces[user] for user in users if user in pieces]
+    if len(maps) != len(users) or not all(m.is_equal(maps[0]) for m in maps):
+        raise _Inexpressible(
+            f"the domain {domain} is nested in the mapped loops and holds "
+            f"{', '.join(users)}, which move by different maps, and loopy "
+            "gives the loops it defines one domain"
+        )
+    return maps[0]
 
 
 def _picking(count: int, positions: Sequence[int]) -> isl.Map:
@@ -2572,6 +3580,11 @@ def _one_basic_set(image: isl.Set, before: Any) -> isl.BasicSet:
 
 def _image(domain: Any, mapping: isl.Map) -> isl.BasicSet:
     """The domain that defines the mapped loops, moved along ``mapping``."""
+    return _one_basic_set(_image_set(domain, mapping), domain)
+
+
+def _image_set(domain: Any, mapping: isl.Map) -> isl.Set:
+    """:func:`_image`, as the set isl computes, one basic set or not."""
     inputs = _dim_names(mapping, isl.dim_type.in_)
     outputs = _dim_names(mapping, isl.dim_type.out)
     names = list(domain.get_var_names(isl.dim_type.set))
@@ -2584,7 +3597,7 @@ def _image(domain: Any, mapping: isl.Map) -> isl.BasicSet:
     )
     for k, name in enumerate((*outputs, *rest)):
         image = image.set_dim_name(isl.dim_type.set, k, name)
-    return _one_basic_set(image, domain)
+    return image
 
 
 def _image_of_params(domain: Any, mapping: isl.Map) -> isl.BasicSet:
@@ -2638,3 +3651,211 @@ def _as_set(domain: Any) -> isl.Set:
     if isinstance(domain, isl.BasicSet):
         return isl.Set.from_basic_set(domain)
     return domain
+
+
+# {{{ loops over a lattice
+
+
+def _ranked(names: Sequence[str], order: Sequence[str]) -> list[str]:
+    """``names`` outermost first: in ``order``, then the rest as they come."""
+    rank = {name: k for k, name in enumerate(order)}
+    return sorted(
+        names, key=lambda name: (rank.get(name, len(order)), names.index(name))
+    )
+
+
+def _stride_of(domain: Any, name: str, inner: Sequence[str]) -> tuple[int, Any]:
+    """The stride of ``name`` in ``domain`` given its outer loops, and its offset.
+
+    The loops inside it are projected out first, so that the offset is an
+    affine function of the parameters and the loops outside it only; isl's
+    ``get_stride_info`` would otherwise express it in any of the others.
+    """
+    projected = _as_set(domain)
+    for other in inner:
+        dims = projected.get_var_names(isl.dim_type.set)
+        if other in dims:
+            projected = projected.project_out(
+                isl.dim_type.set, dims.index(other), 1
+            )
+    info = projected.get_stride_info(
+        projected.get_var_names(isl.dim_type.set).index(name)
+    )
+    return info.get_stride().to_python(), info.get_offset()
+
+
+def _stepped(
+    kernel: Any, order: Sequence[str], tags: Mapping[str, str]
+) -> tuple[Any, dict[str, str]]:
+    """``kernel`` with each loop over a lattice written as a count of steps.
+
+    The image of a map that is not unimodular has holes: the diamond's is the
+    points where ``a + b`` is even, which isl states as an existentially
+    quantified constraint. loopy loops over such a domain's bounding box and
+    tests the constraint with an ``if`` in the innermost loop, so that half
+    the iterations of that loop do nothing (note 13 of
+    ``docs/loopy-notes.md``). Here every loop is asked, outermost first,
+    whether isl finds a stride for it given the loops outside it: ``b`` steps
+    by 2 from ``-a``. Such a loop is replaced by a counter, ``b = 2*b_step -
+    a``, in the domain (whose preimage has no holes left) and in every
+    instruction, and the new loop runs over the counter. For fixed values of
+    the loops outside it, the counter and the loop it replaces increase
+    together and meet the same points, so the kernel runs the same instances
+    in the same order: the change of variables is the one the order the
+    checker approved already fixes, and isl confirms, for each loop, that the
+    new domain maps back onto the old one exactly.
+
+    Done last, on the kernel code is generated from, and not in the kernel
+    later steps transform: a tile of ``b`` splits the loop the checker knows,
+    not the counter. A loop is left as loopy has it when it carries a tag
+    (a hardware axis is not a loop loopy steps through), is the loop of a
+    reduction, is named by another domain as a parameter (a fiber nested in
+    it), or has a stride whose offset involves a loop that does not run
+    around every instruction in it.
+
+    Returns the kernel, and for each loop replaced the expression it became,
+    as text: ``{"b": "2*b_step - a"}``.
+    """
+    if kernel is None:
+        return None, {}
+    from loopy.match import parse_stack_match
+    from loopy.symbolic import (
+        RuleAwareSubstitutionMapper,
+        SubstitutionRuleMappingContext,
+        aff_to_expr,
+        get_dependencies,
+    )
+    from pymbolic.mapper.substitutor import make_subst_func
+
+    entry = kernel.default_entrypoint
+    within: dict[str, set[str]] = {}
+    folded: set[str] = set()
+    for insn in entry.instructions:
+        for name in insn.within_inames:
+            within.setdefault(name, set()).add(insn.id)
+        folded |= set(insn.reduction_inames())
+    nested: set[str] = set()
+    for domain in entry.domains:
+        nested |= set(domain.get_var_names(isl.dim_type.param))
+    fresh = entry.get_var_name_generator()
+    domains = list(entry.domains)
+    substitution: dict[str, Any] = {}
+    renamed: dict[str, str] = {}
+    shown: dict[str, str] = {}
+    for position, domain in enumerate(domains):
+        params = set(domain.get_var_names(isl.dim_type.param))
+        ranked = _ranked(list(domain.get_var_names(isl.dim_type.set)), order)
+        for k, name in enumerate(ranked):
+            if name in tags or name not in within or name in folded | nested:
+                continue
+            try:
+                stride, offset = _stride_of(domain, name, ranked[k + 1 :])
+            except isl.Error:  # pragma: no cover - isl finds no stride
+                continue
+            if stride <= 1:
+                continue
+            around = {
+                renamed.get(outer, outer)
+                for outer in ranked[:k]
+                if within[name] <= within.get(outer, set())
+            }
+            value = aff_to_expr(offset)
+            if not set(get_dependencies(value)) - params <= around:
+                continue
+            counter = fresh(f"{name}_step")
+            value = stride * prim.Variable(counter) + value
+            counted = _counted(domain, name, counter, value)
+            if counted is None:
+                continue
+            domain = counted
+            substitution[name] = value
+            renamed[name] = counter
+            shown[name] = _stepped_text(stride, counter, offset)
+        domains[position] = domain
+    if not renamed:
+        return kernel, {}
+    insns = [
+        insn.copy(
+            within_inames=frozenset(renamed.get(n, n) for n in insn.within_inames)
+        )
+        if insn.within_inames & set(renamed)
+        else insn
+        for insn in entry.instructions
+    ]
+    priority = frozenset(
+        tuple(renamed.get(name, name) for name in nest)
+        for nest in entry.loop_priority
+    )
+    entry = entry.copy(domains=domains, instructions=insns, loop_priority=priority)
+    context = SubstitutionRuleMappingContext(
+        entry.substitutions, entry.get_var_name_generator()
+    )
+    mapper = RuleAwareSubstitutionMapper(
+        context, make_subst_func(substitution), within=parse_stack_match(None)
+    )
+    entry = context.finish_kernel(
+        mapper.map_kernel(entry, map_args=False, map_tvs=False)
+    )
+    return kernel.with_kernel(entry), shown
+
+
+def _counted(domain: Any, name: str, counter: str, value: Any) -> Any:
+    """``domain`` over ``counter`` in place of ``name``, where ``name = value``.
+
+    The preimage of the domain under the change of variables, which isl
+    confirms maps back onto the domain exactly. ``None`` when it does not, or
+    is not one basic set.
+    """
+    from loopy.symbolic import aff_from_expr
+
+    before = _as_set(domain)
+    names = list(before.get_var_names(isl.dim_type.set))
+    space = before.get_space().set_dim_name(
+        isl.dim_type.set, names.index(name), counter
+    )
+    try:
+        listed = isl.AffList.alloc(space.get_ctx(), len(names))
+        for other in names:
+            listed = listed.add(
+                aff_from_expr(space, value if other == name else prim.Variable(other))
+            )
+        function = isl.MultiAff.from_aff_list(
+            space.map_from_domain_and_range(before.get_space()), listed
+        )
+        after = before.preimage_multi_aff(function).coalesce()
+        if not after.apply(isl.Map.from_multi_aff(function)).is_equal(before):
+            return None  # pragma: no cover - isl's stride holds by construction
+    except isl.Error:  # pragma: no cover - defensive against isl declining
+        return None
+    if after.n_basic_set() != 1:  # pragma: no cover - a preimage of a basic set
+        return None
+    (out,) = after.get_basic_sets()
+    return out
+
+
+def _stepped_text(stride: int, counter: str, offset: Any) -> str:
+    """``2*b_step - a``: a loop as its counter, the way a reader writes it."""
+    from loopy.symbolic import aff_to_expr
+
+    if offset.dim(isl.dim_type.div) or offset.get_denominator_val().to_python() != 1:
+        return f"{stride}*{counter} + {aff_to_expr(offset)}"
+    terms = [(stride, counter)]
+    for kind in (isl.dim_type.in_, isl.dim_type.param):
+        for k in range(offset.dim(kind)):
+            coefficient = offset.get_coefficient_val(kind, k).to_python()
+            if coefficient:
+                terms.append((coefficient, offset.get_dim_name(kind, k)))
+    out = ""
+    for coefficient, name in terms:
+        magnitude = "" if abs(coefficient) == 1 else f"{abs(coefficient)}*"
+        if not out:
+            out = f"{'-' if coefficient < 0 else ''}{magnitude}{name}"
+        else:
+            out += f" {'-' if coefficient < 0 else '+'} {magnitude}{name}"
+    constant = offset.get_constant_val().to_python()
+    if constant:
+        out += f" {'-' if constant < 0 else '+'} {abs(constant)}"
+    return out
+
+
+# }}}

@@ -93,17 +93,64 @@ with a pair of statement instances.
   isl gives, `floor((a + b)/2)`. That answers the question the spike asked:
   loopy 2025.2 generates correct code for a non-unimodular image, bit for bit
   on the stencil (against its reference, untiled and tiled in diamond
-  coordinates) and on the acoustic pair (against the native run), with the
-  parity tested inside the innermost loop rather than stepped over. A map the rewrite cannot write for loopy (loops no one domain
-  defines, an image that is not one basic set, a piecewise inverse) is a
-  `refuted` `buildable` fact, and the schedule has no kernel from then on. A
-  map moves every statement in its loops alike; a map per statement is
-  refused. `examples/wavefront_acoustic.py` tries the diamond three ways: with
-  space first it is refused with a witness, with time first it is accepted and
-  runs, and tiling it is refused, because the pair needs a time offset between
-  its statements. Note 13 in `docs/loopy-notes.md` has the details, and
-  `loopty.oracle.is_bijection_on` is the totality-and-bijectivity question the
-  first fact asks.
+  coordinates) and on the acoustic pair (against the native run). A map the
+  rewrite cannot write for loopy (loops no one domain defines, an image that
+  is not one basic set, a piecewise inverse) is a `refuted` `buildable` fact,
+  and the schedule has no kernel from then on. `examples/wavefront_acoustic.py`
+  tries the diamond four ways: with space first it is refused with a witness,
+  with time first it is accepted and runs, tiling it is refused, because the
+  pair needs an offset between its statements, and tiling it with that offset,
+  a map per statement (below), is accepted and runs. Note 13 in
+  `docs/loopy-notes.md` has the details, and `loopty.oracle.is_bijection_on`
+  is the totality-and-bijectivity question the first fact asks.
+- **A loop over a lattice counts its steps** (`Schedule.strides`). loopy
+  loops over the bounding box of a domain with an existentially quantified
+  constraint and tests the constraint inside the innermost loop, so the
+  diamond's loop over `b` tested the parity of `a + b` at every `b`
+  (`if (-b - a + 2 * ((b + a) / 2) == 0)`) and did nothing at half of them.
+  Once a step has set the nest, the kernel code is generated from asks isl
+  for the stride of each loop given the loops outside it, and replaces a loop
+  that has one by a counter of its steps, `b = 2*b_step - a`, in the domain,
+  whose preimage has no holes left, and in every instruction. The counter and
+  the loop increase together for fixed outer loops, so the instances and their
+  order are the ones the checker approved, and isl confirms for each loop that
+  the new domain maps back onto the old one. It is done on the kernel code is
+  made from, not on the one steps transform, so a later tile still splits the
+  loop the checker knows, and the loop counted after a tile of the diamond is
+  `b_inner`. `Schedule.strides` names each loop replaced and its expression,
+  `{"b": "2*b_step - a"}`. The diamond on the stencil and on the acoustic pair
+  compiles with no parity test and still agrees bit for bit at sizes of both
+  parities, and a guard that narrows a loop to a congruence (`when(i % 2 ==
+  0)`) is stepped over too. A loop with a tag, the loop of a reduction, a loop
+  another domain names, and a loop whose offset involves a loop not around all
+  its instructions keep loopy's test. Every other schedule of the examples
+  generates the code it did (#45).
+- **A map per statement in `Schedule.affine`.** A union map whose input tuples
+  name statements moves each statement by its own map:
+  `affine("{ S0[t, i] -> [a, b] : a = t + i and b = t - i; S1[t, i] -> [a, b] :
+  a = t + i and b = t - i + 1 }")` puts the pressure update of the acoustic
+  pair half a step after the velocity update along the diamond, which is the
+  offset a diamond tiling of the pair needs, and `.tile("a", "b", 4, 4)` after
+  it is accepted where the tiling of the plain diamond is refused. The
+  `bijective` and `monotone` facts are asked of the maps together, over the
+  dependences between the statements as well as within each: `S1` put before
+  the `S0` whose velocity it reads is refused with that pair as the witness.
+  The statements of a loop keep sharing its loops in the kernel, since loopy
+  gives them one domain: the new loops run over the union of the images (its
+  polyhedral hull when the union is not one basic set), each instruction is
+  predicated on its own image and reads its old loops back from its own
+  inverse, and the instruction that computes a ragged row's length moves with
+  the statement whose fiber it bounds. Maps that are all one map build that
+  map's kernel. Every statement in the loops the maps name has to run in all
+  of them and be given a map, the maps have to take the same loops to the
+  same new ones, and a map may not name its output tuple, or a statement the
+  kernel does not have, and a statement may not be given two maps; each is a
+  `ValueError` naming the statement. Two statements of one ragged fiber moved
+  by different maps are a `refuted` `buildable` fact, since the fiber is one
+  loopy domain, and so are two fibers of one row, whose length one instruction
+  computes for both. The diamond tiling of
+  `examples/wavefront_acoustic.py` agrees with the native run bit for bit, and
+  `loopty run` compiles it as a third schedule of the kernel (#46).
 - **Execution** (`loopty.executor`). `LoopyExecutor` runs a kernel, a schedule or
   a term through `lp.ExecutableCTarget` on numpy or `Arr` arguments, and
   `differential()` compares the compiled run against the Python body at the
@@ -216,7 +263,7 @@ with a pair of statement instances.
   does (the strict triangle written `Sigma[a: Fin[n], Fin[a]]` has the
   declared points in an `n x (n - 1)` box). The executor also passes the
   sizes the call determines to a kernel whose flat buffers give loopy none
-  (note 14 in `docs/loopy-notes.md`).
+  (note 15 in `docs/loopy-notes.md`).
   A box extent that can be negative at some size, `n - 1` at `n = 0`, is
   neither a shape nor part of where a piece starts, since the domain is empty
   there and its box has no cells: isl decides which extents are never
@@ -996,6 +1043,73 @@ with a pair of statement instances.
   raised but returned, as a `refuted` agreement fact with the refusal as its
   reason and no outputs, the way the faithfulness fact counts it, so
   `loopty run` prints it under the fact's `REFUTED` line.
+- A hardware axis on the C target is a `refuted` `buildable` fact (#47): loopy's
+  C code runs in one thread, and code generation stopped with "plain C does not
+  have local hw axes" (or group) for a schedule the check had passed, including
+  one retargeted to C by `loopty run --target c`. So is a `vec` loop that keeps
+  a sum's accumulator in it, which C has no vector types for. The target's own
+  limit is asked after every other, since it is the one `retarget("opencl")`
+  removes; the spmv demo's device schedule, written for `"c"`, keeps its
+  ragged-fiber reason, and its transcript is unchanged. The tests that tagged
+  loops on `"c"` for the casts' sake assert the refuted fact beside the decided
+  casts, or run on loopy's plain OpenCL target, now a shared `plain_opencl`
+  fixture.
+- An `unr`, `ilp` or `vec` loop whose length is not a number when the code is
+  generated is a `refuted` `buildable` fact (#48). loopy writes such a loop
+  out, and a loop over `Fin[n]` with `n` free failed inside isl with
+  "unbounded optimum", naming no loop. The length is asked as loopy asks it,
+  of the loop's bounds with every size and every other loop projected out, so
+  a triangle inside a fixed extent builds, and the reason names the split that
+  makes a loop of fixed length. The check for a hardware axis on a nested
+  reduction no longer counts `ilp` as one; such a loop is refused for the
+  privatization note 11 describes instead.
+- The check knows loopy's rules for hardware axes (#55): the axes of a kind are
+  numbered from 0 with none left out (`l.1` alone was "local axis 0 unused"),
+  an instruction has one loop per axis, `vec` included, with a sum's loop
+  counted as one of its statement's ("instruction 'S0' has multiple inames
+  tagged 'l.0'"), and every instruction runs on every group and local axis the
+  kernel uses, a sum's accumulator and a ragged row's length among them ("does
+  not use all local hw axes"). `l.auto`, which loopy assigns only inside its
+  own transforms, is refused too. Each is read off the kernel's own
+  instructions and tags after every step.
+- The same comparison with loopy's code generation, over every tag and pair of
+  tags on a set of small kernels, found three more, now refused: a concurrent
+  loop (`ilp` and `vec` as well as a hardware axis) on a ragged fiber, or on a
+  dense loop the lowering defines in one domain with a fiber, which loopy
+  refuses in any domain with a data-dependent parameter; a `vec` loop in which
+  a ragged row's length is read, or around a sum on a local axis, which failed
+  with a `TypeError` inside loopy. `tests/test_buildable.py` asks each case of
+  the schedule and of loopy, with loopy's caches off; note 14 of
+  `docs/loopy-notes.md` has the table.
+- An `ilp` or `ilp.seq` loop in which a ragged row's length is read is a
+  `refuted` `buildable` fact. loopy generated its code, and the code was wrong:
+  it gives a temporary written inside an `ilp` loop an array along the loop,
+  and the loop over the row's fiber still read the length by its name, so it
+  compared its variable with the array's address. The C run read past the rows
+  and crashed. It had passed the check, since nothing concurrent sits in the
+  fiber's domain; `unr` builds and runs.
+- A ragged fiber inside a dense loop of its row lowers beside a statement of
+  that loop (#53). The statement in the fiber was cut after its row, where the
+  row's length is assigned, and the one beside the fiber was not, so the row
+  loop came out in two domains and the kernel was refused for using `r` for
+  two loops, which it does not. Every cut is now passed on to the statements
+  that share the loops up to it, and the kernel lowers and agrees with its
+  body. A loop the lowering still cannot define once is refused as a limit of
+  the lowering, not blamed on its name, when every statement that has it has
+  the same loops around it.
+- The agreement fact of a kernel or a term run by `LoopyExecutor.differential`
+  records the target the run was made on (#56). It read the target off the
+  object, which a kernel does not carry, so a run on OpenCL was recorded, and
+  named, as `[c]`. `agreement` takes the target as a keyword, defaulting to the
+  schedule's.
+- A loop tagged `vec` carries no order, as one tagged `ilp` does not (#57).
+  loopy runs such a loop around each instruction of its body separately, so
+  two statements of the loop no longer interleave, and `vec` kept its place in
+  the order the checker asks about: `tag(i="vec")` on a loop whose second
+  statement feeds the first statement of the next iteration was a decided
+  cast, and the compiled run disagreed with the body. It is refused with the
+  witness `ilp` gets, and a `vec` tag on a reduction's loop asks the
+  accumulation's permission to be reassociated, as `ilp` does.
 
 ### Changed
 
