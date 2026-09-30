@@ -51,3 +51,24 @@ def _silence_loopys_own_deprecations() -> Iterator[None]:
             category=DeprecationWarning,
         )
         yield
+
+
+@pytest.fixture
+def plain_opencl(monkeypatch):
+    """loopy's plain OpenCL target in place of the pyopencl one; loopy itself.
+
+    ``lower.target_for("opencl")`` builds loopy's PyOpenCL target, which
+    cannot be built without pyopencl, and CI has neither pyopencl nor a
+    device. Code generation is all a buildability test asks of the target,
+    and the plain one generates the same OpenCL C.
+    """
+    lp = pytest.importorskip("loopy")
+    from loopty import lower
+
+    plain = lower.target_for
+    monkeypatch.setattr(
+        lower,
+        "target_for",
+        lambda target="c": lp.OpenCLTarget() if target == "opencl" else plain(target),
+    )
+    return lp
