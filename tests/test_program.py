@@ -14,7 +14,7 @@ import islpy as isl
 import loopy as lp
 import numpy as np
 import pytest
-from lanky.prelude import Bool, Nat, Real
+from lanky.prelude import Bool, Int, Nat, Real
 
 from loopty import (
     Arr,
@@ -1029,7 +1029,8 @@ def test_a_temporary_of_reals_is_stored_as_the_compiled_one_is() -> None:
     with pytest.raises(ValueError, match="c is stored as int64"):
         LoopyExecutor().run(halves, c=counts.copy(), y=Arr.zeros(3))
     inputs = {"c": Arr.from_numpy(counts.copy()), "y": Arr.zeros(3)}
-    with pytest.raises(ValueError, match="give that Arr.zeros_like dtype=float64"):
+    fix = "Give that Arr.zeros_like dtype=float64, or pass c as float64"
+    with pytest.raises(ValueError, match=fix):
         LoopyExecutor().differential(halves, Schedule(halves), inputs)
     # A c the contract accepts as whole floats makes a float64 f natively too.
     fact = LoopyExecutor().differential(
@@ -1098,6 +1099,93 @@ def test_every_sort_has_a_native_storage(sort, storage, holds, refused) -> None:
         assert not holds_natively(sort, dtype), dtype
 
 
+@pytest.mark.parametrize(
+    "sort",
+    [
+        Real,
+        Real.exact,
+        float,
+        complex,
+        np.float32,
+        np.complex128,
+        np.complex64,
+        np.int32,
+        Nat,
+        Int,
+        int,
+        Fin[4],
+        Bool,
+        bool,
+    ],
+)
+def test_every_sort_that_lowers_has_a_native_storage(sort) -> None:
+    # The lowering and the storage check know the same sorts, so no temporary
+    # lowers unchecked. The compiled storage holds what the native one does,
+    # but for Bool, whose compiled byte holds a truth value as a bool does.
+    from loopty.contract import holds_natively, native_storage
+    from loopty.lower import numpy_dtype
+
+    compiled = numpy_dtype(sort)
+    assert native_storage(sort) is not None
+    if sort is Bool or sort is bool:
+        assert (compiled.kind, compiled.itemsize) == ("i", 1)
+    else:
+        assert holds_natively(sort, compiled), compiled
+
+
+def test_a_refused_storage_names_only_the_fixes_that_keep_the_parameter() -> None:
+    # Passing the parameter in the temporary's dtype is named as a fix only
+    # when that dtype holds the parameter's own sort too: a real u passed as
+    # a bool or an integer to make b or c of it would be another u.
+    @program
+    def unmarked(u, y):
+        b = Arr.zeros_like(u)
+        mark(u, b)
+        keep_unmarked(b, u, y)
+
+    @program
+    def counted(u, y):
+        c = Arr.zeros_like(u)
+        truncate(u, c)
+        count(c, y)
+
+    @program
+    def rotated(u, g):
+        f = Arr.zeros_like(u)
+        rotate(u, f)
+        square(f, g)
+
+    u = Arr.from_numpy(np.array([0.5, 2.0]))
+    cases = [
+        (unmarked, {"u": u, "y": Arr.zeros(2)}, "bool", None),
+        (counted, {"u": u, "y": Arr.zeros(2)}, "int64", None),
+        (
+            rotated,
+            {"u": u, "g": Arr.zeros(2, dtype=np.complex128)},
+            "complex128",
+            "complex128",
+        ),
+    ]
+    for prog, inputs, given, passed in cases:
+        with pytest.raises(ValueError) as refused:
+            LoopyExecutor().run(prog, **inputs)
+        message = str(refused.value)
+        assert f"Give that Arr.zeros_like dtype={given}" in message, message
+        assert ("or pass u as" in message) == (passed is not None), message
+        if passed is not None:
+            assert f"or pass u as {passed}" in message, message
+        assert "<class" not in message, message
+
+    @program
+    def given_reals(u, g):
+        f = Arr.zeros_like(u, dtype=np.float64)
+        rotate(u, f)
+        square(f, g)
+
+    with pytest.raises(TraceError, match="declares its elements complex128,"):
+        given_reals.trace()
+
+
 def test_a_complex_temporary_is_stored_as_the_compiled_one_is() -> None:
     # zeros_like(u) of a real u is real natively, so rotate's quarter turn
     # cannot be stored in it, where the compiled temporary, complex, keeps it:
@@ -1117,7 +1205,7 @@ def test_a_complex_temporary_is_stored_as_the_compiled_one_is() -> None:
     assert rotated.term.temporaries_like == (("f", "u"),)
     with pytest.raises(ValueError, match="u is stored as float64"):
         LoopyExecutor().run(rotated, **make())
-    with pytest.raises(ValueError, match="give that Arr.zeros_like dtype=complex128"):
+    with pytest.raises(ValueError, match="Give that Arr.zeros_like dtype=complex128"):
         LoopyExecutor().differential(rotated, Schedule(rotated), make())
 
     @program
@@ -1163,7 +1251,7 @@ def test_a_temporary_of_truth_values_is_a_bool_natively() -> None:
     assert unmarked.term.temporaries_like == (("b", "u"),)
     with pytest.raises(TypeError):
         unmarked(**make())
-    with pytest.raises(ValueError, match="give that Arr.zeros_like dtype=bool"):
+    with pytest.raises(ValueError, match="Give that Arr.zeros_like dtype=bool"):
         LoopyExecutor().run(unmarked, **make())
 
     @program

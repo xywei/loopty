@@ -169,7 +169,10 @@ def numpy_dtype(sort: Any) -> np.dtype:
     ``Real`` is double precision, ``Nat`` and ``Int`` are 32-bit (which is what
     an index into an array is on every target loopy generates for), ``Bool`` is a
     byte, and an index type such as ``Fin[m]``, which is the element type of a
-    column-index array, is stored as an integer like any other index.
+    column-index array, is stored as an integer like any other index. A numpy
+    dtype or scalar type is itself, and Python's ``float`` and ``complex`` are
+    double precision, which is how :func:`loopty.contract.native_storage` has
+    them stored natively too.
     """
     if isinstance(sort, np.dtype):
         return sort
@@ -177,6 +180,8 @@ def numpy_dtype(sort: Any) -> np.dtype:
         return np.dtype(sort)
     if sort is float:
         return np.dtype(np.float64)
+    if sort is complex:
+        return np.dtype(np.complex128)
     if sort is int:
         return np.dtype(np.int32)
     if sort is bool:

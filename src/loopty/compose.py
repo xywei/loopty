@@ -391,9 +391,11 @@ def _variables(expr: Any) -> list[Any]:
 
 
 def _shown(value: Any) -> str:
-    """A size or a sort as a message prints it."""
+    """A size or a sort as a message prints it, a numpy scalar type by name."""
     if isinstance(value, prim.ExpressionNode):
         return render(value)
+    if isinstance(value, type) and issubclass(value, np.generic):
+        return np.dtype(value).name
     return str(value)
 
 
@@ -1482,10 +1484,11 @@ class _Composer:
                 raise TraceError(
                     f"{self.program} makes {name} at {made.where} as an array of "
                     f"{got if got is not None else here.dtype!r}, and "
-                    f"{self.origin[name]} declares its elements {sort}, which "
-                    f"the native run has to store as {storage_wanted(sort)} to "
-                    f"hold them as the compiled program does: the native run "
-                    f"would compute {name} otherwise than the compiled one. "
+                    f"{self.origin[name]} declares its elements "
+                    f"{_shown(sort)}, which the native run has to store as "
+                    f"{storage_wanted(sort)} to hold them as the compiled "
+                    f"program does: the native run would compute {name} "
+                    f"otherwise than the compiled one. "
                     f"Pass Arr.zeros_like dtype={want}"
                 )
             value = value.like

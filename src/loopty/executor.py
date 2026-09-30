@@ -313,7 +313,7 @@ class LoopyExecutor:
         names = [name for name, _ in term.params]
         supplied = {**dict(zip(names, args, strict=False)), **kwargs}
         check_arguments(dict(term.params), supplied, lowering.ragged)
-        inherited_storage(dict(term.temporaries), term.temporaries_like, supplied)
+        inherited_storage(term.array_types, term.temporaries_like, supplied)
         layouts = _declared_layouts(term, lowering, supplied)
         call = _call_arguments(term, lowering, args, kwargs, layouts)
         call, empty = _pad_empty_arrays(call, lowering)
@@ -463,7 +463,7 @@ class LoopyExecutor:
         # which is exactly what hides an alias between two of them, and the
         # native run would otherwise be the first thing to meet a bad index.
         check_arguments(dict(term.params), args, lowering.ragged)
-        inherited_storage(dict(term.temporaries), term.temporaries_like, args)
+        inherited_storage(term.array_types, term.temporaries_like, args)
         native = dict(reference or {})
         if native:
             missing = [name for name in lowering.outputs if name not in native]

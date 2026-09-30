@@ -357,7 +357,11 @@ with a pair of statement instances.
   runs (`Term.temporaries_like`, `contract.inherited_storage`): an integer or
   a `float32` `u` is refused for a real `f = Arr.zeros_like(u)`, a real one
   for a complex or a `Bool` `f`, and a real one for a natural `f` (#71). The
-  interpreter stores a temporary as the native run has to.
+  refusal names the dtype to give `Arr.zeros_like`, and passing `u` in that
+  dtype only when it holds `u`'s own sort too, so a real `u` is never told to
+  be passed as a bool. The interpreter stores a temporary as the native run
+  has to, and Python's `complex` lowers as `complex128`, as `float` lowers as
+  `float64`, so the lowering and the storage check know the same sorts.
 - **A term may state its offsets** (`Term.offsets`, `Term.offsets_of`). The
   offsets a counts family's rows are read through were always read off the
   names of the term's parameters, which is right for a kernel and wrong for a

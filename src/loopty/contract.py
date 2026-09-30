@@ -482,7 +482,7 @@ def storage_wanted(sort: Any) -> str:
 
 
 def inherited_storage(
-    temporaries: Mapping[str, Any],
+    types: Mapping[str, Any],
     like: Iterable[tuple[str, str]],
     supplied: Mapping[str, Any],
 ) -> None:
@@ -495,12 +495,18 @@ def inherited_storage(
     makes the native one truncate every real written into it, a ``float32``
     one rounds it, and a real one drops the imaginary part of a complex
     value, where the compiled one does none of these, so the two runs would
-    compute two things; the call is refused, naming the dtype to pass. What
-    each sort has to be stored as natively is :func:`native_storage`.
+    compute two things; the call is refused, naming the dtype to give that
+    ``Arr.zeros_like``. What each sort has to be stored as natively is
+    :func:`native_storage`.
+
+    ``types`` is the type of every array of the term, parameters and
+    temporaries alike (:attr:`loopty.term.Term.array_types`). Passing ``u``
+    in that dtype is named as a fix too, but only when the dtype also holds
+    every value of ``u``'s own element sort: a real ``u`` passed as a bool to
+    make a ``Bool`` temporary of it would be a different ``u``.
     """
     for temporary, name in like:
-        typ = temporaries.get(temporary)
-        sort = getattr(typ, "dtype", None)
+        sort = getattr(types.get(temporary), "dtype", None)
         want = native_storage(sort)
         value = supplied.get(name)
         if want is None or value is None:
@@ -508,15 +514,26 @@ def inherited_storage(
         got = np.asarray(value.numpy() if isinstance(value, Arr) else value).dtype
         if holds_natively(sort, got):
             continue
+        fix = f"Give that Arr.zeros_like dtype={want}"
+        own = native_storage(getattr(types.get(name), "dtype", None))
+        if own is not None and np.can_cast(own, want, casting="safe"):
+            fix += f", or pass {name} as {want}"
         raise ValueError(
             f"the argument {name} is stored as {got}, and the program makes "
             f"{temporary} with Arr.zeros_like from it, which natively is an "
             f"array of {got} too; the kernels {temporary} is passed to declare "
-            f"its elements {sort}, which the native run has to store as "
-            f"{storage_wanted(sort)} to hold them as the compiled program does, "
-            f"so the two runs would compute {temporary} differently. "
-            f"Pass {name} as {want}, or give that Arr.zeros_like dtype={want}"
+            f"its elements {_shown_sort(sort)}, which the native run has to "
+            f"store as {storage_wanted(sort)} to hold them as the compiled "
+            f"program does, so the two runs would compute {temporary} "
+            f"differently. {fix}"
         )
+
+
+def _shown_sort(sort: Any) -> str:
+    """A sort as a message says it: a numpy scalar type by its dtype's name."""
+    if isinstance(sort, type) and issubclass(sort, np.generic):
+        return np.dtype(sort).name
+    return str(sort)
 
 
 def _linear(expr: Any) -> bool:
