@@ -13,6 +13,7 @@ from lanky.plugins import registry
 from lanky.prelude import Nat, Real
 
 from loopty import Arr, Fin, kernel, program, when
+from loopty.faithful import KIND
 from loopty.kernel import Kernel, KernelTheory, Program
 
 KERNELS = Path(__file__).parent / "kernels"
@@ -105,6 +106,23 @@ def test_the_theory_owns_kernels_and_nothing_else() -> None:
     assert {"in-bounds", "disjoint-writes", "ordering", "postcondition"} <= kinds
 
 
+def test_every_fact_of_a_kernel_is_keyed_by_its_definition() -> None:
+    """``kind:module.qualname@line:detail``, as lanky keys a theorem's fact.
+
+    The module is the one this file's path gives it (``tests`` is no
+    package), not the name it was imported under, so the ids are the same
+    in this file's ledger and in the ``rests_on`` of a file that imports it.
+    """
+    assert scan.module == "test_kernel"
+    assert scan.definition == f"test_kernel.scan@{scan.line}"
+    facts = scan.facts()
+    assert {fact.kind for fact in facts} >= {"in-bounds", "postcondition", KIND}
+    for fact in facts:
+        assert fact.id.startswith(f"{fact.kind}:{scan.definition}"), fact.id
+    (post,) = [fact for fact in facts if fact.kind == "postcondition"]
+    assert post.id == f"postcondition:test_kernel.scan@{scan.line}"
+
+
 def test_a_body_that_cannot_be_traced_is_reported_as_a_fact() -> None:
     @kernel
     def branchy(u: Arr[Fin[n], Real]):  # noqa: F821
@@ -116,6 +134,7 @@ def test_a_body_that_cannot_be_traced_is_reported_as_a_fact() -> None:
     assert len(facts) == 1
     assert facts[0].status is Status.REFUTED
     assert facts[0].kind == "trace"
+    assert facts[0].id == f"trace:{branchy.definition}"
     assert "when" in facts[0].provenance["error"]
     # lanky prints a refuted fact's reason under its REFUTED line, so the fix
     # reaches the terminal and not only the JSON ledger. The claim is refuted
@@ -230,12 +249,112 @@ def test_a_callee_of_another_file_is_an_id_this_ledger_does_not_hold(
         sys.modules.pop("loopty_test_callee", None)
     printed = capsys.readouterr().out.splitlines()
     (row,) = [line for line in printed if "after scan(...)" in line]
-    assert row.startswith("assumed under scan:postcondition  ")
-    unresolved = "rests on scan:postcondition, which this ledger does not hold"
+    # the id names the callee's definition, by the module its file's path gives it
+    post = f"postcondition:loopty_test_callee.scan@{_decorated_at(CALLEE)}"
+    assert row.startswith(f"assumed under {post}  ")
+    unresolved = f"rests on {post}, which this ledger does not hold"
     assert any(
         line.startswith("UNRESOLVED solve at caller.py:") and line.endswith(unresolved)
         for line in printed
     )
+
+
+def _decorated_at(text: str, decorator: str = "@kernel") -> int:
+    """The line of a file's first ``decorator``, which its object's fact ids name."""
+    lines = text.splitlines()
+    return next(k for k, line in enumerate(lines, 1) if line.startswith(decorator))
+
+
+CROSSMOD = """
+from __future__ import annotations
+
+from lanky.prelude import Nat
+from loopty_test_helpers_scan import scan as helper_scan
+
+from loopty import Arr, Fin, kernel, program
+
+
+@kernel
+def scan(cnt: Arr[Fin[n], Nat], out: Arr[Fin[n], Nat]) -> out[0] == cnt[0]:
+    \"\"\"A kernel of this file with the helper's name, and a claim of its own.\"\"\"
+    for r in cnt.dom:
+        out[r] = cnt[r]
+
+
+@program
+def solve(cnt, off):
+    \"\"\"Runs the helper's scan, imported under another name.\"\"\"
+    helper_scan(cnt, off)
+
+
+@program
+def solve_both(cnt, off, out):
+    \"\"\"Runs both kernels called scan.\"\"\"
+    helper_scan(cnt, off)
+    scan(cnt, out)
+"""
+
+
+def test_a_restatement_rests_on_the_callees_fact_and_not_a_namesake(
+    tmp_path, capsys
+) -> None:
+    """#42: a local kernel with the callee's name cannot stand in for the callee.
+
+    Kernel fact ids were keyed by the qualified name alone, so ``solve``'s
+    restatement of the helper's postcondition rested on ``scan:postcondition``,
+    which this file's ledger resolved to its own ``scan``, a different
+    statement, and no ``UNRESOLVED`` line said that the real one is in the
+    helper's ledger. And ``solve_both``, which calls both kernels, got one
+    restatement where it owes two, since the second had the first's id. Ids
+    are now keyed by definition, so the restatement names the helper's fact,
+    by the id that fact has in the helper's own ledger.
+    """
+    import sys
+
+    from lanky import cli
+    from lanky.check import check_path
+
+    helper = tmp_path / "loopty_test_helpers_scan.py"
+    helper.write_text(CALLEE, encoding="utf-8")
+    crossmod = tmp_path / "crossmod.py"
+    crossmod.write_text(CROSSMOD, encoding="utf-8")
+    theirs = f"postcondition:loopty_test_helpers_scan.scan@{_decorated_at(CALLEE)}"
+    ours = f"postcondition:crossmod.scan@{_decorated_at(CROSSMOD)}"
+    out = tmp_path / "out.json"
+    try:
+        ledger = check_path(crossmod)
+        assert cli.main(["check", str(crossmod)]) == 0
+        printed = capsys.readouterr().out.splitlines()
+        assert cli.main(["check", str(helper), str(crossmod), "--json", str(out)]) == 0
+        capsys.readouterr()
+    finally:
+        sys.modules.pop("loopty_test_helpers_scan", None)
+
+    (local,) = [fact for fact in ledger if fact.kind == "postcondition"]
+    assert local.id == ours
+    # one restatement per callee, the two kernels called scan included
+    by_program: dict[str, list] = {}
+    for fact in ledger:
+        if fact.kind == "postcondition-in-scope":
+            by_program.setdefault(fact.owner, []).append(fact.rests_on)
+    assert by_program == {"solve": [(theirs,)], "solve_both": [(theirs,), (ours,)]}
+
+    # the helper's fact is in its own ledger, and this one says so
+    (row,) = [line for line in printed if "after scan(...) in solve:" in line]
+    assert row.startswith(f"assumed under {theirs}  ")
+    assert any(
+        line.startswith("UNRESOLVED solve at crossmod.py:")
+        and line.endswith(f"rests on {theirs}, which this ledger does not hold")
+        for line in printed
+    )
+    # and the id it names is the one the helper's ledger holds
+    rows = json.loads(out.read_text(encoding="utf-8"))
+    (post,) = [
+        row
+        for row in rows
+        if row["kind"] == "postcondition" and row["where"].startswith("loopty_test_")
+    ]
+    assert post["id"] == theirs
 
 
 def test_a_guard_is_found_under_an_aliased_import() -> None:

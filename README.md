@@ -41,19 +41,19 @@ row verbatim, and checked by `scripts/refresh_example_outputs.py`):
 
 ```console
 $ lanky check examples/spmv.py
-STATUS                            BY             WHERE        OWNER          STATEMENT
---------------------------------  -------------  -----------  -------------  ------------------------------------------------------------------------
-decided                           isl            spmv.py:79   scan           off[0] is in bounds for every instance of S0
-decided                           isl            spmv.py:81   scan           off[r + 1] is in bounds for every instance of S1
-decided                           isl            spmv.py:79   scan           distinct instances of S0 write distinct cells of off
-assumed                           -              spmv.py:69   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
-tested                            property-test  spmv.py:84   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat] | off(0) ==...
-decided                           isl            spmv.py:112  spmv           y[r] is in bounds for every instance of S0
-decided                           type           spmv.py:112  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
-decided                           isl            spmv.py:112  spmv           distinct instances of S0 write distinct cells of y
-decided                           type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
-tested                            interpreter    spmv.py:102  spmv           the traced term computes what the body computes
-assumed under scan:postcondition  -              spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
+STATUS                                    BY             WHERE        OWNER          STATEMENT
+----------------------------------------  -------------  -----------  -------------  ------------------------------------------------------------------------
+decided                                   isl            spmv.py:79   scan           off[0] is in bounds for every instance of S0
+decided                                   isl            spmv.py:81   scan           off[r + 1] is in bounds for every instance of S1
+decided                                   isl            spmv.py:79   scan           distinct instances of S0 write distinct cells of off
+assumed                                   -              spmv.py:69   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+tested                                    property-test  spmv.py:84   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat] | off(0) ==...
+decided                                   isl            spmv.py:112  spmv           y[r] is in bounds for every instance of S0
+decided                                   type           spmv.py:112  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
+decided                                   isl            spmv.py:112  spmv           distinct instances of S0 write distinct cells of y
+decided                                   type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
+tested                                    interpreter    spmv.py:102  spmv           the traced term computes what the body computes
+assumed under postcondition:spmv.scan@69  -              spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
 ...
 20 facts: 2 assumed, 15 decided, 3 tested
 ```
@@ -74,9 +74,12 @@ and the first cell that differs.
 
 The last row belongs to `solve`, the `@program` that runs `scan` and then
 `spmv`. It restates `scan`'s postcondition in the program's scope, and rests on
-`scan`'s own postcondition fact, which the row names:
-`assumed under scan:postcondition`. Nothing has established that fact yet, and
-the restatement is worth no more than it.
+`scan`'s own postcondition fact, which the row names by its id:
+`assumed under postcondition:spmv.scan@69`. The id is the kind, then `scan`'s
+definition, the module the file's path gives it, its name and its line, so a
+`scan` imported from another file, or defined twice, is never taken for this
+one. Nothing has established that fact yet, and the restatement is worth no
+more than it.
 
 And a transformation is a cast, checked before it is applied:
 
@@ -338,10 +341,19 @@ end to end; the edges are sharp.
   documented next step; see the module docstring of `loopty/flow.py`.
 - `@program` restates a callee's postcondition as a fact in scope, which rests
   on the callee's own fact (lanky's `rests_on`, so the row reads
-  `assumed under scan:postcondition`), but no rule consumes postconditions as
-  hypotheses yet, so "facts travel" is bookkeeping. A callee imported from
-  another file has its fact in that file's ledger, so `lanky check` counts the
-  id as an assumption and names it in an `UNRESOLVED` line.
+  `assumed under postcondition:spmv.scan@69`), but no rule consumes
+  postconditions as hypotheses yet, so "facts travel" is bookkeeping. A callee
+  imported from another file has its fact in that file's ledger, so `lanky
+  check` counts the id as an assumption and names it in an `UNRESOLVED` line;
+  the id is the one that ledger holds, since every fact of a kernel is keyed
+  by the kernel's definition (`lanky.ledger.fact_id` over the module the
+  file's path gives it), and a kernel of the program's own file with the
+  callee's name has an id of its own.
+- A schedule's facts, its casts and the agreement of its run, are named by
+  its key, which starts with the kernel's name and not its definition. Two
+  kernels of one name scheduled in one file (one defined there and one
+  imported, say) share those ids, and `loopty run` keeps the later one's cast
+  facts in place of the earlier one's.
 - Only a two-axis (row, fiber) ragged array lowers. A deeper dependent sum
   raises.
 - A polyhedral domain is an array's whole index set, so it cannot sit beside
@@ -473,6 +485,13 @@ lanky's Lean oracle is an extra of *lanky*, so a ledger that says `proved lean`
 needs `uv add "lanky[lean]"` in the same environment. Without it the same
 theorem reads `tested property-test`, and every other row is unchanged.
 
+loopty needs lanky 0.1.0.dev1 or later, and follows lanky's `main` between
+`devN` bumps. lanky's version moves to the next `0.1.0.devN` whenever an
+interface loopty uses changes, and loopty's floor (`lanky>=0.1.0.dev1` in
+`pyproject.toml`) is raised with it; in between, loopty is developed and
+tested against lanky's `main`, and a lanky that satisfies the floor may still
+lack something loopty's `main` uses.
+
 For work on loopty itself, lanky is resolved from a sibling checkout:
 
 ```sh
@@ -481,6 +500,10 @@ uv sync --group dev
 uv run pytest -q
 uv run ruff check .
 ```
+
+CI clones lanky's branch of the same name as the one under test when there is
+one, and lanky's `main` otherwise, so a change that needs both repositories is
+tested as one.
 
 A kernel file needs `from __future__ import annotations` and a ruff `F821`
 per-file ignore, because a size such as `n` in `Arr[Fin[n], Real]` is a symbolic

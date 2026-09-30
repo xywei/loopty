@@ -50,6 +50,12 @@ than the instances that write, and each such fact lists those conjuncts, with
 the reason, under ``unnarrowed`` in its provenance: proved, it holds for the
 instances that write too; refuted, its witness may be an instance the guard
 masks.
+
+Every id is built by :func:`lanky.ledger.fact_id`: the rule's kind, the
+kernel's definition (``module`` and ``line`` as well as ``owner``, which
+:class:`loopty.kernel.Kernel` passes), and what the fact is about, as in
+``in-bounds:spmv.spmv@102:S0:read:x[col[r, j]]``. A term checked with no
+kernel behind it leaves the module and the line out.
 """
 
 from __future__ import annotations
@@ -59,7 +65,7 @@ from typing import Any
 
 import islpy as isl
 import pymbolic.primitives as prim
-from lanky.ledger import Fact, Status
+from lanky.ledger import Fact, Status, fact_id
 from lanky.prelude import FinType
 from lanky.terms import render, structurally_equal
 
@@ -161,7 +167,9 @@ def _justified_by_type(
     return ", ".join(reasons) if reasons else None
 
 
-def in_bounds_facts(term: Term, owner: str) -> list[Fact]:
+def in_bounds_facts(
+    term: Term, owner: str, *, module: str | None = None, line: int | None = None
+) -> list[Fact]:
     """One fact per array access: the cells it reaches are cells the array has.
 
     The fact's id names the access, ``S1:read:x[r - 1]``, and not the domain it
@@ -207,7 +215,13 @@ def in_bounds_facts(term: Term, owner: str) -> list[Fact]:
         for (array, kind, text), places in listed.items():
             arrtype = types[array]
             indices = places[0][0]
-            identifier = f"{owner}:in-bounds:{stmt.id}:{kind}:{text}"
+            identifier = fact_id(
+                "in-bounds",
+                owner,
+                module=module,
+                line=line,
+                detail=f"{stmt.id}:{kind}:{text}",
+            )
             role = roles.get((array, kind, text))
             subject = text if role is None else f"{text}, {role},"
             layout = {} if role is None else {"layout": role}
@@ -426,7 +440,9 @@ def _is_widened(relation: isl.Map, indices: Sequence[Any]) -> bool:
 # {{{ write disjointness, ordering, exactness, postcondition
 
 
-def write_disjointness_facts(term: Term, owner: str) -> list[Fact]:
+def write_disjointness_facts(
+    term: Term, owner: str, *, module: str | None = None, line: int | None = None
+) -> list[Fact]:
     """One fact per writing statement: distinct instances write distinct cells."""
     labels = instance_labels(term)
     sizes = flow.size_names(term)
@@ -446,7 +462,13 @@ def write_disjointness_facts(term: Term, owner: str) -> list[Fact]:
         )
         facts.append(
             Fact(
-                id=f"{owner}:disjoint-writes:{stmt.id}:{footprint.array}",
+                id=fact_id(
+                    "disjoint-writes",
+                    owner,
+                    module=module,
+                    line=line,
+                    detail=f"{stmt.id}:{footprint.array}",
+                ),
                 kind="disjoint-writes",
                 statement=(
                     f"distinct instances of {stmt.id} write distinct cells of "
@@ -471,7 +493,14 @@ def write_disjointness_facts(term: Term, owner: str) -> list[Fact]:
     return facts
 
 
-def ordering_facts(term: Term, owner: str, where: str) -> list[Fact]:
+def ordering_facts(
+    term: Term,
+    owner: str,
+    where: str,
+    *,
+    module: str | None = None,
+    line: int | None = None,
+) -> list[Fact]:
     """One fact: the order the body was written in respects its own dependences.
 
     The dependence relation is *defined* from the footprints, so this is not a
@@ -481,6 +510,7 @@ def ordering_facts(term: Term, owner: str, where: str) -> list[Fact]:
     """
     if not term.stmts:
         return []
+    identifier = fact_id("ordering", owner, module=module, line=line)
     try:
         sizes = flow.size_names(term)
         schedule = flow.assume_sizes(flow.schedule_of(term), sizes)
@@ -488,7 +518,7 @@ def ordering_facts(term: Term, owner: str, where: str) -> list[Fact]:
     except Exception as exc:  # noqa: BLE001 - a term we cannot analyse is ASSUMED
         return [
             Fact(
-                id=f"{owner}:ordering",
+                id=identifier,
                 kind="ordering",
                 statement="the source order runs every dependence forward in time",
                 term=None,
@@ -510,7 +540,7 @@ def ordering_facts(term: Term, owner: str, where: str) -> list[Fact]:
         provenance["unnarrowed"] = wide
     return [
         Fact(
-            id=f"{owner}:ordering",
+            id=identifier,
             kind="ordering",
             statement="the source order runs every dependence forward in time",
             term=Monotone(
@@ -527,7 +557,9 @@ def ordering_facts(term: Term, owner: str, where: str) -> list[Fact]:
     ]
 
 
-def reduction_facts(term: Term, owner: str) -> list[Fact]:
+def reduction_facts(
+    term: Term, owner: str, *, module: str | None = None, line: int | None = None
+) -> list[Fact]:
     """One fact per reduction: the exactness class its accumulation is allowed."""
     facts: list[Fact] = []
     for stmt in term.stmts:
@@ -537,7 +569,13 @@ def reduction_facts(term: Term, owner: str) -> list[Fact]:
             target = f"{written.array}[{indices}]"
             facts.append(
                 Fact(
-                    id=f"{owner}:exactness:{stmt.id}:{position}",
+                    id=fact_id(
+                        "exactness",
+                        owner,
+                        module=module,
+                        line=line,
+                        detail=f"{stmt.id}:{position}",
+                    ),
                     kind="exactness",
                     statement=(
                         f"the accumulation into {target} over "
@@ -558,23 +596,35 @@ def reduction_facts(term: Term, owner: str) -> list[Fact]:
     return facts
 
 
-def postcondition_id(owner: str) -> str:
+def postcondition_id(
+    owner: str, *, module: str | None = None, line: int | None = None
+) -> str:
     """The id of the fact a kernel's return annotation becomes.
 
     One builder for it, because a program names the fact of each kernel it
     calls by this id (see :meth:`loopty.kernel.Program.facts`), and an id that
     drifted from the kernel's own would name a fact the ledger does not hold.
+    It is keyed by the kernel's definition, ``owner`` with ``module`` and
+    ``line`` (see :func:`lanky.ledger.fact_id`), so two kernels of one name
+    in two modules have two ids: ``postcondition:spmv.scan@69``.
     """
-    return f"{owner}:postcondition"
+    return fact_id("postcondition", owner, module=module, line=line)
 
 
-def postcondition_facts(term: Term, owner: str, where: str) -> list[Fact]:
+def postcondition_facts(
+    term: Term,
+    owner: str,
+    where: str,
+    *,
+    module: str | None = None,
+    line: int | None = None,
+) -> list[Fact]:
     """The return annotation as a fact, for whatever oracle can take it."""
     if term.post is None:
         return []
     return [
         Fact(
-            id=postcondition_id(owner),
+            id=postcondition_id(owner, module=module, line=line),
             kind="postcondition",
             statement=render(term.post),
             term=term.post,
@@ -589,19 +639,30 @@ def postcondition_facts(term: Term, owner: str, where: str) -> list[Fact]:
 # }}}
 
 
-def facts_for(term: Term, owner: str = "", where: str = "") -> list[Fact]:
+def facts_for(
+    term: Term,
+    owner: str = "",
+    where: str = "",
+    *,
+    module: str | None = None,
+    line: int | None = None,
+) -> list[Fact]:
     """Every obligation ``term`` owes, in the order the rules generate them.
 
-    ``owner`` is the decorated object's qualified name, which the ledger prints
-    and which makes the fact ids stable across runs; ``where`` is the kernel's
-    own ``file:line``, used by the facts that belong to the kernel as a whole
-    rather than to one statement.
+    ``owner`` is the decorated object's qualified name, which the ledger prints;
+    ``where`` is the kernel's own ``file:line``, used by the facts that belong
+    to the kernel as a whole rather than to one statement. ``module`` and
+    ``line`` complete the kernel's definition, the module its file's path
+    gives it and the line it is defined at, and every id is keyed by all
+    three (:func:`lanky.ledger.fact_id`), so the ids are stable across runs
+    and two kernels of one name in two modules do not share them.
     """
     owner = owner or term.name
+    key = {"module": module, "line": line}
     return [
-        *in_bounds_facts(term, owner),
-        *write_disjointness_facts(term, owner),
-        *ordering_facts(term, owner, where),
-        *reduction_facts(term, owner),
-        *postcondition_facts(term, owner, where),
+        *in_bounds_facts(term, owner, **key),
+        *write_disjointness_facts(term, owner, **key),
+        *ordering_facts(term, owner, where, **key),
+        *reduction_facts(term, owner, **key),
+        *postcondition_facts(term, owner, where, **key),
     ]
