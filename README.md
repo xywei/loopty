@@ -349,6 +349,11 @@ end to end; the edges are sharp.
   by the kernel's definition (`lanky.ledger.fact_id` over the module the
   file's path gives it), and a kernel of the program's own file with the
   callee's name has an id of its own.
+- A schedule's facts, its casts and the agreement of its run, are named by
+  its key, which starts with the kernel's name and not its definition. Two
+  kernels of one name scheduled in one file (one defined there and one
+  imported, say) share those ids, and `loopty run` keeps the later one's cast
+  facts in place of the earlier one's.
 - Only a two-axis (row, fiber) ragged array lowers. A deeper dependent sum
   raises.
 - A polyhedral domain is an array's whole index set, so it cannot sit beside

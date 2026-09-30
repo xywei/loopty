@@ -1217,9 +1217,12 @@ with a pair of statement instances.
   `Kernel` and `Program` carry `module` and `definition`, the typing rules
   and `faithfulness_fact` take `module=` and `line=`, and
   `loopty.typing.postcondition_id(owner, module=, line=)` builds the
-  postcondition's id for both sides. Cast and agreement facts keep the ids
-  their schedule's key gives them. The `lanky check` transcripts show the
-  new ids.
+  postcondition's id for both sides. Every id `lanky check` prints and
+  writes with `--json` for a kernel file changes this way, and the `lanky
+  check` transcripts show the new ids. Cast and agreement facts keep the ids
+  their schedule's key gives them, which names the kernel by its name alone,
+  so two kernels of one name scheduled in one `loopty run` still share them;
+  the README lists it among the limits.
 - **A program's restatement of a callee's postcondition rests on the callee's
   fact.** `Program.facts` pointed at the callee's postcondition with a `from`
   entry in the provenance, which lanky had no way to read, so the ledger
