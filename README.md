@@ -480,6 +480,13 @@ lanky's Lean oracle is an extra of *lanky*, so a ledger that says `proved lean`
 needs `uv add "lanky[lean]"` in the same environment. Without it the same
 theorem reads `tested property-test`, and every other row is unchanged.
 
+loopty needs lanky 0.1.0.dev1 or later, and follows lanky's `main` between
+`devN` bumps. lanky's version moves to the next `0.1.0.devN` whenever an
+interface loopty uses changes, and loopty's floor (`lanky>=0.1.0.dev1` in
+`pyproject.toml`) is raised with it; in between, loopty is developed and
+tested against lanky's `main`, and a lanky that satisfies the floor may still
+lack something loopty's `main` uses.
+
 For work on loopty itself, lanky is resolved from a sibling checkout:
 
 ```sh
@@ -488,6 +495,10 @@ uv sync --group dev
 uv run pytest -q
 uv run ruff check .
 ```
+
+CI clones lanky's branch of the same name as the one under test when there is
+one, and lanky's `main` otherwise, so a change that needs both repositories is
+tested as one.
 
 A kernel file needs `from __future__ import annotations` and a ruff `F821`
 per-file ignore, because a size such as `n` in `Arr[Fin[n], Real]` is a symbolic

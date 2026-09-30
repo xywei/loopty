@@ -1192,8 +1192,15 @@ with a pair of statement instances.
   suite's deprecation errors: it was raised by `lp.map_domain`, which nothing
   in loopty calls now. The one test that calls it, to pin that loopy refuses
   the diamond, silences it locally.
-- `lanky>=0.1.0.dev0` is a dependency, resolved from a sibling checkout by
-  `[tool.uv.sources]` during development.
+- `lanky>=0.1.0.dev1` is a dependency, resolved from a sibling checkout by
+  `[tool.uv.sources]` during development (#37). Every lanky commit used to be
+  `0.1.0.dev0`, the placeholder that reserved the name included, so the floor
+  admitted a lanky with none of what loopty imports. lanky's version now moves
+  to the next `0.1.0.devN` whenever an interface loopty uses changes, and this
+  floor is raised with it; 0.1.0.dev1 is the lanky whose ids are keyed by the
+  path of the defining file (`lanky.check.module_name`), which loopty's ids
+  now use. In between, loopty follows lanky's `main`, which the README's
+  install section says.
 - **Every fact of a kernel or a program is keyed by its definition** (#42).
   The ids go through `lanky.ledger.fact_id(kind, owner, module, line)`, as a
   theorem's do: the kind, then the module the file's path gives it under its
