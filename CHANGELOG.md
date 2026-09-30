@@ -219,9 +219,82 @@ with a pair of statement instances.
   domain, and a `dir()` or frame probe all trace to one iteration's value and
   are refuted. The demos' ledgers carry
   one more row per kernel, and their transcripts are regenerated.
+- **Array arguments over polyhedral domains** (`loopty.domain`, #12). The
+  decision's slice binders: `Where[i: Fin[n], j: Fin[n], j < i]` is a box cut
+  by constraints (the lower triangle; a band is `(i - j <= 1) & (j - i <= 1)`),
+  `Sigma[i: Fin[n], Fin[i + 1]]` a sum whose fibers are affine in the binders
+  before them, and `Fin[n] + Fin[m]`, lanky's `SumType`, a union of pieces
+  whose points are `(p, x)`. Python reads `i: Fin[n]` in a subscript as a
+  slice and lanky's annotation scope invents `i`, so nothing is parsed. A
+  constraint is a conjunction of comparisons of quasi-affine terms, which isl
+  states exactly; `!=`, `|`, a non-affine term and a non-linear bound are
+  refused where the annotation is evaluated, since a domain wider than it was
+  written would decide a read outside it in bounds. Such an array has its
+  domain in `ArrType.domain` and no axes of its own. `.dom` runs binder by
+  binder: `L.dom[i]` over the points the constraints on the first two axes
+  allow at `i`, the traced loop carrying those constraints as the native one
+  applies them, and a fiber at a point outside the domain is empty in both. A
+  union's pieces are walked by number, which a trace runs as the Python loop
+  it is; a piece is chosen by a Python integer (anything else, a piece that is
+  not there, and a reduction over the pieces are `TraceError`s naming the
+  fix), and so is a fiber taken at a point isl cannot state. In-bounds
+  obligations are stated over the exact set (`flow.cell_set`), so `L[i, i]` is
+  refuted although the box around the triangle has the cell. The contract
+  refuses, at every entry point, an argument whose points are not the declared
+  domain's at the sizes the call determines, compared as sets and not as
+  spellings, and a plain `ndarray`. Two layouts store the same array: the box
+  of the binders, which a single domain lowers to as an array of that shape
+  and a union to pieces one after another at bases that are sizes, and packed
+  rows, the domain's cells in lexicographic order read as `L[off_L[i] + j]`
+  through a table of row starts less their first column, which the executor
+  computes from the domain and passes as it passes a ragged array's offsets.
+  A domain whose rows skip columns cannot be packed and is refused. At run
+  time, `Arr.zeros(domain, n=..., storage=...)` and `Arr.from_cells(domain,
+  values, ...)` build an array over a domain (a kernel's own is
+  `kernel.arg_types[name].domain`); it is indexed at the domain's points and
+  refuses any other cell, and `Arr.cells()` reads it in one order whatever its
+  layout, which is what the contract, the differential test and the
+  faithfulness fact compare. A run is over the declared domain whatever the
+  argument's spelling: natively, an argument written otherwise is copied into
+  an array over the declared domain for the call, since `L.dom[i].size` is
+  the binder's bound and `L.dom` runs binder by binder, and a compiled kernel
+  addresses the declared domain's layout at the call's sizes, the executor
+  copying an argument into it and back when its storage differs, or its box
+  does (the strict triangle written `Sigma[a: Fin[n], Fin[a]]` has the
+  declared points in an `n x (n - 1)` box). The executor also passes the
+  sizes the call determines to a kernel whose flat buffers give loopy none
+  (note 15 in `docs/loopy-notes.md`).
+  A box extent that can be negative at some size, `n - 1` at `n = 0`, is
+  neither a shape nor part of where a piece starts, since the domain is empty
+  there and its box has no cells: isl decides which extents are never
+  negative, a single domain with another one is a flat buffer, and a piece
+  after one starts at a value argument the executor computes. A size a
+  binder's bound runs up to is a non-negative integer, as the isl set and
+  the boxes assume, and `Arr.zeros` and the contract refuse any other. The
+  faithfulness fact draws such arrays from the declared domain. This needs
+  the lanky that has `SumType`.
+- **`Schedule.pack(*arrays)`.** Store arrays over a domain packed. Not a cast:
+  no instance moves and no fact is emitted, since a layout says where a cell
+  is kept and every fact is about the cells. The schedule is lowered again
+  with the arrays packed and every step so far replayed, so each is checked
+  against the kernel that stores them so, and the step is in the schedule's
+  key, its history and what `retarget` replays. `lower_generic` and `lower`
+  take the layouts as `layouts=`, and `Lowering.storage` and
+  `Lowering.tables` record them.
+- **A sixth demo**, `examples/pairs.py`: symmetric pair interactions over the
+  lower triangle, one statement writing each pair once and a second summing a
+  particle's row and column (`f[k, p]` under `k > p`). Every in-bounds
+  obligation is decided by isl over the exact triangle, and `loopty run`
+  compiles it boxed and packed, each agreeing with the native run. Its section
+  in `examples/README.md` and the excerpts in `README.md` and
+  `docs/quickstart.md` are generated by the refresh script.
 
 ### Fixed
 
+- The cells of a dense array are stated over dimensions none of whose names
+  is a size: over `x: Arr[Fin[a0], Real]` they were `0 <= a0 < a0`, which has
+  no points, and `x[i]` was refuted. The dimensions of a domain's set get the
+  same care (`loopty.domain.dimension_names`).
 - A guard's reads are stated over the loop nest *before* the guard narrowed it
   (`Stmt.loop_domain`), because `when` evaluates its whole condition at every
   point and only masks the write: `when((i + 1 < n) & (flag[i + 1] != 0))`

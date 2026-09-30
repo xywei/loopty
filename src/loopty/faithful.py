@@ -200,7 +200,10 @@ def _record(arguments: Mapping[str, Any]) -> dict[str, Any]:
     """A sampled input, written down for the provenance."""
     out: dict[str, Any] = {}
     for name, value in arguments.items():
-        if isinstance(value, Arr):
+        if isinstance(value, Arr) and value.domain is not None:
+            out[name] = value.cells().tolist()
+            out[f"{name} domain"] = repr(value.domain)
+        elif isinstance(value, Arr):
             out[name] = value.numpy().tolist()
             if value.is_ragged:
                 out[f"{name} offsets"] = value.offsets.tolist()
@@ -216,7 +219,9 @@ def sample_arguments(
 
     Every size a shape or a sort names is drawn from :data:`SIZES`, and every
     array has the extents its axes then evaluate to, with a ragged axis taking
-    its row lengths from the counts array it names. Elements are drawn by sort:
+    its row lengths from the counts array it names, and an array over a
+    polyhedral domain a draw at each of the domain's points, stored in its box.
+    Elements are drawn by sort:
     a point of ``Fin[m]`` below ``m``, a ``Nat`` below 4 (which keeps ragged
     rows short, and allows empty ones), an ``Int`` between -3 and 3, a ``Real``
     from a standard normal. Arrays the kernel writes are drawn too, because a
@@ -234,6 +239,12 @@ def sample_arguments(
     ragged: list[tuple[str, ArrType]] = []
     for name, typ in term.params:
         if isinstance(typ, ArrType):
+            if typ.domain is not None:
+                needed = typ.domain.size_names()
+                fixed = typ.domain.fixed({size: sizes[size] for size in needed})
+                values = _draw(typ.dtype, (fixed.count,), sizes, rng)
+                arguments[name] = Arr.from_cells(typ.domain, values, **fixed.sizes)
+                continue
             if any(typ.ragged):
                 ragged.append((name, typ))
                 continue
@@ -277,7 +288,7 @@ def _size_names(term: Term) -> set[str]:
         if isinstance(base, FinType):
             out |= set(free_variables(base.bound))
         if isinstance(typ, ArrType):
-            for axis in typ.axes:
+            for axis in typ.shape_terms:
                 out |= set(free_variables(axis))
     return out
 
@@ -355,16 +366,20 @@ def _draw(
 def _copy(value: Any) -> Any:
     """A private copy of one argument, so that the two runs cannot see each other."""
     if isinstance(value, Arr):
-        if value.is_ragged:
-            return Arr(value.numpy().copy(), value.offsets.copy())
-        return Arr(value.numpy().copy())
+        return value.copy()
     if isinstance(value, np.ndarray):
         return value.copy()
     return value
 
 
 def _buffer(value: Any) -> np.ndarray | None:
-    """The numpy buffer of an array argument, or ``None`` for a scalar."""
+    """The numpy buffer of an array argument, or ``None`` for a scalar.
+
+    An array over a domain gives its cells in their order, which is what the
+    positions a message names count (:func:`loopty.contract._cell_label`).
+    """
+    if isinstance(value, Arr) and value.domain is not None:
+        return value.cells()
     if isinstance(value, Arr):
         return value.numpy()
     if isinstance(value, np.ndarray):

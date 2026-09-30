@@ -297,6 +297,16 @@ class Kernel(_Decorated):
         so the native run used to raise on the very input the contract had just
         accepted, and the differential test could not compare the two. See
         :meth:`_integer_copies` for which arrays are copied and why only those.
+
+        *An array over a domain is run over the declared domain.* The contract
+        asks an argument for the declared points, which another spelling can
+        have, and a spelling is more than its points: ``L.dom`` runs binder by
+        binder, and ``L.dom[i].size`` is the binder's bound. Over
+        ``Sigma[a: Fin[n], Fin[a]]`` that size is ``i``, and over the declared
+        ``Where[i: Fin[n], j: Fin[n], j < i]`` it is ``n``, which is what the
+        trace and the compiled run say. Such an argument is copied into an
+        array over the declared domain for the call and copied back after it
+        (:meth:`_over_declared_domains`).
         """
         bound = self._bound(args, kwargs)
         layout = declared_layout(tuple(self.arg_types.items()))
@@ -305,7 +315,9 @@ class Kernel(_Decorated):
             bound,
             {name: offsets for name, (_, offsets) in layout.items() if offsets},
         )
-        copies = self._integer_copies(bound)
+        integer = self._integer_copies(bound)
+        declared = self._over_declared_domains(bound, integer)
+        copies = {**integer, **declared}
         code = self.fn.__code__
         names = code.co_varnames[: code.co_argcount]
         positional = [
@@ -329,7 +341,47 @@ class Kernel(_Decorated):
                 keywords[name] = view
             else:
                 positional[names.index(name)] = view
-        return self.fn(*positional, **keywords)
+        try:
+            return self.fn(*positional, **keywords)
+        finally:
+            for name, copy in declared.items():
+                # An integer copy is of an array the body only reads.
+                if name not in integer:
+                    bound[name].load(copy.storage, copy.numpy(), copy.domain)
+
+    def _over_declared_domains(
+        self, bound: dict[str, Any], integer: dict[str, Any]
+    ) -> dict[str, Arr]:
+        """Copies over the declared domain of the arrays built over another one.
+
+        One for every argument over a domain that is not the declared domain
+        at the call's sizes, holding the same values at the same points (the
+        contract checked the points) in the argument's own storage, and taken
+        from its integer copy when it has one (``integer``, see
+        :meth:`_integer_copies`). The body runs on the copy, so its loops and
+        sizes are the declared domain's, and :meth:`__call__` writes the copy
+        back into the argument.
+        """
+        from loopty.contract import resolve_sizes
+
+        out: dict[str, Arr] = {}
+        sizes: dict[str, int] | None = None
+        for name, typ in self.arg_types.items():
+            if not isinstance(typ, ArrType) or typ.domain is None:
+                continue
+            value = integer.get(name, bound.get(name))
+            if not (isinstance(value, Arr) and value.domain is not None):
+                continue
+            if sizes is None:
+                sizes = resolve_sizes(self.arg_types, bound)
+            needed = {size: sizes[size] for size in typ.domain.size_names()}
+            given = value.domain
+            if given.domain == typ.domain and given.sizes == needed:
+                continue
+            out[name] = Arr.from_cells(
+                typ.domain, value.cells(), storage=value.storage or "box", **needed
+            )
+        return out
 
     def _integer_copies(self, bound: dict[str, Any]) -> dict[str, Any]:
         """Integer copies of the float-stored arrays of an integral sort.
@@ -370,8 +422,7 @@ class Kernel(_Decorated):
             if name in written:
                 continue
             if isinstance(value, Arr):
-                whole = np.real(value.numpy()).astype(np.int64)
-                out[name] = Arr(whole, value.offsets) if value.is_ragged else Arr(whole)
+                out[name] = value._replaced(np.real(value.numpy()).astype(np.int64))
             else:
                 out[name] = np.real(value).astype(np.int64)
         return out

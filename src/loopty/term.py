@@ -236,22 +236,46 @@ class ArrType:
     ``val: Arr[Fin[n], Fin[cnt], Real]`` the axes are ``(n, cnt)`` and
     ``ragged == (False, True)``, meaning the bound of the second axis at row
     ``r`` is ``cnt[r]``.
+
+    An array over a polyhedral domain (``Arr[Where[...], Real]``, a
+    ``Sigma[...]`` or a union of pieces; see :mod:`loopty.domain`) has its
+    index set in ``domain`` instead, and no axes of its own: its shape is the
+    domain, and a rule that reads ``axes`` as a box finds none to read.
     """
 
     axes: tuple[Expression, ...]
     dtype: object
     ragged: tuple[bool, ...]
+    domain: Any = None
 
     def __post_init__(self) -> None:
         if len(self.axes) != len(self.ragged):
             raise ValueError(
                 f"{len(self.axes)} axes but {len(self.ragged)} raggedness flags"
             )
+        if self.domain is not None and self.axes:
+            raise ValueError("an array over a domain has no axes of its own")
 
     @property
     def ndim(self) -> int:
         """Number of index axes."""
+        if self.domain is not None:
+            return int(self.domain.ndim)
         return len(self.axes)
+
+    @property
+    def shape_terms(self) -> tuple[Expression, ...]:
+        """The terms the array's shape mentions sizes in.
+
+        Its axes, or for an array over a domain one variable for each size the
+        domain names, so that a rule collecting the sizes of a signature finds
+        the domain's too.
+        """
+        if self.domain is None:
+            return self.axes
+        from lanky.terms import Var
+
+        return tuple(Var(name) for name in sorted(self.domain.size_names()))
 
 
 @dataclass(frozen=True)

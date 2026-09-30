@@ -654,3 +654,25 @@ the previous `t`, with no barrier between them), or refuses it with
 `MissingBarrierError` ("requires synchronization by a global barrier", for
 the acoustic pair with `i` on `g.0`). Both are `decided` casts and `buildable`
 schedules.
+
+## 15. A flat buffer gives loopy no size to read
+
+**Symptom.** A kernel over a union of pieces, or with an array stored packed
+(see `loopty.domain`), and no dense array whose shape names a size, fails with
+`TypeError: value argument 'm' was not given and could not be automatically
+determined`, for a size the call determines perfectly well.
+
+**Cause.** loopy finds a value argument the caller does not pass by reading
+it off the shape of an array argument that mentions it. A union's pieces one
+after another, and packed rows, are flat buffers of a length no loop bound
+states, and are declared with `shape=None` (as a ragged array's values are),
+so there is nothing to read `n` off. A single domain in its box has a shape,
+the box, and loopy reads its sizes from that as from any dense array, unless
+an extent of the box can be negative at some size (`n - 1` at `n = 0`), in
+which case it is a flat buffer too.
+
+**Local fix.** `executor._call_arguments` passes, for a kernel with an array
+over a domain, every size the call determines (`contract.resolve_sizes`, which
+reads an array over a domain's own sizes by name) that the kernel takes as a
+value argument and the caller did not pass. A kernel with no such array is
+called exactly as before, so nothing that ran changes.

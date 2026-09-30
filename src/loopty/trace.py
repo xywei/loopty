@@ -94,7 +94,7 @@ from typing import Any
 import islpy as isl
 import numpy as np
 import pymbolic.primitives as prim
-from lanky.prelude import FinType, Refined
+from lanky.prelude import FinType, Refined, SumType
 from lanky.terms import (
     Exists,
     Forall,
@@ -108,7 +108,8 @@ from lanky.terms import (
 )
 
 from loopty.arr import Arr, ArrSpec
-from loopty.flow import domain_set, expr_text, free_names
+from loopty.domain import Polyhedron, Union, index_domain
+from loopty.flow import NonAffine, domain_set, expr_text, free_names
 from loopty.idx import Reflections
 from loopty.term import Access, ArrType, Reduction, Stmt, Term
 
@@ -377,6 +378,12 @@ class _Loop:
     target: str | None = None
     where: str = ""
     state: _Snapshot | None = None
+    #: What else bounds the loop, beside ``0 <= iname < bound``: the
+    #: constraints of a polyhedral domain's fiber (see
+    #: :meth:`SymDom.constraints_for`), as terms and as the isl text they
+    #: render to.
+    constraints: tuple[Any, ...] = ()
+    texts: tuple[str, ...] = ()
 
 
 @dataclass
@@ -494,8 +501,16 @@ class Tracer:
         hint: str | None,
         owner: Any = None,
         frame: Any = None,
+        constraints: Callable[[Var], Sequence[Any]] | None = None,
     ) -> Var:
         """Open a loop level over ``0 <= i < bound`` and return its variable.
+
+        ``constraints`` gives, for the loop's variable, whatever else bounds
+        the loop: the constraints of the fiber of a polyhedral domain it runs
+        over, at the fiber's prefix (:meth:`SymDom.constraints_for`). They are
+        part of the loop nest, every statement inside is over them, and each
+        has to be a comparison isl states exactly, or the loop is refused
+        rather than widened (:func:`_domain_texts`).
 
         ``hint`` is the ``for`` target, and ``frame`` the frame running the
         ``for``, as it is now, before it binds that target. What it holds is
@@ -510,6 +525,11 @@ class Tracer:
         name = self.fresh_iname(hint)
         var = Var(name)
         loop = _Loop(name, var, bound, owner, target=hint)
+        if constraints is not None:
+            loop.constraints = tuple(constraints(var))
+            dom = getattr(owner, "dom", None)
+            spelled = _domain_text(dom) if isinstance(dom, SymDom) else "the domain"
+            loop.texts = _domain_texts(loop.constraints, self, (), spelled)
         if frame is not None:
             loop.where = _location(frame)
             probes = _binding_probes(frame)
@@ -660,6 +680,14 @@ class Tracer:
         """The exclusive bounds of the enclosing loops, outermost first."""
         return tuple(loop.bound for loop in self.loops)
 
+    def loop_constraints(self) -> tuple[str, ...]:
+        """The isl text of what else bounds the enclosing loops.
+
+        The constraints of the polyhedral fibers they run over (see
+        :meth:`enter_loop`), which belong to the loop nest as its bounds do.
+        """
+        return tuple(text for loop in self.loops for text in loop.texts)
+
     # }}}
 
     # {{{ guards
@@ -695,7 +723,10 @@ class Tracer:
         return domain_set(
             self.inames,
             self.bounds,
-            constraints=constraints_of(self.guard(), self),
+            constraints=(
+                *self.loop_constraints(),
+                *constraints_of(self.guard(), self),
+            ),
             reflections=self.reflections,
         )
 
@@ -721,7 +752,12 @@ class Tracer:
         guard ``(i + 1 < n) & (flag[i + 1] != 0)`` still reads ``flag[n]`` at
         ``i = n - 1``.
         """
-        return domain_set(self.inames, self.bounds, reflections=self.reflections)
+        return domain_set(
+            self.inames,
+            self.bounds,
+            constraints=self.loop_constraints(),
+            reflections=self.reflections,
+        )
 
     def record(
         self,
@@ -782,7 +818,14 @@ class Tracer:
         closed puts ``r`` in the domain alone.
         """
         return _loop_variables(
-            (assignee, expr, source, self.guard(), self.bounds),
+            (
+                assignee,
+                expr,
+                source,
+                self.guard(),
+                self.bounds,
+                tuple(loop.constraints for loop in self.loops),
+            ),
             self._inames,
             bound=self.inames,
             reflections=self.reflections,
@@ -1953,7 +1996,7 @@ def _integer_names(params: Sequence[tuple[str, Any]]) -> set[str]:
     out: set[str] = set()
     for name, typ in params:
         if isinstance(typ, ArrType):
-            out |= _free_size_names(typ.axes)
+            out |= _free_size_names(typ.shape_terms)
             sort = typ.dtype
         else:
             sort = typ
@@ -1966,6 +2009,35 @@ def _integer_names(params: Sequence[tuple[str, Any]]) -> set[str]:
 
 
 # }}}
+
+
+def _domain_texts(
+    props: Sequence[Any], tracer: Tracer, bound: Collection[str], spelled: str
+) -> tuple[str, ...]:
+    """The isl text of the constraints of a polyhedral fiber, or a refusal.
+
+    A domain's constraints are exact where it is written (see
+    :mod:`loopty.domain`); at the prefix a fiber is taken at they need not be,
+    since the prefix is substituted for the binders: an array read in
+    ``L.dom[p[k]]``, or a name isl would read as an integer that is not one.
+    Dropping such a conjunct, as a guard's is dropped, would widen the loop
+    past the points the native run visits, so the fiber is refused. ``bound``
+    names the reduction binders that count as integers, as in
+    :func:`constraints_of`, and ``spelled`` is how a message names the fiber.
+    """
+    texts: list[str] = []
+    for prop in props:
+        for part, text, why in _conjuncts(prop, tracer, bound):
+            if text is None:
+                raise TraceError(
+                    f"{spelled} is bounded by {_shown(part)} at the point it is "
+                    f"taken at, and that constraint {why}, so the loop over it "
+                    "would not be the domain's fiber. Take a fiber of a domain at "
+                    "loop variables, or at affine expressions of loop variables "
+                    "and sizes"
+                )
+            texts.append(text)
+    return tuple(texts)
 
 
 # {{{ symbolic arrays
@@ -1992,6 +2064,11 @@ class SymDom:
     loop level; inside a ``loopty.reduce_sum`` generator, iteration binds a
     reduction variable instead, because Lanky is driving it and asks for the
     point itself.
+
+    Over a polyhedral domain (:mod:`loopty.domain`) a fiber's loop is also
+    bounded by the domain's constraints at its prefix
+    (:meth:`constraints_for`), and the pieces of a union are iterated as the
+    Python ``range`` they are: a piece is a Python integer in a trace too.
     """
 
     __slots__ = ("array", "prefix")
@@ -1999,6 +2076,31 @@ class SymDom:
     def __init__(self, array: SymArr, prefix: tuple[Any, ...] = ()) -> None:
         self.array = array
         self.prefix = prefix
+
+    @property
+    def pieces(self) -> int | None:
+        """The number of pieces, when this is the first axis of a union."""
+        domain = self.array.type.domain
+        if isinstance(domain, Union) and not self.prefix:
+            return len(domain.pieces)
+        return None
+
+    def constraints_for(self, var: Any) -> tuple[Any, ...]:
+        """What else bounds a loop over this fiber with variable ``var``.
+
+        Nothing for a dense or a ragged axis. For a polyhedral domain's axis,
+        the bounds of the axes before it at the prefix and every constraint on
+        the axes up to it (:meth:`loopty.domain.Polyhedron.prefix_constraints`),
+        so that the loop is the domain's fiber and a fiber at a point outside
+        the domain is empty, as it is natively.
+        """
+        domain = self.array.type.domain
+        if domain is None:
+            return ()
+        if isinstance(domain, Union):
+            piece = domain.pieces[self.prefix[0]]
+            return piece.prefix_constraints(self.prefix[1:], var)
+        return domain.prefix_constraints(self.prefix, var)
 
     @property
     def axis(self) -> int:
@@ -2052,14 +2154,28 @@ class SymDom:
                 f"{self.array.name} has {self.array.ndim} axes; there is no "
                 f"axis {self.axis + 1} to take a fiber of"
             )
+        if self.array.type.domain is not None:
+            self.array.check_domain_index(
+                self.axis, index, f"{_domain_text(self)}[{_key_text(index)}]"
+            )
         return SymDom(self.array, (*self.prefix, index))
 
-    def __iter__(self) -> _DomIterator:
-        """One generic point, bound on the first ``next`` and not before."""
-        return _DomIterator(self)
+    def __iter__(self) -> Any:
+        """One generic point, bound on the first ``next`` and not before.
+
+        The pieces of a union are the exception: they are walked, as a Python
+        ``range``, so that each piece traces as statements of its own.
+        """
+        pieces = self.pieces
+        if pieces is None:
+            return _DomIterator(self)
+        return _PieceIterator(self, pieces)
 
     def __len__(self) -> int:
-        """Refuse: the extent is symbolic."""
+        """Refuse: the extent is symbolic, unless these are a union's pieces."""
+        pieces = self.pieces
+        if pieces is not None:
+            return pieces
         raise TraceError(
             f"the size of {self.array.name}.dom is symbolic while tracing; "
             "iterate it instead of asking for its length"
@@ -2161,7 +2277,46 @@ class _DomIterator:
                 "reduction and its domain are recorded"
             )
         self.loop = True
-        return tracer.enter_loop(self.dom.bound, _loop_target_name(), self, frame)
+        return tracer.enter_loop(
+            self.dom.bound,
+            _loop_target_name(),
+            self,
+            frame,
+            constraints=self.dom.constraints_for,
+        )
+
+
+class _PieceIterator:
+    """The pieces of a union, walked: ``0``, ``1``, ... as a ``range`` walks them.
+
+    A reduction over them is refused, on the first ``next`` rather than in
+    ``__iter__``, for the reason :class:`_DomIterator` binds late: Python calls
+    ``iter`` on a generator's outermost iterable before ``reduce_sum`` has
+    started tracing its binders.
+    """
+
+    __slots__ = ("dom", "left")
+
+    def __init__(self, dom: SymDom, pieces: int) -> None:
+        self.dom = dom
+        self.left = iter(range(pieces))
+
+    def __iter__(self) -> _PieceIterator:
+        return self
+
+    def __next__(self) -> int:
+        from lanky.terms import current_trace
+
+        if current_trace() is not None:
+            name = self.dom.array.name
+            raise TraceError(
+                f"a reduction over the pieces of {name}, {_domain_text(self.dom)}, "
+                "adds pieces whose points are different domains, and one "
+                "reduction has one domain. Reduce over each piece and add the "
+                f"results: reduce_sum(... for i in {name}.dom[0]) + "
+                f"reduce_sum(... for i in {name}.dom[1])"
+            )
+        return next(self.left)
 
 
 class SymArr:
@@ -2189,8 +2344,17 @@ class SymArr:
 
         A ragged axis names a counts array, and its bound at row ``r`` is
         ``cnt[r]``: the type says where the size comes from, and the index
-        expression of the enclosing axis says which row.
+        expression of the enclosing axis says which row. An axis of a
+        polyhedral domain is bounded by its binder's bound at the prefix, and
+        the first axis of a union by the number of its pieces.
         """
+        domain = self.type.domain
+        if isinstance(domain, Union):
+            if axis == 0:
+                return len(domain.pieces)
+            return domain.pieces[prefix[0]].axis_bound(tuple(prefix[1:axis]))
+        if domain is not None:
+            return domain.axis_bound(tuple(prefix[:axis]))
         size = self.type.axes[axis]
         if not self.type.ragged[axis]:
             return size
@@ -2203,15 +2367,68 @@ class SymArr:
         """The iteration domain of the outer axis."""
         return SymDom(self, ())
 
+    def check_domain_index(self, axis: int, index: Any, spelled: str) -> None:
+        """Refuse an index of a polyhedral domain's axis that tracing cannot keep.
+
+        The piece of a union is chosen by a Python integer, one of its pieces,
+        since each piece is a domain of its own and a statement is over one.
+        Any other axis's index has to be quasi-affine, since it is put into the
+        domain's constraints at a fiber and into the access an in-bounds
+        obligation compares with the domain.
+        """
+        domain = self.type.domain
+        if isinstance(domain, Union) and axis == 0:
+            if not isinstance(index, int | np.integer) or isinstance(
+                index, bool | np.bool_
+            ):
+                raise TraceError(
+                    f"{spelled} chooses a piece of {self.name} by {_shown(index)}, "
+                    f"and a piece of the union {domain} is chosen by a Python "
+                    f"integer: iterate them with 'for p in {self.name}.dom', or "
+                    "write the piece's number"
+                )
+            if not 0 <= int(index) < len(domain.pieces):
+                raise TraceError(
+                    f"{spelled} chooses piece {int(index)} of {self.name}, and "
+                    f"the union {domain} has {len(domain.pieces)} pieces"
+                )
+            return
+        try:
+            expr_text(index, None, None)
+        except (NonAffine, TypeError):
+            raise TraceError(
+                f"{spelled} indexes the domain of {self.name} by {_shown(index)}, "
+                "which is not quasi-affine, so the point it names is not one isl "
+                f"can compare with {domain}. Index an array over a domain by "
+                "loop variables, or by affine expressions of them and the sizes"
+            ) from None
+
+    def _check_domain_key(self, key: Any, where: str, write: bool) -> None:
+        """Refuse a subscript of an array over a domain that names no point."""
+        indices = _index_tuple(key)
+        spelled = f"{self.name}[{_key_text(key)}]" + (" = ..." if write else "")
+        if len(indices) != self.ndim:
+            raise TraceError(
+                f"{spelled} at {where} gives {len(indices)} indices, and a point "
+                f"of {self.type.domain}, the domain of {self.name}, has {self.ndim}"
+            )
+        for axis, index in enumerate(indices):
+            self.check_domain_index(axis, index, f"{spelled} at {where}")
+
     def __getitem__(self, key: Any) -> Subscript:
         """Read: build the index expression ``name[...]``."""
-        self._refuse_whole(key, _location(sys._getframe(1)), write=False)
+        where = _location(sys._getframe(1))
+        self._refuse_whole(key, where, write=False)
+        if self.type.domain is not None:
+            self._check_domain_key(key, where, write=False)
         return _subscript(self.name, _index_tuple(key))
 
     def __setitem__(self, key: Any, value: Any) -> None:
         """Write: record a statement at the caller's file and line."""
         where = _location(sys._getframe(1))
         self._refuse_whole(key, where, write=True)
+        if self.type.domain is not None:
+            self._check_domain_key(key, where, write=True)
         indices = _index_tuple(key)
         tracer = self.tracer
         expr = lower_reductions(value, tracer, where=where)
@@ -2598,7 +2815,12 @@ def lower_reductions(
             raise TraceError(_reduction_condition_message(unstated, binders, where))
         inames: list[str] = []
         bounds: list[Any] = []
+        # A binder over the fiber of a polyhedral domain is bounded by the
+        # domain's constraints at the fiber's prefix, as a loop over it is.
+        fibers: list[Any] = []
         for var, domain in expr.binders:
+            if isinstance(domain, SymDom):
+                fibers.extend(domain.constraints_for(var))
             if var.name in tracer.inames:
                 raise TraceError(
                     f"the reduction binder {var.name!r} shadows the enclosing "
@@ -2612,12 +2834,16 @@ def lower_reductions(
             inames.append(var.name)
             bounds.append(_binder_bound(domain))
         inner = (*enclosing, *zip(inames, bounds, strict=True))
-        guards = (*outer_guards, expr.guard)
+        spelled = f"the domain of the reduction over {', '.join(binders)}"
+        texts = _domain_texts(fibers, tracer, bound, spelled)
+        guards = (*outer_guards, expr.guard, *fibers)
         body = lower_reductions(expr.body, tracer, inner, guards, where)
         domain = domain_set(
             (*tracer.inames, *inames),
             (*tracer.bounds, *bounds),
             constraints=(
+                *tracer.loop_constraints(),
+                *texts,
                 *constraints_of(tracer.guard(), tracer),
                 *_binder_constraints(enclosing, tracer),
                 *(
@@ -2832,11 +3058,9 @@ def mask_writes(value: Any) -> Any:
     around the loop bounds.
     """
     if isinstance(value, Arr):
-        offsets = value.offsets if value.is_ragged else None
-        masked = _MaskedArr(value.numpy(), offsets)
-        # A view already reading through a kernel's declared layout keeps it.
-        layout = value.layout
-        return masked if layout is None else masked.through(*layout)
+        # Every field is shared: the buffers, a declared layout a ragged view
+        # reads through, and the domain and storage of an array over one.
+        return value._shared(_MaskedArr)
     if isinstance(value, np.ndarray):
         return value.view(_MaskedArray)
     return value
@@ -2945,7 +3169,27 @@ def array_type(
     Real]`` next to ``cnt: Arr[Fin[n], Nat]`` says that row ``r`` of ``val`` has
     ``cnt[r]`` entries, which is the dependent sum spelled point-free. Any other
     symbolic size is an ordinary size parameter, uniform across rows.
+
+    A polyhedral domain, ``Where[...]``, ``Sigma[...]`` or a sum of pieces
+    (:mod:`loopty.domain`), is the whole index set of the array and its only
+    written axis; the type keeps it in ``domain``.
     """
+    written = [
+        axis for axis in spec.axes if isinstance(axis, Polyhedron | SumType)
+    ]
+    if written:
+        at = f" of {name}" if name else ""
+        if len(spec.axes) != 1:
+            raise TraceError(
+                f"the type{at}, {spec!r}, has the domain {written[0]} beside other "
+                "axes, and a domain is an array's whole index set: write every "
+                "axis in it, as in Arr[Where[i: Fin[k], j: Fin[n], ...], Real]"
+            )
+        try:
+            domain = index_domain(written[0])
+        except TypeError as exc:
+            raise TraceError(f"the type{at}, {spec!r}: {exc}") from exc
+        return ArrType(axes=(), dtype=spec.dtype, ragged=(), domain=domain)
     axes = tuple(_axis_size(axis) for axis in spec.axes)
     ragged = []
     for position, size in enumerate(axes):
@@ -3020,7 +3264,7 @@ def trace(kernel: Any, arg_types: Any) -> Term:
             tracer.array_types[parameter] = arrtype
             # A size a shape mentions is a name the isl spaces already use, so
             # no reflected parameter may be called that; see Reflections.
-            tracer.reflections.reserve(_free_size_names(arrtype.axes))
+            tracer.reflections.reserve(_free_size_names(arrtype.shape_terms))
             arguments.append(SymArr(parameter, arrtype, tracer))
         else:
             params.append((parameter, annotation))
@@ -3056,7 +3300,7 @@ def trace(kernel: Any, arg_types: Any) -> Term:
     sizes: set[str] = set()
     for _, arrtype in params:
         if isinstance(arrtype, ArrType):
-            sizes |= _free_size_names(arrtype.axes)
+            sizes |= _free_size_names(arrtype.shape_terms)
     return Term(
         name=name,
         params=tuple(params),
