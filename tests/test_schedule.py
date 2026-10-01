@@ -507,9 +507,14 @@ def test_exactness_is_read_off_the_reduction_being_transformed() -> None:
 
     # ``k`` belongs to the approx reduction, so tagging it is a reassociation
     # the type permits. It used to be refused, because the first reduction
-    # found for ``y`` was the exact one.
-    tagged = schedule.tag(k="l.0")
+    # found for ``y`` was the exact one. (On ``l.0`` the cast is refused now
+    # for another reason: S0 has no loop or sum on the axis, so it runs on
+    # every work item of it, and writes the ``y[r]`` S1 adds to, #63. ``ilp``
+    # asks the same permission and runs in one work item.)
+    tagged = schedule.tag(k="ilp")
     assert tagged.reassociated == frozenset({"y"})
+    with pytest.raises(IllegalCast, match="S0 runs in no loop on l.0"):
+        schedule.tag(k="l.0")
 
 
 def test_realize_answers_for_every_reduction_writing_the_array() -> None:

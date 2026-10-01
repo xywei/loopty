@@ -73,12 +73,19 @@ starts that loop (see :func:`_work_items`). A statement with no loop on an
 axis that a loop of another statement is on runs on every work item of it, as
 loopy would run it, so every dependence to or from it joins two work items.
 The loop of a sum is not a loop of its statement here: the whole sum happens
-inside one instance, loopy synchronizes the partial sums of a sum on a local
-axis through local memory, and an axis that only sums are on is not asked
-about, so local sums stay allowed. ``ilp`` and ``vec`` loops run inside one
-work item, and only lose their order. A refusal names the dependence and the
-two work items: ``S0[t=0, i=1] writes u[1, 1] read by S0[t=1, i=2] on another
-work item``.
+inside one instance. loopy runs a sum on a local axis as partial sums on every
+work item of the axis, combined through local memory with barriers between
+them, and then stores the result from one work item. So what the sum's body
+reads is read on every work item of the axis, and what the statement's own
+instruction reads and writes, on one, the same one for every statement whose
+sum is on the axis. Local sums stay allowed, and so does a sum's result read
+by another statement's instruction; read in the body of another sum, or of
+the same sum at a later step, it is refused, as loopy refuses it for want of
+a global barrier, and so is a sum that reads the cell its own statement
+writes, which is one instance (see :func:`_within_instances`). ``ilp`` and
+``vec`` loops run inside one work item, and only lose their order. A refusal
+names the dependence and the two work items: ``S0[t=0, i=1] writes u[1, 1]
+read by S0[t=1, i=2] on another work item``.
 
 Legal is not the same as buildable
 ----------------------------------
@@ -620,7 +627,14 @@ def _as_maps(mapping: Any) -> tuple[Any, dict[str, isl.Map] | None]:
 
 @dataclass(frozen=True)
 class _Dep:
-    """One dependence: which instances, through which cell of which array."""
+    """One dependence: which instances, through which cell of which array.
+
+    ``source_part`` and ``sink_part`` say where in its statement each end's
+    access is made (see :func:`_accesses`): ``""`` in the statement's own
+    instruction, ``"sum"`` in the body of a sum, ``"row"`` where the length of
+    a ragged row is read. Only the work items an access runs on depend on it
+    (see :func:`_work_items`).
+    """
 
     kind: str  # "raw", "war", "waw"
     array: str
@@ -629,6 +643,8 @@ class _Dep:
     source_indices: tuple[Any, ...]
     sink_indices: tuple[Any, ...]
     relation: isl.Map
+    source_part: str = ""
+    sink_part: str = ""
 
     def verbs(self) -> tuple[str, str]:
         """How to say, in the rejection message, what each end did."""
@@ -639,8 +655,10 @@ class _Dep:
         }[self.kind]
 
 
-def _accesses(stmt: Stmt, term: Term) -> list[tuple[str, str, tuple[Any, ...]]]:
-    """Every array reference of a statement, as ``(kind, array, indices)``.
+def _accesses(
+    stmt: Stmt, term: Term
+) -> list[tuple[str, str, tuple[Any, ...], str]]:
+    """Every array reference of a statement, as ``(kind, array, indices, part)``.
 
     The list comes from :func:`loopty.flow.statement_accesses`, which is the one
     place the question "what does this statement touch?" is answered: the
@@ -655,16 +673,29 @@ def _accesses(stmt: Stmt, term: Term) -> list[tuple[str, str, tuple[Any, ...]]]:
     that is the one thing unpacked here. The domains it reports are dropped: a
     schedule's coordinates are the layout's, not the term's, and an index that
     does not fit them is widened by :func:`_index_text`.
+
+    ``part`` is read off the loops the collector says an access is made in:
+    ``""`` for the statement's own loops, which is its own instruction,
+    ``"sum"`` for more, the body of a sum, and ``"row"`` for fewer, the length
+    of a ragged row read where its loop starts. On a device these are
+    different instructions, which can run on different work items (see
+    :func:`_work_items`). The length of a row a sum runs over is read in the
+    statement's loops, and is counted with its own instruction; that is
+    wrong only where loopy generates no code: with that sum on a local axis
+    (a concurrent loop in a ragged fiber), or another of the statement's sums
+    there (the instruction that reads the length runs in no loop on the axis).
     """
     from loopty.flow import statement_accesses
 
-    out: list[tuple[str, str, tuple[Any, ...]]] = []
-    for array, indices, kind, _inames, _domain in statement_accesses(stmt, term):
+    own = len(stmt.inames)
+    out: list[tuple[str, str, tuple[Any, ...], str]] = []
+    for array, indices, kind, inames, _domain in statement_accesses(stmt, term):
+        part = "" if len(inames) == own else "sum" if len(inames) > own else "row"
         if kind == "acc":
-            out.append(("write", array, tuple(indices)))
-            out.append(("read", array, tuple(indices)))
+            out.append(("write", array, tuple(indices), part))
+            out.append(("read", array, tuple(indices), part))
         else:
-            out.append((kind, array, tuple(indices)))
+            out.append((kind, array, tuple(indices), part))
     return out
 
 
@@ -692,6 +723,42 @@ def _index_text(expr: Any, renaming: dict[str, Any], allowed: set[str]) -> str |
         return None
 
 
+def _same_cell(
+    a: Stmt,
+    b: Stmt,
+    a_indices: Sequence[Any],
+    b_indices: Sequence[Any],
+    layout: _Layout,
+    params: set[str],
+) -> isl.Map:
+    """The pairs of an instance of ``a`` and one of ``b`` that touch one cell.
+
+    ``a_indices`` and ``b_indices`` are the two accesses' subscripts, compared
+    axis by axis; an axis either one cannot state in isl is left
+    unconstrained (see :func:`_index_text`), which can only add pairs.
+    """
+    source_dims = layout.dims("x")
+    target_dims = layout.dims("y", suffix="_")
+    renaming_a = {
+        iname: prim.Variable(f"x{k}") for k, iname in enumerate(layout.coords[a.id])
+    }
+    allowed_a = {f"x{k}" for k in range(len(layout.coords[a.id]))} | params
+    renaming_b = {
+        iname: prim.Variable(f"y{k}") for k, iname in enumerate(layout.coords[b.id])
+    }
+    allowed_b = {f"y{k}" for k in range(len(layout.coords[b.id]))} | params
+    constraints = [f"s = {layout.index(a.id)}", f"s_ = {layout.index(b.id)}"]
+    for a_index, b_index in zip(a_indices, b_indices, strict=True):
+        left = _index_text(a_index, renaming_a, allowed_a)
+        right = _index_text(b_index, renaming_b, allowed_b)
+        if left is None or right is None:
+            continue
+        constraints.append(f"{left} = {right}")
+    return isl.Map(
+        f"{{ [{source_dims}] -> [{target_dims}] : {' and '.join(constraints)} }}"
+    )
+
+
 def _dependences(
     term: Term,
     layout: _Layout,
@@ -705,45 +772,20 @@ def _dependences(
     array, at least one of them writes it, and the original order runs one before
     the other. Nothing is declared: this is the definition, evaluated by isl.
     """
-    source_dims = layout.dims("x")
-    target_dims = layout.dims("y", suffix="_")
     out: list[_Dep] = []
     for a in term.stmts:
-        renaming_a = {
-            iname: prim.Variable(f"x{k}")
-            for k, iname in enumerate(layout.coords[a.id])
-        }
-        allowed_a = {f"x{k}" for k in range(len(layout.coords[a.id]))} | params
         for b in term.stmts:
-            renaming_b = {
-                iname: prim.Variable(f"y{k}")
-                for k, iname in enumerate(layout.coords[b.id])
-            }
-            allowed_b = {f"y{k}" for k in range(len(layout.coords[b.id]))} | params
-            for a_kind, a_array, a_indices in _accesses(a, term):
-                for b_kind, b_array, b_indices in _accesses(b, term):
+            for a_kind, a_array, a_indices, a_part in _accesses(a, term):
+                for b_kind, b_array, b_indices, b_part in _accesses(b, term):
                     if a_array != b_array:
                         continue
                     if a_kind == "read" and b_kind == "read":
                         continue
                     if len(a_indices) != len(b_indices):
                         continue
-                    constraints = [
-                        f"s = {layout.index(a.id)}",
-                        f"s_ = {layout.index(b.id)}",
-                    ]
-                    for a_index, b_index in zip(a_indices, b_indices, strict=True):
-                        left = _index_text(a_index, renaming_a, allowed_a)
-                        right = _index_text(b_index, renaming_b, allowed_b)
-                        if left is None or right is None:
-                            continue
-                        constraints.append(f"{left} = {right}")
-                    relation = isl.Map(
-                        f"{{ [{source_dims}] -> [{target_dims}] : "
-                        f"{' and '.join(constraints)} }}"
-                    )
                     relation = (
-                        relation.intersect_domain(instances)
+                        _same_cell(a, b, a_indices, b_indices, layout, params)
+                        .intersect_domain(instances)
                         .intersect_range(instances)
                         .intersect(before)
                     )
@@ -763,8 +805,57 @@ def _dependences(
                             source_indices=a_indices,
                             sink_indices=b_indices,
                             relation=relation.coalesce(),
+                            source_part=a_part,
+                            sink_part=b_part,
                         )
                     )
+    return tuple(out)
+
+
+def _within_instances(
+    term: Term, layout: _Layout, instances: isl.Set, params: set[str]
+) -> tuple[_Dep, ...]:
+    """The cells a statement's sums read that its own instruction then writes.
+
+    One instance reads and writes such a cell, so the pair is no dependence
+    of :func:`_dependences`, which are between two instances, and needs no
+    order. On a device it can be two work items: a sum on a local axis reads
+    on every work item of it, and the statement's instruction writes on one
+    (see :func:`_work_items`), which loopy asks a global barrier between.
+    Each is a ``war`` from an instance to itself, and names the written cell
+    at both ends, since the read's subscripts can name the sum's own loops.
+    """
+    identity = isl.Map.identity(instances.get_space().map_from_set())
+    identity = identity.intersect_domain(instances)
+    out: list[_Dep] = []
+    for stmt in term.stmts:
+        accesses = _accesses(stmt, term)
+        for r_kind, r_array, r_indices, r_part in accesses:
+            if r_kind != "read" or r_part != "sum":
+                continue
+            for w_kind, w_array, w_indices, w_part in accesses:
+                if w_kind != "write" or w_part != "" or w_array != r_array:
+                    continue
+                if len(r_indices) != len(w_indices):
+                    continue
+                relation = _same_cell(
+                    stmt, stmt, r_indices, w_indices, layout, params
+                ).intersect(identity)
+                if relation.is_empty():
+                    continue
+                out.append(
+                    _Dep(
+                        kind="war",
+                        array=r_array,
+                        source=stmt.id,
+                        sink=stmt.id,
+                        source_indices=w_indices,
+                        sink_indices=w_indices,
+                        relation=relation.coalesce(),
+                        source_part="sum",
+                        sink_part="",
+                    )
+                )
     return tuple(out)
 
 
@@ -874,30 +965,54 @@ def _grid_base(kernel: Any, name: str) -> tuple[str, tuple[str, ...]] | None:
 class _WorkItems:
     """Where on the launch grid each statement instance runs.
 
-    ``axes`` are the group and local axes a loop of some statement is on, by
-    name, and ``loops[stmt_id][axis]`` is that statement's loop on the axis,
-    or ``None`` when it runs on every work item of it. ``coordinates[axis]``
-    maps an instance of the schedule's layout to its work item along the
-    axis. ``known`` names the loops whose start loopy says, and ``hidden``
-    the parameters that stand for the start of each of the others.
+    ``axes`` are the group and local axes a loop of some statement or of
+    some sum is on, by name, and ``loops[stmt_id][axis]`` is that
+    statement's loop on the axis, or ``None`` when it has no loop there.
+    ``summed[stmt_id]`` are the axes a sum of the statement is on and no
+    loop of it is.
+
+    ``coordinates[axis]`` maps an instance of the schedule's layout to the
+    work item along the axis its own instruction runs on, and
+    ``spread[axis]`` to the work items every part of it runs on: the
+    instruction, its sums and the reads of its rows' lengths. The two differ
+    only for a statement a sum of which is on the axis and no loop: its own
+    instruction runs on one work item of the axis once the sum is done, and
+    its sum on all of them. ``known`` names the loops whose start loopy says,
+    and ``hidden`` the parameters that stand for the start of each of the
+    others, and for the work item of each axis where a sum's statement runs.
     """
 
     axes: tuple[str, ...]
     loops: dict[str, dict[str, str | None]]
+    summed: dict[str, frozenset[str]]
     coordinates: dict[str, isl.Map]
+    spread: dict[str, isl.Map]
     known: frozenset[str]
     hidden: frozenset[str]
 
+    def placed(self, part: str, axis: str) -> isl.Map:
+        """The work items along ``axis`` of an access made in ``part``.
+
+        ``part`` as :func:`_accesses` says it: ``""`` for the statement's own
+        instruction, which runs where :attr:`coordinates` puts it, and
+        anything else for a sum's body or a row's length, which run where
+        :attr:`spread` does.
+        """
+        return (self.coordinates if part == "" else self.spread)[axis]
+
 
 def _work_items(
-    layout: _Layout, tags: Mapping[str, str], kernel: Any, taken: set[str]
+    layout: _Layout,
+    tags: Mapping[str, str],
+    kernel: Any,
+    taken: set[str],
+    sums: Mapping[str, Sequence[str]] | None = None,
 ) -> _WorkItems | None:
     """Each instance's work item along every hardware axis, or ``None``.
 
-    ``None`` when no loop of any statement is on a group or a local axis,
-    which leaves nothing to ask. A sum's loop is not a statement's (see
-    "Work items" in the module docstring), so an axis that only sums are on
-    is not one of them.
+    ``sums[stmt_id]`` are the loops of the statement's sums, by the names
+    they have now. ``None`` when no loop of a statement or of a sum is on a
+    group or a local axis, which leaves nothing to ask.
 
     An instance's work item along an axis is ``x - base``: ``x`` the value of
     its statement's loop on the axis and ``base`` where loopy starts counting
@@ -910,12 +1025,26 @@ def _work_items(
     found to share a work item only when they are of one loop and agree on
     it.
 
-    A statement with no loop on the axis runs on every work item of it, and
-    so is taken to be at any work item at all; so is one with two loops on
-    the axis, which loopy refuses to generate code for. Every dependence to
-    or from either joins two work items.
+    A statement with neither a loop nor a sum on the axis runs on every work
+    item of it, and so is taken to be at any work item at all; so is one with
+    two loops on the axis, which loopy refuses to generate code for. Every
+    dependence to or from either joins two work items.
+
+    A sum's loop is not one of its statement's: the sum happens inside one
+    instance, and loopy runs a sum on a local axis as partial sums on every
+    work item of the axis, combined through local memory with barriers
+    between them. Then, on one work item, the statement's own instruction
+    stores the result (``if (lid(0) == 0)`` in the code loopy generates). So
+    what the sum's body reads it reads on every work item, and what the
+    instruction reads and writes it reads and writes on one, the same one
+    for every statement whose sum is on the axis, which is a parameter of its
+    own here; the two sums of a row that the row's statements pass a value
+    between therefore stay allowed, and a sum that reads what another
+    statement's instruction wrote is refused.
     """
+    sums = sums or {}
     on: dict[str, dict[str, list[str]]] = {}
+    summed: dict[str, frozenset[str]] = {}
     for stmt_id in layout.stmt_ids:
         mine: dict[str, list[str]] = {}
         for name in layout.coords[stmt_id]:
@@ -923,30 +1052,50 @@ def _work_items(
             if axis is not None:
                 mine.setdefault(axis, []).append(name)
         on[stmt_id] = mine
-    axes = tuple(sorted({axis for mine in on.values() for axis in mine}))
+        summed_on: set[str] = set()
+        for name in sums.get(stmt_id, ()):
+            axis = _grid_axis(tags[name], name) if name in tags else None
+            if axis is not None and axis not in mine:
+                summed_on.add(axis)
+        summed[stmt_id] = frozenset(summed_on)
+    axes = tuple(
+        sorted(
+            {axis for mine in on.values() for axis in mine}
+            | {axis for theirs in summed.values() for axis in theirs}
+        )
+    )
     if not axes:
         return None
 
+    hidden: set[str] = set()
+
+    def fresh(name: str) -> str:
+        while name in taken or name in hidden:
+            name += "_"
+        hidden.add(name)
+        return name
+
     starts: dict[str, tuple[str, tuple[str, ...]]] = {}
     known: set[str] = set()
-    hidden: set[str] = set()
     for name in sorted({n for mine in on.values() for ns in mine.values() for n in ns}):
         start = _grid_base(kernel, name)
         if start is None:
-            param = f"start_{name}"
-            while param in taken or param in hidden:
-                param += "_"
-            hidden.add(param)
+            param = fresh(f"start_{name}")
             start = (param, (param,))
         else:
             known.add(name)
         starts[name] = start
+    results = {
+        axis: fresh("result_" + "".join(c if c.isalnum() else "_" for c in axis))
+        for axis in axes
+        if any(axis in mine for mine in summed.values())
+    }
 
     # Primed names, which no size or loop of a kernel can have, since a
     # Python identifier cannot hold a prime and isl's syntax can.
     source = ", ".join(["s'", *(f"x{k}'" for k in range(layout.width))])
-    coordinates: dict[str, isl.Map] = {}
-    for axis in axes:
+
+    def coordinate(axis: str, after_sums: bool) -> isl.Map:
         out: isl.Map | None = None
         for stmt_id in layout.stmt_ids:
             loops = on[stmt_id].get(axis, [])
@@ -956,13 +1105,17 @@ def _work_items(
                 base, params = starts[loops[0]]
                 position = layout.coords[stmt_id].index(loops[0])
                 constraints.append(f"h' = x{position}' - ({base})")
+            elif after_sums and not loops and axis in summed[stmt_id]:
+                params = (results[axis],)
+                constraints.append(f"h' = {results[axis]}")
             prefix = f"[{', '.join(params)}] -> " if params else ""
             piece = isl.Map(
                 f"{prefix}{{ [{source}] -> [h'] : {' and '.join(constraints)} }}"
             )
             out = piece if out is None else out.union(piece)
         assert out is not None
-        coordinates[axis] = out.coalesce()
+        return out.coalesce()
+
     loops_on: dict[str, dict[str, str | None]] = {}
     for stmt_id in layout.stmt_ids:
         loops_on[stmt_id] = {}
@@ -972,7 +1125,9 @@ def _work_items(
     return _WorkItems(
         axes=axes,
         loops=loops_on,
-        coordinates=coordinates,
+        summed=summed,
+        coordinates={axis: coordinate(axis, after_sums=True) for axis in axes},
+        spread={axis: coordinate(axis, after_sums=False) for axis in axes},
         known=frozenset(known),
         hidden=frozenset(hidden),
     )
@@ -982,18 +1137,22 @@ def _work_items(
 _OTHER_WORK_ITEM = "{ [h] -> [g] : g < h or g > h }"
 
 
-def _apart(reindex: isl.Map, coordinate: isl.Map) -> isl.Map:
+def _apart(
+    reindex: isl.Map, source: isl.Map, sink: isl.Map | None = None
+) -> isl.Map:
     """The pairs of the term's instances a schedule puts on two work items.
 
-    ``reindex`` takes the term's instances to the schedule's, and
-    ``coordinate`` takes those to their work item along one axis (see
-    :func:`_work_items`); a pair is apart when some work item of the first
-    differs from some work item of the second, which for a statement that
-    runs on every work item is always.
+    ``reindex`` takes the term's instances to the schedule's, and ``source``
+    and ``sink`` take those to the work items along one axis that the two
+    ends of a pair run on (see :func:`_work_items`), ``sink`` the same as
+    ``source`` when it is not given; a pair is apart when some work item of
+    the first differs from some work item of the second, which for an end
+    that runs on every work item is always.
     """
-    placed = reindex.apply_range(coordinate)
-    return placed.apply_range(isl.Map(_OTHER_WORK_ITEM)).apply_range(
-        placed.reverse()
+    first = reindex.apply_range(source)
+    second = first if sink is None else reindex.apply_range(sink)
+    return first.apply_range(isl.Map(_OTHER_WORK_ITEM)).apply_range(
+        second.reverse()
     )
 
 
@@ -2165,6 +2324,10 @@ class Schedule:
         self._deps = _dependences(
             self._term, self._layout, self._instances, before, params
         )
+        #: Pairs that only work items can separate (see :func:`_work_items`).
+        self._within = _within_instances(
+            self._term, self._layout, self._instances, params
+        )
         self._deps_total, self._flow_note = _cross_check(
             self._term, _union(dep.relation for dep in self._deps)
         )
@@ -3111,11 +3274,15 @@ class Schedule:
         # two instances on one work item; a dependence between two work items
         # is refused whatever the order (see "Work items" in the module
         # docstring).
+        sums: dict[str, list[str]] = {}
+        for name, key in draft.reductions.items():
+            sums.setdefault(key.rsplit(":", 1)[0], []).append(name)
         work = _work_items(
             layout,
             draft.tags,
             draft.kernel,
             set(self._params) | set(self._term.sizes),
+            sums,
         )
         if not refused and work is not None:
             crossing = self._first_crossing(text, reindex, work)
@@ -3318,34 +3485,52 @@ class Schedule:
     ) -> tuple[str, tuple, str] | None:
         """A dependence the schedule puts on two work items, or ``None``.
 
-        Asked of the union of the dependences first, which is what the verdict
-        is about, and of each dependence and each axis only when there is a
-        refusal to explain, as :meth:`_first_violation` is. Returns the
+        Asked of the union of the dependences first, with every part of a
+        statement where any part of it runs (:attr:`_WorkItems.spread`),
+        which is what the verdict is about when nothing crosses. When
+        something might, each dependence and each axis is asked with the
+        work items its two accesses run on (:meth:`_WorkItems.placed`), and
+        what ``loopy.flow`` finds besides with the union's. The pairs within
+        one instance that only work items separate (see
+        :func:`_within_instances`) are asked as dependences are. Returns the
         message, the witness and the detail of the refusal. ``reindex`` takes
         the term's instances to the schedule's.
         """
         total = self._deps_total
-        if total is None:
-            return None
-        total = total.subtract(
-            isl.Map.identity(total.get_space().domain().map_from_set())
-        )
-        apart = {
-            axis: _apart(reindex, work.coordinates[axis]) for axis in work.axes
-        }
-        crossed = [
-            axis for axis in work.axes if not total.intersect(apart[axis]).is_empty()
-        ]
-        if not crossed:
-            return None
-        for dep in self._deps:
+        crossed = False
+        spread: dict[str, isl.Map] = {}
+        if total is not None:
+            total = total.subtract(
+                isl.Map.identity(total.get_space().domain().map_from_set())
+            )
+            spread = {
+                axis: _apart(reindex, work.spread[axis]) for axis in work.axes
+            }
+            crossed = any(
+                not total.intersect(spread[axis]).is_empty() for axis in work.axes
+            )
+        for dep in (*(self._deps if crossed else ()), *self._within):
             for axis in work.axes:
-                if dep.relation.intersect(apart[axis]).is_empty():
+                apart = _apart(
+                    reindex,
+                    work.placed(dep.source_part, axis),
+                    work.placed(dep.sink_part, axis),
+                )
+                if dep.relation.intersect(apart).is_empty():
                     continue
                 return self._render_crossing(text, dep, axis, reindex, work)
-        return self._unattributed_crossing(  # pragma: no cover - see below
-            text, total.intersect(apart[crossed[0]]), crossed[0], reindex, work
-        )
+        if not crossed or total is None:
+            return None
+        mine = _union(dep.relation for dep in self._deps)
+        others = total if mine is None else total.subtract(mine)
+        for axis in work.axes:
+            crossing = others.intersect(spread[axis])
+            if crossing.is_empty():
+                continue
+            return self._unattributed_crossing(  # pragma: no cover - see below
+                text, crossing, axis, reindex, work
+            )
+        return None
 
     def _unattributed_crossing(
         self,
@@ -3361,7 +3546,10 @@ class Schedule:
         :func:`_cross_check`), so a dependence only the other finds is refused
         too, with the pair of instances and no array cell.
         """
-        witness, _ = self._crossing_witness(relation, axis, reindex, work)
+        spread = work.spread[axis]
+        witness, _ = self._crossing_witness(
+            relation, axis, reindex, work, spread, spread
+        )
         message = (
             f"{text} illegal: a dependence loopty.flow finds joins two work "
             f"items of {axis}, and nothing in a kernel orders two work items "
@@ -3370,18 +3558,26 @@ class Schedule:
         return message, witness, f"a dependence joins two work items of {axis}"
 
     def _crossing_witness(
-        self, relation: isl.Map, axis: str, reindex: isl.Map, work: _WorkItems
+        self,
+        relation: isl.Map,
+        axis: str,
+        reindex: isl.Map,
+        work: _WorkItems,
+        source: isl.Map,
+        sink: isl.Map,
     ) -> tuple[tuple, tuple[int, int]]:
         """A pair of ``relation`` on two work items of ``axis``, and the two.
 
-        The pair and its work items are sampled together, at the size hint
-        where there is a point there, and the parameters that stand for a
-        start loopy could not say are dropped first, since a witness is read
-        at sizes and not at those.
+        ``source`` and ``sink`` give the work items each end runs on (see
+        :meth:`_WorkItems.placed`). The pair and its work items are sampled
+        together, at the size hint where there is a point there, and the
+        parameters that stand for a start loopy could not say, or for the
+        work item a sum's statement runs on, are dropped first, since a
+        witness is read at sizes and not at those.
         """
-        placed = reindex.apply_range(work.coordinates[axis])
         pairs = (
-            placed.product(placed)
+            reindex.apply_range(source)
+            .product(reindex.apply_range(sink))
             .intersect_domain(relation.wrap())
             .intersect_range(isl.Map(_OTHER_WORK_ITEM).wrap())
         )
@@ -3403,9 +3599,12 @@ class Schedule:
         params = dict(zip(names, point[:n_params], strict=True))
         width = self._origin_layout.width + 1
         values = point[n_params:]
-        source = self._name_instance(values[:width])
-        sink = self._name_instance(values[width : 2 * width])
-        return (source, sink, params), (values[2 * width], values[2 * width + 1])
+        source_instance = self._name_instance(values[:width])
+        sink_instance = self._name_instance(values[width : 2 * width])
+        return (source_instance, sink_instance, params), (
+            values[2 * width],
+            values[2 * width + 1],
+        )
 
     def _render_crossing(
         self, text: str, dep: _Dep, axis: str, reindex: isl.Map, work: _WorkItems
@@ -3414,30 +3613,61 @@ class Schedule:
 
         Which instance, which cell, and why the two run on two work items:
         the loop on the axis puts them there, by its values, or one of the
-        statements has no loop on the axis and runs on every work item of it.
+        statements has no loop on the axis and runs on every work item of it,
+        or a sum on the axis runs the access on every work item of it and the
+        statement's own instruction on one.
         """
         witness, (first, second) = self._crossing_witness(
-            dep.relation, axis, reindex, work
+            dep.relation,
+            axis,
+            reindex,
+            work,
+            work.placed(dep.source_part, axis),
+            work.placed(dep.sink_part, axis),
         )
         (source_id, source_coords), (sink_id, sink_coords), params = witness
         source_loop = work.loops[source_id][axis]
         sink_loop = work.loops[sink_id][axis]
         if source_loop is None or sink_loop is None:
-            everywhere = list(
-                dict.fromkeys(
-                    stmt_id
-                    for stmt_id, loop in (
-                        (source_id, source_loop),
-                        (sink_id, sink_loop),
+            active = {
+                "raw": ("writes", "reads"),
+                "war": ("reads", "writes"),
+                "waw": ("writes", "writes"),
+            }[dep.kind]
+            everywhere: list[str] = []
+            parts: list[str] = []
+            for stmt_id, loop, part, verb in (
+                (source_id, source_loop, dep.source_part, active[0]),
+                (sink_id, sink_loop, dep.sink_part, active[1]),
+            ):
+                if loop is not None:
+                    continue
+                if axis not in work.summed[stmt_id]:
+                    if not everywhere:
+                        parts.append("")
+                    if stmt_id not in everywhere:
+                        everywhere.append(stmt_id)
+                elif part == "":
+                    parts.append(
+                        f"{stmt_id} {verb} it on one work item of {axis}, once "
+                        f"its sum on {axis} is done"
                     )
-                    if loop is None
+                elif part == "sum":
+                    parts.append(
+                        f"{stmt_id} {verb} it in a sum, on every work item of {axis}"
+                    )
+                else:
+                    parts.append(
+                        f"{stmt_id} {verb} it for the length of a row, on every "
+                        f"work item of {axis}"
+                    )
+            if everywhere:
+                verb = "runs" if len(everywhere) == 1 else "run"
+                parts[parts.index("")] = (
+                    f"{' and '.join(everywhere)} {verb} in no loop on {axis}, so "
+                    "on every work item of it"
                 )
-            )
-            verb = "runs" if len(everywhere) == 1 else "run"
-            how = (
-                f"{' and '.join(everywhere)} {verb} in no loop on {axis}, so on "
-                "every work item of it"
-            )
+            how = "; ".join(parts)
         else:
             one = source_loop == sink_loop
             loops = source_loop if one else f"{source_loop} and {sink_loop}"

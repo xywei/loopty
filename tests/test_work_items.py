@@ -180,6 +180,24 @@ def test_rows_whose_dependences_stay_in_their_row_are_unchanged(plain_opencl):
     )
 
 
+@pytest.mark.parametrize("split", [False, True])
+def test_targets_whose_terms_stay_with_their_target_are_unchanged(
+    plain_opencl, split
+) -> None:
+    # p2p's targets across the grid: each writes the terms of its own list
+    # and sums them into its own potential, so nothing crosses a work item.
+    schedule = Schedule(example("p2p").p2p, target="opencl")
+    tags = {"t": "g.0"}
+    if split:
+        schedule = schedule.split("t", 4, inner="t_in", outer="t_out")
+        tags = {"t_out": "g.0", "t_in": "l.0"}
+    code = loopy_says(plain_opencl, schedule.kernel, tags)
+    assert "get_group_id" in code, code
+    tagged = schedule.tag(**tags)
+    assert set(casts(tagged)) == {"decided"}
+    assert tagged.buildable == (True, "")
+
+
 # }}}
 
 
@@ -370,19 +388,21 @@ def row_sums_read_backwards(
 
 
 def test_local_sums_stay_allowed(plain_opencl) -> None:
-    # A sum on a local axis happens inside one instance, and every work item
-    # of the group runs the statement around it; loopy synchronizes the
-    # partial sums through local memory, with barriers. An axis only sums are
-    # on is not asked about.
+    # A sum on a local axis happens inside one instance: loopy sums the parts
+    # on every work item of the axis, combines them through local memory with
+    # barriers, and stores the result from one work item, the first. Every
+    # statement summed on the axis runs its own instruction there, so the
+    # second reads, outside its sum, what the first wrote on that work item.
     sums = {"j": "l.0", "k": "l.0"}
     for fn, rows in ((two_row_sums, {"i": "g.0"}), (row_sums_read_backwards, {})):
         schedule = Schedule(fn, target="opencl")
         tagged = schedule.tag(**rows, **sums)
         assert casts(tagged) == ["decided"] * 4
+        assert tagged.facts()[1].statement.endswith("within one work item")
         assert tagged.buildable == (True, "")
-        assert "barrier(CLK_LOCAL_MEM_FENCE)" in loopy_says(
-            plain_opencl, schedule.kernel, {**rows, **sums}
-        )
+        code = loopy_says(plain_opencl, schedule.kernel, {**rows, **sums})
+        assert "barrier(CLK_LOCAL_MEM_FENCE)" in code, code
+        assert code.count("if (lid(0) == 0)") == 2, code
 
 
 def test_rows_on_a_group_axis_do_not_share_their_local_sums(plain_opencl):
@@ -394,6 +414,160 @@ def test_rows_on_a_group_axis_do_not_share_their_local_sums(plain_opencl):
     assert said.startswith("MissingBarrierError") and GLOBAL_BARRIER in said, said
     with pytest.raises(IllegalCast, match="the loops i and p on g.0 run them"):
         schedule.tag(**tags)
+
+
+@kernel
+def sum_of_a_sum(a: Arr[Fin[8], Real], b: Arr[Fin[8], Real], s: Arr[Fin[2], Real]):
+    """A sum, then a sum whose body reads it."""
+    s[0] = reduce_sum(a[j] for j in a.dom)
+    s[1] = reduce_sum(s[0] * b[k] for k in b.dom)
+
+
+@kernel
+def sum_after_a_sum(a: Arr[Fin[8], Real], b: Arr[Fin[8], Real], s: Arr[Fin[2], Real]):
+    """A sum, then a statement that adds it to a sum of its own."""
+    s[0] = reduce_sum(a[j] for j in a.dom)
+    s[1] = s[0] + reduce_sum(b[k] for k in b.dom)
+
+
+@kernel
+def row_sum_in_a_row_sum(
+    a: Arr[Fin[8], Fin[8], Real],
+    b: Arr[Fin[8], Fin[8], Real],
+    y: Arr[Fin[8], Real],
+    z: Arr[Fin[8], Real],
+):
+    """Two row sums, the second's body reading the first's."""
+    for i in y.dom:
+        y[i] = reduce_sum(a[i, j] for j in a.dom[i])
+        z[i] = reduce_sum(b[i, k] * y[i] for k in b.dom[i])
+
+
+@kernel
+def running_sums(a: Arr[Fin[nt], Fin[8], Real]):  # noqa: F821
+    """Each step's last cell is the sum of the step before."""
+    steps = a.dom
+    for t in steps:
+        with when(t + 1 < steps.size):
+            a[t + 1, 7] = reduce_sum(a[t, k] for k in a.dom[t])
+
+
+@pytest.mark.parametrize(
+    ("fn", "tags", "sizes", "pair"),
+    [
+        (sum_of_a_sum, {"j": "l.0", "k": "l.0"}, None, ("S0", "S1")),
+        (
+            row_sum_in_a_row_sum,
+            {"i": "g.0", "j": "l.0", "k": "l.0"},
+            None,
+            ("S0", "S1"),
+        ),
+        (running_sums, {"k": "l.0"}, {"nt": 4}, ("S0", "S0")),
+    ],
+    ids=["a-sum-of-a-sum", "a-row-sum-in-a-row-sum", "a-sum-at-the-next-step"],
+)
+def test_a_sum_that_reads_what_a_sum_stored_is_refused(
+    plain_opencl, fn, tags, sizes, pair
+) -> None:
+    # The first statement stores its result on one work item; the body of
+    # the second sum reads it on every work item of the axis. loopy asks for
+    # a global barrier between the two, and the casts used to leave an axis
+    # only sums are on unasked, so buildable said the code could be generated.
+    schedule = Schedule(fn, target="opencl", sizes=sizes)
+    said = loopy_says(plain_opencl, schedule.kernel, tags)
+    assert said.startswith("MissingBarrierError") and GLOBAL_BARRIER in said, said
+
+    with pytest.raises(IllegalCast) as caught:
+        schedule.tag(**tags)
+    message = str(caught.value)
+    source, sink = pair
+    assert (
+        f"{source} writes it on one work item of l.0, once its sum on l.0 is "
+        f"done; {sink} reads it in a sum, on every work item of l.0, and nothing"
+    ) in message, message
+    (source_id, _), (sink_id, _), _ = caught.value.witness
+    assert (source_id, sink_id) == pair
+    fact = caught.value.fact
+    assert (fact.kind, fact.status.value) == ("monotone", "refuted")
+    assert fact.provenance["detail"].endswith("joins two work items of l.0")
+
+
+@kernel
+def total_into_its_own_array(a: Arr[Fin[8], Real]):
+    """The last cell set to the sum of the array, itself among them."""
+    a[7] = reduce_sum(a[k] for k in a.dom)
+
+
+def test_a_sum_over_the_cell_its_statement_writes_is_refused(plain_opencl):
+    # One instance reads a[7] in its sum and writes it, so no two instances
+    # depend on each other. On a device the read is on work item 7 and the
+    # write on the first, and loopy asks for a global barrier between them.
+    schedule = Schedule(total_into_its_own_array, target="opencl")
+    said = loopy_says(plain_opencl, schedule.kernel, {"k": "l.0"})
+    assert said.startswith("MissingBarrierError") and GLOBAL_BARRIER in said, said
+    with pytest.raises(IllegalCast) as caught:
+        schedule.tag(k="l.0")
+    assert str(caught.value) == (
+        "tag(k='l.0') illegal: instance S0[] reads a[7] overwritten by S0[] on "
+        "another work item: S0 reads it in a sum, on every work item of l.0; S0 "
+        "writes it on one work item of l.0, once its sum on l.0 is done, and "
+        "nothing in a kernel orders two work items through global memory"
+    )
+    assert caught.value.fact.provenance["detail"] == (
+        "a war dependence on a joins two work items of l.0"
+    )
+    # A row's sum into another array is a sum like any other.
+    tags = {"j": "l.0", "k": "l.0"}
+    assert casts(Schedule(two_row_sums, target="opencl").tag(**tags)) == [
+        "decided"
+    ] * 4
+
+
+@kernel
+def sums_beside_a_loop(
+    x: Arr[Fin[8], Real], s: Arr[Fin[2], Real], y: Arr[Fin[8], Real]
+):
+    """Two sums on a local axis that a loop between them is on as well."""
+    s[0] = reduce_sum(x[j] for j in x.dom)
+    for i in y.dom:
+        y[i] = x[i] * 2.0
+    s[1] = s[0] + reduce_sum(x[k] for k in x.dom)
+
+
+def test_a_sum_result_read_by_another_sums_statement_stays_allowed(plain_opencl):
+    # Both statements store from the work item their sums leave the result
+    # on, the first one, and the second reads s[0] there, outside its sum.
+    # loopy generates both kernels. With a loop of another statement on the
+    # axis, the statements around the sums used to count as running on every
+    # work item, and the second kernel was refused.
+    for fn, tags in (
+        (sum_after_a_sum, {"j": "l.0", "k": "l.0"}),
+        (sums_beside_a_loop, {"j": "l.0", "i": "l.0", "k": "l.0"}),
+    ):
+        schedule = Schedule(fn, target="opencl")
+        code = loopy_says(plain_opencl, schedule.kernel, tags)
+        assert "s[1] = s[0] + acc_k[0];" in code, code
+        tagged = schedule.tag(**tags)
+        assert casts(tagged)[:2] == ["decided"] * 2
+        assert tagged.buildable == (True, "")
+
+
+def test_each_access_says_which_instruction_of_its_statement_makes_it() -> None:
+    # The statement's own instruction, a sum's body, and the length of a
+    # ragged row read where the row's loop starts: on a device three
+    # instructions, which need not run on one work item.
+    from loopty.schedule import _accesses
+
+    term = Schedule(row_sum_in_a_row_sum).term
+    accesses = _accesses(term.stmts[1], term)
+    parts = {(kind, array, part) for kind, array, _, part in accesses}
+    assert parts == {("write", "z", ""), ("read", "b", "sum"), ("read", "y", "sum")}
+    # p2p's first statement runs in the loop over a target's list, whose
+    # length is read once per target, outside that loop.
+    term = Schedule(example("p2p").p2p).term
+    accesses = _accesses(term.stmts[0], term)
+    parts = {(kind, array, part) for kind, array, _, part in accesses}
+    assert ("write", "term", "") in parts and ("read", "cnt", "row") in parts
 
 
 # }}}

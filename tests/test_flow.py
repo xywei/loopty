@@ -164,13 +164,14 @@ def rendered(accesses) -> set[tuple[str, str, str]]:
     """``(kind, array, "i + 1")`` for the schedule checker's own access list.
 
     Rendered rather than compared as terms: ``==`` on a lanky variable builds a
-    proposition instead of answering a bool.
+    proposition instead of answering a bool. The part of the statement each
+    access is made in is dropped.
     """
     from lanky.terms import render
 
     return {
         (kind, array, ", ".join(render(i) for i in indices))
-        for kind, array, indices in accesses
+        for kind, array, indices, _part in accesses
     }
 
 
