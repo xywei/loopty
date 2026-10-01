@@ -1312,8 +1312,10 @@ with a pair of statement instances.
   val" and a parallel `r` was accepted. Such a kernel now has one `layout`
   fact per counts family whose counts or declared offsets it writes,
   `assumed` with the reason (`loopty.typing.layout_facts`), and the in-bounds
-  and disjoint-writes facts of the family's ragged arrays rest on it, as do
-  the `monotone` casts of a schedule of the kernel or of a program whose call
+  and disjoint-writes facts of the family's ragged arrays rest on it, as does
+  a fact decided by type through an index read from one of them
+  (`x[col[r, j]]`, whose index is read from a cell of a moved row), and the
+  `monotone` casts of a schedule of the kernel or of a program whose call
   rewrites it: the ledger shows them decided under the layout, and worth an
   assumption. A kernel that only reads its layout, as every demo does, has no
   such fact.

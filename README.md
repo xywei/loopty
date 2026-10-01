@@ -440,12 +440,13 @@ end to end; the edges are sharp.
   the run, and nothing states what it writes there, so such a kernel has a
   `layout` fact for each counts family it rewrites, `assumed`, and the
   in-bounds and disjoint-writes facts of the family's ragged arrays rest on
-  it, as do the `monotone` casts of its schedules: the ledger shows them
-  `decided under layout:...` and worth an assumption. Deciding the layout
-  fact needs the monotone-offsets formulation above. The native run checks
-  every cell it reads through the layout against the buffer and raises
-  `IndexError` for one outside it, but two rows moved onto the same cells go
-  unnoticed by both runs.
+  it, as do a fact decided by type through an index read from one of them
+  (`x[col[r, j]]`) and the `monotone` casts of its schedules: the ledger
+  shows them `decided under layout:...` and worth an assumption. Deciding
+  the layout fact needs the monotone-offsets formulation above. The native
+  run checks every cell it reads through the layout against the buffer and
+  raises `IndexError` for one outside it, but two rows moved onto the same
+  cells go unnoticed by both runs.
 - `Schedule.affine` and maps whose image has holes. The diamond
   `(t, i) -> (t + i, t - i)` reaches only the points of equal parity, and
   loopy's own `map_domain` refuses it, so loopty rewrites the kernel over the

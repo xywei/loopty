@@ -652,6 +652,41 @@ def test_a_kernel_that_writes_its_layout_has_a_layout_fact(fn) -> None:
     assert read.rests_on == (layout.id,)
 
 
+def gather_through_moved_rows(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    off: Arr[Fin[n + 1], Nat],  # noqa: F821
+    col: Arr[Fin[n], Fin[cnt], Fin[m]],  # noqa: F821
+    s: Arr[Fin[n], Nat],  # noqa: F821
+    x: Arr[Fin[m], Real],  # noqa: F821
+    first: Arr[Fin[n], Fin[m]],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The rows of ``col`` moved to start at ``s[r]``, then read as indices."""
+    for r in y.dom:
+        off[r] = s[r]
+        y[r] = reduce_sum(x[col[r, j]] for j in col.dom[r])
+        for j in col.dom[r]:
+            first[r] = col[r, j]
+
+
+def test_an_index_read_from_a_moved_row_rests_on_the_layout() -> None:
+    # ``x[col[r, j]]`` is in bounds by the element sort of ``col``, which holds
+    # of a cell of ``col``, and ``col[r, j]`` is a cell of ``col`` only while
+    # the rows stay inside its buffer: with ``s[r]`` past its end the compiled
+    # run reads an index from outside ``col`` and then a cell outside ``x``.
+    from lanky.ledger import Status
+
+    _term, ledger, (layout,) = layout_of(gather_through_moved_rows)
+    (gather,) = [fact for fact in ledger if fact.id.endswith(":read:x[col[r, j]]")]
+    assert gather.decided_by == "type"
+    assert gather.rests_on == (layout.id,)
+    assert ledger.support(gather).effective is Status.ASSUMED
+    # So does the write of such an index into an array of the sort.
+    (sort,) = [fact for fact in ledger if fact.kind == "element-sort"]
+    assert sort.decided_by == "type"
+    assert sort.rests_on == (layout.id,)
+
+
 def test_a_kernel_that_only_reads_its_layout_has_none() -> None:
     from loopty.schedule import Schedule
 

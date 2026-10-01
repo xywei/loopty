@@ -44,7 +44,8 @@ buffer, or two rows moved onto the same cells. No rule states what such a
 kernel writes there, so it gets one ``layout`` fact per counts family it
 rewrites, ``assumed`` with the reason (:func:`layout_facts`), and the
 in-bounds and disjoint-writes facts of the family's ragged arrays rest on it,
-as do the ``monotone`` casts of a schedule of the kernel
+as does a fact decided by type through an index read from one of them
+(``x[col[r, j]]``), and the ``monotone`` casts of a schedule of the kernel
 (:mod:`loopty.schedule`). The ledger then shows them decided under the
 layout, and worth no more than it.
 
@@ -89,7 +90,7 @@ kernel behind it leaves the module and the line out.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import islpy as isl
@@ -192,6 +193,34 @@ def _typed_by(indices: Sequence[Any], types: dict[str, Any]) -> list[str]:
     return out
 
 
+def _by_type_rests_on(
+    places: Sequence[Sequence[Any]],
+    types: dict[str, Any],
+    sorts: Mapping[str, tuple[str, ...]],
+    layouts: Mapping[str, tuple[str, ...]],
+) -> tuple[str, ...]:
+    """What a fact decided by type through the indices of ``places`` rests on.
+
+    For every array an index is read from (:func:`_typed_by`), the
+    element-sort facts of the writes into it, since the type says what the
+    contract checked when the call started and those facts say the term keeps
+    it so, and then the layout fact of a ragged one whose layout the term
+    rewrites, since the element is read from a cell of a row that the layout
+    is to keep inside its buffer (:func:`layout_facts`).
+    """
+    names = list(
+        dict.fromkeys(name for indices in places for name in _typed_by(indices, types))
+    )
+    return tuple(
+        dict.fromkeys(
+            [
+                *(sort_id for name in names for sort_id in sorts.get(name, ())),
+                *(layout_id for name in names for layout_id in layouts.get(name, ())),
+            ]
+        )
+    )
+
+
 def _justified_by_type(
     indices: Sequence[Any], arrtype: ArrType, types: dict[str, Any]
 ) -> str | None:
@@ -244,7 +273,9 @@ def in_bounds_facts(
     the type says what the contract checked when the call started, and those
     facts say the term keeps it so. The fact of an access to a ragged array
     whose layout the term rewrites rests on that layout's fact
-    (:func:`layout_facts`), since it is decided against the row.
+    (:func:`layout_facts`), since it is decided against the row, and so does
+    a fact decided by type through an index read from such an array
+    (``x[col[r, j]]``), since the element is read from a cell of the row.
     """
     types = dict(term.params)
     sizes = flow.size_names(term)
@@ -288,13 +319,8 @@ def in_bounds_facts(
             ]
             reason = reasons[0] if None not in reasons else None
             if reason is not None:
-                rests_on = tuple(
-                    dict.fromkeys(
-                        sort_id
-                        for place in places
-                        for name in _typed_by(place[0], types)
-                        for sort_id in sorts.get(name, ())
-                    )
+                rests_on = _by_type_rests_on(
+                    [place[0] for place in places], types, sorts, layouts
                 )
                 rests_on += layouts.get(array, ())
                 facts.append(
@@ -558,13 +584,16 @@ def element_sort_facts(
     and a refutation names one, at the sizes it was read off at. A value read
     from an array of the same element sort, or a scalar of that sort, is a
     point of it by type, and the fact rests on the element-sort facts of the
-    writes into that array. Anything else is ``assumed``, with the reason.
+    writes into that array, and on its layout fact when the term rewrites the
+    layout of its rows (:func:`layout_facts`). Anything else is ``assumed``,
+    with the reason.
     """
     types = dict(term.params)
     types.update(term.temporaries)
     sizes = flow.size_names(term)
     reflections = term.reflections
     sorts = _element_sort_ids(term, owner, module=module, line=line)
+    layouts = layout_fact_ids(term, owner, module=module, line=line)
     facts: list[Fact] = []
     for stmt in term.stmts:
         written = stmt.assignee
@@ -598,13 +627,7 @@ def element_sort_facts(
                     provenance={**common, "rule": "index type", "reason": reason},
                     where=stmt.where,
                     owner=owner,
-                    rests_on=tuple(
-                        dict.fromkeys(
-                            sort_id
-                            for name in _typed_by((value,), types)
-                            for sort_id in sorts.get(name, ())
-                        )
-                    ),
+                    rests_on=_by_type_rests_on([(value,)], types, sorts, layouts),
                 )
             )
             continue
