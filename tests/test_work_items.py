@@ -25,7 +25,7 @@ from typing import Any
 import islpy as isl
 import pymbolic.primitives as prim
 import pytest
-from lanky.prelude import Real
+from lanky.prelude import Nat, Real
 
 import hand_terms as ht
 from loopty import Arr, Fin, kernel, reduce_sum, when
@@ -352,6 +352,28 @@ def test_without_a_kernel_two_loops_never_share_a_work_item() -> None:
     assert not pair((0, 3), (0, 4)).intersect(apart).is_empty()
     assert not pair((0, 3), (1, 3)).intersect(apart).is_empty()
     assert _work_items(layout, {"i": "ilp", "k": "vec"}, None, {"n"}) is None
+
+    # A schedule left with no kernel by a map the rewrite cannot write: the
+    # rows on a group axis keep their accumulation in their own work item.
+    unwritten = Schedule(fiber_sums, sizes={"n": 4}).affine(
+        "{ [r, j] -> [q, k] : q = r and k = j + r }"
+    )
+    assert unwritten.kernel is None
+    tagged = unwritten.tag(q="g.0")
+    assert casts(tagged) == ["decided"] * 4
+    assert tagged.facts()[-1].statement.endswith("within one work item")
+
+
+@kernel
+def fiber_sums(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """Row sums written as a loop over the fiber, not as a reduction."""
+    for r in y.dom:
+        for j in val.dom[r]:
+            y[r] = y[r] + val[r, j]
 
 
 # }}}
