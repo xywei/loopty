@@ -381,6 +381,21 @@ with a pair of statement instances.
   `double f[n];` declared inside), and agrees compiled. `examples/spmv.py`
   gives its `solve` program example inputs, so `loopty run` compiles it too;
   the transcripts are regenerated.
+- **A program has a `trace-faithful` fact** (#66), the last of
+  `Program.facts()`, as a kernel's is the last of its own: the program's term,
+  interpreted, against its body, run natively, on the module's example inputs
+  for it and on inputs drawn from the types the term gives its parameters.
+  The term is built from what the body does with placeholders, and a body can
+  look at an argument in a way no placeholder sees: `if isinstance(x, Arr):
+  scale2(x)` left `scale2` out of the term, which only a differential run on
+  a file with example inputs caught, while `lanky check` said nothing about
+  the program and a `Schedule` of it decided its casts against a term the
+  body does not compute. Such a program is now refuted, with the input and
+  the first differing cell, and `lanky check` exits 1. A program whose term
+  cannot be built has the fact `assumed`, with the composition's refusal as
+  its reason (`loopty.faithful.no_term_fact`). The spmv and composition demos
+  have one row more each, `solve`'s and `burgers_rhs`'s, both `tested`, and
+  `Program.facts()` is computed once, as a kernel's is.
 
 ### Fixed
 
@@ -1226,6 +1241,22 @@ with a pair of statement instances.
   now keyed by definition (see Changed), so the restatement names the
   helper's fact by the id it has in the helper's own ledger, and each callee
   gets a restatement of its own.
+- The term interpreter runs a kernel whose loop bound reads an array the
+  kernel writes (#52). It enumerated every instance of every statement before
+  it ran any, so it refused such a kernel ("which instances run depends on
+  when the bound is read"), and the `trace-faithful` fact of, say, a kernel
+  that clears the next row's count after summing a row stayed `assumed`
+  while its differential run was `tested`. It now walks the loop tree as the
+  body runs it, and enumerates a loop when it reaches it: the bound of a loop
+  over `val.dom[r]` is read where that loop starts, each time it starts, as
+  the native `for` reads it, and a reduction's where it is summed. So such a
+  kernel's fact is `tested` or `refuted` like any other. A bound is one
+  parameter of a domain, read once, so one that bounds two nested loops of
+  one statement (`for k in val.dom[r]` inside `for j in val.dom[r]`) and
+  reads an array the kernel writes is refused, and the fact stays `assumed`,
+  since the body reads it where each loop starts. A domain no array bounds
+  is still checked against the work limit before anything runs, by its
+  bounding box.
 
 ### Changed
 

@@ -253,14 +253,18 @@ end to end; the edges are sharp.
   that is what `~(i > 0)` is (`~` on a Python bool is bitwise), while the trace
   records `not (i > 0)`, so such a kernel traces and its `trace-faithful` fact
   is refuted by the native refusal, which names the fix.
-- The faithfulness fact. For each kernel, the traced term is run by an
-  interpreter (`loopty.interpret`: statement by statement in source order over
-  each statement's isl domain, expressions evaluated with numpy's arithmetic,
-  reductions summed in the order `reduce_sum` sums natively) and compared with
-  the native run, on the file's `example_inputs()` and on three inputs drawn
-  from the declared types. It is a `trace-faithful` fact, `tested` on
-  agreement and `refuted` with the input and the first differing cell, which
-  is where state hidden past every check above shows up.
+- The faithfulness fact. For each kernel and each program, the traced term is
+  run by an interpreter (`loopty.interpret`: statement by statement in source
+  order over each statement's isl domain, each loop enumerated when the run
+  reaches it, so that a ragged loop runs to the length its row has when the
+  loop starts, expressions evaluated with numpy's arithmetic, reductions
+  summed in the order `reduce_sum` sums natively) and compared with the
+  native run, on the file's `example_inputs()` and on three inputs drawn from
+  the declared types. It is a `trace-faithful` fact, `tested` on agreement and
+  `refuted` with the input and the first differing cell, which is where state
+  hidden past every check above shows up, and, for a program, a call its body
+  makes or skips by looking at an argument as no placeholder can be looked at
+  (`isinstance(x, Arr)`).
 - Typing rules and the ledger: in-bounds by isl or by type, write disjointness,
   ordering, reduction exactness, postconditions. The reads a ragged layout
   makes are accesses like any other, in-bounds obligations and dependences
@@ -491,8 +495,10 @@ end to end; the edges are sharp.
   test, not a proof: it compares the runs on the inputs it tries, so hidden
   state no such input exercises goes unseen. It stays `assumed`, with the
   reason, when no input runs natively, when the term calls a function the
-  interpreter has no numpy counterpart for, or when a loop bound reads an array
-  the same kernel writes.
+  interpreter has no numpy counterpart for, or when one ragged bound of a
+  statement bounds two of its loops (a fiber loop inside another over the
+  same row) and reads an array the kernel writes, which the body reads where
+  each loop starts and the interpreter reads once.
 
 **Not yet.**
 

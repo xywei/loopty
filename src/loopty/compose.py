@@ -81,7 +81,12 @@ anybody sees. A callee with an array over a polyhedral domain
 across calls.
 
 The term has no postcondition. Each callee's stays its own, and
-:meth:`loopty.kernel.Program.facts` restates it in the program's scope.
+:meth:`loopty.kernel.Program.facts` restates it in the program's scope. What
+the body does with a placeholder is all the term can see, and a body can tell
+one from an array without touching it (``isinstance(x, Arr)``), so the term
+can leave out calls the native run makes. That is what the program's
+``trace-faithful`` fact is for, as a kernel's is (:mod:`loopty.faithful`): the
+term, interpreted, against the body, run natively.
 """
 
 from __future__ import annotations

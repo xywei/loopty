@@ -578,15 +578,22 @@ class Program(_Decorated):
     every program in a file. Fusing the calls is not done: it is a cast over
     this term, and waits for facts that travel.
 
-    What it adds to the ledger is bookkeeping rather than reasoning: the
-    postcondition of every kernel it calls is restated as a fact *in the scope
-    of the program*, which rests on the callee's own fact. That is lanky's
+    What it adds to the ledger is mostly bookkeeping rather than reasoning:
+    the postcondition of every kernel it calls is restated as a fact *in the
+    scope of the program*, which rests on the callee's own fact. That is lanky's
     ``rests_on``, so the ledger names the callee's postcondition beside the
     restatement (``assumed under postcondition:spmv.scan@69``) and counts it
     in what the restatement is worth, and a reader can see which claims the
     program depends on. The id names the callee's definition, so a callee
     imported from another module under another name is named by its own
     fact there, and never by a kernel of the same name in the program's file.
+    The last fact is the program's ``trace-faithful`` fact, as a kernel's is:
+    its term, interpreted, against its body run natively, on the module's
+    example inputs for it and on inputs drawn from the term's parameters
+    (:mod:`loopty.faithful`). The term is built from what the body does with
+    placeholders, and a body can look at what it was given in ways no
+    placeholder sees (``isinstance(x, Arr)``, say), so this is the fact that
+    catches a term that is not what the body computes.
 
     What it does not do yet is use those postconditions as hypotheses. Carrying
     the scan's recurrence into the in-bounds proof of the product is the
@@ -599,6 +606,7 @@ class Program(_Decorated):
     def __init__(self, fn: Any) -> None:
         super().__init__(fn)
         self._term: Term | None = None
+        self._facts: tuple[Fact, ...] | None = None
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """Run the body natively; its kernel calls run natively too.
@@ -617,6 +625,7 @@ class Program(_Decorated):
         native run does not need a term and is not refused.
         """
         self._term = trace_program(self)
+        self._facts = None
         return self._term
 
     @property
@@ -653,7 +662,7 @@ class Program(_Decorated):
         return tuple(out)
 
     def facts(self) -> tuple[Fact, ...]:
-        """One fact per callee postcondition, as a claim in this program's scope.
+        """One fact per callee postcondition, then the ``trace-faithful`` fact.
 
         Each rests on the callee's postcondition fact, named by the id the
         callee's own facts give it (:func:`loopty.typing.postcondition_id`),
@@ -669,7 +678,16 @@ class Program(_Decorated):
 
         The restatement's own id names the program and then the callee's
         definition, so two callees of one name get a restatement each.
+
+        The ``trace-faithful`` fact compares the program's term, interpreted,
+        with its body, run natively, as a kernel's does
+        (:func:`loopty.faithful.faithfulness_fact`), keyed by the program's
+        definition. A program whose term cannot be built has no term to
+        compare, and the fact is ``assumed`` with the reason; ``loopty run``
+        reports the same program as one it cannot schedule.
         """
+        if self._facts is not None:
+            return self._facts
         out: list[Fact] = []
         for callee in self.callees():
             try:
@@ -706,7 +724,29 @@ class Program(_Decorated):
                     ),
                 )
             )
-        return tuple(out)
+        from loopty.faithful import faithfulness_fact, no_term_fact
+
+        key = {"module": self.module, "line": self.line}
+        try:
+            term = self.term
+        except Exception as exc:  # noqa: BLE001 - reported as a fact, not raised
+            out.append(
+                no_term_fact(
+                    self.qualname,
+                    self.where,
+                    f"the term of {self.__name__} cannot be built: "
+                    f"{type(exc).__name__}: {exc}",
+                    **key,
+                )
+            )
+        else:
+            out.append(
+                faithfulness_fact(
+                    self, term, owner=self.qualname, where=self.where, **key
+                )
+            )
+        self._facts = tuple(out)
+        return self._facts
 
     def __repr__(self) -> str:
         return f"<program {self.__name__} at {self.where}>"
@@ -719,9 +759,10 @@ class KernelTheory:
     the resulting term, returning the obligations: in-bounds per access, write
     disjointness, the ordering the dependences impose, the exactness class of
     each reduction, and the postcondition; then the ``trace-faithful`` fact,
-    that the term computes what the body computes (:mod:`loopty.faithful`). An
-    object this theory does not own gives an empty tuple, which is how several
-    theories share one ledger.
+    that the term computes what the body computes (:mod:`loopty.faithful`). A
+    program's are its callees' postconditions restated, and its own
+    ``trace-faithful`` fact. An object this theory does not own gives an empty
+    tuple, which is how several theories share one ledger.
     """
 
     name = "kernel"

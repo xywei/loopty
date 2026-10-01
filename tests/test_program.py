@@ -1420,12 +1420,12 @@ def test_a_program_restates_the_postconditions_of_a_program_it_calls() -> None:
 
     assert [stmt.id for stmt in wraps_clears.term.stmts] == ["clear.S0"]
     assert wraps_clears.callees() == (clear,)
-    (fact,) = wraps_clears.facts()
+    (fact,) = restatements(wraps_clears)
     assert fact.statement.startswith("after clear(...) in wraps_clears")
     assert fact.rests_on == (
         postcondition_id(clear.qualname, module=clear.module, line=clear.line),
     )
-    assert [f.statement for f in clears.facts()] == [
+    assert [f.statement for f in restatements(clears)] == [
         fact.statement.replace("wraps_clears", "clears")
     ]
 
@@ -1443,6 +1443,144 @@ def test_the_native_run_is_not_refused() -> None:
     assert list(x.numpy()) == [7.0, 4.0]
     with pytest.raises(TraceError):
         natively.trace()
+
+
+# }}}
+
+
+# {{{ the faithfulness fact
+
+
+def restatements(prog) -> list:
+    """The restatements of a program's callee postconditions, among its facts."""
+    return [fact for fact in prog.facts() if fact.kind == "postcondition-in-scope"]
+
+
+@kernel
+def plus_one(x: Arr[Fin[n], Real]):  # noqa: F821
+    """Add one to every entry."""
+    for i in x.dom:
+        x[i] = x[i] + 1.0
+
+
+@kernel
+def doubles(x: Arr[Fin[n], Real]):  # noqa: F821
+    """Double every entry."""
+    for i in x.dom:
+        x[i] = 2.0 * x[i]
+
+
+@program
+def probing(x):
+    """The issue's program: the second call only when ``x`` is an array."""
+    plus_one(x)
+    if isinstance(x, Arr):  # False for the placeholder, True natively
+        doubles(x)
+
+
+def faithful_of(prog):
+    """The ``trace-faithful`` fact of a program, which is its last fact."""
+    from lanky.ledger import fact_id
+
+    fact = prog.facts()[-1]
+    assert fact.kind == "trace-faithful"
+    assert fact.id == fact_id(
+        "trace-faithful", prog.qualname, module=prog.module, line=prog.line
+    )
+    assert fact.owner == prog.qualname
+    assert fact.where == prog.where
+    return fact
+
+
+def test_a_probe_that_changes_the_term_refutes_the_faithfulness_fact() -> None:
+    # The term is plus_one alone, and the body runs both kernels, so the two
+    # meanings disagree at the first cell of the first sample (#66). It used
+    # to be caught only by a differential run on a file with example inputs,
+    # and a schedule of the program decided its casts against a term the body
+    # does not compute.
+    from lanky.ledger import Status
+
+    assert [stmt.id for stmt in probing.term.stmts] == ["plus_one.S0"]
+    fact = faithful_of(probing)
+    assert fact.status is Status.REFUTED, fact.provenance
+    assert fact.decided_by == "interpreter"
+    counterexample = fact.provenance["counterexample"]
+    assert counterexample["input"].startswith("sample 1 (")
+    assert counterexample["cell"] == "x[0]"
+    assert counterexample["body"] == 2 * counterexample["term"]
+    assert "does not compute what the body computes" in fact.provenance["reason"]
+    assert set(fact.provenance["arguments"]) == {"x"}
+
+
+@pytest.mark.parametrize(
+    "prog", [solve, burgers, twice, outer], ids=lambda p: p.__name__
+)
+def test_a_faithful_program_is_tested_on_every_sample(prog) -> None:
+    # The samples are drawn from the types the term gives the program's
+    # parameters, which are its callees'; a temporary is the program's own.
+    from lanky.ledger import Status
+
+    from loopty.faithful import SAMPLES
+
+    fact = faithful_of(prog)
+    assert fact.status is Status.TESTED, fact.provenance
+    assert fact.provenance["compared"] == SAMPLES
+
+
+def test_a_program_whose_term_cannot_be_built_is_assumed() -> None:
+    # Nothing to interpret: the fact says why, and the program still runs.
+    from lanky.ledger import Status
+
+    @program
+    def touches(x):
+        scale(2.0, x)
+        x.numpy()[0] = 7.0
+
+    fact = faithful_of(touches)
+    assert fact.status is Status.ASSUMED
+    reason = fact.provenance["reason"]
+    assert reason.startswith("the term of touches cannot be built: TraceError: ")
+
+
+PROBING = """
+from __future__ import annotations
+
+from lanky.prelude import Real
+
+from loopty import Arr, Fin, kernel, program
+
+
+@kernel
+def plus_one(x: Arr[Fin[n], Real]):
+    for i in x.dom:
+        x[i] = x[i] + 1.0
+
+
+@kernel
+def doubles(x: Arr[Fin[n], Real]):
+    for i in x.dom:
+        x[i] = 2.0 * x[i]
+
+
+@program
+def probing(x):
+    plus_one(x)
+    if isinstance(x, Arr):
+        doubles(x)
+"""
+
+
+def test_check_refutes_a_program_whose_term_is_not_its_body(tmp_path, capsys) -> None:
+    # ``lanky check`` used to say nothing about the program at all.
+    from lanky.cli import main as lanky_main
+
+    path = tmp_path / "probing.py"
+    path.write_text(PROBING, encoding="utf-8")
+    code = lanky_main(["check", str(path)])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "REFUTED probing at probing.py:" in out
+    assert "the traced term computes what the body computes" in out
 
 
 # }}}
