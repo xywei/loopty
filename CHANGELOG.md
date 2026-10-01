@@ -1282,6 +1282,23 @@ with a pair of statement instances.
   character other than a letter, a digit or an underscore written `_`, which
   is the instruction's id and so names one statement, and isl's refusal of a
   map that names a statement by such an id says how to spell it.
+- An index read from an array the kernel writes is no longer in bounds by
+  its element sort alone (#64). `x[perm[j]]` with `perm: Arr[Fin[n], Fin[n]]`
+  was decided by type, which rests on the contract's check of every cell of
+  `perm` when the kernel is called, and nothing checked what the kernel then
+  wrote into `perm`: after `perm[i] = i + 1` the native run raised
+  `IndexError` at `x[4]`, the compiled one read past the end of `x`, and the
+  ledger said decided. Every write into an array of a `Fin[m]` element sort
+  now owes a fact of kind `element-sort`, that the value written is a point
+  of `Fin[m]` (`loopty.typing.element_sort_facts`): isl decides it for a
+  quasi-affine value and refutes it with the instance that writes outside
+  (`[i=0] ... at [n=1]` here), the type decides it for a value read from an
+  array of the same sort, and it is assumed otherwise. A fact decided by type
+  through an array the kernel writes rests on the element-sort facts of the
+  writes into it, so the ledger shows `x[perm[j]]` decided under the write's
+  fact and worth what that fact is worth, refuted here, and `lanky check`
+  exits 1. A kernel that only reads its index arrays, as every demo does,
+  has no such fact.
 
 ### Changed
 

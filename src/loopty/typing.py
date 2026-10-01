@@ -19,6 +19,20 @@ access that is neither is left ``ASSUMED`` with its reason, because widening a
 non-affine index into a parameter would let isl *refute* an obligation that is
 merely unknown.
 
+*Element sorts, one per write.* The by-type rule rests on every cell of
+``col`` being a point of ``Fin[m]``, which the contract checks when the kernel
+is called. A kernel that writes into such an array has to keep it so, or
+``perm[i] = i + 1`` followed by ``x[perm[j]]`` reads past the end of ``x``
+under an in-bounds fact decided by type. So every write into an array whose
+element sort is ``Fin[m]`` owes the fact that the value written is a point of
+``Fin[m]`` (kind ``element-sort``): isl decides it where the value is
+quasi-affine, refuting it with the instance that writes outside; the type
+decides it where the value is itself read from an array of that element sort;
+and it is ``assumed`` otherwise. An in-bounds fact decided by type through an
+array the kernel writes rests on the element-sort facts of every write into
+that array (lanky's ``rests_on``), so the ledger counts them in what it is
+worth.
+
 *Write disjointness.* Distinct instances of a statement must write distinct
 cells, or the loop cannot be run in parallel and the order of the writes is
 part of the result. The obligation is the emptiness of the set of pairs of
@@ -75,6 +89,7 @@ from loopty.term import ArrType, Term
 from loopty.trace import reductions_in
 
 __all__ = [
+    "element_sort_facts",
     "facts_for",
     "in_bounds_facts",
     "instance_labels",
@@ -143,6 +158,23 @@ def _index_type(expr: Any, types: dict[str, Any]) -> Any:
     return None
 
 
+def _typed_by(indices: Sequence[Any], types: dict[str, Any]) -> list[str]:
+    """The arrays whose element sorts the by-type rule reads for ``indices``.
+
+    ``col`` for ``x[col[r, j]]``; a scalar parameter of a ``Fin`` sort is a
+    value of the call, which no statement writes, and is not listed.
+    """
+    out: list[str] = []
+    for index in indices:
+        if isinstance(index, prim.Subscript) and isinstance(
+            index.aggregate, prim.Variable
+        ):
+            name = index.aggregate.name
+            if isinstance(types.get(name), ArrType) and name not in out:
+                out.append(name)
+    return out
+
+
 def _justified_by_type(
     indices: Sequence[Any], arrtype: ArrType, types: dict[str, Any]
 ) -> str | None:
@@ -189,9 +221,15 @@ def in_bounds_facts(
     that bounds the loop over j, is in bounds ...``, and ``layout`` in its
     provenance says the same. Without that a refuted one names a read nobody
     can find in the kernel.
+
+    A fact decided by type through an array the term writes rests on the
+    element-sort facts of the writes into it (:func:`element_sort_facts`):
+    the type says what the contract checked when the call started, and those
+    facts say the term keeps it so.
     """
     types = dict(term.params)
     sizes = flow.size_names(term)
+    sorts = _element_sort_ids(term, owner, module=module, line=line)
     # One table for the whole term: the cells an array has and the cells an
     # access reaches are two isl sets that get compared, so both have to call
     # ``cnt[r]`` by the parameter the statement domains already use.
@@ -230,6 +268,14 @@ def in_bounds_facts(
             ]
             reason = reasons[0] if None not in reasons else None
             if reason is not None:
+                rests_on = tuple(
+                    dict.fromkeys(
+                        sort_id
+                        for place in places
+                        for name in _typed_by(place[0], types)
+                        for sort_id in sorts.get(name, ())
+                    )
+                )
                 facts.append(
                     Fact(
                         id=identifier,
@@ -245,6 +291,7 @@ def in_bounds_facts(
                         },
                         where=stmt.where,
                         owner=owner,
+                        rests_on=rests_on,
                     )
                 )
                 continue
@@ -432,6 +479,161 @@ def _is_widened(relation: isl.Map, indices: Sequence[Any]) -> bool:
         return not relation.range().is_bounded()
     except Exception:  # pragma: no cover - isl always answers this
         return False
+
+
+# }}}
+
+
+# {{{ element sorts
+
+
+def _fin_sort(typ: Any) -> FinType | None:
+    """The ``Fin[m]`` element sort of an array type, or ``None``."""
+    if isinstance(typ, ArrType) and isinstance(typ.dtype, FinType):
+        return typ.dtype
+    return None
+
+
+def _element_sort_id(
+    stmt: Any, owner: str, *, module: str | None, line: int | None
+) -> str:
+    """The id of the element-sort fact of one write, by statement and cell."""
+    written = stmt.assignee
+    return fact_id(
+        "element-sort",
+        owner,
+        module=module,
+        line=line,
+        detail=f"{stmt.id}:{_access_text(written.array, written.indices)}",
+    )
+
+
+def _element_sort_ids(
+    term: Term, owner: str, *, module: str | None, line: int | None
+) -> dict[str, tuple[str, ...]]:
+    """The element-sort fact ids of the writes into each array, by array."""
+    types = term.array_types
+    out: dict[str, list[str]] = {}
+    for stmt in term.stmts:
+        array = stmt.assignee.array
+        if _fin_sort(types.get(array)) is None:
+            continue
+        out.setdefault(array, []).append(
+            _element_sort_id(stmt, owner, module=module, line=line)
+        )
+    return {array: tuple(ids) for array, ids in out.items()}
+
+
+def element_sort_facts(
+    term: Term, owner: str, *, module: str | None = None, line: int | None = None
+) -> list[Fact]:
+    """One fact per write into an array of a ``Fin`` element sort.
+
+    The value written is a point of the sort, which is what keeps the by-type
+    rule for an index read from the array sound once the kernel has written
+    it (see the module docstring). isl decides it when the value is
+    quasi-affine: the instances that write a value outside the sort are none,
+    and a refutation names one, at the sizes it was read off at. A value read
+    from an array of the same element sort, or a scalar of that sort, is a
+    point of it by type, and the fact rests on the element-sort facts of the
+    writes into that array. Anything else is ``assumed``, with the reason.
+    """
+    types = dict(term.params)
+    types.update(term.temporaries)
+    sizes = flow.size_names(term)
+    reflections = term.reflections
+    sorts = _element_sort_ids(term, owner, module=module, line=line)
+    facts: list[Fact] = []
+    for stmt in term.stmts:
+        written = stmt.assignee
+        sort = _fin_sort(types.get(written.array))
+        if sort is None:
+            continue
+        cell = _access_text(written.array, written.indices)
+        value = stmt.expr
+        shown = render(value)
+        identifier = _element_sort_id(stmt, owner, module=module, line=line)
+        statement = (
+            f"the value {stmt.id} writes into {cell}, {shown}, is a point of {sort}"
+        )
+        common = {
+            "statement": stmt.id,
+            "array": written.array,
+            "value": shown,
+            "sort": str(sort),
+        }
+        virtual = ArrType(axes=(sort.bound,), dtype=sort, ragged=(False,))
+        reason = _justified_by_type((value,), virtual, types)
+        if reason is not None:
+            facts.append(
+                Fact(
+                    id=identifier,
+                    kind="element-sort",
+                    statement=f"{statement} by type ({reason})",
+                    term=None,
+                    status=Status.DECIDED,
+                    decided_by="type",
+                    provenance={**common, "rule": "index type", "reason": reason},
+                    where=stmt.where,
+                    owner=owner,
+                    rests_on=tuple(
+                        dict.fromkeys(
+                            sort_id
+                            for name in _typed_by((value,), types)
+                            for sort_id in sorts.get(name, ())
+                        )
+                    ),
+                )
+            )
+            continue
+        try:
+            relation = flow.access_relation(stmt.inames, stmt.domain, (value,))
+            if _is_widened(relation, (value,)):
+                raise flow.NonAffine("widened")
+            points = flow.cell_set(virtual, (value,), reflections=reflections)
+            relation, points = _align_both(relation, points)
+            outside = relation.intersect_range(points.complement()).domain()
+            outside = flow.assume_sizes(outside, sizes)
+        except Exception as exc:  # noqa: BLE001 - an unstatable rule is ASSUMED
+            why = (
+                "the value is not quasi-affine and its type does not say it is "
+                f"a point of {sort}, so isl is not asked"
+                if isinstance(exc, flow.NonAffine)
+                else f"no isl form: {exc}"
+            )
+            facts.append(
+                Fact(
+                    id=identifier,
+                    kind="element-sort",
+                    statement=statement,
+                    term=None,
+                    status=Status.ASSUMED,
+                    provenance={**common, "reason": why},
+                    where=stmt.where,
+                    owner=owner,
+                )
+            )
+            continue
+        facts.append(
+            Fact(
+                id=identifier,
+                kind="element-sort",
+                statement=statement,
+                term=Empty(
+                    outside,
+                    description=(
+                        f"instances of {stmt.id} writing a value outside {sort} "
+                        f"into {written.array}"
+                    ),
+                    labels=tuple(stmt.inames),
+                ),
+                status=Status.ASSUMED,
+                provenance={**common, **_unnarrowed(stmt)},
+                where=stmt.where,
+                owner=owner,
+            )
+        )
+    return facts
 
 
 # }}}
@@ -661,6 +863,7 @@ def facts_for(
     key = {"module": module, "line": line}
     return [
         *in_bounds_facts(term, owner, **key),
+        *element_sort_facts(term, owner, **key),
         *write_disjointness_facts(term, owner, **key),
         *ordering_facts(term, owner, where, **key),
         *reduction_facts(term, owner, **key),

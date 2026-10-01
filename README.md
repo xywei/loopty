@@ -266,7 +266,13 @@ end to end; the edges are sharp.
   makes or skips by looking at an argument as no placeholder can be looked at
   (`isinstance(x, Arr)`).
 - Typing rules and the ledger: in-bounds by isl or by type, write disjointness,
-  ordering, reduction exactness, postconditions. The reads a ragged layout
+  ordering, reduction exactness, postconditions. A write into an array whose
+  element sort is `Fin[m]` owes the fact that the value written is a point of
+  `Fin[m]` (`element-sort`), decided by isl for a quasi-affine value, by type
+  for a value read from an array of that sort, and assumed otherwise, and an
+  index read from such an array is in bounds by type resting on those facts,
+  so `perm[i] = i + 1` followed by `x[perm[j]]` is refuted where it was
+  decided. The reads a ragged layout
   makes are accesses like any other, in-bounds obligations and dependences
   every cast is checked against: the start of the row a ragged access is
   flattened through (`off[r]`, when the kernel declares the offsets), and the
