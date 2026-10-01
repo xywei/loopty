@@ -963,15 +963,15 @@ def _work_items(
             out = piece if out is None else out.union(piece)
         assert out is not None
         coordinates[axis] = out.coalesce()
+    loops_on: dict[str, dict[str, str | None]] = {}
+    for stmt_id in layout.stmt_ids:
+        loops_on[stmt_id] = {}
+        for axis in axes:
+            loops = on[stmt_id].get(axis, [])
+            loops_on[stmt_id][axis] = loops[0] if len(loops) == 1 else None
     return _WorkItems(
         axes=axes,
-        loops={
-            stmt_id: {
-                axis: loops[0] if len(loops := on[stmt_id].get(axis, [])) == 1 else None
-                for axis in axes
-            }
-            for stmt_id in layout.stmt_ids
-        },
+        loops=loops_on,
         coordinates=coordinates,
         known=frozenset(known),
         hidden=frozenset(hidden),
