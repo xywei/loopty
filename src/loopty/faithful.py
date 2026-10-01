@@ -15,7 +15,11 @@ interpreted term (:func:`loopty.interpret.interpret`) on the same inputs, each
 on copies of its own, and compares every array argument afterwards. The inputs
 are the module's example inputs, when it has any (the ``example_inputs()`` that
 ``loopty run`` reads, see :mod:`loopty.cli`), and :data:`SAMPLES` inputs drawn
-from the declared types with every size at least 2, from a fixed seed. An
+from the declared types with every size at least 2, from a fixed seed. A
+program gets the same fact (:meth:`loopty.kernel.Program.facts`): its term is
+composed from what its body does with placeholders (:mod:`loopty.compose`),
+which a body can tell from its arguments, and its inputs are drawn from the
+types the term gives its parameters, which are its callees'. An
 output is compared at its exactness class (:func:`loopty.tolerance.output_class`):
 bit for bit when it is ``exact``, within the class's tolerance otherwise.
 
@@ -60,6 +64,7 @@ __all__ = [
     "SEED",
     "SIZES",
     "faithfulness_fact",
+    "no_term_fact",
     "sample_arguments",
 ]
 
@@ -103,12 +108,12 @@ def faithfulness_fact(
 ) -> Fact:
     """The ``trace-faithful`` fact of one kernel, established by running it.
 
-    ``kernel`` is the decorated kernel, which is called as the native run, and
-    ``term`` its traced term. The id is keyed by the kernel's definition,
-    ``owner``, ``module`` and ``line``, as the typing rules key theirs (see
-    :func:`loopty.typing.facts_for`). Nothing here raises: an input that
-    cannot be run is skipped, and anything unexpected leaves the fact
-    ``assumed`` with the error as its reason.
+    ``kernel`` is the decorated kernel, or program, which is called as the
+    native run, and ``term`` its traced term. The id is keyed by the kernel's
+    definition, ``owner``, ``module`` and ``line``, as the typing rules key
+    theirs (see :func:`loopty.typing.facts_for`). Nothing here raises: an
+    input that cannot be run is skipped, and anything unexpected leaves the
+    fact ``assumed`` with the error as its reason.
     """
     identifier = fact_id(KIND, owner, module=module, line=line)
     inputs: list[dict[str, Any]] = []
@@ -165,6 +170,32 @@ def faithfulness_fact(
             reason=f"no input ran natively, so nothing was compared ({skipped})",
         )
     return fact(Status.TESTED, compared=agreed)
+
+
+def no_term_fact(
+    owner: str,
+    where: str,
+    reason: str,
+    *,
+    module: str | None = None,
+    line: int | None = None,
+) -> Fact:
+    """The ``trace-faithful`` fact of something with no term to compare.
+
+    ``assumed``, with ``reason``, under the id :func:`faithfulness_fact` would
+    give it: a program whose term cannot be built (:mod:`loopty.compose`),
+    which still runs natively, has nothing for the interpreter to run.
+    """
+    return Fact(
+        id=fact_id(KIND, owner, module=module, line=line),
+        kind=KIND,
+        statement=STATEMENT,
+        term=None,
+        status=Status.ASSUMED,
+        provenance={"reason": reason},
+        where=where,
+        owner=owner,
+    )
 
 
 # {{{ inputs

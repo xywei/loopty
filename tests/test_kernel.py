@@ -159,7 +159,11 @@ def test_a_program_runs_natively_and_records_its_callees_claims() -> None:
 
     assert {callee.__name__ for callee in both.callees()} == {"scan", "scale"}
     facts = both.facts()
-    assert [fact.kind for fact in facts] == ["postcondition-in-scope"]
+    # The restatement, then the program's own trace-faithful fact.
+    assert [fact.kind for fact in facts] == [
+        "postcondition-in-scope",
+        "trace-faithful",
+    ]
     assert facts[0].status is Status.ASSUMED
     assert facts[0].owner.endswith("both")
 
@@ -170,7 +174,9 @@ def test_a_programs_restatement_rests_on_the_callees_own_fact() -> None:
     It used to be a ``from`` entry in the provenance, which lanky could not
     read, so the ledger showed the restatement as a free-standing assumption.
     """
-    (restated,) = both.facts()
+    (restated,) = [
+        fact for fact in both.facts() if fact.kind == "postcondition-in-scope"
+    ]
     (post,) = [fact for fact in scan.facts() if fact.kind == "postcondition"]
     assert restated.rests_on == (post.id,)
     assert restated.provenance == {"callee": scan.qualname}

@@ -383,6 +383,147 @@ def test_a_length_rewritten_inside_the_loop_it_bounds_is_read_once() -> None:
     assert fact.status is Status.TESTED, fact.provenance
 
 
+@pytest.mark.parametrize(
+    ("fn", "native"),
+    [
+        (sums_then_count_in_a_loop_of_the_row, [6.0, 8.0, 21.0]),
+        (count_then_sums_in_a_loop_of_the_row, [4.0, 8.0, 10.0]),
+        (fiber_then_count_in_a_loop_of_the_row, [4.0, 6.0, 19.0]),
+        (sums_then_next_count_in_a_loop_of_the_row, [8.0, 2.0, 2.0]),
+        (count_grown_inside_its_own_fiber, [3.0, 3.0, 15.0]),
+    ],
+)
+def test_the_interpreter_reads_a_written_bound_where_its_loop_starts(
+    fn, native
+) -> None:
+    # The interpreter used to enumerate every statement's domain before it ran
+    # anything, and refused these kernels (#52). The bound of a loop over a
+    # fiber is now read when that loop starts, each time it starts, and a
+    # reduction's when it is summed, which is what the body does.
+    arguments = row_loop_input()
+    if "x" not in term_of(fn).param_names:
+        del arguments["x"]
+    copies = {name: value.copy() for name, value in arguments.items()}
+    Kernel(fn)(**arguments)
+    assert arguments["y"].numpy().tolist() == native
+    interpret(term_of(fn), copies)
+    for name, value in arguments.items():
+        assert copies[name].numpy().tobytes() == value.numpy().tobytes(), name
+
+
+def pairs_in_a_row_recounted(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A fiber loop inside another over the same row, the row's length reset."""
+    for r in y.dom:
+        for j in val.dom[r]:
+            for k in val.dom[r]:
+                y[r] = y[r] + val[r, k]
+            cnt[r] = 1
+
+
+def test_a_written_bound_of_two_loops_of_one_statement_is_refused() -> None:
+    # Natively the loop over ``k`` reads the row's length each time it starts,
+    # 2 and then 1 for row 0, and ``cnt_r`` is one parameter of the domain of
+    # the statement, which the interpreter can read once only. A guess would
+    # be a refutation of a faithful trace, so the fact is left assumed.
+    from lanky.ledger import Status
+
+    from loopty.interpret import InterpretError
+
+    arguments = row_loop_input()
+    del arguments["x"]
+    with pytest.raises(InterpretError, match="bounds the loops over j and k"):
+        interpret(term_of(pairs_in_a_row_recounted), arguments)
+    fact = Kernel(pairs_in_a_row_recounted).facts()[-1]
+    assert fact.status is Status.ASSUMED
+    assert "the interpreter reads it once for them all" in fact.provenance["reason"]
+
+
+def sum_of_x_in_a_fiber_recounted(
+    x: Arr[Fin[m], Real],  # noqa: F821
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A sum over ``x`` once per entry of row ``r``, the row's length reset."""
+    for r in y.dom:
+        for j in val.dom[r]:
+            y[r] = y[r] + reduce_sum(x[i] for i in x.dom)
+            cnt[r] = 1
+
+
+def test_a_sum_in_a_fiber_keeps_the_length_its_loop_was_read_at() -> None:
+    # The sum's domain repeats ``0 <= j < nl_cnt_r`` from the loop around it.
+    # Read again where the sum starts, ``cnt[r]`` is 1 from ``j = 1`` on, so
+    # the sum was empty there and the interpreter disagreed with the body
+    # (y = [2, 2, 2]), which refuted a faithful trace.
+    from lanky.ledger import Status
+
+    arguments = row_loop_input()
+    copies = {name: value.copy() for name, value in arguments.items()}
+    Kernel(sum_of_x_in_a_fiber_recounted)(**arguments)
+    assert arguments["y"].numpy().tolist() == [4.0, 2.0, 6.0]
+    interpret(term_of(sum_of_x_in_a_fiber_recounted), copies)
+    for name, value in arguments.items():
+        assert copies[name].numpy().tobytes() == value.numpy().tobytes(), name
+    fact = Kernel(sum_of_x_in_a_fiber_recounted).facts()[-1]
+    assert fact.status is Status.TESTED, fact.provenance
+
+
+def row_sum_in_its_own_fiber_recounted(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The row summed once per entry of the row, the row's length reset."""
+    for r in y.dom:
+        for j in val.dom[r]:
+            y[r] = y[r] + reduce_sum(val[r, k] for k in val.dom[r])
+            cnt[r] = 1
+
+
+def test_a_written_bound_of_a_loop_and_a_sum_inside_it_is_refused() -> None:
+    # Natively the loop over ``j`` reads the row's length once, 2 for row 0,
+    # and the sum over ``k`` reads it each time it starts, 2 and then 1; the
+    # two share the one parameter ``nl_cnt_r``, which is read once.
+    from lanky.ledger import Status
+
+    from loopty.interpret import InterpretError
+
+    arguments = row_loop_input()
+    del arguments["x"]
+    copies = {name: value.copy() for name, value in arguments.items()}
+    Kernel(row_sum_in_its_own_fiber_recounted)(**arguments)
+    assert arguments["y"].numpy().tolist() == [4.0, 3.0, 23.0]
+    with pytest.raises(
+        InterpretError, match="bounds the loop over j and the sum over k inside it"
+    ):
+        interpret(term_of(row_sum_in_its_own_fiber_recounted), copies)
+    fact = Kernel(row_sum_in_its_own_fiber_recounted).facts()[-1]
+    assert fact.status is Status.ASSUMED
+    assert "again where the sum starts" in fact.provenance["reason"]
+
+
+def test_the_faithfulness_fact_of_a_kernel_writing_its_counts_is_tested() -> None:
+    # The issue's kernel: the next row's length cleared after each row is
+    # summed. Its differential run was tested and its faithfulness fact was
+    # left assumed, because the interpreter refused the bound (#52).
+    from lanky.ledger import Status
+
+    fact = Kernel(row_sums_then_next_count).facts()[-1]
+    assert fact.kind == KIND
+    assert fact.status is Status.TESTED, fact.provenance
+    assert fact.provenance["compared"] == SAMPLES
+    arguments = issue_input([2, 3, 6])
+    del arguments["ends"], arguments["off"]
+    out = interpret(term_of(row_sums_then_next_count), arguments)
+    assert out["y"].tolist() == [3.0, 0.0, 0.0]
+    assert out["cnt"].tolist() == [2, 0, 0]
+
+
 def test_samples_pass_the_offsets_of_the_ragged_array_they_draw() -> None:
     # A call has to pass them so, and a native run that refuses a sample says
     # nothing about the term.
@@ -404,6 +545,192 @@ def test_the_faithfulness_fact_runs_the_samples_through_the_layout() -> None:
     assert len(outcomes) == SAMPLES
     assert not [outcome for outcome in outcomes if "ValueError" in outcome]
     assert fact.provenance["compared"] >= 1
+
+
+# }}}
+
+
+# {{{ the layout fact (#51)
+
+
+def overlap_then_write(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    off: Arr[Fin[n + 1], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+):
+    """Every row moved to start at cell 0, then written: the issue's kernel."""
+    for r in cnt.dom:
+        off[r] = 0
+        for j in val.dom[r]:
+            val[r, j] = r + 1.0
+
+
+def shortened_in_its_own_loop(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A row's length set to zero inside the loop it bounds."""
+    for r in y.dom:
+        for j in val.dom[r]:
+            y[r] = y[r] + val[r, j]
+            cnt[r] = 0
+
+
+def layout_of(fn):
+    """The term of ``fn``, its facts settled by isl, and its layout facts."""
+    from lanky.ledger import Ledger
+
+    from loopty import typing as rules
+    from loopty.oracle import IslOracle
+
+    term = term_of(fn)
+    oracle = IslOracle()
+    facts = [
+        (oracle.establish(fact) or fact) if oracle.can_establish(fact) else fact
+        for fact in rules.facts_for(term, owner=term.name, where="test.py:1")
+    ]
+    layouts = [fact for fact in facts if fact.kind == "layout"]
+    return term, Ledger(facts), layouts
+
+
+def test_rows_moved_onto_each_other_leave_the_disjoint_writes_assumed() -> None:
+    # The disjoint writes of ``val`` were decided over ``[r, j]``, and a
+    # parallel ``r`` accepted, while every row starts at cell 0 once the
+    # kernel has run its first statement (#51).
+    from lanky.ledger import Status
+
+    from loopty.schedule import Schedule
+
+    term, ledger, (layout,) = layout_of(overlap_then_write)
+    assert layout.id == "layout:overlap_then_write:cnt"
+    assert layout.status is Status.ASSUMED
+    assert layout.statement == (
+        "the rows of val stay inside their buffers and apart while S0 write off"
+    )
+    assert layout.provenance["written"] == ["off"]
+    (disjoint,) = [
+        fact
+        for fact in ledger
+        if fact.kind == "disjoint-writes" and fact.provenance["array"] == "val"
+    ]
+    assert disjoint.status is Status.DECIDED
+    assert disjoint.rests_on == (layout.id,)
+    assert ledger.support(disjoint).effective is Status.ASSUMED
+    (access,) = [
+        fact for fact in ledger if fact.id.endswith(":S1:write:val[r, j]")
+    ]
+    assert access.status is Status.DECIDED
+    assert ledger.support(access).under == (layout.id,)
+    # The facts about the dense arrays, the layout's own reads among them,
+    # rest on nothing.
+    assert {fact.id for fact in ledger if fact.rests_on} == {disjoint.id, access.id}
+    # A cast is decided against the dependences of ``val`` over ``[r, j]``.
+    monotone = [
+        fact
+        for fact in Schedule(term).split("r", 2).facts()
+        if fact.kind == "monotone"
+    ]
+    assert [fact.rests_on for fact in monotone] == [(layout.id,)]
+
+
+def test_a_row_shortened_in_its_own_loop_leaves_its_reads_assumed() -> None:
+    from lanky.ledger import Status
+
+    _term, ledger, (layout,) = layout_of(shortened_in_its_own_loop)
+    assert layout.provenance["written"] == ["cnt"]
+    (read,) = [fact for fact in ledger if fact.id.endswith(":S0:read:val[r, j]")]
+    assert read.status is Status.DECIDED
+    assert ledger.support(read).effective is Status.ASSUMED
+    assert ledger.support(read).under == (layout.id,)
+
+
+@pytest.mark.parametrize("fn", [row_sums_then_next_offset, row_sums_then_next_count])
+def test_a_kernel_that_writes_its_layout_has_a_layout_fact(fn) -> None:
+    _term, ledger, (layout,) = layout_of(fn)
+    (read,) = [fact for fact in ledger if fact.id.endswith(":S0:read:val[r, j]")]
+    assert read.rests_on == (layout.id,)
+
+
+def gather_through_moved_rows(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    off: Arr[Fin[n + 1], Nat],  # noqa: F821
+    col: Arr[Fin[n], Fin[cnt], Fin[m]],  # noqa: F821
+    s: Arr[Fin[n], Nat],  # noqa: F821
+    x: Arr[Fin[m], Real],  # noqa: F821
+    first: Arr[Fin[n], Fin[m]],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The rows of ``col`` moved to start at ``s[r]``, then read as indices."""
+    for r in y.dom:
+        off[r] = s[r]
+        y[r] = reduce_sum(x[col[r, j]] for j in col.dom[r])
+        for j in col.dom[r]:
+            first[r] = col[r, j]
+
+
+def test_an_index_read_from_a_moved_row_rests_on_the_layout() -> None:
+    # ``x[col[r, j]]`` is in bounds by the element sort of ``col``, which holds
+    # of a cell of ``col``, and ``col[r, j]`` is a cell of ``col`` only while
+    # the rows stay inside its buffer: with ``s[r]`` past its end the compiled
+    # run reads an index from outside ``col`` and then a cell outside ``x``.
+    from lanky.ledger import Status
+
+    _term, ledger, (layout,) = layout_of(gather_through_moved_rows)
+    (gather,) = [fact for fact in ledger if fact.id.endswith(":read:x[col[r, j]]")]
+    assert gather.decided_by == "type"
+    assert gather.rests_on == (layout.id,)
+    assert ledger.support(gather).effective is Status.ASSUMED
+    # So does the write of such an index into an array of the sort.
+    (sort,) = [fact for fact in ledger if fact.kind == "element-sort"]
+    assert sort.decided_by == "type"
+    assert sort.rests_on == (layout.id,)
+
+
+def test_a_kernel_that_only_reads_its_layout_has_none() -> None:
+    from loopty.schedule import Schedule
+
+    term, ledger, layouts = layout_of(row_sums_through_offsets)
+    assert layouts == []
+    assert not [fact for fact in ledger if fact.rests_on]
+    assert not [fact for fact in Schedule(term).facts() if fact.rests_on]
+
+
+OVERLAP = """
+from __future__ import annotations
+
+from lanky.prelude import Nat, Real
+
+from loopty import Arr, Fin, kernel
+
+
+@kernel
+def overlap_then_write(
+    cnt: Arr[Fin[n], Nat],
+    off: Arr[Fin[n + 1], Nat],
+    val: Arr[Fin[n], Fin[cnt], Real],
+):
+    for r in cnt.dom:
+        off[r] = 0
+        for j in val.dom[r]:
+            val[r, j] = r + 1.0
+"""
+
+
+def test_check_shows_the_writes_decided_under_the_layout(tmp_path, capsys) -> None:
+    from lanky.cli import main as lanky_main
+
+    path = tmp_path / "overlap.py"
+    path.write_text(OVERLAP, encoding="utf-8")
+    assert lanky_main(["check", str(path)]) == 0
+    out = capsys.readouterr().out
+    layout = "layout:overlap.overlap_then_write@9:cnt"
+    rows = out.splitlines()
+    (row,) = [line for line in rows if "write distinct cells of val" in line]
+    assert row.startswith(f"decided under {layout}")
+    assert row.split()[3] == "assumed"
+    (fact,) = [line for line in rows if "stay inside their buffers" in line]
+    assert fact.startswith("assumed ")
 
 
 # }}}

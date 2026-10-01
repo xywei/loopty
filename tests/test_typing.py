@@ -732,3 +732,166 @@ def test_a_guards_own_read_is_not_over_the_wide_domain() -> None:
 
 
 # }}}
+
+
+# {{{ element sorts (#64)
+
+
+def self_perm(
+    perm: Arr[Fin[n], Fin[n]],  # noqa: F821
+    x: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The issue's kernel: a permutation written off by one, then gathered."""
+    for i in perm.dom:
+        perm[i] = i + 1
+    for j in y.dom:
+        y[j] = x[perm[j]]
+
+
+def reversed_perm(
+    perm: Arr[Fin[n], Fin[n]],  # noqa: F821
+    x: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The same, with a permutation that is one."""
+    for i in perm.dom:
+        perm[i] = y.dom.size - 1 - i
+    for j in y.dom:
+        y[j] = x[perm[j]]
+
+
+def copied_perm(
+    other: Arr[Fin[n], Fin[n]],  # noqa: F821
+    perm: Arr[Fin[n], Fin[n]],  # noqa: F821
+    x: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A permutation copied from another of the same sort."""
+    for i in perm.dom:
+        perm[i] = other[i]
+    for j in y.dom:
+        y[j] = x[perm[j]]
+
+
+def squared_perm(
+    perm: Arr[Fin[n], Fin[n]],  # noqa: F821
+    x: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A value isl cannot state: whether it is a point of Fin(n) is unknown."""
+    for i in perm.dom:
+        perm[i] = i * i
+    for j in y.dom:
+        y[j] = x[perm[j]]
+
+
+def gathered(facts):
+    """The element-sort fact of ``perm[i]`` and the fact of ``x[perm[j]]``."""
+    (sort,) = [f for f in facts if f.kind == "element-sort"]
+    (read,) = [f for f in facts if f.id.endswith(":S1:read:x[perm[j]]")]
+    return sort, read
+
+
+def test_a_write_into_a_fin_array_is_refuted_where_it_leaves_the_sort() -> None:
+    # ``x[perm[j]]`` was decided in bounds by type, and nothing checked what
+    # the kernel wrote into ``perm``: the compiled run read past ``x`` (#64).
+    from lanky.ledger import Ledger
+
+    _, facts = facts_of(self_perm)
+    sort, read = gathered(facts)
+    assert sort.id == "element-sort:self_perm:S0:perm[i]"
+    assert sort.statement == (
+        "the value S0 writes into perm[i], i + 1, is a point of Fin(n)"
+    )
+    assert read.status is Status.DECIDED
+    assert read.decided_by == "type"
+    assert read.rests_on == (sort.id,)
+    ledger = Ledger(settled(facts))
+    refuted = ledger[sort.id]
+    assert refuted.status is Status.REFUTED
+    assert refuted.decided_by == "isl"
+    assert (
+        "is one of the instances of S0 writing a value outside Fin(n) into perm"
+        in refuted.provenance["reason"]
+    )
+    assert refuted.provenance["witness_text"].startswith("[i=")
+    # The read is worth what the write it rests on is worth.
+    assert ledger.support(read).effective is Status.REFUTED
+    assert ledger.support(read).under == (sort.id,)
+
+
+def test_a_write_that_keeps_the_sort_is_decided_and_so_is_the_read() -> None:
+    from lanky.ledger import Ledger
+
+    _, facts = facts_of(reversed_perm)
+    sort, read = gathered(facts)
+    ledger = Ledger(settled(facts))
+    assert ledger[sort.id].status is Status.DECIDED
+    assert ledger[sort.id].decided_by == "isl"
+    assert ledger.support(read).effective is Status.DECIDED
+    assert ledger.support(read).under == ()
+
+
+def test_a_value_read_from_an_array_of_the_sort_is_a_point_of_it_by_type() -> None:
+    _, facts = facts_of(copied_perm)
+    sort, read = gathered(facts)
+    assert sort.status is Status.DECIDED
+    assert sort.decided_by == "type"
+    assert sort.statement.endswith("by type (other[i] : Fin(n))")
+    assert sort.rests_on == ()
+    assert read.rests_on == (sort.id,)
+
+
+def test_a_value_isl_cannot_state_leaves_the_read_assumed() -> None:
+    from lanky.ledger import Ledger
+
+    _, facts = facts_of(squared_perm)
+    sort, read = gathered(facts)
+    assert sort.status is Status.ASSUMED
+    assert sort.term is None
+    assert "not quasi-affine" in sort.provenance["reason"]
+    ledger = Ledger(settled(facts))
+    assert ledger.support(read).effective is Status.ASSUMED
+    assert ledger.support(read).under == (sort.id,)
+
+
+def test_an_index_array_only_read_owes_nothing() -> None:
+    # spmv's ``col`` is read, never written: its by-type facts rest on nothing.
+    ledger = check_path(KERNELS / "spmv_min.py")
+    assert not [fact for fact in ledger if fact.kind == "element-sort"]
+    assert not [fact for fact in ledger if fact.kind == "in-bounds" and fact.rests_on]
+
+
+SELF_PERM = '''
+from __future__ import annotations
+
+from lanky.prelude import Real
+
+from loopty import Arr, Fin, kernel
+
+
+@kernel
+def self_perm(perm: Arr[Fin[n], Fin[n]], x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
+    for i in perm.dom:
+        perm[i] = i + 1
+    for j in y.dom:
+        y[j] = x[perm[j]]
+'''
+
+
+def test_check_refutes_the_write_and_exits_one(tmp_path, capsys) -> None:
+    from lanky.cli import main as lanky_main
+
+    path = tmp_path / "self_perm.py"
+    path.write_text(SELF_PERM, encoding="utf-8")
+    assert lanky_main(["check", str(path)]) == 1
+    out = capsys.readouterr().out
+    assert "REFUTED self_perm at self_perm.py:12:" in out
+    assert "is a point of Fin(n)" in out
+    row = next(line for line in out.splitlines() if "x[perm[j]] is in bounds" in line)
+    assert row.startswith("decided under element-sort:self_perm.self_perm@9:S0:perm[i]")
+    assert "refuted" in row
+
+
+# }}}

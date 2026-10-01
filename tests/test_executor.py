@@ -163,7 +163,8 @@ def test_a_native_refusal_is_a_refuted_agreement_rather_than_raised() -> None:
     fact = executor().differential(flipped, schedule, arrays)
     assert fact.kind == "agreement"
     assert fact.status.value == "refuted"
-    assert fact.id == f"agreement:{schedule.key}"
+    assert fact.id == schedule.fact_id("agreement")
+    assert fact.id == f"agreement:{flipped.definition}:[c]"
     assert fact.provenance["error"].startswith("TraceError: the guard of")
     reason = fact.provenance["reason"]
     assert reason.startswith("the body, run natively, is refused")
@@ -192,7 +193,7 @@ def test_a_kernel_run_on_opencl_records_opencl(plain_opencl, monkeypatch) -> Non
     fact = LoopyExecutor(target="opencl").differential(doubled, doubled, arrays)
     assert fact.status.value == "tested"
     assert fact.provenance["target"] == "opencl"
-    assert fact.id == "agreement:doubled[opencl]"
+    assert fact.id == f"agreement:{doubled.definition}:[opencl]"
 
 
 @pytest.mark.filterwarnings("ignore:Bitwise inversion:DeprecationWarning")
@@ -203,7 +204,7 @@ def test_a_refused_kernel_run_on_opencl_records_opencl(plain_opencl) -> None:
     fact = LoopyExecutor(target="opencl").differential(flipped, flipped, arrays)
     assert fact.status.value == "refuted"
     assert fact.provenance["target"] == "opencl"
-    assert fact.id == "agreement:flipped[opencl]"
+    assert fact.id == f"agreement:{flipped.definition}:[opencl]"
 
 
 def test_the_agreement_of_a_run_names_the_target_it_is_given() -> None:
@@ -212,7 +213,7 @@ def test_the_agreement_of_a_run_names_the_target_it_is_given() -> None:
     assert agreement(term, term, {"z": z}, {"z": z}).provenance["target"] == "c"
     on_device = agreement(term, term, {"z": z}, {"z": z}, target="opencl")
     assert on_device.provenance["target"] == "opencl"
-    assert on_device.id == f"agreement:{term.name}[opencl]"
+    assert on_device.id == f"agreement:{term.name}:[opencl]"
     # A schedule's own target is the default, as it always was.
     schedule = Schedule(term)
     assert agreement(term, schedule, {"z": z}, {"z": z}).provenance["target"] == "c"
@@ -227,10 +228,25 @@ def test_an_agreement_fact_is_named_after_the_schedule_that_ran() -> None:
     }
     split = Schedule(ht.axpy_term()).split("i", 2)
     fact = executor().differential(axpy_reference, split, arrays)
-    assert fact.id == f"agreement:{split.key}"
+    assert fact.id == split.fact_id("agreement")
+    steps = "[c].split('i', 2, inner='i_inner', outer='i_outer')"
+    assert fact.id == f"agreement:axpy:{steps}"
     assert fact.id != executor().differential(
         axpy_reference, Schedule(ht.axpy_term()), arrays
     ).id
+
+
+def test_a_schedule_of_a_schedule_names_the_kernel_by_its_definition() -> None:
+    # ``Schedule`` takes a schedule too, and starts from its term. Its facts
+    # name the kernel behind it, as the first schedule's do, and not the
+    # term's name, which two kernels can share (#75).
+    split = Schedule(Schedule(doubled)).split("i", 2)
+    steps = "[c].split('i', 2, inner='i_inner', outer='i_outer')"
+    assert split.fact_id("agreement") == f"agreement:{doubled.definition}:{steps}"
+    assert [fact.id for fact in split.facts()] == [
+        f"cast:{doubled.definition}:{steps}:bijective",
+        f"cast:{doubled.definition}:{steps}:monotone",
+    ]
 
 
 def test_the_exactness_class_of_an_output_is_the_weakest_of_three() -> None:

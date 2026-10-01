@@ -137,14 +137,16 @@ def test_a_demo_states_obligations_and_none_is_refuted(name: str) -> None:
 
 
 #: The kernels of each demo, each of which owes one faithfulness fact.
+#: The kernels and the programs of each demo, each of which has a
+#: ``trace-faithful`` fact.
 KERNELS = {
-    "spmv": {"scan", "spmv"},
+    "spmv": {"scan", "spmv", "solve"},
     "stencil_skew": {"jacobi"},
     "wavefront_acoustic": {"acoustic"},
     "reshape_layouts": {"rows_of", "cols_of", "transpose"},
     "p2p": {"p2p"},
     "pairs": {"pairs"},
-    "composition": {"flux", "divergence"},
+    "composition": {"flux", "divergence", "burgers_rhs"},
 }
 
 
@@ -152,6 +154,7 @@ KERNELS = {
 def test_every_kernel_of_a_demo_computes_what_its_body_computes(name: str) -> None:
     # The traced term, interpreted, against the native body: on the demo's
     # own example inputs first, then on inputs drawn from the declared types.
+    # A program's term is composed from its calls, and it has the fact too.
     _result, facts = _invoke(name, "check")
     faithful = [fact for fact in facts if fact["kind"] == "trace-faithful"]
     assert {fact["owner"] for fact in faithful} == KERNELS[name]
@@ -671,7 +674,13 @@ def test_the_pairs_run_in_both_layouts_and_both_agree() -> None:
     agreements = sorted(
         fact["id"] for fact in facts if fact["kind"] == "agreement"
     )
-    assert agreements == ["agreement:pairs[c]", "agreement:pairs[c].pack('f')"]
+    # Named by the kernel's definition, then the target and the steps.
+    (definition,) = {fact_id.split(":")[1] for fact_id in agreements}
+    assert definition.startswith("pairs.pairs@")
+    assert agreements == [
+        f"agreement:{definition}:[c]",
+        f"agreement:{definition}:[c].pack('f')",
+    ]
 
 
 def test_the_packed_pairs_keep_the_triangle_and_no_more() -> None:

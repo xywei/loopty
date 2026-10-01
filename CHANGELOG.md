@@ -381,6 +381,21 @@ with a pair of statement instances.
   `double f[n];` declared inside), and agrees compiled. `examples/spmv.py`
   gives its `solve` program example inputs, so `loopty run` compiles it too;
   the transcripts are regenerated.
+- **A program has a `trace-faithful` fact** (#66), the last of
+  `Program.facts()`, as a kernel's is the last of its own: the program's term,
+  interpreted, against its body, run natively, on the module's example inputs
+  for it and on inputs drawn from the types the term gives its parameters.
+  The term is built from what the body does with placeholders, and a body can
+  look at an argument in a way no placeholder sees: `if isinstance(x, Arr):
+  scale2(x)` left `scale2` out of the term, which only a differential run on
+  a file with example inputs caught, while `lanky check` said nothing about
+  the program and a `Schedule` of it decided its casts against a term the
+  body does not compute. Such a program is now refuted, with the input and
+  the first differing cell, and `lanky check` exits 1. A program whose term
+  cannot be built has the fact `assumed`, with the composition's refusal as
+  its reason (`loopty.faithful.no_term_fact`). The spmv and composition demos
+  have one row more each, `solve`'s and `burgers_rhs`'s, both `tested`, and
+  `Program.facts()` is computed once, as a kernel's is.
 
 ### Fixed
 
@@ -1226,6 +1241,85 @@ with a pair of statement instances.
   now keyed by definition (see Changed), so the restatement names the
   helper's fact by the id it has in the helper's own ledger, and each callee
   gets a restatement of its own.
+- The term interpreter runs a kernel whose loop bound reads an array the
+  kernel writes (#52). It enumerated every instance of every statement before
+  it ran any, so it refused such a kernel ("which instances run depends on
+  when the bound is read"), and the `trace-faithful` fact of, say, a kernel
+  that clears the next row's count after summing a row stayed `assumed`
+  while its differential run was `tested`. It now walks the loop tree as the
+  body runs it, and enumerates a loop when it reaches it: the bound of a loop
+  over `val.dom[r]` is read where that loop starts, each time it starts, as
+  the native `for` reads it, and a reduction's where it is summed, while
+  the bounds of the loops around a reduction, which its domain repeats, keep
+  the values their loops were read at. So such a kernel's fact is `tested` or
+  `refuted` like any other. A bound is one parameter of a domain, read once,
+  so one that bounds two nested loops of one statement (`for k in
+  val.dom[r]` inside `for j in val.dom[r]`), or a loop and a sum inside it
+  (`reduce_sum(val[r, k] for k in val.dom[r])` inside `for j in
+  val.dom[r]`), and reads an array the kernel writes is refused, and the fact
+  stays `assumed`, since the body reads it where each loop or sum starts. A
+  domain no array bounds is still checked against the work limit before
+  anything runs, by its bounding box.
+- The facts of a schedule are keyed by the kernel's definition, as the
+  kernel's own facts are (#75). Their ids started with `Schedule.key`, which
+  names the kernel by its name, so in a file that defines a `double` and
+  imports another as `helper_double`, `Schedule(double).split("i", 2)` and
+  `Schedule(helper_double).split("i", 2)` shared their ids: `loopty run`
+  kept the helper's cast facts in place of the local kernel's, which could
+  hide a refuted fact of one behind a decided fact of the other, and the
+  helper's agreement survived only through the `#2` a schedule run twice
+  gets. The ids now go through `lanky.ledger.fact_id`, with the kernel's
+  definition and then the target and the steps
+  (`Schedule.fact_id`): `cast:spmv.spmv@102:[c].split('j', 2, inner='j_in',
+  outer='j_out'):bijective`, and `agreement:spmv.spmv@102:[c]` for a kernel
+  run without a schedule. `Schedule.key` stays the readable call text, and a
+  term scheduled with no kernel behind it is named by its name,
+  `cast:transpose:[c]...`, and a schedule of a schedule by the kernel behind
+  it. `loopty.schedule.definition_of` gives what a fact names an object by.
+- A map per statement in `Schedule.affine` can name a program's statement
+  (#79). A program's statements are named after their calls, `flux.S0` and
+  `step@2.S0`, which isl cannot read as tuple names, so `{ flux.S0[j] -> [jj]
+  : jj = j }` was a syntax error, and `flux_S0`, loopy's id of the
+  instruction, was refused as not a statement of the program. A tuple name
+  that is no statement's id is now read as the id spelled with every
+  character other than a letter, a digit or an underscore written `_`, which
+  is the instruction's id and so names one statement, and isl's refusal of a
+  map that names a statement by such an id says how to spell it.
+- An index read from an array the kernel writes is no longer in bounds by
+  its element sort alone (#64). `x[perm[j]]` with `perm: Arr[Fin[n], Fin[n]]`
+  was decided by type, which rests on the contract's check of every cell of
+  `perm` when the kernel is called, and nothing checked what the kernel then
+  wrote into `perm`: after `perm[i] = i + 1` the native run raised
+  `IndexError` at `x[4]`, the compiled one read past the end of `x`, and the
+  ledger said decided. Every write into an array of a `Fin[m]` element sort
+  now owes a fact of kind `element-sort`, that the value written is a point
+  of `Fin[m]` (`loopty.typing.element_sort_facts`): isl decides it for a
+  quasi-affine value and refutes it with the instance that writes outside
+  (`[i=0] ... at [n=1]` here), the type decides it for a value read from an
+  array of the same sort, and it is assumed otherwise. A fact decided by type
+  through an array the kernel writes rests on the element-sort facts of the
+  writes into it, so the ledger shows `x[perm[j]]` decided under the write's
+  fact and worth what that fact is worth, refuted here, and `lanky check`
+  exits 1. A kernel that only reads its index arrays, as every demo does,
+  has no such fact.
+- A kernel that rewrites the layout of a ragged array no longer has that
+  array's in-bounds and disjoint-writes facts decided outright (#51). They
+  are decided against the length of a row and over `[r, j]`, which holds of
+  the flat buffer while every row lies inside it and apart from the others,
+  as the contract checks when the call starts; `off[r] = s[r]` can move a row
+  past the end of the buffer, and `off[r] = 0` every row onto the same cells,
+  where the ledger decided "distinct instances of S1 write distinct cells of
+  val" and a parallel `r` was accepted. Such a kernel now has one `layout`
+  fact per counts family whose counts or declared offsets it writes,
+  `assumed` with the reason (`loopty.typing.layout_facts`), and the in-bounds
+  and disjoint-writes facts of the family's ragged arrays rest on it, as does
+  a fact decided by type through an index read from one of them
+  (`x[col[r, j]]`, whose index is read from a cell of a moved row), and the
+  `monotone` casts of a schedule of the kernel or of a program whose call
+  rewrites it: the ledger shows them decided under the layout, and worth an
+  assumption. `lanky check` lists the layout fact among the kernel's facts,
+  and `loopty run` beside the casts that rest on it. A kernel that only reads
+  its layout, as every demo does, has no such fact.
 - A real literal stored into an integer array keeps its fraction until the
   store (#73). The lowering handed loopy a Python `float` as it was, and loopy
   writes an untyped constant in the type of the expression around it, which
@@ -1407,10 +1501,8 @@ with a pair of statement instances.
   `loopty.typing.postcondition_id(owner, module=, line=)` builds the
   postcondition's id for both sides. Every id `lanky check` prints and
   writes with `--json` for a kernel file changes this way, and the `lanky
-  check` transcripts show the new ids. Cast and agreement facts keep the ids
-  their schedule's key gives them, which names the kernel by its name alone,
-  so two kernels of one name scheduled in one `loopty run` still share them;
-  the README lists it among the limits.
+  check` transcripts show the new ids. A schedule's cast and agreement facts
+  are keyed by definition too, since #75 (see Fixed).
 - **A program's restatement of a callee's postcondition rests on the callee's
   fact.** `Program.facts` pointed at the callee's postcondition with a `from`
   entry in the provenance, which lanky had no way to read, so the ledger

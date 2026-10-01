@@ -262,15 +262,17 @@ def recount(cnt: Arr[Fin[n], Nat], val: Arr[Fin[n], Fin[cnt], Real]):  # noqa: F
             val[r, j] = 1.0
 
 
-def test_a_loop_bound_the_kernel_writes_is_refused() -> None:
-    # Which instances of the second loop run depends on when ``cnt[r]`` is
-    # read, and the interpreter reads every domain before it runs anything.
+def test_a_loop_bound_the_kernel_writes_is_read_where_the_loop_starts() -> None:
+    # The interpreter used to enumerate every statement's domain before it ran
+    # anything, so it refused a bound the kernel writes (#52). It now reads
+    # ``cnt[r]`` where the loop over ``val.dom[r]`` starts, as the body does.
     arguments = {
         "cnt": Arr.from_numpy(np.array([1, 2], dtype=np.int64)),
         "val": Arr.ragged([1, 2]),
     }
-    with pytest.raises(InterpretError, match="reads cnt, which recount also writes"):
-        interpret(recount.term, arguments)
+    native, interpreted = both(recount, arguments)
+    assert interpreted["val"].numpy().tolist() == [1.0, 1.0, 1.0]
+    assert_identical(native, interpreted)
 
 
 def test_a_domain_parameter_that_is_not_a_whole_number_is_named() -> None:

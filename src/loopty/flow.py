@@ -71,7 +71,12 @@ the arithmetic; that is the form the demos and the tracer use.
 The alternative formulation, ``off[r] <= a < off[r + 1]`` with the offsets
 constrained by the scan recurrence, keeps those relations and is the natural
 next step. It is not implemented, and it is not needed for in-bounds or
-disjointness on the ragged form, which is all the MVP's typing rules ask for.
+disjointness on the ragged form, which is all the MVP's typing rules ask for,
+as long as the kernel leaves its layout as the contract checked it. One that
+writes its counts or its offsets can move a row out of the buffer or onto
+another, and the ragged form's facts about it rest on an ``assumed`` layout
+fact (:func:`loopty.typing.layout_facts`) until this formulation, with the
+writes to the offsets as hypotheses, can decide it.
 
 *Distinct parameters are distinct storage.* :func:`dependences` compares
 footprints array by array and reports nothing between two differently named

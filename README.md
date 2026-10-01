@@ -55,7 +55,7 @@ decided                                   type           spmv.py:112  spmv      
 tested                                    interpreter    spmv.py:102  spmv           the traced term computes what the body computes
 assumed under postcondition:spmv.scan@69  -              spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
 ...
-20 facts: 2 assumed, 15 decided, 3 tested
+21 facts: 2 assumed, 15 decided, 4 tested
 ```
 
 Look at the `x[col[r, j]]` row, and at what decided it. That indirection is the
@@ -192,9 +192,9 @@ table of row starts. Both compiled runs agree with the native one.
 - **The reference implementation is the kernel.** The same body runs on numpy
   under plain `python` and traces to the term loopy compiles, so the differential
   test compares a program with itself rather than with a second implementation.
-  That the trace *is* the body is checked too, not assumed: every kernel's
-  ledger has a `trace-faithful` fact, the traced term interpreted and compared
-  with the native run, bit for bit when the output is `exact`.
+  That the trace *is* the body is checked too, not assumed: every kernel and
+  every program has a `trace-faithful` fact, the traced term interpreted and
+  compared with the native run, bit for bit when the output is `exact`.
 - **The index set of an argument is a type, and not a box.** An array over the
   lower triangle, a band, a sum with affine fibers or a union of pieces is
   written as that set, `Arr[Where[i: Fin[n], j: Fin[n], j < i], Real]`, and its
@@ -258,16 +258,26 @@ end to end; the edges are sharp.
   compiled a byte, into which C converts `0.5` as `0`: `b[i] = u[i]` is a
   `TraceError` naming `b[i] = u[i] != 0`, and an integer arriving at a bool
   array natively, `~(i > 0)` again, is refused there as it is by `when`.
-- The faithfulness fact. For each kernel, the traced term is run by an
-  interpreter (`loopty.interpret`: statement by statement in source order over
-  each statement's isl domain, expressions evaluated with numpy's arithmetic,
-  reductions summed in the order `reduce_sum` sums natively) and compared with
-  the native run, on the file's `example_inputs()` and on three inputs drawn
-  from the declared types. It is a `trace-faithful` fact, `tested` on
-  agreement and `refuted` with the input and the first differing cell, which
-  is where state hidden past every check above shows up.
+- The faithfulness fact. For each kernel and each program, the traced term is
+  run by an interpreter (`loopty.interpret`: statement by statement in source
+  order over each statement's isl domain, each loop enumerated when the run
+  reaches it, so that a ragged loop runs to the length its row has when the
+  loop starts, expressions evaluated with numpy's arithmetic, reductions
+  summed in the order `reduce_sum` sums natively) and compared with the
+  native run, on the file's `example_inputs()` and on three inputs drawn from
+  the declared types. It is a `trace-faithful` fact, `tested` on agreement and
+  `refuted` with the input and the first differing cell, which is where state
+  hidden past every check above shows up, and, for a program, a call its body
+  makes or skips by looking at an argument as no placeholder can be looked at
+  (`isinstance(x, Arr)`).
 - Typing rules and the ledger: in-bounds by isl or by type, write disjointness,
-  ordering, reduction exactness, postconditions. The reads a ragged layout
+  ordering, reduction exactness, postconditions. A write into an array whose
+  element sort is `Fin[m]` owes the fact that the value written is a point of
+  `Fin[m]` (`element-sort`), decided by isl for a quasi-affine value, by type
+  for a value read from an array of that sort, and assumed otherwise, and an
+  index read from such an array is in bounds by type resting on those facts,
+  so `perm[i] = i + 1` followed by `x[perm[j]]` is refuted where it was
+  decided. The reads a ragged layout
   makes are accesses like any other, in-bounds obligations and dependences
   every cast is checked against: the start of the row a ragged access is
   flattened through (`off[r]`, when the kernel declares the offsets), and the
@@ -292,7 +302,10 @@ end to end; the edges are sharp.
   `{ S0[t, i] -> [a, b] : ...; S1[t, i] -> [a, b] : ... }`, moves each
   statement by its own map, checked on the dependences between the statements
   as well as within each, which is the time offset a diamond tiling of two
-  statements that feed each other needs. A loop over an image with holes, such
+  statements that feed each other needs. A program's statement, `flux.S0` or
+  `step@2.S0`, which isl cannot read as a tuple name, is named with every
+  other character spelled `_`, `flux_S0` or `step_2_S0`, the id of its
+  instruction in the lowered kernel. A loop over an image with holes, such
   as the diamond's `b`, counts its steps (`b = 2*b_step - a`,
   `Schedule.strides`) instead of testing a parity at every `b`. A loop on a
   hardware axis (`g.*`, `l.*`) is the launch grid, outside every other loop,
@@ -416,11 +429,6 @@ end to end; the edges are sharp.
   its size (note 16 in `docs/loopy-notes.md`); on OpenCL it is a global
   temporary, which is generated but, like every device path, not run from a
   development machine.
-- A schedule's facts, its casts and the agreement of its run, are named by
-  its key, which starts with the kernel's name and not its definition. Two
-  kernels of one name scheduled in one file (one defined there and one
-  imported, say) share those ids, and `loopty run` keeps the later one's cast
-  facts in place of the earlier one's.
 - Only a two-axis (row, fiber) ragged array lowers. A deeper dependent sum
   raises.
 - A polyhedral domain is an array's whole index set, so it cannot sit beside
@@ -455,9 +463,16 @@ end to end; the edges are sharp.
   over `[r, j]`. Both assume the offsets lay the rows out inside the flat
   buffer and apart from each other, which the contract checks when a run
   starts. A kernel that writes its counts or its offsets can break that during
-  the run. The native run checks every cell it reads through them against the
-  buffer and raises `IndexError` for one outside it, but two rows moved onto
-  the same cells go unnoticed, and the ledger sees neither.
+  the run, and nothing states what it writes there, so such a kernel has a
+  `layout` fact for each counts family it rewrites, `assumed`, and the
+  in-bounds and disjoint-writes facts of the family's ragged arrays rest on
+  it, as do a fact decided by type through an index read from one of them
+  (`x[col[r, j]]`) and the `monotone` casts of its schedules: the ledger
+  shows them `decided under layout:...` and worth an assumption. Deciding
+  the layout fact needs the monotone-offsets formulation above. The native
+  run checks every cell it reads through the layout against the buffer and
+  raises `IndexError` for one outside it, but two rows moved onto the same
+  cells go unnoticed by both runs.
 - `Schedule.affine` and maps whose image has holes. The diamond
   `(t, i) -> (t + i, t - i)` reaches only the points of equal parity, and
   loopy's own `map_domain` refuses it, so loopty rewrites the kernel over the
@@ -522,8 +537,11 @@ end to end; the edges are sharp.
   test, not a proof: it compares the runs on the inputs it tries, so hidden
   state no such input exercises goes unseen. It stays `assumed`, with the
   reason, when no input runs natively, when the term calls a function the
-  interpreter has no numpy counterpart for, or when a loop bound reads an array
-  the same kernel writes.
+  interpreter has no numpy counterpart for, or when one ragged bound of a
+  statement bounds two of its loops (a fiber loop inside another over the
+  same row), or a loop and a sum inside it over the same row, and reads an
+  array the kernel writes, which the body reads where each loop or sum starts
+  and the interpreter reads once.
 
 **Not yet.**
 
