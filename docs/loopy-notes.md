@@ -1,6 +1,6 @@
 # Notes on loopy and islpy
 
-Fourteen interactions with loopty's dependencies that cost real debugging
+Sixteen interactions with loopty's dependencies that cost real debugging
 time, each with the local workaround and the reason it is local. No upstream
 issues were filed: these are notes so that the next person meets the answer
 instead of the symptom.
