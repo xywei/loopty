@@ -68,15 +68,15 @@ schedule: Schedule(spmv, target='c').split(j, 2).realize('y', tree=True)
   decided  isl  the accumulation into y is reassociated by realize('y', tree=True), so its result is compared at 'reassoc'
 device schedule: Schedule(spmv, target='c').tag(r='g.0').split(j, 32).tag(j_in='l.0').realize('y', tree=True)
   decided  isl  tag(r='g.0') renames the instances of spmv one for one
-  decided  isl  the order after tag(r='g.0') runs every dependence of spmv forward
+  decided  isl  the order after tag(r='g.0') runs every dependence of spmv forward, within one work item
   decided  isl  split(j, 32) renames the instances of spmv one for one
-  decided  isl  the order after split(j, 32) runs every dependence of spmv forward
+  decided  isl  the order after split(j, 32) runs every dependence of spmv forward, within one work item
   decided  isl  tag(j_in='l.0') renames the instances of spmv one for one
-  decided  isl  the order after tag(j_in='l.0') runs every dependence of spmv forward
+  decided  isl  the order after tag(j_in='l.0') runs every dependence of spmv forward, within one work item
   refuted  loopy-target c code can be generated for spmv after tag(j_in='l.0')
   decided  isl  the accumulation into y is reassociated by tag(j_in='l.0'), so its result is compared at 'reassoc'
   decided  isl  realize('y', tree=True) renames the instances of spmv one for one
-  decided  isl  the order after realize('y', tree=True) runs every dependence of spmv forward
+  decided  isl  the order after realize('y', tree=True) runs every dependence of spmv forward, within one work item
   reason: the parallel tag on j_in sits inside a loop whose bound comes from an array (a ragged fiber), and loopy will not put a hardware axis in a domain with a data-dependent parameter. Parallelize an enclosing loop with a size known at launch instead, such as the rows of a CSR product
 
   y: difference 5.55e-17 within 1.48e-06 (approx) -> tested

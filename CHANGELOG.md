@@ -1278,6 +1278,39 @@ with a pair of statement instances.
   bool array is refused as `when` refuses an integer guard, since that is
   what `~(i > 0)` of a loop variable is there, `-2` or `-1`, which a bool
   array stored as `True` at every point.
+- The `monotone` cast refuses a dependence between instances on two work
+  items of a hardware axis (#63). It dropped a loop on `g.*` or `l.*` from the
+  order it checked, as it drops `ilp` and `vec`, and let the loops around it
+  order the rest; loopy runs the axis as the launch grid, outside every loop,
+  and nothing in a kernel orders two work items through global memory. So
+  `jacobi` in `examples/stencil_skew.py` with `i` on `g.0` or `l.0` was a
+  `decided` cast and a buildable schedule, and loopy generated it with no
+  barrier, each work item reading what its neighbour wrote a step before; the
+  acoustic pair of `examples/wavefront_acoustic.py`, and two loops on one axis
+  where the second reads the first's cells in another order, were the same,
+  and loopy refused them with `MissingBarrierError`. Each is refused now, with
+  the dependence and the two work items: `tag(i='g.0') illegal: instance
+  S0[t=0, i=1] writes u[1, 1] read by S0[t=1, i=2] on another work item ...:
+  the loop i on g.0 runs them on work items 0 and 1 of it`. An instance's work
+  item is the value of its loop on the axis counted from where loopy starts
+  that loop (`get_hw_axis_base_for_codegen`), so two loops on one axis that
+  start at different values are compared as loopy runs them. A statement with
+  no loop on an axis that another statement's loop is on runs on every work
+  item of it, so a dependence to or from it is refused too: the scan of
+  `off` before the rows that read it, with the rows on `l.0`, used to be a
+  legal cast. A sum on a local axis is not a loop of its statement, and stays
+  allowed, since loopy synchronizes its partial sums. Its body reads on every
+  work item of the axis, though, and its statement stores the result from
+  one, so a sum whose body reads what another sum's statement stored, at the
+  same step or a later one, or the cell its own statement writes, is refused
+  too, where loopy asks for a global barrier and `buildable` used to pass;
+  two statements may still pass a sum's result between them outside their
+  sums. `ilp` and `vec` lose only their order, as before; spmv's rows and
+  p2p's targets on `g.0` are unchanged. The check
+  is asked after every step, so a skew that moves a tagged loop's dependences
+  onto two work items is refused as well. A monotone fact about a schedule
+  with a loop on a hardware axis says "within one work item", and the
+  transcripts are regenerated.
 
 ### Changed
 
