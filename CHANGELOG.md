@@ -1257,6 +1257,22 @@ with a pair of statement instances.
   since the body reads it where each loop starts. A domain no array bounds
   is still checked against the work limit before anything runs, by its
   bounding box.
+- The facts of a schedule are keyed by the kernel's definition, as the
+  kernel's own facts are (#75). Their ids started with `Schedule.key`, which
+  names the kernel by its name, so in a file that defines a `double` and
+  imports another as `helper_double`, `Schedule(double).split("i", 2)` and
+  `Schedule(helper_double).split("i", 2)` shared their ids: `loopty run`
+  kept the helper's cast facts in place of the local kernel's, which could
+  hide a refuted fact of one behind a decided fact of the other, and the
+  helper's agreement survived only through the `#2` a schedule run twice
+  gets. The ids now go through `lanky.ledger.fact_id`, with the kernel's
+  definition and then the target and the steps
+  (`Schedule.fact_id`): `cast:spmv.spmv@102:[c].split('j', 2, inner='j_in',
+  outer='j_out'):bijective`, and `agreement:spmv.spmv@102:[c]` for a kernel
+  run without a schedule. `Schedule.key` stays the readable call text, and a
+  term scheduled with no kernel behind it is named by its name,
+  `cast:transpose:[c]...`. `loopty.schedule.definition_of` gives what a fact
+  names an object by.
 
 ### Changed
 
@@ -1353,10 +1369,8 @@ with a pair of statement instances.
   `loopty.typing.postcondition_id(owner, module=, line=)` builds the
   postcondition's id for both sides. Every id `lanky check` prints and
   writes with `--json` for a kernel file changes this way, and the `lanky
-  check` transcripts show the new ids. Cast and agreement facts keep the ids
-  their schedule's key gives them, which names the kernel by its name alone,
-  so two kernels of one name scheduled in one `loopty run` still share them;
-  the README lists it among the limits.
+  check` transcripts show the new ids. A schedule's cast and agreement facts
+  are keyed by definition too, since #75 (see Fixed).
 - **A program's restatement of a callee's postcondition rests on the callee's
   fact.** `Program.facts` pointed at the callee's postcondition with a `from`
   entry in the provenance, which lanky had no way to read, so the ledger

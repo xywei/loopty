@@ -73,8 +73,10 @@ with the refusal as its reason; see
 :meth:`loopty.executor.LoopyExecutor.differential`.
 
 Every schedule keeps its own facts in the ledger, however many schedules of one
-kernel the file has, because a fact's id names the schedule it is about (see
-:attr:`loopty.schedule.Schedule.key`).
+kernel the file has, and however many kernels of one name it schedules (one
+defined there and one imported, say), because a fact's id names the kernel's
+definition and the schedule it is about (see
+:meth:`loopty.schedule.Schedule.fact_id`).
 """
 
 from __future__ import annotations
@@ -346,9 +348,10 @@ class RunVerb:
                 continue
             runs[fact.id] = runs.get(fact.id, 0) + 1
             if runs[fact.id] > 1:
-                # Two schedules with one key are one schedule, but a file may
-                # run it twice, on two sets of inputs: each run keeps its fact,
-                # so that a refuted one is not replaced by a later tested one.
+                # Two schedules with one id are one schedule of one kernel,
+                # but a file may run it twice, on two sets of inputs: each run
+                # keeps its fact, so that a refuted one is not replaced by a
+                # later tested one.
                 fact = dataclasses.replace(fact, id=f"{fact.id}#{runs[fact.id]}")
             ledger.add(fact)
             outputs = fact.provenance.get("outputs", {})

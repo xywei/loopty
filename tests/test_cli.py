@@ -569,10 +569,84 @@ def test_every_schedule_of_one_kernel_keeps_its_facts_in_the_ledger(tmp_path) ->
     kinds = [fact["kind"] for fact in facts]
     assert kinds.count("bijective") == kinds.count("monotone") == 2
     agreements = [fact["id"] for fact in facts if fact["kind"] == "agreement"]
-    four = "agreement:scale[c].split('i', 4, inner='i_inner', outer='i_outer')"
-    two = "agreement:scale[c].split('i', 2, inner='i_inner', outer='i_outer')"
+    four = "agreement:scale:[c].split('i', 4, inner='i_inner', outer='i_outer')"
+    two = "agreement:scale:[c].split('i', 2, inner='i_inner', outer='i_outer')"
     assert agreements == [four, two, f"{four}#2"]
     assert len({fact["id"] for fact in facts}) == len(facts) == 7
+
+
+HELPERS_TWICE = """
+from __future__ import annotations
+
+from lanky.prelude import Real
+
+from loopty import Arr, Fin, Schedule, kernel
+
+
+@kernel
+def double(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
+    for i in x.dom:
+        y[i] = 2.0 * x[i]
+"""
+
+TWICE = """
+from __future__ import annotations
+
+import numpy as np
+from lanky.prelude import Real
+
+from loopty import Arr, Fin, Schedule, kernel
+from {helpers} import double as helper_double
+
+
+@kernel
+def double(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
+    for i in x.dom:
+        y[i] = 3.0 * x[i]
+
+
+mine = Schedule(double).split("i", 2)
+theirs = Schedule(helper_double).split("i", 2)
+
+
+def example_inputs():
+    return {{"x": Arr.from_numpy(np.arange(4.0)), "y": Arr.zeros(4)}}
+"""
+
+
+def test_two_kernels_of_one_name_keep_their_schedules_facts_apart(tmp_path) -> None:
+    """The issue's files: a kernel and an imported one, both called ``double``.
+
+    The ids of a schedule's facts started with the kernel's name, so the two
+    splits shared them: the ledger held four facts where six are owed, the
+    local kernel's casts replaced by the helper's, and the helper's agreement
+    kept only through the ``#2`` a schedule run twice gets (#75). They are now
+    keyed by each kernel's definition, as its own facts are.
+    """
+    helpers = f"helpers_twice_{tmp_path.name.replace('-', '_')}"
+    (tmp_path / f"{helpers}.py").write_text(HELPERS_TWICE, encoding="utf-8")
+    path = tmp_path / "twice.py"
+    path.write_text(TWICE.format(helpers=helpers), encoding="utf-8")
+    out_path = tmp_path / "ledger.json"
+    assert main(["run", str(path), "--json", str(out_path)]) == 0
+    facts = json.loads(out_path.read_text(encoding="utf-8"))
+    ids = [fact["id"] for fact in facts]
+    assert len(set(ids)) == len(ids) == 6
+    assert not [identifier for identifier in ids if "#" in identifier]
+    steps = "[c].split('i', 2, inner='i_inner', outer='i_outer')"
+    by_where = {}
+    for fact in facts:
+        by_where.setdefault(fact["where"].split(":")[0], []).append(fact["id"])
+    assert sorted(by_where) == [f"{helpers}.py", "twice.py"]
+    for where, mine in by_where.items():
+        module = where.removesuffix(".py")
+        line = 11 if module == "twice" else 9
+        definition = f"{module}.double@{line}"
+        assert sorted(mine) == [
+            f"agreement:{definition}:{steps}",
+            f"cast:{definition}:{steps}:bijective",
+            f"cast:{definition}:{steps}:monotone",
+        ]
 
 
 # }}}

@@ -674,7 +674,13 @@ def test_the_pairs_run_in_both_layouts_and_both_agree() -> None:
     agreements = sorted(
         fact["id"] for fact in facts if fact["kind"] == "agreement"
     )
-    assert agreements == ["agreement:pairs[c]", "agreement:pairs[c].pack('f')"]
+    # Named by the kernel's definition, then the target and the steps.
+    (definition,) = {fact_id.split(":")[1] for fact_id in agreements}
+    assert definition.startswith("pairs.pairs@")
+    assert agreements == [
+        f"agreement:{definition}:[c]",
+        f"agreement:{definition}:[c].pack('f')",
+    ]
 
 
 def test_the_packed_pairs_keep_the_triangle_and_no_more() -> None:

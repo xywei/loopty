@@ -88,12 +88,17 @@ Fact ids
 --------
 
 A fact's id names the schedule it is about, precisely enough to tell it from
-every other schedule of the kernel: the kernel, the target, and every step up
-to the one the fact is about, with every argument it was given
-(:attr:`Schedule.key`). Two schedules of one kernel in one file therefore keep
-their facts apart in a ledger, which keeps one fact per id, while two that
-share their first steps share the facts about those steps, which are the same
-claims.
+every other schedule of every kernel: the kernel's definition, then the
+target and every step up to the one the fact is about, with every argument it
+was given (:meth:`Schedule.fact_id`). The definition is the module the
+kernel's file's path gives it, its qualified name and its line, through
+:func:`lanky.ledger.fact_id`, as every fact of the kernel itself is keyed, so
+two kernels of one name, one defined in a file and one imported into it, keep
+their schedules' facts apart. Two schedules of one kernel in one file keep
+theirs apart too, since a ledger keeps one fact per id, while two that share
+their first steps share the facts about those steps, which are the same
+claims. :attr:`Schedule.key` is the readable call text, which names the
+kernel by its name.
 
 Maps whose image has holes
 --------------------------
@@ -143,6 +148,7 @@ from typing import Any
 import islpy as isl
 import loopy as lp
 import pymbolic.primitives as prim
+from lanky.ledger import fact_id
 from pymbolic.mapper.substitutor import substitute
 
 from loopty import idx
@@ -163,6 +169,7 @@ __all__ = [
     "IllegalCast",
     "Schedule",
     "UnbuildableSchedule",
+    "definition_of",
     "parallel_tag",
 ]
 
@@ -1774,6 +1781,26 @@ def _target_reason(draft: _Draft) -> str | None:
 # }}}
 
 
+def definition_of(obj: Any, term: Term) -> dict[str, Any]:
+    """What the facts about ``obj`` name it by: its owner, module and line.
+
+    The keywords :func:`lanky.ledger.fact_id` takes. A kernel or a program
+    gives its definition, the qualified name, the module its file's path
+    gives it and its line, which is what its own facts are keyed by
+    (:mod:`loopty.kernel`); a term gives its name alone, since nothing says
+    where it was defined.
+    """
+    qualname = getattr(obj, "qualname", None)
+    if isinstance(qualname, str) and qualname and not isinstance(obj, Term):
+        line = getattr(obj, "line", None)
+        return {
+            "owner": qualname,
+            "module": getattr(obj, "module", None) or None,
+            "line": line if isinstance(line, int) else None,
+        }
+    return {"owner": term.name, "module": None, "line": None}
+
+
 def _term_of(obj: Any) -> Term:
     """The term of a kernel, a schedule, or a term."""
     if isinstance(obj, Term):
@@ -1865,6 +1892,9 @@ class Schedule:
     ) -> None:
         self._source = kernel
         self._term = _term_of(kernel)
+        #: What the ids of the schedule's facts name the kernel by; see
+        #: :meth:`fact_id`.
+        self._definition = definition_of(kernel, self._term)
         self._target = target
         self._sizes = dict(sizes or {})
         #: The layout of each array over a domain that is not boxed; only
@@ -2130,12 +2160,39 @@ class Schedule:
         with one key are one schedule. :attr:`history` and the repr are for
         reading and leave out what does not change the text (``split(j, 2)``
         does not name its halves), which two different schedules can differ
-        in. The id of a cast fact is ``cast:`` and this key up to the step it
-        is about, then its kind; that of the agreement a run of the schedule
-        records (:func:`loopty.executor.agreement`) is ``agreement:`` and the
-        whole key.
+        in. The facts are not named by this key, which names the kernel by
+        its name, and two kernels can share a name; see :meth:`fact_id`.
         """
         return _key(self._term.name, self._target, self._steps)
+
+    def fact_id(self, kind: str, detail: str = "") -> str:
+        """The id of a fact of ``kind`` about this schedule.
+
+        :func:`lanky.ledger.fact_id` over the kernel's definition, the module
+        its file's path gives it, its qualified name and its line, with the
+        target and the steps as :attr:`key` writes them, and ``detail``
+        after them::
+
+            agreement:spmv.spmv@102:[c].split('j', 2, inner='j_in', outer='j_out')
+
+        That is the id of the agreement a run of the schedule records
+        (:func:`loopty.executor.agreement`). A cast fact's is ``cast:`` and
+        the steps up to the one it is about, then its kind. Keyed by the
+        definition, as every fact of the kernel itself is, so that two
+        kernels of one name scheduled in one file, one defined there and one
+        imported, keep their facts apart (#75); a term scheduled with no
+        kernel behind it is named by its name.
+        """
+        return self._fact_id(kind, self._steps, detail)
+
+    def _fact_id(
+        self, kind: str, steps: Sequence[tuple[str, tuple, dict]], detail: str = ""
+    ) -> str:
+        """:meth:`fact_id`, over the steps given rather than the schedule's."""
+        text = _steps_text(self._target, steps)
+        return fact_id(
+            kind, **self._definition, detail=f"{text}:{detail}" if detail else text
+        )
 
     def __repr__(self) -> str:
         steps = "".join(f".{step}" for step in self._history)
@@ -3081,7 +3138,7 @@ class Schedule:
         """One ledger entry for one question about one step.
 
         ``step`` is the step's recipe, ``(method, args, kwargs)``, and the
-        fact's id is :attr:`key` with it as the last step: the steps up to
+        fact's id is :meth:`fact_id` with it as the last step: the steps up to
         this one, and not a count of them, because two schedules of one kernel
         both have a first step and keep facts in one ledger. ``about`` tells
         apart two facts of one kind about one step, such as the exactness of
@@ -3121,8 +3178,7 @@ class Schedule:
             provenance["reason"] = reason or detail
         suffix = f":{about}" if about else ""
         return Fact(
-            id=f"cast:{_key(self._term.name, self._target, (*self._steps, step))}"
-            f":{kind}{suffix}",
+            id=self._fact_id("cast", (*self._steps, step), f"{kind}{suffix}"),
             kind=kind,
             statement=statement,
             term=None,
@@ -3140,7 +3196,12 @@ class Schedule:
 
 def _key(name: str, target: str, steps: Sequence[tuple[str, tuple, dict]]) -> str:
     """``spmv[c].split('j', 2, inner='j_in', outer='j_out')``: :attr:`Schedule.key`."""
-    return f"{name}[{target}]" + "".join(f".{_call_text(step)}" for step in steps)
+    return name + _steps_text(target, steps)
+
+
+def _steps_text(target: str, steps: Sequence[tuple[str, tuple, dict]]) -> str:
+    """``[c].split('j', 2, inner='j_in', outer='j_out')``: a key after the name."""
+    return f"[{target}]" + "".join(f".{_call_text(step)}" for step in steps)
 
 
 def _call_text(step: tuple[str, tuple, dict]) -> str:

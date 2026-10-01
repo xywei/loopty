@@ -516,11 +516,12 @@ def test_realize_answers_for_every_reduction_writing_the_array() -> None:
 def test_the_facts_name_the_term_the_oracle_and_the_dependence_source() -> None:
     schedule = Schedule(ht.transpose_term()).split("i", 4)
     facts = schedule.facts()
-    step = "transpose[c].split('i', 4, inner='i_inner', outer='i_outer')"
-    assert schedule.key == step
+    steps = "[c].split('i', 4, inner='i_inner', outer='i_outer')"
+    assert schedule.key == f"transpose{steps}"
+    # A term has no definition behind it, and is named by its name.
     assert [fact.id for fact in facts] == [
-        f"cast:{step}:bijective",
-        f"cast:{step}:monotone",
+        f"cast:transpose:{steps}:bijective",
+        f"cast:transpose:{steps}:monotone",
     ]
     for fact in facts:
         assert fact.decided_by == "isl"

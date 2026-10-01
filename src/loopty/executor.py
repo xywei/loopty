@@ -685,22 +685,31 @@ def _agreement_fact(
 ) -> Any:
     """The agreement fact itself, named after the schedule that was run.
 
-    Its id is ``agreement:`` and the schedule's
-    :attr:`~loopty.schedule.Schedule.key`, so that two schedules of one kernel
-    run from one file keep two facts in the ledger; a kernel or a term run
-    without a schedule is named by its name and target alone.
+    Its id is the schedule's :meth:`~loopty.schedule.Schedule.fact_id`, which
+    names the kernel by its definition and then the target and the steps, so
+    that two schedules of one kernel run from one file keep two facts in the
+    ledger, and so do two kernels of one name. A kernel or a program run
+    without a schedule is named by its definition and the target alone, and a
+    term by its name and the target.
 
     It is placed at the term's first statement, or at the term's own
     :attr:`~loopty.term.Term.where` when it has one: a program's term does,
     since its first statement is some kernel's, perhaps in another file.
     """
-    from lanky.ledger import Fact, Status
+    from lanky.ledger import Fact, Status, fact_id
 
-    key = getattr(schedule, "key", None)
-    if not isinstance(key, str):
-        key = f"{term.name}[{provenance['target']}]"
+    from loopty.schedule import Schedule, definition_of
+
+    if isinstance(schedule, Schedule):
+        identifier = schedule.fact_id("agreement")
+    else:
+        identifier = fact_id(
+            "agreement",
+            **definition_of(schedule, term),
+            detail=f"[{provenance['target']}]",
+        )
     return Fact(
-        id=f"agreement:{key}",
+        id=identifier,
         kind="agreement",
         statement=(
             f"the scheduled run of {term.name} agrees with the native run "
