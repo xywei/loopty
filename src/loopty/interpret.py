@@ -32,7 +32,10 @@ does. Its reading of the term is literal:
   against the target's library (``sqrt`` is :func:`numpy.sqrt`).
 * A reduction adds its terms in the order the native ``reduce_sum`` does:
   lexicographically over its binders, the order of a generator's nested
-  ``for`` clauses, with Python's :func:`sum`, starting from ``0``.
+  ``for`` clauses, with Python's :func:`sum`, starting from ``0``. A bound of
+  its own binders is read where it is summed, and one of the loops around it
+  keeps the value it was read at where its loop started, as the body's loop
+  does.
 * A ragged array is read and written through the counts and offsets the
   kernel declares, as the statements before have left them
   (:meth:`loopty.arr.Arr.through`), which is how the native run and the
@@ -48,7 +51,7 @@ from __future__ import annotations
 import builtins
 import operator
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import islpy as isl
@@ -60,7 +63,7 @@ from loopty.arr import Arr
 from loopty.contract import integral_sort, native_storage, resolve_sizes
 from loopty.flow import bounds_dimension
 from loopty.term import Access, ArrType, Reduction, Stmt, Term, declared_layout
-from loopty.trace import accesses_in
+from loopty.trace import accesses_in, reductions_in
 
 __all__ = ["InterpretError", "TooLarge", "interpret"]
 
@@ -172,7 +175,9 @@ class _Member:
     ``pending`` has been read; from then on it is ``points``, the coordinates
     of its instances below the walk's level, and ``space`` is ``None``.
     ``levels`` gives the loop each bound of the domain bounds, by its depth, or
-    the statement's own depth for a bound of none.
+    the statement's own depth for a bound of none. ``read`` gives the bounds
+    read so far, by parameter, which a reduction's domain repeats for the
+    loops around it (see :meth:`_Run.reduction`).
     """
 
     index: int
@@ -183,6 +188,7 @@ class _Member:
     pending: dict[str, Any]
     levels: dict[str, int]
     points: list[tuple[int, ...]] | None = None
+    read: dict[str, int] = field(default_factory=dict)
 
     def at(
         self,
@@ -193,7 +199,12 @@ class _Member:
     ) -> _Member:
         """This statement one iteration further down, at ``env``."""
         return replace(
-            self, env=env, space=space, pending=dict(self.pending), points=points
+            self,
+            env=env,
+            space=space,
+            pending=dict(self.pending),
+            points=points,
+            read=dict(self.read),
         )
 
 
@@ -331,8 +342,10 @@ class _Run:
         A reflected bound is one parameter, read once, where the outermost
         loop it bounds starts. The body reads it again where each loop inside
         that one starts, ``for k in val.dom[r]`` inside ``for j in
-        val.dom[r]``, which gives the same value unless the term writes what
-        the bound reads in between; so a bound of two loops of one statement
+        val.dom[r]``, and where a sum over it inside that loop starts,
+        ``reduce_sum(val[r, k] for k in val.dom[r])``, which gives the same
+        value unless the term writes what the bound reads in between; so a
+        bound of two loops of one statement, or of a loop and a sum inside it,
         that reads an array the term writes is refused, rather than given one
         reading where the body has two.
         """
@@ -370,6 +383,17 @@ class _Run:
                         f"{self.term.name} writes {', '.join(touched)}, which it "
                         "reads: the body reads it where each of those loops "
                         "starts, and the interpreter reads it once for them all"
+                    )
+                summed = _summed_over(stmt, name)
+                if bounded and summed and touched:
+                    raise InterpretError(
+                        f"the bound {render(expr)} (the domain parameter {name}) "
+                        f"of {stmt.id} bounds the loop over {names[bounded[0]]} "
+                        f"and the sum over {', '.join(summed)} inside it, and "
+                        f"{self.term.name} writes {', '.join(touched)}, which it "
+                        "reads: the body reads it where the loop starts and "
+                        "again where the sum starts, and the interpreter reads "
+                        "it once for both"
                     )
                 pending[name] = expr
                 levels[name] = bounded[0] if bounded else len(names)
@@ -481,10 +505,16 @@ class _Run:
             except _Unknown:
                 continue
             member.space = _fix_param(member.space, name, value)
+            member.read[name] = value
             del member.pending[name]
 
     def instance(self, member: _Member) -> None:
-        """Run one statement at the point the walk has reached, if it has one."""
+        """Run one statement at the point the walk has reached, if it has one.
+
+        Its expressions see the bounds its loops were read at as well as its
+        loop variables, so that a sum inside the loops, whose domain repeats
+        their bounds, takes them as the loops did (:meth:`reduction`).
+        """
         if member.points is not None:
             if not member.points:
                 return
@@ -500,7 +530,7 @@ class _Run:
             if member.space.is_empty():
                 return
         self.spend()
-        stmt, point = member.stmt, member.env
+        stmt, point = member.stmt, {**member.read, **member.env}
         if stmt.guard is not None and not self.truth(stmt.guard, point):
             return
         value = self.value(stmt.expr, point)
@@ -724,7 +754,12 @@ class _Run:
 
         The domain's dimensions are the statement's inames, fixed by ``env``,
         followed by the reduction's own. An enclosing reduction's binders are
-        parameters of the domain, and ``env`` gives them too.
+        parameters of the domain, and ``env`` gives them too. So does a bound
+        of the statement's loops that the domain repeats, at the value it had
+        where its loop started: ``0 <= j < nl_cnt_r`` for a sum inside ``for
+        j in val.dom[r]`` holds at the ``j`` the loop reached, whatever the
+        loop has written into ``cnt[r]`` since. A bound of the sum's own
+        binders is read now, where the native ``reduce_sum`` reads it.
         """
         if node.op != "sum":
             raise InterpretError(f"no meaning for a reduction of kind {node.op!r}")
@@ -736,6 +771,25 @@ class _Run:
         return builtins.sum(terms)
 
     # }}}
+
+
+def _summed_over(stmt: Stmt, name: str) -> list[str]:
+    """The binders of the sums in ``stmt`` that the parameter ``name`` bounds.
+
+    A sum's domain has the statement's loops first and its own binders after
+    them (:meth:`_Run.reduction`), so only a constraint on one of those counts.
+    """
+    out: list[str] = []
+    for reduction in reductions_in((stmt.expr, stmt.guard)):
+        domain = reduction.domain
+        position = domain.find_dim_by_name(isl.dim_type.param, name)
+        if position < 0:
+            continue
+        dims = domain.get_var_names(isl.dim_type.set)
+        for level in range(len(stmt.inames), len(dims)):
+            if bounds_dimension(domain, level, position) and dims[level] not in out:
+                out.append(dims[level])
+    return out
 
 
 def _fold(apply: Any, values: Sequence[Any]) -> Any:

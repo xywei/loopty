@@ -442,6 +442,71 @@ def test_a_written_bound_of_two_loops_of_one_statement_is_refused() -> None:
     assert "the interpreter reads it once for them all" in fact.provenance["reason"]
 
 
+def sum_of_x_in_a_fiber_recounted(
+    x: Arr[Fin[m], Real],  # noqa: F821
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A sum over ``x`` once per entry of row ``r``, the row's length reset."""
+    for r in y.dom:
+        for j in val.dom[r]:
+            y[r] = y[r] + reduce_sum(x[i] for i in x.dom)
+            cnt[r] = 1
+
+
+def test_a_sum_in_a_fiber_keeps_the_length_its_loop_was_read_at() -> None:
+    # The sum's domain repeats ``0 <= j < nl_cnt_r`` from the loop around it.
+    # Read again where the sum starts, ``cnt[r]`` is 1 from ``j = 1`` on, so
+    # the sum was empty there and the interpreter disagreed with the body
+    # (y = [2, 2, 2]), which refuted a faithful trace.
+    from lanky.ledger import Status
+
+    arguments = row_loop_input()
+    copies = {name: value.copy() for name, value in arguments.items()}
+    Kernel(sum_of_x_in_a_fiber_recounted)(**arguments)
+    assert arguments["y"].numpy().tolist() == [4.0, 2.0, 6.0]
+    interpret(term_of(sum_of_x_in_a_fiber_recounted), copies)
+    for name, value in arguments.items():
+        assert copies[name].numpy().tobytes() == value.numpy().tobytes(), name
+    fact = Kernel(sum_of_x_in_a_fiber_recounted).facts()[-1]
+    assert fact.status is Status.TESTED, fact.provenance
+
+
+def row_sum_in_its_own_fiber_recounted(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The row summed once per entry of the row, the row's length reset."""
+    for r in y.dom:
+        for j in val.dom[r]:
+            y[r] = y[r] + reduce_sum(val[r, k] for k in val.dom[r])
+            cnt[r] = 1
+
+
+def test_a_written_bound_of_a_loop_and_a_sum_inside_it_is_refused() -> None:
+    # Natively the loop over ``j`` reads the row's length once, 2 for row 0,
+    # and the sum over ``k`` reads it each time it starts, 2 and then 1; the
+    # two share the one parameter ``nl_cnt_r``, which is read once.
+    from lanky.ledger import Status
+
+    from loopty.interpret import InterpretError
+
+    arguments = row_loop_input()
+    del arguments["x"]
+    copies = {name: value.copy() for name, value in arguments.items()}
+    Kernel(row_sum_in_its_own_fiber_recounted)(**arguments)
+    assert arguments["y"].numpy().tolist() == [4.0, 3.0, 23.0]
+    with pytest.raises(
+        InterpretError, match="bounds the loop over j and the sum over k inside it"
+    ):
+        interpret(term_of(row_sum_in_its_own_fiber_recounted), copies)
+    fact = Kernel(row_sum_in_its_own_fiber_recounted).facts()[-1]
+    assert fact.status is Status.ASSUMED
+    assert "again where the sum starts" in fact.provenance["reason"]
+
+
 def test_the_faithfulness_fact_of_a_kernel_writing_its_counts_is_tested() -> None:
     # The issue's kernel: the next row's length cleared after each row is
     # summed. Its differential run was tested and its faithfulness fact was

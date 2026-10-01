@@ -1249,14 +1249,17 @@ with a pair of statement instances.
   while its differential run was `tested`. It now walks the loop tree as the
   body runs it, and enumerates a loop when it reaches it: the bound of a loop
   over `val.dom[r]` is read where that loop starts, each time it starts, as
-  the native `for` reads it, and a reduction's where it is summed. So such a
-  kernel's fact is `tested` or `refuted` like any other. A bound is one
-  parameter of a domain, read once, so one that bounds two nested loops of
-  one statement (`for k in val.dom[r]` inside `for j in val.dom[r]`) and
-  reads an array the kernel writes is refused, and the fact stays `assumed`,
-  since the body reads it where each loop starts. A domain no array bounds
-  is still checked against the work limit before anything runs, by its
-  bounding box.
+  the native `for` reads it, and a reduction's where it is summed, while
+  the bounds of the loops around a reduction, which its domain repeats, keep
+  the values their loops were read at. So such a kernel's fact is `tested` or
+  `refuted` like any other. A bound is one parameter of a domain, read once,
+  so one that bounds two nested loops of one statement (`for k in
+  val.dom[r]` inside `for j in val.dom[r]`), or a loop and a sum inside it
+  (`reduce_sum(val[r, k] for k in val.dom[r])` inside `for j in
+  val.dom[r]`), and reads an array the kernel writes is refused, and the fact
+  stays `assumed`, since the body reads it where each loop or sum starts. A
+  domain no array bounds is still checked against the work limit before
+  anything runs, by its bounding box.
 - The facts of a schedule are keyed by the kernel's definition, as the
   kernel's own facts are (#75). Their ids started with `Schedule.key`, which
   names the kernel by its name, so in a file that defines a `double` and

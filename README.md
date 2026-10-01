@@ -507,8 +507,9 @@ end to end; the edges are sharp.
   reason, when no input runs natively, when the term calls a function the
   interpreter has no numpy counterpart for, or when one ragged bound of a
   statement bounds two of its loops (a fiber loop inside another over the
-  same row) and reads an array the kernel writes, which the body reads where
-  each loop starts and the interpreter reads once.
+  same row), or a loop and a sum inside it over the same row, and reads an
+  array the kernel writes, which the body reads where each loop or sum starts
+  and the interpreter reads once.
 
 **Not yet.**
 
