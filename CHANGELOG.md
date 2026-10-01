@@ -1226,6 +1226,17 @@ with a pair of statement instances.
   now keyed by definition (see Changed), so the restatement names the
   helper's fact by the id it has in the helper's own ledger, and each callee
   gets a restatement of its own.
+- A real literal stored into an integer array keeps its fraction until the
+  store (#73). The lowering handed loopy a Python `float` as it was, and loopy
+  writes an untyped constant in the type of the expression around it, which
+  on the right-hand side is the assignee's: `c[i] = u[i] * 0.5` into a `Nat`
+  `c` was generated as `c[i] = (int32_t) (u[i] * 0)`, so `[1, 2, 3, 4]` gave
+  `[0, 0, 0, 0]` compiled and `[0, 1, 1, 2]` natively. loopy also took `0.5`
+  for a `float32`, so half of an integer was computed in single precision.
+  A `float` is lowered as `np.float64` and a `complex` as `np.complex128`,
+  which loopy writes as they are; a complex literal single precision does
+  not hold, which loopy refused to type, lowers too. Note 17 in
+  `docs/loopy-notes.md`.
 
 ### Changed
 

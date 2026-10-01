@@ -358,6 +358,30 @@ class ExpressionLowerer(Mapper):
         return LoopyReduction("sum", inames, self.rec(expr.body))
 
     def map_constant(self, expr: Any) -> Any:
+        """A Python ``float`` becomes ``np.float64``, a ``complex`` ``np.complex128``.
+
+        loopy gives a bare Python number the type of the place it stands in,
+        and does not say so. Its C code generator writes one in the type
+        context of the expression around it, which on the right-hand side of
+        an assignment is the assignee's: ``c[i] = u[i] * 0.5`` into an integer
+        ``c`` came out as ``c[i] = (int32_t) (u[i] * 0)``. Its type inference
+        takes a float that single precision holds for a ``float32``, so
+        ``k[i] * 0.5`` of an integer ``k`` was computed in single precision
+        while numpy computes it in double. A numpy scalar is typed explicitly,
+        and loopy writes it as it is. Double precision is what numpy gives a
+        Python float beside an integer or a double, which is what the native
+        run computes with; see note 17 in ``docs/loopy-notes.md``.
+
+        Integers and booleans are left alone. A numpy scalar already says its
+        type, and ``np.float64`` is a subclass of ``float``, so it is asked
+        about first.
+        """
+        if isinstance(expr, np.generic | bool | int):
+            return expr
+        if isinstance(expr, float):
+            return np.float64(expr)
+        if isinstance(expr, complex):
+            return np.complex128(expr)
         return expr
 
     def map_variable(self, expr: Any) -> prim.Variable:
