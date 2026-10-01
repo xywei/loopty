@@ -141,8 +141,9 @@ decided                                   isl            spmv.py:102  spmv      
 decided                                   type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
 tested                                    interpreter    spmv.py:102  spmv           the traced term computes what the body computes
 assumed under postcondition:spmv.scan@69  -              spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
+tested                                    interpreter    spmv.py:115  solve          the traced term computes what the body computes
 
-20 facts: 2 assumed, 15 decided, 3 tested
+21 facts: 2 assumed, 15 decided, 4 tested
 ```
 
 Read the `BY` column.
@@ -161,9 +162,9 @@ Read the `BY` column.
 - `property-test` established the theorem. In a checkout with `lanky[lean]`
   installed this row reads `proved lean` instead. loopty does not pull the Lean
   extra, so a plain `uv sync --group dev` here gives the tested row.
-- `interpreter` tested the last fact of each kernel, the only one about the
-  trace itself: every other row is about the term tracing recorded, and this
-  one asks whether that term is the body. The term is run by loopty's own
+- `interpreter` tested the last fact of each kernel and of the program, the
+  only one about the trace itself: every other row is about the term tracing
+  recorded, and this one asks whether that term is the body. The term is run by loopty's own
   interpreter, statement by statement over each statement's isl domain, and
   compared with the body run natively, on the file's `example_inputs()` and on
   three inputs drawn from the declared types. `--json` lists the inputs; a

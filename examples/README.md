@@ -106,7 +106,8 @@ beside it is `tested` here, and `proved` on a machine with the Lean extra
 installed. The last row of each kernel, `tested` by `interpreter`, is the one
 fact about the trace itself: the traced term, run by loopty's interpreter,
 agrees with the body run natively, on this file's `example_inputs()` and on
-three inputs drawn from the declared types.
+three inputs drawn from the declared types. The program `solve` has that fact
+too, about the term its two calls compose into.
 
 ```console
 $ uv run lanky check examples/spmv.py
@@ -132,8 +133,9 @@ decided                                   isl            spmv.py:102  spmv      
 decided                                   type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
 tested                                    interpreter    spmv.py:102  spmv           the traced term computes what the body computes
 assumed under postcondition:spmv.scan@69  -              spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
+tested                                    interpreter    spmv.py:115  solve          the traced term computes what the body computes
 
-20 facts: 2 assumed, 15 decided, 3 tested
+21 facts: 2 assumed, 15 decided, 4 tested
 ```
 
 ### loopty run examples/spmv.py
@@ -548,26 +550,29 @@ void burgers_rhs(int32_t const n, double const *__restrict__ u, double *__restri
 
 ### lanky check examples/composition.py
 
-The two kernels' obligations. The program adds no row: neither kernel states
-a postcondition for it to restate.
+The two kernels' obligations, and the program's one fact: neither kernel
+states a postcondition for it to restate, and its last row, `tested` by
+`interpreter`, says that its term, the two calls composed, computes what its
+body computes.
 
 ```console
 $ uv run lanky check examples/composition.py
-STATUS   BY           WHERE              OWNER       STATEMENT
--------  -----------  -----------------  ----------  ------------------------------------------------------
-decided  isl          composition.py:65  flux        f[j] is in bounds for every instance of S0
-decided  isl          composition.py:65  flux        u[j] is in bounds for every instance of S0
-decided  isl          composition.py:65  flux        distinct instances of S0 write distinct cells of f
-decided  isl          composition.py:61  flux        the source order runs every dependence forward in time
-tested   interpreter  composition.py:61  flux        the traced term computes what the body computes
-decided  isl          composition.py:73  divergence  rhs[i] is in bounds for every instance of S0
-decided  isl          composition.py:73  divergence  f[i + 1] is in bounds for every instance of S0
-decided  isl          composition.py:73  divergence  f[i - 1] is in bounds for every instance of S0
-decided  isl          composition.py:73  divergence  distinct instances of S0 write distinct cells of rhs
-decided  isl          composition.py:68  divergence  the source order runs every dependence forward in time
-tested   interpreter  composition.py:68  divergence  the traced term computes what the body computes
+STATUS   BY           WHERE              OWNER        STATEMENT
+-------  -----------  -----------------  -----------  ------------------------------------------------------
+decided  isl          composition.py:65  flux         f[j] is in bounds for every instance of S0
+decided  isl          composition.py:65  flux         u[j] is in bounds for every instance of S0
+decided  isl          composition.py:65  flux         distinct instances of S0 write distinct cells of f
+decided  isl          composition.py:61  flux         the source order runs every dependence forward in time
+tested   interpreter  composition.py:61  flux         the traced term computes what the body computes
+decided  isl          composition.py:73  divergence   rhs[i] is in bounds for every instance of S0
+decided  isl          composition.py:73  divergence   f[i + 1] is in bounds for every instance of S0
+decided  isl          composition.py:73  divergence   f[i - 1] is in bounds for every instance of S0
+decided  isl          composition.py:73  divergence   distinct instances of S0 write distinct cells of rhs
+decided  isl          composition.py:68  divergence   the source order runs every dependence forward in time
+tested   interpreter  composition.py:68  divergence   the traced term computes what the body computes
+tested   interpreter  composition.py:76  burgers_rhs  the traced term computes what the body computes
 
-11 facts: 9 decided, 2 tested
+12 facts: 9 decided, 3 tested
 ```
 
 ### loopty run examples/composition.py

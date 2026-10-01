@@ -18,8 +18,8 @@ Run this file three ways.
     compiled program with the native one.
 
 ``lanky check examples/composition.py``
-    The two kernels' obligations. The program adds none: neither kernel states
-    a postcondition for it to restate.
+    The two kernels' obligations, and the program's ``trace-faithful`` fact;
+    neither kernel states a postcondition for the program to restate.
 
 ``loopty run examples/composition.py``
     Each kernel alone, and the program as one kernel, compiled and compared

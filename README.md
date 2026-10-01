@@ -55,7 +55,7 @@ decided                                   type           spmv.py:112  spmv      
 tested                                    interpreter    spmv.py:102  spmv           the traced term computes what the body computes
 assumed under postcondition:spmv.scan@69  -              spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
 ...
-20 facts: 2 assumed, 15 decided, 3 tested
+21 facts: 2 assumed, 15 decided, 4 tested
 ```
 
 Look at the `x[col[r, j]]` row, and at what decided it. That indirection is the
@@ -192,9 +192,9 @@ table of row starts. Both compiled runs agree with the native one.
 - **The reference implementation is the kernel.** The same body runs on numpy
   under plain `python` and traces to the term loopy compiles, so the differential
   test compares a program with itself rather than with a second implementation.
-  That the trace *is* the body is checked too, not assumed: every kernel's
-  ledger has a `trace-faithful` fact, the traced term interpreted and compared
-  with the native run, bit for bit when the output is `exact`.
+  That the trace *is* the body is checked too, not assumed: every kernel and
+  every program has a `trace-faithful` fact, the traced term interpreted and
+  compared with the native run, bit for bit when the output is `exact`.
 - **The index set of an argument is a type, and not a box.** An array over the
   lower triangle, a band, a sum with affine fibers or a union of pieces is
   written as that set, `Arr[Where[i: Fin[n], j: Fin[n], j < i], Real]`, and its
