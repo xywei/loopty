@@ -222,6 +222,19 @@ def test_an_agreement_fact_is_named_after_the_schedule_that_ran() -> None:
     ).id
 
 
+def test_a_schedule_of_a_schedule_names_the_kernel_by_its_definition() -> None:
+    # ``Schedule`` takes a schedule too, and starts from its term. Its facts
+    # name the kernel behind it, as the first schedule's do, and not the
+    # term's name, which two kernels can share (#75).
+    split = Schedule(Schedule(doubled)).split("i", 2)
+    steps = "[c].split('i', 2, inner='i_inner', outer='i_outer')"
+    assert split.fact_id("agreement") == f"agreement:{doubled.definition}:{steps}"
+    assert [fact.id for fact in split.facts()] == [
+        f"cast:{doubled.definition}:{steps}:bijective",
+        f"cast:{doubled.definition}:{steps}:monotone",
+    ]
+
+
 def test_the_exactness_class_of_an_output_is_the_weakest_of_three() -> None:
     term = ht.spmv_term(exactness="exact")
     plain = Schedule(term)

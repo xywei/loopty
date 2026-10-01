@@ -1788,9 +1788,12 @@ def definition_of(obj: Any, term: Term) -> dict[str, Any]:
     The keywords :func:`lanky.ledger.fact_id` takes. A kernel or a program
     gives its definition, the qualified name, the module its file's path
     gives it and its line, which is what its own facts are keyed by
-    (:mod:`loopty.kernel`); a term gives its name alone, since nothing says
-    where it was defined.
+    (:mod:`loopty.kernel`); a schedule gives the definition of what it
+    schedules; a term gives its name alone, since nothing says where it was
+    defined.
     """
+    if isinstance(obj, Schedule):
+        return dict(obj._definition)
     qualname = getattr(obj, "qualname", None)
     if isinstance(qualname, str) and qualname and not isinstance(obj, Term):
         line = getattr(obj, "line", None)
