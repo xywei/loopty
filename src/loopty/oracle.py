@@ -281,7 +281,8 @@ def is_monotone(schedule: isl.Map, deps: isl.Map) -> Verdict:
     Self-dependences are dropped first: an instance never has to run before
     itself. Parallel (``g.*``, ``l.*``) inames are unordered and must be removed
     from the schedule by the caller before asking, because this question is about
-    a sequential order.
+    a sequential order. That a dependence joins no two work items of a hardware
+    axis is a separate question, which :mod:`loopty.schedule` asks.
     """
     deps = deps.subtract(_identity_like(deps))
     if deps.is_empty():

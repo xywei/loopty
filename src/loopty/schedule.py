@@ -6,9 +6,10 @@ transform and then hand the result to a small checker, which asks isl two
 questions: is the reindexing a bijection on statement instances, and is the new
 execution order monotone on the dependence relation? Parallel inames (``g.*``,
 ``l.*``, ``ilp``, ``vec``) carry no order, so they are dropped from the order
-before the second question is asked. This is the de Bruijn criterion applied
-to scheduling: any Python transformation is admissible because its output is
-checked, not its code.
+before the second question is asked, and a hardware axis (``g.*``, ``l.*``)
+also may not join two work items by a dependence (see "Work items" below).
+This is the de Bruijn criterion applied to scheduling: any Python
+transformation is admissible because its output is checked, not its code.
 
 Three things have to be written down for those two questions to be askable.
 
@@ -49,6 +50,35 @@ between "tiling is illegal here" and "instance (0, 8) writes what instance
 (1, 7) reads, and your tiling runs them the other way round". The refuted fact
 the exception carries says the same thing: its ``reason`` is the exception's
 message, which is what lanky prints under a ``REFUTED`` line.
+
+Work items
+----------
+
+A loop on a hardware axis is more than unordered. loopy runs it as the launch
+grid, outside every loop of the kernel: each work item runs the whole kernel at
+its own value of the loop, and nothing in a kernel orders two work items
+through global memory. There is no barrier across groups, loopy puts one
+between the work items of a group only for a local temporary, and its own
+check of the barriers a kernel needs asks about pairs of instructions, so a
+statement that depends on itself across a sequential loop is never asked
+about. Leaving the hardware loop out of the time vector reads as "the loops
+around it order everything else", and on a device they order nothing between
+two work items: ``jacobi`` with ``i`` on ``g.0`` reads at step ``t + 1`` what
+the neighbouring group wrote at step ``t``, with no barrier between them.
+
+So the second question has a second half, asked when the order passes: no
+dependence may join instances on two work items. An instance's work item
+along an axis is the value of its loop on that axis, counted from where loopy
+starts that loop (see :func:`_work_items`). A statement with no loop on an
+axis that a loop of another statement is on runs on every work item of it, as
+loopy would run it, so every dependence to or from it joins two work items.
+The loop of a sum is not a loop of its statement here: the whole sum happens
+inside one instance, loopy synchronizes the partial sums of a sum on a local
+axis through local memory, and an axis that only sums are on is not asked
+about, so local sums stay allowed. ``ilp`` and ``vec`` loops run inside one
+work item, and only lose their order. A refusal names the dependence and the
+two work items: ``S0[t=0, i=1] writes u[1, 1] read by S0[t=1, i=2] on another
+work item``.
 
 Legal is not the same as buildable
 ----------------------------------
@@ -171,6 +201,8 @@ __all__ = [
 #: among them although neither is launched in parallel: loopy runs such a loop
 #: around each instruction of its body separately (unrolled, or in vectors),
 #: so two statements of the loop no longer interleave as the source wrote.
+#: ``g.*`` and ``l.*`` are launched in parallel, and the other loops do not
+#: order their instances either; :func:`_work_items` is the rest of that.
 PARALLEL_TAG_PREFIXES = ("g.", "l.", "ilp", "vec")
 
 
@@ -298,7 +330,12 @@ def _coefficients(
 def _nests(
     layout: _Layout, order: Sequence[str], tags: dict[str, str]
 ) -> dict[str, tuple[str, ...]]:
-    """Each statement's ordered loops, with the unordered ones left out."""
+    """Each statement's ordered loops, with the unordered ones left out.
+
+    A loop on a hardware axis is left out as ``ilp`` and ``vec`` are, which
+    is right only for two instances on one work item; that a dependence joins
+    no two work items is asked separately (see :func:`_work_items`).
+    """
     return {
         stmt_id: tuple(
             iname
@@ -777,6 +814,187 @@ def _cross_check(term: Term, mine: isl.Map | None) -> tuple[isl.Map | None, str]
     if mine.is_equal(theirs):
         return mine, "agree with loopty.flow"
     return mine.union(theirs), "differ from loopty.flow; checked against the union"
+
+
+# }}}
+
+
+# {{{ work items
+
+
+def _grid_axis(tag: Any, name: str) -> str | None:
+    """The group or local axis a tag puts the loop ``name`` on, or ``None``.
+
+    Read as loopy reads the tag, and named as loopy prints it: ``g.0``,
+    ``l.1``. ``l.auto``, whose axis loopy has not chosen, is taken to be an
+    axis of the loop's own, which can only refuse more; loopy refuses the
+    tag when it generates code in any case. ``vec`` is not one: a vectorized
+    loop runs in one work item.
+    """
+    from loopy.kernel.data import AutoLocalInameTagBase, GroupInameTag, LocalInameTag
+
+    parsed = _loopy_tag(tag)
+    if isinstance(parsed, GroupInameTag | LocalInameTag):
+        return str(parsed)
+    if isinstance(parsed, AutoLocalInameTagBase):
+        return f"{parsed} ({name})"
+    return None
+
+
+def _grid_base(kernel: Any, name: str) -> tuple[str, tuple[str, ...]] | None:
+    """Where loopy starts counting the work items of the loop ``name``.
+
+    loopy runs a loop on a hardware axis as ``name = base + index``, where
+    ``index`` is the work item's along the axis and ``base`` the static
+    minimum of the loop's lower bound over the sizes
+    (``loopy.kernel.tools.get_hw_axis_base_for_codegen``, which loopy's code
+    generation and its own race check both use). Returns ``base`` as isl
+    text with the parameters it names, or ``None`` when there is no kernel to
+    ask or loopy finds no such minimum.
+    """
+    if kernel is None:
+        return None
+    from loopy.kernel.tools import get_hw_axis_base_for_codegen
+    from loopy.symbolic import aff_to_expr
+
+    try:
+        base = get_hw_axis_base_for_codegen(kernel.default_entrypoint, name)
+        text = idx.isl_expr(aff_to_expr(base))
+    except Exception:  # noqa: BLE001 - a start loopy cannot say is not known
+        return None
+    space = base.get_space()
+    params = tuple(
+        space.get_dim_name(isl.dim_type.param, k)
+        for k in range(space.dim(isl.dim_type.param))
+    )
+    return text, params
+
+
+@dataclass(frozen=True)
+class _WorkItems:
+    """Where on the launch grid each statement instance runs.
+
+    ``axes`` are the group and local axes a loop of some statement is on, by
+    name, and ``loops[stmt_id][axis]`` is that statement's loop on the axis,
+    or ``None`` when it runs on every work item of it. ``coordinates[axis]``
+    maps an instance of the schedule's layout to its work item along the
+    axis. ``known`` names the loops whose start loopy says, and ``hidden``
+    the parameters that stand for the start of each of the others.
+    """
+
+    axes: tuple[str, ...]
+    loops: dict[str, dict[str, str | None]]
+    coordinates: dict[str, isl.Map]
+    known: frozenset[str]
+    hidden: frozenset[str]
+
+
+def _work_items(
+    layout: _Layout, tags: Mapping[str, str], kernel: Any, taken: set[str]
+) -> _WorkItems | None:
+    """Each instance's work item along every hardware axis, or ``None``.
+
+    ``None`` when no loop of any statement is on a group or a local axis,
+    which leaves nothing to ask. A sum's loop is not a statement's (see
+    "Work items" in the module docstring), so an axis that only sums are on
+    is not one of them.
+
+    An instance's work item along an axis is ``x - base``: ``x`` the value of
+    its statement's loop on the axis and ``base`` where loopy starts counting
+    that loop's work items (see :func:`_grid_base`). Two loops on one axis
+    can start at different values, and then ``i = 3`` in ``1 <= i < n`` and
+    ``k = 3`` in ``0 <= k < n`` are two work items while ``i = 4`` and ``k =
+    3`` are one. Without a kernel to read the start off (see
+    :attr:`Schedule.kernel`), or when loopy finds none, the start is a
+    parameter of its own, not one of ``taken``, so that two instances are
+    found to share a work item only when they are of one loop and agree on
+    it.
+
+    A statement with no loop on the axis runs on every work item of it, and
+    so is taken to be at any work item at all; so is one with two loops on
+    the axis, which loopy refuses to generate code for. Every dependence to
+    or from either joins two work items.
+    """
+    on: dict[str, dict[str, list[str]]] = {}
+    for stmt_id in layout.stmt_ids:
+        mine: dict[str, list[str]] = {}
+        for name in layout.coords[stmt_id]:
+            axis = _grid_axis(tags[name], name) if name in tags else None
+            if axis is not None:
+                mine.setdefault(axis, []).append(name)
+        on[stmt_id] = mine
+    axes = tuple(sorted({axis for mine in on.values() for axis in mine}))
+    if not axes:
+        return None
+
+    starts: dict[str, tuple[str, tuple[str, ...]]] = {}
+    known: set[str] = set()
+    hidden: set[str] = set()
+    for name in sorted({n for mine in on.values() for ns in mine.values() for n in ns}):
+        start = _grid_base(kernel, name)
+        if start is None:
+            param = f"start_{name}"
+            while param in taken or param in hidden:
+                param += "_"
+            hidden.add(param)
+            start = (param, (param,))
+        else:
+            known.add(name)
+        starts[name] = start
+
+    # Primed names, which no size or loop of a kernel can have, since a
+    # Python identifier cannot hold a prime and isl's syntax can.
+    source = ", ".join(["s'", *(f"x{k}'" for k in range(layout.width))])
+    coordinates: dict[str, isl.Map] = {}
+    for axis in axes:
+        out: isl.Map | None = None
+        for stmt_id in layout.stmt_ids:
+            loops = on[stmt_id].get(axis, [])
+            constraints = [f"s' = {layout.index(stmt_id)}"]
+            params: tuple[str, ...] = ()
+            if len(loops) == 1:
+                base, params = starts[loops[0]]
+                position = layout.coords[stmt_id].index(loops[0])
+                constraints.append(f"h' = x{position}' - ({base})")
+            prefix = f"[{', '.join(params)}] -> " if params else ""
+            piece = isl.Map(
+                f"{prefix}{{ [{source}] -> [h'] : {' and '.join(constraints)} }}"
+            )
+            out = piece if out is None else out.union(piece)
+        assert out is not None
+        coordinates[axis] = out.coalesce()
+    return _WorkItems(
+        axes=axes,
+        loops={
+            stmt_id: {
+                axis: loops[0] if len(loops := on[stmt_id].get(axis, [])) == 1 else None
+                for axis in axes
+            }
+            for stmt_id in layout.stmt_ids
+        },
+        coordinates=coordinates,
+        known=frozenset(known),
+        hidden=frozenset(hidden),
+    )
+
+
+#: Two work items of one axis: two values of its coordinate.
+_OTHER_WORK_ITEM = "{ [h] -> [g] : g < h or g > h }"
+
+
+def _apart(reindex: isl.Map, coordinate: isl.Map) -> isl.Map:
+    """The pairs of the term's instances a schedule puts on two work items.
+
+    ``reindex`` takes the term's instances to the schedule's, and
+    ``coordinate`` takes those to their work item along one axis (see
+    :func:`_work_items`); a pair is apart when some work item of the first
+    differs from some work item of the second, which for a statement that
+    runs on every work item is always.
+    """
+    placed = reindex.apply_range(coordinate)
+    return placed.apply_range(isl.Map(_OTHER_WORK_ITEM)).apply_range(
+        placed.reverse()
+    )
 
 
 # }}}
@@ -2151,7 +2369,13 @@ class Schedule:
         A tag is a coordinate in the target's execution type, and the parallel
         ones are the interesting case: they remove the iname from the order, so
         tagging a loop that carries a dependence is rejected here rather than
-        producing a race at run time.
+        producing a race at run time. A hardware axis (``g.*``, ``l.*``) is
+        the launch grid besides, and nothing orders two of its work items, so
+        a dependence between instances on two work items is rejected too,
+        whichever loop carries it: ``i`` on ``g.0`` in a stencil whose step
+        ``t + 1`` reads the neighbours of step ``t``, and every dependence to
+        or from a statement with no loop on the axis, which runs on every
+        work item of it (see "Work items" in the module docstring).
 
         A name that is neither a loop nor the loop of a reduction, and a tag
         loopy cannot read, are refused with a ``ValueError`` before anything
@@ -2876,20 +3100,37 @@ class Schedule:
         bad = None if overall.ok else self._first_violation(schedule)
         refused = bad is not None or not overall.ok
         witness = overall.witness if bad is None else bad[1]
+        detail = overall.detail if bad is None else bad[2]
         if bad is not None:
             message = self._render_violation(text, *bad)
         elif refused:
             message = f"{text} illegal: {overall.detail}"
         else:
             message = ""
+        # The order leaves the loops on hardware axes out, which is right for
+        # two instances on one work item; a dependence between two work items
+        # is refused whatever the order (see "Work items" in the module
+        # docstring).
+        work = _work_items(
+            layout,
+            draft.tags,
+            draft.kernel,
+            set(self._params) | set(self._term.sizes),
+        )
+        if not refused and work is not None:
+            crossing = self._first_crossing(text, reindex, work)
+            if crossing is not None:
+                refused = True
+                message, witness, detail = crossing
+        within = "" if work is None else ", within one work item"
         facts.append(
             self._fact(
                 "monotone",
                 f"the order after {text} runs every dependence of "
-                f"{self._term.name} forward",
+                f"{self._term.name} forward{within}",
                 status="refuted" if refused else "decided",
                 witness=witness,
-                detail=overall.detail if bad is None else bad[2],
+                detail=detail,
                 step=recipe,
                 reason=message,
             )
@@ -2995,23 +3236,11 @@ class Schedule:
         lex = isl.Map.lex_lt(timed.get_space().domain())
         violating_times = timed.subtract(lex)
         inverse = schedule.reverse()
-        bad = (
+        bad = self._at_hint(
             violating_times.apply_domain(inverse)
             .apply_range(inverse)
             .intersect(relation)
         )
-        if self._sizes:
-            names = bad.get_var_names(isl.dim_type.param)
-            fixed = bad
-            for name, value in self._sizes.items():
-                if name in names:
-                    fixed = fixed.fix_val(
-                        isl.dim_type.param,
-                        names.index(name),
-                        isl.Val.int_from_si(bad.get_ctx(), value),
-                    )
-            if not fixed.is_empty():
-                bad = fixed
         n_params = bad.dim(isl.dim_type.param)
         n_in = bad.dim(isl.dim_type.in_)
         wrapped = bad.wrap()
@@ -3063,6 +3292,178 @@ class Schedule:
             f"{source_verb} {dep.array}[{cell}] {sink_verb} by "
             f"{_instance_text(sink_id, sink_coords)} scheduled earlier{at}"
         )
+
+    def _at_hint(self, obj: Any) -> Any:
+        """``obj`` with the sizes fixed at the hint, if it has a point there.
+
+        A witness is read off at the sizes the schedule was given when it
+        can be (see :meth:`_witness`), and at isl's choice when the hint
+        leaves nothing to read.
+        """
+        if not self._sizes:
+            return obj
+        names = obj.get_var_names(isl.dim_type.param)
+        fixed = obj
+        for name, value in self._sizes.items():
+            if name in names:
+                fixed = fixed.fix_val(
+                    isl.dim_type.param,
+                    names.index(name),
+                    isl.Val.int_from_si(obj.get_ctx(), value),
+                )
+        return obj if fixed.is_empty() else fixed
+
+    def _first_crossing(
+        self, text: str, reindex: isl.Map, work: _WorkItems
+    ) -> tuple[str, tuple, str] | None:
+        """A dependence the schedule puts on two work items, or ``None``.
+
+        Asked of the union of the dependences first, which is what the verdict
+        is about, and of each dependence and each axis only when there is a
+        refusal to explain, as :meth:`_first_violation` is. Returns the
+        message, the witness and the detail of the refusal. ``reindex`` takes
+        the term's instances to the schedule's.
+        """
+        total = self._deps_total
+        if total is None:
+            return None
+        total = total.subtract(
+            isl.Map.identity(total.get_space().domain().map_from_set())
+        )
+        apart = {
+            axis: _apart(reindex, work.coordinates[axis]) for axis in work.axes
+        }
+        crossed = [
+            axis for axis in work.axes if not total.intersect(apart[axis]).is_empty()
+        ]
+        if not crossed:
+            return None
+        for dep in self._deps:
+            for axis in work.axes:
+                if dep.relation.intersect(apart[axis]).is_empty():
+                    continue
+                return self._render_crossing(text, dep, axis, reindex, work)
+        return self._unattributed_crossing(  # pragma: no cover - see below
+            text, total.intersect(apart[crossed[0]]), crossed[0], reindex, work
+        )
+
+    def _unattributed_crossing(
+        self,
+        text: str,
+        relation: isl.Map,
+        axis: str,
+        reindex: isl.Map,
+        work: _WorkItems,
+    ) -> tuple[str, tuple, str]:  # pragma: no cover - loopy.flow agrees here
+        """A crossing only ``loopy.flow``'s dependences have, which name no cell.
+
+        The schedule is checked against the union of both (see
+        :func:`_cross_check`), so a dependence only the other finds is refused
+        too, with the pair of instances and no array cell.
+        """
+        witness, _ = self._crossing_witness(relation, axis, reindex, work)
+        message = (
+            f"{text} illegal: a dependence loopty.flow finds joins two work "
+            f"items of {axis}, and nothing in a kernel orders two work items "
+            "through global memory"
+        )
+        return message, witness, f"a dependence joins two work items of {axis}"
+
+    def _crossing_witness(
+        self, relation: isl.Map, axis: str, reindex: isl.Map, work: _WorkItems
+    ) -> tuple[tuple, tuple[int, int]]:
+        """A pair of ``relation`` on two work items of ``axis``, and the two.
+
+        The pair and its work items are sampled together, at the size hint
+        where there is a point there, and the parameters that stand for a
+        start loopy could not say are dropped first, since a witness is read
+        at sizes and not at those.
+        """
+        placed = reindex.apply_range(work.coordinates[axis])
+        pairs = (
+            placed.product(placed)
+            .intersect_domain(relation.wrap())
+            .intersect_range(isl.Map(_OTHER_WORK_ITEM).wrap())
+        )
+        points = pairs.wrap().flatten()
+        for name in work.hidden:
+            names = points.get_var_names(isl.dim_type.param)
+            if name in names:
+                points = points.project_out(isl.dim_type.param, names.index(name), 1)
+        points = self._at_hint(points)
+        n_params = points.dim(isl.dim_type.param)
+        names = points.get_var_names(isl.dim_type.param)
+        if n_params:
+            points = points.move_dims(
+                isl.dim_type.set, 0, isl.dim_type.param, 0, n_params
+            )
+        point = isl_oracle.sample_point(points)
+        if point is None:  # pragma: no cover - the pairs are known to be there
+            return (), (0, 0)
+        params = dict(zip(names, point[:n_params], strict=True))
+        width = self._origin_layout.width + 1
+        values = point[n_params:]
+        source = self._name_instance(values[:width])
+        sink = self._name_instance(values[width : 2 * width])
+        return (source, sink, params), (values[2 * width], values[2 * width + 1])
+
+    def _render_crossing(
+        self, text: str, dep: _Dep, axis: str, reindex: isl.Map, work: _WorkItems
+    ) -> tuple[str, tuple, str]:
+        """The refusal of a dependence between two work items, and its witness.
+
+        Which instance, which cell, and why the two run on two work items:
+        the loop on the axis puts them there, by its values, or one of the
+        statements has no loop on the axis and runs on every work item of it.
+        """
+        witness, (first, second) = self._crossing_witness(
+            dep.relation, axis, reindex, work
+        )
+        (source_id, source_coords), (sink_id, sink_coords), params = witness
+        source_loop = work.loops[source_id][axis]
+        sink_loop = work.loops[sink_id][axis]
+        if source_loop is None or sink_loop is None:
+            everywhere = list(
+                dict.fromkeys(
+                    stmt_id
+                    for stmt_id, loop in (
+                        (source_id, source_loop),
+                        (sink_id, sink_loop),
+                    )
+                    if loop is None
+                )
+            )
+            verb = "runs" if len(everywhere) == 1 else "run"
+            how = (
+                f"{' and '.join(everywhere)} {verb} in no loop on {axis}, so on "
+                "every work item of it"
+            )
+        else:
+            one = source_loop == sink_loop
+            loops = source_loop if one else f"{source_loop} and {sink_loop}"
+            which = (
+                f"work items {first} and {second} of it"
+                if {source_loop, sink_loop} <= work.known
+                else "two work items of it"
+            )
+            how = (
+                f"the {'loop' if one else 'loops'} {loops} on {axis} "
+                f"{'runs' if one else 'run'} them on {which}"
+            )
+        source_verb, sink_verb = dep.verbs()
+        cell = _cell_text(dep.source_indices, source_coords, params)
+        at = _sizes_text(params, self._sizes)
+        message = (
+            f"{text} illegal: instance {_instance_text(source_id, source_coords)} "
+            f"{source_verb} {dep.array}[{cell}] {sink_verb} by "
+            f"{_instance_text(sink_id, sink_coords)} on another work item{at}: "
+            f"{how}, and nothing in a kernel orders two work items through "
+            "global memory"
+        )
+        detail = (
+            f"a {dep.kind} dependence on {dep.array} joins two work items of {axis}"
+        )
+        return message, witness, detail
 
     # }}}
 
