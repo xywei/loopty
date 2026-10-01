@@ -1,6 +1,6 @@
 # Notes on loopy and islpy
 
-Fourteen interactions with loopty's dependencies that cost real debugging
+Seventeen interactions with loopty's dependencies that cost real debugging
 time, each with the local workaround and the reason it is local. No upstream
 issues were filed: these are notes so that the next person meets the answer
 instead of the symptom.
@@ -642,18 +642,65 @@ check passes can fail for a reason nobody has met. The dense loop between a
 row and its fiber could be given a domain of its own by the lowering, which
 would make it a loop a device can run; that is not done.
 
-One class is known and not asked, because it is about the casts rather than
-the target. The casts drop a loop on `g.*` or `l.*` from the order they check,
-as if the loops around it ordered its instances, but loopy runs a hardware
-axis as the launch grid, outside every loop, and synchronizes nothing across
-work items through global memory. A dependence between two work items passes
-the casts, and loopy either misses it, since its barrier check asks only about
-dependences between two instructions (`jacobi` in `examples/stencil_skew.py`
-with `i` on `g.0` or `l.0`: each work item reads what its neighbour wrote at
-the previous `t`, with no barrier between them), or refuses it with
-`MissingBarrierError` ("requires synchronization by a global barrier", for
-the acoustic pair with `i` on `g.0`). Both are `decided` casts and `buildable`
-schedules.
+**Work items.** One more class was about the casts rather than the target.
+The casts dropped a loop on `g.*` or `l.*` from the order they check, as they
+drop `ilp` and `vec`, as if the loops around it ordered its instances. loopy
+runs a hardware axis as the launch grid, outside every loop: a work item runs
+the whole kernel at its own value of the loop, counted from where the loop
+starts (`get_hw_axis_base_for_codegen` in `loopy.kernel.tools`, the static
+minimum of its lower bound), and nothing in a kernel orders two work items
+through global memory. loopy's barrier check (`DependencyTracker` and
+`WriteRaceChecker` in `loopy.schedule`) asks, of two instructions one of
+which depends on the other, whether two different work items touch one cell,
+and asks nothing of an instruction's dependence on itself. Measured on loopy's
+plain OpenCL target, caches off, with what loopty says now; before, every row
+was a `decided` cast and a buildable schedule (#63):
+
+| schedule | loopy | loopty |
+|---|---|---|
+| `jacobi` (`examples/stencil_skew.py`), `i` on `g.0` or `l.0` | builds, with no barrier: each work item reads at step `t + 1` what its neighbour wrote at step `t` | refused: "the loop i on g.0 runs them on work items 0 and 1 of it" |
+| the acoustic pair (`examples/wavefront_acoustic.py`), `i` on `g.0` or `l.0` | `MissingBarrierError`: "Dependency 'S1 depends on S0' (for variable 'velocity') requires synchronization by a global barrier" | refused |
+| `y[i] = x[i] + 1.0`, then `z[k] = y[7 - k]` in a loop of its own, `i` and `k` on `g.0` (or both on `l.0`) | the same, for `y` | refused |
+| the same, `i` alone on `g.0` | the same | refused: "S1 runs in no loop on g.0, so on every work item of it" |
+| `y[i]` over `1 <= i < n`, then `z[k] = y[k]` over `0 <= k < n - 1`, both on `g.0` | the same: `i` runs on work item `i - 1` | refused |
+| the same, reading `y[k + 1]` | builds | legal |
+| two sums on `l.0` in a row loop on `g.0`, the second statement reading the first's row | builds, with local barriers | legal |
+| the same in two row loops on `g.0`, the second reading the rows backwards | `MissingBarrierError` | refused |
+| the same in one row loop, the second sum's body reading the first's row, `y[i]` | `MissingBarrierError`, for `y` | refused: "S1 reads it in a sum, on every work item of l.0" |
+| `s[0]` a sum on `l.0`, then `s[1]` a sum on `l.0` whose body reads `s[0]` | `MissingBarrierError`, for `s` | refused |
+| `a[t + 1, 7]` the sum over `k` on `l.0` of `a[t, k]` | `MissingBarrierError`: "Dependency 'S0 depends on S0_k_transfer' (for variable 'a')" | refused |
+| `a[7]` the sum over `k` on `l.0` of `a[k]`, one instance | the same | refused: "S0 reads it in a sum, on every work item of l.0; S0 writes it on one work item of l.0" |
+| `s[1] = s[0] +` a sum on `l.0`, after `s[0]` a sum on `l.0`, with or without a loop on `l.0` between them | builds | legal |
+| spmv's rows on `g.0` | builds | legal |
+
+`schedule._work_items` gives each instance its work item along each axis that
+a statement's loop is on, the loop's value less its start as loopy reads it,
+and the `monotone` cast refuses, after the order passes, any dependence whose
+two ends can be on two work items. A statement with no loop on the axis runs
+on every work item of it, as loopy would run it, so every dependence to or
+from it is refused. A sum's loop is not counted as its statement's: the sum
+happens inside one instance. loopy realizes a sum on a local axis
+(`realize_reduction`) as a part on every work item of the axis, combined in a
+local temporary with a barrier between stages, and the last stage and the
+statement's own instruction run on the first work item alone (`if (lid(0) ==
+0)`). So the reads of the sum's body are on every work item, and the
+statement's own reads and writes on one, the same for every statement summed
+on the axis. Two statements pass a sum's result between their own
+instructions freely; the body of a sum that reads what another statement's
+instruction wrote is refused, as loopy refuses it, and so is a sum's body
+reading at the next step of a loop what its own statement stored at this one.
+So is a sum that reads a cell its own statement writes, although one
+instance does both and the dependences, which are between two instances, do
+not list it (`schedule._within_instances`). `tests/test_work_items.py` keeps
+each row.
+
+The check is coarser than it could be in three places, all on the side of
+refusing: the body of a sum is taken to read on every work item, though each
+of its reads is on the work item of the sum's loop; the work item a sum's
+statement runs on is taken to be one unknown work item, the same for every
+such statement, though loopy always takes the first; and a schedule without a
+kernel (an `affine` step the kernel rewrite could not write) has no start to
+read off a loop, so only two instances of one loop share a work item there.
 
 ## 15. A flat buffer gives loopy no size to read
 
@@ -704,3 +751,43 @@ program whose intermediate is larger than the thread's stack crashes the same
 way, and nothing checks the size first. The demos' intermediates are a few
 hundred bytes. The OpenCL path is generated, not run: nothing on a development
 machine imports pyopencl.
+
+## 17. A bare Python number takes the type of where it stands
+
+**Symptom.** `c[i] = u[i] * 0.5` with `c: Arr[Fin[n], Nat]` generates
+
+```c
+for (int32_t i = 0; i <= -1 + n; ++i)
+  c[i] = (int32_t) (u[i] * 0);
+```
+
+for the C target, so on `u = [1.0, 2.0, 3.0, 4.0]` the native run stores
+`[0, 1, 1, 2]` and the compiled run `[0, 0, 0, 0]`. The same kernel with a
+real `c` is correct, and nothing is reported either way.
+
+**Cause.** Two of loopy's rules for an untyped constant, which a Python
+`float` is. Its C expression code generator
+(`ExpressionToCExpressionMapper.map_constant`) writes such a constant in the
+type context it is handed, and a sum or a product hands its operands the
+context it was given, which on the right-hand side of an assignment is the
+assignee's: in an integer context the constant is written as `int(expr)`. Its
+type inference (`TypeInferenceMapper.map_constant`) guesses `float32` for a
+float that single precision holds, and joins `int32` with `float32` into
+`float32` ("numpy makes this a double. I disagree."), so `k[i] * 0.5 >
+16777216.0` of an integer `k` is generated as `k[i] * 0.5f > 16777216.0f` and
+is false at `k = 33554433`, where numpy computes in double and finds it true.
+A numpy scalar is "explicitly typed": both rules leave it alone, and the code
+generator writes it as it is.
+
+**Local fix.** `lower.ExpressionLowerer.map_constant` lowers a Python `float`
+as `np.float64` and a `complex` as `np.complex128`, the precision numpy gives
+a Python number next to an integer or a double. A term keeps the number as
+the body wrote it; only what loopy is handed changes. An integer is left
+alone: loopy types it `int32` or `int64` by its value, as numpy would.
+
+**What it does not cover.** A Python float next to a `float32` array is
+`float32` in numpy and double precision here, so a kernel over a numpy
+`float32` sort computes such a product in double and rounds it when it is
+stored, where numpy rounds the constant to single precision first. The two
+differ in the last bit of a single, within the `approx` class a bare floating
+dtype is compared by (`tolerance.element_class`).

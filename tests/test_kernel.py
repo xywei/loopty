@@ -148,8 +148,14 @@ def test_a_body_that_cannot_be_traced_is_reported_as_a_fact() -> None:
 def test_a_program_runs_natively_and_records_its_callees_claims() -> None:
     cnt = Arr.from_numpy(np.array([1, 2, 3], dtype=np.int64))
     off = Arr.zeros(4, dtype=np.int64)
-    both(cnt, off, 2)
-    assert list(off.numpy()) == [0, 2, 6, 12]
+    # scan runs; scale writes its x as reals, and an integer off would
+    # truncate natively what the compiled scale keeps, so its call is refused.
+    with pytest.raises(ValueError, match="x is stored as int64"):
+        both(cnt, off, 2)
+    assert list(off.numpy()) == [0, 1, 3, 6]
+    x = Arr.from_numpy(np.array([1.0, 2.0]))
+    scale(2.0, x)
+    assert list(x.numpy()) == [2.0, 4.0]
 
     assert {callee.__name__ for callee in both.callees()} == {"scan", "scale"}
     facts = both.facts()

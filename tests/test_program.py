@@ -1238,7 +1238,8 @@ def test_a_complex_temporary_is_stored_as_the_compiled_one_is() -> None:
 def test_a_temporary_of_truth_values_is_a_bool_natively() -> None:
     # Compiled, b is a byte. Natively only a bool array holds a truth value
     # with ~ logical on it: ~ on a float refuses, and on an integer is
-    # bitwise, which when refuses. So b is made a bool, or refused.
+    # bitwise, which when refuses. So b is made a bool, or refused: natively
+    # by mark, which writes it, and compiled by the program.
     @program
     def unmarked(u, y):
         b = Arr.zeros_like(u)
@@ -1249,7 +1250,7 @@ def test_a_temporary_of_truth_values_is_a_bool_natively() -> None:
         return {"u": Arr.from_numpy(np.array([0.5, 2.0, 1.0])), "y": Arr.zeros(3)}
 
     assert unmarked.term.temporaries_like == (("b", "u"),)
-    with pytest.raises(TypeError):
+    with pytest.raises(ValueError, match="b is stored as float64.*Pass b as bool"):
         unmarked(**make())
     with pytest.raises(ValueError, match="Give that Arr.zeros_like dtype=bool"):
         LoopyExecutor().run(unmarked, **make())

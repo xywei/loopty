@@ -346,19 +346,30 @@ def scan_then_row_sums(
         y[i] = reduce_sum(val[i, j] for j in val.dom[i])
 
 
-def test_the_rows_read_after_the_scan_can_still_run_in_parallel() -> None:
+def test_the_rows_read_after_the_scan_are_ordered_and_not_on_one_work_item() -> None:
     # The offsets reads add dependences from the scan to the rows, and every
     # one of them runs from the first loop to the second: none is carried by
-    # the row loop, so tagging it stays legal. The scan's own loop carries its
-    # recurrence and is refused, as it always was.
+    # the row loop, so the order lets the rows run in any order. On a local
+    # axis that is not enough. The scan has no loop on the rows' axis, so it
+    # runs on every work item of it, and the offsets every row reads are
+    # written by all of them, with nothing ordering one work item's writes
+    # before another's reads (#63). The scan's own loop carries its
+    # recurrence and is refused by the order, as it always was.
     from lanky.terms import evaluate_annotations
 
     from loopty.trace import trace
 
     term = trace(scan_then_row_sums, evaluate_annotations(scan_then_row_sums))
     schedule = Schedule(term, sizes={"n": 6})
-    schedule.tag(i="l.0")
-    with pytest.raises(IllegalCast, match=r"writes off\[.*read by S1\["):
+    with pytest.raises(IllegalCast) as caught:
+        schedule.tag(i="l.0")
+    message = str(caught.value)
+    assert "writes off[" in message and "on another work item" in message
+    assert "in no loop on l.0, so on every work item of it" in message
+    assert "scheduled earlier" not in message
+    with pytest.raises(
+        IllegalCast, match=r"writes off\[.*read by S1\[.*scheduled earlier"
+    ):
         schedule.tag(r="l.0")
 
 
@@ -496,9 +507,14 @@ def test_exactness_is_read_off_the_reduction_being_transformed() -> None:
 
     # ``k`` belongs to the approx reduction, so tagging it is a reassociation
     # the type permits. It used to be refused, because the first reduction
-    # found for ``y`` was the exact one.
-    tagged = schedule.tag(k="l.0")
+    # found for ``y`` was the exact one. (On ``l.0`` the cast is refused now
+    # for another reason: S0 has no loop or sum on the axis, so it runs on
+    # every work item of it, and writes the ``y[r]`` S1 adds to, #63. ``ilp``
+    # asks the same permission and runs in one work item.)
+    tagged = schedule.tag(k="ilp")
     assert tagged.reassociated == frozenset({"y"})
+    with pytest.raises(IllegalCast, match="S0 runs in no loop on l.0"):
+        schedule.tag(k="l.0")
 
 
 def test_realize_answers_for_every_reduction_writing_the_array() -> None:
@@ -810,8 +826,11 @@ def test_a_skewed_loop_keeps_its_tag_in_the_kernel() -> None:
     # The skew keeps the loop's name, so it keeps the loop's tag: the schedule
     # says i is a local axis, and so does the kernel it builds. Through
     # lp.map_domain and back the tag was lost, and the kernel ran the loop
-    # the schedule had checked as parallel one iteration at a time.
-    schedule = Schedule(ht.jacobi_term()).tag(i="l.0").skew("i", by="t")
+    # the schedule had checked as parallel one iteration at a time. (The
+    # stencil this was measured on is refused now: with i on l.0 each work
+    # item reads what its neighbour wrote a step before, #63. The transpose
+    # has no dependence for the skew to move between work items.)
+    schedule = Schedule(ht.transpose_term()).tag(i="l.0").skew("i", by="j")
     assert schedule.tags == {"i": "l.0"}
     (tag,) = schedule.kernel.default_entrypoint.inames["i"].tags
     assert type(tag).__name__ == "LocalInameTag"

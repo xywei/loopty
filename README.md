@@ -252,7 +252,12 @@ end to end; the edges are sharp.
   integer is a `TraceError`, on a native run and under tracing alike. Natively
   that is what `~(i > 0)` is (`~` on a Python bool is bitwise), while the trace
   records `not (i > 0)`, so such a kernel traces and its `trace-faithful` fact
-  is refuted by the native refusal, which names the fix.
+  is refuted by the native refusal, which names the fix. What is stored into
+  an array of `Bool` has to be a truth value too, a comparison, a connective
+  of truth values or a `Bool` read, since natively the array is a bool and
+  compiled a byte, into which C converts `0.5` as `0`: `b[i] = u[i]` is a
+  `TraceError` naming `b[i] = u[i] != 0`, and an integer arriving at a bool
+  array natively, `~(i > 0)` again, is refused there as it is by `when`.
 - The faithfulness fact. For each kernel and each program, the traced term is
   run by an interpreter (`loopty.interpret`: statement by statement in source
   order over each statement's isl domain, each loop enumerated when the run
@@ -302,7 +307,17 @@ end to end; the edges are sharp.
   other character spelled `_`, `flux_S0` or `step_2_S0`, the id of its
   instruction in the lowered kernel. A loop over an image with holes, such
   as the diamond's `b`, counts its steps (`b = 2*b_step - a`,
-  `Schedule.strides`) instead of testing a parity at every `b`.
+  `Schedule.strides`) instead of testing a parity at every `b`. A loop on a
+  hardware axis (`g.*`, `l.*`) is the launch grid, outside every other loop,
+  and nothing in a kernel orders two of its work items through global memory,
+  so the `monotone` cast also refuses any dependence between instances on two
+  work items, with the dependence and the two work items as the witness (the
+  stencil's `jacobi` with `i` on `g.0`, the acoustic pair likewise). A
+  statement with no loop on the axis runs on every work item of it. A sum on
+  a local axis stays allowed, since loopy synchronizes its partial sums; its
+  body reads on every work item, and its statement stores the result from
+  one, so a sum whose body reads what another sum's statement stored is
+  refused, as loopy refuses it for want of a global barrier.
 - The target-capability check: a concurrent tag (a hardware axis, `ilp` or
   `vec`) inside a data-dependent (ragged) loop bound or its domain, a hardware
   axis on a reduction nested in another, a reduction loopy will not realize
@@ -343,9 +358,20 @@ end to end; the edges are sharp.
   to have the declared domain's points at the sizes of the call, and a value
   of a refined sort such as `Fin[m]` has to be one — an array element and a
   scalar argument alike, and being one means being a finite whole number in
-  range, not merely passing two comparisons. These are the assumptions the typing
-  rules make about a *call* rather than about the term, and a violation is a
-  `ValueError` naming the argument. Distinct parameters being disjoint storage
+  range, not merely passing two comparisons. An array the kernel writes has to
+  be stored as its element sort is natively (`float64` for `Real`, `bool` for
+  `Bool`, a signed integer of 32 bits or more for `Nat`, `Int` and `Fin[m]`, a
+  numpy sort as itself), since an integer `x` for a `Real` parameter truncates
+  every write the compiled run keeps; an array it only reads is read by the
+  native run in that dtype, as the compiled run converts it, so an integer `x`
+  no longer overflows natively where the compiled double does not. A complex
+  entry of a sort that is not complex has no imaginary part, and an entry of
+  `Bool` stored as a number is `0` or `1`. A scalar is asked the same, and is
+  converted into the dtype of its sort in both runs, since it is passed by
+  value: `np.int64(2**32)` for a `Real` is a double natively too, and a `Bool`
+  a numpy bool, on which `~` is `not`. These are the assumptions the typing
+  rules and the two runs make about a *call* rather than about the term, and a
+  violation is a `ValueError` naming the argument. Distinct parameters being disjoint storage
   is the load-bearing one: dependences are computed per array name, so a kernel
   reading `x[i - 1]` and writing `y[i]` may legally run `i` in parallel, and
   the same kernel called with `x is y` is a race that the differential test
@@ -472,13 +498,18 @@ end to end; the edges are sharp.
   6, 11 and 14 of `docs/loopy-notes.md` and no others, so it is a list rather
   than a model of what the backend can do. A schedule it passes can still fail
   in code generation for a reason nobody has met yet.
-- The casts drop a loop on a hardware axis from the order they check, as if
-  the other loops ordered its instances. loopy runs the axis as the launch
-  grid and synchronizes nothing across work items through global memory, so a
-  dependence between two work items passes the casts and is either a race
-  loopy does not see (the stencil's `jacobi` with `i` on `g.0`, across
-  iterations of `t`) or a global barrier loopy asks for. See note 14 in
-  `docs/loopy-notes.md`.
+- A statement with no loop on a hardware axis that a loop or a sum of another
+  statement is on runs on every work item of it, so every dependence to or
+  from it is refused, even where each work item reads back only what it
+  wrote itself (every work item storing one value into one cell, say; loopy
+  refuses such a statement for the axis it lacks in any case). The body of a
+  sum on such an axis is taken to read on every work item of it, though each
+  read happens on the work item of the sum's loop, and the work item a sum's
+  statement stores its result from is taken to be one unknown work item, the
+  same for every such statement, though loopy always uses the first. Both
+  are coarser than the check could be, and refuse more. Without a kernel to
+  read a loop's start off (after an `affine` step the kernel rewrite could
+  not write), only two instances of one loop are taken to share a work item.
 - A kernel called with a zero-length *shape-bearing* argument (a matrix with no
   rows at all) cannot run on the C target: loopy cannot pass an empty array, and
   the workaround that rescues the empty flat buffer of a ragged axis cannot be

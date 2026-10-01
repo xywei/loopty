@@ -60,7 +60,13 @@ import pymbolic.primitives as prim
 from lanky.terms import Abs, evaluate, render
 
 from loopty.arr import Arr
-from loopty.contract import integral_sort, native_storage, resolve_sizes
+from loopty.contract import (
+    native_copy,
+    native_scalar,
+    native_storage,
+    read_storage,
+    resolve_sizes,
+)
 from loopty.flow import bounds_dimension
 from loopty.term import Access, ArrType, Reduction, Stmt, Term, declared_layout
 from loopty.trace import accesses_in, reductions_in
@@ -141,10 +147,13 @@ def interpret(
     bounding boxes, and otherwise at the loop, the instance or the reduction
     that goes over, with the arrays partly written. A domain is checked by its
     bounding box before its points are collected (see :meth:`_Run.enumerate`),
-    so a domain far past the limit costs nothing to refuse. An array of an
-    integral sort stored as floats is read as integers when the term does not
-    write it, which is what the native run does (see
-    :meth:`loopty.kernel.Kernel.__call__`).
+    so a domain far past the limit costs nothing to refuse. An array the term
+    does not write is read in the dtype its sort is stored in when it is
+    given in another (:func:`loopty.contract.read_storage`): an integral one
+    stored as floats as integers, a ``Real`` one stored as integers as
+    ``float64``, and a scalar is read in that dtype whatever the term does
+    (:func:`loopty.contract.native_scalar`). That is what the native run does
+    (see :meth:`loopty.kernel.Kernel.__call__`).
     """
     return _Run(term, arguments).run(limit)
 
@@ -155,10 +164,8 @@ def _storage(value: Any, typ: ArrType, written: bool) -> Arr:
         value = Arr(value)
     if not isinstance(value, Arr):
         raise InterpretError(f"an array parameter was given {value!r}")
-    buffer = value.numpy()
-    if not written and integral_sort(typ.dtype) and buffer.dtype.kind in "fc":
-        return value._replaced(np.real(buffer).astype(np.int64))
-    return value
+    want = None if written else read_storage(typ.dtype, value.numpy().dtype)
+    return value if want is None else native_copy(value, want)
 
 
 def _key(indices: Sequence[Any]) -> Any:
@@ -223,7 +230,7 @@ class _Run:
             if isinstance(typ, ArrType):
                 self.arrays[name] = _storage(value, typ, name in written)
             else:
-                self.scalars[name] = value
+                self.scalars[name] = native_scalar(typ, value)
         for name, (counts, offsets) in declared_layout(
             term.params, term.offsets
         ).items():

@@ -2432,9 +2432,61 @@ class SymArr:
         indices = _index_tuple(key)
         tracer = self.tracer
         expr = lower_reductions(value, tracer, where=where)
+        self._refuse_untruthful(key, value, where)
         assignee = Access(self.name, indices)
         kind = "accumulate" if _reads_assignee(expr, assignee) else "assign"
         tracer.record(assignee, expr, kind, where, source=value)
+
+    def _refuse_untruthful(self, key: Any, value: Any, where: str) -> None:
+        """Refuse a store into an array of ``Bool`` of what is not a truth value.
+
+        Natively such an array is a numpy bool, which stores any value that is
+        not zero as ``True``, and compiled it is a byte, into which C converts
+        a real by truncating it: ``b[i] = u[i]`` stores ``True`` for ``0.5``
+        natively and ``0`` compiled, and ``2`` for ``2.0``, which is no truth
+        value at all and reads as one in a guard and not in a comparison. So
+        the value has to be one already, in both runs; what counts is
+        :func:`_truth_valued`, and the fix named is a comparison.
+        """
+        from loopty.contract import truth_sort
+
+        if not truth_sort(self.type.dtype):
+            return
+        judged = prim.ExpressionNode | int | float | complex | np.generic
+        if not isinstance(value, judged):
+            # A whole array, a container: refused for what it is elsewhere.
+            return
+        sorts = {**self.tracer.params, **self.tracer.array_types}
+        if _truth_valued(value, sorts):
+            return
+        cell = f"{self.name}[{_key_text(key)}]"
+        shown = _shown(value)
+        operand = _untruthful_operand(value, sorts)
+        if isinstance(value, int | float | complex | np.number):
+            fix = f"Store {bool(value)}, the truth value numpy makes of {shown}"
+        elif operand is not None:
+            fix = (
+                f"It is a connective, and its operand {_shown(operand)} is not a "
+                "truth value: the trace reads '&', '|' and '~' as 'and', 'or' "
+                "and 'not', and natively they are bitwise on an integer. Make "
+                f"every operand a truth value ({_compared(_shown(operand))}), "
+                "or write a bitwise operation as arithmetic (k % 2 != 0 for the "
+                "low bit of an integer k)"
+            )
+        else:
+            fix = (
+                f"Store a truth value: a comparison such as {cell} = "
+                f"{_compared(shown)}, a connective of truth values (&, |, ~), "
+                f"a read of an array of {self.type.dtype}, or True or False"
+            )
+        raise TraceError(
+            f"{cell} = {shown} at {where} stores a value that is not a truth "
+            f"value into {self.name}, whose elements are {self.type.dtype}. "
+            f"Natively {self.name} is a numpy bool array, which stores any value "
+            "that is not zero as True, and compiled it is an array of bytes, "
+            "into which C converts a number as it is: 0.5 becomes 0 and 2.0 "
+            f"becomes 2. So the two runs would store different things. {fix}"
+        )
 
     def _refuse_whole(self, key: Any, where: str, write: bool) -> None:
         """Refuse a subscript that names more than one cell.
@@ -2532,6 +2584,69 @@ def _whole_key(key: Any) -> bool:
     parts = key if isinstance(key, tuple) else (key,)
     many = slice | list | np.ndarray | SymArr | SymDom
     return any(part is Ellipsis or isinstance(part, many) for part in parts)
+
+
+def _truth_valued(value: Any, params: Mapping[str, Any]) -> bool:
+    """Whether a value stored into an array of truth values is one in both runs.
+
+    A comparison is, and so is a quantifier. A read of an array whose elements
+    are truth values is (:func:`loopty.contract.native_storage` says ``bool``),
+    and so is a scalar parameter of such a sort, and ``True`` and ``False``.
+    A connective is one when its operands are: ``&``, ``|`` and ``~`` build
+    ``and``, ``or`` and ``not`` in the trace, and natively they are logical
+    on a bool and bitwise on an integer, so ``k[i] & 1`` of an integer ``k``
+    is not a truth value in the native run, whatever the trace records. An
+    integer is not one either, ``0`` and ``1`` included, as it is not one for
+    :class:`when`; the native run refuses to store one (:class:`_MaskedArr`).
+    """
+    from lanky.terms import PropositionMixin
+
+    from loopty.contract import native_storage
+
+    def holds_truth(sort: Any) -> bool:
+        return native_storage(sort) == np.dtype(np.bool_)
+
+    if isinstance(value, bool | np.bool_):
+        return True
+    if isinstance(value, prim.LogicalAnd | prim.LogicalOr):
+        return all(_truth_valued(child, params) for child in value.children)
+    if isinstance(value, prim.LogicalNot):
+        return _truth_valued(value.child, params)
+    if isinstance(value, prim.Comparison | PropositionMixin):
+        return True
+    if isinstance(value, prim.Subscript) and isinstance(value.aggregate, prim.Variable):
+        typ = params.get(value.aggregate.name)
+        return isinstance(typ, ArrType) and holds_truth(typ.dtype)
+    if isinstance(value, prim.Variable):
+        sort = params.get(value.name)
+        return sort is not None and not isinstance(sort, ArrType) and holds_truth(sort)
+    return False
+
+
+def _untruthful_operand(value: Any, params: Mapping[str, Any]) -> Any:
+    """The first operand of a connective that is not a truth value, or ``None``.
+
+    ``None`` too when ``value`` is no connective: what is wrong is then the
+    value itself.
+    """
+    if isinstance(value, prim.LogicalAnd | prim.LogicalOr):
+        children: tuple[Any, ...] = tuple(value.children)
+    elif isinstance(value, prim.LogicalNot):
+        children = (value.child,)
+    else:
+        return None
+    for child in children:
+        if _truth_valued(child, params):
+            continue
+        inner = _untruthful_operand(child, params)
+        return child if inner is None else inner
+    return None
+
+
+def _compared(shown: str) -> str:
+    """``u[i] != 0``: the comparison that makes a number a truth value, as written."""
+    simple = not any(mark in shown for mark in " +-*/%<>=&|~^(")
+    return f"{shown} != 0" if simple else f"({shown}) != 0"
 
 
 def _key_text(key: Any) -> str:
@@ -3003,13 +3118,57 @@ def _writes_are_masked() -> bool:
     return not all(_MASKS)
 
 
+def _refuse_integer_truth(dtype: np.dtype, value: Any, frame: Any) -> None:
+    """Refuse to store an integer into a bool array, as :class:`when` refuses one.
+
+    The trace reads ``~``, ``&`` and ``|`` as ``not``, ``and`` and ``or``, and
+    natively they are bitwise on an integer and on a Python bool: ``~(i > 0)``
+    of a loop variable is ``-2`` or ``-1``, which a bool array stores as
+    ``True`` at every point, while the compiled kernel stores ``False`` where
+    ``i > 0``. A bool array is what holds an array of ``Bool`` natively
+    (:func:`loopty.contract.native_storage`), so an integer arriving at one
+    is a value the two runs disagree about, or a constant ``0`` or ``1`` that
+    is spelled ``False`` or ``True`` everywhere else.
+
+    The masking view knows the array's dtype and not its declared sort, so
+    this holds of every bool array, one of a numpy ``np.bool_`` sort too. That
+    is wider than the trace's rule (:meth:`SymArr._refuse_untruthful`), which
+    leaves such a sort alone because C's conversion into its ``bool`` is
+    numpy's: ``b[i] = k[i]`` of an integer ``k`` would agree, and is refused
+    here, naming ``k != 0``, while ``~(i > 0)`` would not.
+    """
+    if dtype == np.bool_ and _integer(value):
+        raise TraceError(_integer_store_message(value, _location(frame)))
+
+
+def _integer_store_message(value: Any, where: str) -> str:
+    """What to say about an integer stored into an array of truth values."""
+    at = f" at {where}" if where else ""
+    return (
+        f"the value stored{at} into an array of truth values is the integer "
+        f"{int(value)}, not a truth value. Python's '~' is bitwise on an int "
+        "and on a bool: ~True is -2 and ~False is -1, and a bool array stores "
+        "both as True, so '~(i > 0)' on a loop variable is True at every point "
+        "when the body runs natively, while the traced term reads it as 'not' "
+        "and the compiled kernel stores False where i > 0. '&' and '|' with an "
+        "integer operand are bitwise in the same way. Store a comparison "
+        "('i <= 0' for '~(i > 0)', and 'k != 0' for an integer k), or True or "
+        "False."
+    )
+
+
 class _MaskedArr(Arr):
     """An :class:`~loopty.arr.Arr` sharing its buffers, whose writes obey ``when``."""
 
     def __setitem__(self, key: Any, value: Any) -> None:
-        """Write, unless an open ``when`` block is false."""
+        """Write, unless an open ``when`` block is false.
+
+        An integer written into a bool array is refused; see
+        :func:`_refuse_integer_truth`.
+        """
         if _writes_are_masked():
             return
+        _refuse_integer_truth(self.numpy().dtype, value, sys._getframe(1))
         super().__setitem__(key, value)
 
     def __getitem__(self, key: Any) -> Any:
@@ -3026,9 +3185,10 @@ class _MaskedArray(np.ndarray):
     """A numpy view whose writes obey ``when``."""
 
     def __setitem__(self, key: Any, value: Any) -> None:
-        """Write, unless an open ``when`` block is false."""
+        """Write, unless an open ``when`` block is false; see :class:`_MaskedArr`."""
         if _writes_are_masked():
             return
+        _refuse_integer_truth(self.dtype, value, sys._getframe(1))
         super().__setitem__(key, value)
 
     def __getitem__(self, key: Any) -> Any:
