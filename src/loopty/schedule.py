@@ -164,6 +164,7 @@ from loopty.lower import (
     reductions_of,
 )
 from loopty.term import Stmt, Term
+from loopty.typing import layout_fact_ids
 
 __all__ = [
     "IllegalCast",
@@ -1895,6 +1896,17 @@ class Schedule:
         #: What the ids of the schedule's facts name the kernel by; see
         #: :meth:`fact_id`.
         self._definition = definition_of(kernel, self._term)
+        #: The layout facts a ``monotone`` cast rests on: the dependences of a
+        #: ragged array are computed over ``[r, j]``, which are its cells only
+        #: while its layout keeps the rows apart, and a kernel that rewrites
+        #: its counts or offsets is taken to (see :func:`loopty.typing.layout_facts`).
+        self._layout_ids = tuple(
+            dict.fromkeys(
+                identifier
+                for ids in layout_fact_ids(self._term, **self._definition).values()
+                for identifier in ids
+            )
+        )
         self._target = target
         self._sizes = dict(sizes or {})
         #: The layout of each array over a domain that is not boxed; only
@@ -3007,6 +3019,7 @@ class Schedule:
                 detail=overall.detail if bad is None else bad[2],
                 step=recipe,
                 reason=message,
+                rests_on=self._layout_ids,
             )
         )
         if refused:
@@ -3192,6 +3205,7 @@ class Schedule:
         oracle: str = "isl",
         reason: str = "",
         about: str = "",
+        rests_on: tuple[str, ...] = (),
     ) -> Any:
         """One ledger entry for one question about one step.
 
@@ -3221,6 +3235,10 @@ class Schedule:
         order runs backwards.
         Exactness and buildability are not questions for isl, and their facts
         have none.
+
+        ``rests_on`` names the facts the answer takes for granted, which for a
+        ``monotone`` cast of a kernel that rewrites its layout are the layout's
+        facts (see :attr:`_layout_ids`).
         """
         from lanky.ledger import Fact, Status
 
@@ -3245,6 +3263,7 @@ class Schedule:
             provenance=provenance,
             where=self._term.stmts[0].where if self._term.stmts else "",
             owner=self._term.name,
+            rests_on=rests_on,
         )
 
     def facts(self) -> tuple:

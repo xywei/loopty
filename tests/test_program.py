@@ -1487,6 +1487,51 @@ def test_a_program_statement_named_by_its_id_says_how_to_spell_it() -> None:
 # }}}
 
 
+# {{{ a layout a call rewrites (#51)
+
+
+@kernel
+def clear_next(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """Sum a row, then clear the length of the next one."""
+    for r in y.dom:
+        y[r] = reduce_sum(val[r, j] for j in val.dom[r])
+        with when(r + 1 < y.dom.size):
+            cnt[r + 1] = 0
+
+
+@program
+def clears_next(cnt, val, y):
+    """One call that rewrites the counts its rows are read through."""
+    clear_next(cnt, val, y)
+
+
+def test_a_program_whose_call_rewrites_a_layout_has_its_layout_fact() -> None:
+    # A schedule of the program rests its monotone casts on the program's
+    # layout fact, which the program's facts carry, as a kernel's do.
+    from lanky.ledger import fact_id
+
+    (layout,) = [fact for fact in clears_next.facts() if fact.kind == "layout"]
+    assert layout.id == fact_id(
+        "layout",
+        clears_next.qualname,
+        module=clears_next.module,
+        line=clears_next.line,
+        detail="cnt",
+    )
+    (loop,) = clears_next.term.stmts[0].inames
+    schedule = Schedule(clears_next).split(loop, 2)
+    (monotone,) = [fact for fact in schedule.facts() if fact.kind == "monotone"]
+    assert monotone.rests_on == (layout.id,)
+    assert not [fact for fact in burgers.facts() if fact.kind == "layout"]
+
+
+# }}}
+
+
 # {{{ the faithfulness fact
 
 

@@ -33,6 +33,21 @@ array the kernel writes rests on the element-sort facts of every write into
 that array (lanky's ``rests_on``), so the ledger counts them in what it is
 worth.
 
+*A layout the kernel rewrites.* The in-bounds fact of a ragged access
+``val[r, j]`` is decided against the length of row ``r``, and the disjoint
+writes and the dependences of ``val`` are computed over ``[r, j]``. Both hold
+of the flat buffer only while the offsets lay every row out inside it and
+apart from the others, which the contract checks when the call starts. A
+kernel that writes the counts or the offsets its ragged arrays are read
+through can break that during the run: a row moved past the end of the
+buffer, or two rows moved onto the same cells. No rule states what such a
+kernel writes there, so it gets one ``layout`` fact per counts family it
+rewrites, ``assumed`` with the reason (:func:`layout_facts`), and the
+in-bounds and disjoint-writes facts of the family's ragged arrays rest on it,
+as do the ``monotone`` casts of a schedule of the kernel
+(:mod:`loopty.schedule`). The ledger then shows them decided under the
+layout, and worth no more than it.
+
 *Write disjointness.* Distinct instances of a statement must write distinct
 cells, or the loop cannot be run in parallel and the order of the writes is
 part of the result. The obligation is the emptiness of the set of pairs of
@@ -93,6 +108,8 @@ __all__ = [
     "facts_for",
     "in_bounds_facts",
     "instance_labels",
+    "layout_fact_ids",
+    "layout_facts",
     "ordering_facts",
     "postcondition_facts",
     "postcondition_id",
@@ -225,11 +242,14 @@ def in_bounds_facts(
     A fact decided by type through an array the term writes rests on the
     element-sort facts of the writes into it (:func:`element_sort_facts`):
     the type says what the contract checked when the call started, and those
-    facts say the term keeps it so.
+    facts say the term keeps it so. The fact of an access to a ragged array
+    whose layout the term rewrites rests on that layout's fact
+    (:func:`layout_facts`), since it is decided against the row.
     """
     types = dict(term.params)
     sizes = flow.size_names(term)
     sorts = _element_sort_ids(term, owner, module=module, line=line)
+    layouts = layout_fact_ids(term, owner, module=module, line=line)
     # One table for the whole term: the cells an array has and the cells an
     # access reaches are two isl sets that get compared, so both have to call
     # ``cnt[r]`` by the parameter the statement domains already use.
@@ -276,6 +296,7 @@ def in_bounds_facts(
                         for sort_id in sorts.get(name, ())
                     )
                 )
+                rests_on += layouts.get(array, ())
                 facts.append(
                     Fact(
                         id=identifier,
@@ -367,6 +388,7 @@ def in_bounds_facts(
                     },
                     where=stmt.where,
                     owner=owner,
+                    rests_on=layouts.get(array, ()),
                 )
             )
     return facts
@@ -639,15 +661,133 @@ def element_sort_facts(
 # }}}
 
 
+# {{{ a layout the term rewrites
+
+
+def _rewritten_layouts(term: Term) -> dict[str, dict[str, Any]]:
+    """Every counts family whose layout the term writes, with what writes it.
+
+    For each, by counts name: ``arrays``, the ragged arrays laid out over the
+    family; ``layout``, the arrays their rows are read through, the counts
+    when they are an array of the term and the offsets it declares
+    (:meth:`loopty.term.Term.offsets_of`); ``written``, those of them the
+    term writes; and ``statements``, the statements that write them.
+    """
+    types = term.array_types
+    families: dict[str, list[str]] = {}
+    for name, typ in types.items():
+        if not isinstance(typ, ArrType) or typ.domain is not None:
+            continue
+        for size, ragged in zip(typ.axes, typ.ragged, strict=True):
+            if ragged and isinstance(size, prim.Variable):
+                families.setdefault(size.name, []).append(name)
+    out: dict[str, dict[str, Any]] = {}
+    for counts, arrays in families.items():
+        layout = [counts] if isinstance(types.get(counts), ArrType) else []
+        offsets = term.offsets_of(counts)
+        if offsets is not None and offsets not in layout:
+            layout.append(offsets)
+        writers = [stmt for stmt in term.stmts if stmt.assignee.array in layout]
+        if not writers:
+            continue
+        assigned = {stmt.assignee.array for stmt in writers}
+        written = [name for name in layout if name in assigned]
+        out[counts] = {
+            "arrays": arrays,
+            "layout": layout,
+            "written": written,
+            "statements": writers,
+        }
+    return out
+
+
+def layout_fact_ids(
+    term: Term, owner: str, *, module: str | None = None, line: int | None = None
+) -> dict[str, tuple[str, ...]]:
+    """The ids of the layout facts the facts about each ragged array rest on.
+
+    By array, for every ragged array laid out over a family the term
+    rewrites (see :func:`layout_facts`); an array not listed rests on none.
+    """
+    out: dict[str, tuple[str, ...]] = {}
+    for counts, family in _rewritten_layouts(term).items():
+        identifier = fact_id("layout", owner, module=module, line=line, detail=counts)
+        for array in family["arrays"]:
+            out[array] = (*out.get(array, ()), identifier)
+    return out
+
+
+def layout_facts(
+    term: Term, owner: str, *, module: str | None = None, line: int | None = None
+) -> list[Fact]:
+    """One ``assumed`` fact per counts family whose layout the term rewrites.
+
+    It states what the facts about the family's ragged arrays take for
+    granted once the term has written the counts or the offsets they are read
+    through: that every row stays inside the buffer and apart from the
+    others, as the contract checked when the call started. Nothing decides
+    it, since no rule states what the term writes there (the offsets staying
+    nondecreasing and inside the buffer, with the counts as their
+    differences, would), and the facts that rest on it say so in the ledger.
+    A term that only reads its layout has none.
+    """
+    facts: list[Fact] = []
+    for counts, family in _rewritten_layouts(term).items():
+        arrays = _listed(family["arrays"])
+        written = _listed(family["written"])
+        writers = [stmt.id for stmt in family["statements"]]
+        facts.append(
+            Fact(
+                id=fact_id("layout", owner, module=module, line=line, detail=counts),
+                kind="layout",
+                statement=(
+                    f"the rows of {arrays} stay inside their buffers and apart "
+                    f"while {_listed(writers)} write {written}"
+                ),
+                term=None,
+                status=Status.ASSUMED,
+                provenance={
+                    "counts": counts,
+                    "arrays": list(family["arrays"]),
+                    "layout": list(family["layout"]),
+                    "written": list(family["written"]),
+                    "statements": writers,
+                    "reason": (
+                        f"{_listed(writers)} write {written}, which the rows of "
+                        f"{arrays} are read through. Their accesses are in "
+                        "bounds against the length of their row, and their "
+                        "cells are told apart as [r, j], which holds of the "
+                        "flat buffer while every row lies inside it and apart "
+                        "from the others, as the contract checks when the call "
+                        "starts; nothing states what the kernel writes there "
+                        "during the run"
+                    ),
+                },
+                where=family["statements"][0].where,
+                owner=owner,
+            )
+        )
+    return facts
+
+
+# }}}
+
+
 # {{{ write disjointness, ordering, exactness, postcondition
 
 
 def write_disjointness_facts(
     term: Term, owner: str, *, module: str | None = None, line: int | None = None
 ) -> list[Fact]:
-    """One fact per writing statement: distinct instances write distinct cells."""
+    """One fact per writing statement: distinct instances write distinct cells.
+
+    The cells of a ragged array are ``[r, j]``, which are distinct cells of
+    its buffer while its layout keeps the rows apart; the fact of a ragged
+    array whose layout the term rewrites rests on that layout's fact.
+    """
     labels = instance_labels(term)
     sizes = flow.size_names(term)
+    layouts = layout_fact_ids(term, owner, module=module, line=line)
     by_statement = {stmt.id: stmt for stmt in term.stmts}
     facts: list[Fact] = []
     for footprint in flow.footprints(term):
@@ -690,6 +830,7 @@ def write_disjointness_facts(
                 },
                 where=stmt.where,
                 owner=owner,
+                rests_on=layouts.get(footprint.array, ()),
             )
         )
     return facts
@@ -864,6 +1005,7 @@ def facts_for(
     return [
         *in_bounds_facts(term, owner, **key),
         *element_sort_facts(term, owner, **key),
+        *layout_facts(term, owner, **key),
         *write_disjointness_facts(term, owner, **key),
         *ordering_facts(term, owner, where, **key),
         *reduction_facts(term, owner, **key),

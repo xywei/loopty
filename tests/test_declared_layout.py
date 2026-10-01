@@ -483,3 +483,154 @@ def test_the_faithfulness_fact_runs_the_samples_through_the_layout() -> None:
 
 
 # }}}
+
+
+# {{{ the layout fact (#51)
+
+
+def overlap_then_write(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    off: Arr[Fin[n + 1], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+):
+    """Every row moved to start at cell 0, then written: the issue's kernel."""
+    for r in cnt.dom:
+        off[r] = 0
+        for j in val.dom[r]:
+            val[r, j] = r + 1.0
+
+
+def shortened_in_its_own_loop(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A row's length set to zero inside the loop it bounds."""
+    for r in y.dom:
+        for j in val.dom[r]:
+            y[r] = y[r] + val[r, j]
+            cnt[r] = 0
+
+
+def layout_of(fn):
+    """The term of ``fn``, its facts settled by isl, and its layout facts."""
+    from lanky.ledger import Ledger
+
+    from loopty import typing as rules
+    from loopty.oracle import IslOracle
+
+    term = term_of(fn)
+    oracle = IslOracle()
+    facts = [
+        (oracle.establish(fact) or fact) if oracle.can_establish(fact) else fact
+        for fact in rules.facts_for(term, owner=term.name, where="test.py:1")
+    ]
+    layouts = [fact for fact in facts if fact.kind == "layout"]
+    return term, Ledger(facts), layouts
+
+
+def test_rows_moved_onto_each_other_leave_the_disjoint_writes_assumed() -> None:
+    # The disjoint writes of ``val`` were decided over ``[r, j]``, and a
+    # parallel ``r`` accepted, while every row starts at cell 0 once the
+    # kernel has run its first statement (#51).
+    from lanky.ledger import Status
+
+    from loopty.schedule import Schedule
+
+    term, ledger, (layout,) = layout_of(overlap_then_write)
+    assert layout.id == "layout:overlap_then_write:cnt"
+    assert layout.status is Status.ASSUMED
+    assert layout.statement == (
+        "the rows of val stay inside their buffers and apart while S0 write off"
+    )
+    assert layout.provenance["written"] == ["off"]
+    (disjoint,) = [
+        fact
+        for fact in ledger
+        if fact.kind == "disjoint-writes" and fact.provenance["array"] == "val"
+    ]
+    assert disjoint.status is Status.DECIDED
+    assert disjoint.rests_on == (layout.id,)
+    assert ledger.support(disjoint).effective is Status.ASSUMED
+    (access,) = [
+        fact for fact in ledger if fact.id.endswith(":S1:write:val[r, j]")
+    ]
+    assert access.status is Status.DECIDED
+    assert ledger.support(access).under == (layout.id,)
+    # The facts about the dense arrays, the layout's own reads among them,
+    # rest on nothing.
+    assert {fact.id for fact in ledger if fact.rests_on} == {disjoint.id, access.id}
+    # A cast is decided against the dependences of ``val`` over ``[r, j]``.
+    monotone = [
+        fact
+        for fact in Schedule(term).split("r", 2).facts()
+        if fact.kind == "monotone"
+    ]
+    assert [fact.rests_on for fact in monotone] == [(layout.id,)]
+
+
+def test_a_row_shortened_in_its_own_loop_leaves_its_reads_assumed() -> None:
+    from lanky.ledger import Status
+
+    _term, ledger, (layout,) = layout_of(shortened_in_its_own_loop)
+    assert layout.provenance["written"] == ["cnt"]
+    (read,) = [fact for fact in ledger if fact.id.endswith(":S0:read:val[r, j]")]
+    assert read.status is Status.DECIDED
+    assert ledger.support(read).effective is Status.ASSUMED
+    assert ledger.support(read).under == (layout.id,)
+
+
+@pytest.mark.parametrize("fn", [row_sums_then_next_offset, row_sums_then_next_count])
+def test_a_kernel_that_writes_its_layout_has_a_layout_fact(fn) -> None:
+    _term, ledger, (layout,) = layout_of(fn)
+    (read,) = [fact for fact in ledger if fact.id.endswith(":S0:read:val[r, j]")]
+    assert read.rests_on == (layout.id,)
+
+
+def test_a_kernel_that_only_reads_its_layout_has_none() -> None:
+    from loopty.schedule import Schedule
+
+    term, ledger, layouts = layout_of(row_sums_through_offsets)
+    assert layouts == []
+    assert not [fact for fact in ledger if fact.rests_on]
+    assert not [fact for fact in Schedule(term).facts() if fact.rests_on]
+
+
+OVERLAP = """
+from __future__ import annotations
+
+from lanky.prelude import Nat, Real
+
+from loopty import Arr, Fin, kernel
+
+
+@kernel
+def overlap_then_write(
+    cnt: Arr[Fin[n], Nat],
+    off: Arr[Fin[n + 1], Nat],
+    val: Arr[Fin[n], Fin[cnt], Real],
+):
+    for r in cnt.dom:
+        off[r] = 0
+        for j in val.dom[r]:
+            val[r, j] = r + 1.0
+"""
+
+
+def test_check_shows_the_writes_decided_under_the_layout(tmp_path, capsys) -> None:
+    from lanky.cli import main as lanky_main
+
+    path = tmp_path / "overlap.py"
+    path.write_text(OVERLAP, encoding="utf-8")
+    assert lanky_main(["check", str(path)]) == 0
+    out = capsys.readouterr().out
+    layout = "layout:overlap.overlap_then_write@9:cnt"
+    rows = out.splitlines()
+    (row,) = [line for line in rows if "write distinct cells of val" in line]
+    assert row.startswith(f"decided under {layout}")
+    assert row.split()[3] == "assumed"
+    (fact,) = [line for line in rows if "stay inside their buffers" in line]
+    assert fact.startswith("assumed ")
+
+
+# }}}

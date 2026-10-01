@@ -684,7 +684,11 @@ class Program(_Decorated):
         (:func:`loopty.faithful.faithfulness_fact`), keyed by the program's
         definition. A program whose term cannot be built has no term to
         compare, and the fact is ``assumed`` with the reason; ``loopty run``
-        reports the same program as one it cannot schedule.
+        reports the same program as one it cannot schedule. Before it come
+        the ``layout`` facts of the term (:func:`loopty.typing.layout_facts`),
+        when a call rewrites the counts or the offsets a ragged array of the
+        term is read through: a ``Schedule`` of the program rests its
+        ``monotone`` casts on them, as one of a kernel does.
         """
         if self._facts is not None:
             return self._facts
@@ -740,6 +744,7 @@ class Program(_Decorated):
                 )
             )
         else:
+            out.extend(rules.layout_facts(term, self.qualname, **key))
             out.append(
                 faithfulness_fact(
                     self, term, owner=self.qualname, where=self.where, **key

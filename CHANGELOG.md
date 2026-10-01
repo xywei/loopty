@@ -1299,6 +1299,21 @@ with a pair of statement instances.
   fact and worth what that fact is worth, refuted here, and `lanky check`
   exits 1. A kernel that only reads its index arrays, as every demo does,
   has no such fact.
+- A kernel that rewrites the layout of a ragged array no longer has that
+  array's in-bounds and disjoint-writes facts decided outright (#51). They
+  are decided against the length of a row and over `[r, j]`, which holds of
+  the flat buffer while every row lies inside it and apart from the others,
+  as the contract checks when the call starts; `off[r] = s[r]` can move a row
+  past the end of the buffer, and `off[r] = 0` every row onto the same cells,
+  where the ledger decided "distinct instances of S1 write distinct cells of
+  val" and a parallel `r` was accepted. Such a kernel now has one `layout`
+  fact per counts family whose counts or declared offsets it writes,
+  `assumed` with the reason (`loopty.typing.layout_facts`), and the in-bounds
+  and disjoint-writes facts of the family's ragged arrays rest on it, as do
+  the `monotone` casts of a schedule of the kernel or of a program whose call
+  rewrites it: the ledger shows them decided under the layout, and worth an
+  assumption. A kernel that only reads its layout, as every demo does, has no
+  such fact.
 
 ### Changed
 
