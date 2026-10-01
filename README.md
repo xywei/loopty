@@ -343,7 +343,10 @@ end to end; the edges are sharp.
   native run in that dtype, as the compiled run converts it, so an integer `x`
   no longer overflows natively where the compiled double does not. A complex
   entry of a sort that is not complex has no imaginary part, and an entry of
-  `Bool` stored as a number is `0` or `1`. These are the assumptions the typing
+  `Bool` stored as a number is `0` or `1`. A scalar is asked the same, and is
+  converted into the dtype of its sort in both runs, since it is passed by
+  value: `np.int64(2**32)` for a `Real` is a double natively too, and a `Bool`
+  a numpy bool, on which `~` is `not`. These are the assumptions the typing
   rules and the two runs make about a *call* rather than about the term, and a
   violation is a `ValueError` naming the argument. Distinct parameters being disjoint storage
   is the load-bearing one: dependences are computed per array name, so a kernel

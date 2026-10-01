@@ -117,6 +117,37 @@ def _as_numpy(value: Any, dtype: np.dtype | None = None) -> np.ndarray:
     return np.ascontiguousarray(array)
 
 
+def _as_scalar(value: Any, dtype: np.dtype | None = None) -> Any:
+    """A scalar argument as loopy's invoker takes it for a ``dtype`` argument.
+
+    The C invoker hands a scalar to ``ctypes``, which takes a number of the C
+    type's kind and nothing else: the byte ``Bool`` is lowered as refuses a
+    numpy bool and a float, and a double refuses a complex number. So a truth
+    value or a float is passed to an integer argument as an ``int``, and a
+    complex number to one that is not complex as its real part. The contract
+    has required a ``Bool`` scalar given as a number to be ``0`` or ``1``, an
+    integral one to be stored as an integer, and a complex one of a sort that
+    is not complex to have no imaginary part
+    (:func:`loopty.contract.scalar_parameters`), so nothing is lost, and the
+    value passed is the one the native run computes with
+    (:func:`loopty.contract.native_scalar`).
+    """
+    if dtype is None:
+        return value
+    try:
+        got = np.asarray(value).dtype
+    except (TypeError, ValueError, OverflowError):
+        return value
+    want = np.dtype(dtype)
+    if np.ndim(value) or got.kind not in "bfc":
+        return value
+    if got.kind == "c" and want.kind != "c":
+        value = np.real(value)
+    if want.kind in "iu":
+        return int(value)
+    return value
+
+
 def _copy(value: Any) -> Any:
     """A private copy of an argument, so that a reference run cannot be seen.
 
@@ -222,7 +253,7 @@ def _call_arguments(
         if isinstance(value, np.ndarray | Arr):
             out[name] = _as_numpy(value, dtypes.get(name))
         else:
-            out[name] = value
+            out[name] = _as_scalar(value, dtypes.get(name))
     for argument, (array, piece) in lowering.bases.items():
         layout = layouts[array]
         packed = lowering.storage[array] == "packed"

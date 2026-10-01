@@ -65,7 +65,9 @@ in that dtype (:func:`read_storage`), which is what the compiled run reads
 too. :func:`element_types` asks the values the questions the conversion would
 otherwise answer without a word: a complex entry of a sort that is not complex
 has no imaginary part, and an entry of ``Bool`` stored as a number is ``0`` or
-``1``.
+``1``. A scalar is passed by value, so both runs convert it into that dtype
+(:func:`native_scalar`), and :func:`scalar_parameters` asks it the same two
+questions.
 
 Nothing here checks array *shapes* against each other; see
 ``docs/loopy-notes.md`` for why lowering has to declare some arrays without
@@ -99,6 +101,7 @@ __all__ = [
     "inherited_storage",
     "integral_sort",
     "native_copy",
+    "native_scalar",
     "native_storage",
     "ragged_arguments",
     "read_storage",
@@ -636,6 +639,50 @@ def native_copy(value: Any, dtype: np.dtype) -> Any:
     return value._replaced(converted) if isinstance(value, Arr) else converted
 
 
+def native_scalar(sort: Any, value: Any) -> Any:
+    """A scalar argument as the native run computes with it, for ``sort``.
+
+    The compiled run passes a scalar as the C type the lowering declares for
+    its sort (:func:`loopty.lower.numpy_dtype`), and the native run used to
+    compute with whatever it was given: ``np.int64(2**32)`` for ``a: Real``
+    overflowed at ``a * a`` where the compiled run squares a double,
+    ``np.int8(100)`` for ``a: Nat`` wrapped at ``a + a``, and a ``np.float32``
+    added in single precision. A scalar is passed by value, so converting it
+    breaks no promise about where writes land, and the native run and the
+    interpreter compute with it in :func:`native_storage`'s dtype, as the
+    compiled run does. A truth value is a numpy bool, Python's ``True``
+    included: ``~`` on a Python bool is the integer ``-2``, which ``when``
+    refuses and a bool array stores as ``True``, where the compiled run
+    computes ``!flag``.
+
+    A value that holds its sort already (:func:`holds_natively`) is returned
+    as it is, and so is a Python ``int`` of an integral sort, which no
+    conversion makes more exact, and anything that is not a number.
+    :func:`scalar_parameters` has required the value to be one of the sort: a
+    whole number for an integral one, ``0`` or ``1`` for ``Bool``, and no
+    imaginary part for a sort that is not complex, which is dropped here.
+    """
+    want = native_storage(sort)
+    if want is None:
+        return value
+    try:
+        got = np.asarray(value).dtype
+    except (TypeError, ValueError, OverflowError):
+        return value
+    if np.ndim(value) or got.kind not in "biufc":
+        return value
+    base = _base_sort(sort)
+    if (base is int or integral_sort(base)) and isinstance(value, int):
+        return value
+    if want.kind == "b":
+        return value if isinstance(value, np.bool_) else np.bool_(np.real(value))
+    if holds_natively(sort, got):
+        return value
+    if got.kind == "c" and want.kind != "c":
+        value = np.real(value)
+    return want.type(value)
+
+
 def _shown_sort(sort: Any) -> str:
     """A sort as a message says it: a numpy scalar type by its dtype's name."""
     if isinstance(sort, type) and issubclass(sort, np.generic):
@@ -1025,13 +1072,20 @@ def scalar_parameters(
     converted to, and the native run indexes with it, which numpy refuses.
     Converting it would be the caller's choice to make, so the message says
     ``int(...)``.
+
+    A scalar of any other sort is asked what :func:`element_types` asks an
+    entry, because both runs convert it into its sort's dtype
+    (:func:`native_scalar`): a complex one of a sort that is not complex has
+    no imaginary part, and one of ``Bool`` given as a number is ``0`` or ``1``
+    (see :func:`_scalar_value`).
     """
     sizes = resolve_sizes(types, supplied) if sizes is None else sizes
     extents = axis_extents(types, supplied) if extents is None else extents
     for name, sort in types.items():
-        if isinstance(sort, ArrType) or not integral_sort(sort):
+        if isinstance(sort, ArrType) or name not in supplied:
             continue
-        if name not in supplied:
+        if not integral_sort(sort):
+            _scalar_value(name, sort, supplied[name])
             continue
         value = supplied[name]
         if isinstance(value, bool | np.bool_):
@@ -1075,6 +1129,45 @@ def scalar_parameters(
             f"access indexed by {name} as in bounds *by type*, with no check in "
             "the generated code, so the parameter's type has to hold of the "
             "value that is passed in"
+        )
+
+
+def _scalar_value(name: str, sort: Any, value: Any) -> None:
+    """Refuse a scalar of a sort that is not integral, if its conversion changes it.
+
+    Both runs convert the scalar into the dtype of its sort: the compiled one
+    into the C type the lowering declares, the native one and the interpreter
+    into :func:`native_storage`'s dtype (:func:`native_scalar`). A complex
+    value is converted into a sort that is not complex by dropping its
+    imaginary part, so it is a value of the sort only when that part is zero.
+    A number given for ``Bool`` reaches compiled code as a byte, and the native
+    run as a bool, and the two hold one value only for ``0`` and ``1``: ``2``
+    is stored as ``2`` compiled and as ``True`` natively. Anything that is not
+    a number is left to the runs.
+    """
+    want = native_storage(sort)
+    if want is None or isinstance(value, bool | np.bool_):
+        return
+    try:
+        number = np.asarray(value)
+    except (TypeError, ValueError, OverflowError):
+        return
+    if number.ndim or number.dtype.kind not in "iufc":
+        return
+    if number.dtype.kind == "c" and want.kind != "c" and number.imag != 0:
+        raise ValueError(
+            f"the argument {name} is {value!r}, which is not a value of "
+            f"{_shown_sort(sort)}: a complex number is one only when its "
+            f"imaginary part is zero. Both runs convert {name} into the dtype "
+            f"{_shown_sort(sort)} is stored in, which drops the imaginary part"
+        )
+    if truth_sort(sort) and np.real(number) not in (0, 1):
+        raise ValueError(
+            f"the argument {name} is {value!r}, which is not a value of {sort}: "
+            f"{name} has to be a truth value, given as a bool or as 0 or 1. The "
+            f"compiled run passes {name} as a byte, and a byte holds a truth "
+            "value as a bool does only when it is 0 or 1: C converts 0.5 into a "
+            "byte as 0 and keeps 2 as 2, where a bool holds True for both"
         )
 
 

@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 from lanky.prelude import Bool, Int, Nat, Real
 
-from loopty import Arr, Fin, Schedule, TraceError, kernel, when
+from loopty import Arr, Fin, Schedule, TraceError, Where, kernel, reduce_sum, when
 from loopty.executor import LoopyExecutor, emit_code
 from loopty.interpret import interpret
 
@@ -323,6 +323,192 @@ def test_an_array_of_truth_values_read_as_numbers_holds_zero_and_one():
     assert list(native["y"]) == [1.0, 0.0, 3.0]
     agrees(keep_unmarked, lambda: make(np.array([0, 1, 0], dtype=np.int8)))
     agrees(keep_unmarked, lambda: make(np.array([0.0, 1.0, 0.0])))
+
+
+@kernel
+def plus_one(c: Arr[Fin[n], Nat], d: Arr[Fin[n], Nat]):  # noqa: F821
+    """Every entry plus one."""
+    for i in c.dom:
+        d[i] = c[i] + 1
+
+
+@kernel
+def row_squares(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The sum of the squares of every row of a ragged array."""
+    for r in val.dom:
+        y[r] = reduce_sum(val[r, j] * val[r, j] for j in val.dom[r])
+
+
+@kernel
+def halve_rows(cnt: Arr[Fin[n], Nat], val: Arr[Fin[n], Fin[cnt], Real]):  # noqa: F821
+    """Halve every entry of a ragged array."""
+    for r in val.dom:
+        for j in val.dom[r]:
+            val[r, j] = val[r, j] / 2
+
+
+@kernel
+def lower_squares(
+    L: Arr[Where[i: Fin[n], j: Fin[n], j < i], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The sum of the squares of every row of a strictly lower triangle."""
+    for i in L.dom:
+        y[i] = reduce_sum(L[i, j] * L[i, j] for j in L.dom[i])
+
+
+def test_an_array_in_another_layout_is_read_and_refused_as_a_dense_one():
+    # The copy keeps the layout: a ragged array its offsets, an array over a
+    # domain its domain. A uint8 array of naturals is read as int64 too, where
+    # natively 255 + 1 wrapped round to 0 and compiled it was 256.
+    from lanky.terms import Var
+
+    def narrow() -> dict:
+        return {"c": np.array([255, 1], np.uint8), "d": np.zeros(2, np.int64)}
+
+    native = narrow()
+    plus_one(**native)
+    assert list(native["d"]) == [256, 2]
+    agrees(plus_one, narrow)
+
+    cnt = np.array([2, 1], np.int64)
+
+    def ragged(dtype) -> dict:
+        values = np.array([2**32, 3, 5], dtype)
+        return {"cnt": cnt, "val": Arr.ragged(cnt, values=values), "y": np.zeros(2)}
+
+    native = ragged(np.int64)
+    row_squares(**native)
+    assert list(native["y"]) == [2.0**64, 25.0]
+    agrees(row_squares, lambda: ragged(np.int64))
+    with pytest.raises(ValueError, match="val is stored as int64.*Pass val as float64"):
+        halve_rows(cnt=cnt, val=Arr.ragged(cnt, values=np.array([3, 5, 7])))
+
+    i, j, size = Var("i"), Var("j"), Var("n")
+    triangle = Where[i : Fin[size], j : Fin[size], j < i]
+
+    def lower() -> dict:
+        values = np.array([2**32, 3, 5], np.int64)
+        return {"L": Arr.from_cells(triangle, values, n=3), "y": np.zeros(3)}
+
+    native = lower()
+    lower_squares(**native)
+    assert list(native["y"]) == [0.0, 2.0**64, 34.0]
+    agrees(lower_squares, lower)
+
+
+# }}}
+
+
+# {{{ a scalar that does not hold its sort (#77)
+
+
+@kernel
+def square_of(a: Real, y: Arr[Fin[n], Real]):  # noqa: F821
+    """The square of a scalar, at every cell."""
+    for i in y.dom:
+        y[i] = a * a
+
+
+@kernel
+def twice(a: Nat, y: Arr[Fin[n], Nat]):  # noqa: F821
+    """Twice a natural number, at every cell."""
+    for i in y.dom:
+        y[i] = a + a
+
+
+@kernel
+def scaled(a: Real, y: Arr[Fin[n], Real]):  # noqa: F821
+    """Twice a scalar, at every cell."""
+    for i in y.dom:
+        y[i] = a * 2.0
+
+
+@kernel
+def negated(flag: Bool, b: Arr[Fin[n], Bool]):  # noqa: F821
+    """The negation of a truth value, at every cell."""
+    for i in b.dom:
+        b[i] = ~flag
+
+
+@kernel
+def unless(flag: Bool, y: Arr[Fin[n], Real]):  # noqa: F821
+    """Ones where a truth value does not hold."""
+    for i in y.dom:
+        with when(~flag):
+            y[i] = 1.0
+
+
+def test_a_scalar_is_computed_with_in_the_dtype_of_its_sort():
+    # A scalar is passed by value, so the native run converts it as the
+    # compiled run does: np.int64(2 ** 32) squared overflowed natively, and
+    # np.int8(100) doubled wrapped round to -56.
+    def wide() -> dict:
+        return {"a": np.int64(2**32), "y": np.zeros(2)}
+
+    native = wide()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        square_of(**native)
+    assert list(native["y"]) == [2.0**64, 2.0**64]
+    interpreted = wide()
+    interpret(square_of.term, interpreted)
+    assert list(interpreted["y"]) == [2.0**64, 2.0**64]
+    agrees(square_of, wide)
+
+    def narrow() -> dict:
+        return {"a": np.int8(100), "y": np.zeros(2, np.int64)}
+
+    native = narrow()
+    twice(**native)
+    assert list(native["y"]) == [200, 200]
+    agrees(twice, narrow)
+
+
+def test_a_truth_value_scalar_is_a_numpy_bool_natively():
+    # ~True is -2 on a Python bool, which a bool array stored as True and when
+    # refused; compiled it is !flag. A numpy bool is negated logically, and
+    # compiled it is passed as the byte Bool is lowered as.
+    for flag in (True, False, np.True_, 1, 0.0):
+        native = {"flag": flag, "b": np.zeros(2, dtype=bool)}
+        negated(**native)
+        assert list(native["b"]) == [not flag] * 2
+        agrees(negated, lambda f=flag: {"flag": f, "b": np.zeros(2, dtype=bool)})
+        # Compiled, a guard that names no loop variable is dropped (#90), so
+        # only the native run of this one is compared, with the interpreter.
+        native = {"flag": flag, "y": np.zeros(2)}
+        unless(**native)
+        assert list(native["y"]) == [0.0 if flag else 1.0] * 2
+    # The samples of the faithfulness fact draw Python bools.
+    assert negated.facts()[-1].status.value == "tested"
+    assert unless.facts()[-1].status.value == "tested"
+
+
+def test_a_scalar_its_sort_does_not_hold_is_refused():
+    # 2 for a Bool was stored as the byte 2 compiled and as True natively.
+    for flag in (2, 0.5, np.int64(-1)):
+        args = {"flag": flag, "b": np.zeros(2, dtype=bool)}
+        with pytest.raises(ValueError, match="flag has to be a truth value"):
+            negated(**args)
+        with pytest.raises(ValueError, match="flag has to be a truth value"):
+            LoopyExecutor().run(negated, **args)
+
+    with pytest.raises(ValueError, match=r"a is \(1\+1j\).*imaginary part"):
+        scaled(a=1 + 1j, y=np.zeros(2))
+    with pytest.raises(ValueError, match="imaginary part"):
+        LoopyExecutor().run(scaled, a=1 + 1j, y=np.zeros(2))
+    # A complex scalar with no imaginary part is a real one in both runs, and
+    # neither warns.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", np.exceptions.ComplexWarning)
+        native = {"a": 1.5 + 0j, "y": np.zeros(2)}
+        scaled(**native)
+        assert list(native["y"]) == [3.0, 3.0]
+        agrees(scaled, lambda: {"a": np.complex128(1.5), "y": np.zeros(2)})
 
 
 # }}}

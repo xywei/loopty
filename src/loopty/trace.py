@@ -3129,6 +3129,13 @@ def _refuse_integer_truth(dtype: np.dtype, value: Any, frame: Any) -> None:
     (:func:`loopty.contract.native_storage`), so an integer arriving at one
     is a value the two runs disagree about, or a constant ``0`` or ``1`` that
     is spelled ``False`` or ``True`` everywhere else.
+
+    The masking view knows the array's dtype and not its declared sort, so
+    this holds of every bool array, one of a numpy ``np.bool_`` sort too. That
+    is wider than the trace's rule (:meth:`SymArr._refuse_untruthful`), which
+    leaves such a sort alone because C's conversion into its ``bool`` is
+    numpy's: ``b[i] = k[i]`` of an integer ``k`` would agree, and is refused
+    here, naming ``k != 0``, while ``~(i > 0)`` would not.
     """
     if dtype == np.bool_ and _integer(value):
         raise TraceError(_integer_store_message(value, _location(frame)))

@@ -54,6 +54,7 @@ from lanky.terms import Abs, evaluate, render
 from loopty.arr import Arr
 from loopty.contract import (
     native_copy,
+    native_scalar,
     native_storage,
     read_storage,
     resolve_sizes,
@@ -140,8 +141,9 @@ def interpret(
     does not write is read in the dtype its sort is stored in when it is
     given in another (:func:`loopty.contract.read_storage`): an integral one
     stored as floats as integers, a ``Real`` one stored as integers as
-    ``float64``. That is what the native run does (see
-    :meth:`loopty.kernel.Kernel.__call__`).
+    ``float64``, and a scalar is read in that dtype whatever the term does
+    (:func:`loopty.contract.native_scalar`). That is what the native run does
+    (see :meth:`loopty.kernel.Kernel.__call__`).
     """
     return _Run(term, arguments).run(limit)
 
@@ -176,7 +178,7 @@ class _Run:
             if isinstance(typ, ArrType):
                 self.arrays[name] = _storage(value, typ, name in written)
             else:
-                self.scalars[name] = value
+                self.scalars[name] = native_scalar(typ, value)
         for name, (counts, offsets) in declared_layout(
             term.params, term.offsets
         ).items():

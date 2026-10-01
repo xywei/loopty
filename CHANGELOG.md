@@ -1255,7 +1255,17 @@ with a pair of statement instances.
   imaginary part for any sort that is not complex, as it did for an integral
   one, and an entry of `Bool` stored as a number that is not `0` or `1`, which
   the compiled byte would hold as it is. The executor drops a zero imaginary
-  part before the cast, which no longer warns.
+  part before the cast, which no longer warns. A scalar argument is passed by
+  value, so the native run and the interpreter convert it into the dtype of
+  its sort whatever the kernel does (`contract.native_scalar`):
+  `np.int64(2**32)` for a `Real` no longer overflows at `a * a`, `np.int8(100)`
+  for a `Nat` no longer wraps at `a + a`, and a `Bool` is a numpy bool, so
+  `~flag` of Python's `True` is `False` there as it is compiled, where it was
+  `-2`. The contract asks a scalar what it asks an entry: a `Bool` given as a
+  number is `0` or `1` (`2` was stored as the byte `2` compiled), and a
+  complex one of a sort that is not complex has no imaginary part. The
+  executor passes a truth value to compiled code as an `int`, since `ctypes`
+  refused a numpy bool for the byte `Bool` is lowered as.
 - A store into an array of `Bool` of what is not a truth value is a
   `TraceError` naming the fix (#78). Natively the array is a numpy bool, which
   stores `0.5` as `True`, and compiled a byte, into which C converts `0.5` as

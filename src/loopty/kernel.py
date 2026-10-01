@@ -51,6 +51,7 @@ from loopty.compose import current_recorder, trace_program
 from loopty.contract import (
     check_arguments,
     native_copy,
+    native_scalar,
     read_storage,
     written_storage,
 )
@@ -339,6 +340,10 @@ class Kernel(_Decorated):
         through a copy, since its writes have to land in the caller's array,
         and is refused unless it is stored as its sort is. See
         :meth:`_storage_copies` for which arrays are copied and why only those.
+        A scalar is passed by value and is converted whatever the body does
+        (:func:`loopty.contract.native_scalar`): ``np.int64(2**32)`` for a
+        ``Real`` is a double, and Python's ``True`` for a ``Bool`` a numpy
+        bool, on which ``~`` is ``not`` as it is compiled.
 
         *An array over a domain is run over the declared domain.* The contract
         asks an argument for the declared points, which another spelling can
@@ -366,7 +371,7 @@ class Kernel(_Decorated):
         )
         stored = self._storage_copies(bound)
         declared = self._over_declared_domains(bound, stored)
-        copies = {**stored, **declared}
+        copies = {**stored, **declared, **self._scalar_copies(bound)}
         code = self.fn.__code__
         names = code.co_varnames[: code.co_argcount]
         positional = [
@@ -482,6 +487,22 @@ class Kernel(_Decorated):
             for name, (value, want) in candidates.items()
             if name not in written
         }
+
+    def _scalar_copies(self, bound: dict[str, Any]) -> dict[str, Any]:
+        """The scalar arguments in the dtype of their sort, where they are not.
+
+        :func:`loopty.contract.native_scalar` says which and why. A scalar is
+        passed by value, so unlike an array it is converted whether or not
+        the body assigns to its name, and without a trace.
+        """
+        out: dict[str, Any] = {}
+        for name, sort in self.arg_types.items():
+            if isinstance(sort, ArrType) or name not in bound:
+                continue
+            value = native_scalar(sort, bound[name])
+            if value is not bound[name]:
+                out[name] = value
+        return out
 
     def _prepare(self, value: Any) -> Any:
         """One argument, as the body needs to see it: a masking view of it."""
