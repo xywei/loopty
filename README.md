@@ -330,9 +330,17 @@ end to end; the edges are sharp.
   to have the declared domain's points at the sizes of the call, and a value
   of a refined sort such as `Fin[m]` has to be one — an array element and a
   scalar argument alike, and being one means being a finite whole number in
-  range, not merely passing two comparisons. These are the assumptions the typing
-  rules make about a *call* rather than about the term, and a violation is a
-  `ValueError` naming the argument. Distinct parameters being disjoint storage
+  range, not merely passing two comparisons. An array the kernel writes has to
+  be stored as its element sort is natively (`float64` for `Real`, `bool` for
+  `Bool`, a signed integer of 32 bits or more for `Nat`, `Int` and `Fin[m]`, a
+  numpy sort as itself), since an integer `x` for a `Real` parameter truncates
+  every write the compiled run keeps; an array it only reads is read by the
+  native run in that dtype, as the compiled run converts it, so an integer `x`
+  no longer overflows natively where the compiled double does not. A complex
+  entry of a sort that is not complex has no imaginary part, and an entry of
+  `Bool` stored as a number is `0` or `1`. These are the assumptions the typing
+  rules and the two runs make about a *call* rather than about the term, and a
+  violation is a `ValueError` naming the argument. Distinct parameters being disjoint storage
   is the load-bearing one: dependences are computed per array name, so a kernel
   reading `x[i - 1]` and writing `y[i]` may legally run `i` in parallel, and
   the same kernel called with `x is y` is a race that the differential test

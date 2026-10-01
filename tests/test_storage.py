@@ -11,11 +11,15 @@ sort (#77), and a value that is not a truth value stored into an array of
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
+import pytest
 from lanky.prelude import Bool, Int, Nat, Real
 
-from loopty import Arr, Fin, Schedule, kernel
+from loopty import Arr, Fin, Schedule, kernel, when
 from loopty.executor import LoopyExecutor, emit_code
+from loopty.interpret import interpret
 
 
 def agrees(kern, make) -> None:
@@ -125,6 +129,200 @@ def test_a_complex_literal_is_double_precision():
     out = LoopyExecutor().run(turn, **make())
     assert np.array_equal(out["f"], (0.1 + 0.2j) * np.array([1.0, -2.0]))
     agrees(turn, make)
+
+
+# }}}
+
+
+# {{{ an argument that does not hold its sort (#77)
+
+
+@kernel
+def halve_twice(x: Arr[Fin[n], Real]):  # noqa: F821
+    """Halve every entry, then double it: the identity, on reals."""
+    for i in x.dom:
+        x[i] = x[i] / 2
+    for i in x.dom:
+        x[i] = x[i] * 2
+
+
+@kernel
+def double(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """Twice every entry."""
+    for i in x.dom:
+        y[i] = 2 * x[i]
+
+
+@kernel
+def square(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """The square of every entry."""
+    for i in x.dom:
+        y[i] = x[i] * x[i]
+
+
+@kernel
+def self_sum(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """Every entry added to itself."""
+    for i in x.dom:
+        y[i] = x[i] + x[i]
+
+
+@kernel
+def truncate(u: Arr[Fin[n], Real], c: Arr[Fin[n], Nat]):  # noqa: F821
+    """Every entry as a natural number, which drops its fraction."""
+    for i in u.dom:
+        c[i] = u[i]
+
+
+@kernel
+def mark(u: Arr[Fin[n], Real], b: Arr[Fin[n], Bool]):  # noqa: F821
+    """Which entries are above one."""
+    for i in u.dom:
+        b[i] = u[i] > 1.0
+
+
+@kernel
+def keep_unmarked(
+    b: Arr[Fin[n], Bool],  # noqa: F821
+    u: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """Copy the entries ``b`` does not mark."""
+    for i in u.dom:
+        with when(~b[i]):
+            y[i] = u[i]
+
+
+def test_an_integer_array_written_as_reals_is_refused():
+    # Natively every write was truncated, and compiled none was: [3, 5] came
+    # back [2, 4] from the native run and [3., 5.] from the compiled one.
+    def make() -> dict:
+        return {"x": np.array([3, 5])}
+
+    fix = "Pass x as float64"
+    with pytest.raises(ValueError, match="x is stored as int64") as refused:
+        halve_twice(**make())
+    assert fix in str(refused.value)
+    with pytest.raises(ValueError, match=fix):
+        LoopyExecutor().run(halve_twice, **make())
+    with pytest.raises(ValueError, match=fix):
+        LoopyExecutor().differential(halve_twice, Schedule(halve_twice), make())
+    agrees(halve_twice, lambda: {"x": np.array([3.0, 5.0])})
+
+
+def test_a_complex_array_of_reals_is_refused_unless_it_is_real():
+    # The cast into float64 dropped the imaginary part, which the native run
+    # kept: y was [2+2j, 4-6j] natively and [2, 4] compiled.
+    def make() -> dict:
+        return {
+            "x": np.array([1 + 1j, 2 - 3j]),
+            "y": np.zeros(2, dtype=complex),
+        }
+
+    with pytest.raises(ValueError, match=r"x\[0\] is \(1\+1j\).*imaginary part"):
+        double(**make())
+    with pytest.raises(ValueError, match="imaginary part"):
+        LoopyExecutor().run(double, **make())
+
+    # A complex x with no imaginary part is a real one, read as one by both
+    # runs, and the cast says nothing; a complex y is still refused, since it
+    # is written.
+    def real_parts() -> dict:
+        return {"x": np.array([1 + 0j, -2 + 0j]), "y": np.zeros(2)}
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", np.exceptions.ComplexWarning)
+        native = real_parts()
+        double(**native)
+        assert list(native["y"]) == [2.0, -4.0]
+        assert native["x"].dtype == np.complex128
+        agrees(double, real_parts)
+    with pytest.raises(ValueError, match="y is stored as complex128"):
+        LoopyExecutor().run(double, x=np.ones(2), y=np.zeros(2, dtype=complex))
+
+
+def test_an_integer_array_read_as_reals_is_read_as_reals_by_both_runs():
+    # An integer x that is only read used to be computed in natively: x * x
+    # overflowed int64 at 2 ** 32, where the compiled run squares a double.
+    # The interpreter reads it the way the native run does.
+    def make() -> dict:
+        return {"x": np.array([2**32, 3], dtype=np.int64), "y": np.zeros(2)}
+
+    native = make()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        square(**native)
+    assert list(native["y"]) == [2.0**64, 9.0]
+    assert native["x"].dtype == np.int64 and list(native["x"]) == [2**32, 3]
+    interpreted = make()
+    interpret(square.term, interpreted)
+    assert list(interpreted["y"]) == [2.0**64, 9.0]
+    agrees(square, make)
+
+    # A bool x is read as reals too: True + True was True natively.
+    def truths() -> dict:
+        return {"x": np.array([True, False]), "y": np.zeros(2)}
+
+    native = truths()
+    self_sum(**native)
+    assert list(native["y"]) == [2.0, 0.0]
+    agrees(self_sum, truths)
+
+
+def test_an_array_of_naturals_written_as_floats_is_refused():
+    # A float c kept the fraction natively that the compiled integer drops.
+    def make() -> dict:
+        return {"u": np.array([1.5, 2.0]), "c": np.zeros(2)}
+
+    with pytest.raises(ValueError, match="c is stored as float64") as refused:
+        truncate(**make())
+    message = str(refused.value)
+    assert "a signed integer of 32 bits or more" in message
+    assert "Pass c as int64" in message
+    with pytest.raises(ValueError, match="Pass c as int64"):
+        LoopyExecutor().run(truncate, **make())
+    for dtype in (np.int64, np.int32):
+        agrees(
+            truncate, lambda d=dtype: {"u": np.array([1.5, 2.0]), "c": np.zeros(2, d)}
+        )
+
+
+def test_an_array_of_truth_values_written_as_bytes_is_refused():
+    with pytest.raises(ValueError, match="b is stored as int8") as refused:
+        mark(u=np.array([0.5, 2.0]), b=np.zeros(2, dtype=np.int8))
+    assert "Pass b as bool" in str(refused.value)
+
+
+def test_an_array_of_reals_written_as_float32_is_refused():
+    # Natively each write is rounded to single precision, and compiled none
+    # is, so 1e8 + 1 written and 1e8 taken away again leaves 0 natively and 1
+    # compiled.
+    with pytest.raises(ValueError, match="x is stored as float32"):
+        LoopyExecutor().run(halve_twice, x=np.ones(2, dtype=np.float32))
+
+
+def test_an_array_of_truth_values_read_as_numbers_holds_zero_and_one():
+    # Compiled, b is bytes, and a byte converted from 0.5 is 0 where a bool is
+    # True. An int8 b of zeros and ones is read natively as the bools it
+    # stands for, so ~ is logical on it there too; it used to be bitwise,
+    # which when refuses.
+    def make(b) -> dict:
+        return {
+            "b": b,
+            "u": np.array([1.0, 2.0, 3.0]),
+            "y": np.zeros(3),
+        }
+
+    with pytest.raises(ValueError, match=r"b\[0\] is 0.5.*a truth value"):
+        keep_unmarked(**make(np.array([0.5, 0.0, 1.0])))
+    with pytest.raises(ValueError, match=r"b\[1\] is 2"):
+        LoopyExecutor().run(keep_unmarked, **make(np.array([0, 2, 1], dtype=np.int8)))
+
+    native = make(np.array([0, 1, 0], dtype=np.int8))
+    keep_unmarked(**native)
+    assert list(native["y"]) == [1.0, 0.0, 3.0]
+    agrees(keep_unmarked, lambda: make(np.array([0, 1, 0], dtype=np.int8)))
+    agrees(keep_unmarked, lambda: make(np.array([0.0, 1.0, 0.0])))
 
 
 # }}}

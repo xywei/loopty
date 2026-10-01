@@ -1,6 +1,6 @@
 """What an argument list owes a term, checked before anything runs.
 
-Four of loopty's claims are claims about the *call* and not about the term, so
+Several of loopty's claims are claims about the *call* and not about the term, so
 nothing inside the type system can establish them and nothing downstream can
 notice when they fail. They are checked here, in one place, by every entry point
 that turns Python values into a run: :class:`loopty.executor.LoopyExecutor` for a
@@ -54,6 +54,19 @@ the same two questions, against the sizes the arrays of the call determine,
 and asks one more: an integral scalar has to be stored as an integer, because
 neither run can use ``1.0`` as an index.
 
+*An array is stored as its sort is, or it is only read.* The compiled run
+converts every array argument into the dtype the lowering stores its element
+sort in, and the native run computes in the dtype it is given, so an integer
+array passed for ``x: Arr[Fin[n], Real]`` is two arrays: the native run
+truncates every real written into it, and the compiled run keeps it. An array
+the term writes has to be stored as :func:`native_storage` says
+(:func:`written_storage`). One it only reads is read natively through a copy
+in that dtype (:func:`read_storage`), which is what the compiled run reads
+too. :func:`element_types` asks the values the questions the conversion would
+otherwise answer without a word: a complex entry of a sort that is not complex
+has no imaginary part, and an entry of ``Bool`` stored as a number is ``0`` or
+``1``.
+
 Nothing here checks array *shapes* against each other; see
 ``docs/loopy-notes.md`` for why lowering has to declare some arrays without
 one, and the README's status list for the consequence. One thing about a shape
@@ -85,13 +98,17 @@ __all__ = [
     "holds_natively",
     "inherited_storage",
     "integral_sort",
+    "native_copy",
     "native_storage",
     "ragged_arguments",
+    "read_storage",
     "resolve_sizes",
     "scalar_parameters",
     "sizes_not_negative",
     "sort_bound",
     "storage_wanted",
+    "truth_sort",
+    "written_storage",
 ]
 
 
@@ -529,6 +546,96 @@ def inherited_storage(
         )
 
 
+def written_storage(
+    types: Mapping[str, Any],
+    supplied: Mapping[str, Any],
+    written: Iterable[str],
+) -> None:
+    """Refuse an array argument that is written and not stored as its sort is.
+
+    The compiled run converts every array argument into the dtype the
+    lowering stores its element sort in (:func:`loopty.lower.numpy_dtype`),
+    computes in that, and writes the results back; the native run computes in
+    the array it was given. An array that is written holds what each run
+    writes into it, and the two hold one thing only when the native array is
+    stored as :func:`native_storage` says. An integer ``x`` for ``x:
+    Arr[Fin[n], Real]`` truncates every write the compiled one keeps, so
+    halving ``[3, 5]`` and doubling it again leaves ``[2, 4]`` natively and
+    ``[3, 5]`` compiled; a ``float32`` one rounds what the compiled one keeps;
+    a complex one keeps an imaginary part the compiled one never had; a real
+    one for ``Bool`` refuses ``~``. A copy in the right dtype would make the
+    runs agree and break the native run's promise that its writes land in the
+    caller's array, so the call is refused, naming the dtype to pass. An array
+    that is only read is read through such a copy instead (:func:`read_storage`).
+
+    ``written`` names the arrays the term writes: the lowering's outputs for a
+    compiled run, and the term's assignees for a native one.
+    """
+    written = set(written)
+    for name, typ in types.items():
+        if name not in written or not isinstance(typ, ArrType):
+            continue
+        buffer = _buffer(supplied.get(name))
+        if buffer is None:
+            continue
+        sort = typ.dtype
+        want = native_storage(sort)
+        if want is None or holds_natively(sort, buffer.dtype):
+            continue
+        raise ValueError(
+            f"the argument {name} is stored as {buffer.dtype}, and {name} is "
+            f"written: its elements are {_shown_sort(sort)}, which the native "
+            f"run has to store as {storage_wanted(sort)} to hold what is written "
+            "into them as the compiled run does, so the two runs would compute "
+            f"{name} differently. Pass {name} as {want}"
+        )
+
+
+def read_storage(sort: Any, dtype: Any) -> np.dtype | None:
+    """The dtype the native run reads an array of ``sort`` stored as ``dtype`` in.
+
+    ``None`` when the array holds ``sort`` natively as it is
+    (:func:`holds_natively`), and :func:`native_storage` otherwise: an integer
+    array of ``Real`` elements is read as ``float64``, a float one of
+    ``Fin[m]`` as ``int64``, one of ``0`` and ``1`` for ``Bool`` as ``bool``.
+    That is what the compiled run reads as well, since it converts the array
+    into its own dtype on the way in, but for an integral sort, which is 32
+    bits wide there (see :func:`holds_natively`). The native run used to
+    compute in the dtype it was given, so an integer ``x`` of a ``Real``
+    parameter overflowed at ``x[i] * x[i]`` where the compiled run squares a
+    double, and a ``bool`` one added ``True + True`` to ``True``. A dtype that
+    is not a number's is ``None`` too: nothing converts it.
+
+    Only an array the term does not write is read through a copy; one it
+    writes is refused instead (:func:`written_storage`).
+    """
+    want = native_storage(sort)
+    if want is None:
+        return None
+    try:
+        got = np.dtype(dtype)
+    except TypeError:
+        return None
+    if got.kind not in "biufc" or holds_natively(sort, got):
+        return None
+    return want
+
+
+def native_copy(value: Any, dtype: np.dtype) -> Any:
+    """A copy of an array argument in ``dtype``: what :func:`read_storage` asks for.
+
+    An :class:`~loopty.arr.Arr` stays one, ragged or over a domain, with its
+    own layout. A complex array loses its imaginary part only for a dtype that
+    is not complex, for whose sort :func:`element_types` has required it to be
+    zero; it is dropped here and not by the cast, which would warn.
+    """
+    buffer = value.numpy() if isinstance(value, Arr) else np.asarray(value)
+    if buffer.dtype.kind == "c" and dtype.kind != "c":
+        buffer = buffer.real
+    converted = buffer.astype(dtype)
+    return value._replaced(converted) if isinstance(value, Arr) else converted
+
+
 def _shown_sort(sort: Any) -> str:
     """A sort as a message says it: a numpy scalar type by its dtype's name."""
     if isinstance(sort, type) and issubclass(sort, np.generic):
@@ -593,6 +700,21 @@ def integral_sort(sort: Any) -> bool:
     if isinstance(sort, FinType):
         return True
     return getattr(sort, "name", None) in ("Nat", "Int")
+
+
+def truth_sort(sort: Any) -> bool:
+    """Whether the points of ``sort`` are truth values compiled code keeps in a byte.
+
+    ``Bool``, and Python's ``bool``, which the lowering stores as a byte
+    (:func:`loopty.lower.numpy_dtype`) because OpenCL takes no ``bool``
+    argument, and the native run as a numpy bool (:func:`native_storage`).
+    The two hold one value only while the byte is ``0`` or ``1``: C converts
+    ``0.5`` into a byte as ``0`` and keeps ``2`` as ``2``, where a bool holds
+    ``True`` for both. A numpy bool given as the sort is C's ``bool`` compiled,
+    whose conversion is numpy's, and is not one of these.
+    """
+    base = _base_sort(sort)
+    return base is bool or getattr(base, "name", None) == "Bool"
 
 
 def sort_bound(
@@ -679,7 +801,7 @@ def element_bound(
 
 #: The half-open range of the integers a float-stored element of an integral
 #: sort is converted to: the native run reads such an array as ``int64`` (see
-#: :meth:`loopty.kernel.Kernel._integer_copies`). Both ends are floats that
+#: :meth:`loopty.kernel.Kernel._storage_copies`). Both ends are floats that
 #: ``float64`` holds exactly, and every whole float inside them converts
 #: exactly.
 INT64_RANGE = (-(2.0**63), 2.0**63)
@@ -735,6 +857,14 @@ def element_types(
     kept the float. So a refined integer sort (``Fin``, ``Nat``, ``Int``) asks
     :func:`_not_an_integer` first. See its docstring for why an integer-valued
     float array is accepted.
+
+    Two more sorts say something about a value that the compiled run's
+    conversion would otherwise change. A complex entry is a value of a sort
+    that is not complex, ``Real`` say, only when its imaginary part is zero:
+    the cast into ``float64`` drops it, and the native run computes with it.
+    And a ``Bool`` entry stored as a number has to be ``0`` or ``1``
+    (:func:`truth_sort`), because the compiled run converts it into a byte as
+    it is, and the native run reads it as a truth value.
     """
     sizes = resolve_sizes(types, supplied) if sizes is None else sizes
     extents = axis_extents(types, supplied) if extents is None else extents
@@ -746,24 +876,57 @@ def element_types(
         if flat is None or not flat.size or flat.dtype.kind not in "biufc":
             continue
         if flat.dtype.kind == "c":
-            # A complex entry is a whole number only when its imaginary part is
-            # zero; anything else would be truncated by the cast into the
-            # compiled kernel's integer dtype while the native run refused it.
-            if not integral_sort(typ.dtype):
+            storage = native_storage(typ.dtype)
+            if storage is None or storage.kind == "c":
                 continue
-            whole = (
-                np.isfinite(flat) & (flat.imag == 0) & (flat.real == np.rint(flat.real))
-            )
-            offenders = np.flatnonzero(~whole)
+            if integral_sort(typ.dtype):
+                # A complex entry is a whole number only when its imaginary
+                # part is zero; anything else would be truncated by the cast
+                # into the compiled kernel's integer dtype while the native run
+                # refused it.
+                whole = (
+                    np.isfinite(flat)
+                    & (flat.imag == 0)
+                    & (flat.real == np.rint(flat.real))
+                )
+                offenders = np.flatnonzero(~whole)
+                if offenders.size:
+                    position = int(offenders[0])
+                    raise ValueError(
+                        f"{_cell_label(name, value, position)} is "
+                        f"{flat[position]}, which is not a value of {typ.dtype}: "
+                        f"an element of {name} has to be a finite whole number, "
+                        "and a complex entry is one only when its imaginary part "
+                        "is zero"
+                    )
+            # Any other sort that is not complex: the cast into the compiled
+            # kernel's dtype drops the imaginary part, which the native run
+            # computes with.
+            offenders = np.flatnonzero(flat.imag != 0)
+            if offenders.size:
+                position = int(offenders[0])
+                raise ValueError(
+                    f"{_cell_label(name, value, position)} is {flat[position]}, "
+                    f"which is not a value of {_shown_sort(typ.dtype)}: a complex "
+                    "entry is one only when its imaginary part is zero. The "
+                    f"compiled run converts {name} into the dtype it stores "
+                    f"{_shown_sort(typ.dtype)} in, which drops the imaginary "
+                    "part, while the native run computes with it"
+                )
+            flat = flat.real
+        if truth_sort(typ.dtype) and flat.dtype.kind != "b":
+            offenders = np.flatnonzero((flat != 0) & (flat != 1))
             if offenders.size:
                 position = int(offenders[0])
                 raise ValueError(
                     f"{_cell_label(name, value, position)} is {flat[position]}, "
                     f"which is not a value of {typ.dtype}: an element of {name} "
-                    "has to be a finite whole number, and a complex entry is one "
-                    "only when its imaginary part is zero"
+                    "has to be a truth value, stored as a bool or as 0 or 1. The "
+                    f"compiled run stores {name} as bytes, and a byte holds a "
+                    "truth value as a bool does only when it is 0 or 1: C "
+                    "converts 0.5 into a byte as 0 and keeps 2 as 2, where a "
+                    "bool holds True for both"
                 )
-            flat = flat.real
         if integral_sort(typ.dtype):
             position = _not_an_integer(flat)
             if position is not None:
@@ -1028,13 +1191,19 @@ def check_arguments(
     types: Mapping[str, Any],
     supplied: Mapping[str, Any],
     offsets_args: Mapping[str, str] | None = None,
+    written: Iterable[str] | None = None,
 ) -> None:
     """Everything an argument list owes a term, in one call.
 
     ``types`` maps a parameter to its :class:`~loopty.term.ArrType` or scalar
     sort, ``supplied`` maps a parameter to the value the caller passed, and
     ``offsets_args`` is the lowering's flattening map when there is a lowering.
-    Raises :class:`ValueError` naming the argument at fault.
+    ``written`` names the arrays the term writes, when the caller knows them,
+    and their storage is checked too (:func:`written_storage`); a native call
+    knows them only once the body is traced, which it does only when some
+    array is not stored as its sort is (see
+    :meth:`loopty.kernel.Kernel._storage_copies`). Raises :class:`ValueError`
+    naming the argument at fault.
 
     The sizes are resolved once and handed to both element checks, so that an
     array and a scalar declared over the same ``Fin[n]`` are measured against
@@ -1048,3 +1217,5 @@ def check_arguments(
     extents = axis_extents(types, supplied)
     element_types(types, supplied, sizes, extents)
     scalar_parameters(types, supplied, sizes, extents)
+    if written is not None:
+        written_storage(types, supplied, written)

@@ -1237,6 +1237,25 @@ with a pair of statement instances.
   which loopy writes as they are; a complex literal single precision does
   not hold, which loopy refused to type, lowers too. Note 17 in
   `docs/loopy-notes.md`.
+- An array argument stored in a dtype that does not hold its element sort no
+  longer computes one thing natively and another compiled (#77). The compiled
+  run converts every array into the dtype its sort is lowered as, and the
+  native run computed in the dtype it was given: an integer `x` for a `Real`
+  parameter that the kernel halves and doubles came back `[2, 4]` natively and
+  `[3., 5.]` compiled, and a complex `x` lost its imaginary part compiled
+  only. An array the kernel writes has to be stored as its sort is natively
+  (`contract.written_storage`, the rule `contract.native_storage` states for a
+  program's temporary), and is refused on every entry point otherwise, naming
+  the dtype to pass: an integer or `float32` one for `Real`, a float one for
+  `Nat`, a byte for `Bool`. An array the kernel only reads is read by the
+  native run, and by the interpreter, through a copy in that dtype
+  (`contract.read_storage`, which generalizes the integer copy of a
+  float-stored index array), so an integer `x` read as reals no longer
+  overflows natively at `x * x`. The contract refuses a complex entry with an
+  imaginary part for any sort that is not complex, as it did for an integral
+  one, and an entry of `Bool` stored as a number that is not `0` or `1`, which
+  the compiled byte would hold as it is. The executor drops a zero imaginary
+  part before the cast, which no longer warns.
 
 ### Changed
 

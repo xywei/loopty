@@ -98,13 +98,21 @@ def _resolve(obj: Any, target: str | None = None) -> tuple[Term, Any, Lowering, 
 
 
 def _as_numpy(value: Any, dtype: np.dtype | None = None) -> np.ndarray:
-    """A numpy view of an argument, unwrapping a runtime :class:`~loopty.arr.Arr`."""
+    """A numpy view of an argument, unwrapping a runtime :class:`~loopty.arr.Arr`.
+
+    A complex array converted into a dtype that is not complex is given its
+    real part first. The contract has required the imaginary part to be zero
+    (:func:`loopty.contract.element_types`), so nothing is lost, and the cast
+    no longer warns that something might be.
+    """
     from loopty.arr import Arr
 
     if isinstance(value, Arr):
         value = value.numpy()
     array = np.asarray(value)
     if dtype is not None and array.dtype != dtype:
+        if array.dtype.kind == "c" and np.dtype(dtype).kind != "c":
+            array = array.real
         array = array.astype(dtype)
     return np.ascontiguousarray(array)
 
@@ -304,15 +312,18 @@ class LoopyExecutor:
         The arguments are checked against the term before anything is compiled
         or run: distinct array parameters may not share storage, a ragged
         argument has to agree with its counts family and with any offsets given
-        alongside it, and an element of a refined sort has to be one. All three
-        are properties of the call rather than of the term, and all three are
-        what a typing rule assumed when it decided something; see
+        alongside it, an element of a refined sort has to be one, and an array
+        the kernel writes has to be stored as its element sort is natively. All
+        of these are properties of the call rather than of the term, and each
+        is what a typing rule, or the native run's meaning, assumed; see
         :mod:`loopty.contract`.
         """
         term, kernel, lowering, target_name = _resolve(obj, self.target)
         names = [name for name, _ in term.params]
         supplied = {**dict(zip(names, args, strict=False)), **kwargs}
-        check_arguments(dict(term.params), supplied, lowering.ragged)
+        check_arguments(
+            dict(term.params), supplied, lowering.ragged, written=lowering.outputs
+        )
         inherited_storage(term.array_types, term.temporaries_like, supplied)
         layouts = _declared_layouts(term, lowering, supplied)
         call = _call_arguments(term, lowering, args, kwargs, layouts)
@@ -372,10 +383,13 @@ class LoopyExecutor:
         A plain ``ndarray`` needs this as much as an ``Arr`` does. It reaches
         loopy through :func:`_as_numpy`, which hands over the caller's own array
         only when it is already contiguous and of the lowered dtype; a strided
-        view (``z[:, 0]``) or a ``float32`` output for a ``Real`` parameter is
-        copied on the way in, and the results used to stay in that copy. Such
-        an output is written back here, cast to the caller's dtype the way any
-        assignment into it would be.
+        view (``z[:, 0]``) or an ``int64`` output for a ``Nat`` parameter,
+        which is lowered as ``int32``, is copied on the way in, and the results
+        used to stay in that copy. Such an output is written back here, cast to
+        the caller's dtype. An output whose dtype does not hold its element
+        sort, a ``float32`` one for ``Real`` say, is refused by the contract
+        before the run (:func:`loopty.contract.written_storage`), so the cast
+        changes no value.
 
         An array over a domain ran in the layout ``storage`` names for it over
         the declared domain (``layouts``, see :func:`_declared_layouts`), and
@@ -462,7 +476,9 @@ class LoopyExecutor:
         # Before the copies: ``_copy`` gives every argument a buffer of its own,
         # which is exactly what hides an alias between two of them, and the
         # native run would otherwise be the first thing to meet a bad index.
-        check_arguments(dict(term.params), args, lowering.ragged)
+        check_arguments(
+            dict(term.params), args, lowering.ragged, written=lowering.outputs
+        )
         inherited_storage(term.array_types, term.temporaries_like, args)
         native = dict(reference or {})
         if native:
