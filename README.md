@@ -291,7 +291,10 @@ end to end; the edges are sharp.
   `{ S0[t, i] -> [a, b] : ...; S1[t, i] -> [a, b] : ... }`, moves each
   statement by its own map, checked on the dependences between the statements
   as well as within each, which is the time offset a diamond tiling of two
-  statements that feed each other needs. A loop over an image with holes, such
+  statements that feed each other needs. A program's statement, `flux.S0` or
+  `step@2.S0`, which isl cannot read as a tuple name, is named with every
+  other character spelled `_`, `flux_S0` or `step_2_S0`, the id of its
+  instruction in the lowered kernel. A loop over an image with holes, such
   as the diamond's `b`, counts its steps (`b = 2*b_step - a`,
   `Schedule.strides`) instead of testing a parity at every `b`.
 - The target-capability check: a concurrent tag (a hardware axis, `ilp` or

@@ -1273,6 +1273,15 @@ with a pair of statement instances.
   term scheduled with no kernel behind it is named by its name,
   `cast:transpose:[c]...`. `loopty.schedule.definition_of` gives what a fact
   names an object by.
+- A map per statement in `Schedule.affine` can name a program's statement
+  (#79). A program's statements are named after their calls, `flux.S0` and
+  `step@2.S0`, which isl cannot read as tuple names, so `{ flux.S0[j] -> [jj]
+  : jj = j }` was a syntax error, and `flux_S0`, loopy's id of the
+  instruction, was refused as not a statement of the program. A tuple name
+  that is no statement's id is now read as the id spelled with every
+  character other than a letter, a digit or an underscore written `_`, which
+  is the instruction's id and so names one statement, and isl's refusal of a
+  map that names a statement by such an id says how to spell it.
 
 ### Changed
 

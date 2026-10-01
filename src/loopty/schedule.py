@@ -2701,7 +2701,13 @@ class Schedule:
             )
 
         puts ``S1`` half a step after ``S0`` along the diamond, which is what a
-        diamond tiling of a pair of statements that feed each other needs. The
+        diamond tiling of a pair of statements that feed each other needs. A
+        program's statements are named after their calls, ``flux.S0`` and
+        ``step@2.S0`` (:mod:`loopty.compose`), which isl cannot read as tuple
+        names, so a tuple names a statement by its id with every character
+        other than a letter, a digit or an underscore spelled ``_`` as well,
+        ``flux_S0`` and ``step_2_S0``, which is the id loopy gives its
+        instruction, and so names one statement. The
         statements still share their loops, so every map has to take the same
         loops to the same new ones, and every statement in those loops has to
         run in all of them and be given one map, and only one; each of those
@@ -2725,9 +2731,17 @@ class Schedule:
         one loopy domain defines, is a ``refuted`` ``buildable`` fact with the
         reason, and the schedule then has no kernel.
         """
-        recorded, pieces = _as_maps(mapping)
-        mapping = recorded if pieces is None else next(iter(pieces.values()))
+        try:
+            recorded, pieces = _as_maps(mapping)
+        except ValueError as exc:
+            hint = self._spelling_hint(mapping)
+            if hint is None:
+                raise
+            raise ValueError(f"{exc}\n{hint}") from exc
         text = f"affine({recorded})"
+        if pieces is not None:
+            pieces = self._statements_named(pieces)
+        mapping = recorded if pieces is None else next(iter(pieces.values()))
         draft = self._draft()
         self._reindex_into(draft, mapping, text, pieces)
         inputs = _dim_names(mapping, isl.dim_type.in_)
@@ -2748,6 +2762,50 @@ class Schedule:
             draft.order = [*kept[:first], *outputs, *kept[first:]]
         self._affine_into(draft, mapping, pieces)
         return self._commit(draft, text, ("affine", (recorded,), {}))
+
+    def _statements_named(self, pieces: Mapping[str, isl.Map]) -> dict[str, isl.Map]:
+        """The maps per statement of :meth:`affine`, by statement id.
+
+        A tuple name that is a statement's id names it. One that is not is
+        read as a statement's id spelled as an isl name, every character other
+        than a letter, a digit or an underscore written ``_`` (``flux_S0`` for
+        the program statement ``flux.S0``). That is the id of the statement's
+        instruction in the lowered kernel, and loopy refuses two instructions
+        of one id, so in a term that lowers the spelling names one statement.
+        A name that is neither is passed on as it is, and refused as not a
+        statement of the kernel (:meth:`_check_pieces`).
+        """
+        spelled = {insn: stmt_id for stmt_id, insn in self._lowering.insn_ids.items()}
+        ids = {stmt.id for stmt in self._term.stmts}
+        # isl reads no id that differs from its spelling, so no two names
+        # given here are one statement's.
+        return {
+            name if name in ids else spelled.get(name, name): piece
+            for name, piece in pieces.items()
+        }
+
+    def _spelling_hint(self, mapping: Any) -> str | None:
+        """What to write for a statement whose id isl cannot read, if one is.
+
+        For the text of a map that isl refused, when the text names a
+        statement of the term by an id that is not an isl name, as a
+        program's statement ids are (``flux.S0``).
+        """
+        if not isinstance(mapping, str):
+            return None
+        named = [
+            stmt.id
+            for stmt in self._term.stmts
+            if _sanitize(stmt.id) != stmt.id and f"{stmt.id}[" in mapping
+        ]
+        if not named:
+            return None
+        spellings = ", ".join(f"{stmt_id} as {_sanitize(stmt_id)}" for stmt_id in named)
+        return (
+            "A statement whose id isl cannot read as a tuple name is named with "
+            "every character other than a letter, a digit or an underscore "
+            f"spelled _: {spellings}"
+        )
 
     def _affine_into(
         self,

@@ -1448,6 +1448,45 @@ def test_the_native_run_is_not_refused() -> None:
 # }}}
 
 
+# {{{ maps per statement of a program (#79)
+
+
+def test_a_map_per_statement_names_a_program_statement_as_isl_spells_it() -> None:
+    # ``flux.S0`` is not an isl tuple name, and ``flux_S0``, loopy's id of its
+    # instruction, was refused as not a statement of the program. It names
+    # the one statement it spells.
+    schedule = Schedule(burgers).affine(
+        "[n] -> { flux_S0[j] -> [jj] : jj = n - 1 - j }"
+    )
+    assert "jj" in schedule.order
+    assert {fact.kind for fact in schedule.facts()} == {"bijective", "monotone"}
+    assert {fact.status.value for fact in schedule.facts()} == {"decided"}
+    fact = LoopyExecutor().differential(burgers, schedule, burgers_inputs())
+    assert fact.status.value == "tested", fact.provenance
+
+
+def test_a_repeated_call_s_statement_is_named_with_its_count() -> None:
+    # ``scale@2.S0`` is spelled ``scale_2_S0``, and only its own loop moves.
+    stmt = twice.term.stmt("scale@2.S0")
+    (loop,) = stmt.inames
+    schedule = Schedule(twice).affine(f"{{ scale_2_S0[{loop}] -> [k] : k = {loop} }}")
+    assert schedule.order == ("i", "k")
+    x = Arr.from_numpy(np.arange(4.0))
+    fact = LoopyExecutor().differential(twice, schedule, {"x": x})
+    assert fact.status.value == "tested", fact.provenance
+
+
+def test_a_program_statement_named_by_its_id_says_how_to_spell_it() -> None:
+    with pytest.raises(ValueError) as caught:
+        Schedule(burgers).affine("{ flux.S0[j] -> [jj] : jj = j }")
+    message = str(caught.value)
+    assert "is not an isl map" in message
+    assert "spelled _: flux.S0 as flux_S0" in message
+
+
+# }}}
+
+
 # {{{ the faithfulness fact
 
 
