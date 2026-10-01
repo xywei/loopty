@@ -1226,6 +1226,58 @@ with a pair of statement instances.
   now keyed by definition (see Changed), so the restatement names the
   helper's fact by the id it has in the helper's own ledger, and each callee
   gets a restatement of its own.
+- A real literal stored into an integer array keeps its fraction until the
+  store (#73). The lowering handed loopy a Python `float` as it was, and loopy
+  writes an untyped constant in the type of the expression around it, which
+  on the right-hand side is the assignee's: `c[i] = u[i] * 0.5` into a `Nat`
+  `c` was generated as `c[i] = (int32_t) (u[i] * 0)`, so `[1, 2, 3, 4]` gave
+  `[0, 0, 0, 0]` compiled and `[0, 1, 1, 2]` natively. loopy also took `0.5`
+  for a `float32`, so half of an integer was computed in single precision.
+  A `float` is lowered as `np.float64` and a `complex` as `np.complex128`,
+  which loopy writes as they are; a complex literal single precision does
+  not hold, which loopy refused to type, lowers too. Note 17 in
+  `docs/loopy-notes.md`.
+- An array argument stored in a dtype that does not hold its element sort no
+  longer computes one thing natively and another compiled (#77). The compiled
+  run converts every array into the dtype its sort is lowered as, and the
+  native run computed in the dtype it was given: an integer `x` for a `Real`
+  parameter that the kernel halves and doubles came back `[2, 4]` natively and
+  `[3., 5.]` compiled, and a complex `x` lost its imaginary part compiled
+  only. An array the kernel writes has to be stored as its sort is natively
+  (`contract.written_storage`, the rule `contract.native_storage` states for a
+  program's temporary), and is refused on every entry point otherwise, naming
+  the dtype to pass: an integer or `float32` one for `Real`, a float one for
+  `Nat`, a byte for `Bool`. An array the kernel only reads is read by the
+  native run, and by the interpreter, through a copy in that dtype
+  (`contract.read_storage`, which generalizes the integer copy of a
+  float-stored index array), so an integer `x` read as reals no longer
+  overflows natively at `x * x`. The contract refuses a complex entry with an
+  imaginary part for any sort that is not complex, as it did for an integral
+  one, and an entry of `Bool` stored as a number that is not `0` or `1`, which
+  the compiled byte would hold as it is. The executor drops a zero imaginary
+  part before the cast, which no longer warns. A scalar argument is passed by
+  value, so the native run and the interpreter convert it into the dtype of
+  its sort whatever the kernel does (`contract.native_scalar`):
+  `np.int64(2**32)` for a `Real` no longer overflows at `a * a`, `np.int8(100)`
+  for a `Nat` no longer wraps at `a + a`, and a `Bool` is a numpy bool, so
+  `~flag` of Python's `True` is `False` there as it is compiled, where it was
+  `-2`. The contract asks a scalar what it asks an entry: a `Bool` given as a
+  number is `0` or `1` (`2` was stored as the byte `2` compiled), and a
+  complex one of a sort that is not complex has no imaginary part. The
+  executor passes a truth value to compiled code as an `int`, since `ctypes`
+  refused a numpy bool for the byte `Bool` is lowered as.
+- A store into an array of `Bool` of what is not a truth value is a
+  `TraceError` naming the fix (#78). Natively the array is a numpy bool, which
+  stores `0.5` as `True`, and compiled a byte, into which C converts `0.5` as
+  `0` and `2.0` as `2`. A comparison, a connective whose operands are truth
+  values, a read of an array or a scalar of truth values, and `True` and
+  `False` are stored; `b[i] = u[i]` is refused with `b[i] = u[i] != 0` as the
+  fix, an integer constant with the truth value numpy makes of it, and
+  `k[i] & 1` of an integer `k`, which the trace reads as `and` and numpy
+  computes bitwise, with its operand named. Natively an integer stored into a
+  bool array is refused as `when` refuses an integer guard, since that is
+  what `~(i > 0)` of a loop variable is there, `-2` or `-1`, which a bool
+  array stored as `True` at every point.
 - The `monotone` cast refuses a dependence between instances on two work
   items of a hardware axis (#63). It dropped a loop on `g.*` or `l.*` from the
   order it checked, as it drops `ilp` and `vec`, and let the loops around it

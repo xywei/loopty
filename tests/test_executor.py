@@ -62,6 +62,13 @@ def test_positional_arguments_follow_the_term_signature() -> None:
     assert np.allclose(out["z"], 3.0 * x + y)
 
 
+@kernel
+def add_index(c: Arr[Fin[n], Nat]):  # noqa: F821
+    """``c[i] = c[i] + i``: an output of naturals, lowered as 32-bit integers."""
+    for i in c.dom:
+        c[i] = c[i] + i
+
+
 def test_a_strided_or_differently_typed_output_is_updated_in_place() -> None:
     # ``_as_numpy`` copies an output that is not contiguous, or not of the
     # lowered dtype, on the way into loopy. The results have to come back out
@@ -76,10 +83,17 @@ def test_a_strided_or_differently_typed_output_is_updated_in_place() -> None:
     assert np.allclose(z, 3.0 * x + y)
     assert np.all(storage[:, 1] == 0.0)
 
+    # A Nat output stored as int64 is lowered as int32, and copied.
+    c = np.array([5, 6, 7], dtype=np.int64)
+    executor().run(add_index, c=c)
+    assert c.dtype == np.int64
+    assert list(c) == [5, 7, 9]
+
+    # A float32 z for a float64 one used to be copied too, and the native run
+    # rounded every write the compiled one kept; it is refused now.
     single = np.zeros(4, dtype=np.float32)
-    executor().run(ht.axpy_term(), a=3.0, x=x, y=y, z=single)
-    assert single.dtype == np.float32
-    assert np.allclose(single, 3.0 * x + y)
+    with pytest.raises(ValueError, match="z is stored as float32"):
+        executor().run(ht.axpy_term(), a=3.0, x=x, y=y, z=single)
 
 
 def test_a_ragged_array_supplies_its_own_offsets() -> None:
@@ -782,17 +796,23 @@ def test_the_native_run_reads_an_integer_valued_float_index_array_too() -> None:
     assert fact.status.value == "tested"
 
 
-def test_a_float_stored_integral_array_the_body_writes_is_not_copied() -> None:
+def test_a_float_stored_integral_array_the_body_writes_is_refused() -> None:
     # A write has to land in the caller's buffer, so an array the body writes is
-    # never swapped for a copy, whatever its storage.
+    # never swapped for a copy, whatever its storage. It used to run on the
+    # floats, where c[i] + 0.5 would have kept what the compiled integer drops,
+    # and it is refused now, naming the dtype that holds a Nat.
     @kernel
     def count_up(c: Arr[Fin[n], Nat]):  # noqa: F821
         for i in c.dom:
             c[i] = c[i] + 1
 
     counts = np.array([0.0, 2.0, 5.0])
+    with pytest.raises(ValueError, match="c is stored as float64.*Pass c as int64"):
+        count_up(counts)
+    assert counts.tolist() == [0.0, 2.0, 5.0]
+    counts = counts.astype(np.int64)
     count_up(counts)
-    assert counts.tolist() == [1.0, 3.0, 6.0]
+    assert counts.tolist() == [1, 3, 6]
 
 
 @kernel

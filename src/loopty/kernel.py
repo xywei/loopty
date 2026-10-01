@@ -48,7 +48,13 @@ from lanky.terms import evaluate_annotations
 from loopty import typing as rules
 from loopty.arr import Arr, ArrSpec
 from loopty.compose import current_recorder, trace_program
-from loopty.contract import check_arguments, integral_sort
+from loopty.contract import (
+    check_arguments,
+    native_copy,
+    native_scalar,
+    read_storage,
+    written_storage,
+)
 from loopty.term import (
     ArrType,
     Term,
@@ -321,13 +327,23 @@ class Kernel(_Decorated):
         array's own offsets gave it a second meaning. On entry the two layouts
         agree, which is what the contract checked above.
 
-        *An index array stored as floats is read as integers.* The contract
-        accepts ``col = [1.0, 0.0]`` for ``col: Arr[..., Fin[m]]``, because being
-        a point of ``Fin[m]`` is a property of the value, and the compiled run
-        casts it to an integer on the way in. numpy refuses a float as an index,
-        so the native run used to raise on the very input the contract had just
-        accepted, and the differential test could not compare the two. See
-        :meth:`_integer_copies` for which arrays are copied and why only those.
+        *An array is read as its sort is stored.* The compiled run converts
+        every array into the dtype its element sort is stored in on the way in,
+        so an array the body only reads is read natively through a copy in
+        :func:`loopty.contract.native_storage`'s dtype too. The contract
+        accepts ``col = [1.0, 0.0]`` for ``col: Arr[..., Fin[m]]``, because
+        being a point of ``Fin[m]`` is a property of the value, and numpy
+        refuses a float as an index, so the native run used to raise on the
+        very input the contract had just accepted; an integer ``x`` of a
+        ``Real`` parameter used to overflow at ``x[i] * x[i]``, where the
+        compiled run squares a double. An array the body writes cannot be read
+        through a copy, since its writes have to land in the caller's array,
+        and is refused unless it is stored as its sort is. See
+        :meth:`_storage_copies` for which arrays are copied and why only those.
+        A scalar is passed by value and is converted whatever the body does
+        (:func:`loopty.contract.native_scalar`): ``np.int64(2**32)`` for a
+        ``Real`` is a double, and Python's ``True`` for a ``Bool`` a numpy
+        bool, on which ``~`` is ``not`` as it is compiled.
 
         *An array over a domain is run over the declared domain.* The contract
         asks an argument for the declared points, which another spelling can
@@ -353,9 +369,9 @@ class Kernel(_Decorated):
             bound,
             {name: offsets for name, (_, offsets) in layout.items() if offsets},
         )
-        integer = self._integer_copies(bound)
-        declared = self._over_declared_domains(bound, integer)
-        copies = {**integer, **declared}
+        stored = self._storage_copies(bound)
+        declared = self._over_declared_domains(bound, stored)
+        copies = {**stored, **declared, **self._scalar_copies(bound)}
         code = self.fn.__code__
         names = code.co_varnames[: code.co_argcount]
         positional = [
@@ -383,20 +399,20 @@ class Kernel(_Decorated):
             return self.fn(*positional, **keywords)
         finally:
             for name, copy in declared.items():
-                # An integer copy is of an array the body only reads.
-                if name not in integer:
+                # A storage copy is of an array the body only reads.
+                if name not in stored:
                     bound[name].load(copy.storage, copy.numpy(), copy.domain)
 
     def _over_declared_domains(
-        self, bound: dict[str, Any], integer: dict[str, Any]
+        self, bound: dict[str, Any], stored: dict[str, Any]
     ) -> dict[str, Arr]:
         """Copies over the declared domain of the arrays built over another one.
 
         One for every argument over a domain that is not the declared domain
         at the call's sizes, holding the same values at the same points (the
         contract checked the points) in the argument's own storage, and taken
-        from its integer copy when it has one (``integer``, see
-        :meth:`_integer_copies`). The body runs on the copy, so its loops and
+        from its storage copy when it has one (``stored``, see
+        :meth:`_storage_copies`). The body runs on the copy, so its loops and
         sizes are the declared domain's, and :meth:`__call__` writes the copy
         back into the argument.
         """
@@ -407,7 +423,7 @@ class Kernel(_Decorated):
         for name, typ in self.arg_types.items():
             if not isinstance(typ, ArrType) or typ.domain is None:
                 continue
-            value = integer.get(name, bound.get(name))
+            value = stored.get(name, bound.get(name))
             if not (isinstance(value, Arr) and value.domain is not None):
                 continue
             if sizes is None:
@@ -421,48 +437,71 @@ class Kernel(_Decorated):
             )
         return out
 
-    def _integer_copies(self, bound: dict[str, Any]) -> dict[str, Any]:
-        """Integer copies of the float-stored arrays of an integral sort.
+    def _storage_copies(self, bound: dict[str, Any]) -> dict[str, Any]:
+        """Copies of the arrays the body only reads, in the dtype of their sort.
 
-        Only arrays whose declared element sort is integral (``Fin``, ``Nat``,
-        ``Int``) and whose storage is floating or complex are candidates, and
-        :func:`loopty.contract.check_arguments` has already required every
-        entry of those to be a finite whole number inside
-        :data:`loopty.contract.INT64_RANGE`, so the copy is exact. The copy is
-        ``int64`` while the lowering stores an integral sort as ``int32``; a
-        value between the two ranges runs natively and is narrowed by the
-        compiled run's cast, as the same value stored as ``int64`` is.
+        An array is a candidate when its dtype does not hold its declared
+        element sort as the compiled run holds it
+        (:func:`loopty.contract.read_storage`): an integer or ``float32`` array
+        of ``Real``, a float one of ``Fin``, ``Nat`` or ``Int``, an ``int8`` one
+        of ``Bool``. :func:`loopty.contract.check_arguments` has already
+        required every entry of those to be a value of the sort (a finite whole
+        number inside :data:`loopty.contract.INT64_RANGE`, no imaginary part,
+        ``0`` or ``1``), so the copy changes no value, except by rounding to a
+        narrower sort (a ``float64`` array of ``np.float32``), which the
+        compiled run's conversion rounds the same way. An integral sort is copied as
+        ``int64`` while the lowering stores it as ``int32``; a value between
+        the two ranges runs natively and is narrowed by the compiled run's
+        cast, as the same value stored as ``int64`` is.
 
-        An array the body *writes* is left as it is. A copy is a new buffer, and
+        An array the body *writes* is not copied. A copy is a new buffer, and
         the native run's promise is that writes land in the caller's array; an
         array that is only read can be copied without anybody being able to
-        tell. Which arrays are written is a fact about the term, so it is asked
-        of the term, and only when there is a candidate at all: a call with no
-        float-stored index array never traces. A body that cannot be traced
-        still runs natively, with its arguments as given.
+        tell. So a written candidate is refused
+        (:func:`loopty.contract.written_storage`), naming the dtype to pass.
+        Which arrays are written is a fact about the term, so it is asked of
+        the term, and only when there is a candidate at all: a call whose
+        arrays are all stored as their sorts are never traces. A body that
+        cannot be traced still runs natively, with its arguments as given.
         """
-        candidates: dict[str, Any] = {}
+        candidates: dict[str, tuple[Any, np.dtype]] = {}
         for name, typ in self.arg_types.items():
-            if not isinstance(typ, ArrType) or not integral_sort(typ.dtype):
+            if not isinstance(typ, ArrType):
                 continue
             value = bound.get(name)
             buffer = value.numpy() if isinstance(value, Arr) else value
-            if isinstance(buffer, np.ndarray) and buffer.dtype.kind in "fc":
-                candidates[name] = value
+            if not isinstance(buffer, np.ndarray):
+                continue
+            want = read_storage(typ.dtype, buffer.dtype)
+            if want is not None:
+                candidates[name] = (value, want)
         if not candidates:
             return {}
         try:
             written = {stmt.assignee.array for stmt in self.term.stmts}
         except Exception:  # noqa: BLE001 - reported by facts(), not by a native run
             return {}
+        written_storage(self.arg_types, bound, written & candidates.keys())
+        return {
+            name: native_copy(value, want)
+            for name, (value, want) in candidates.items()
+            if name not in written
+        }
+
+    def _scalar_copies(self, bound: dict[str, Any]) -> dict[str, Any]:
+        """The scalar arguments in the dtype of their sort, where they are not.
+
+        :func:`loopty.contract.native_scalar` says which and why. A scalar is
+        passed by value, so unlike an array it is converted whether or not
+        the body assigns to its name, and without a trace.
+        """
         out: dict[str, Any] = {}
-        for name, value in candidates.items():
-            if name in written:
+        for name, sort in self.arg_types.items():
+            if isinstance(sort, ArrType) or name not in bound:
                 continue
-            if isinstance(value, Arr):
-                out[name] = value._replaced(np.real(value.numpy()).astype(np.int64))
-            else:
-                out[name] = np.real(value).astype(np.int64)
+            value = native_scalar(sort, bound[name])
+            if value is not bound[name]:
+                out[name] = value
         return out
 
     def _prepare(self, value: Any) -> Any:

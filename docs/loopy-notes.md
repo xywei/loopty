@@ -1,6 +1,6 @@
 # Notes on loopy and islpy
 
-Sixteen interactions with loopty's dependencies that cost real debugging
+Seventeen interactions with loopty's dependencies that cost real debugging
 time, each with the local workaround and the reason it is local. No upstream
 issues were filed: these are notes so that the next person meets the answer
 instead of the symptom.
@@ -751,3 +751,43 @@ program whose intermediate is larger than the thread's stack crashes the same
 way, and nothing checks the size first. The demos' intermediates are a few
 hundred bytes. The OpenCL path is generated, not run: nothing on a development
 machine imports pyopencl.
+
+## 17. A bare Python number takes the type of where it stands
+
+**Symptom.** `c[i] = u[i] * 0.5` with `c: Arr[Fin[n], Nat]` generates
+
+```c
+for (int32_t i = 0; i <= -1 + n; ++i)
+  c[i] = (int32_t) (u[i] * 0);
+```
+
+for the C target, so on `u = [1.0, 2.0, 3.0, 4.0]` the native run stores
+`[0, 1, 1, 2]` and the compiled run `[0, 0, 0, 0]`. The same kernel with a
+real `c` is correct, and nothing is reported either way.
+
+**Cause.** Two of loopy's rules for an untyped constant, which a Python
+`float` is. Its C expression code generator
+(`ExpressionToCExpressionMapper.map_constant`) writes such a constant in the
+type context it is handed, and a sum or a product hands its operands the
+context it was given, which on the right-hand side of an assignment is the
+assignee's: in an integer context the constant is written as `int(expr)`. Its
+type inference (`TypeInferenceMapper.map_constant`) guesses `float32` for a
+float that single precision holds, and joins `int32` with `float32` into
+`float32` ("numpy makes this a double. I disagree."), so `k[i] * 0.5 >
+16777216.0` of an integer `k` is generated as `k[i] * 0.5f > 16777216.0f` and
+is false at `k = 33554433`, where numpy computes in double and finds it true.
+A numpy scalar is "explicitly typed": both rules leave it alone, and the code
+generator writes it as it is.
+
+**Local fix.** `lower.ExpressionLowerer.map_constant` lowers a Python `float`
+as `np.float64` and a `complex` as `np.complex128`, the precision numpy gives
+a Python number next to an integer or a double. A term keeps the number as
+the body wrote it; only what loopy is handed changes. An integer is left
+alone: loopy types it `int32` or `int64` by its value, as numpy would.
+
+**What it does not cover.** A Python float next to a `float32` array is
+`float32` in numpy and double precision here, so a kernel over a numpy
+`float32` sort computes such a product in double and rounds it when it is
+stored, where numpy rounds the constant to single precision first. The two
+differ in the last bit of a single, within the `approx` class a bare floating
+dtype is compared by (`tolerance.element_class`).
