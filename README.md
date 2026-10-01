@@ -252,7 +252,12 @@ end to end; the edges are sharp.
   integer is a `TraceError`, on a native run and under tracing alike. Natively
   that is what `~(i > 0)` is (`~` on a Python bool is bitwise), while the trace
   records `not (i > 0)`, so such a kernel traces and its `trace-faithful` fact
-  is refuted by the native refusal, which names the fix.
+  is refuted by the native refusal, which names the fix. What is stored into
+  an array of `Bool` has to be a truth value too, a comparison, a connective
+  of truth values or a `Bool` read, since natively the array is a bool and
+  compiled a byte, into which C converts `0.5` as `0`: `b[i] = u[i]` is a
+  `TraceError` naming `b[i] = u[i] != 0`, and an integer arriving at a bool
+  array natively, `~(i > 0)` again, is refused there as it is by `when`.
 - The faithfulness fact. For each kernel, the traced term is run by an
   interpreter (`loopty.interpret`: statement by statement in source order over
   each statement's isl domain, expressions evaluated with numpy's arithmetic,

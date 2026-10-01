@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 from lanky.prelude import Bool, Int, Nat, Real
 
-from loopty import Arr, Fin, Schedule, kernel, when
+from loopty import Arr, Fin, Schedule, TraceError, kernel, when
 from loopty.executor import LoopyExecutor, emit_code
 from loopty.interpret import interpret
 
@@ -323,6 +323,101 @@ def test_an_array_of_truth_values_read_as_numbers_holds_zero_and_one():
     assert list(native["y"]) == [1.0, 0.0, 3.0]
     agrees(keep_unmarked, lambda: make(np.array([0, 1, 0], dtype=np.int8)))
     agrees(keep_unmarked, lambda: make(np.array([0.0, 1.0, 0.0])))
+
+
+# }}}
+
+
+# {{{ a value that is not a truth value, stored into Bool (#78)
+
+
+@kernel
+def mark_raw(u: Arr[Fin[n], Real], b: Arr[Fin[n], Bool]):  # noqa: F821
+    """A real stored into a Bool array: a truth value natively, a byte compiled."""
+    for i in u.dom:
+        b[i] = u[i]
+
+
+@kernel
+def low_bit(k: Arr[Fin[n], Int], b: Arr[Fin[n], Bool]):  # noqa: F821
+    """``&`` of an integer, which is bitwise natively and ``and`` in the trace."""
+    for i in k.dom:
+        b[i] = k[i] & 1
+
+
+@kernel
+def set_all(u: Arr[Fin[n], Real], b: Arr[Fin[n], Bool]):  # noqa: F821
+    """An integer constant stored into a Bool array."""
+    for i in u.dom:
+        b[i] = 1
+
+
+@kernel
+def not_first(b: Arr[Fin[n], Bool]):  # noqa: F821
+    """``~`` of a comparison of a loop variable, which natively is ``-2`` or ``-1``."""
+    for i in b.dom:
+        b[i] = ~(i > 0)
+
+
+@kernel
+def in_band(
+    u: Arr[Fin[n], Real],  # noqa: F821
+    c: Arr[Fin[n], Bool],  # noqa: F821
+    b: Arr[Fin[n], Bool],  # noqa: F821
+):
+    """Truth values every way they are written: comparisons, connectives, reads."""
+    for i in u.dom:
+        b[i] = ((u[i] > 0.5) & (u[i] < 2.5)) | ~c[i]
+
+
+def test_a_real_stored_into_a_bool_array_is_refused_by_the_trace():
+    # Natively 0.5 was stored as True, and compiled the byte was 0; 2.0 was a
+    # byte of 2.
+    with pytest.raises(TraceError, match=r"b\[i\] = u\[i\] != 0") as refused:
+        mark_raw.trace()
+    assert "0.5 becomes 0 and 2.0 becomes 2" in str(refused.value)
+    (fact,) = mark_raw.facts()
+    assert fact.kind == "trace" and fact.status.value == "refuted"
+    assert "b[i] = u[i] != 0" in fact.provenance["reason"]
+
+    with pytest.raises(TraceError, match="Store True, the truth value numpy"):
+        set_all.trace()
+    # The trace records k[i] & 1 as "and", and natively it is bitwise: an
+    # integer operand makes a connective no truth value.
+    with pytest.raises(TraceError, match=r"its operand k\[i\] is not a truth value"):
+        low_bit.trace()
+
+
+def test_truth_values_stored_into_a_bool_array_agree():
+    def make() -> dict:
+        return {
+            "u": np.array([0.0, 1.0, 2.0, 3.0]),
+            "c": np.array([True, True, False, True]),
+            "b": np.zeros(4, dtype=bool),
+        }
+
+    native = make()
+    in_band(**native)
+    assert list(native["b"]) == [False, True, True, False]
+    agrees(in_band, make)
+
+
+@pytest.mark.filterwarnings("ignore:Bitwise inversion:DeprecationWarning")
+def test_an_integer_stored_into_a_bool_array_natively_is_refused():
+    # ~(i > 0) traces as "not", and natively is ~ of a Python bool, -2 or -1,
+    # which a bool array stored as True at every point.
+    def make() -> dict:
+        return {"b": np.zeros(3, dtype=bool)}
+
+    not_first.trace()
+    with pytest.raises(TraceError, match="is the integer -1, not a truth value"):
+        not_first(**make())
+    fact = LoopyExecutor().differential(not_first, Schedule(not_first), make())
+    assert fact.status.value == "refuted"
+    assert "'i <= 0' for '~(i > 0)'" in fact.provenance["reason"]
+    faithful = not_first.facts()[-1]
+    assert faithful.kind == "trace-faithful"
+    assert faithful.status.value == "refuted"
 
 
 # }}}

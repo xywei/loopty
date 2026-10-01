@@ -1256,6 +1256,18 @@ with a pair of statement instances.
   one, and an entry of `Bool` stored as a number that is not `0` or `1`, which
   the compiled byte would hold as it is. The executor drops a zero imaginary
   part before the cast, which no longer warns.
+- A store into an array of `Bool` of what is not a truth value is a
+  `TraceError` naming the fix (#78). Natively the array is a numpy bool, which
+  stores `0.5` as `True`, and compiled a byte, into which C converts `0.5` as
+  `0` and `2.0` as `2`. A comparison, a connective whose operands are truth
+  values, a read of an array or a scalar of truth values, and `True` and
+  `False` are stored; `b[i] = u[i]` is refused with `b[i] = u[i] != 0` as the
+  fix, an integer constant with the truth value numpy makes of it, and
+  `k[i] & 1` of an integer `k`, which the trace reads as `and` and numpy
+  computes bitwise, with its operand named. Natively an integer stored into a
+  bool array is refused as `when` refuses an integer guard, since that is
+  what `~(i > 0)` of a loop variable is there, `-2` or `-1`, which a bool
+  array stored as `True` at every point.
 
 ### Changed
 
