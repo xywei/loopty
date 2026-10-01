@@ -1274,8 +1274,8 @@ with a pair of statement instances.
   outer='j_out'):bijective`, and `agreement:spmv.spmv@102:[c]` for a kernel
   run without a schedule. `Schedule.key` stays the readable call text, and a
   term scheduled with no kernel behind it is named by its name,
-  `cast:transpose:[c]...`. `loopty.schedule.definition_of` gives what a fact
-  names an object by.
+  `cast:transpose:[c]...`, and a schedule of a schedule by the kernel behind
+  it. `loopty.schedule.definition_of` gives what a fact names an object by.
 - A map per statement in `Schedule.affine` can name a program's statement
   (#79). A program's statements are named after their calls, `flux.S0` and
   `step@2.S0`, which isl cannot read as tuple names, so `{ flux.S0[j] -> [jj]
@@ -1317,8 +1317,9 @@ with a pair of statement instances.
   (`x[col[r, j]]`, whose index is read from a cell of a moved row), and the
   `monotone` casts of a schedule of the kernel or of a program whose call
   rewrites it: the ledger shows them decided under the layout, and worth an
-  assumption. A kernel that only reads its layout, as every demo does, has no
-  such fact.
+  assumption. `lanky check` lists the layout fact among the kernel's facts,
+  and `loopty run` beside the casts that rest on it. A kernel that only reads
+  its layout, as every demo does, has no such fact.
 
 ### Changed
 
