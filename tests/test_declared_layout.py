@@ -383,6 +383,82 @@ def test_a_length_rewritten_inside_the_loop_it_bounds_is_read_once() -> None:
     assert fact.status is Status.TESTED, fact.provenance
 
 
+@pytest.mark.parametrize(
+    ("fn", "native"),
+    [
+        (sums_then_count_in_a_loop_of_the_row, [6.0, 8.0, 21.0]),
+        (count_then_sums_in_a_loop_of_the_row, [4.0, 8.0, 10.0]),
+        (fiber_then_count_in_a_loop_of_the_row, [4.0, 6.0, 19.0]),
+        (sums_then_next_count_in_a_loop_of_the_row, [8.0, 2.0, 2.0]),
+        (count_grown_inside_its_own_fiber, [3.0, 3.0, 15.0]),
+    ],
+)
+def test_the_interpreter_reads_a_written_bound_where_its_loop_starts(
+    fn, native
+) -> None:
+    # The interpreter used to enumerate every statement's domain before it ran
+    # anything, and refused these kernels (#52). The bound of a loop over a
+    # fiber is now read when that loop starts, each time it starts, and a
+    # reduction's when it is summed, which is what the body does.
+    arguments = row_loop_input()
+    if "x" not in term_of(fn).param_names:
+        del arguments["x"]
+    copies = {name: value.copy() for name, value in arguments.items()}
+    Kernel(fn)(**arguments)
+    assert arguments["y"].numpy().tolist() == native
+    interpret(term_of(fn), copies)
+    for name, value in arguments.items():
+        assert copies[name].numpy().tobytes() == value.numpy().tobytes(), name
+
+
+def pairs_in_a_row_recounted(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A fiber loop inside another over the same row, the row's length reset."""
+    for r in y.dom:
+        for j in val.dom[r]:
+            for k in val.dom[r]:
+                y[r] = y[r] + val[r, k]
+            cnt[r] = 1
+
+
+def test_a_written_bound_of_two_loops_of_one_statement_is_refused() -> None:
+    # Natively the loop over ``k`` reads the row's length each time it starts,
+    # 2 and then 1 for row 0, and ``cnt_r`` is one parameter of the domain of
+    # the statement, which the interpreter can read once only. A guess would
+    # be a refutation of a faithful trace, so the fact is left assumed.
+    from lanky.ledger import Status
+
+    from loopty.interpret import InterpretError
+
+    arguments = row_loop_input()
+    del arguments["x"]
+    with pytest.raises(InterpretError, match="bounds the loops over j and k"):
+        interpret(term_of(pairs_in_a_row_recounted), arguments)
+    fact = Kernel(pairs_in_a_row_recounted).facts()[-1]
+    assert fact.status is Status.ASSUMED
+    assert "the interpreter reads it once for them all" in fact.provenance["reason"]
+
+
+def test_the_faithfulness_fact_of_a_kernel_writing_its_counts_is_tested() -> None:
+    # The issue's kernel: the next row's length cleared after each row is
+    # summed. Its differential run was tested and its faithfulness fact was
+    # left assumed, because the interpreter refused the bound (#52).
+    from lanky.ledger import Status
+
+    fact = Kernel(row_sums_then_next_count).facts()[-1]
+    assert fact.kind == KIND
+    assert fact.status is Status.TESTED, fact.provenance
+    assert fact.provenance["compared"] == SAMPLES
+    arguments = issue_input([2, 3, 6])
+    del arguments["ends"], arguments["off"]
+    out = interpret(term_of(row_sums_then_next_count), arguments)
+    assert out["y"].tolist() == [3.0, 0.0, 0.0]
+    assert out["cnt"].tolist() == [2, 0, 0]
+
+
 def test_samples_pass_the_offsets_of_the_ragged_array_they_draw() -> None:
     # A call has to pass them so, and a native run that refuses a sample says
     # nothing about the term.
