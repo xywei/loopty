@@ -642,18 +642,49 @@ check passes can fail for a reason nobody has met. The dense loop between a
 row and its fiber could be given a domain of its own by the lowering, which
 would make it a loop a device can run; that is not done.
 
-One class is known and not asked, because it is about the casts rather than
-the target. The casts drop a loop on `g.*` or `l.*` from the order they check,
-as if the loops around it ordered its instances, but loopy runs a hardware
-axis as the launch grid, outside every loop, and synchronizes nothing across
-work items through global memory. A dependence between two work items passes
-the casts, and loopy either misses it, since its barrier check asks only about
-dependences between two instructions (`jacobi` in `examples/stencil_skew.py`
-with `i` on `g.0` or `l.0`: each work item reads what its neighbour wrote at
-the previous `t`, with no barrier between them), or refuses it with
-`MissingBarrierError` ("requires synchronization by a global barrier", for
-the acoustic pair with `i` on `g.0`). Both are `decided` casts and `buildable`
-schedules.
+**Work items.** One more class was about the casts rather than the target.
+The casts dropped a loop on `g.*` or `l.*` from the order they check, as they
+drop `ilp` and `vec`, as if the loops around it ordered its instances. loopy
+runs a hardware axis as the launch grid, outside every loop: a work item runs
+the whole kernel at its own value of the loop, counted from where the loop
+starts (`get_hw_axis_base_for_codegen` in `loopy.kernel.tools`, the static
+minimum of its lower bound), and nothing in a kernel orders two work items
+through global memory. loopy's barrier check (`DependencyTracker` and
+`WriteRaceChecker` in `loopy.schedule`) asks, of two instructions one of
+which depends on the other, whether two different work items touch one cell,
+and asks nothing of an instruction's dependence on itself. Measured on loopy's
+plain OpenCL target, caches off, with what loopty says now; before, every row
+was a `decided` cast and a buildable schedule (#63):
+
+| schedule | loopy | loopty |
+|---|---|---|
+| `jacobi` (`examples/stencil_skew.py`), `i` on `g.0` or `l.0` | builds, with no barrier: each work item reads at step `t + 1` what its neighbour wrote at step `t` | refused: "the loop i on g.0 runs them on work items 0 and 1 of it" |
+| the acoustic pair (`examples/wavefront_acoustic.py`), `i` on `g.0` or `l.0` | `MissingBarrierError`: "Dependency 'S1 depends on S0' (for variable 'velocity') requires synchronization by a global barrier" | refused |
+| `y[i] = x[i] + 1.0`, then `z[k] = y[7 - k]` in a loop of its own, `i` and `k` on `g.0` (or both on `l.0`) | the same, for `y` | refused |
+| the same, `i` alone on `g.0` | the same | refused: "S1 runs in no loop on g.0, so on every work item of it" |
+| `y[i]` over `1 <= i < n`, then `z[k] = y[k]` over `0 <= k < n - 1`, both on `g.0` | the same: `i` runs on work item `i - 1` | refused |
+| the same, reading `y[k + 1]` | builds | legal |
+| two sums on `l.0` in a row loop on `g.0`, the second statement reading the first's row | builds, with local barriers | legal |
+| the same in two row loops on `g.0`, the second reading the rows backwards | `MissingBarrierError` | refused |
+| spmv's rows on `g.0` | builds | legal |
+
+`schedule._work_items` gives each instance its work item along each axis that
+a statement's loop is on, the loop's value less its start as loopy reads it,
+and the `monotone` cast refuses, after the order passes, any dependence whose
+two ends can be on two work items. A statement with no loop on the axis runs
+on every work item of it, as loopy would run it, so every dependence to or
+from it is refused. A sum's loop is not counted: the sum happens inside one
+instance, and loopy synchronizes the partial sums of a local one through local
+memory, so an axis only sums are on is not asked about. `tests/test_work_items.py`
+keeps each row.
+
+The check is coarser than it could be in two places, both on the side of
+refusing: a statement whose sum is on an axis that a loop of another
+statement is on is taken to run every access on every work item, though the
+reads in the sum's body run on the work item of the sum's loop, and a schedule
+without a kernel (an `affine` step the kernel rewrite could not write) has no
+start to read off a loop, so only two instances of one loop share a work item
+there.
 
 ## 15. A flat buffer gives loopy no size to read
 
