@@ -652,6 +652,67 @@ def test_two_kernels_of_one_name_keep_their_schedules_facts_apart(tmp_path) -> N
 # }}}
 
 
+# {{{ a cast decided under a layout the kernel rewrites (#51)
+
+
+CLEARS_NEXT = """
+from __future__ import annotations
+
+import numpy as np
+from lanky.prelude import Nat, Real
+
+from loopty import Arr, Fin, Schedule, kernel, reduce_sum, when
+
+
+@kernel
+def clear_next(
+    cnt: Arr[Fin[n], Nat],
+    val: Arr[Fin[n], Fin[cnt], Real],
+    y: Arr[Fin[n], Real],
+):
+    for r in y.dom:
+        y[r] = reduce_sum(val[r, j] for j in val.dom[r])
+        with when(r + 1 < y.dom.size):
+            cnt[r + 1] = 0
+
+
+split = Schedule(clear_next).split("r", 2)
+
+
+def example_inputs():
+    counts = [2, 1, 3]
+    return {
+        "cnt": Arr.from_numpy(np.array(counts, dtype=np.int64)),
+        "val": Arr.ragged(counts, values=np.arange(1.0, 7.0)),
+        "y": Arr.zeros(3),
+    }
+"""
+
+
+def test_run_lists_the_layout_fact_a_cast_rests_on(tmp_path, capsys) -> None:
+    """The monotone cast is decided under the kernel's layout fact.
+
+    The table said so, ``decided under layout:fixture.clear_next@10:cnt``,
+    and the fact it named was in no row of it: ``lanky check`` lists it among
+    the kernel's facts, and ``loopty run`` lists the schedules' only.
+    """
+    path = write_fixture(tmp_path, CLEARS_NEXT)
+    out_path = tmp_path / "ledger.json"
+    assert main(["run", str(path), "--json", str(out_path)]) == 0
+    facts = {fact["id"]: fact for fact in json.loads(out_path.read_text("utf-8"))}
+    layout = "layout:fixture.clear_next@10:cnt"
+    assert facts[layout]["status"] == "assumed"
+    (monotone,) = [fact for fact in facts.values() if fact["kind"] == "monotone"]
+    assert monotone["rests_on"] == [layout]
+    assert monotone["effective"] == "assumed"
+    assert [fact["kind"] for fact in facts.values()].count("layout") == 1
+    out = capsys.readouterr().out
+    assert "stay inside their buffers and apart while S1 write cnt" in out
+
+
+# }}}
+
+
 # {{{ what a run raises (#44)
 
 

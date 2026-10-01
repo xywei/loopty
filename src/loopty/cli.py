@@ -76,7 +76,11 @@ Every schedule keeps its own facts in the ledger, however many schedules of one
 kernel the file has, and however many kernels of one name it schedules (one
 defined there and one imported, say), because a fact's id names the kernel's
 definition and the schedule it is about (see
-:meth:`loopty.schedule.Schedule.fact_id`).
+:meth:`loopty.schedule.Schedule.fact_id`). A cast that rests on the ``layout``
+fact of a kernel that rewrites its ragged layout
+(:func:`loopty.typing.layout_facts`) has that fact beside it in the ledger, as
+``lanky check`` lists it among the kernel's, so that the assumption it is
+decided under is a row of the table and not only an id.
 """
 
 from __future__ import annotations
@@ -270,8 +274,9 @@ class RunVerb:
         from lanky.plugins import registry
 
         from loopty.executor import LoopyExecutor, emit_code
-        from loopty.schedule import Schedule
+        from loopty.schedule import Schedule, definition_of
         from loopty.trace import TraceError
+        from loopty.typing import layout_facts
 
         target = getattr(args, "target", None)
         before = len(registry.objects)
@@ -316,8 +321,15 @@ class RunVerb:
         for schedule in schedules:
             name = _name_of(schedule)
             print(f"{name}: {schedule!r}")
-            for fact in schedule.facts():
+            facts = schedule.facts()
+            for fact in facts:
                 ledger.add(fact)
+            resting = {identifier for fact in facts for identifier in fact.rests_on}
+            for fact in layout_facts(
+                schedule.term, **definition_of(schedule, schedule.term)
+            ):
+                if fact.id in resting:
+                    ledger.add(fact)
             ok, reason = schedule.buildable
             if not ok:
                 print(f"  not buildable for the {schedule.target} target: {reason}")
