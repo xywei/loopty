@@ -295,8 +295,11 @@ end to end; the edges are sharp.
   so the `monotone` cast also refuses any dependence between instances on two
   work items, with the dependence and the two work items as the witness (the
   stencil's `jacobi` with `i` on `g.0`, the acoustic pair likewise). A
-  statement with no loop on the axis runs on every work item of it; a sum on
-  a local axis stays allowed, since loopy synchronizes its partial sums.
+  statement with no loop on the axis runs on every work item of it. A sum on
+  a local axis stays allowed, since loopy synchronizes its partial sums; its
+  body reads on every work item, and its statement stores the result from
+  one, so a sum whose body reads what another sum's statement stored is
+  refused, as loopy refuses it for want of a global barrier.
 - The target-capability check: a concurrent tag (a hardware axis, `ilp` or
   `vec`) inside a data-dependent (ragged) loop bound or its domain, a hardware
   axis on a reduction nested in another, a reduction loopy will not realize
@@ -464,16 +467,18 @@ end to end; the edges are sharp.
   6, 11 and 14 of `docs/loopy-notes.md` and no others, so it is a list rather
   than a model of what the backend can do. A schedule it passes can still fail
   in code generation for a reason nobody has met yet.
-- A statement with no loop on a hardware axis that another statement's loop
-  is on runs on every work item of it, so every dependence to or from it is
-  refused, even where each work item reads back only what it wrote itself
-  (every work item storing one value into one cell, say; loopy refuses such a
-  statement for the axis it lacks in any case). A statement whose sum is on
-  such an axis counts as one of these, though the reads in the sum's body
-  happen on the work item of the sum's loop, which is finer than the check
-  asks. Without a kernel to read a loop's start off (after an `affine` step
-  the kernel rewrite could not write), only two instances of one loop are
-  taken to share a work item.
+- A statement with no loop on a hardware axis that a loop or a sum of another
+  statement is on runs on every work item of it, so every dependence to or
+  from it is refused, even where each work item reads back only what it
+  wrote itself (every work item storing one value into one cell, say; loopy
+  refuses such a statement for the axis it lacks in any case). The body of a
+  sum on such an axis is taken to read on every work item of it, though each
+  read happens on the work item of the sum's loop, and the work item a sum's
+  statement stores its result from is taken to be one unknown work item, the
+  same for every such statement, though loopy always uses the first. Both
+  are coarser than the check could be, and refuse more. Without a kernel to
+  read a loop's start off (after an `affine` step the kernel rewrite could
+  not write), only two instances of one loop are taken to share a work item.
 - A kernel called with a zero-length *shape-bearing* argument (a matrix with no
   rows at all) cannot run on the C target: loopy cannot pass an empty array, and
   the workaround that rescues the empty flat buffer of a ragged axis cannot be

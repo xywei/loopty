@@ -666,6 +666,11 @@ was a `decided` cast and a buildable schedule (#63):
 | the same, reading `y[k + 1]` | builds | legal |
 | two sums on `l.0` in a row loop on `g.0`, the second statement reading the first's row | builds, with local barriers | legal |
 | the same in two row loops on `g.0`, the second reading the rows backwards | `MissingBarrierError` | refused |
+| the same in one row loop, the second sum's body reading the first's row, `y[i]` | `MissingBarrierError`, for `y` | refused: "S1 reads it in a sum, on every work item of l.0" |
+| `s[0]` a sum on `l.0`, then `s[1]` a sum on `l.0` whose body reads `s[0]` | `MissingBarrierError`, for `s` | refused |
+| `a[t + 1, 7]` the sum over `k` on `l.0` of `a[t, k]` | `MissingBarrierError`: "Dependency 'S0 depends on S0_k_transfer' (for variable 'a')" | refused |
+| `a[7]` the sum over `k` on `l.0` of `a[k]`, one instance | the same | refused: "S0 reads it in a sum, on every work item of l.0; S0 writes it on one work item of l.0" |
+| `s[1] = s[0] +` a sum on `l.0`, after `s[0]` a sum on `l.0`, with or without a loop on `l.0` between them | builds | legal |
 | spmv's rows on `g.0` | builds | legal |
 
 `schedule._work_items` gives each instance its work item along each axis that
@@ -673,18 +678,29 @@ a statement's loop is on, the loop's value less its start as loopy reads it,
 and the `monotone` cast refuses, after the order passes, any dependence whose
 two ends can be on two work items. A statement with no loop on the axis runs
 on every work item of it, as loopy would run it, so every dependence to or
-from it is refused. A sum's loop is not counted: the sum happens inside one
-instance, and loopy synchronizes the partial sums of a local one through local
-memory, so an axis only sums are on is not asked about. `tests/test_work_items.py`
-keeps each row.
+from it is refused. A sum's loop is not counted as its statement's: the sum
+happens inside one instance. loopy realizes a sum on a local axis
+(`realize_reduction`) as a part on every work item of the axis, combined in a
+local temporary with a barrier between stages, and the last stage and the
+statement's own instruction run on the first work item alone (`if (lid(0) ==
+0)`). So the reads of the sum's body are on every work item, and the
+statement's own reads and writes on one, the same for every statement summed
+on the axis. Two statements pass a sum's result between their own
+instructions freely; the body of a sum that reads what another statement's
+instruction wrote is refused, as loopy refuses it, and so is a sum's body
+reading at the next step of a loop what its own statement stored at this one.
+So is a sum that reads a cell its own statement writes, although one
+instance does both and the dependences, which are between two instances, do
+not list it (`schedule._within_instances`). `tests/test_work_items.py` keeps
+each row.
 
-The check is coarser than it could be in two places, both on the side of
-refusing: a statement whose sum is on an axis that a loop of another
-statement is on is taken to run every access on every work item, though the
-reads in the sum's body run on the work item of the sum's loop, and a schedule
-without a kernel (an `affine` step the kernel rewrite could not write) has no
-start to read off a loop, so only two instances of one loop share a work item
-there.
+The check is coarser than it could be in three places, all on the side of
+refusing: the body of a sum is taken to read on every work item, though each
+of its reads is on the work item of the sum's loop; the work item a sum's
+statement runs on is taken to be one unknown work item, the same for every
+such statement, though loopy always takes the first; and a schedule without a
+kernel (an `affine` step the kernel rewrite could not write) has no start to
+read off a loop, so only two instances of one loop share a work item there.
 
 ## 15. A flat buffer gives loopy no size to read
 

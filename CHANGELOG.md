@@ -1247,8 +1247,14 @@ with a pair of statement instances.
   item of it, so a dependence to or from it is refused too: the scan of
   `off` before the rows that read it, with the rows on `l.0`, used to be a
   legal cast. A sum on a local axis is not a loop of its statement, and stays
-  allowed, since loopy synchronizes its partial sums; `ilp` and `vec` lose
-  only their order, as before; spmv's rows on `g.0` are unchanged. The check
+  allowed, since loopy synchronizes its partial sums. Its body reads on every
+  work item of the axis, though, and its statement stores the result from
+  one, so a sum whose body reads what another sum's statement stored, at the
+  same step or a later one, or the cell its own statement writes, is refused
+  too, where loopy asks for a global barrier and `buildable` used to pass;
+  two statements may still pass a sum's result between them outside their
+  sums. `ilp` and `vec` lose only their order, as before; spmv's rows and
+  p2p's targets on `g.0` are unchanged. The check
   is asked after every step, so a skew that moves a tagged loop's dependences
   onto two work items is refused as well. A monotone fact about a schedule
   with a loop on a hardware axis says "within one work item", and the
