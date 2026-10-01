@@ -164,10 +164,11 @@ Read the `BY` column.
   extra, so a plain `uv sync --group dev` here gives the tested row.
 - `interpreter` tested the last fact of each kernel and of the program, the
   only one about the trace itself: every other row is about the term tracing
-  recorded, and this one asks whether that term is the body. The term is run by loopty's own
-  interpreter, statement by statement over each statement's isl domain, and
-  compared with the body run natively, on the file's `example_inputs()` and on
-  three inputs drawn from the declared types. `--json` lists the inputs; a
+  recorded, and this one asks whether that term is the body. The term is run
+  by loopty's own interpreter, statement by statement over each statement's
+  isl domain, and compared with the body run natively, on the file's
+  `example_inputs()` and on three inputs drawn from the declared types. For
+  the program the term is the two calls composed. `--json` lists the inputs; a
   body that kept state where tracing does not look would make this row
   `refuted`, with the input and the first cell that differs.
 - Two facts are `assumed`: `scan`'s postcondition, which needs the recurrence,
