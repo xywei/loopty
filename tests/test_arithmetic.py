@@ -18,7 +18,7 @@ from lanky.prelude import Int, Nat, Real
 
 from loopty import Arr, Fin, Schedule, TraceError, kernel, reduce_sum, when
 from loopty.contract import INTEGRAL_RANGE
-from loopty.executor import LoopyExecutor
+from loopty.executor import LoopyExecutor, emit_code
 from loopty.lower import numpy_dtype
 
 
@@ -34,6 +34,62 @@ def agrees(kern, make) -> None:
             assert np.array_equal(value, compiled[name]), (name, value, compiled[name])
     fact = LoopyExecutor().differential(kern, Schedule(kern), make())
     assert fact.status.value == "tested", fact.provenance
+
+
+# {{{ an integer quotient (#82)
+
+
+@kernel
+def int_quot(k: Arr[Fin[n], Int], h: Arr[Fin[n], Int]):  # noqa: F821
+    """Half of an integer, doubled: ``3 / 2 * 2`` is ``3.0`` natively."""
+    for i in k.dom:
+        h[i] = k[i] / 2 * 2
+
+
+@kernel
+def quotients(
+    k: Arr[Fin[n], Int],  # noqa: F821
+    m: Nat,
+    h: Arr[Fin[n], Int],  # noqa: F821
+    g: Arr[Fin[n], Int],  # noqa: F821
+):
+    """A quotient of loop variables, and one by a scalar, before the store."""
+    for i in k.dom:
+        h[i] = i / 2 * 2
+        g[i] = k[i] / m * m
+
+
+def test_an_integer_quotient_is_true_division_compiled_too():
+    # C divided two integers as integers, so 3 / 2 * 2 was 2; numpy divides
+    # them as doubles, and the store truncated 3.0 to 3.
+    def make() -> dict:
+        return {"k": np.array([3, -3, 4, 7]), "h": np.zeros(4, np.int64)}
+
+    native = make()
+    int_quot(**native)
+    assert list(native["h"]) == [3, -3, 4, 7]
+    assert "(double) (k[i]) / 2" in emit_code(int_quot)
+    agrees(int_quot, make)
+
+    def scaled() -> dict:
+        return {
+            "k": np.array([3, -3, 4, 7]),
+            "m": 2,
+            "h": np.zeros(4, np.int64),
+            "g": np.zeros(4, np.int64),
+        }
+
+    native = scaled()
+    quotients(**native)
+    assert list(native["h"]) == [0, 1, 2, 3]
+    assert list(native["g"]) == [3, -3, 4, 7]
+    agrees(quotients, scaled)
+    # A numpy scalar divides as a Python int does: the cast does not depend
+    # on how the caller passed it.
+    agrees(quotients, lambda: {**scaled(), "m": np.int64(2)})
+
+
+# }}}
 
 
 # {{{ a connective of integers (#83)
@@ -123,6 +179,143 @@ def test_the_named_fix_agrees():
     low_bits(**native)
     assert list(native["y"]) == [0.0, 2.0, 0.25, 0.0]
     agrees(low_bits, make)
+
+
+# }}}
+
+
+# {{{ a power (#84)
+
+
+@kernel
+def inverse(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """A negative integer exponent: a call of loopy's integer power."""
+    for i in x.dom:
+        y[i] = x[i] ** -1
+
+
+@kernel
+def inverse_root(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """A floating exponent: a call of ``pow``, whose header loopy never included."""
+    for i in x.dom:
+        y[i] = x[i] ** -0.5
+
+
+@kernel
+def cubes(
+    x: Arr[Fin[n], Real.exact],  # noqa: F821
+    k: Arr[Fin[n], Int],  # noqa: F821
+    y: Arr[Fin[n], Real.exact],  # noqa: F821
+    h: Arr[Fin[n], Int],  # noqa: F821
+):
+    """A cube of a real, which numpy computes with ``pow``, and of an integer."""
+    for i in x.dom:
+        y[i] = x[i] ** 3
+        h[i] = k[i] ** 3
+
+
+def test_a_power_compiles_and_is_computed_with_pow():
+    def make() -> dict:
+        return {"x": np.array([0.5, 3.0, 1.4554425309821815]), "y": np.zeros(3)}
+
+    for kern in (inverse, inverse_root):
+        code = emit_code(kern)
+        assert "#include <math.h>" in code
+        assert "pow(" in code and "loopy_pow" not in code
+        agrees(kern, make)
+
+    # x ** 3 at this x is not (x * x) * x, which loopy's integer power
+    # computed: numpy calls pow, and so does the lowered code now. An integer
+    # cube stays an integer power, whose definition needs <stdint.h> first.
+    x = 1.4554425309821815
+    assert np.float64(x) ** 3 != (x * x) * x
+
+    def cubed() -> dict:
+        return {
+            "x": np.array([x, 1.7199053588004087, -2.0]),
+            "k": np.array([2, -3, 1290]),
+            "y": np.zeros(3),
+            "h": np.zeros(3, np.int64),
+        }
+
+    code = emit_code(cubes)
+    assert "pow(x[i], 3.0)" in code
+    assert "loopy_pow_int32_int32(k[i], 3)" in code
+    assert code.index("#include <stdint.h>") < code.index("loopy_pow_int32_int32")
+    agrees(cubes, cubed)
+
+
+# }}}
+
+
+# {{{ a literal beside a float32 (#91)
+
+
+@kernel
+def f32_scale(
+    x: Arr[Fin[n], np.float32],  # noqa: F821
+    y: Arr[Fin[n], np.float32],  # noqa: F821
+):
+    """A Python float beside a ``float32`` is a ``float32`` natively (NEP 50)."""
+    for i in x.dom:
+        y[i] = x[i] * 0.1 + 0.3
+
+
+@kernel
+def f32_mixed(
+    x: Arr[Fin[n], np.float32],  # noqa: F821
+    k: Arr[Fin[n], Int],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], np.float32],  # noqa: F821
+):
+    """A ``float32`` beside an integer array, and beside a Python float sum."""
+    for i in x.dom:
+        y[i] = x[i] / k[i]
+        z[i] = x[i] * (0.3 + i)
+
+
+@kernel
+def halve(k: Arr[Fin[n], Int], h: Arr[Fin[n], Real]):  # noqa: F821
+    """A Python float beside an integer is a double, as before."""
+    for i in k.dom:
+        h[i] = k[i] * 0.5
+
+
+def test_a_literal_beside_a_float32_is_single_precision():
+    # The literals were doubles, so x * 0.1 + 0.3 was computed in double and
+    # rounded at the store, a bit away from numpy's single precision.
+    rng = np.random.default_rng(91)
+
+    def make() -> dict:
+        x = rng.uniform(-4.0, 4.0, 64).astype(np.float32)
+        return {"x": x, "y": np.zeros(64, np.float32)}
+
+    code = emit_code(f32_scale)
+    assert "x[i] * 0.10000000149011612f + 0.30000001192092896f" in code
+    data = make()
+    agrees(f32_scale, lambda: {name: value.copy() for name, value in data.items()})
+    assert "k[i] * 0.5;" in emit_code(halve)
+
+
+def test_a_float32_beside_an_integer_or_a_python_float_is_what_numpy_makes():
+    # x / k of a float32 x and an integer k is a double natively, and was a
+    # float compiled; 0.3 + i is a Python float, which numpy rounds to single
+    # precision beside x, and which was a double compiled.
+    def make() -> dict:
+        return {
+            "x": np.array([1.0, 0.1, 3.5, -7.25], np.float32),
+            "k": np.array([3, 7, -9, 11]),
+            "y": np.zeros(4),
+            "z": np.zeros(4, np.float32),
+        }
+
+    native = make()
+    f32_mixed(**native)
+    assert native["y"][0] == 1.0 / 3.0
+    code = emit_code(f32_mixed)
+    assert "(double) (x[i]) / k[i]" in code
+    assert "(float) (0.3 + i)" in code
+    agrees(f32_mixed, make)
 
 
 # }}}

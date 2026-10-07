@@ -63,7 +63,7 @@ import loopy as lp
 import numpy as np
 import pymbolic.primitives as prim
 from loopy.symbolic import Reduction as LoopyReduction
-from loopy.symbolic import set_to_cond_expr
+from loopy.symbolic import TypeCast, set_to_cond_expr
 from pymbolic.mapper import Mapper
 
 from loopty.contract import compiled_storage
@@ -76,6 +76,7 @@ from loopty.flow import (
     statement_accesses,
 )
 from loopty.idx import linearize
+from loopty.promotion import Promotion
 from loopty.term import (
     COUNT_PARAM,
     COUNT_PARAM_REFLECTED,
@@ -95,6 +96,7 @@ __all__ = [
     "GCC_NO_CONTRACTION_PRAGMA",
     "NO_CONTRACTION_FLAG",
     "NO_CONTRACTION_PRAGMAS",
+    "POWER_INCLUDES",
     "RESERVED_PREFIX",
     "RESERVED_WORDS",
     "ExpressionLowerer",
@@ -145,6 +147,13 @@ NO_CONTRACTION_PRAGMAS = {
 #: Where the pragma sorts among loopy's own preambles: after OpenCL's extension
 #: pragmas (``00_``) and before the includes (``10_``).
 _NO_CONTRACTION_TAG = "05_loopty_fp_contract"
+
+#: The headers a power needs on the C targets (:func:`_power_preambles`).
+POWER_INCLUDES = "#include <stdint.h>\n#include <math.h>"
+
+#: Where they sort among loopy's preambles: after the pragma above, and before
+#: loopy's definition of an integer power (``07_``), which needs ``int32_t``.
+_POWER_TAG = "06_loopty_power"
 
 
 class LoweringError(TypeError):
@@ -278,13 +287,16 @@ def _reduction_nesting(expr: Any) -> list[tuple[Reduction, tuple[int, ...]]]:
 class ExpressionLowerer(Mapper):
     """Rebuild a term's expression out of plain pymbolic nodes.
 
-    Three jobs in one walk. lanky's subclasses are replaced by pymbolic's, so
+    Four jobs in one walk. lanky's subclasses are replaced by pymbolic's, so
     that loopy's structural comparisons work (lanky's ``==`` builds a
     proposition). :class:`~loopty.term.Access` and bare subscripts are turned
     into flat storage accesses, which is where a ragged layout's ``off[r] + j``
     enters. :class:`~loopty.term.Reduction` becomes ``lp.Reduction`` over its
     inames, and the reduction's domain is collected on the side so the caller can
-    add it to the kernel.
+    add it to the kernel. And an operation whose operands C would compute in
+    another type than numpy does natively has them converted
+    (:mod:`loopty.promotion`): ``k[i] / 2`` of an integer ``k`` is
+    ``(double) (k[i]) / 2``, and ``0.1`` beside a ``float32`` is ``0.1f``.
     """
 
     def __init__(self, lowering: _Builder) -> None:
@@ -378,23 +390,62 @@ class ExpressionLowerer(Mapper):
             expr.aggregate.name, tuple(self.rec(i) for i in index)
         )
 
+    def _operation(
+        self, expr: Any, operands: Sequence[Any], build: Any
+    ) -> prim.Expression:
+        """An operation, with its operands converted where numpy's type is not C's.
+
+        ``build`` makes the node from a list of lowered operands. The plan is
+        :meth:`loopty.promotion.Promotion.steps`, one step per operand after
+        the first, evaluated from the left as numpy and C both evaluate a sum
+        or a product of several: a step that converts its left operand
+        converts everything to the left of it, as one cast around the
+        operands before. An operation the plan leaves alone is rebuilt as it
+        was, so a kernel whose arithmetic C and numpy type alike lowers to the
+        code it always did. See note 18 in ``docs/loopy-notes.md``.
+        """
+        lowered = [self.rec(operand) for operand in operands]
+        promotion = self.lowering.promotion
+        steps = () if promotion is None else promotion.steps(expr)
+        if not any(step.converts for step in steps):
+            return build(lowered)
+        head = [lowered[0]]
+        for operand, step in zip(lowered[1:], steps, strict=True):
+            if step.left is not None:
+                before = head[0] if len(head) == 1 else build(head)
+                head = [_converted(before, step.left)]
+            if step.right is not None:
+                operand = _converted(operand, step.right)
+            head.append(operand)
+        return build(head)
+
     def map_sum(self, expr: Any) -> prim.Expression:
-        return prim.Sum(tuple(self.rec(child) for child in expr.children))
+        return self._operation(expr, expr.children, lambda ops: prim.Sum(tuple(ops)))
 
     def map_product(self, expr: Any) -> prim.Expression:
-        return prim.Product(tuple(self.rec(child) for child in expr.children))
+        return self._operation(
+            expr, expr.children, lambda ops: prim.Product(tuple(ops))
+        )
 
     def map_quotient(self, expr: Any) -> prim.Expression:
-        return prim.Quotient(self.rec(expr.numerator), self.rec(expr.denominator))
+        return self._operation(
+            expr, (expr.numerator, expr.denominator), lambda ops: prim.Quotient(*ops)
+        )
 
     def map_floor_div(self, expr: Any) -> prim.Expression:
-        return prim.FloorDiv(self.rec(expr.numerator), self.rec(expr.denominator))
+        return self._operation(
+            expr, (expr.numerator, expr.denominator), lambda ops: prim.FloorDiv(*ops)
+        )
 
     def map_remainder(self, expr: Any) -> prim.Expression:
-        return prim.Remainder(self.rec(expr.numerator), self.rec(expr.denominator))
+        return self._operation(
+            expr, (expr.numerator, expr.denominator), lambda ops: prim.Remainder(*ops)
+        )
 
     def map_power(self, expr: Any) -> prim.Expression:
-        return prim.Power(self.rec(expr.base), self.rec(expr.exponent))
+        return self._operation(
+            expr, (expr.base, expr.exponent), lambda ops: prim.Power(*ops)
+        )
 
     def map_call(self, expr: Any) -> prim.Expression:
         return prim.Call(
@@ -402,7 +453,11 @@ class ExpressionLowerer(Mapper):
         )
 
     def map_comparison(self, expr: Any) -> prim.Expression:
-        return prim.Comparison(self.rec(expr.left), expr.operator, self.rec(expr.right))
+        return self._operation(
+            expr,
+            (expr.left, expr.right),
+            lambda ops: prim.Comparison(ops[0], expr.operator, ops[1]),
+        )
 
     def map_logical_and(self, expr: Any) -> prim.Expression:
         return prim.LogicalAnd(tuple(self.rec(c) for c in expr.children))
@@ -430,6 +485,19 @@ class ExpressionLowerer(Mapper):
         raise LoweringError(
             f"cannot lower {type(expr).__name__} into a loopy expression: {expr!r}"
         )
+
+
+def _converted(expr: Any, dtype: np.dtype) -> Any:
+    """``expr`` computed in ``dtype``: a literal written in it, anything else cast.
+
+    A literal is a constant of the dtype, which loopy writes as it is
+    (``0.1f`` for a ``float32``), so a literal beside a ``float32`` operand
+    is what numpy makes of it there; a cast would round the double instead,
+    which is the same value and more to read.
+    """
+    if isinstance(expr, bool | int | float | complex | np.number | np.bool_):
+        return dtype.type(expr)
+    return TypeCast(dtype, expr)
 
 
 # }}}
@@ -772,6 +840,9 @@ class _Builder:
         #: The statement whose expressions are being lowered, which is the
         #: other half of a reduction's key.
         self.statement: str | None = None
+        #: The type numpy computes each operation in, and where the lowered
+        #: code has to convert an operand to compute it in that type too.
+        self.promotion = Promotion(term)
         self.expr = ExpressionLowerer(self)
 
     # {{{ ragged storage
@@ -1304,6 +1375,9 @@ def _plain(expr: Any) -> Any:
 
 class _NullBuilder:
     """A builder for expressions that cannot contain array references."""
+
+    #: A size expression is an integer, which numpy and C compute alike.
+    promotion = None
 
     def access(self, name: str, indices: tuple[Any, ...]) -> prim.Expression:
         variable = prim.Variable(name)
@@ -2022,6 +2096,7 @@ def lower_generic(
     )
 
     contraction = allows_contraction(term)
+    preambles = () if contraction else _no_contraction_preambles(target)
     kernel = lp.make_kernel(
         merged,
         insns,
@@ -2029,7 +2104,7 @@ def lower_generic(
         target=target_for(target),
         lang_version=_LANG_VERSION,
         name=_kernel_name(term.name, [arg.name for arg in args]),
-        preambles=() if contraction else _no_contraction_preambles(target),
+        preambles=(*preambles, *_power_preambles(term, target)),
     )
     if not contraction and target in ("c", None):
         kernel = lp.set_options(kernel, build_options=[NO_CONTRACTION_FLAG])
@@ -2102,6 +2177,33 @@ def _no_contraction_preambles(target: str | None) -> tuple[tuple[str, str], ...]
     """The preamble that asks the target's compiler not to contract, if any."""
     pragma = NO_CONTRACTION_PRAGMAS.get(target or "c")
     return () if pragma is None else ((_NO_CONTRACTION_TAG, pragma),)
+
+
+def _power_preambles(term: Term, target: str | None) -> tuple[tuple[str, str], ...]:
+    """The headers a power needs on the C targets, when the term has one.
+
+    loopy writes ``x ** 2`` as ``x * x``, and any other power as a call: of
+    ``pow`` (``powf``) for a floating exponent, whose header ``math.h`` it
+    never includes (note 2 in ``docs/loopy-notes.md``), and of a
+    ``loopy_pow_<base>_<exponent>`` it defines for an integer one, whose
+    signature names ``int32_t`` above the ``stdint.h`` it includes. Both
+    failed to compile, ``x ** -1`` and ``x ** 0.5`` alike (#84). The lowering
+    gives a floating power a floating exponent (:mod:`loopty.promotion`),
+    which leaves the integer definition to integer powers. See note 18.
+    """
+    if (target or "c") not in ("c", "c-source"):
+        return ()
+    for stmt in term.stmts:
+        for node in walk((stmt.assignee, stmt.expr, stmt.guard)):
+            if isinstance(node, prim.Power) and not _written_as_product(node):
+                return ((_POWER_TAG, POWER_INCLUDES),)
+    return ()
+
+
+def _written_as_product(power: prim.Power) -> bool:
+    """Whether loopy writes a power without a call: exponent ``0``, ``1`` or ``2``."""
+    exponent = power.exponent
+    return isinstance(exponent, int | float | np.number) and exponent in (0, 1, 2)
 
 
 def _scalar_assumptions(term: Term, declared: set[str]) -> isl.BasicSet | None:
