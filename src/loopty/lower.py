@@ -53,6 +53,7 @@ piece after one starts at a value argument the executor computes
 from __future__ import annotations
 
 import dataclasses
+import functools
 import re
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -64,8 +65,13 @@ import numpy as np
 import pymbolic.primitives as prim
 from loopy.symbolic import Reduction as LoopyReduction
 from loopy.symbolic import TypeCast, set_to_cond_expr
-from loopy.target.c import CFamilyASTBuilder
-from loopy.target.pyopencl import PyOpenCLPythonASTBuilder
+from loopy.target.c import CASTBuilder, CFamilyASTBuilder
+from loopy.target.c.codegen.expression import ExpressionToCExpressionMapper
+from loopy.target.pyopencl import (
+    ExpressionToPyOpenCLCExpressionMapper,
+    PyOpenCLCASTBuilder,
+    PyOpenCLPythonASTBuilder,
+)
 from pymbolic.mapper import Mapper
 
 from loopty.contract import compiled_storage
@@ -78,6 +84,12 @@ from loopty.flow import (
     statement_accesses,
 )
 from loopty.idx import linearize
+from loopty.operations import (
+    DEFINITIONS_DIGEST,
+    OPERATIONS,
+    NumpyArithmetic,
+    numpy_arithmetic_preambles,
+)
 from loopty.promotion import Promotion
 from loopty.term import (
     COUNT_PARAM,
@@ -106,9 +118,11 @@ __all__ = [
     "InProcessCTarget",
     "LoweringError",
     "Lowering",
+    "SourceCTarget",
     "allows_contraction",
     "count_param_name",
     "count_param_names",
+    "is_library_name",
     "is_reserved",
     "lower",
     "lower_generic",
@@ -210,6 +224,24 @@ class _HostCodeWithoutConditionals(CFamilyASTBuilder):
         return False
 
 
+class _CExpressions(NumpyArithmetic, ExpressionToCExpressionMapper):
+    """loopy's C expressions, with ``//``, ``%``, ``<<`` and ``>>`` numpy's."""
+
+
+class _CCode(CASTBuilder):
+    """The device code of loopty's C targets: loopy's, with numpy's arithmetic.
+
+    ``//``, ``%``, ``<<`` and ``>>`` are calls of functions defined as numpy
+    defines them (:mod:`loopty.operations`), whose definitions are preambles.
+    """
+
+    def preamble_generators(self) -> Any:
+        return [*super().preamble_generators(), numpy_arithmetic_preambles]
+
+    def get_expression_to_c_expression_mapper(self, codegen_state: Any) -> Any:
+        return _CExpressions(codegen_state)
+
+
 class InProcessCTarget(lp.ExecutableCTarget):
     """``lp.ExecutableCTarget``, with every condition in the code that runs.
 
@@ -221,12 +253,35 @@ class InProcessCTarget(lp.ExecutableCTarget):
     function directly. So the guard was gone and the body ran unconditionally
     (#90). With host code that cannot hold a condition, loopy hoists the guard
     no further than the device function's body, and it is emitted there.
-    Everything else is ``lp.ExecutableCTarget``'s; note 18 in
-    ``docs/loopy-notes.md`` has the details.
+    Note 18 in ``docs/loopy-notes.md`` has the details.
+
+    Its device code writes ``//``, ``%``, ``<<`` and ``>>`` as numpy computes
+    them (:class:`_CCode`, note 20), and the definitions are hashed in, so
+    that loopy's cache keeps no code of other ones.
     """
+
+    hash_fields = (*lp.ExecutableCTarget.hash_fields, "arithmetic")
+    arithmetic = DEFINITIONS_DIGEST
 
     def get_host_ast_builder(self) -> Any:
         return _HostCodeWithoutConditionals(self)
+
+    def get_device_ast_builder(self) -> Any:
+        return _CCode(self)
+
+
+class SourceCTarget(lp.CTarget):
+    """``lp.CTarget``, whose code is only printed, with numpy's arithmetic.
+
+    The source ``loopty run --emit-code`` prints for target ``c-source``: the
+    device code of :class:`InProcessCTarget`, with no host code.
+    """
+
+    hash_fields = (*lp.CTarget.hash_fields, "arithmetic")
+    arithmetic = DEFINITIONS_DIGEST
+
+    def get_device_ast_builder(self) -> Any:
+        return _CCode(self)
 
 
 class _LaunchWithoutConditionals(PyOpenCLPythonASTBuilder):
@@ -235,6 +290,20 @@ class _LaunchWithoutConditionals(PyOpenCLPythonASTBuilder):
     @property
     def can_implement_conditionals(self) -> bool:
         return False
+
+
+class _OpenCLExpressions(NumpyArithmetic, ExpressionToPyOpenCLCExpressionMapper):
+    """loopy's OpenCL C expressions, with numpy's arithmetic."""
+
+
+class _OpenCLCode(PyOpenCLCASTBuilder):
+    """The kernel code of :class:`InKernelOpenCLTarget`; see :class:`_CCode`."""
+
+    def preamble_generators(self) -> Any:
+        return [*super().preamble_generators(), numpy_arithmetic_preambles]
+
+    def get_expression_to_c_expression_mapper(self, codegen_state: Any) -> Any:
+        return _OpenCLExpressions(codegen_state)
 
 
 class InKernelOpenCLTarget(lp.PyOpenCLTarget):
@@ -247,11 +316,18 @@ class InKernelOpenCLTarget(lp.PyOpenCLTarget):
     instead of writing nothing. With host code that cannot hold a condition,
     the guard is emitted in the kernel, as it is for ``lp.OpenCLTarget``,
     which generates no host code. Building one imports pyopencl, as
-    ``lp.PyOpenCLTarget`` does; defining the class does not.
+    ``lp.PyOpenCLTarget`` does; defining the class does not. Its kernel
+    writes numpy's arithmetic, as :class:`InProcessCTarget` does.
     """
+
+    hash_fields = (*lp.PyOpenCLTarget.hash_fields, "arithmetic")
+    arithmetic = DEFINITIONS_DIGEST
 
     def get_host_ast_builder(self) -> Any:
         return _LaunchWithoutConditionals(self)
+
+    def get_device_ast_builder(self) -> Any:
+        return _OpenCLCode(self)
 
 
 def target_for(target: str = "c") -> Any:
@@ -260,15 +336,18 @@ def target_for(target: str = "c") -> Any:
     ``"c"`` is :class:`InProcessCTarget`, ``lp.ExecutableCTarget`` with every
     condition in the device function, which compiles with the system toolchain
     and runs in process; it is the only target a laptop or CI ever uses.
+    ``"c-source"`` is :class:`SourceCTarget`, whose code is only printed.
     ``"opencl"`` is :class:`InKernelOpenCLTarget`, ``lp.PyOpenCLTarget`` with
     every condition in the kernel, and pyopencl is imported when it is built,
     here and nowhere else, inside the branch, so that importing loopty on a
-    machine without a device costs nothing and can never fail.
+    machine without a device costs nothing and can never fail. All three
+    write ``//``, ``%``, ``<<`` and ``>>`` as numpy computes them
+    (:mod:`loopty.operations`).
     """
     if target in ("c", None):
         return InProcessCTarget()
     if target == "c-source":
-        return lp.CTarget()
+        return SourceCTarget()
     if target == "opencl":
         return InKernelOpenCLTarget()
     raise LoweringError(f"unknown target {target!r}; expected 'c' or 'opencl'")
@@ -348,21 +427,71 @@ def _reduction_nesting(expr: Any) -> list[tuple[Reduction, tuple[int, ...]]]:
 class ExpressionLowerer(Mapper):
     """Rebuild a term's expression out of plain pymbolic nodes.
 
-    Four jobs in one walk. lanky's subclasses are replaced by pymbolic's, so
+    Five jobs in one walk. lanky's subclasses are replaced by pymbolic's, so
     that loopy's structural comparisons work (lanky's ``==`` builds a
     proposition). :class:`~loopty.term.Access` and bare subscripts are turned
     into flat storage accesses, which is where a ragged layout's ``off[r] + j``
     enters. :class:`~loopty.term.Reduction` becomes ``lp.Reduction`` over its
     inames, and the reduction's domain is collected on the side so the caller can
-    add it to the kernel. And an operation whose operands C would compute in
+    add it to the kernel. An operation whose operands C would compute in
     another type than numpy does natively has them converted
     (:mod:`loopty.promotion`): ``k[i] / 2`` of an integer ``k`` is
-    ``(double) (k[i]) / 2``, and ``0.1`` beside a ``float32`` is ``0.1f``.
+    ``(double) (k[i]) / 2``, ``0.1`` beside a ``float32`` is ``0.1f``, and
+    ``col[i] * col[i]`` of a ``Fin[m]`` array is computed in 64 bits, but in a
+    subscript: an index is index arithmetic, which loopy computes in 32 bits
+    and isl reasons about, so an integer is not widened inside one. A guard
+    that reads no array is a condition on the loops, which loopy reads into
+    isl too, and whose reader refuses a cast (note 20 in
+    ``docs/loopy-notes.md``), so nothing in one is cast at all: a literal is
+    still written in numpy's dtype, and loopy computes a quotient of integers
+    in double in a comparison of its own accord (:meth:`condition`). An
+    operation C leaves undefined where numpy does not, ``//``, ``%``, ``<<``
+    and ``>>``, is rebuilt as it is, and loopty's targets write it as numpy
+    computes it (:mod:`loopty.operations`, :func:`target_for`).
     """
 
-    def __init__(self, lowering: _Builder) -> None:
+    def __init__(self, lowering: _Builder | _NullBuilder) -> None:
         super().__init__()
         self.lowering = lowering
+        #: How many subscripts deep the walk is.
+        self._subscripts = 0
+        #: Whether the walk is in a guard that reads no array; see
+        #: :meth:`condition`.
+        self._on_loops = False
+
+    def condition(self, guard: Any) -> Any:
+        """Lower a statement's guard.
+
+        A guard that reads no array names loop variables, sizes and scalars
+        alone, and loopy reads such a predicate as an isl set
+        (``loopy.symbolic.condition_to_set``), whose evaluator raises on a
+        cast instead of declining it: ``when(i ** 0.5 > 1.5)`` failed in
+        loopy's bounds check. So no operand in one is cast; one is converted
+        only when it is a literal, which is written in the dtype. Such a guard
+        is index arithmetic, which is left in 32 bits as a subscript is.
+        """
+        reads = any(isinstance(node, Access | prim.Subscript) for node in walk(guard))
+        if reads:
+            return self.rec(guard)
+        self._on_loops = True
+        try:
+            return self.rec(guard)
+        finally:
+            self._on_loops = False
+
+    @property
+    def in_subscript(self) -> bool:
+        """Whether the expression being lowered is index arithmetic."""
+        return self._subscripts > 0
+
+    def _indices(self, indices: Sequence[Any]) -> tuple[Any, ...]:
+        """Lower the indices of a subscript, as index arithmetic."""
+        self._subscripts += 1
+        try:
+            return tuple(self.rec(index) for index in indices)
+        finally:
+            self._subscripts -= 1
+
 
     # The dispatcher: two of our node types are not pymbolic nodes at all, so
     # they are recognized before the mapper method lookup.
@@ -377,9 +506,7 @@ class ExpressionLowerer(Mapper):
 
     def map_access(self, expr: Access) -> prim.Expression:
         """An array reference in index-type axes becomes one in flat storage."""
-        return self.lowering.access(
-            expr.array, tuple(self.rec(i) for i in expr.indices)
-        )
+        return self.lowering.access(expr.array, self._indices(expr.indices))
 
     def map_term_reduction(self, expr: Reduction) -> prim.Expression:
         """``Reduction`` becomes ``lp.Reduction``; its domain is collected.
@@ -394,10 +521,10 @@ class ExpressionLowerer(Mapper):
         inames = tuple(renaming.get(name, name) for name in expr.inames)
         self.lowering.add_reduction_domain(expr, inames)
         if not renaming:
-            return LoopyReduction(expr.op, inames, self.rec(expr.body))
+            return LoopyReduction(expr.op, inames, self._summed(expr))
         self.lowering.push_renaming(renaming)
         try:
-            body = self.rec(expr.body)
+            body = self._summed(expr)
         finally:
             self.lowering.pop_renaming()
         return LoopyReduction(expr.op, inames, body)
@@ -411,7 +538,22 @@ class ExpressionLowerer(Mapper):
         """
         inames = tuple(binder.name for binder, _domain in expr.binders)
         self.lowering.add_binder_domains(expr.binders)
-        return LoopyReduction("sum", inames, self.rec(expr.body))
+        return LoopyReduction("sum", inames, self._summed(expr))
+
+    def _summed(self, expr: Any) -> Any:
+        """The body of a sum, converted where numpy adds its terms in more bits.
+
+        loopy accumulates in the type of the body, and numpy adds the terms to
+        ``0``, so the count a sum of truth values is, or a sum of indices, is
+        64 bits wide natively (:meth:`loopty.promotion.Promotion._summed`).
+        """
+        body = self.rec(expr.body)
+        promotion = self.lowering.promotion
+        steps = () if promotion is None else promotion.steps(expr)
+        for step in steps:
+            if step.right is not None and self._casts(body):
+                body = _converted(body, step.right)
+        return body
 
     def map_constant(self, expr: Any) -> Any:
         """A Python ``float`` becomes ``np.float64``, a ``complex`` ``np.complex128``.
@@ -449,9 +591,7 @@ class ExpressionLowerer(Mapper):
         if not isinstance(expr.aggregate, prim.Variable):
             raise LoweringError(f"cannot lower a subscript of {expr.aggregate!r}")
         index = expr.index if isinstance(expr.index, tuple) else (expr.index,)
-        return self.lowering.access(
-            expr.aggregate.name, tuple(self.rec(i) for i in index)
-        )
+        return self.lowering.access(expr.aggregate.name, self._indices(index))
 
     def _operation(
         self, expr: Any, operands: Sequence[Any], build: Any
@@ -466,21 +606,31 @@ class ExpressionLowerer(Mapper):
         operands before. An operation the plan leaves alone is rebuilt as it
         was, so a kernel whose arithmetic C and numpy type alike lowers to the
         code it always did. See note 19 in ``docs/loopy-notes.md``.
+
+        Inside a subscript an integer is not widened (see the class): a step
+        converting to an integer dtype is left out there.
         """
         lowered = [self.rec(operand) for operand in operands]
         promotion = self.lowering.promotion
         steps = () if promotion is None else promotion.steps(expr)
+        if self.in_subscript or self._on_loops:
+            steps = tuple(_without_widening(step) for step in steps)
         if not any(step.converts for step in steps):
             return build(lowered)
         head = [lowered[0]]
         for operand, step in zip(lowered[1:], steps, strict=True):
             if step.left is not None:
                 before = head[0] if len(head) == 1 else build(head)
-                head = [_converted(before, step.left)]
-            if step.right is not None:
+                if self._casts(before):
+                    head = [_converted(before, step.left)]
+            if step.right is not None and self._casts(operand):
                 operand = _converted(operand, step.right)
             head.append(operand)
         return build(head)
+
+    def _casts(self, operand: Any) -> bool:
+        """Whether ``operand`` may be converted here; see :meth:`condition`."""
+        return not self._on_loops or _is_literal(operand)
 
     def map_sum(self, expr: Any) -> prim.Expression:
         return self._operation(expr, expr.children, lambda ops: prim.Sum(tuple(ops)))
@@ -508,6 +658,22 @@ class ExpressionLowerer(Mapper):
     def map_power(self, expr: Any) -> prim.Expression:
         return self._operation(
             expr, (expr.base, expr.exponent), lambda ops: prim.Power(*ops)
+        )
+
+    def map_bitwise_xor(self, expr: Any) -> prim.Expression:
+        """``a ^ b``, which C computes as numpy does in the type numpy does (#107)."""
+        return self._operation(
+            expr, expr.children, lambda ops: prim.BitwiseXor(tuple(ops))
+        )
+
+    def map_left_shift(self, expr: Any) -> prim.Expression:
+        return self._operation(
+            expr, (expr.shiftee, expr.shift), lambda ops: prim.LeftShift(*ops)
+        )
+
+    def map_right_shift(self, expr: Any) -> prim.Expression:
+        return self._operation(
+            expr, (expr.shiftee, expr.shift), lambda ops: prim.RightShift(*ops)
         )
 
     def map_call(self, expr: Any) -> prim.Expression:
@@ -550,6 +716,20 @@ class ExpressionLowerer(Mapper):
         )
 
 
+def _without_widening(step: Any) -> Any:
+    """``step`` without a conversion to an integer dtype; see ExpressionLowerer."""
+    left = step.left if step.left is None or step.left.kind not in "biu" else None
+    right = step.right if step.right is None or step.right.kind not in "biu" else None
+    if left is step.left and right is step.right:
+        return step
+    return dataclasses.replace(step, left=left, right=right)
+
+
+def _is_literal(expr: Any) -> bool:
+    """Whether ``expr`` is a number, which :func:`_converted` writes in a dtype."""
+    return isinstance(expr, bool | int | float | complex | np.number | np.bool_)
+
+
 def _converted(expr: Any, dtype: np.dtype) -> Any:
     """``expr`` computed in ``dtype``: a literal written in it, anything else cast.
 
@@ -558,7 +738,7 @@ def _converted(expr: Any, dtype: np.dtype) -> Any:
     is what numpy makes of it there; a cast would round the double instead,
     which is the same value and more to read.
     """
-    if isinstance(expr, bool | int | float | complex | np.number | np.bool_):
+    if _is_literal(expr):
         return dtype.type(expr)
     return TypeCast(dtype, expr)
 
@@ -684,6 +864,93 @@ RESERVED_WORDS = frozenset(
 RESERVED_PREFIX = re.compile(r"_[A-Z_]")
 
 
+#: The functions C99's ``math.h`` declares, each also with an ``f`` and an
+#: ``l`` suffix, and ``complex.h``'s, which the generated code includes for a
+#: power (:func:`_power_preambles`) and for complex values, and for
+#: :mod:`loopty.operations`.
+_C_LIBRARY_FUNCTIONS = frozenset(
+    form
+    for function in """
+    acos asin atan atan2 cos sin tan acosh asinh atanh cosh sinh tanh exp exp2
+    expm1 frexp ilogb ldexp log log10 log1p log2 logb modf scalbn scalbln cbrt
+    fabs hypot pow sqrt erf erfc lgamma tgamma ceil floor nearbyint rint lrint
+    llrint round lround llround trunc fmod remainder remquo copysign nan
+    nextafter nexttoward fdim fmax fmin fma
+    cabs cacos cacosh carg casin casinh catan catanh ccos ccosh cexp cimag clog
+    conj cpow cproj creal csin csinh csqrt ctan ctanh
+""".split()
+    for form in (function, f"{function}f", f"{function}l")
+)
+
+#: What those headers, and ``stdint.h``, define as macros or types: a
+#: function of that name is expanded, or declared over a type. A ``uint8_t``
+#: and every other exact, least and fast width is matched by
+#: :data:`_STDINT_TYPE`.
+_C_LIBRARY_MACROS = frozenset(
+    """
+    fpclassify isfinite isinf isnan isnormal signbit isgreater isgreaterequal
+    isless islessequal islessgreater isunordered NAN INFINITY HUGE_VAL
+    HUGE_VALF HUGE_VALL FP_INFINITE FP_NAN FP_NORMAL FP_SUBNORMAL FP_ZERO
+    FP_FAST_FMA FP_FAST_FMAF FP_FAST_FMAL FP_ILOGB0 FP_ILOGBNAN MATH_ERRNO
+    MATH_ERREXCEPT math_errhandling float_t double_t I CMPLX CMPLXF CMPLXL
+    intmax_t uintmax_t intptr_t uintptr_t
+""".split()
+)
+
+_STDINT_TYPE = re.compile(
+    r"u?int(_least|_fast)?(8|16|32|64)_t$"
+    r"|U?INT\w*_(MIN|MAX|C)$|(SIZE|PTRDIFF|SIG_ATOMIC|WCHAR|WINT)_(MIN|MAX)$"
+)
+
+#: The helper functions loopy and loopty define in a preamble:
+#: ``loopy_floor_div_pos_b_int32``, ``loopy_pow_int32_int32``,
+#: ``loopty_mod_int64``. A name with anything after the types is not one, so
+#: the ``_knl`` a clash adds ends the clash.
+_HELPER_FUNCTION = re.compile(
+    r"loopt?y_(floor_div(_pos_b)?|mod(_pos_b)?|pow|lshift|rshift)"
+    r"(_(u?int|float|complex)\d+)+$"
+)
+
+
+@functools.cache
+def _known_functions() -> frozenset[str]:
+    """Every function name loopy resolves on a target loopty lowers for.
+
+    loopy looks a call up among its own functions (``make_tuple``), the
+    target's (``floor``, ``sqrt``, ``conj`` on C; ``dot`` and ``make_float2``
+    on OpenCL) and a translation unit's, the kernel itself included, and the
+    target's win: a kernel named ``floor`` is looked up as the function. The
+    targets are asked for their lists, so a loopy that knows more names is
+    followed; :mod:`loopty.operations` adds its own.
+    """
+    from loopy.library.function import get_loopy_callables
+    from loopy.target.pyopencl import get_pyopencl_callables
+
+    names = set(get_loopy_callables())
+    for target in (lp.CTarget(), lp.OpenCLTarget()):
+        names |= set(target.get_device_ast_builder().known_callables)
+    names |= set(get_pyopencl_callables())
+    names |= set(OPERATIONS)
+    return frozenset(names)
+
+
+def is_library_name(name: str) -> bool:
+    """Whether a function of this name collides with one the generated code sees.
+
+    A function loopy resolves a call by (:func:`_known_functions`), one the C
+    headers the generated code includes declare, with its ``f`` and ``l``
+    forms, or define as a macro or a type, or a helper loopy or loopty
+    defines in a preamble. A kernel of such a name failed inside loopy
+    (``KeyError: 'floor'``) or in the C compiler (``conflicting types for
+    'cpow'``), #108.
+    """
+    if name in _known_functions() or name in _C_LIBRARY_FUNCTIONS:
+        return True
+    if name in _C_LIBRARY_MACROS:
+        return True
+    return bool(_STDINT_TYPE.match(name) or _HELPER_FUNCTION.match(name))
+
+
 def is_reserved(name: str) -> bool:
     """Whether generated C or OpenCL C code cannot declare ``name``.
 
@@ -746,6 +1013,12 @@ def _kernel_name(name: str, taken: Sequence[str]) -> str:
     than refusing keeps a legal Python name legal: nothing
     outside the generated source refers to the kernel by this name, because
     callers hold the :class:`Lowering` and address arguments by name.
+
+    A name a function the generated code sees already has is renamed the same
+    way (:func:`is_library_name`): a kernel named ``floor`` was looked up by
+    loopy as C's ``floor`` and failed with ``KeyError: 'floor'``, and one
+    named ``cpow`` over complex arrays clashed in the C compiler with the
+    ``cpow`` that ``complex.h`` declares (#108).
     """
     base = _sanitize(name)
     if not base or base[0].isdigit():
@@ -754,10 +1027,18 @@ def _kernel_name(name: str, taken: Sequence[str]) -> str:
         # ``_Generic`` stays reserved with any suffix, so it gets a prefix.
         base = f"k{base}"
     taken = set(taken)
-    if base not in taken and not is_reserved(base):
+
+    def clashes(candidate: str) -> bool:
+        return (
+            candidate in taken
+            or is_reserved(candidate)
+            or is_library_name(candidate)
+        )
+
+    if not clashes(base):
         return base
     candidate = f"{base}_knl"
-    while candidate in taken or is_reserved(candidate):
+    while clashes(candidate):
         candidate = f"{candidate}_"
     return candidate
 
@@ -2066,7 +2347,7 @@ def lower_generic(
         insn_ids[stmt.id] = insn_id
         predicates = frozenset()
         if stmt.guard is not None:
-            predicates = frozenset([expr(stmt.guard)])
+            predicates = frozenset([expr.condition(stmt.guard)])
         insns.append(
             lp.Assignment(
                 assignee=assignee,
