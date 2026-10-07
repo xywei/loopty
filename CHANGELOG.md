@@ -1405,6 +1405,71 @@ with a pair of statement instances.
   onto two work items is refused as well. A monotone fact about a schedule
   with a loop on a hardware axis says "within one work item", and the
   transcripts are regenerated.
+- A guard that reads only scalars is kept in the compiled kernel (#90).
+  `when(flag)` of a `Bool` scalar, or `when(a > 0.5)` of a `Real` one, around
+  every statement of a kernel was lowered as an instruction predicate naming
+  no loop variable, which loopy hoists out of the device function into host
+  code around its call, and `lp.ExecutableCTarget` generates that host code
+  and never runs it. So the compiled run wrote every cell whatever the scalar
+  said, where the native run wrote none: the differential test refuted such
+  a kernel and the `trace-faithful` fact did not. A guard on one cell of an
+  array (`when(x[0] > 0.5)`) was dropped the same way. Target `c` is now
+  `loopty.lower.InProcessCTarget`, whose host code cannot hold a condition, so
+  the guard is emitted around the loop in the function that runs. On the
+  PyOpenCL target the hoisted guard wrapped the launch and the event the host
+  code returns, so a false guard raised `UnboundLocalError`; target `opencl`
+  is now `loopty.lower.InKernelOpenCLTarget`, which keeps the guard in the
+  kernel the same way. See note 18 in `docs/loopy-notes.md`.
+- A whole array stored into a cell is refused while tracing (#85).
+  `y[i] = u` traced, with the symbolic array itself as the statement's
+  right-hand side, where natively numpy refuses to store a sequence in a
+  cell. It is now a `TraceError` naming the loop nest to write, as `u` used
+  whole on the right of an operator is, and a domain (`y[i] = u.dom`), a
+  list, tuple, set or dict, a numpy array with an axis, an array the body
+  holds, and a generator (with `reduce_sum(...)` named as the fix) are refused
+  the same way. Natively numpy refuses each of them for a number, and stores
+  into a `Bool` cell the truth value of the whole (`[False]` is `True`),
+  which the message says.
+- Two statements whose ids spell one instruction id are refused by the
+  lowering, naming both (#88). A statement's instruction is named by its id
+  with every character other than a letter, a digit or an underscore written
+  `_`, so a hand-built term with statements `a.S0` and `a@S0` failed inside
+  `lp.make_kernel` with loopy's "duplicate instruction id: 'a_S0'", which
+  names neither. A statement whose id spells the instruction that computes a
+  row length (`nl_cnt_r_init`) is refused the same way. A traced kernel's ids
+  and a program's call labels cannot collide.
+- The term interpreter reads a bound that bounds two loops of one
+  statement, or a loop and a sum inside it, where each of them starts
+  (#87). A bound is one parameter of a domain, and the interpreter read it
+  once, so it refused such a bound when it reads an array the kernel writes
+  (`for k in val.dom[r]` inside `for j in val.dom[r]`, and `reduce_sum(val[r,
+  k] for k in val.dom[r])` inside the loop over `j`, each followed by
+  `cnt[r] = 1`), and the `trace-faithful` fact stayed `assumed`. Such a
+  bound now gets a parameter of its own for each loop inside the outermost
+  one it bounds, read where that loop starts, and one for the statement's
+  sums, read where each sum starts, while the constraints a sum repeats
+  from the loops around it keep the readings of those loops
+  (`interpret._Run.read_apart`). So the fact of such a kernel is `tested` or
+  `refuted` like any other; the lowering still refuses a statement that
+  would see a length rewritten after it was computed.
+- The `layout` fact of a kernel that writes its offsets is decided where
+  the writes say what they do (#86). It was `assumed` whatever the kernel
+  wrote. For a family whose rows are as long as a counts array the kernel
+  reads and does not write, every write to the offsets is now either one
+  that lays the row out as the counts do, `off[q] = off[q - 1] + cnt[q -
+  1]` at `1 <= q <= n` (the value the contract checked there, so by
+  induction the offsets stay as they were), or a value of the loop variables
+  and the sizes alone, which is the start the counts give its row only for
+  `off[0] = 0`. The fact is then the isl question whether any instance
+  writes another such start: decided when none does, so a kernel that
+  rescans its offsets has its facts worth what they are, and refuted with
+  the instance otherwise, `[r=1]` at `n = 2` for the issue's kernel that
+  sets every start to 0, where counts of 1 in rows 0 and 1 put both rows on
+  cell 0. `lanky check` exits 1 on it, and `loopty run` asks isl about the
+  layout fact a cast rests on as `lanky check` does. A start read from
+  another array, a count written, a write under a guard isl cannot state, or
+  counts with more than one axis leave the fact `assumed`, and its reason
+  names the write.
 
 ### Changed
 

@@ -11,9 +11,13 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from lanky.prelude import Nat, Real
 
 import hand_terms as ht
+from loopty import Arr, Fin, kernel
 from loopty.lower import (
+    InKernelOpenCLTarget,
+    InProcessCTarget,
     LoweringError,
     count_param_names,
     lower,
@@ -278,6 +282,13 @@ def test_the_opencl_target_is_named_but_not_imported() -> None:
     assert isinstance(target_for("c"), lp.ExecutableCTarget)
     with pytest.raises(LoweringError):
         target_for("cuda")
+    # Neither target's host code holds a condition, which loopy would hoist
+    # a guard naming no loop variable into (#90). The OpenCL target imports
+    # pyopencl when it is built, so its host code builder is asked of the
+    # class.
+    assert not InProcessCTarget().get_host_ast_builder().can_implement_conditionals
+    opencl_host = InKernelOpenCLTarget.get_host_ast_builder(None)
+    assert not opencl_host.can_implement_conditionals
     # Importing loopty, lowering, and running must never pull in pyopencl.
     assert "pyopencl" not in sys.modules
 
@@ -485,6 +496,75 @@ def test_a_kernels_term_still_finds_its_offsets_by_name() -> None:
         offsets=(("cnt", "elsewhere"),),
     )
     assert stated.offsets_of("cnt") == "elsewhere"
+
+
+# }}}
+
+
+# {{{ two statements spelling one instruction id (#88)
+
+
+def test_two_statements_spelling_one_instruction_id_are_refused_by_name() -> None:
+    # loopy refused the kernel from inside lp.make_kernel, "duplicate
+    # instruction id: 'a_S0'", naming neither statement.
+    import dataclasses
+
+    from loopty.schedule import Schedule
+
+    @kernel
+    def twice(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in x.dom:
+            x[i] = 2.0 * x[i]
+        for i in y.dom:
+            y[i] = 2.0 * y[i]
+
+    first, second = twice.term.stmts
+
+    def renamed(*ids):
+        return dataclasses.replace(
+            twice.term,
+            stmts=tuple(
+                dataclasses.replace(stmt, id=new)
+                for stmt, new in zip((first, second), ids, strict=True)
+            ),
+        )
+
+    with pytest.raises(LoweringError) as caught:
+        Schedule(renamed("a.S0", "a@S0"))
+    message = str(caught.value)
+    assert "statements 'a.S0' and 'a@S0' both spell the instruction id 'a_S0'" in (
+        message
+    )
+    assert "give the statements ids that stay apart" in message
+    with pytest.raises(LoweringError, match="two statements have the id 'S0'"):
+        lower_generic(renamed("S0", "S0"))
+    # Ids that stay apart once spelled lower as before.
+    out = run(renamed("a.S0", "a.S1"), x=np.ones(2), y=np.ones(2))
+    assert list(out["x"]) == [2.0, 2.0]
+    assert list(out["y"]) == [2.0, 2.0]
+
+
+def test_a_statement_spelling_a_row_length_instruction_id_is_refused() -> None:
+    import dataclasses
+
+    @kernel
+    def rows(
+        cnt: Arr[Fin[n], Nat],  # noqa: F821
+        val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+        y: Arr[Fin[n], Real],  # noqa: F821
+    ):
+        for r in y.dom:
+            for j in val.dom[r]:
+                y[r] = y[r] + val[r, j]
+
+    (stmt,) = rows.term.stmts
+    insns = {insn.id for insn in lower(rows.term).default_entrypoint.instructions}
+    (count_id,) = insns - {"S0"}
+    term = dataclasses.replace(
+        rows.term, stmts=(dataclasses.replace(stmt, id=count_id),)
+    )
+    with pytest.raises(LoweringError, match=f"lowered as the instruction '{count_id}'"):
+        lower_generic(term)
 
 
 # }}}
