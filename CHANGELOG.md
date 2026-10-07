@@ -1659,6 +1659,16 @@ with a pair of statement instances.
   `under`. The `from` entry is gone; `callee`
   stays. The `lanky check` transcripts of `examples/spmv.py` show the new row,
   and this needs the lanky that has `Fact.rests_on`.
+- **`lanky check` says why lanky's tester left a postcondition `assumed`**
+  (lanky #67). A kernel's postcondition, and a program's restatement of one,
+  mention the kernel's arrays and sizes, which nothing in the claim binds, so
+  the property tester could not run them, and said so only in the
+  provenance. lanky's tester declines such a claim before it draws anything
+  now, naming the names, and `lanky check` prints that in a `DECLINED` line
+  under the table: `examples/spmv.py`'s two `assumed` rows, `scan`'s
+  postcondition and its restatement in `solve`, get one each, which the
+  transcripts in `examples/README.md` and `docs/quickstart.md` show. No status
+  changes. This needs the lanky whose tester declines a free name.
 
 ### Notes
 

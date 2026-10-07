@@ -144,6 +144,11 @@ assumed under postcondition:spmv.scan@69  -              spmv.py:115  solve     
 tested                                    interpreter    spmv.py:115  solve          the traced term computes what the body computes
 
 21 facts: 2 assumed, 15 decided, 4 tested
+
+DECLINED scan at spmv.py:69: off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+  property-test: the statement mentions cnt, n and off, which no parameter or binder of it binds, so no draw gives them a value and the statement cannot be tested; a name misspelt, not imported, or meant as a parameter is the usual cause
+DECLINED solve at spmv.py:115: after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+  property-test: the statement mentions cnt, n and off, which no parameter or binder of it binds, so no draw gives them a value and the statement cannot be tested; a name misspelt, not imported, or meant as a parameter is the usual cause
 ```
 
 Read the `BY` column.
@@ -173,7 +178,10 @@ Read the `BY` column.
   `refuted`, with the input and the first cell that differs.
 - Two facts are `assumed`: `scan`'s postcondition, which needs the recurrence,
   and the restatement of it inside `solve`. Nothing established them and nothing
-  pretends otherwise. The restatement rests on `scan`'s fact, and its row says
+  pretends otherwise, and the `DECLINED` lines under the table say why lanky's
+  property tester did not try them: they mention `scan`'s arrays and size,
+  `cnt`, `n` and `off`, which nothing in a claim binds, so no draw gives them
+  a value. The restatement rests on `scan`'s fact, and its row says
   so, `assumed under postcondition:spmv.scan@69`: whatever `scan`'s
   postcondition comes to be worth, the restatement is worth no more. The id
   names `scan`'s definition, the module `spmv` that the file's path gives it,

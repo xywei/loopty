@@ -101,7 +101,10 @@ device schedule: Schedule(spmv, target='c').tag(r='g.0').split(j, 32).tag(j_in='
 ### lanky check examples/spmv.py
 
 The two `assumed` rows are the honest ones: nothing in the term decides the
-scan's recurrence, and `lanky` says so rather than passing over it. The theorem
+scan's recurrence, and `lanky` says so rather than passing over it. The
+`DECLINED` lines under the table say why lanky's property tester did not try
+them either: the claims are about the kernel's arrays and size, `cnt`, `n` and
+`off`, which nothing in a claim binds, so no draw gives them a value. The theorem
 beside it is `tested` here, and `proved` on a machine with the Lean extra
 installed. The last row of each kernel, `tested` by `interpreter`, is the one
 fact about the trace itself: the traced term, run by loopty's interpreter,
@@ -136,6 +139,11 @@ assumed under postcondition:spmv.scan@69  -              spmv.py:115  solve     
 tested                                    interpreter    spmv.py:115  solve          the traced term computes what the body computes
 
 21 facts: 2 assumed, 15 decided, 4 tested
+
+DECLINED scan at spmv.py:69: off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+  property-test: the statement mentions cnt, n and off, which no parameter or binder of it binds, so no draw gives them a value and the statement cannot be tested; a name misspelt, not imported, or meant as a parameter is the usual cause
+DECLINED solve at spmv.py:115: after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+  property-test: the statement mentions cnt, n and off, which no parameter or binder of it binds, so no draw gives them a value and the statement cannot be tested; a name misspelt, not imported, or meant as a parameter is the usual cause
 ```
 
 ### loopty run examples/spmv.py

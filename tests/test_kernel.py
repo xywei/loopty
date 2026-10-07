@@ -260,7 +260,17 @@ def test_a_callee_of_another_file_is_an_id_this_ledger_does_not_hold(
     finally:
         sys.modules.pop("loopty_test_callee", None)
     printed = capsys.readouterr().out.splitlines()
-    (row,) = [line for line in printed if "after scan(...)" in line]
+    # the table's row; the restatement mentions the callee's arrays, which
+    # nothing in it binds, and lanky's tester says so in a DECLINED line
+    (row,) = [
+        line
+        for line in printed
+        if "after scan(...)" in line and not line.startswith("DECLINED ")
+    ]
+    assert any(
+        line.startswith("DECLINED solve at caller.py:") and "after scan(...)" in line
+        for line in printed
+    )
     # the id names the callee's definition, by the module its file's path gives it
     post = f"postcondition:loopty_test_callee.scan@{_decorated_at(CALLEE)}"
     assert row.startswith(f"assumed under {post}  ")
@@ -352,7 +362,11 @@ def test_a_restatement_rests_on_the_callees_fact_and_not_a_namesake(
     assert by_program == {"solve": [(theirs,)], "solve_both": [(theirs,), (ours,)]}
 
     # the helper's fact is in its own ledger, and this one says so
-    (row,) = [line for line in printed if "after scan(...) in solve:" in line]
+    (row,) = [
+        line
+        for line in printed
+        if "after scan(...) in solve:" in line and not line.startswith("DECLINED ")
+    ]
     assert row.startswith(f"assumed under {theirs}  ")
     assert any(
         line.startswith("UNRESOLVED solve at crossmod.py:")
