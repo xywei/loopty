@@ -677,13 +677,13 @@ number's postcondition, forall i in Fin(n). perm[i] == n - 1 - i: tested
 #include <stdint.h>
 #include <stdbool.h>
 
-void checked(int32_t const n, int32_t *__restrict__ perm, double const *__restrict__ x, double *__restrict__ y, int32_t *__restrict__ gather_perm_ok)
+void checked(int32_t const n, int32_t *__restrict__ perm, double const *__restrict__ x, double *__restrict__ y, int64_t *__restrict__ gather_perm_ok)
 {
   for (int32_t i = 0; i <= -1 + n; ++i)
     perm[i] = n + -1 + -1 * i;
   for (int32_t i_1 = 0; i_1 <= -1 + n; ++i_1)
     if ((perm[i_1] < 0 || perm[i_1] >= n))
-      gather_perm_ok[0] = 1;
+      gather_perm_ok[0] = (int64_t) (1);
   if (gather_perm_ok[0] == 0)
     for (int32_t i_0 = 0; i_0 <= -1 + n; ++i_0)
       y[i_0] = x[perm[i_0]];
