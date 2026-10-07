@@ -151,6 +151,7 @@ from loopty.contract import (
 from loopty.flow import NonAffine, domain_set, expr_text, free_names
 from loopty.hypotheses import (
     discharge,
+    free_in,
     linear,
     mentioned,
     substitute,
@@ -1175,6 +1176,13 @@ class _Composer:
             param: Var(names[param]) for param, _typ in term.params if param in names
         }
         claimed.update(exprs)
+        if term.post is not None:
+            # A name the postcondition leaves free that is neither a
+            # parameter nor a size of the callee has no value natively, and
+            # nothing of the program's is meant by it: it is spelled so that
+            # no name of the program is, and isl cannot state it.
+            for name in sorted(free_in(term.post) - set(claimed)):
+                claimed[name] = Var(f"{name}@{label}")
         post = None if term.post is None else substitute(term.post, claimed)
         types = {
             param: _rename_type(typ, names, exprs) for param, typ in term.params

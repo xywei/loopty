@@ -1630,6 +1630,14 @@ with a pair of statement instances.
   call made `lim[0]` larger, and then said that cells nobody cleared were 0:
   a requirement on `perm` read `decided` under two true postconditions, and
   the compiled program read past `x` where the native one was refused.
+- A name a postcondition leaves free that is neither a parameter nor a size
+  of its kernel means nothing in a program (`loopty.compose`): natively it
+  has no value, and the claim is never evaluated. It kept its spelling, and
+  was read as whatever the program called so, a size another kernel named
+  `k` say, or the binder `q` of a layout requirement; one row's equation was
+  then every row's. A hypothesis is also never read as speaking of the
+  claim's own binders (`loopty.hypotheses.discharge`): a name of one it
+  leaves free is renamed apart.
 
 ### Changed
 

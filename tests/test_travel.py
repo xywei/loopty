@@ -674,6 +674,55 @@ def test_a_write_to_an_array_a_binders_sort_reads_retires_the_claim() -> None:
         LoopyExecutor().run(wrong.cleared, **inputs())
 
 
+def test_a_name_a_postcondition_has_no_value_for_means_nothing_in_a_program() -> None:
+    # capped says perm[i] < k with k neither a parameter nor a size of its
+    # own, so natively k has no value and the claim is never evaluated. In
+    # the program, k is the length of x, which touch names so; read as that,
+    # the claim decided gather's requirement, and the compiled program read
+    # past x where the native one was refused.
+    (requirement,) = wrong.capped_then_gather.term.requirements
+    assert not requirement.decided
+
+    def inputs():
+        return {
+            "perm": Arr.zeros(4, dtype=np.int64),
+            "x": Arr.from_numpy(np.arange(4.0)),
+            "y": Arr.zeros(4),
+        }
+
+    with pytest.raises(ValueError, match=r"perm\[0\] is 4"):
+        wrong.capped_then_gather(**inputs())
+    with pytest.raises(ValueError, match="stops before gather"):
+        LoopyExecutor().run(wrong.capped_then_gather, **inputs())
+
+
+def test_a_hypothesis_never_speaks_of_the_claims_own_binders() -> None:
+    # scan_at_q's q is free, and the layout requirement is a claim over a
+    # binder the composition also calls q: read as that binder, one row's
+    # equation would have been every row's.
+    (requirement,) = wrong.scanned_at_q.term.requirements
+    assert requirement.kind == "layout" and not requirement.decided
+    q_, off_, cnt_ = Var("q"), Var("off"), Var("cnt")
+    one_row = Hypothesis(
+        LogicalAnd(
+            (
+                Comparison(Subscript(off_, 0), "==", 0),
+                Comparison(
+                    Subscript(off_, q_),
+                    "==",
+                    Subscript(off_, q_ - 1) + Subscript(cnt_, q_ - 1),
+                ),
+            )
+        ),
+        "one row nobody named",
+    )
+    found = discharge(
+        LAYOUT, _layout_goal(), [one_row], integral={"off", "cnt"}, known={"n"},
+        nonneg={"n"},
+    )
+    assert not found.decided
+
+
 def test_a_size_only_an_element_sort_names_is_renamed_apart() -> None:
     # Both calls of scan_flat name their buffer nnz, which no axis of
     # scan_flat is as long as. Taken as one name, the two buffers would be

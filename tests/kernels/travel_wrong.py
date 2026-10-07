@@ -191,6 +191,53 @@ def cleared(perm, lim, x, y):
 # }}}
 
 
+# {{{ a postcondition that names something it has no value for
+
+
+@kernel
+def touch(x: Arr[Fin[k], Real]):
+    """Give the program a size called ``k``, the length of ``x``."""
+    for i in x.dom:
+        x[i] = x[i] + 0.0
+
+
+@kernel
+def capped(perm: Arr[Fin[n], Fin[n]]) -> all(
+    (perm[i] >= 0) & (perm[i] < k) for i in Fin[n]
+):
+    """``k`` is no parameter and no size of this kernel: natively it has no value."""
+    for i in perm.dom:
+        perm[i] = perm.dom.size
+
+
+@program
+def capped_then_gather(perm, x, y):
+    """The program's k is x's length, which capped's k never meant."""
+    touch(x)
+    capped(perm)
+    gather(perm, x, y)
+
+
+@kernel
+def scan_at_q(
+    cnt: Arr[Fin[n], Nat], off: Arr[Fin[n + 1], Nat]
+) -> (off[0] == 0) & (off[q] == off[q - 1] + cnt[q - 1]):
+    """``q`` is free: it says something of one row nobody named."""
+    off[0] = 0
+    for r in cnt.dom:
+        off[r + 1] = off[r] + cnt[r] + 1
+
+
+@program
+def scanned_at_q(cnt, off, val, y):
+    """The layout requirement is asked about every q, which scan_at_q's is not."""
+    scan_at_q(cnt, off)
+    rowsums(cnt, off, val, y)
+
+
+# }}}
+
+
 # {{{ offsets with the wrong step
 
 

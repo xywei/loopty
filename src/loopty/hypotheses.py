@@ -103,6 +103,7 @@ __all__ = [
     "Discharge",
     "cells_in",
     "discharge",
+    "free_in",
     "linear",
     "linear_expr",
     "mentioned",
@@ -251,6 +252,36 @@ def _names(expr: Any) -> set[str]:
                 visit(item)
 
     visit(expr)
+    return out
+
+
+def free_in(expr: Any) -> set[str]:
+    """The names ``expr`` mentions that no quantifier of it binds.
+
+    A binder's sort is read with the binders before it bound, as
+    :func:`substitute` reads it.
+    """
+    out: set[str] = set()
+
+    def visit(node: Any, bound: frozenset[str]) -> None:
+        if isinstance(node, prim.Variable):
+            if node.name not in bound:
+                out.add(node.name)
+        elif isinstance(node, Forall | Exists):
+            inner = set(bound)
+            for var, domain in node.binders:
+                visit(_sort_terms(domain), frozenset(inner))
+                inner.add(var.name)
+            visit(node.body, frozenset(inner))
+            visit(node.guard, frozenset(inner))
+        elif isinstance(node, prim.ExpressionNode):
+            for arg in init_args(node):
+                visit(arg, bound)
+        elif isinstance(node, tuple | list):
+            for item in node:
+                visit(item, bound)
+
+    visit(expr, frozenset())
     return out
 
 
@@ -829,6 +860,18 @@ def _run(
     reserved = set(dims) | set(params) | set(known) | _names(goal)
     for hypothesis in hypotheses:
         reserved |= _names(hypothesis.claim)
+    # A hypothesis is about the program, never about the claim's binders: a
+    # name of one that it leaves free is another thing that happens to be
+    # spelled so, and is renamed apart rather than read as the binder.
+    claims = []
+    for hypothesis in hypotheses:
+        clash = free_in(hypothesis.claim) & set(dims)
+        apart = {}
+        for name in sorted(clash):
+            fresh = _fresh(name, reserved)
+            reserved.add(fresh)
+            apart[name] = Var(fresh)
+        claims.append(substitute(hypothesis.claim, apart))
     cells = _Cells(reserved, integral)
     for name, expr in reflected.items():
         if isinstance(expr, prim.Subscript) and isinstance(
@@ -856,12 +899,12 @@ def _run(
         note(dropped, "of the claim")
     found = assume_sizes(found, set(nonneg) | set(reflected))
     seen: set[Any] = set()
-    pending = list(hypotheses)
+    pending = list(zip(hypotheses, claims, strict=True))
     for _round in range(ROUNDS):
         known_cells = cells.known()
         grew = False
-        for hypothesis in pending:
-            for instance in _instances(hypothesis.claim, known_cells):
+        for hypothesis, claim in pending:
+            for instance in _instances(claim, known_cells):
                 key = structural_key(instance)
                 if key in seen:
                     continue
