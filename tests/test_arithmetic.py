@@ -275,6 +275,16 @@ def f32_mixed(
 
 
 @kernel
+def turn32(
+    x: Arr[Fin[n], np.float32],  # noqa: F821
+    z: Arr[Fin[n], np.complex64],  # noqa: F821
+):
+    """A Python complex beside a ``float32`` is a ``complex64`` natively."""
+    for i in x.dom:
+        z[i] = x[i] * (0.1 + 0.2j)
+
+
+@kernel
 def halve(k: Arr[Fin[n], Int], h: Arr[Fin[n], Real]):  # noqa: F821
     """A Python float beside an integer is a double, as before."""
     for i in k.dom:
@@ -295,6 +305,16 @@ def test_a_literal_beside_a_float32_is_single_precision():
     data = make()
     agrees(f32_scale, lambda: {name: value.copy() for name, value in data.items()})
     assert "k[i] * 0.5;" in emit_code(halve)
+
+    def turned() -> dict:
+        return {
+            "x": data["x"].copy(),
+            "z": np.zeros(64, np.complex64),
+        }
+
+    code = emit_code(turn32)
+    assert "x[i] * (0.10000000149011612f + 0.20000000298023224f * I)" in code
+    agrees(turn32, turned)
 
 
 def test_a_float32_beside_an_integer_or_a_python_float_is_what_numpy_makes():
