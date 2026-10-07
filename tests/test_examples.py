@@ -41,6 +41,7 @@ NAMES = (
     "p2p",
     "pairs",
     "composition",
+    "travel",
 )
 
 _RESULTS: dict[tuple[str, str], tuple[Any, list[dict]]] = {}
@@ -147,7 +148,27 @@ KERNELS = {
     "p2p": {"p2p"},
     "pairs": {"pairs"},
     "composition": {"flux", "divergence", "burgers_rhs"},
+    "travel": {
+        "number",
+        "number_quiet",
+        "gather",
+        "permuted",
+        "checked",
+        "scan",
+        "rowsums",
+        "through",
+        "scan_flat",
+        "weigh",
+        "flat",
+    },
 }
+
+
+#: The kernels whose drawn inputs the body may refuse. ``weigh`` reads a flat
+#: buffer of ``nnz`` cells through offsets of ``Fin[nnz + 1]``, and counts
+#: drawn from their type can sum past ``nnz``: its contract refuses the
+#: offsets they give, and an input the body refuses says nothing either way.
+REFUSES_DRAWS = {("travel", "weigh"), ("travel", "flat")}
 
 
 @pytest.mark.parametrize("name", NAMES)
@@ -163,7 +184,15 @@ def test_every_kernel_of_a_demo_computes_what_its_body_computes(name: str) -> No
         assert fact["decided_by"] == "interpreter"
         inputs = fact["provenance"]["inputs"]
         assert inputs[0] == {"input": "example_inputs()", "outcome": "agreed"}
-        assert [entry["outcome"] for entry in inputs] == ["agreed"] * 4
+        outcomes = [entry["outcome"] for entry in inputs]
+        if (name, fact["owner"]) in REFUSES_DRAWS:
+            assert len(outcomes) == 4
+            assert all(
+                outcome == "agreed" or outcome.startswith("skipped: the body raised")
+                for outcome in outcomes
+            ), outcomes
+            continue
+        assert outcomes == ["agreed"] * 4
 
 
 @pytest.mark.parametrize("name", NAMES)
@@ -728,6 +757,83 @@ def test_the_composed_program_keeps_its_intermediate_to_itself() -> None:
     result, _ = _invoke("composition", "python")
     assert "double f[n];" in result.stdout
     assert "-> tested" in result.stdout
+
+
+# }}}
+
+
+# {{{ travel
+
+
+def test_the_travel_demo_decides_its_requirements_or_checks_them() -> None:
+    _result, facts = _invoke("travel", "check")
+    requirements = {
+        (fact["owner"], fact["provenance"]["requirement"]): fact
+        for fact in facts
+        if fact["kind"] == "requirement"
+    }
+    assert set(requirements) == {
+        ("permuted", "element"),
+        ("checked", "element"),
+        ("through", "layout"),
+        ("flat", "layout"),
+        ("flat", "element"),
+    }
+    # gather's requirement after number is number's postcondition, and the
+    # rows read through a scan's offsets are the scan's.
+    for key in (("permuted", "element"), ("through", "layout"), ("flat", "layout")):
+        requirement = requirements[key]
+        assert requirement["status"] == "decided"
+        assert requirement["effective"] == "tested"
+        (rests_on,) = requirement["rests_on"]
+        assert rests_on.startswith(f"postcondition-in-scope:travel.{key[0]}@")
+    # Nothing says what number_quiet writes, or that the scan's offsets stay
+    # below nnz, so the program checks them.
+    for key in (("checked", "element"), ("flat", "element")):
+        assert requirements[key]["status"] == "assumed"
+        assert "checked" in requirements[key]["provenance"]
+    post = [
+        fact
+        for fact in facts
+        if fact["kind"] == "postcondition"
+        and fact["owner"] in ("number", "scan", "scan_flat")
+    ]
+    assert [fact["status"] for fact in post] == ["tested", "tested", "tested"]
+
+
+def test_the_travel_demo_decides_a_flat_access_where_the_scan_was_called() -> None:
+    _result, facts = _invoke("travel", "check")
+    (alone,) = [
+        fact
+        for fact in facts
+        if fact["owner"] == "weigh"
+        and fact["kind"] == "in-bounds"
+        and fact["statement"].startswith("val[off[r] + j]")
+    ]
+    assert alone["status"] == "assumed"
+    (scoped,) = [
+        fact
+        for fact in facts
+        if fact["owner"] == "flat" and fact["kind"] == "in-bounds"
+    ]
+    assert scoped["status"] == "decided"
+    assert scoped["decided_by"] == "isl"
+    # Under the scan's postcondition, which is tested, and the element type of
+    # off, which the program checks: that is the assumption it is decided under.
+    (element,) = [
+        fact
+        for fact in facts
+        if fact["owner"] == "flat"
+        and fact["kind"] == "requirement"
+        and fact["provenance"]["requirement"] == "element"
+    ]
+    assert scoped["under"] == [element["id"]]
+
+
+def test_the_travel_demo_prints_the_check_it_compiles() -> None:
+    result, _ = _invoke("travel", "python")
+    assert "checked when it runs" in result.stdout
+    assert "gather_perm_ok[0] = 1" in result.stdout
 
 
 # }}}
