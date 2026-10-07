@@ -1445,6 +1445,23 @@ with a pair of statement instances.
   (`interpret._Run.read_apart`). So the fact of such a kernel is `tested` or
   `refuted` like any other; the lowering still refuses a statement that
   would see a length rewritten after it was computed.
+- The `layout` fact of a kernel that writes its offsets is decided where
+  the writes say what they do (#86). It was `assumed` whatever the kernel
+  wrote. For a family whose rows are as long as a counts array the kernel
+  reads and does not write, every write to the offsets is now either one
+  that lays the row out as the counts do, `off[q] = off[q - 1] + cnt[q -
+  1]` at `1 <= q <= n` (the value the contract checked there, so by
+  induction the offsets stay as they were), or a value of the loop variables
+  and the sizes alone, which is the start the counts give its row only for
+  `off[0] = 0`. The fact is then the isl question whether any instance
+  writes another such start: decided when none does, so a kernel that
+  rescans its offsets has its facts worth what they are, and refuted with
+  the instance otherwise, `[r=1]` at `n = 2` for the issue's kernel that
+  sets every start to 0, where counts of 1 in rows 0 and 1 put both rows on
+  cell 0. `lanky check` exits 1 on it, and `loopty run` asks isl about the
+  layout fact a cast rests on as `lanky check` does. A start read from
+  another array, a count written, or a write under a guard isl cannot state
+  leaves the fact `assumed`, and its reason names the write.
 
 ### Changed
 

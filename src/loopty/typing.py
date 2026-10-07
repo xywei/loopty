@@ -39,15 +39,18 @@ writes and the dependences of ``val`` are computed over ``[r, j]``. Both hold
 of the flat buffer only while the offsets lay every row out inside it and
 apart from the others, which the contract checks when the call starts. A
 kernel that writes the counts or the offsets its ragged arrays are read
-through can break that during the run: a row moved past the end of the
-buffer, or two rows moved onto the same cells. No rule states what such a
-kernel writes there, so it gets one ``layout`` fact per counts family it
-rewrites, ``assumed`` with the reason (:func:`layout_facts`), and the
-in-bounds and disjoint-writes facts of the family's ragged arrays rest on it,
-as does a fact decided by type through an index read from one of them
-(``x[col[r, j]]``), and the ``monotone`` casts of a schedule of the kernel
-(:mod:`loopty.schedule`). The ledger then shows them decided under the
-layout, and worth no more than it.
+through can break that during the run: a row moved past the end of the buffer,
+or two rows moved onto the same cells. Such a kernel gets one ``layout`` fact
+per counts family it rewrites (:func:`layout_facts`). isl decides it where the
+kernel writes only the offsets, each as the counts lay it out
+(``off[r + 1] = off[r] + cnt[r]``) or as a value of its loop variables and the
+sizes alone, of which only ``off[0] = 0`` is right whatever the counts, and
+refutes it with an instance that writes another; any other write leaves it
+``assumed`` with the reason. The in-bounds and disjoint-writes facts of the
+family's ragged arrays rest on it, as does a fact decided by type through an
+index read from one of them (``x[col[r, j]]``), and the ``monotone`` casts of
+a schedule of the kernel (:mod:`loopty.schedule`). The ledger then shows them
+decided under the layout, and worth no more than it.
 
 *Write disjointness.* Distinct instances of a statement must write distinct
 cells, or the loop cannot be run in parallel and the order of the writes is
@@ -743,22 +746,65 @@ def layout_fact_ids(
 def layout_facts(
     term: Term, owner: str, *, module: str | None = None, line: int | None = None
 ) -> list[Fact]:
-    """One ``assumed`` fact per counts family whose layout the term rewrites.
+    """One fact per counts family whose layout the term rewrites.
 
     It states what the facts about the family's ragged arrays take for
     granted once the term has written the counts or the offsets they are read
     through: that every row stays inside the buffer and apart from the
-    others, as the contract checked when the call started. Nothing decides
-    it, since no rule states what the term writes there (the offsets staying
-    nondecreasing and inside the buffer, with the counts as their
-    differences, would), and the facts that rest on it say so in the ledger.
-    A term that only reads its layout has none.
+    others, as the contract checked when the call started. A term that only
+    reads its layout has none.
+
+    Where the family's rows are as long as a counts array the term reads and
+    does not write, and the term writes only the offsets, the fact is decided
+    (#86). The contract checks on entry that the offsets start at 0 and have
+    the counts as their differences, so ``off[q] = off[q - 1] + cnt[q - 1]``
+    stores the value the cell already holds, and so does ``off[0] = 0``: if
+    every write is one of those, every write leaves the offsets as they were,
+    by induction over the run, and the rows stay where the contract found
+    them. A start written without reading anything, a value of the loop
+    variables and the sizes, is the start the counts give its row only at row
+    0, where it is 0: the counts are data, and the start of row ``q`` is the
+    sum of the counts before it, which some counts make another value. So the
+    fact is the isl question whether any instance writes such a start
+    elsewhere, and a witness is an instance that moves a row: a negative
+    start is a row before the buffer; a positive one, with a count of 1 in
+    that row alone, a row past the end of a buffer of one cell; and 0 at
+    another row, with a count of 1 in it and in row 0, two rows on cell 0. Any
+    other
+    write (the counts themselves, a start read from another array, a value
+    under a guard isl cannot state) leaves the fact ``assumed``, with the
+    reason, and the facts that rest on it say so in the ledger.
     """
     facts: list[Fact] = []
     for counts, family in _rewritten_layouts(term).items():
         arrays = _listed(family["arrays"])
         written = _listed(family["written"])
         writers = [stmt.id for stmt in family["statements"]]
+        provenance: dict[str, Any] = {
+            "counts": counts,
+            "arrays": list(family["arrays"]),
+            "layout": list(family["layout"]),
+            "written": list(family["written"]),
+            "statements": writers,
+        }
+        question = _row_starts_question(term, counts, family)
+        if isinstance(question, str):
+            provenance["reason"] = (
+                f"{_listed(writers)} write {written}, which the rows of "
+                f"{arrays} are read through. Their accesses are in bounds "
+                "against the length of their row, and their cells are told "
+                "apart as [r, j], which holds of the flat buffer while every "
+                "row lies inside it and apart from the others, as the contract "
+                "checks when the call starts; nothing states what the kernel "
+                f"writes there during the run: {question}"
+            )
+        else:
+            question, restated, fixed = question
+            provenance["rule"] = _row_starts_rule(
+                term.offsets_of(counts) or "", counts, restated, fixed
+            )
+            provenance["restated"] = restated
+            provenance["fixed"] = fixed
         facts.append(
             Fact(
                 id=fact_id("layout", owner, module=module, line=line, detail=counts),
@@ -767,30 +813,206 @@ def layout_facts(
                     f"the rows of {arrays} stay inside their buffers and apart "
                     f"while {_listed(writers)} write {written}"
                 ),
-                term=None,
+                term=None if isinstance(question, str) else question,
                 status=Status.ASSUMED,
-                provenance={
-                    "counts": counts,
-                    "arrays": list(family["arrays"]),
-                    "layout": list(family["layout"]),
-                    "written": list(family["written"]),
-                    "statements": writers,
-                    "reason": (
-                        f"{_listed(writers)} write {written}, which the rows of "
-                        f"{arrays} are read through. Their accesses are in "
-                        "bounds against the length of their row, and their "
-                        "cells are told apart as [r, j], which holds of the "
-                        "flat buffer while every row lies inside it and apart "
-                        "from the others, as the contract checks when the call "
-                        "starts; nothing states what the kernel writes there "
-                        "during the run"
-                    ),
-                },
+                provenance=provenance,
                 where=family["statements"][0].where,
                 owner=owner,
             )
         )
     return facts
+
+
+def _row_starts_rule(
+    offsets: str, counts: str, restated: Sequence[str], fixed: Sequence[str]
+) -> str:
+    """What a decided layout fact rests on, in words."""
+    def verb(ids: Sequence[str]) -> str:
+        return "writes" if len(ids) == 1 else "write"
+
+    parts = []
+    if restated:
+        parts.append(
+            f"{_listed(restated)} {verb(restated)} {offsets}[q] = "
+            f"{offsets}[q - 1] + {counts}[q - 1] at 1 <= q <= the number of "
+            "rows, the value the contract checked there, which leaves the "
+            "offsets as they were"
+        )
+    if fixed:
+        parts.append(
+            f"{_listed(fixed)} {verb(fixed)} a start that reads no array, "
+            f"which is the start the counts give its row only for "
+            f"{offsets}[0] = 0"
+        )
+    return (
+        "; ".join(parts)
+        + f", and nothing writes {counts}: the rows stay as the contract "
+        "checked them if no instance writes another start"
+    )
+
+
+def _row_starts_question(
+    term: Term, counts: str, family: Mapping[str, Any]
+) -> tuple[Empty, list[str], list[str]] | str:
+    """The question that decides a family's layout fact, or why there is none.
+
+    See :func:`layout_facts`. The question is an :class:`Empty` over the
+    padded instance space, of the instances that write a start of a row
+    without reading anything, other than 0 at row 0. A write that restates
+    the start from the counts adds nothing to it. With the restated and the
+    fixed statements, by id.
+    """
+    types = term.array_types
+    counts_type = types.get(counts)
+    if not isinstance(counts_type, ArrType):
+        return (
+            f"the rows are as long as the offsets say, {counts} being no "
+            "array of the kernel, and no rule follows their differences"
+        )
+    if counts in family["written"]:
+        writers = [s.id for s in family["statements"] if s.assignee.array == counts]
+        return (
+            f"{_listed(writers)} write {counts}, the lengths of the rows, and "
+            "no rule follows what a row's new length reaches"
+        )
+    offsets = term.offsets_of(counts)
+    try:
+        rows = flow.expr_text(counts_type.axes[0], None, None)
+    except Exception:  # noqa: BLE001 - said as the reason
+        return f"the number of rows, {render(counts_type.axes[0])}, is not affine"
+    sizes = flow.size_names(term)
+    allowed = set(sizes) - set(dict(term.reflected))
+    depth = flow.instance_space_depth(term)
+    restated: list[str] = []
+    fixed: list[tuple[int, Any, isl.Set]] = []
+    for index, stmt in enumerate(term.stmts):
+        if not any(stmt is writer for writer in family["statements"]):
+            continue
+        if _restates_start(stmt, offsets, counts, rows, sizes):
+            restated.append(stmt.id)
+            continue
+        instances = _fixed_starts(stmt, rows, allowed)
+        if instances is None:
+            cell = _access_text(stmt.assignee.array, stmt.assignee.indices)
+            return (
+                f"{stmt.id} writes {cell} = {render(stmt.expr)}, which is "
+                f"neither the start the counts give the row, {offsets}[q - 1] "
+                f"+ {counts}[q - 1] at q >= 1, nor a value of the loop "
+                "variables and the sizes alone"
+            )
+        fixed.append((index, stmt, instances))
+    if len(fixed) == 1 and fixed[0][1].inames:
+        # One statement: its instances in its own loop variables, which is
+        # how a witness reads best, ``[r=1]``.
+        ((_index, stmt, found),) = fixed
+        labels: tuple[str, ...] = tuple(stmt.inames)
+    else:
+        labels = instance_labels(term)
+        found = isl.Set(f"{{ [{', '.join(labels)}] : 1 = 0 }}")
+        for index, stmt, instances in fixed:
+            pad = flow.pad_map(len(stmt.inames), index, depth)
+            piece = instances.apply(pad.align_params(instances.get_space()))
+            found, piece = _align_both(found, piece)
+            found = found.union(piece)
+    ids = [stmt.id for _index, stmt, _instances in fixed]
+    question = Empty(
+        flow.assume_sizes(found, sizes),
+        description=(
+            f"instances of {_listed(ids) or 'no statement'} that write into "
+            f"{offsets} the start of a row which the counts in {counts} can "
+            "put elsewhere (the start of row q is the sum of the counts before "
+            "it, and only row 0 starts at 0 whatever they are)"
+        ),
+        labels=labels,
+    )
+    return question, restated, ids
+
+
+def _restates_start(
+    stmt: Any, offsets: str | None, counts: str, rows: str, sizes: Any
+) -> bool:
+    """Whether ``stmt`` writes ``off[q] = off[q - 1] + cnt[q - 1]``, ``1 <= q <= n``.
+
+    The two reads are told by their arrays and their indices are compared
+    with ``q - 1`` by isl, over the statement's domain, so ``off[r + 1] =
+    cnt[r] + off[r]`` is one. ``rows`` is the number of rows, as isl text.
+    """
+    if offsets is None or stmt.kind != "assign" or len(stmt.assignee.indices) != 1:
+        return False
+    (cell,) = stmt.assignee.indices
+    value = stmt.expr
+    if not isinstance(value, prim.Sum) or len(value.children) != 2:
+        return False
+    reads: dict[str, Any] = {}
+    for child in value.children:
+        if not (
+            isinstance(child, prim.Subscript)
+            and isinstance(child.aggregate, prim.Variable)
+        ):
+            return False
+        index = child.index
+        indices = index if isinstance(index, tuple) else (index,)
+        if len(indices) != 1:
+            return False
+        reads[child.aggregate.name] = indices[0]
+    if set(reads) != {offsets, counts}:
+        return False
+    try:
+        before = flow.access_relation(stmt.inames, stmt.domain, (cell - 1,))
+        if _is_widened(before, (cell,)):
+            return False
+        for name in (offsets, counts):
+            read = flow.access_relation(stmt.inames, stmt.domain, (reads[name],))
+            left, right = _align_both(before, read)
+            if _is_widened(read, (reads[name],)) or not left.is_equal(right):
+                return False
+        cells = flow.access_relation(stmt.inames, stmt.domain, (cell,))
+        names = sorted(flow.free_names(rows))
+        inside = isl.Set(
+            f"[{', '.join(names)}] -> {{ [q] : 1 <= q <= {rows} }}"
+        )
+        cells, inside = _align_both(cells, inside)
+        outside = flow.assume_sizes(
+            cells.intersect_range(inside.complement()).domain(), sizes
+        )
+        return bool(outside.is_empty())
+    except Exception:  # noqa: BLE001 - not the shape, then
+        return False
+
+
+def _fixed_starts(stmt: Any, rows: str, allowed: set[str]) -> isl.Set | None:
+    """The instances of ``stmt`` that write a start of a row other than 0 at 0.
+
+    Over the statement's own iteration space, or ``None`` when ``stmt`` is
+    not a write of a value that reads nothing: its domain, its cell and its
+    value have to be affine in its loop variables and the sizes, with no
+    reflected bound and no scalar, and its guard has to be stated whole, so
+    that every instance in the set does write.
+    """
+    from loopty.trace import accesses_in
+
+    if stmt.kind != "assign" or stmt.unnarrowed or len(stmt.assignee.indices) != 1:
+        return None
+    (cell,) = stmt.assignee.indices
+    if accesses_in((cell, stmt.expr)):
+        return None
+    if not set(stmt.domain.get_var_names(isl.dim_type.param)) <= allowed:
+        return None
+    try:
+        relation = flow.access_relation(stmt.inames, stmt.domain, (cell, stmt.expr))
+    except Exception:  # noqa: BLE001 - not affine
+        return None
+    if _is_widened(relation, (cell, stmt.expr)):
+        return None
+    if not set(relation.get_var_names(isl.dim_type.param)) <= allowed:
+        return None
+    names = sorted(flow.free_names(rows))
+    elsewhere = isl.Set(
+        f"[{', '.join(names)}] -> {{ [q, v] : 0 <= q < {rows} and "
+        "(q > 0 or v < 0 or v > 0) }"
+    )
+    relation, elsewhere = _align_both(relation, elsewhere)
+    return relation.intersect_range(elsewhere).domain()
 
 
 # }}}

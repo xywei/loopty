@@ -617,21 +617,30 @@ def layout_of(fn):
     return term, Ledger(facts), layouts
 
 
-def test_rows_moved_onto_each_other_leave_the_disjoint_writes_assumed() -> None:
+def test_rows_moved_onto_each_other_refute_the_layout_fact() -> None:
     # The disjoint writes of ``val`` were decided over ``[r, j]``, and a
     # parallel ``r`` accepted, while every row starts at cell 0 once the
-    # kernel has run its first statement (#51).
+    # kernel has run its first statement (#51). The layout fact they rest on
+    # was assumed whatever the kernel wrote; a start that reads nothing is
+    # now asked of isl, and 0 at row 1 is one some counts contradict (#86).
     from lanky.ledger import Status
 
     from loopty.schedule import Schedule
 
     term, ledger, (layout,) = layout_of(overlap_then_write)
     assert layout.id == "layout:overlap_then_write:cnt"
-    assert layout.status is Status.ASSUMED
+    assert layout.status is Status.REFUTED, layout.provenance
+    assert layout.decided_by == "isl"
     assert layout.statement == (
         "the rows of val stay inside their buffers and apart while S0 write off"
     )
     assert layout.provenance["written"] == ["off"]
+    assert layout.provenance["fixed"] == ["S0"]
+    assert layout.provenance["reason"].startswith(
+        "[r=1] is one of the instances of S0 that write into off the start of "
+        "a row which the counts in cnt can put elsewhere"
+    )
+    assert layout.provenance["reason"].endswith("at [n=2]")
     (disjoint,) = [
         fact
         for fact in ledger
@@ -639,7 +648,7 @@ def test_rows_moved_onto_each_other_leave_the_disjoint_writes_assumed() -> None:
     ]
     assert disjoint.status is Status.DECIDED
     assert disjoint.rests_on == (layout.id,)
-    assert ledger.support(disjoint).effective is Status.ASSUMED
+    assert ledger.support(disjoint).effective is Status.REFUTED
     (access,) = [
         fact for fact in ledger if fact.id.endswith(":S1:write:val[r, j]")
     ]
@@ -655,6 +664,88 @@ def test_rows_moved_onto_each_other_leave_the_disjoint_writes_assumed() -> None:
         if fact.kind == "monotone"
     ]
     assert [fact.rests_on for fact in monotone] == [(layout.id,)]
+    # The witness, run: with one entry in rows 0 and 1, both rows are cell 0,
+    # and row 1 overwrites what row 0 wrote there.
+    arguments = {
+        "cnt": Arr.from_numpy(np.array([1, 1], dtype=np.int64)),
+        "off": Arr.from_numpy(np.array([0, 1, 2], dtype=np.int64)),
+        "val": Arr.ragged([1, 1], values=np.zeros(2)),
+    }
+    Kernel(overlap_then_write)(**arguments)
+    assert arguments["val"].numpy().tolist() == [2.0, 0.0]
+
+
+def rescanned_then_summed(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    off: Arr[Fin[n + 1], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The offsets computed again from the counts, row by row, then read."""
+    off[0] = 0
+    for r in y.dom:
+        off[r + 1] = cnt[r] + off[r]
+        y[r] = reduce_sum(val[r, j] for j in val.dom[r])
+
+
+def first_row_moved(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    off: Arr[Fin[n + 1], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """Row 0 moved one cell on, then every row summed."""
+    off[0] = 1
+    for r in y.dom:
+        y[r] = reduce_sum(val[r, j] for j in val.dom[r])
+
+
+def test_offsets_written_as_the_counts_lay_them_out_decide_the_layout() -> None:
+    # The contract checks that the offsets start at 0 and have the counts as
+    # their differences, so writing either again leaves every cell as it was,
+    # and the facts that rest on the layout are worth what they are (#86).
+    from lanky.ledger import Status
+
+    _term, ledger, (layout,) = layout_of(rescanned_then_summed)
+    assert layout.status is Status.DECIDED, layout.provenance
+    assert layout.decided_by == "isl"
+    assert layout.provenance["restated"] == ["S1"]
+    assert layout.provenance["fixed"] == ["S0"]
+    assert "S1 writes off[q] = off[q - 1] + cnt[q - 1]" in layout.provenance["rule"]
+    (read,) = [fact for fact in ledger if fact.id.endswith(":S2:read:val[r, j]")]
+    assert read.rests_on == (layout.id,)
+    assert ledger.support(read).effective is Status.DECIDED
+    assert ledger.support(read).under == ()
+
+
+def test_a_start_written_past_the_end_refutes_the_layout() -> None:
+    # Row 0 starts at 0 whatever the counts; at 1, a buffer of one cell, the
+    # counts 1 in row 0 and 0 after it, has the row past its end.
+    from lanky.ledger import Status
+
+    _term, _ledger, (layout,) = layout_of(first_row_moved)
+    assert layout.status is Status.REFUTED, layout.provenance
+    assert layout.provenance["reason"].endswith("at [n=1]")
+    arguments = {
+        "cnt": Arr.from_numpy(np.array([1], dtype=np.int64)),
+        "off": Arr.from_numpy(np.array([0, 1], dtype=np.int64)),
+        "val": Arr.ragged([1], values=np.ones(1)),
+        "y": Arr.zeros(1),
+    }
+    with pytest.raises(IndexError, match="of the flat buffer"):
+        Kernel(first_row_moved)(**arguments)
+
+
+def test_a_start_read_from_another_array_leaves_the_layout_assumed() -> None:
+    from lanky.ledger import Status
+
+    _term, _ledger, (layout,) = layout_of(gather_through_moved_rows)
+    assert layout.status is Status.ASSUMED
+    assert layout.provenance["reason"].endswith(
+        "S0 writes off[r] = s[r], which is neither the start the counts give "
+        "the row, off[q - 1] + cnt[q - 1] at q >= 1, nor a value of the loop "
+        "variables and the sizes alone"
+    )
 
 
 def test_a_row_shortened_in_its_own_loop_leaves_its_reads_assumed() -> None:
@@ -745,15 +836,16 @@ def test_check_shows_the_writes_decided_under_the_layout(tmp_path, capsys) -> No
 
     path = tmp_path / "overlap.py"
     path.write_text(OVERLAP, encoding="utf-8")
-    assert lanky_main(["check", str(path)]) == 0
+    assert lanky_main(["check", str(path)]) == 1
     out = capsys.readouterr().out
     layout = "layout:overlap.overlap_then_write@9:cnt"
     rows = out.splitlines()
     (row,) = [line for line in rows if "write distinct cells of val" in line]
     assert row.startswith(f"decided under {layout}")
-    assert row.split()[3] == "assumed"
-    (fact,) = [line for line in rows if "stay inside their buffers" in line]
-    assert fact.startswith("assumed ")
+    assert row.split()[3] == "refuted"
+    (fact,) = [line for line in rows if line.startswith("refuted ")]
+    assert "stay inside their buffers" in fact
+    assert "  [r=1] is one of the instances of S0 that write into off" in out
 
 
 # }}}
