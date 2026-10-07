@@ -92,9 +92,13 @@ fact per id. ``lanky check`` refuses such claims (lanky's #52), and so does
 this command: the first kernel's fact is kept, the other's claim is recorded
 on it as ``duplicate_claims`` in its provenance, as ``lanky check`` records
 it, and a ``DUPLICATE`` block under the table names the kernel, each id and
-the claims of it, in the table and not, and the command exits 1. Each kernel
-needs an id of its own: a definition of its own, or a ``__qualname__`` of its
-own given to the function before it is decorated. One kernel scheduled
+the claims of it, in the table and not, and the command exits 1. The command
+has decided and run every claim by then, so a claim not in the table that was
+refuted is said to be, with what explains it, as the ``REFUTED`` block would
+explain it. Each kernel needs an id of its own: a definition of its own, or a
+``__qualname__`` of its own given to the function before it is decorated; a
+term scheduled with no kernel behind it, or any object with no definition to
+name, is named by its name, and needs a name of its own. One kernel scheduled
 several times is not refused: two of its schedules that share their first
 steps share the facts about them, and a schedule run twice keeps both
 agreement facts, the second under its id with ``#2`` after it.
@@ -309,18 +313,25 @@ class _Claims:
         self._kernels: dict[str, list[int]] = {}
         #: How many runs recorded an agreement fact under each id.
         self._runs: dict[str, int] = {}
+        #: Each id other kernels claimed too, with their facts, in the order
+        #: ``duplicate_claims`` names them: ``loopty run`` decided them all,
+        #: and one that was refuted is said to be (see :func:`_report_duplicates`).
+        self.refused: dict[str, list[Any]] = {}
+        #: The ids of kernels with no definition to name, which are named by
+        #: their name (see :func:`loopty.schedule.definition_of`).
+        self.by_name: set[str] = set()
 
-    def add(self, fact: Any, kernel: Any) -> None:
-        """Add a fact about ``kernel``, unless its id is claimed already.
+    def add(self, fact: Any, schedule: Any) -> None:
+        """Add a fact a schedule makes, unless its id is claimed already.
 
-        By another schedule of ``kernel``, whose fact is the same claim, or by
+        By another schedule of the kernel, whose fact is the same claim, or by
         another kernel, whose fact is kept with this claim recorded on it.
         """
-        if not self._another(fact, kernel) and fact.id not in self.ledger:
+        if not self._another(fact, schedule) and fact.id not in self.ledger:
             self.ledger.add(fact)
 
-    def add_run(self, fact: Any, kernel: Any) -> Any:
-        """Add the agreement fact of one run of ``kernel``, and return it.
+    def add_run(self, fact: Any, schedule: Any) -> Any:
+        """Add the agreement fact of one run of a schedule, and return it.
 
         Two schedules of one kernel with one id are one schedule, but a file
         may run it twice, on two sets of inputs: each run keeps its fact, the
@@ -328,7 +339,7 @@ class _Claims:
         replaced by a later tested one. A run of another kernel whose
         agreement has the id is that kernel's claim, recorded and not kept.
         """
-        if self._another(fact, kernel):
+        if self._another(fact, schedule):
             return fact
         count = self._runs[fact.id] = self._runs.get(fact.id, 0) + 1
         if count > 1:
@@ -336,13 +347,21 @@ class _Claims:
         self.ledger.add(fact)
         return fact
 
-    def _another(self, fact: Any, kernel: Any) -> bool:
+    def _another(self, fact: Any, schedule: Any) -> bool:
         """Whether another kernel claimed ``fact.id`` first; records the claim if so.
 
         A kernel's claim is recorded once per id, however many of its
         schedules make it.
         """
-        kernels = self._kernels.setdefault(fact.id, [id(kernel)])
+        from loopty.schedule import definition_of
+
+        kernel = _kernel_of(schedule)
+        kernels = self._kernels.get(fact.id)
+        if kernels is None:
+            self._kernels[fact.id] = [id(kernel)]
+            if definition_of(schedule, schedule.term)["line"] is None:
+                self.by_name.add(fact.id)
+            return False
         if kernels[0] == id(kernel):
             return False
         if id(kernel) not in kernels:
@@ -350,21 +369,31 @@ class _Claims:
             kept = self.ledger[fact.id]
             claims = [*kept.provenance.get(DUPLICATE_CLAIMS, ()), fact.statement]
             self.ledger.add(kept.with_status(kept.status, **{DUPLICATE_CLAIMS: claims}))
+            self.refused.setdefault(fact.id, []).append(fact)
         return True
 
 
-def _report_duplicates(ledger: Any) -> bool:
+def _report_duplicates(claims: _Claims) -> bool:
     """Name each kernel whose id another kernel's claims had; whether there was one.
 
     The ``DUPLICATE`` block ``lanky check`` prints, one per owner, with each
     id and the claims of it by their statements, and what to do about it.
-    The words differ in one place: ``lanky check`` leaves a later claim of an
-    id unchecked, and ``loopty run`` has decided every schedule's casts by
-    the time the file is imported, and runs every schedule, so a claim is
-    said to be in the table or not in it. Either way the claim not in the
-    table may be one that does not hold, and the run fails.
+    The words differ where the two commands do: ``lanky check`` leaves a
+    later claim of an id unchecked, and ``loopty run`` has decided every
+    schedule's casts by the time the file is imported, and runs every
+    schedule, so a claim is said to be in the table or not in it, and one
+    not in it that was refuted is said to be, with lanky's own lines of what
+    explains it (:func:`lanky.cli.refutation_lines`), since no row and no
+    ``REFUTED`` block shows it. The fix named is the one that gives the
+    kernel an id of its own: its definition names it, or, when it has none
+    (see :func:`loopty.schedule.definition_of`), its name does.
     """
-    duplicated = [fact for fact in ledger if fact.provenance.get(DUPLICATE_CLAIMS)]
+    from lanky.cli import refutation_lines
+    from lanky.ledger import Status
+
+    duplicated = [
+        fact for fact in claims.ledger if fact.provenance.get(DUPLICATE_CLAIMS)
+    ]
     by_owner: dict[str, list[Any]] = {}
     for fact in duplicated:
         by_owner.setdefault(fact.owner, []).append(fact)
@@ -388,12 +417,24 @@ def _report_duplicates(ledger: Any) -> bool:
             if len(facts) > 1:
                 print(f"  {fact.id}")
             print(f"{indent}in the table: {fact.statement}")
-            for statement in fact.provenance[DUPLICATE_CLAIMS]:
-                print(f"{indent}not in the table: {statement}")
-        print(
-            "  each kernel needs an id of its own: a definition of its own, or a "
-            "__qualname__ of its own before it is decorated"
-        )
+            for claim in claims.refused[fact.id]:
+                if claim.status is not Status.REFUTED:
+                    print(f"{indent}not in the table: {claim.statement}")
+                    continue
+                print(f"{indent}not in the table, refuted: {claim.statement}")
+                for line in refutation_lines(claim):
+                    print(f"{indent}  {line}")
+        if any(fact.id not in claims.by_name for fact in facts):
+            print(
+                "  each kernel needs an id of its own: a definition of its own, or "
+                "a __qualname__ of its own before it is decorated"
+            )
+        if any(fact.id in claims.by_name for fact in facts):
+            print(
+                "  each kernel needs an id of its own: one with no definition to "
+                "name, such as a term, is named by its name, and needs a name of "
+                "its own"
+            )
     return bool(duplicated)
 
 
@@ -480,16 +521,15 @@ class RunVerb:
         for schedule in schedules:
             name = _name_of(schedule)
             print(f"{name}: {schedule!r}")
-            of = _kernel_of(schedule)
             facts = schedule.facts()
             for fact in facts:
-                claims.add(fact, of)
+                claims.add(fact, schedule)
             resting = {identifier for fact in facts for identifier in fact.rests_on}
             for fact in layout_facts(
                 schedule.term, **definition_of(schedule, schedule.term)
             ):
                 if fact.id in resting:
-                    claims.add(fact, of)
+                    claims.add(fact, schedule)
             ok, reason = schedule.buildable
             if not ok:
                 print(f"  not buildable for the {schedule.target} target: {reason}")
@@ -518,7 +558,7 @@ class RunVerb:
                 print(f"  {type(exc).__name__}: {exc}")
                 failures += 1
                 continue
-            fact = claims.add_run(fact, of)
+            fact = claims.add_run(fact, schedule)
             outputs = fact.provenance.get("outputs", {})
             for output, detail in outputs.items():
                 print(
@@ -532,7 +572,7 @@ class RunVerb:
             print(ledger.render())
         if args.json_out:
             Path(args.json_out).write_text(ledger.to_json(), encoding="utf-8")
-        duplicated = _report_duplicates(ledger)
+        duplicated = _report_duplicates(claims)
         # The same block ``lanky check`` prints, through lanky's own printer:
         # what explains each refutation belongs under its line, and not only
         # in the JSON ledger.

@@ -761,6 +761,57 @@ def test_one_claim_of_an_id_prints_it_on_the_duplicate_line(tmp_path, capsys) ->
     ]
 
 
+def test_a_claim_not_in_the_table_that_was_refuted_is_said_to_be(
+    tmp_path, capsys
+) -> None:
+    """Two stand-ins of one term, the second's body tripling what it doubles.
+
+    Neither has a definition, so both are named by the term's name and share
+    every id: the first's facts are the table's, and the second's run, which
+    is refuted, is a claim not in the table. The run decided it all the same,
+    and nothing else would show it: no row is refuted, and there is no
+    ``REFUTED`` block. So the block says it was refuted, with lanky's lines
+    of what explains it, and the fix it names is a name of the kernel's own,
+    since a ``__qualname__`` names nothing that has no definition.
+    """
+    body = FIXTURE + (
+        "\n\nclass Triple(Scale):\n"
+        "    def __call__(self, x, y):\n"
+        "        y[...] = 3.0 * x\n\n\n"
+        'tripled = Schedule(Triple()).split("i", 4)\n'
+    )
+    path = write_fixture(tmp_path, body)
+    out_path = tmp_path / "ledger.json"
+    assert main(["run", str(path), "--json", str(out_path)]) == 1
+    out = capsys.readouterr().out
+    assert "  y: difference 7 within 2.2e-05 (approx) -> refuted" in out
+    assert "REFUTED" not in out
+    facts = json.loads(out_path.read_text(encoding="utf-8"))
+    assert {fact["status"] for fact in facts} == {"decided", "tested"}
+    agreement = "the scheduled run of scale agrees with the native run to the "
+    agreement += "accuracy its types state"
+    block = out[out.index("DUPLICATE") :].splitlines()
+    assert block[0] == (
+        "DUPLICATE scale at fixture.py:1: several claims have each of the 3 ids "
+        "below"
+    )
+    assert block[-5:] == [
+        "  agreement:scale:[c].split('i', 4, inner='i_inner', outer='i_outer')",
+        f"    in the table: {agreement}",
+        f"    not in the table, refuted: {agreement}",
+        "      y differs from the native run: difference 7, allowed 2.2e-05 (approx)",
+        "  each kernel needs an id of its own: one with no definition to name, "
+        "such as a term, is named by its name, and needs a name of its own",
+    ]
+    # The casts were decided for both, and are said to be no more than claims.
+    assert [line for line in block if "not in the table" in line][:2] == [
+        "    not in the table: split(i, 4) renames the instances of scale one for "
+        "one",
+        "    not in the table: the order after split(i, 4) runs every dependence "
+        "of scale forward",
+    ]
+
+
 def test_kernels_a_factory_names_apart_keep_their_facts(tmp_path, capsys) -> None:
     # The fix the block names: a __qualname__ of each kernel's own, given
     # before it is decorated.

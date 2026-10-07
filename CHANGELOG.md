@@ -1429,11 +1429,16 @@ with a pair of statement instances.
   in its provenance (the key `lanky check` records it under, so `--json`
   carries it), and a `DUPLICATE` block under the table names the kernel,
   each id, and the claims of it in the table and not, and says how to give
-  each kernel an id of its own; the command exits 1. One kernel scheduled
-  several times is not refused, nor a schedule of a schedule of it: its
-  schedules that share their first steps share the facts about them, and a
-  schedule run twice keeps both agreement facts, the second with `#2` after
-  its id.
+  each kernel an id of its own; the command exits 1. The run has decided
+  every claim by then, so one not in the table that was refuted, such as
+  the other kernel's run, is said to be, with what explains it under it,
+  since no row and no `REFUTED` block shows it. The fix named is a
+  definition or a `__qualname__` of the kernel's own, or, for a term
+  scheduled with no kernel behind it, which is named by its name, a name of
+  its own. One kernel scheduled several times is not refused, nor a
+  schedule of a schedule of it: its schedules that share their first steps
+  share the facts about them, and a schedule run twice keeps both agreement
+  facts, the second with `#2` after its id.
 
 ### Changed
 
