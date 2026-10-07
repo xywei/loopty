@@ -836,7 +836,10 @@ floating power gets a floating exponent, so that loopy calls `pow`
 (`pow(x[i], 3.0)`). A sum or a product of several operands is planned from
 the left, as both evaluate it. A term with a power loopy writes as a call gets
 `#include <stdint.h>` and `#include <math.h>` in a preamble tagged
-`06_loopty_power`, which sorts before loopy's definitions. An operation C and
+`06_loopty_power`, which sorts before loopy's definitions, and a term with
+complex values `#include <complex.h>` there too, since loopy's power of a
+complex base names `double complex` in its signature and loopy includes the
+header at `10_complex`, after it. An operation C and
 numpy type alike is lowered exactly as before, so no kernel over `Real` and
 integers changes but for its quotients and powers.
 
@@ -851,4 +854,8 @@ call; an operation whose type depends on that is left as C types it. The
 interpreter's functions (`sqrt`, `exp`, ...) are typed as numpy types them,
 and a call of anything else is not typed, nor is anything around it. On the
 OpenCL target a `float32` kernel that numpy computes partly in double is
-compiled partly in double too, and needs `cl_khr_fp64` there.
+compiled partly in double too, and needs `cl_khr_fp64` there. A complex power
+keeps an integer exponent, and loopy's power multiplies in the order numpy's
+complex power does for a positive one, so `z[i] ** 3` agrees bit for bit; a
+negative exponent is inverted first, where numpy inverts the power, a last bit
+away.

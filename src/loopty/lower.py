@@ -155,6 +155,11 @@ POWER_INCLUDES = "#include <stdint.h>\n#include <math.h>"
 #: loopy's definition of an integer power (``07_``), which needs ``int32_t``.
 _POWER_TAG = "06_loopty_power"
 
+#: The header a power of a complex base needs there too, for ``double complex``
+#: in the signature of loopy's integer power; only a term with complex values
+#: gets it, since it defines ``I``.
+_COMPLEX_INCLUDE = "#include <complex.h>"
+
 
 class LoweringError(TypeError):
     """A term that cannot be handed to loopy as it stands.
@@ -2191,15 +2196,33 @@ def _power_preambles(term: Term, target: str | None) -> tuple[tuple[str, str], .
     signature names ``int32_t`` above the ``stdint.h`` it includes. Both
     failed to compile, ``x ** -1`` and ``x ** 0.5`` alike (#84). The lowering
     gives a floating power a floating exponent (:mod:`loopty.promotion`),
-    which leaves the integer definition to integer powers. See note 18.
+    which leaves the integer definition to integer powers. A complex base
+    keeps an integer exponent, and the definition's signature names
+    ``double complex`` above the ``complex.h`` loopy includes, so a term with
+    complex values gets that header here too. See note 18.
     """
     if (target or "c") not in ("c", "c-source"):
         return ()
-    for stmt in term.stmts:
-        for node in walk((stmt.assignee, stmt.expr, stmt.guard)):
-            if isinstance(node, prim.Power) and not _written_as_product(node):
-                return ((_POWER_TAG, POWER_INCLUDES),)
-    return ()
+    nodes = [
+        node
+        for stmt in term.stmts
+        for node in walk((stmt.assignee, stmt.expr, stmt.guard))
+    ]
+    if not any(
+        isinstance(node, prim.Power) and not _written_as_product(node)
+        for node in nodes
+    ):
+        return ()
+    sorts = [typ.dtype for typ in term.array_types.values()]
+    sorts += [sort for _, sort in term.params if not isinstance(sort, ArrType)]
+    stored = [compiled_storage(sort) for sort in sorts]
+    complex_term = any(dtype is not None and dtype.kind == "c" for dtype in stored)
+    complex_term = complex_term or any(
+        isinstance(node, complex | np.complexfloating) for node in nodes
+    )
+    if complex_term:
+        return ((_POWER_TAG, f"{POWER_INCLUDES}\n{_COMPLEX_INCLUDE}"),)
+    return ((_POWER_TAG, POWER_INCLUDES),)
 
 
 def _written_as_product(power: prim.Power) -> bool:

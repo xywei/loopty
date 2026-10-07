@@ -349,7 +349,8 @@ end to end; the edges are sharp.
   conversions would pick another: a quotient of integers is a double, a Python
   float beside a `float32` is single precision (`0.1f`), a `float32` beside an
   integer array is a double, and a floating power calls `pow`, as numpy does.
-  Any power compiles on the C target. See note 18 in `docs/loopy-notes.md`.
+  Any power compiles on the C target, of a complex base too. See note 18 in
+  `docs/loopy-notes.md`.
 - Array arguments over polyhedral domains (`loopty.domain`): `Where[...]`,
   binders written as slices and then the comparisons that cut their box,
   joined by `&`; `Sigma[...]`, binders and an unnamed last fiber affine in

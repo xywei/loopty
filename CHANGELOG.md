@@ -1392,10 +1392,11 @@ with a pair of statement instances.
   exponent calls a power loopy defines in a preamble whose signature names
   `int32_t` before loopy includes `stdint.h`, and a floating one calls `pow`,
   for which loopy includes no `math.h` (note 2). A term with such a power
-  gets both headers in a preamble that sorts first. A floating power is given
-  a floating exponent, since loopy's integer power multiplies repeatedly and
-  rounds at every step, and `x ** 3` differed from numpy's in the last bit at
-  about one `x` in four.
+  gets both headers in a preamble that sorts first, and `complex.h` too when
+  it has complex values, since the power of a complex base names
+  `double complex` there. A floating power is given a floating exponent,
+  since loopy's integer power multiplies repeatedly and rounds at every step,
+  and `x ** 3` differed from numpy's in the last bit at about one `x` in four.
 - A connective of an operand that is not a truth value is a `TraceError`
   wherever it is (#83), as it was in a store into `Bool` only (#78): the
   trace reads `&`, `|` and `~` as `and`, `or` and `not`, and natively they

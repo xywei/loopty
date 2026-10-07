@@ -306,6 +306,50 @@ def test_a_power_compiles_and_is_computed_with_pow():
     agrees(cubes, cubed)
 
 
+@kernel
+def complex_cube(
+    z: Arr[Fin[n], np.complex128],  # noqa: F821
+    w: Arr[Fin[n], np.complex128],  # noqa: F821
+):
+    """A complex cube: loopy's integer power over ``double complex``."""
+    for i in z.dom:
+        w[i] = z[i] ** 3
+
+
+@kernel
+def complex_roots(
+    z: Arr[Fin[n], np.complex128],  # noqa: F821
+    v: Arr[Fin[n], np.complex128],  # noqa: F821
+    u: Arr[Fin[n], np.complex128],  # noqa: F821
+):
+    """A complex square root by ``cpow``, and a negative integer power."""
+    for i in z.dom:
+        v[i] = z[i] ** 0.5
+        u[i] = z[i] ** -2
+
+
+def test_a_complex_power_compiles():
+    # loopy's integer power for a complex base names ``double complex`` in its
+    # signature, above the complex.h it includes, so z ** 3 did not compile.
+    # It multiplies as numpy's complex power does for a positive exponent, so
+    # the cube agrees bit for bit; a negative one is inverted first, which
+    # numpy does last, and is compared at the class of a bare complex dtype.
+    rng = np.random.default_rng(84)
+    z = rng.uniform(-2.0, 2.0, 32) + 1j * rng.uniform(-2.0, 2.0, 32)
+
+    def make(*names: str) -> dict:
+        return {"z": z.copy(), **{name: np.zeros(32, complex) for name in names}}
+
+    code = emit_code(complex_cube)
+    assert code.index("#include <complex.h>") < code.index("loopy_pow_complex128")
+    agrees(complex_cube, lambda: make("w"))
+    LoopyExecutor().run(complex_roots, **make("v", "u"))
+    fact = LoopyExecutor().differential(
+        complex_roots, Schedule(complex_roots), make("v", "u")
+    )
+    assert fact.status.value == "tested", fact.provenance
+
+
 # }}}
 
 
