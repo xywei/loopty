@@ -595,6 +595,12 @@ class Lowering:
     of a union whose start is not a term of the sizes (see
     :meth:`_Builder.piece_base`); the executor computes that too, in the
     array's layout.
+
+    ``checks`` maps the flag of each checked point of a program to what a
+    failure raises (:attr:`loopty.term.Term.checks`). A flag is a one-cell
+    argument the kernel writes, so it is among ``outputs``; the executor
+    passes it zeroed, reads it after the run, and keeps it out of the
+    results, which :attr:`results` lists.
     """
 
     term: Term
@@ -611,11 +617,17 @@ class Lowering:
     storage: dict[str, str] = field(default_factory=dict)
     tables: dict[str, str] = field(default_factory=dict)
     bases: dict[str, tuple[str, int]] = field(default_factory=dict)
+    checks: dict[str, str] = field(default_factory=dict)
 
     @property
     def name(self) -> str:
         """The kernel's name."""
         return self.term.name
+
+    @property
+    def results(self) -> tuple[str, ...]:
+        """The outputs that are parameters of the term: every one but the flags."""
+        return tuple(name for name in self.outputs if name not in self.checks)
 
 
 def _reads_assignee(stmt: Stmt) -> bool:
@@ -2239,10 +2251,13 @@ def lower_generic(
         target=target,
         reduction_inames=_reduction_inames(term, builder),
         contraction=contraction,
-        temporaries=tuple(name for name, _ in term.temporaries),
+        temporaries=tuple(
+            name for name, _ in term.temporaries if name not in dict(term.checks)
+        ),
         storage=dict(builder.storage),
         tables=dict(builder.tables),
         bases=dict(builder.bases),
+        checks=dict(term.checks),
     )
 
 
@@ -2751,7 +2766,25 @@ def _arguments(
         array_args.append(extra.name)
         declared.add(extra.name)
 
+    flags = dict(term.checks)
     for name, typ in term.temporaries:
+        if name in flags:
+            # A checked point's flag is the program's own, and an argument all
+            # the same: the executor passes it zeroed and reads it after the
+            # run, which a temporary would not let it do (loopty.compose).
+            args.append(
+                lp.GlobalArg(
+                    name,
+                    numpy_dtype(typ.dtype),
+                    shape=(1,),
+                    is_input=True,
+                    is_output=True,
+                )
+            )
+            array_args.append(name)
+            outputs.append(name)
+            declared.add(name)
+            continue
         args.append(_temporary(term, name, typ, builder.target, declared | scalars))
         declared.add(name)
 

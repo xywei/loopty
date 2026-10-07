@@ -73,7 +73,7 @@ from loopty.flow import bounds_dimension
 from loopty.term import Access, ArrType, Reduction, Stmt, Term, declared_layout
 from loopty.trace import accesses_in, reductions_in
 
-__all__ = ["InterpretError", "TooLarge", "interpret"]
+__all__ = ["CheckFailed", "InterpretError", "TooLarge", "interpret"]
 
 
 class InterpretError(RuntimeError):
@@ -82,6 +82,16 @@ class InterpretError(RuntimeError):
 
 class TooLarge(InterpretError):
     """More statement instances than the caller allowed."""
+
+
+class CheckFailed(ValueError):
+    """A checked point of a program found a cell its requirement excludes.
+
+    A program checks what a call's contract checks of an array an earlier
+    call wrote, where nothing decided it (:class:`loopty.term.Requirement`).
+    The message is the requirement's, which the compiled run raises too; it
+    is a :class:`ValueError`, as the native refusal of the call is.
+    """
 
 
 class _Unknown(Exception):
@@ -335,6 +345,12 @@ class _Run:
                     f"more than {limit} statement instances and reduction terms"
                 )
         self.block(members, 0)
+        for flag, message in self.term.checks:
+            # A checked point of a program (loopty.compose): its statement set
+            # the flag where a cell failed, every later statement was guarded
+            # by it, and the run stops here as the compiled one does.
+            if self.arrays[flag].numpy().reshape(-1)[0]:
+                raise CheckFailed(message)
         return {
             name: self.arrays[name].numpy()
             for name in dict.fromkeys(stmt.assignee.array for stmt in self.term.stmts)

@@ -41,21 +41,21 @@ row verbatim, and checked by `scripts/refresh_example_outputs.py`):
 
 ```console
 $ lanky check examples/spmv.py
-STATUS                                    BY             WHERE        OWNER          STATEMENT
-----------------------------------------  -------------  -----------  -------------  ------------------------------------------------------------------------
-decided                                   isl            spmv.py:79   scan           off[0] is in bounds for every instance of S0
-decided                                   isl            spmv.py:81   scan           off[r + 1] is in bounds for every instance of S1
-decided                                   isl            spmv.py:79   scan           distinct instances of S0 write distinct cells of off
-assumed                                   -              spmv.py:69   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
-tested                                    property-test  spmv.py:84   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat] | off(0) ==...
-decided                                   isl            spmv.py:112  spmv           y[r] is in bounds for every instance of S0
-decided                                   type           spmv.py:112  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
-decided                                   isl            spmv.py:112  spmv           distinct instances of S0 write distinct cells of y
-decided                                   type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
-tested                                    interpreter    spmv.py:102  spmv           the traced term computes what the body computes
-assumed under postcondition:spmv.scan@69  -              spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
+STATUS   EFFECTIVE  BY             WHERE        OWNER          STATEMENT
+-------  ---------  -------------  -----------  -------------  ------------------------------------------------------------------------
+decided  decided    isl            spmv.py:79   scan           off[0] is in bounds for every instance of S0
+decided  decided    isl            spmv.py:81   scan           off[r + 1] is in bounds for every instance of S1
+decided  decided    isl            spmv.py:79   scan           distinct instances of S0 write distinct cells of off
+tested   tested     native         spmv.py:69   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+tested   tested     property-test  spmv.py:84   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat] | off(0) ==...
+decided  decided    isl            spmv.py:112  spmv           y[r] is in bounds for every instance of S0
+decided  decided    type           spmv.py:112  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
+decided  decided    isl            spmv.py:112  spmv           distinct instances of S0 write distinct cells of y
+decided  decided    type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
+tested   tested     interpreter    spmv.py:102  spmv           the traced term computes what the body computes
+decided  tested     call           spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
 ...
-21 facts: 2 assumed, 15 decided, 4 tested
+21 facts: 16 decided, 5 tested
 ```
 
 Look at the `x[col[r, j]]` row, and at what decided it. That indirection is the
@@ -72,16 +72,24 @@ file's example inputs and on inputs drawn from the declared types. A body that
 kept state where tracing does not look would be refuted here, with the input
 and the first cell that differs.
 
-The last row belongs to `solve`, the `@program` that runs `scan` and then
-`spmv`. It restates `scan`'s postcondition in the program's scope, and rests on
-`scan`'s own postcondition fact, which the row names by its id:
-`assumed under postcondition:spmv.scan@69`. The id is the kind, then `scan`'s
-definition, the module the file's path gives it, its name and its line, so a
-`scan` imported from another file, or defined twice, is never taken for this
-one. Nothing has established that fact yet, and the restatement is worth no
-more than it. `loopty run` compiles `solve` too, as one kernel: its term is
-the two kernels' statements in call order, and the compiled program is
-compared with the program run natively.
+`scan`'s postcondition is `tested` by `native`: it is evaluated at what every
+native run of `scan` left in its arguments, on the file's example inputs and on
+the drawn ones, and held after each. The last row belongs to `solve`, the
+`@program` that runs `scan` and then `spmv`. It restates `scan`'s postcondition
+in the program's scope, `decided` by the call, and rests on `scan`'s own
+postcondition fact, `postcondition:spmv.scan@69`, so it is worth what that fact
+is worth: the `EFFECTIVE` column reads `tested`. The id is the kind, then
+`scan`'s definition, the module the file's path gives it, its name and its
+line, so a `scan` imported from another file, or defined twice, is never taken
+for this one. `loopty run` compiles `solve` too, as one kernel: its term is the
+two kernels' statements in call order, and the compiled program is compared
+with the program run natively.
+
+A postcondition is also what a later call may assume. A kernel's requirements
+on its inputs are its argument types, and where an earlier call of a program
+wrote the array, the requirement is decided under what held when the call was
+made, or checked by the compiled program between the two calls;
+`examples/travel.py` shows both.
 
 And a transformation is a cast, checked before it is applied:
 
@@ -231,6 +239,25 @@ end to end; the edges are sharp.
   a file with its native run, as it does a kernel. A body that does anything
   to an argument but pass it to a kernel, or make an array like it, is refused
   with a `TraceError` naming the fix.
+- Facts that travel between a program's calls (`loopty.hypotheses`). A
+  kernel's requirements on its inputs are its argument types, and two of them
+  are about what an array's cells hold: an element of a `Fin[m]` sort is a
+  point of it, and the offsets a ragged family is read through are the ones
+  its counts give. Where an earlier call wrote the array, the requirement is
+  a `requirement` fact of the program, decided by isl under what held at the
+  call: the earlier callees' postconditions that nothing has written over
+  since, the zeros an `Arr.zeros_like` starts an array with, the types the
+  program's contract checks of what nothing has written yet, and the
+  theorems the program cites (`@program(uses=[scan_monotone])`),
+  instantiated at the cells the requirement reads. The fact rests on the
+  facts it used, so `gather`'s requirement after `number` reads
+  `decided` and is worth `tested`, as `number`'s postcondition is. Where the
+  hypotheses do not decide it, the compiled program checks the cells between
+  the two calls and stops there, with the message of the native refusal; the
+  requirement stays `assumed`, and its fact says why. The same hypotheses
+  decide a callee's in-bounds fact its own term leaves `assumed`, a flat
+  `val[off[r] + j]` after the scan, as a fact of the program's.
+  `examples/travel.py` shows all three.
 - Tracing a body to a typed term: accesses, statements, reductions, ragged
   fibers, `when` guards, source locations, and a `TraceError` that names the fix
   when a Python `if` is used on a computed value, when a Python name, a
@@ -411,33 +438,50 @@ end to end; the edges are sharp.
 - Ragged bounds are reflected into isl as one parameter per distinct bound term
   (allocated once per kernel, so the same `cnt[r]` is one parameter everywhere
   and two different bounds are never given one name), so `cnt[r]` and
-  `cnt[r + 1]` are unrelated to isl. Nothing knows that counts are
-  non-negative, that they sum to the offsets, or that `off` is monotone, so the
-  scan's recurrence is not usable by the decision procedure. The visible
-  consequence: an access against flat storage, `val[off[r] + j]`, is reported
-  **`assumed`** with the reason in its provenance, never `decided`. The ragged
-  spelling `val[r, j]` over `0 <= j < cnt[r]`, which is what the tracer and the
-  demos produce, *is* decided. The monotone-offsets formulation is the
-  documented next step; see the module docstring of `loopty/flow.py`.
-- `@program` restates a callee's postcondition as a fact in scope, which rests
-  on the callee's own fact (lanky's `rests_on`, so the row reads
-  `assumed under postcondition:spmv.scan@69`), but no rule consumes
-  postconditions as hypotheses yet, so "facts travel" is bookkeeping. A callee
-  imported from another file has its fact in that file's ledger, so `lanky
-  check` counts the id as an assumption and names it in an `UNRESOLVED` line;
-  the id is the one that ledger holds, since every fact of a kernel is keyed
-  by the kernel's definition (`lanky.ledger.fact_id` over the module the
-  file's path gives it), and a kernel of the program's own file with the
-  callee's name has an id of its own.
+  `cnt[r + 1]` are unrelated to isl. Within one kernel nothing knows that
+  counts sum to the offsets, or that `off` is monotone, so an access against
+  flat storage, `val[off[r] + j]`, is reported **`assumed`** in the kernel's
+  own ledger, with the reason in its provenance. The ragged spelling
+  `val[r, j]` over `0 <= j < cnt[r]`, which is what the tracer and the demos
+  produce, *is* decided. In a program, the same access is decided where the
+  kernel is called after the call that wrote `off`, under that call's
+  postcondition: the cells `off[r]`, `off[r + 1]` and `cnt[r]` become isl
+  parameters, and the scan's recurrence, instantiated at them, is an affine
+  constraint between them (`loopty.hypotheses`, `examples/travel.py`). The
+  fact is the program's, resting on what it used.
+- A kernel's postcondition is `tested` against its native runs, on the
+  file's example inputs and on drawn ones, never `decided`: deciding it from
+  the term, by which statement last writes each cell, is not done yet.
+  `@program` restates a callee's postcondition as a fact in scope, `decided` by
+  the call and resting on the callee's own fact (lanky's `rests_on`), and
+  offers it as a hypothesis to the calls after it, until a call writes an
+  array it mentions. A callee imported from another file has its fact in that
+  file's ledger, so `lanky check` counts the id as an assumption and names it
+  in an `UNRESOLVED` line; the id is the one that ledger holds, since every
+  fact of a kernel is keyed by the kernel's definition (`lanky.ledger.fact_id`
+  over the module the file's path gives it), and a kernel of the program's
+  own file with the callee's name has an id of its own. A theorem the program
+  cites (`@program(uses=[scan_monotone])`) is used at the arrays its
+  hypotheses match, and only where each array's cells are points of the
+  family's sort when the call is made: `scan_monotone` is about offsets of
+  `Nat`, and nothing says the cells a scan wrote are, so it takes a theorem
+  over `Int` to say the offsets a scan computed are monotone. Only affine
+  facts reach isl; a hypothesis isl cannot state is dropped, which assumes
+  less, never more.
 - A program lowers sequentially: its calls' loops run one after another, as
   the program runs them. Fusing them is a cast over the program's term that
   is not written yet, and so is deciding the storage of an intermediate. The
   compiled program is one call, so the contract checks its arguments when it
-  starts and not at every call: an array whose cells a callee's contract
-  checks (an element sort `Fin[m]`, the counts or offsets of a ragged family
-  it reads) is refused once an earlier call has written it or the program
-  made it, because nothing would check it before the callee's in-bounds facts
-  rely on it. The kernels an array is passed to have to declare the same
+  starts and not at every call. What a callee's contract checks of the cells
+  of an array an earlier call wrote, or the program made (an element sort
+  `Fin[m]`, the offsets a ragged family is read through), is a `requirement`
+  of the program: decided by isl under the hypotheses that held at the call,
+  or, where they do not decide it, checked by the compiled program between
+  the two calls, which then stops with the requirement's message where the
+  native callee is refused (`examples/travel.py`). The counts of a ragged
+  family an earlier call wrote are still refused: its rows are laid out in a
+  buffer the program is given, which no hypothesis about the program's
+  arrays can speak of. The kernels an array is passed to have to declare the same
   element sort for it, and every call has to read a ragged family's rows
   through the same offsets; a loop in the body whose trip count is an
   argument (a host loop) is refused, and so are an array made like a ragged
@@ -503,7 +547,8 @@ end to end; the edges are sharp.
   sizes, and refutes it with the instance that writes a start the counts can
   contradict (`off[r] = 0` at `r = 1`). A start read from another array, or
   a count written, leaves it `assumed`, and the facts on it worth an
-  assumption; deciding those needs the monotone-offsets formulation above.
+  assumption; deciding those needs the monotone-offsets formulation of
+  `loopty/flow.py`, within the kernel.
   The native run checks every cell it reads through the layout against the
   buffer and raises `IndexError` for one outside it, but two rows moved onto
   the same cells go unnoticed by both runs.
