@@ -117,7 +117,7 @@ _FLOATING_FLOOR_DIV = """
       floordiv += 1;
     return floordiv;
   }}
-  return copysign{f}(0, a / b);
+  return copysign{f}(({T}) 0, a / b);
 }}"""
 
 #: numpy's floating remainder (``npy_remainder``): ``fmod``, moved toward the
@@ -134,7 +134,7 @@ _FLOATING_MOD = """
       mod += b;
   }}
   else
-    mod = copysign{f}(0, b);
+    mod = copysign{f}(({T}) 0, b);
   return mod;
 }}"""
 

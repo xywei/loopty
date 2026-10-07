@@ -938,6 +938,24 @@ def test_floating_remainder_and_floor_division_are_numpys():
     agrees(wrapped32, lambda: {k: v.copy() for k, v in data.items()})
 
 
+def test_the_opencl_definitions_call_one_overload():
+    # OpenCL C overloads fmod, floor and copysign by type, and copysign(0, b)
+    # of an int zero beside a float b is ambiguous between the float and the
+    # double one. The device path is not run here, so its text is checked.
+    from loopy.target.c import CTarget
+    from loopy.target.opencl import OpenCLTarget
+
+    from loopty.operations import definition
+
+    code = definition("loopty_mod", np.dtype(np.float32), OpenCLTarget())
+    assert "inline float loopty_mod_float32(float a, float b)" in code
+    assert "fmod(a, b)" in code and "copysign((float) 0, b)" in code
+    assert "#include" not in code
+    code = definition("loopty_floor_div", np.dtype(np.float32), CTarget())
+    assert "static inline float loopty_floor_div_float32" in code
+    assert "floorf(div)" in code and "copysignf((float) 0, a / b)" in code
+
+
 # }}}
 
 
