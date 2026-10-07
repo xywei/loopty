@@ -856,11 +856,13 @@ def _row_starts_question(
 ) -> tuple[Empty, list[str], list[str]] | str:
     """The question that decides a family's layout fact, or why there is none.
 
-    See :func:`layout_facts`. The question is an :class:`Empty` over the
-    padded instance space, of the instances that write a start of a row
-    without reading anything, other than 0 at row 0. A write that restates
-    the start from the counts adds nothing to it. With the restated and the
-    fixed statements, by id.
+    See :func:`layout_facts`. The question is an :class:`Empty` of the
+    instances that write a start of a row without reading anything, other
+    than 0 at row 0, over the loop variables of the one statement that
+    writes such starts, or the padded instance space for several. A write
+    that restates the start from the counts adds nothing to it. With the
+    restated and the fixed statements, by id. The counts and the offsets
+    have to be arguments, which the contract checks on entry.
     """
     types = term.array_types
     counts_type = types.get(counts)
@@ -876,6 +878,17 @@ def _row_starts_question(
             "no rule follows what a row's new length reaches"
         )
     offsets = term.offsets_of(counts)
+    unchecked = [
+        name
+        for name in (counts, offsets)
+        if name is not None and name not in term.param_names
+    ]
+    if unchecked:
+        # A program's own array starts as zeros, not as the contract checked.
+        return (
+            f"{_listed(unchecked)} {'is' if len(unchecked) == 1 else 'are'} "
+            "no argument, so the contract checks nothing about them on entry"
+        )
     try:
         rows = flow.expr_text(counts_type.axes[0], None, None)
     except Exception:  # noqa: BLE001 - said as the reason
