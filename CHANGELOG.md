@@ -1416,6 +1416,13 @@ with a pair of statement instances.
   `loopty.lower.InProcessCTarget`, whose host code cannot hold a condition, so
   the guard is emitted around the loop in the function that runs. See note 18
   in `docs/loopy-notes.md`.
+- A whole array stored into a cell is refused while tracing (#85).
+  `y[i] = u` traced, with the symbolic array itself as the statement's
+  right-hand side, where natively numpy refuses to store a sequence in a
+  cell. It is now a `TraceError` naming the loop nest to write, as `u` used
+  whole on the right of an operator is, and a domain (`y[i] = u.dom`), a list
+  or tuple of values, and a numpy array of more than one value are refused
+  the same way.
 
 ### Changed
 

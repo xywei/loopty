@@ -2429,6 +2429,7 @@ class SymArr:
         self._refuse_whole(key, where, write=True)
         if self.type.domain is not None:
             self._check_domain_key(key, where, write=True)
+        self._refuse_many_values(key, value, where)
         indices = _index_tuple(key)
         tracer = self.tracer
         expr = lower_reductions(value, tracer, where=where)
@@ -2436,6 +2437,47 @@ class SymArr:
         assignee = Access(self.name, indices)
         kind = "accumulate" if _reads_assignee(expr, assignee) else "assign"
         tracer.record(assignee, expr, kind, where, source=value)
+
+    def _refuse_many_values(self, key: Any, value: Any, where: str) -> None:
+        """Refuse a store of many values into one cell.
+
+        A whole array, a domain, and a list, tuple or numpy array of values
+        are each many values, and natively numpy refuses to store one into a
+        cell ("setting an array element with a sequence"). The trace recorded
+        it as the statement's right-hand side, a symbolic array where a term
+        has a value (#85). An array is refused as it is when it is used whole
+        on the right of an operator, with the loop nest to write.
+        """
+        cell = f"{self.name}[{_key_text(key)}]"
+        if isinstance(value, SymArr):
+            raise TraceError(
+                _whole_array_message(
+                    value,
+                    f"{cell} = {value.name}",
+                    where,
+                    write=False,
+                    why=f"stores every cell of it into one cell of {self.name}",
+                )
+            )
+        if isinstance(value, SymDom):
+            text = _domain_text(value)
+            raise TraceError(
+                f"{cell} = {text} at {where} stores the domain {text}, every "
+                f"index of it, into one cell of {self.name}, which numpy "
+                "refuses natively (setting an array element with a sequence). "
+                f"Iterate the domain and store one index in each cell: for j "
+                f"in {text}: ... j ..."
+            )
+        if isinstance(value, list | tuple) or (
+            isinstance(value, np.ndarray) and value.ndim > 0
+        ):
+            raise TraceError(
+                f"{cell} = {_shown(value)} at {where} stores a sequence of "
+                f"values into one cell of {self.name}, which numpy refuses "
+                "natively (setting an array element with a sequence). A "
+                "statement stores one value in each cell: store each value in "
+                "a cell of its own, or index the one you meant"
+            )
 
     def _refuse_untruthful(self, key: Any, value: Any, where: str) -> None:
         """Refuse a store into an array of ``Bool`` of what is not a truth value.

@@ -1132,6 +1132,56 @@ def test_arithmetic_on_a_whole_array_is_refused() -> None:
         term_of(doubled)
 
 
+def test_a_whole_array_stored_into_a_cell_is_refused() -> None:
+    # The statement's right-hand side used to be the symbolic array itself,
+    # SymArr(u: ...), where natively numpy refuses to store a sequence in a
+    # cell. A domain and a list of values were recorded the same way.
+    from loopty.kernel import Kernel
+
+    def whole(u: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in u.dom:
+            y[i] = u
+
+    def row(a: Arr[Fin[m], Fin[n], Real], y: Arr[Fin[m], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = a
+
+    def indices(u: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in u.dom:
+            y[i] = u.dom
+
+    def pair(u: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in u.dom:
+            y[i] = [u[i], 1.0]
+
+    def constant(y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = np.array([1.0, 2.0])
+
+    with pytest.raises(TraceError) as caught:
+        term_of(whole)
+    message = str(caught.value)
+    assert "y[i] = u at test_trace.py:" in message
+    assert "an operation on the whole array u" in message
+    assert "stores every cell of it into one cell of y" in message
+    assert "for i in u.dom: ... u[i] ..." in message
+    with pytest.raises(TraceError, match=r"for i in a.dom: for j in a.dom\[i\]"):
+        term_of(row)
+    with pytest.raises(TraceError, match=r"y\[i\] = u.dom at .* stores the domain"):
+        term_of(indices)
+    with pytest.raises(TraceError, match=r"y\[i\] = \[u\[i\], 1.0\] at .* sequence"):
+        term_of(pair)
+    with pytest.raises(TraceError, match=r"stores a sequence of values into one"):
+        term_of(constant)
+    # Natively each is refused by numpy.
+    for body in (whole, indices, pair, constant):
+        arguments = {"u": Arr.from_numpy(np.ones(2)), "y": Arr.zeros(2)}
+        if body is constant:
+            del arguments["u"]
+        with pytest.raises(ValueError, match="sequence"):
+            Kernel(body)(**arguments)
+
+
 def test_fewer_indices_than_axes_name_a_row_and_are_refused() -> None:
     # ``u[t]`` of a two-axis array is a whole row, natively as in numpy.
     def rows(u: Arr[Fin[nt], Fin[nx], Real]):  # noqa: F821
