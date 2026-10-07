@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from lanky.prelude import Int, Nat, Real
+from lanky.prelude import Bool, Int, Nat, Real
 
 from loopty import Arr, Fin, Schedule, TraceError, kernel, reduce_sum, when
 from loopty.contract import INTEGRAL_RANGE
@@ -165,6 +165,67 @@ def test_a_connective_of_an_integer_is_refused_by_the_trace():
         (fact,) = kern.facts()
         assert fact.kind == "trace" and fact.status.value == "refuted"
         assert "is not a truth value" in fact.provenance["reason"]
+
+
+@kernel
+def low_bit_cell(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """A connective of a loop variable in the index of the cell written."""
+    for i in x.dom:
+        y[i & 1] = x[i]
+
+
+@kernel
+def complement_scale(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """``~`` of a comparison of a loop variable, used as a number."""
+    for i in x.dom:
+        y[i] = x[i] * ~(i > 0)
+
+
+@kernel
+def complement_chain(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """``~`` of a connective of such comparisons, inside a sum's body."""
+    for i in x.dom:
+        y[i] = reduce_sum(x[j] * ~((j > 0) & (j < i)) for j in x.dom)
+
+
+@kernel
+def complement_read(
+    x: Arr[Fin[n], Real],  # noqa: F821
+    f: Bool,
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """``~`` of a comparison of an array's element, and of a ``Bool`` scalar."""
+    for i in x.dom:
+        y[i] = x[i] * ~(x[i] > 0.5) + ~f
+
+
+@pytest.mark.filterwarnings("ignore:Bitwise inversion:DeprecationWarning")
+def test_a_complement_of_a_python_bool_is_refused_where_it_is_a_number():
+    # i > 0 is a Python bool natively, and ~ of one is bitwise, -2 or -1, so y
+    # was -2 * x[i] natively and 0 compiled. A guard or a cell of an array of
+    # truth values refuses that integer natively; anywhere else the trace
+    # refuses it, naming the complement.
+    def make() -> dict:
+        return {"x": np.array([0.25, 0.75, 1.0]), "y": np.zeros(3)}
+
+    native = make()
+    complement_scale(**native)
+    assert list(native["y"]) == [-0.25, -1.5, -2.0]
+    with pytest.raises(TraceError, match=r"'i <= 0' for '~\(i > 0\)'"):
+        complement_scale.trace()
+    with pytest.raises(TraceError, match="computes as a Python bool"):
+        complement_chain.trace()
+    (fact,) = complement_scale.facts()
+    assert fact.kind == "trace" and fact.status.value == "refuted"
+    # The index of the cell written is asked too: y[i & 1] wrote y[0] and
+    # y[1] natively, and y[i and 1] does not even index compiled.
+    with pytest.raises(TraceError, match=r"its operand i is not a truth value"):
+        low_bit_cell.trace()
+    # ~ of a numpy bool is logical natively, as it is compiled: an element
+    # compared, and a Bool scalar, which the native run makes a numpy bool
+    # however it is passed.
+    for f in (True, np.True_, False):
+        agrees(complement_read, lambda f=f: {**make(), "f": f})
 
 
 def test_the_named_fix_agrees():

@@ -259,9 +259,13 @@ end to end; the edges are sharp.
   `TraceError` naming `b[i] = u[i] != 0`, and an integer arriving at a bool
   array natively, `~(i > 0)` again, is refused there as it is by `when`.
   Every operand of `&`, `|` and `~` has to be a truth value, wherever the
-  connective is, since the trace and the compiled kernel read them as `and`,
-  `or` and `not` and natively they are bitwise on an integer: `(k[i] & 1) *
-  x[i]` is a `TraceError` naming `k[i] != 0`, and `k % 2` for `k & 1`.
+  connective is, the index of the cell written included, since the trace and
+  the compiled kernel read them as `and`, `or` and `not` and natively they are
+  bitwise on an integer: `(k[i] & 1) * x[i]` is a `TraceError` naming
+  `k[i] != 0`, and `k % 2` for `k & 1`. And `~(i > 0)` used as a number
+  (`x[i] * ~(i > 0)`, in a sum's body or an index) is a `TraceError` naming
+  `i <= 0`, since natively it is the `-2` or `-1` the native run refuses only
+  where a truth value is asked for.
 - The faithfulness fact. For each kernel and each program, the traced term is
   run by an interpreter (`loopty.interpret`: statement by statement in source
   order over each statement's isl domain, each loop enumerated when the run

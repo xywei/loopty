@@ -1401,8 +1401,12 @@ with a pair of statement instances.
   trace reads `&`, `|` and `~` as `and`, `or` and `not`, and natively they
   are bitwise on an integer, so `(k[i] & 1) * x[i]` was `0` natively at
   `k[i] = 2` and `x[i]` compiled. A stored value, a guard, a sum's body, an
-  index and a comparison are all asked, and the fix is named: `k[i] != 0`,
-  or `k % 2` for `k & 1`.
+  index, the index of the cell written and a comparison are all asked, and
+  the fix is named: `k[i] != 0`, or `k % 2` for `k & 1`. `~` of a comparison
+  of Python numbers, `~(i > 0)` of a loop variable, is bitwise natively too,
+  `-2` or `-1`, which the native run refuses in a guard and a `Bool` cell
+  (#25, #78); used as a number anywhere else, as in `x[i] * ~(i > 0)`, it is
+  now a `TraceError` naming the complement, `i <= 0`.
 - An entry or a scalar of `Nat`, `Int` or `Fin[m]` outside the 32-bit range
   the compiled run stores it in is refused on every entry point (#92), naming
   the range (`contract.INTEGRAL_RANGE`) and the fix: a value inside it, or a
