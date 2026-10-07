@@ -748,6 +748,36 @@ def test_a_start_read_from_another_array_leaves_the_layout_assumed() -> None:
     )
 
 
+def second_block_moved(
+    cnt: Arr[Fin[n], Fin[m], Nat],  # noqa: F821
+    off: Arr[Fin[n * m + 1], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[m], Fin[cnt], Real],  # noqa: F821
+):
+    """``off[n]``, the start of a row when there are ``n * m``, moved to 0."""
+    off[cnt.dom.size] = 0
+    for r in cnt.dom:
+        for s in cnt.dom[r]:
+            for j in val.dom[r, s]:
+                val[r, s, j] = 1.0
+
+
+def test_a_start_of_a_two_axis_family_leaves_the_layout_assumed() -> None:
+    # The rows are the n * m cells of the counts, and off[n] starts one of
+    # them when m > 1. Counted by the first axis alone, n rows, it was past
+    # the last start and the fact was decided.
+    from lanky.ledger import Status
+
+    from loopty.typing import layout_facts
+
+    (layout,) = layout_facts(term_of(second_block_moved), "second_block_moved")
+    assert layout.status is Status.ASSUMED, layout.provenance
+    assert layout.term is None
+    assert layout.provenance["reason"].endswith(
+        "cnt has 2 axes, and the rule follows the starts of the rows of a counts "
+        "array with one"
+    )
+
+
 def test_a_row_shortened_in_its_own_loop_leaves_its_reads_assumed() -> None:
     from lanky.ledger import Status
 

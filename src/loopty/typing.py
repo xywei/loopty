@@ -754,26 +754,27 @@ def layout_facts(
     others, as the contract checked when the call started. A term that only
     reads its layout has none.
 
-    Where the family's rows are as long as a counts array the term reads and
-    does not write, and the term writes only the offsets, the fact is decided
-    (#86). The contract checks on entry that the offsets start at 0 and have
-    the counts as their differences, so ``off[q] = off[q - 1] + cnt[q - 1]``
-    stores the value the cell already holds, and so does ``off[0] = 0``: if
-    every write is one of those, every write leaves the offsets as they were,
-    by induction over the run, and the rows stay where the contract found
-    them. A start written without reading anything, a value of the loop
-    variables and the sizes, is the start the counts give its row only at row
-    0, where it is 0: the counts are data, and the start of row ``q`` is the
-    sum of the counts before it, which some counts make another value. So the
-    fact is the isl question whether any instance writes such a start
-    elsewhere, and a witness is an instance that moves a row: a negative
-    start is a row before the buffer; a positive one, with a count of 1 in
-    that row alone, a row past the end of a buffer of one cell; and 0 at
-    another row, with a count of 1 in it and in row 0, two rows on cell 0. Any
-    other
-    write (the counts themselves, a start read from another array, a value
-    under a guard isl cannot state) leaves the fact ``assumed``, with the
-    reason, and the facts that rest on it say so in the ledger.
+    Where the family's rows are as long as a counts array of one axis that the
+    term reads and does not write, and the term writes only the offsets, the
+    fact is decided (#86). The contract checks on entry that the offsets start
+    at 0 and have the counts as their differences, so
+    ``off[q] = off[q - 1] + cnt[q - 1]`` stores the value the cell already
+    holds, and so does ``off[0] = 0``: if every write is one of those, every
+    write leaves the offsets as they were, by induction over the run, and the
+    rows stay where the contract found them. A start written without reading
+    anything, a value of the loop variables and the sizes, is the start the
+    counts give its row only at row 0, where it is 0: the counts are data, and
+    the start of row ``q`` is the sum of the counts before it, which some
+    counts make another value. So the fact is the isl question whether any
+    instance writes such a start elsewhere, and a witness is an instance that
+    moves a row: a negative start is a row before the buffer; a positive one,
+    with a count of 1 in that row alone, a row past the end of a buffer of one
+    cell; and 0 at another row, with a count of 1 in it and in row 0, two rows
+    on cell 0. The last offset, ``off[n]``, starts no row: a row is as long as
+    its count says, natively and compiled, so a write there moves nothing. Any
+    other write (the counts themselves, a start read from another array, a
+    value under a guard isl cannot state) leaves the fact ``assumed``, with
+    the reason, and the facts that rest on it say so in the ledger.
     """
     facts: list[Fact] = []
     for counts, family in _rewritten_layouts(term).items():
@@ -862,7 +863,8 @@ def _row_starts_question(
     writes such starts, or the padded instance space for several. A write
     that restates the start from the counts adds nothing to it. With the
     restated and the fixed statements, by id. The counts and the offsets
-    have to be arguments, which the contract checks on entry.
+    have to be arguments, which the contract checks on entry, and the counts
+    an array of one axis, whose length is the number of rows.
     """
     types = term.array_types
     counts_type = types.get(counts)
@@ -870,6 +872,14 @@ def _row_starts_question(
         return (
             f"the rows are as long as the offsets say, {counts} being no "
             "array of the kernel, and no rule follows their differences"
+        )
+    if len(counts_type.axes) != 1:
+        # The rows are the cells of the counts, laid out one after another,
+        # and the start of row q is not the start of the q-th row of the first
+        # axis: the question below counts the rows by that axis alone.
+        return (
+            f"{counts} has {len(counts_type.axes)} axes, and the rule follows "
+            "the starts of the rows of a counts array with one"
         )
     if counts in family["written"]:
         writers = [s.id for s in family["statements"] if s.assignee.array == counts]

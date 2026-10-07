@@ -1467,8 +1467,9 @@ with a pair of statement instances.
   sets every start to 0, where counts of 1 in rows 0 and 1 put both rows on
   cell 0. `lanky check` exits 1 on it, and `loopty run` asks isl about the
   layout fact a cast rests on as `lanky check` does. A start read from
-  another array, a count written, or a write under a guard isl cannot state
-  leaves the fact `assumed`, and its reason names the write.
+  another array, a count written, a write under a guard isl cannot state, or
+  counts with more than one axis leave the fact `assumed`, and its reason
+  names the write.
 
 ### Changed
 
