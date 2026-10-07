@@ -1002,6 +1002,72 @@ def test_a_sum_of_truth_values_is_refused_by_the_trace():
     agrees(either_or_both, both)
 
 
+@kernel
+def differenced(
+    b: Arr[Fin[n], Bool],  # noqa: F821
+    c: Arr[Fin[n], Bool],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A difference of two truth values, which numpy refuses."""
+    for i in b.dom:
+        y[i] = (b[i] - c[i]) * 1.0
+
+
+@kernel
+def xor_or_difference(
+    b: Arr[Fin[n], Bool],  # noqa: F821
+    c: Arr[Fin[n], Bool],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The two fixes: ``^`` for ``xor``, and ``1 * b - c`` for a difference."""
+    for i in b.dom:
+        y[i] = (b[i] ^ c[i]) * 1.0
+        z[i] = (1 * b[i] - c[i]) * 1.0
+
+
+@kernel
+def less_a_truth(
+    x: Arr[Fin[n], Real],  # noqa: F821
+    b: Arr[Fin[n], Bool],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A truth value subtracted from a real, which numpy computes."""
+    for i in x.dom:
+        y[i] = x[i] - b[i] + (i > 1) - (i > 2)
+
+
+def test_a_difference_of_truth_values_is_refused_by_the_trace():
+    # numpy refuses b - c of two bools at every point, and the compiled
+    # kernel subtracted the bytes.
+    def make() -> dict:
+        return {
+            "b": np.array([True, True, False, False]),
+            "c": np.array([True, False, True, False]),
+            "y": np.zeros(4),
+        }
+
+    with pytest.raises(TypeError, match="numpy boolean subtract"):
+        differenced(**make())
+    with pytest.raises(TraceError, match="subtracts truth values") as refused:
+        differenced.trace()
+    assert "'b[i] ^ c[i]' for 'xor', or '1 * b[i] - c[i]'" in str(refused.value)
+
+    def both() -> dict:
+        return {**make(), "z": np.zeros(4)}
+
+    native = both()
+    xor_or_difference(**native)
+    assert list(native["y"]) == [0.0, 1.0, 1.0, 0.0]
+    assert list(native["z"]) == [0.0, 1.0, -1.0, 0.0]
+    agrees(xor_or_difference, both)
+    # A real less a truth value, and Python bools of the loops, are numbers.
+    agrees(
+        less_a_truth,
+        lambda: {"x": np.arange(4.0), "b": make()["b"], "y": np.zeros(4)},
+    )
+
+
 # }}}
 
 
@@ -1060,6 +1126,46 @@ def test_bitwise_xor_and_shifts_are_numpys():
     with pytest.raises(TraceError, match="is not an integer") as refused:
         real_bits.trace()
     assert "k * 4 for k << 2" in str(refused.value)
+
+
+@kernel
+def shifted_back(k: Arr[Fin[n], Int], y: Arr[Fin[n], Int]):  # noqa: F821
+    """A shift by a negative literal, of a numpy integer and of a loop variable."""
+    for i in k.dom:
+        y[i] = (k[i] << -1) + (i << -1)
+
+
+@kernel
+def shifted_numpy(k: Arr[Fin[n], Int], y: Arr[Fin[n], Int]):  # noqa: F821
+    """A numpy integer shifted by a negative literal: ``0``, or ``-1``."""
+    for i in k.dom:
+        y[i] = (k[i] << -1) + (k[i] >> -1)
+
+
+@kernel
+def complex_remainder(
+    z: Arr[Fin[n], np.complex128],  # noqa: F821
+    w: Arr[Fin[n], np.complex128],  # noqa: F821
+):
+    """``%`` of a complex value, which numpy refuses."""
+    for i in z.dom:
+        w[i] = z[i] % 2.0
+
+
+def test_a_shift_python_refuses_and_a_complex_remainder_are_refused():
+    # Python refuses i << -1 of a loop variable, an int, where numpy shifts a
+    # numpy integer to 0 or -1, which the compiled run computes too.
+    with pytest.raises(TraceError, match="shifts by a negative amount") as refused:
+        shifted_back.trace()
+    assert "Write 'i >> 1'" in str(refused.value)
+    agrees(
+        shifted_numpy,
+        lambda: {"k": np.array([5, -5, 0]), "y": np.zeros(3, np.int64)},
+    )
+    # numpy refuses % and // of a complex number; it failed inside loopy's
+    # code generator.
+    with pytest.raises(TraceError, match="which is complex"):
+        complex_remainder.trace()
 
 
 # }}}
@@ -1196,6 +1302,35 @@ def test_a_guard_on_the_loops_is_not_cast():
     on_the_loops(**native)
     assert list(native["y"]) == [0.0, 0.0, 0.0, 6.0, 8.0, 10.0, 12.0, 0.0]
     agrees(on_the_loops, make)
+
+
+@kernel
+def on_the_scalars(
+    x: Arr[Fin[n], Real],  # noqa: F821
+    a: np.float32,
+    s: Int,
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A guard on scalars no domain names, which loopy does not read into isl."""
+    for i in x.dom:
+        with when(s * a > 0.300000008):
+            y[i] = x[i]
+
+
+def test_a_guard_on_scalars_is_computed_as_numpy_computes_it():
+    # numpy computes s * a of an int64 s and a float32 a in double, and C in
+    # single precision, so the cast stays: a guard naming a scalar no domain
+    # names is not read into isl by loopy. Without it, 3 * 0.1f was
+    # 0.3000000119 compiled and 0.3000000045 natively, either side of the
+    # bound.
+    def make() -> dict:
+        return {"x": np.ones(3), "a": np.float32(0.1), "s": 3, "y": np.zeros(3)}
+
+    native = make()
+    on_the_scalars(**native)
+    assert list(native["y"]) == [0.0, 0.0, 0.0]
+    assert "s * 1.0 * a > 0.300000008" in emit_code(on_the_scalars)
+    agrees(on_the_scalars, make)
 
 
 # }}}

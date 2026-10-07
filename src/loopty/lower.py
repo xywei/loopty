@@ -466,9 +466,17 @@ class ExpressionLowerer(Mapper):
         alone, and loopy reads such a predicate as an isl set
         (``loopy.symbolic.condition_to_set``), whose evaluator raises on a
         cast instead of declining it: ``when(i ** 0.5 > 1.5)`` failed in
-        loopy's bounds check. So no operand in one is cast; one is converted
-        only when it is a literal, which is written in the dtype. Such a guard
-        is index arithmetic, which is left in 32 bits as a subscript is.
+        loopy's bounds check. loopy reads a guard on scalars so too, since it
+        counts each scalar argument an instruction reads as a parameter
+        (``loopy.kernel.instruction.get_insn_domain``). So no operand in one
+        is cast. A literal is written in the dtype, and an operand numpy
+        computes in double is multiplied by ``1.0``: C computes the product in
+        double exactly as it would the cast, and the reader declines it as it
+        declines any real. ``s * a`` of an ``Int`` ``s`` and a ``float32``
+        ``a`` is computed in double so, as numpy computes it, where C computed
+        it in single precision when the cast was left out. Such a guard is
+        index arithmetic otherwise, and its integers are left in 32 bits as a
+        subscript's are.
         """
         reads = any(isinstance(node, Access | prim.Subscript) for node in walk(guard))
         if reads:
@@ -550,8 +558,8 @@ class ExpressionLowerer(Mapper):
         promotion = self.lowering.promotion
         steps = () if promotion is None else promotion.steps(expr)
         for step in steps:
-            if step.right is not None and self._casts(body):
-                body = _converted(body, step.right)
+            if step.right is not None:
+                body = self._convert(body, step.right)
         return body
 
     def map_constant(self, expr: Any) -> Any:
@@ -608,8 +616,7 @@ class ExpressionLowerer(Mapper):
 
         Inside a subscript and a guard on the loops an integer is not widened
         (see the class): a step converting to an integer dtype is left out
-        there. In such a guard nothing but a literal is converted at all
-        (:meth:`condition`).
+        there. In such a guard no operand is cast at all (:meth:`condition`).
         """
         lowered = [self.rec(operand) for operand in operands]
         promotion = self.lowering.promotion
@@ -622,16 +629,26 @@ class ExpressionLowerer(Mapper):
         for operand, step in zip(lowered[1:], steps, strict=True):
             if step.left is not None:
                 before = head[0] if len(head) == 1 else build(head)
-                if self._casts(before):
-                    head = [_converted(before, step.left)]
-            if step.right is not None and self._casts(operand):
-                operand = _converted(operand, step.right)
+                head = [self._convert(before, step.left)]
+            if step.right is not None:
+                operand = self._convert(operand, step.right)
             head.append(operand)
         return build(head)
 
-    def _casts(self, operand: Any) -> bool:
-        """Whether ``operand`` may be converted here; see :meth:`condition`."""
-        return not self._on_loops or _is_literal(operand)
+    def _convert(self, operand: Any, dtype: np.dtype) -> Any:
+        """``operand`` computed in ``dtype``, as a guard on the loops allows.
+
+        See :meth:`condition`: there a literal is written in the dtype, a
+        double is had by a product with ``1.0``, and nothing else converts.
+        The ``1.0`` comes first: loopy prints ``s * (1.0 * a)`` as
+        ``s * 1.0 * a``, which C computes in double from the left as well,
+        where ``s * a * 1.0`` would multiply ``s * a`` in single precision.
+        """
+        if not self._on_loops or _is_literal(operand):
+            return _converted(operand, dtype)
+        if dtype == np.float64:
+            return prim.Product((np.float64(1.0), operand))
+        return operand
 
     def map_sum(self, expr: Any) -> prim.Expression:
         return self._operation(expr, expr.children, lambda ops: prim.Sum(tuple(ops)))
