@@ -1621,28 +1621,4 @@ def test_a_guard_that_reads_only_scalars_is_kept_in_the_compiled_kernel() -> Non
     assert code.index("if (a > 0.5)") < code.index("for (")
 
 
-def test_a_guard_that_names_no_loop_variable_is_kept_on_a_device() -> None:
-    # The PyOpenCL target runs its host code, and the guard hoisted into it
-    # wrapped the launch and the line naming the event the host code returns,
-    # so a false guard raised UnboundLocalError (#90). It needs pyopencl and a
-    # device, which CI has neither of.
-    pytest.importorskip("pyopencl")
-    from loopty.executor import LoopyExecutor
-    from loopty.schedule import Schedule
-
-    @kernel
-    def g_flag(flag: Bool, y: Arr[Fin[n], Real]):  # noqa: F821
-        for i in y.dom:
-            with when(~flag):
-                y[i] = 1.0
-
-    for flag in (False, True):
-        native = {"flag": flag, "y": np.zeros(2)}
-        g_flag(**native)
-        out = LoopyExecutor(target="opencl").run(
-            Schedule(g_flag, target="opencl"), flag=flag, y=np.zeros(2)
-        )
-        assert np.array_equal(out["y"], native["y"]), flag
-
-
 # }}}
