@@ -64,6 +64,13 @@ def shifted(f: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
 
 
 @kernel
+def doubled(f: Arr[Fin[n], Real], g: Arr[Fin[n], Real]):  # noqa: F821
+    """Every cell, twice."""
+    for k in g.dom:
+        g[k] = 2.0 * f[k]
+
+
+@kernel
 def bump(u: Arr[Fin[n], Real]):  # noqa: F821
     """Add one to every cell, in place."""
     for k in u.dom:
@@ -169,6 +176,16 @@ def early(u, rhs, y):
     shifted(f, y)
     flux(u, f)
     divergence(f, rhs)
+
+
+@program
+def chained(u, rhs):
+    """Two arrays the program makes, the second computed from the first."""
+    f = Arr.zeros_like(u)
+    g = Arr.zeros_like(u)
+    flux(u, f)
+    doubled(f, g)
+    divergence(g, rhs)
 
 
 @program
@@ -611,6 +628,34 @@ def test_what_a_substitution_cannot_take_is_named(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         Schedule(prog).substitute(array)
+
+
+def test_a_substitution_through_two_arrays_is_refused_either_way() -> None:
+    # The dependences carried over are those of what the producer reads, and
+    # through two arrays that is what the first producer reads, which the
+    # second step does not see: refused, whichever comes first.
+    with pytest.raises(ValueError, match="doubled.S0 reads f, which is computed"):
+        Schedule(chained).substitute("f").substitute("g")
+    with pytest.raises(ValueError, match="doubled.S0 reads f and runs no more"):
+        Schedule(chained).substitute("g").substitute("f")
+    for array in ("f", "g"):
+        agrees(chained, Schedule(chained).substitute(array), burgers_inputs(7))
+
+
+def test_a_statement_taken_out_leaves_no_loop_to_name() -> None:
+    schedule = Schedule(burgers).substitute("f")
+    term = burgers.term
+    gone = {term.stmt("flux.S0").inames[0], term.stmt("f.zeros").inames[0]}
+    assert not gone & set(schedule.order)
+    assert schedule.order == term.stmt("divergence.S0").inames
+    with pytest.raises(ValueError, match="is not an iname"):
+        schedule.tag(**{min(gone): "g.0"})
+    with pytest.raises(ValueError, match="runs no more"):
+        schedule.fuse("flux", "divergence")
+    loop = schedule.order[0]
+    split = schedule.split(loop, 4)
+    assert [fact.status.value for fact in split.facts()][-2:] == ["decided"] * 2
+    agrees(burgers, split, burgers_inputs(10))
 
 
 def test_an_array_is_substituted_once() -> None:

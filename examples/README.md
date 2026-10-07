@@ -1,6 +1,6 @@
 # The loopty demos
 
-Eight files, each of which runs three ways. Every console block below is a
+Nine files, each of which runs three ways. Every console block below is a
 snapshot of real output, not prose about it, and it is produced mechanically:
 
 ```console
@@ -26,6 +26,7 @@ marked with `...` is an excerpt and the lines it keeps are checked verbatim.
 | `pairs.py` | symmetric pair interactions over the lower triangle, an array argument over the domain `Where[i: Fin[n], j: Fin[n], j < i]`, decided in bounds over the exact triangle and run boxed and packed |
 | `composition.py` | two kernels composed by a program and lowered as one loopy kernel, with the intermediate a temporary of it and the edge between the kernels found in the footprints |
 | `travel.py` | facts that travel between a program's calls: a requirement decided under the postcondition of the call before, one checked by the compiled program between the calls, and a flat access in bounds where it follows the scan |
+| `fusion.py` | the program of `composition.py` with its two loops fused into one, a fusion one step too early refused with its pair, and the intermediate computed where it is read instead of stored |
 
 Run them with `uv run` from the repository root:
 
@@ -518,8 +519,11 @@ and the array is one of its temporaries: declared inside the one kernel loopy
 generates, zeroed where the program made it (`f.zeros`), and passed by nobody.
 Nothing declares that `divergence` needs `flux`; the `f` one writes and the
 other reads is one array of the term, so the dependence is in the footprints
-and orders the two loops. The loops are not fused. That is a cast over this
-term, still to come, and this run is what it will be checked against.
+and orders the two loops. The loops are not fused here: `fusion.py` fuses them,
+a cast over this term checked against that dependence, and this run is the
+reference it is compared with. The program also has a `definedness` fact:
+every cell of `f` that `divergence` reads, `flux` stored before it, so the
+zeros `f` was made with reach no read.
 
 ### python examples/composition.py
 
@@ -529,9 +533,9 @@ native: the program agrees with the numpy slices: True
 
 the term of burgers_rhs(u, rhs):
   temporary f: 1 axis, element Real
-  f.zeros        over i_0 from composition.py:79
-  flux.S0        over j   from composition.py:65
-  divergence.S0  over i   from composition.py:73
+  f.zeros        over i_0 from composition.py:80
+  flux.S0        over j   from composition.py:66
+  divergence.S0  over i   from composition.py:74
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -562,21 +566,22 @@ body computes.
 ```console
 $ uv run lanky check examples/composition.py
 STATUS   BY           WHERE              OWNER        STATEMENT
--------  -----------  -----------------  -----------  ------------------------------------------------------
-decided  isl          composition.py:65  flux         f[j] is in bounds for every instance of S0
-decided  isl          composition.py:65  flux         u[j] is in bounds for every instance of S0
-decided  isl          composition.py:65  flux         distinct instances of S0 write distinct cells of f
-decided  isl          composition.py:61  flux         the source order runs every dependence forward in time
-tested   interpreter  composition.py:61  flux         the traced term computes what the body computes
-decided  isl          composition.py:73  divergence   rhs[i] is in bounds for every instance of S0
-decided  isl          composition.py:73  divergence   f[i + 1] is in bounds for every instance of S0
-decided  isl          composition.py:73  divergence   f[i - 1] is in bounds for every instance of S0
-decided  isl          composition.py:73  divergence   distinct instances of S0 write distinct cells of rhs
-decided  isl          composition.py:68  divergence   the source order runs every dependence forward in time
-tested   interpreter  composition.py:68  divergence   the traced term computes what the body computes
-tested   interpreter  composition.py:76  burgers_rhs  the traced term computes what the body computes
+-------  -----------  -----------------  -----------  ------------------------------------------------------------
+decided  isl          composition.py:66  flux         f[j] is in bounds for every instance of S0
+decided  isl          composition.py:66  flux         u[j] is in bounds for every instance of S0
+decided  isl          composition.py:66  flux         distinct instances of S0 write distinct cells of f
+decided  isl          composition.py:62  flux         the source order runs every dependence forward in time
+tested   interpreter  composition.py:62  flux         the traced term computes what the body computes
+decided  isl          composition.py:74  divergence   rhs[i] is in bounds for every instance of S0
+decided  isl          composition.py:74  divergence   f[i + 1] is in bounds for every instance of S0
+decided  isl          composition.py:74  divergence   f[i - 1] is in bounds for every instance of S0
+decided  isl          composition.py:74  divergence   distinct instances of S0 write distinct cells of rhs
+decided  isl          composition.py:69  divergence   the source order runs every dependence forward in time
+tested   interpreter  composition.py:69  divergence   the traced term computes what the body computes
+decided  isl          composition.py:82  burgers_rhs  every cell of f that divergence reads, flux stored before it
+tested   interpreter  composition.py:77  burgers_rhs  the traced term computes what the body computes
 
-12 facts: 9 decided, 3 tested
+13 facts: 10 decided, 3 tested
 ```
 
 ### loopty run examples/composition.py
@@ -596,9 +601,9 @@ burgers_rhs: Schedule(burgers_rhs, target='c')
 
 STATUS  BY     WHERE              OWNER        STATEMENT
 ------  -----  -----------------  -----------  ------------------------------------------------------------------------
-tested  loopy  composition.py:65  flux         the scheduled run of flux agrees with the native run to the accuracy ...
-tested  loopy  composition.py:73  divergence   the scheduled run of divergence agrees with the native run to the acc...
-tested  loopy  composition.py:76  burgers_rhs  the scheduled run of burgers_rhs agrees with the native run to the ac...
+tested  loopy  composition.py:66  flux         the scheduled run of flux agrees with the native run to the accuracy ...
+tested  loopy  composition.py:74  divergence   the scheduled run of divergence agrees with the native run to the acc...
+tested  loopy  composition.py:77  burgers_rhs  the scheduled run of burgers_rhs agrees with the native run to the ac...
 
 3 facts: 3 tested
 ```
@@ -769,6 +774,141 @@ tested  loopy  travel.py:186  weigh         the scheduled run of weigh agrees wi
 tested  loopy  travel.py:189  flat          the scheduled run of flat agrees with the native run to the accuracy ...
 
 11 facts: 11 tested
+```
+
+## fusion.py
+
+The program of `composition.py`, `burgers_rhs`, scheduled two steps further:
+the Burgers flux and divergence of the closed #6, which fused the two kernels
+with loopy's `fuse_kernels` and `assignment_to_subst` and checked neither.
+Both steps are checked here before they are applied.
+
+`fuse("flux", "divergence", shift=1)` runs `divergence`'s loop inside
+`flux`'s, one step behind. It is `affine` with a map per statement, `{
+flux_S0[j] -> [j]; divergence_S0[i] -> [j] : j = i + 1 }`, and isl decides it
+on the dependences between the two calls: in each step of the one loop `flux`
+stores `f[j]` first, and `divergence` reads `f[j]` and `f[j - 2]`, both
+stored by then. Without the shift `divergence` at `i` would read `f[i + 1]` a
+step before `flux` stores it, and that is the pair the refusal names, with
+the shift that is accepted.
+
+`substitute("f")` then stores no flux at all: `flux`'s statement becomes a
+substitution rule, and `divergence` computes `0.5 * u[j] * u[j]` where it read
+`f[j]`. The step is legal because every cell of `f` that is read, `flux`
+stored before the read (the `definedness` fact), and nothing writes `u` in
+between (the `monotone` fact, over the program as it now runs). The temporary
+goes, and with it the loop that zeroed it.
+
+### python examples/fusion.py
+
+The refusal, then each accepted schedule with its facts, the code loopy
+generates for it, and its compiled run against the native one.
+
+```console
+$ uv run python examples/fusion.py
+native: the program agrees with the numpy slices: True
+
+refused: fuse(flux, divergence) illegal: instance flux.S0[j=2] writes f[2] read by divergence.S0[i=1] scheduled earlier (at n=16, as hinted); fuse('flux', 'divergence', shift=1) runs every dependence between them forward
+
+accepted: Schedule(burgers_rhs, target='c').fuse(flux, divergence, shift=1)
+  decided  isl  fuse(flux, divergence, shift=1) renames the instances of burgers_rhs one for one
+  decided  isl  the order after fuse(flux, divergence, shift=1) runs every dependence of burgers_rhs forward
+
+#include <stdint.h>
+#include <stdbool.h>
+
+void burgers_rhs(int32_t const n, double const *__restrict__ u, double *__restrict__ rhs)
+{
+  double f[n];
+
+  for (int32_t i_0 = 0; i_0 <= -1 + n; ++i_0)
+    f[i_0] = (double) (0.0);
+  for (int32_t j = 0; j <= -1 + n; ++j)
+  {
+    f[j] = 0.5 * u[j] * u[j];
+    if (-2 + j >= 0 && -1 + j > 0 && -1 + j + 1 < n)
+      rhs[-1 + j] = (-1.0 * (f[j] + -1.0 * f[-2 + j])) / 2.0;
+  }
+}
+
+  rhs: difference 0 within 1e-06 (approx) -> tested
+
+accepted: Schedule(burgers_rhs, target='c').fuse(flux, divergence, shift=1).substitute('f')
+  decided  isl  fuse(flux, divergence, shift=1) renames the instances of burgers_rhs one for one
+  decided  isl  the order after fuse(flux, divergence, shift=1) runs every dependence of burgers_rhs forward
+  decided  isl  every cell of f that burgers_rhs reads, flux.S0 has stored by the time it is read
+  decided  isl  substitute('f') renames the instances of burgers_rhs one for one
+  decided  isl  the order after substitute('f') runs every dependence of burgers_rhs forward
+
+#include <stdint.h>
+#include <stdbool.h>
+
+void burgers_rhs(int32_t const n, double const *__restrict__ u, double *__restrict__ rhs)
+{
+  for (int32_t j = 0; j <= -1 + n; ++j)
+    if (-2 + j >= 0 && -1 + j > 0 && -1 + j + 1 < n)
+      rhs[-1 + j] = (-1.0 * (0.5 * u[j] * u[j] + -1.0 * 0.5 * u[-2 + j] * u[-2 + j])) / 2.0;
+}
+
+  rhs: difference 0 within 1e-06 (approx) -> tested
+```
+
+### lanky check examples/fusion.py
+
+The kernels' obligations, and the program's: the definedness of `f`, decided
+by isl, and the program's `trace-faithful` fact. The schedules' facts are in
+the ledger `loopty run` prints.
+
+```console
+$ uv run lanky check examples/fusion.py
+STATUS   BY           WHERE         OWNER        STATEMENT
+-------  -----------  ------------  -----------  ------------------------------------------------------------
+decided  isl          fusion.py:71  flux         f[j] is in bounds for every instance of S0
+decided  isl          fusion.py:71  flux         u[j] is in bounds for every instance of S0
+decided  isl          fusion.py:71  flux         distinct instances of S0 write distinct cells of f
+decided  isl          fusion.py:67  flux         the source order runs every dependence forward in time
+tested   interpreter  fusion.py:67  flux         the traced term computes what the body computes
+decided  isl          fusion.py:79  divergence   rhs[i] is in bounds for every instance of S0
+decided  isl          fusion.py:79  divergence   f[i + 1] is in bounds for every instance of S0
+decided  isl          fusion.py:79  divergence   f[i - 1] is in bounds for every instance of S0
+decided  isl          fusion.py:79  divergence   distinct instances of S0 write distinct cells of rhs
+decided  isl          fusion.py:74  divergence   the source order runs every dependence forward in time
+tested   interpreter  fusion.py:74  divergence   the traced term computes what the body computes
+decided  isl          fusion.py:87  burgers_rhs  every cell of f that divergence reads, flux stored before it
+tested   interpreter  fusion.py:82  burgers_rhs  the traced term computes what the body computes
+
+13 facts: 10 decided, 3 tested
+```
+
+### loopty run examples/fusion.py
+
+Both schedules, compiled and compared with the native run, and each kernel
+alone. The two schedules share their first step, and so its facts.
+
+```console
+$ uv run loopty run examples/fusion.py
+burgers_rhs: Schedule(burgers_rhs, target='c').fuse(flux, divergence, shift=1)
+  rhs: difference 0 within 1e-06 (approx) -> tested
+burgers_rhs: Schedule(burgers_rhs, target='c').fuse(flux, divergence, shift=1).substitute('f')
+  rhs: difference 0 within 1e-06 (approx) -> tested
+flux: Schedule(flux, target='c')
+  f: difference 0 within 1e-06 (approx) -> tested
+divergence: Schedule(divergence, target='c')
+  rhs: difference 0 within 1e-06 (approx) -> tested
+
+STATUS   BY     WHERE         OWNER        STATEMENT
+-------  -----  ------------  -----------  ------------------------------------------------------------------------
+decided  isl    fusion.py:85  burgers_rhs  fuse(flux, divergence, shift=1) renames the instances of burgers_rhs ...
+decided  isl    fusion.py:85  burgers_rhs  the order after fuse(flux, divergence, shift=1) runs every dependence...
+tested   loopy  fusion.py:82  burgers_rhs  the scheduled run of burgers_rhs agrees with the native run to the ac...
+decided  isl    fusion.py:85  burgers_rhs  every cell of f that burgers_rhs reads, flux.S0 has stored by the tim...
+decided  isl    fusion.py:85  burgers_rhs  substitute('f') renames the instances of burgers_rhs one for one
+decided  isl    fusion.py:85  burgers_rhs  the order after substitute('f') runs every dependence of burgers_rhs ...
+tested   loopy  fusion.py:82  burgers_rhs  the scheduled run of burgers_rhs agrees with the native run to the ac...
+tested   loopy  fusion.py:71  flux         the scheduled run of flux agrees with the native run to the accuracy ...
+tested   loopy  fusion.py:79  divergence   the scheduled run of divergence agrees with the native run to the acc...
+
+9 facts: 5 decided, 4 tested
 ```
 
 ## reshape_layouts.py and p2p.py

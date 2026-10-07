@@ -179,6 +179,40 @@ statement is predicated on its own image and uses its own inverse (see
 :func:`_affine_kernel`); for the acoustic pair the images are the points
 where ``a + b`` is even and those where it is odd, and every point of the
 loops is one statement's.
+
+Fusion
+------
+
+The maps per statement need not take the same loops. Two statements in two
+loops one after the other, as a program's two calls are (:mod:`loopty.compose`),
+take each its own loop to one new loop, ``{ flux_S0[j] -> [j];
+divergence_S0[i] -> [j] : j = i + 1 }``, and that is a fusion: the checker
+asks its two questions as for any map per statement, the time map puts the
+statements in the one loop in the order the term has them, and a dependence
+from the producer to a consumer that would now run first is refused with the
+pair. :meth:`Schedule.fuse` builds that map from the two statements' loops and
+a shift. In the kernel each statement's loops were a domain of their own;
+they go, and the new loops get one domain, the union of the images, each
+statement predicated on its own (:func:`_fused_plan`).
+
+Storing less
+------------
+
+An array a program makes is a temporary of its kernel, stored in full from
+the call that writes it to the calls that read it. :meth:`Schedule.substitute`
+stores none of it: a pointwise producer becomes a substitution rule (loopy's
+``assignment_to_subst``), computed again at every read. That reorders no
+instance and is not a cast; it changes what the instances read, and is legal
+when each read is of a cell the producer stored before it (the
+``definedness`` fact) and the producer's own reads would see the same cells
+where the value is now computed. The second is a question about dependences:
+those of the producer's reads are carried over to the reads that replace them,
+those of the statements that no longer run are dropped, and the schedule's
+order has to run the result forward. Every later step is checked against
+that, the dependences of the program as it then runs, so a loop that carried
+the array from one step to the next may go on a hardware axis once the array
+is computed where it is read. Contraction, keeping only the cells live at
+once, is not done.
 """
 
 from __future__ import annotations
@@ -2395,8 +2429,11 @@ class Schedule:
         #: reads the direction of each dependence it carries over from
         #: (see :meth:`substitute`).
         self._before = before
-        #: The arrays :meth:`substitute` computed where they are read.
+        #: The arrays :meth:`substitute` computed where they are read, and
+        #: the statements it took out of the kernel, which have no instances
+        #: and no loops in the schedule any more.
         self._substituted: tuple[str, ...] = ()
+        self._gone: frozenset[str] = frozenset()
         self._deps = _dependences(
             self._term, self._layout, self._instances, before, params
         )
@@ -2847,7 +2884,9 @@ class Schedule:
         mappings: dict[str, isl.Map] = {}
         for stmt_id, coords in list(draft.coords.items()):
             inside = [name for name in inputs if name in coords]
-            if not inside:
+            if not inside or stmt_id in self._gone:
+                # A statement a substitution took out has no instances, and
+                # keeps the loops it had, which are no loops of the kernel.
                 continue
             own = mapping if pieces is None else pieces[stmt_id]
             if pieces is None and len(inside) != len(inputs):
@@ -2901,6 +2940,12 @@ class Schedule:
             raise ValueError(
                 f"{text}: {', '.join(unknown)} {verb} of {self._term.name}"
             )
+        gone = sorted(set(pieces) & self._gone)
+        if gone:
+            raise ValueError(
+                f"{text}: {', '.join(gone)} runs no more: a substitution took it "
+                "out of the kernel"
+            )
         first = next(iter(pieces))
         first_ins = _dim_names(pieces[first], isl.dim_type.in_)
         taken: dict[str, tuple[str, tuple[str, ...]]] = {}
@@ -2927,6 +2972,8 @@ class Schedule:
             for name in ins:
                 taken.setdefault(name, (stmt_id, ins))
         for stmt_id, coords in draft.coords.items():
+            if stmt_id in self._gone:
+                continue
             inside = [name for name in inputs if name in coords]
             piece = pieces.get(stmt_id)
             ins = () if piece is None else _dim_names(piece, isl.dim_type.in_)
@@ -3374,6 +3421,8 @@ class Schedule:
         )
         pieces: dict[str, isl.Map] = {}
         for stmt_id, coords in self._layout.coords.items():
+            if stmt_id in self._gone:
+                continue
             if set(coords) & set(mine):
                 pieces[stmt_id] = identity
             elif set(coords) & set(theirs):
@@ -3400,20 +3449,30 @@ class Schedule:
             raise IllegalCast(message, witness=exc.witness, fact=fact) from None
 
     def _fused_side(self, name: str, text: str) -> list[str]:
-        """The statements one side of :meth:`fuse` names, in term order."""
+        """The statements one side of :meth:`fuse` names, in term order.
+
+        Those a substitution took out run no more, and are left out; a side
+        that names only such statements is refused.
+        """
         ids = self._layout.stmt_ids
-        if name in ids:
-            return [name]
-        called = [stmt_id for stmt_id in ids if stmt_id.startswith(f"{name}.")]
-        if called:
-            return called
-        spelled = [stmt_id for stmt_id in ids if _sanitize(stmt_id) == name]
-        if spelled:
-            return spelled
-        raise ValueError(
-            f"{text}: {name!r} names no statement of {self._term.name} and no "
-            f"call of it; its statements are {', '.join(ids)}"
+        named = (
+            [name]
+            if name in ids
+            else [stmt_id for stmt_id in ids if stmt_id.startswith(f"{name}.")]
+            or [stmt_id for stmt_id in ids if _sanitize(stmt_id) == name]
         )
+        if not named:
+            raise ValueError(
+                f"{text}: {name!r} names no statement of {self._term.name} and "
+                f"no call of it; its statements are {', '.join(ids)}"
+            )
+        live = [stmt_id for stmt_id in named if stmt_id not in self._gone]
+        if not live:
+            raise ValueError(
+                f"{text}: {', '.join(named)} runs no more: a substitution took "
+                "it out of the kernel"
+            )
+        return live
 
     def _fused_loops(
         self, stmts: Sequence[str], name: str, text: str
@@ -3590,7 +3649,7 @@ class Schedule:
         """Compute an array the program makes where it is read, and store none of it.
 
         ``f = Arr.zeros_like(u)`` in a program is a temporary of its kernel
-        (:mod:`loopy.compose`), stored in full between the call that writes
+        (:mod:`loopty.compose`), stored in full between the call that writes
         it and the calls that read it. When one statement writes it, one
         value per cell at the cell its loop variables name (``f[j] = 0.5 *
         u[j] * u[j]``), every read ``f[i + 1]`` can be that value instead,
@@ -3668,6 +3727,29 @@ class Schedule:
         ]
         if not readers:
             raise ValueError(f"{text}: nothing in {term.name} reads {array}")
+        # The dependences carried over are those of what the producer reads,
+        # at the instances that read the array; a statement an earlier
+        # substitution took out reads nothing, and an array it computes is
+        # read through what its own producer reads. Both are refused.
+        taken = [stmt.id for stmt in readers if stmt.id in self._gone]
+        through = sorted(
+            {
+                name
+                for kind, name, _indices, _part in _accesses(producer, term)
+                if kind == "read" and name in self._substituted
+            }
+        )
+        if taken or through:
+            how = (
+                f"{taken[0]} reads {array} and runs no more"
+                if taken
+                else f"{producer.id} reads {through[0]}, which is computed where "
+                "it is read"
+            )
+            raise ValueError(
+                f"{text}: {how}, after an earlier substitution; a substitution "
+                "through two arrays is not done, so substitute only one of them"
+            )
 
         fact = self._definedness_fact(producer, readers, array, text, recipe)
         if fact.status.value == "refuted":
@@ -3688,6 +3770,29 @@ class Schedule:
             f"{producer.id}'s reads carried over to the reads of {array}"
         )
         staged._substituted = (*self._substituted, array)
+        staged._gone = self._gone | gone
+        # The statements taken out have no instances left, and the loops
+        # only they ran in are no loops of the kernel any more, so no later
+        # step can name them.
+        layout = self._origin_layout
+        removed = [
+            _embed(self._domains[stmt_id], layout.index(stmt_id), layout)
+            for stmt_id in sorted(gone)
+        ]
+        origin = self._origin
+        for instances in removed:
+            instances = instances.align_params(origin.get_space())
+            origin = origin.align_params(instances.get_space()).subtract(instances)
+        staged._origin = origin.coalesce()
+        staged._reindex = self._reindex.intersect_domain(staged._origin)
+        staged._instances = staged._reindex.range().coalesce()
+        live = {
+            loop
+            for stmt_id, coords in self._layout.coords.items()
+            if stmt_id not in staged._gone
+            for loop in coords
+        }
+        staged._order = [loop for loop in self._order if loop in live]
         draft = staged._draft()
         if draft.kernel is not None:
             ids = self._lowering.insn_ids

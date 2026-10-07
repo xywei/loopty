@@ -42,6 +42,7 @@ NAMES = (
     "pairs",
     "composition",
     "travel",
+    "fusion",
 )
 
 _RESULTS: dict[tuple[str, str], tuple[Any, list[dict]]] = {}
@@ -148,6 +149,7 @@ KERNELS = {
     "p2p": {"p2p"},
     "pairs": {"pairs"},
     "composition": {"flux", "divergence", "burgers_rhs"},
+    "fusion": {"flux", "divergence", "burgers_rhs"},
     "travel": {
         "number",
         "number_quiet",
@@ -757,6 +759,70 @@ def test_the_composed_program_keeps_its_intermediate_to_itself() -> None:
     result, _ = _invoke("composition", "python")
     assert "double f[n];" in result.stdout
     assert "-> tested" in result.stdout
+
+
+def test_the_composed_program_reads_only_what_its_producer_stored() -> None:
+    _result, facts = _invoke("composition", "check")
+    (fact,) = [fact for fact in facts if fact["kind"] == "definedness"]
+    assert fact["status"] == "decided"
+    assert fact["decided_by"] == "isl"
+    assert fact["statement"] == (
+        "every cell of f that divergence reads, flux stored before it"
+    )
+
+
+# }}}
+
+
+# {{{ fusion (#13)
+
+
+def test_the_fusion_demo_decides_the_fusion_and_the_substitution() -> None:
+    result, facts = _invoke("fusion", "run")
+    assert result.returncode == 0, result.stdout + result.stderr
+    casts = [
+        (fact["kind"], fact["status"], fact["decided_by"])
+        for fact in facts
+        if fact["owner"] == "burgers_rhs" and fact["kind"] != "agreement"
+    ]
+    assert casts == [
+        ("bijective", "decided", "isl"),
+        ("monotone", "decided", "isl"),
+        ("definedness", "decided", "isl"),
+        ("bijective", "decided", "isl"),
+        ("monotone", "decided", "isl"),
+    ]
+    agreements = [
+        fact
+        for fact in facts
+        if fact["owner"] == "burgers_rhs" and fact["kind"] == "agreement"
+    ]
+    assert [fact["status"] for fact in agreements] == ["tested", "tested"]
+
+
+def test_the_fusion_demo_prints_the_refusal_and_two_kernels() -> None:
+    result, _ = _invoke("fusion", "python")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (
+        "refused: fuse(flux, divergence) illegal: instance flux.S0[j=2] writes "
+        "f[2] read by divergence.S0[i=1] scheduled earlier (at n=16, as hinted); "
+        "fuse('flux', 'divergence', shift=1) runs every dependence between them "
+        "forward"
+    ) in result.stdout
+    fused, substituted = result.stdout.split("accepted: ")[1:]
+    assert "double f[n];" in fused
+    assert "double f[n];" not in substituted
+    assert "0.5 * u[j] * u[j]" in substituted
+    assert fused.count("for (") == 2
+    assert substituted.count("for (") == 1
+    assert result.stdout.count("-> tested") == 2
+
+
+def test_the_fusion_demo_states_the_definedness_of_its_intermediate() -> None:
+    _result, facts = _invoke("fusion", "check")
+    (fact,) = [fact for fact in facts if fact["kind"] == "definedness"]
+    assert (fact["status"], fact["decided_by"]) == ("decided", "isl")
+    assert fact["owner"] == "burgers_rhs"
 
 
 # }}}

@@ -13,8 +13,10 @@ declared. An array one call writes and a later call reads is one array of the
 program's term, so the dependence is in the footprints, exactly as between two
 statements of one kernel: the lowering orders the instructions by it, and a
 :class:`~loopty.schedule.Schedule` of the program has it among the dependences
-every cast is checked against. Fusion is not here. It is a cast over this
-term, and it waits for facts that travel from one kernel to the next.
+every cast is checked against. Fusing two calls is a cast over this term
+(:meth:`loopty.schedule.Schedule.fuse`), and computing an array the program
+makes where it is read, instead of storing it, is a step of a schedule too
+(:meth:`loopty.schedule.Schedule.substitute`).
 
 Three things are decided in composing.
 

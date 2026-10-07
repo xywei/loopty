@@ -1,6 +1,6 @@
 # Notes on loopy and islpy
 
-Eighteen interactions with loopty's dependencies that cost real debugging
+Twenty interactions with loopty's dependencies that cost real debugging
 time, each with the local workaround and the reason it is local. No upstream
 issues were filed: these are notes so that the next person meets the answer
 instead of the symptom.
@@ -912,3 +912,28 @@ keeps an integer exponent, and loopy's power multiplies in the order numpy's
 complex power does for a positive one, so `z[i] ** 3` agrees bit for bit; a
 negative exponent is inverted first, where numpy inverts the power, a last bit
 away.
+
+## 20. `assignment_to_subst` wants one writer, and leaves the zeros' loop behind
+
+**What happens.** A program's temporary is zeroed where the program made it
+(the statement `f.zeros`, see `loopty.compose`) and then written by the call
+that produces it, so the instruction that reads it depends on two writers of
+`f`. `lp.assignment_to_subst(kernel, "f")` looks for the one definition among
+a read's dependencies and refuses: "more than one write to 'f' found in
+dependencies of 'divergence_S0'--definition cannot be resolved (writer
+instructions ids: f_zeros, flux_S0)". With the zeroing instruction removed
+first (`lp.remove_instructions`), it substitutes, and drops the producer, the
+temporary and the producer's loop, which it empties
+(`remove_any_newly_unused_inames`); the zeroing instruction's loop was
+emptied before it ran, and stays, and loopy warns of it when the kernel is
+checked: "Found unused inames in kernel: frozenset({'i_0'}) Unused inames
+during linearization will be prohibited".
+
+**Local fix.** `Schedule.substitute` decides first that no read sees the
+zeros (its `definedness` fact: every cell read was stored by the producer
+before the read), then removes the zeroing instructions, removes their loops
+with `lp.remove_unused_inames`, and calls `assignment_to_subst`
+(`schedule._substituted_kernel`). The fact is what makes dropping the zeros
+sound; loopy's own resolution of the definition is by instruction
+dependencies, which are by array and not by cell, so it would accept the
+removal whatever the reads are.

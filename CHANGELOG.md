@@ -455,6 +455,57 @@ with a pair of statement instances.
   the compiled program runs, and a flat access in bounds where it follows the
   scan. `examples/README.md`, the README and the quickstart describe it, and
   the spmv transcripts are regenerated.
+- **Definedness of what passes between a program's calls** (#13,
+  `loopty.flow.definedness`, `loopty.typing.definedness_facts`). An array a
+  program makes with `Arr.zeros_like`, written by one call and read by a
+  later one, is an internal edge of the program, and the program has a
+  `definedness` fact for each call that reads it after another wrote it:
+  every cell the call reads, a call before it stored, so that the zeros the
+  array was made with reach none of its reads. The fact's term is the isl
+  subset question between the two sets of cells, for the isl oracle; a call
+  that does read the zeros somewhere has the fact `decided` by isl all the
+  same, saying so with a cell, since reading them is no error; and a read or
+  a write isl cannot list (an index that is not affine, a guard it cannot
+  state) leaves it `assumed`, with the reason. The composition demo has one
+  row more, `decided`.
+- **Fusion as a checked cast** (#13). `Schedule.affine` takes maps per
+  statement whose statements run in different loops, each taking its own
+  loops to the same new ones, which is a fusion: `{ flux_S0[j] -> [j];
+  divergence_S0[i] -> [j] : j = i + 1 }` runs a program's two calls in one
+  loop, checked as every map per statement is, on the dependences between
+  the calls as well as within each. `Schedule.fuse(producer, consumer,
+  shift=0)` builds that map from two statements, or two calls by their
+  labels, and their loops, outermost first, one shift per loop. A fusion
+  that runs a dependence backwards is refused with the pair of instances and
+  the cell, and the message names the least shift the checker accepts, when
+  a number per loop gives one. The kernel rewrite replaces the two loops'
+  domains by one, the union of the images, each statement predicated on its
+  own and given its own inverse, and nests the domains again; loops that
+  share a domain with a loop no map takes leave the kernel unbuildable, with
+  the reason. Maps per statement that take a loop in common still have to
+  take the same loops, and every statement in a loop some map takes has to
+  be given one that takes all of them.
+- **Storing an intermediate, or not** (#13). `Schedule.substitute(array)`
+  computes an array the program makes where it is read: the one statement
+  that writes it, pointwise, becomes a substitution rule through loopy's
+  `assignment_to_subst`, after the statement that zeroes the array is
+  dropped, and the temporary and the loops left empty go with it. It is
+  refused with a `ValueError` for a parameter, an array two statements
+  write, or a producer that is not pointwise, and with an `IllegalCast` when
+  a read is of a cell the producer does not store, or stores after the read
+  (the `definedness` fact of the step), or when something writes what the
+  producer read between its run and a read of what it stored (the
+  `monotone` fact). The dependences of the dropped statements go, those of
+  the producer's reads are carried over to the reads that replace them, and
+  every later step is checked against the result, so a fused loop that
+  carried the array from step to step may take a hardware axis once it is
+  substituted. Contraction to the cells live at once is not done.
+- **A ninth demo**, `examples/fusion.py`: the Burgers flux and divergence of
+  the closed #6, rebuilt on these. The fusion without a shift is refused with
+  its pair, the fusion one step behind is decided and compiled to one loop,
+  and the substituted schedule stores no flux; both runs agree with the
+  native one. `examples/README.md`, the README and the composition demo
+  describe it, and the composition transcripts are regenerated.
 
 ### Fixed
 
