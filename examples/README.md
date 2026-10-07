@@ -627,6 +627,14 @@ the program it is decided under the scan's postcondition and the element type
 of `off`, which the program checks, since nothing says the scan's offsets stay
 below `nnz`.
 
+The compiled program skips a decided requirement's check only on the strength
+of what a run has borne out: the postconditions here are `tested` against
+their kernels' native runs, and so are the kernels' terms against their
+bodies. A requirement decided under a postcondition its kernel's runs refute,
+under one of a kernel whose term does not compute what its body does, or
+under an axiom, stays `decided` in the ledger, worth what it rests on, and is
+checked when the program runs all the same.
+
 ### python examples/travel.py
 
 Each program natively, how each of its requirements was met, and its compiled

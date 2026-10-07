@@ -298,6 +298,39 @@ def test_a_false_postcondition_is_refuted_by_a_native_run() -> None:
     assert "leaves forall i in Fin(n). perm[i] == i false" in post.provenance["reason"]
 
 
+def test_a_postcondition_some_run_cannot_evaluate_is_not_tested() -> None:
+    # perm[n - i] reads past the end at i = 0, which an empty input never
+    # reaches: held after that one alone, the claim is not borne out by the
+    # run after which it could not be evaluated, and is no ground for a
+    # program to skip a check on.
+    from loopty.faithful import postcondition_fact
+
+    @kernel
+    def from_the_end(perm: Arr[Fin[n], Fin[n]]) -> all(  # noqa: F821
+        perm[n - i] < n for i in Fin[n]  # noqa: F821
+    ):
+        for i in perm.dom:
+            perm[i] = i + 1
+
+    observed = [
+        ("empty", None, {"perm": Arr.zeros(0, dtype=np.int64)}),
+        ("four", None, {"perm": Arr.from_numpy(np.array([1, 2, 3, 4]))}),
+    ]
+    fact = postcondition_fact(
+        from_the_end, from_the_end.term, observed, owner="from_the_end", where="-"
+    )
+    assert fact.status is Status.ASSUMED
+    assert fact.provenance["reason"].startswith(
+        "it held after 1 native run, and could not be evaluated after the "
+        "others (four: not evaluated: IndexError"
+    )
+    # Held after every run, it is tested.
+    fact = postcondition_fact(
+        from_the_end, from_the_end.term, observed[:1], owner="from_the_end", where="-"
+    )
+    assert fact.status is Status.TESTED
+
+
 def test_gathers_requirement_is_decided_under_numbers_postcondition() -> None:
     # #65's permuted program: number writes perm, gather reads x[perm[i]].
     (requirement,) = facts_of("permuted", "requirement")

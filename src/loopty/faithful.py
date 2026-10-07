@@ -44,9 +44,9 @@ its return annotation is a claim about its parameters once the body has run,
 so it is evaluated at what every native run left in them, and the fact of kind
 ``postcondition`` is ``tested`` by ``native`` when it held after every run that
 ran and after one at least, ``refuted`` at the first run after which it is
-false, and ``assumed``, with the reason, when nothing ran or nothing could be
-evaluated. Deciding it from the term instead, by which statement writes each
-cell last, is a question for isl that is not asked yet.
+false, and ``assumed``, with the reason, when nothing ran or it could not be
+evaluated after some run. Deciding it from the term instead, by which
+statement writes each cell last, is a question for isl that is not asked yet.
 """
 
 from __future__ import annotations
@@ -241,6 +241,12 @@ def postcondition_fact(
     statement and the kind of the one :func:`loopty.typing.postcondition_facts`
     states, and its term is an :class:`~loopty.typing.AfterCall`, which no
     oracle mistakes for a closed proposition.
+
+    It is ``tested`` only when it held after every run: one after which it
+    cannot be evaluated (it reads a cell the run's arrays do not have, or a
+    name nothing gives a value) leaves it ``assumed``, however many others
+    it held after, since a program that calls the kernel skips a check on the
+    strength of a ``tested`` postcondition (see :mod:`loopty.compose`).
     """
     from lanky.terms import render, truth_value
 
@@ -311,6 +317,21 @@ def postcondition_fact(
             reason=(
                 "no native run left anything to evaluate it at"
                 + (f" ({tried})" if tried else "")
+            ),
+        )
+    unevaluated = [e for e in inputs if e["outcome"] != "held"]
+    if unevaluated:
+        # A run after which the claim cannot be evaluated is one it says
+        # nothing of: it reads a cell the run's arrays do not have, say,
+        # which an empty input never reaches. Held after the others, it is
+        # not borne out by every run, and a program would skip a check on it.
+        tried = "; ".join(f"{e['input']}: {e['outcome']}" for e in unevaluated)
+        return fact(
+            Status.ASSUMED,
+            compared=held,
+            reason=(
+                f"it held after {held} native run{'s' if held != 1 else ''}, and "
+                f"could not be evaluated after the others ({tried})"
             ),
         )
     return fact(Status.TESTED, compared=held)

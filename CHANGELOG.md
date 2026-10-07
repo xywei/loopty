@@ -441,8 +441,9 @@ with a pair of statement instances.
   It is evaluated at what every native run of the `trace-faithful` fact left
   in the arguments, on the module's example inputs and the drawn ones, and is
   `tested` by `native` when it held after each, `refuted` with the input
-  after which it did not, and `assumed`, with the reason, when nothing could
-  be evaluated. Its term is a `loopty.typing.AfterCall`, which no oracle
+  after which it did not, and `assumed`, with the reason, when nothing ran or
+  it could not be evaluated after some run (it reads a cell the run's arrays
+  do not have, say). Its term is a `loopty.typing.AfterCall`, which no oracle
   takes for a closed proposition. A program's restatement of it is `decided`
   by the call, so it is worth what the postcondition is: `scan`'s in
   `examples/spmv.py` reads `tested` where both rows read `assumed`. Deciding
@@ -1650,6 +1651,13 @@ with a pair of statement instances.
   `i + 1` had it read `x[n]`, where the native `gather` is refused. The fact
   stays `decided`, worth what it rests on, and its statement and provenance
   say that the program checks it when it runs.
+- A postcondition used as a hypothesis rests on its callee's `trace-faithful`
+  fact as well as on the postcondition (`loopty.compose`). It is tested on
+  the callee's body, and the compiled program runs the callee's term: a
+  kernel whose term the trace made another kernel (an `isinstance` taken the
+  other way) kept a postcondition true of its body, and the compiled program
+  read `x[n]` where the native one ran. The requirement is worth no more than
+  that fact, and is checked when it is not at least `tested`.
 - A cited theorem is instantiated without capture
   (`loopty.hypotheses.theorem_instances`). A binder of its goal spelled like
   the program size a variable of it matched took that size's place:
