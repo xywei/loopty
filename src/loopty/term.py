@@ -342,6 +342,12 @@ class Requirement:
     lowered program checks the cells between the calls and sets the cell
     of the one-cell array ``flag`` when one fails, every later statement is
     guarded by that cell, and the compiled run raises ``message``.
+
+    A decided requirement is a checked point too when a fact it rests on is
+    not at least ``tested``: a postcondition its kernel's native runs
+    refuted, or a theorem the property tester does not pass. It keeps its
+    ``question``, and ``reason`` says why it is checked all the same; the
+    compiled program trusts no more than a run has borne out (#115).
     """
 
     call: str
@@ -363,7 +369,7 @@ class Requirement:
 
     @property
     def decided(self) -> bool:
-        """Whether isl decided the requirement, so that nothing checks it."""
+        """Whether isl decided the requirement; ``flag`` says whether it is checked."""
         return self.question is not None
 
 

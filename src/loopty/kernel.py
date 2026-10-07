@@ -644,8 +644,9 @@ class Program(_Decorated):
     requirement of the program, decided by isl under the postconditions that
     held at the call and the theorems the program cites
     (``@program(uses=[scan_monotone])``), or checked by the compiled program
-    between the two calls where it is not (:mod:`loopty.compose`). Each is a
-    ``requirement`` fact, resting on the facts it used. A callee's in-bounds
+    between the two calls where it is not, or where what decided it is not at
+    least ``tested`` (:mod:`loopty.compose`). Each is a ``requirement`` fact,
+    resting on the facts it used. A callee's in-bounds
     fact its own term leaves ``assumed``, a flat ``val[off[r] + j]``, is
     decided under the same hypotheses where they decide it
     (:func:`loopty.typing.scoped_in_bounds_facts`).

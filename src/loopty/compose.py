@@ -85,6 +85,16 @@ The requirement stays ``assumed``, and its fact says why. A count an earlier
 call wrote is still refused: the rows of the ragged array it bounds are laid
 out in a buffer the program was given, which nothing in the term can state.
 
+*The compiled program trusts no more than a run has borne out.* A decided
+requirement whose fact rests on something not at least ``tested`` (a
+postcondition its kernel's runs refute, a cited theorem the property tester
+does not pass, an axiom) keeps its checked point, and stays ``decided`` in
+the ledger, worth what it rests on (#115). And a postcondition is tested on
+the runs its kernel's contract lets in, so it is a hypothesis only after a
+call at which that contract held: where an earlier call wrote an array of the
+callee's of a ``Nat`` element sort, which the native contract checks and no
+requirement does, the postcondition is not offered (:meth:`_Composer.unchecked`).
+
 The hypotheses that held where each call ran are kept with the term too
 (:class:`~loopty.term.Scope`), so that a callee's fact its own term leaves
 ``assumed`` can be decided in the program's scope (see
@@ -901,6 +911,55 @@ def _through(offsets: str | None) -> str:
     return "through its own offsets" if offsets is None else f"through {offsets}"
 
 
+#: What :func:`_theorem_standing` found of each theorem, by identity.
+_THEOREM_STANDINGS: dict[int, tuple[Any, str | None]] = {}
+
+
+def _theorem_standing(theorem: Any) -> str | None:
+    """``None`` when lanky's property tester passes ``theorem``, else why not.
+
+    That is the least a ``lanky check`` of the theorem gives it, ``tested``,
+    and what a program that skips a check on the strength of the theorem
+    asks of it. An axiom is ``assumed`` on its citation, and a theorem that
+    rests on facts of its own (``uses=``) is worth what they are, which the
+    program does not see; neither is enough. A stronger oracle that would
+    prove what the tester cannot sample is not asked, so the check stays.
+    """
+    found = _THEOREM_STANDINGS.get(id(theorem))
+    if found is not None and found[0] is theorem:
+        return found[1]
+    name = getattr(theorem, "__name__", None) or getattr(theorem, "qualname", "theorem")
+    try:
+        from lanky.ledger import STATUS_STRENGTH
+        from lanky.oracles.test import TestOracle
+
+        fact = theorem.fact()
+        if fact.is_axiom:
+            why: str | None = f"the axiom {name} is assumed on its citation"
+        elif fact.rests_on:
+            why = (
+                f"{name} rests on {', '.join(fact.rests_on)}, whose status the "
+                "program does not know"
+            )
+        else:
+            tested = TestOracle().establish(fact) or fact
+            if STATUS_STRENGTH[tested.status] < 1:
+                reason = tested.provenance.get("untested") or tested.provenance.get(
+                    "reason"
+                )
+                why = f"{name} is {tested.status.value}" + (
+                    f" ({reason})" if reason else ""
+                )
+            elif tested.provenance.get("goal_reached") == 0:
+                why = f"{name} passed no draw at which its goal's guard held"
+            else:
+                why = None
+    except Exception as exc:  # noqa: BLE001 - then it stands on nothing
+        why = f"{name} could not be tested: {type(exc).__name__}: {exc}"
+    _THEOREM_STANDINGS[id(theorem)] = (theorem, why)
+    return why
+
+
 def _reflected_spelling(expr: Any) -> str | None:
     """``nl_cnt_r`` for ``cnt[r]``: the name the tracer would give that bound."""
     if not isinstance(expr, prim.Subscript):
@@ -931,6 +990,11 @@ class _Composer:
         }
         #: The theorems the program cites, offered as hypotheses.
         self.uses: tuple[Any, ...] = tuple(getattr(program, "uses", ()))
+        #: The callee each restated postcondition is the postcondition of, by
+        #: the restatement's id, and why each fact a decision rests on is not
+        #: at least ``tested`` (``None`` when it is), by id.
+        self.postconditions: dict[str, Any] = {}
+        self.standings: dict[str, str | None] = {}
         #: What last wrote each program array, by name.
         self.last_writer: dict[str, str] = {}
         #: The offsets some call has read rows through so far, and those an
@@ -1798,6 +1862,12 @@ class _Composer:
         """
         valid: list[Hypothesis] = []
         written: set[str] = set()
+        #: The arrays a call has written so far, which ``written`` holds
+        #: with the ones only an ``Arr.zeros_like`` has.
+        called: set[str] = set()
+        #: The postconditions held back by :meth:`unchecked`, each with the
+        #: arrays it names, for the reason of a requirement on one of them.
+        withheld: list[tuple[frozenset[str], str]] = []
         flags: list[str] = []
         flag_types: list[tuple[str, ArrType]] = []
         shift = 0
@@ -1818,7 +1888,10 @@ class _Composer:
             offered, notes = self.offered(valid, written)
             types_here: list[Hypothesis] = []
             for want in slot.wants:
-                requirement, checks = self.requirement(slot, want, offered, notes)
+                held_back = [note for names, note in withheld if want.array in names]
+                requirement, checks = self.requirement(
+                    slot, want, offered, [*held_back, *notes]
+                )
                 requirements.append(requirement)
                 for check in checks:
                     order = (slot.start + shift, *(0,) * len(check.inames))
@@ -1873,20 +1946,127 @@ class _Composer:
                     ),
                 )
             )
+            unchecked = self.unchecked(slot, called)
             written |= slot.written
+            called |= slot.written
             valid = [h for h in valid if not (h.mentions & slot.written)]
+            withheld = [
+                (names, note) for names, note in withheld if not (names & slot.written)
+            ]
             if slot.post is not None:
+                identifier = self.restatement_id(slot.kernel)
+                self.postconditions[identifier] = slot.kernel
                 claim = self.resolve_claim(slot.post)
-                valid.append(
-                    Hypothesis(
-                        claim=claim,
-                        source=f"the postcondition of {slot.kernel.__name__}, "
-                        f"after {slot.label} at {slot.where}",
-                        rests_on=(self.restatement_id(slot.kernel),),
-                        mentions=frozenset(self.arrays_in(claim)),
+                if unchecked:
+                    # The postcondition was tested on runs its contract let
+                    # in, and here a cell the contract checks natively is
+                    # checked by nothing: it says nothing of this call.
+                    withheld.append(
+                        (
+                            frozenset(self.arrays_in(claim)),
+                            f"the postcondition of {slot.kernel.__name__} after "
+                            f"{slot.label} at {slot.where} is no hypothesis, since "
+                            + "; ".join(unchecked),
+                        )
                     )
-                )
+                else:
+                    valid.append(
+                        Hypothesis(
+                            claim=claim,
+                            source=f"the postcondition of {slot.kernel.__name__}, "
+                            f"after {slot.label} at {slot.where}",
+                            rests_on=(identifier,),
+                            mentions=frozenset(self.arrays_in(claim)),
+                        )
+                    )
         return stmts, requirements, scopes, flag_types
+
+    def unchecked(self, slot: _Done, called: set[str]) -> list[str]:
+        """What the call's contract checks natively that nothing checks here.
+
+        A postcondition is tested on the runs the kernel's contract lets in,
+        so it holds after a call only where the contract held at it. In a
+        program it does for an array nothing wrote before the call, which the
+        program's contract checks on entry, and for one whose ``Fin`` element
+        sort or layout is a requirement of the call, decided or checked
+        (:meth:`requirement`). A ``Nat`` element sort is neither: an earlier
+        call can leave a negative cell in such an array, which the native
+        call refuses and the compiled program passes on. Zeros are naturals,
+        so an array only an ``Arr.zeros_like`` wrote is not counted.
+        """
+        out = []
+        for param, typ in slot.types.items():
+            if not isinstance(typ, ArrType):
+                continue
+            array = slot.arrays.get(param)
+            if array is None or array not in called:
+                continue
+            sort = typ.dtype.base if isinstance(typ.dtype, Refined) else typ.dtype
+            if getattr(sort, "name", None) == "Nat":
+                out.append(
+                    f"its contract checks that the elements of {param} are "
+                    f"naturals, and {self.last_writer_before(array, slot)} wrote "
+                    f"{array} before the call, which no requirement checks"
+                )
+        return out
+
+    def last_writer_before(self, array: str, slot: _Done) -> str:
+        """What wrote ``array`` last before the call ``slot``, in words."""
+        writer = None
+        for other in self.slots:
+            if other is slot:
+                break
+            if isinstance(other, _Done) and array in other.written:
+                writer = f"{other.kernel.__name__} at {other.where}"
+        return writer or "an earlier call"
+
+    def weakly_supported(self, used: Sequence[Hypothesis]) -> list[str]:
+        """Why the facts ``used`` rest on are not all at least ``tested``.
+
+        A requirement isl decided under hypotheses is skipped by the compiled
+        program, which trusts what the hypotheses rest on. A postcondition its
+        kernel's native runs refuted, or that nothing tested, is no ground for
+        that, nor is a cited theorem that the property tester does not pass,
+        or an axiom: the requirement keeps its checked point (#115).
+        """
+        out: list[str] = []
+        for hypothesis in used:
+            for identifier in hypothesis.rests_on:
+                why = self.standing(identifier)
+                if why is not None and why not in out:
+                    out.append(why)
+        return out
+
+    def standing(self, identifier: str) -> str | None:
+        """``None`` when the fact ``identifier`` is at least ``tested``, else why."""
+        if identifier in self.standings:
+            return self.standings[identifier]
+        why = self.look_up(identifier)
+        self.standings[identifier] = why
+        return why
+
+    def look_up(self, identifier: str) -> str | None:
+        """The standing of one fact a hypothesis rests on (see :meth:`standing`)."""
+        from lanky.ledger import STATUS_STRENGTH, Status
+
+        kernel = self.postconditions.get(identifier)
+        if kernel is not None:
+            try:
+                facts = kernel.facts()
+            except Exception as exc:  # noqa: BLE001 - then it stands on nothing
+                return (
+                    f"the postcondition of {kernel.__name__} could not be tested: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+            post = next((f for f in facts if f.kind == "postcondition"), None)
+            if post is not None and STATUS_STRENGTH[post.status] >= 1:
+                return None
+            status = post.status.value if post is not None else Status.ASSUMED.value
+            return f"the postcondition of {kernel.__name__} is {status}"
+        for theorem in self.uses:
+            if theorem.fact_id == identifier:
+                return _theorem_standing(theorem)
+        return f"{identifier} is a fact whose status the program does not know"
 
     def restatement_id(self, kernel: Any) -> str:
         """The id of the program's restatement of ``kernel``'s postcondition."""
@@ -2264,12 +2444,24 @@ class _Composer:
             "claim": claimed,
             "offered": tuple(offered),
         }
-        if outcome.decided:
+        weak = self.weakly_supported(outcome.used) if outcome.decided else []
+        if outcome.decided and not weak:
             return (
                 Requirement(**common, used=outcome.used, question=outcome.question),
                 [],
             )
-        if outcome.contradicting:
+        if weak:
+            # Decided, and the fact rests on something no run has borne out:
+            # the compiled program does not skip the check on its strength.
+            reason = (
+                "decided under "
+                + "; ".join(hypothesis.source for hypothesis in outcome.used)
+                + ", and checked all the same, since "
+                + "; ".join(weak)
+            )
+            common["used"] = outcome.used
+            common["question"] = outcome.question
+        elif outcome.contradicting:
             # A false hypothesis decides everything; the check decides nothing
             # it does not see.
             reason = outcome.reason
@@ -2292,16 +2484,20 @@ class _Composer:
                 + (f"; and {more} more" if more else "")
                 + ", which is read as saying nothing"
             )
-        if notes:
+        if notes and not weak:
             reason += "; " + "; ".join(notes)
         spelled = re.sub(r"\W", "_", slot.label)
         flag = self.fresh(f"{spelled}_{want.param}_ok")
+        why = (
+            f"what decided it rests on facts no run bore out ({'; '.join(weak)})"
+            if weak
+            else "nothing decided what it left there"
+        )
         message = (
             f"the compiled program {self.program} stops before {slot.label} at "
             f"{where}: {failure}, which the contract of {kernel} checks when it "
-            f"is called. {want.writer} wrote {array} before the call, and nothing "
-            "decided what it left there, so the program checks it where the "
-            f"native {kernel} is refused"
+            f"is called. {want.writer} wrote {array} before the call, and {why}, "
+            f"so the program checks it where the native {kernel} is refused"
         )
         statements = []
         for check_id, inames, check_domain, breaks in checks:

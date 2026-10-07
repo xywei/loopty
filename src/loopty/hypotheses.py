@@ -1208,6 +1208,12 @@ def _apply(expr: Any, sigma: Mapping[str, Any], functions: Collection[str]) -> A
 
     A family applied, ``off(r)``, becomes the cell ``off[r]`` of the array it
     matched; a scalar variable becomes the expression it matched.
+
+    Capture-avoiding, as :func:`substitute` is: a quantifier of the theorem
+    whose binder is spelled like a name of what the variables matched is
+    renamed first. ``all(f(a) <= n for a in Fin[n])`` with ``n`` matched to a
+    program size called ``a`` is about that size, and would otherwise say
+    ``perm[a] <= a`` of the binder, which no theorem said.
     """
     if isinstance(expr, prim.Call) and isinstance(expr.function, prim.Variable):
         if expr.function.name in functions:
@@ -1220,19 +1226,32 @@ def _apply(expr: Any, sigma: Mapping[str, Any], functions: Collection[str]) -> A
             return sigma[expr.name]
         return expr
     if isinstance(expr, Forall | Exists):
-        binders = tuple(
-            (var, _apply_sort(sort, sigma, functions)) for var, sort in expr.binders
+        captured: set[str] = set()
+        for name, value in sigma.items():
+            # A family becomes the array it matched, whose name a binder of
+            # the same spelling would capture as surely as a size's.
+            captured |= {value} if name in functions else _names(value)
+        taken = captured | _names(expr) | set(sigma)
+        inner = dict(sigma)
+        renames: dict[str, Any] = {}
+        binders = []
+        for var, sort in expr.binders:
+            sort = _apply_sort(_substitute_sort(sort, renames), inner, functions)
+            inner.pop(var.name, None)
+            if var.name in captured:
+                fresh = _fresh(var.name, taken)
+                taken.add(fresh)
+                renames[var.name] = Var(fresh)
+                binders.append((Var(fresh), sort))
+            else:
+                binders.append((var, sort))
+        body = _apply(substitute(expr.body, renames), inner, functions)
+        guard = (
+            None
+            if expr.guard is None
+            else _apply(substitute(expr.guard, renames), inner, functions)
         )
-        inner = {
-            name: value
-            for name, value in sigma.items()
-            if name not in {var.name for var, _ in expr.binders}
-        }
-        return type(expr)(
-            binders,
-            _apply(expr.body, inner, functions),
-            None if expr.guard is None else _apply(expr.guard, inner, functions),
-        )
+        return type(expr)(tuple(binders), body, guard)
     if isinstance(expr, prim.ExpressionNode):
         args = init_args(expr)
         new = tuple(_apply(arg, sigma, functions) for arg in args)
@@ -1247,6 +1266,12 @@ def _apply(expr: Any, sigma: Mapping[str, Any], functions: Collection[str]) -> A
 def _apply_sort(sort: Any, sigma: Mapping[str, Any], functions: Collection[str]) -> Any:
     if isinstance(sort, FinType):
         return dataclasses.replace(sort, bound=_apply(sort.bound, sigma, functions))
+    if isinstance(sort, Refined) and dataclasses.is_dataclass(sort):
+        return dataclasses.replace(
+            sort,
+            base=_apply_sort(sort.base, sigma, functions),
+            props=tuple(_apply(prop, sigma, functions) for prop in sort.props),
+        )
     return sort
 
 

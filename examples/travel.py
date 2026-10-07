@@ -264,6 +264,8 @@ def main() -> int:
         for requirement in prog.term.requirements:
             if requirement.decided:
                 how = "decided under " + ", ".join(h.source for h in requirement.used)
+                if requirement.flag is not None:
+                    how += ", and checked when it runs"
             else:
                 how = "checked when it runs"
             print(f"  {requirement.statement}")

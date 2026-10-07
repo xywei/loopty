@@ -1392,11 +1392,21 @@ def requirement_facts(
         }
         if requirement.decided:
             provenance["used"] = [h.source for h in requirement.used]
+            statement = requirement.statement
+            if requirement.flag is not None:
+                # Decided under a fact no run bore out: checked all the same.
+                provenance["reason"] = requirement.reason
+                provenance["checked"] = (
+                    f"the compiled program checks {requirement.array} before "
+                    f"{requirement.call} and stops there if a cell fails: "
+                    f"{requirement.message}"
+                )
+                statement = f"{statement} (checked when it runs)"
             facts.append(
                 Fact(
                     id=identifier,
                     kind="requirement",
-                    statement=requirement.statement,
+                    statement=statement,
                     term=requirement.question,
                     status=Status.ASSUMED,
                     provenance=provenance,

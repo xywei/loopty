@@ -6,11 +6,18 @@ another array, about some cells only, a disjunction, a non-affine value, a
 recurrence with the wrong step, or two claims that contradict each other. None
 of them may decide the requirement, so each program checks it between the
 calls (``loopty.compose``).
+
+The programs at the end are decided, or would be, on the strength of
+something no run bears out: a postcondition its kernel's runs refute, a
+theorem instantiated with a size its own binder captures, a postcondition of
+a call whose contract nothing checks in the program, and an axiom. Each is
+checked when the program runs.
 """
 
 from __future__ import annotations
 
-from lanky.prelude import Nat, Real
+from lanky import axiom, theorem
+from lanky.prelude import Fn, Int, Nat, Real
 
 from loopty import Arr, Fin, kernel, program, reduce_sum, when
 
@@ -322,6 +329,116 @@ def two_buffers(cnt, off, wt, val, y, cnt2, off2, wt2, val2, y2):
     weigh(cnt, off, wt, val, y)
     scan_flat(cnt2, off2)
     weigh(cnt2, off2, wt2, val2, y2)
+
+
+# }}}
+
+
+# {{{ decided on the strength of what no run bears out
+
+
+@kernel
+def liar(perm: Arr[Fin[n], Fin[n]]) -> all(perm[i] == n - 1 - i for i in Fin[n]):
+    """Says it reverses the cells, and counts up to ``n`` instead (#115)."""
+    for i in perm.dom:
+        perm[i] = i + 1
+
+
+@program
+def lied_to(perm, x, y):
+    """Decided under liar's postcondition, which its own runs refute."""
+    liar(perm)
+    gather(perm, x, y)
+
+
+@kernel
+def up_to_a(perm: Arr[Fin[a], Fin[a]]) -> all(perm[j] == j + 1 for j in Fin[a]):
+    """Counts up to ``a``, past the end, and says so; its size is called ``a``."""
+    for i in perm.dom:
+        perm[i] = i + 1
+
+
+@theorem
+def bounded(
+    n: Nat,
+    f: Fn[Fin[n], Int],
+    h: all(f(a) == a + 1 for a in Fin[n]),
+) -> all((f(a) <= n) & (f(a) >= 0) for a in Fin[n]):
+    """True: ``f(a) = a + 1 <= n`` where ``a < n``. Its binder is called ``a``."""
+
+
+@program(uses=[bounded])
+def captured(perm, x, y):
+    """bounded at n = a is about the size a, not about its own binder a."""
+    up_to_a(perm)
+    gather(perm, x, y)
+
+
+@kernel
+def below_zero(src: Arr[Fin[n], Nat]):
+    """Leaves negative cells in an array of naturals, and says nothing."""
+    for i in src.dom:
+        src[i] = i - src.dom.size
+
+
+@kernel
+def clamp(
+    src: Arr[Fin[n], Nat], perm: Arr[Fin[n], Fin[n]]
+) -> all((perm[i] >= 0) & (perm[i] < n) for i in Fin[n]):
+    """Copies the naturals below ``n``: a point of ``Fin[n]`` for a natural."""
+    for i in perm.dom:
+        perm[i] = perm.dom.size - 1
+        with when(src[i] < perm.dom.size):
+            perm[i] = src[i]
+
+
+@program
+def clamped(src, perm, x, y):
+    """clamp's contract refuses src natively; nothing checks it compiled."""
+    below_zero(src)
+    clamp(src, perm)
+    gather(perm, x, y)
+
+
+@kernel
+def scan_unit(
+    cnt: Arr[Fin[n], Fin[2]], off: Arr[Fin[n + 1], Fin[n + 1]]
+) -> (off[0] == 0) & all(off[r + 1] == off[r] + cnt[r] for r in Fin[n]) & (
+    off[n] <= n
+):
+    """Offsets of rows of at most one entry, which end at most at ``n``."""
+    off[0] = 0
+    for r in cnt.dom:
+        off[r + 1] = off[r] + cnt[r]
+
+
+@axiom(cite="any book on prefix sums")
+def scan_monotone_cited(
+    n: Nat,
+    cnt: Fn[Fin[n], Nat],
+    off: Fn[Fin[n + 1], Int],
+    h0: off(0) == 0,
+    hs: all(off(r + 1) == off(r) + cnt(r) for r in Fin[n]),
+) -> all(off(a) <= off(b) for a in Fin[n + 1] for b in Fin[n + 1] if a <= b):
+    """The offsets a scan produces are monotone, on a citation."""
+
+
+@kernel
+def pick(
+    off: Arr[Fin[n + 1], Fin[n + 1]],
+    x: Arr[Fin[n + 1], Real],
+    y: Arr[Fin[n + 1], Real],
+):
+    """``y[i] = x[off[i]]``, in bounds by the element type of ``off``."""
+    for i in y.dom:
+        y[i] = x[off[i]]
+
+
+@program(uses=[scan_monotone_cited])
+def picked_on_a_citation(cnt, off, x, y):
+    """Decided under the axiom, which is assumed: checked all the same."""
+    scan_unit(cnt, off)
+    pick(off, x, y)
 
 
 # }}}

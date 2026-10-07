@@ -1642,6 +1642,29 @@ with a pair of statement instances.
   program's names, as its domain is (`loopty.hypotheses.theorem_instances`):
   `f: Fn[Fin[n], Fin[m]]` was compared with an array's element sort as
   `Fin(m)`, the theorem's own `m`, whatever its hypotheses had bound `m` to.
+- A requirement decided on the strength of a fact that is not at least
+  `tested` keeps its checked point (#115): a postcondition its kernel's native
+  runs refute or that nothing tested, a cited theorem the property tester
+  does not pass, or an axiom. The compiled program skipped the check, so a
+  postcondition that says `perm[i] == n - 1 - i` of a kernel that writes
+  `i + 1` had it read `x[n]`, where the native `gather` is refused. The fact
+  stays `decided`, worth what it rests on, and its statement and provenance
+  say that the program checks it when it runs.
+- A cited theorem is instantiated without capture
+  (`loopty.hypotheses.theorem_instances`). A binder of its goal spelled like
+  the program size a variable of it matched took that size's place:
+  `all(f(a) <= n for a in Fin[n])` at `n = a` said `perm[a] <= a` of the
+  binder, which is false of cells the theorem's hypotheses describe, and
+  decided a requirement under a true theorem and a true postcondition; the
+  compiled program read `x[n]`. The binder is renamed apart.
+- A callee's postcondition is no hypothesis after a call whose contract
+  nothing checks in the program (`loopty.compose`). It is tested on the runs
+  its contract lets in, and a `Nat` element sort of an array an earlier call
+  wrote is checked natively by the callee's contract and by nothing in the
+  compiled program: an earlier call leaving `-4` in it made a postcondition
+  false that the compiled program then skipped a check on, and read `x[-4]`.
+  The requirement after it is checked, and its reason says why the
+  postcondition was not used.
 
 ### Changed
 

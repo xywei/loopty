@@ -439,6 +439,9 @@ def test_a_requirement_only_the_cited_theorem_decides() -> None:
         travel.picked, Schedule(travel.picked), travel.example_inputs()["picked"]
     )
     assert fact.status is Status.TESTED, fact.provenance
+    # The theorem passes the property tester, so the compiled program skips
+    # the check on its strength.
+    assert travel.picked.term.checks == ()
 
 
 def test_a_theorem_over_naturals_is_no_hypothesis_about_written_offsets() -> None:
@@ -785,6 +788,123 @@ def test_a_size_only_an_element_sort_names_is_renamed_apart() -> None:
     }
     fact = LoopyExecutor().differential(
         wrong.two_buffers, Schedule(wrong.two_buffers), inputs
+    )
+    assert fact.status is Status.TESTED, fact.provenance
+
+
+# }}}
+
+
+# {{{ what no run bears out is checked all the same
+
+
+def _permutation_inputs():
+    return {
+        "perm": Arr.zeros(4, dtype=np.int64),
+        "x": Arr.from_numpy(np.arange(4.0)),
+        "y": Arr.zeros(4),
+    }
+
+
+def test_a_requirement_decided_under_a_refuted_postcondition_is_checked() -> None:
+    # #115: liar says perm[i] == n - 1 - i and writes i + 1. Its runs refute
+    # that, and gather's requirement, decided under it, skipped its check:
+    # the compiled program read x[4], where the native gather is refused.
+    (post,) = [fact for fact in wrong.liar.facts() if fact.kind == "postcondition"]
+    assert post.status is Status.REFUTED
+    term = wrong.lied_to.term
+    (requirement,) = term.requirements
+    assert requirement.decided
+    assert requirement.flag is not None
+    assert "checked all the same, since the postcondition of liar is refuted" in (
+        requirement.reason
+    )
+    assert term.checks == ((requirement.flag, requirement.message),)
+
+    with pytest.raises(ValueError, match=r"perm\[3\] is 4"):
+        wrong.lied_to(**_permutation_inputs())
+    with pytest.raises(ValueError, match="stops before gather") as compiled:
+        LoopyExecutor().run(wrong.lied_to, **_permutation_inputs())
+    assert "the postcondition of liar is refuted" in str(compiled.value)
+    with pytest.raises(CheckFailed, match="stops before gather"):
+        interpret(term, _permutation_inputs())
+
+    # The ledger keeps what isl decided, worth what it rests on, and says
+    # that the compiled program checks it.
+    (fact,) = [f for f in wrong.lied_to.facts() if f.kind == "requirement"]
+    assert fact.statement.endswith("(checked when it runs)")
+    assert "stops before gather" in fact.provenance["checked"]
+    assert decided(fact).status is Status.DECIDED
+    (restated,) = [
+        f for f in wrong.lied_to.facts() if f.kind == "postcondition-in-scope"
+    ]
+    assert fact.rests_on == (restated.id,)
+
+
+def test_a_theorems_binder_does_not_capture_the_size_it_is_instantiated_at() -> None:
+    # bounded says f(a) <= n for its own binder a. Instantiated at n = a, a
+    # size of the program spelled like that binder, it said perm[a] <= a of
+    # the binder, which is false of up_to_a's cells, and decided gather's
+    # requirement under a true theorem and a true postcondition: the
+    # compiled program read x[4].
+    (requirement,) = wrong.captured.term.requirements
+    (instance,) = [
+        h for h in requirement.offered if h.source.startswith("bounded at")
+    ]
+    said = render(instance.claim)
+    assert said.startswith("forall a_0 in Fin(a). perm[a_0] <= a and")
+    assert not requirement.decided
+    assert requirement.flag is not None
+
+    with pytest.raises(ValueError, match=r"perm\[3\] is 4"):
+        wrong.captured(**_permutation_inputs())
+    with pytest.raises(ValueError, match="stops before gather"):
+        LoopyExecutor().run(wrong.captured, **_permutation_inputs())
+
+
+def test_a_postcondition_is_no_hypothesis_where_its_contract_went_unchecked() -> None:
+    # clamp's postcondition holds of every run its contract lets in, where
+    # src holds naturals. below_zero leaves -4 in src, which clamp's contract
+    # refuses natively and nothing checks compiled; the postcondition then
+    # decided gather's requirement, and the compiled program read x[-4].
+    (post,) = [fact for fact in wrong.clamp.facts() if fact.kind == "postcondition"]
+    assert post.status is Status.TESTED
+    (requirement,) = wrong.clamped.term.requirements
+    assert not requirement.decided
+    assert not any(
+        h.source.startswith("the postcondition of clamp") for h in requirement.offered
+    )
+    assert "the postcondition of clamp after clamp at" in requirement.reason
+    assert "elements of src are naturals, and below_zero at" in requirement.reason
+
+    inputs = {**_permutation_inputs(), "src": Arr.zeros(4, dtype=np.int64)}
+    with pytest.raises(ValueError, match=r"src\[0\] is -4"):
+        wrong.clamped(**{name: value.copy() for name, value in inputs.items()})
+    with pytest.raises(ValueError, match="stops before gather"):
+        LoopyExecutor().run(
+            wrong.clamped, **{name: value.copy() for name, value in inputs.items()}
+        )
+
+
+def test_a_requirement_decided_under_an_axiom_is_checked_all_the_same() -> None:
+    term = wrong.picked_on_a_citation.term
+    (requirement,) = term.requirements
+    assert requirement.decided
+    assert any(
+        h.source.startswith("scan_monotone_cited at") for h in requirement.used
+    )
+    assert "the axiom scan_monotone_cited is assumed on its citation" in (
+        requirement.reason
+    )
+    assert term.checks
+    inputs = {
+        "cnt": Arr.from_numpy(np.array([1, 0, 1], dtype=np.int64)),
+        "off": Arr.zeros(4, dtype=np.int64),
+        "x": Arr.from_numpy(np.arange(4.0)),
+        "y": Arr.zeros(4),
+    }
+    fact = LoopyExecutor().differential(
+        wrong.picked_on_a_citation, Schedule(wrong.picked_on_a_citation), inputs
     )
     assert fact.status is Status.TESTED, fact.provenance
 
