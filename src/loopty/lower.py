@@ -365,7 +365,9 @@ class ExpressionLowerer(Mapper):
         while numpy computes it in double. A numpy scalar is typed explicitly,
         and loopy writes it as it is. Double precision is what numpy gives a
         Python float beside an integer or a double, which is what the native
-        run computes with; see note 17 in ``docs/loopy-notes.md``.
+        run computes with; see note 17 in ``docs/loopy-notes.md``. Beside a
+        ``float32`` numpy gives it single precision, and the operation it
+        stands in writes it so (:meth:`_operation`, note 18).
 
         Integers and booleans are left alone. A numpy scalar already says its
         type, and ``np.float64`` is a subclass of ``float``, so it is asked

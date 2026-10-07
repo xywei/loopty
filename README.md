@@ -258,6 +258,10 @@ end to end; the edges are sharp.
   compiled a byte, into which C converts `0.5` as `0`: `b[i] = u[i]` is a
   `TraceError` naming `b[i] = u[i] != 0`, and an integer arriving at a bool
   array natively, `~(i > 0)` again, is refused there as it is by `when`.
+  Every operand of `&`, `|` and `~` has to be a truth value, wherever the
+  connective is, since the trace and the compiled kernel read them as `and`,
+  `or` and `not` and natively they are bitwise on an integer: `(k[i] & 1) *
+  x[i]` is a `TraceError` naming `k[i] != 0`, and `k % 2` for `k & 1`.
 - The faithfulness fact. For each kernel and each program, the traced term is
   run by an interpreter (`loopty.interpret`: statement by statement in source
   order over each statement's isl domain, each loop enumerated when the run
@@ -336,7 +340,12 @@ end to end; the edges are sharp.
   running on `lp.ExecutableCTarget`. Every argument of `LoopyExecutor.run` is
   an argument of the kernel; the target is chosen by the schedule
   (`Schedule(kernel, target="opencl")`) or by the executor
-  (`LoopyExecutor(target="opencl")`).
+  (`LoopyExecutor(target="opencl")`). Each operation is computed in the type
+  numpy computes it in natively (`loopty.promotion`, by NEP 50), where C's
+  conversions would pick another: a quotient of integers is a double, a Python
+  float beside a `float32` is single precision (`0.1f`), a `float32` beside an
+  integer array is a double, and a floating power calls `pow`, as numpy does.
+  Any power compiles on the C target. See note 18 in `docs/loopy-notes.md`.
 - Array arguments over polyhedral domains (`loopty.domain`): `Where[...]`,
   binders written as slices and then the comparisons that cut their box,
   joined by `&`; `Sigma[...]`, binders and an unnamed last fiber affine in
@@ -358,13 +367,16 @@ end to end; the edges are sharp.
   to have the declared domain's points at the sizes of the call, and a value
   of a refined sort such as `Fin[m]` has to be one — an array element and a
   scalar argument alike, and being one means being a finite whole number in
-  range, not merely passing two comparisons. An array the kernel writes has to
-  be stored as its element sort is natively (`float64` for `Real`, `bool` for
-  `Bool`, a signed integer of 32 bits or more for `Nat`, `Int` and `Fin[m]`, a
-  numpy sort as itself), since an integer `x` for a `Real` parameter truncates
-  every write the compiled run keeps; an array it only reads is read by the
-  native run in that dtype, as the compiled run converts it, so an integer `x`
-  no longer overflows natively where the compiled double does not. A complex
+  range, not merely passing two comparisons. A value of `Nat`, `Int` or
+  `Fin[m]` is also inside the 32 bits the compiled run stores it in, since
+  `2**32 + 5` ran natively as it was and was `5` compiled. An array the kernel
+  writes has to be stored as its element sort is natively (`float64` for
+  `Real`, `bool` for `Bool`, a signed integer of 32 bits or more for `Nat`,
+  `Int` and `Fin[m]`, a numpy sort as itself), since an integer `x` for a
+  `Real` parameter truncates every write the compiled run keeps; an array it
+  only reads is read by the native run in that dtype, as the compiled run
+  converts it, so an integer `x` no longer overflows natively where the
+  compiled double does not. A complex
   entry of a sort that is not complex has no imaginary part, and an entry of
   `Bool` stored as a number is `0` or `1`. A scalar is asked the same, and is
   converted into the dtype of its sort in both runs, since it is passed by
@@ -431,6 +443,13 @@ end to end; the edges are sharp.
   development machine.
 - Only a two-axis (row, fiber) ragged array lowers. A deeper dependent sum
   raises.
+- Integers are 64 bits wide natively and 32 bits compiled. The contract keeps
+  every integral argument inside 32 bits, but a result that leaves them
+  (`c[i] * c[i]` at `c[i] = 2**20`) is a wider number natively and wraps
+  compiled. A scalar of `Real` or of an integral sort is a Python number
+  natively when the caller passes one, and so takes a `float32`'s precision
+  beside one where a numpy scalar would not; an operation whose type depends
+  on that is left as C types it. See note 18 in `docs/loopy-notes.md`.
 - A polyhedral domain is an array's whole index set, so it cannot sit beside
   a dense axis (`Arr[Fin[k], Where[...], Real]` is refused; write the axis as
   a binder of the domain). The pieces of a union have the same number of axes,

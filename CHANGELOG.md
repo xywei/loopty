@@ -1372,6 +1372,45 @@ with a pair of statement instances.
   bool array is refused as `when` refuses an integer guard, since that is
   what `~(i > 0)` of a loop variable is there, `-2` or `-1`, which a bool
   array stored as `True` at every point.
+- Each operation is computed in the type numpy computes it in natively
+  (#82, #91). numpy types an operation by NEP 50, where a Python number takes
+  the dtype of what stands beside it, and C by its usual arithmetic
+  conversions, and the two disagreed: `k[i] / 2 * 2` of an integer `k` was
+  C's integer division compiled, `2` at `k = 3` where the native run stores
+  `3`; `x[i] * 0.1 + 0.3` of a `float32` `x` was computed in double compiled,
+  a bit away from numpy's single precision, which the `approx` class hid; and
+  `x[i] / k[i]` of a `float32` `x` and an integer `k` was single precision
+  compiled and double natively. `loopty.promotion` reads both types off the
+  term, numpy's by doing each operation in numpy on a sample of its
+  operands' types, and the lowering converts an operand where they differ: a
+  literal is written in numpy's dtype (`0.10000000149011612f`, and
+  `complex64` parts beside a `float32`), anything else is cast
+  (`(double) (k[i]) / 2`). Nothing changes for an operation the two type
+  alike. Note 18 in `docs/loopy-notes.md`.
+- A power compiles on the C target, and is computed with `pow`, as numpy
+  computes it (#84). Any power but `x ** 0`, `1` and `2` failed: an integer
+  exponent calls a power loopy defines in a preamble whose signature names
+  `int32_t` before loopy includes `stdint.h`, and a floating one calls `pow`,
+  for which loopy includes no `math.h` (note 2). A term with such a power
+  gets both headers in a preamble that sorts first. A floating power is given
+  a floating exponent, since loopy's integer power multiplies repeatedly and
+  rounds at every step, and `x ** 3` differed from numpy's in the last bit at
+  about one `x` in four.
+- A connective of an operand that is not a truth value is a `TraceError`
+  wherever it is (#83), as it was in a store into `Bool` only (#78): the
+  trace reads `&`, `|` and `~` as `and`, `or` and `not`, and natively they
+  are bitwise on an integer, so `(k[i] & 1) * x[i]` was `0` natively at
+  `k[i] = 2` and `x[i]` compiled. A stored value, a guard, a sum's body, an
+  index and a comparison are all asked, and the fix is named: `k[i] != 0`,
+  or `k % 2` for `k & 1`.
+- An entry or a scalar of `Nat`, `Int` or `Fin[m]` outside the 32-bit range
+  the compiled run stores it in is refused on every entry point (#92), naming
+  the range (`contract.INTEGRAL_RANGE`) and the fix: a value inside it, or a
+  numpy integer sort, which both runs store as it is. `2**32 + 5` ran
+  natively as it was and was `5` compiled, and a `uint64` entry from `2**63`
+  on was read natively through an `int64` copy as a negative number. The
+  dtype a sort is compiled in is `contract.compiled_storage`, which
+  `lower.numpy_dtype` now reads. A result outside 32 bits is a stated limit.
 - The `monotone` cast refuses a dependence between instances on two work
   items of a hardware axis (#63). It dropped a loop on `g.*` or `l.*` from the
   order it checked, as it drops `ilp` and `vec`, and let the loops around it
