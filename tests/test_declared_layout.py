@@ -424,22 +424,23 @@ def pairs_in_a_row_recounted(
             cnt[r] = 1
 
 
-def test_a_written_bound_of_two_loops_of_one_statement_is_refused() -> None:
+def test_a_written_bound_of_two_loops_of_one_statement_is_read_at_each() -> None:
     # Natively the loop over ``k`` reads the row's length each time it starts,
-    # 2 and then 1 for row 0, and ``cnt_r`` is one parameter of the domain of
-    # the statement, which the interpreter can read once only. A guess would
-    # be a refutation of a faithful trace, so the fact is left assumed.
+    # 2 and then 1 for row 0. ``nl_cnt_r`` was one parameter of the domain of
+    # the statement, read once, so the interpreter refused the kernel and the
+    # fact was left assumed (#87). The loop over ``k`` reads a copy of its own.
     from lanky.ledger import Status
-
-    from loopty.interpret import InterpretError
 
     arguments = row_loop_input()
     del arguments["x"]
-    with pytest.raises(InterpretError, match="bounds the loops over j and k"):
-        interpret(term_of(pairs_in_a_row_recounted), arguments)
+    copies = {name: value.copy() for name, value in arguments.items()}
+    Kernel(pairs_in_a_row_recounted)(**arguments)
+    assert arguments["y"].numpy().tolist() == [4.0, 3.0, 23.0]
+    interpret(term_of(pairs_in_a_row_recounted), copies)
+    for name, value in arguments.items():
+        assert copies[name].numpy().tobytes() == value.numpy().tobytes(), name
     fact = Kernel(pairs_in_a_row_recounted).facts()[-1]
-    assert fact.status is Status.ASSUMED
-    assert "the interpreter reads it once for them all" in fact.provenance["reason"]
+    assert fact.status is Status.TESTED, fact.provenance
 
 
 def sum_of_x_in_a_fiber_recounted(
@@ -485,26 +486,48 @@ def row_sum_in_its_own_fiber_recounted(
             cnt[r] = 1
 
 
-def test_a_written_bound_of_a_loop_and_a_sum_inside_it_is_refused() -> None:
-    # Natively the loop over ``j`` reads the row's length once, 2 for row 0,
-    # and the sum over ``k`` reads it each time it starts, 2 and then 1; the
-    # two share the one parameter ``nl_cnt_r``, which is read once.
-    from lanky.ledger import Status
+def nested_sums_in_a_fiber_recounted(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The row summed once per entry, once per entry, the row's length reset."""
+    for r in y.dom:
+        for j in val.dom[r]:
+            y[r] = y[r] + reduce_sum(
+                reduce_sum(val[r, k] for k in val.dom[r]) for i in val.dom[r]
+            )
+            cnt[r] = 1
 
-    from loopty.interpret import InterpretError
+
+@pytest.mark.parametrize(
+    ("fn", "native"),
+    [
+        (row_sum_in_its_own_fiber_recounted, [4.0, 3.0, 23.0]),
+        (nested_sums_in_a_fiber_recounted, [7.0, 3.0, 53.0]),
+    ],
+)
+def test_a_written_bound_of_a_loop_and_a_sum_inside_it_is_read_at_each(
+    fn, native
+) -> None:
+    # Natively the loop over ``j`` reads the row's length once, 2 for row 0,
+    # and the sum over ``k`` reads it each time it starts, 2 and then 1. The
+    # two shared the one parameter ``nl_cnt_r``, read once, so the interpreter
+    # refused the kernel and the fact was left assumed (#87). The sums read a
+    # copy of their own where each starts, and a sum inside a sum bounds the
+    # outer binder by the same copy, read where the outer sum started.
+    from lanky.ledger import Status
 
     arguments = row_loop_input()
     del arguments["x"]
     copies = {name: value.copy() for name, value in arguments.items()}
-    Kernel(row_sum_in_its_own_fiber_recounted)(**arguments)
-    assert arguments["y"].numpy().tolist() == [4.0, 3.0, 23.0]
-    with pytest.raises(
-        InterpretError, match="bounds the loop over j and the sum over k inside it"
-    ):
-        interpret(term_of(row_sum_in_its_own_fiber_recounted), copies)
-    fact = Kernel(row_sum_in_its_own_fiber_recounted).facts()[-1]
-    assert fact.status is Status.ASSUMED
-    assert "again where the sum starts" in fact.provenance["reason"]
+    Kernel(fn)(**arguments)
+    assert arguments["y"].numpy().tolist() == native
+    interpret(term_of(fn), copies)
+    for name, value in arguments.items():
+        assert copies[name].numpy().tobytes() == value.numpy().tobytes(), name
+    fact = Kernel(fn).facts()[-1]
+    assert fact.status is Status.TESTED, fact.provenance
 
 
 def test_the_faithfulness_fact_of_a_kernel_writing_its_counts_is_tested() -> None:

@@ -1431,6 +1431,20 @@ with a pair of statement instances.
   names neither. A statement whose id spells the instruction that computes a
   row length (`nl_cnt_r_init`) is refused the same way. A traced kernel's ids
   and a program's call labels cannot collide.
+- The term interpreter reads a bound that bounds two loops of one
+  statement, or a loop and a sum inside it, where each of them starts
+  (#87). A bound is one parameter of a domain, and the interpreter read it
+  once, so it refused such a bound when it reads an array the kernel writes
+  (`for k in val.dom[r]` inside `for j in val.dom[r]`, and `reduce_sum(val[r,
+  k] for k in val.dom[r])` inside the loop over `j`, each followed by
+  `cnt[r] = 1`), and the `trace-faithful` fact stayed `assumed`. Such a
+  bound now gets a parameter of its own for each loop inside the outermost
+  one it bounds, read where that loop starts, and one for the statement's
+  sums, read where each sum starts, while the constraints a sum repeats
+  from the loops around it keep the readings of those loops
+  (`interpret._Run.read_apart`). So the fact of such a kernel is `tested` or
+  `refuted` like any other; the lowering still refuses a statement that
+  would see a length rewritten after it was computed.
 
 ### Changed
 
