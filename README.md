@@ -295,7 +295,9 @@ end to end; the edges are sharp.
 - `Schedule`: `tag`, `split`, `interchange`, `prioritize`, `tile`, `skew`,
   `affine`, `realize`, each checked as a cast, each emitting its fact;
   `retarget`, which replays every step against another loopy target and
-  re-checks it. `affine(map)` takes an isl map from loops to the loops that
+  re-checks it. A tag belongs to a loop, so `split`, `tile` and `affine`
+  refuse a loop that carries one, and the loops they make are tagged after
+  them. `affine(map)` takes an isl map from loops to the loops that
   replace them, refuses one that misses or merges an instance or runs a
   dependence backwards, and rewrites the kernel over the map's image; `skew` is
   that method with a particular map. A union map whose tuples name statements,

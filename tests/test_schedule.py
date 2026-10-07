@@ -940,6 +940,69 @@ def test_a_tag_names_a_loop_with_or_without_a_kernel() -> None:
     assert unbuildable.tag(q="g.0").tags == {"q": "g.0"}
 
 
+@pytest.mark.parametrize("tag", ["g.0", "l.0", "unr", "for"])
+def test_a_tagged_loop_is_not_split_or_tiled_with_or_without_a_kernel(tag) -> None:
+    # loopy refuses to split a loop with any tag but "for", with a LoopyError
+    # that named no fix, and drops "for" from both halves; with no kernel to
+    # ask, nothing refused. Either way the tag stayed on a loop the schedule
+    # no longer had, so the loops that replaced it were read as untagged: the
+    # monotone fact of a split loop on g.0 no longer said "within one work
+    # item" (#93). Refused before loopy is asked, any tag, either way.
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(ragged_row_sums, evaluate_annotations(ragged_row_sums))
+    with pytest.raises(ValueError) as caught:
+        Schedule(term, sizes={"n": 4}).tag(r=tag).split("r", 2)
+    assert str(caught.value) == (
+        f"split(r, 2): r carries the tag {tag!r}; split it before tagging the "
+        "loops it makes"
+    )
+    unwritten = Schedule(term, sizes={"n": 4}).affine(
+        "{ [r, j] -> [q, k] : q = r and k = j + r }"
+    )
+    assert unwritten.kernel is None
+    tagged = unwritten.tag(q=tag)
+    with pytest.raises(ValueError, match=f"split\\(q, 2\\): q carries the tag '{tag}'"):
+        tagged.split("q", 2, inner="qi", outer="qo")
+    with pytest.raises(ValueError) as caught:
+        tagged.tile("q", "k", 2, 2)
+    assert str(caught.value) == (
+        f"tile(q,k,2,2): q carries the tag {tag!r}; tile before tagging the "
+        "loops the tiling makes"
+    )
+    # Split first and tag what the split makes, and the tag is on a loop the
+    # schedule has.
+    split = unwritten.split("q", 2, inner="qi", outer="qo").tag(qo=tag)
+    assert split.tags == {"qo": tag}
+    assert split.order == ("qo", "qi", "k")
+    if tag == "g.0":
+        assert split.facts()[-1].statement.endswith("within one work item")
+
+
+def test_a_sums_tagged_loop_and_two_tagged_tiled_loops_are_refused_too() -> None:
+    # A sum's loop is split by loopy too, and refused by it the same way.
+    with pytest.raises(ValueError) as caught:
+        Schedule(ht.spmv_term(exactness="reassoc")).tag(j="l.0").split("j", 2)
+    assert str(caught.value) == (
+        "split(j, 2): j carries the tag 'l.0'; split it before tagging the loops "
+        "it makes"
+    )
+    with pytest.raises(ValueError) as caught:
+        Schedule(ht.transpose_term()).tag(i="g.0", j="l.0").tile("i", "j", 2, 2)
+    assert str(caught.value) == (
+        "tile(i,j,2,2): i carries the tag 'g.0' and j carries the tag 'l.0'; tile "
+        "before tagging the loops the tiling makes"
+    )
+    # A loop beside a tagged one is split and tiled as before.
+    beside = Schedule(ht.transpose_term()).tag(i="g.0").split("j", 2)
+    assert beside.tags == {"i": "g.0"}
+    assert beside.order == ("i", "j_outer", "j_inner")
+    summed = Schedule(ht.spmv_term(exactness="reassoc")).tag(j="l.0")
+    assert summed.split("r", 2).tags == {"j": "l.0"}
+
+
 def test_only_the_loops_a_ragged_loop_becomes_keep_its_extent_from_data() -> None:
     # What a hardware axis may not sit inside is a loop whose extent is read
     # from an array. Tiling the ragged fiber with the dense row loop makes the

@@ -1405,7 +1405,19 @@ with a pair of statement instances.
   onto two work items is refused as well. A monotone fact about a schedule
   with a loop on a hardware axis says "within one work item", and the
   transcripts are regenerated.
-
+- `Schedule.split` and `Schedule.tile` refuse a loop that carries a tag, with
+  a `ValueError` naming the fix, before loopy is asked (#93): `split(r, 2): r
+  carries the tag 'g.0'; split it before tagging the loops it makes`. loopy
+  refuses to split a loop with any tag but `for`, so with a kernel the
+  refusal was loopy's `LoopyError`, which named no fix, and it splits a loop
+  tagged `for` into two with no tag. Without a kernel (after an `affine` step
+  the kernel rewrite could not write) nothing refused. Either way the tag
+  stayed in `Schedule.tags` on a loop the schedule no longer has, and the
+  checker read the loops that replaced it as untagged: sequential in the
+  order, and on no hardware axis, so a monotone fact no longer said "within
+  one work item". Every tag is refused, `for` included, and a sum's loop as
+  well, as `affine` refuses a map over a tagged loop: a tag goes on the loops
+  a step makes, after it.
 ### Changed
 
 - **Executor options are separate from kernel arguments.** Every argument of
