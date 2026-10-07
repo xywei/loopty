@@ -183,6 +183,7 @@ loops is one statement's.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -479,6 +480,25 @@ def _dim_names(mapping: isl.Map, kind: Any) -> tuple[str, ...]:
             "names are the loops it maps"
         )
     return tuple(names)
+
+
+def _taken_loops(pieces: Iterable[isl.Map], order: Sequence[str]) -> tuple[str, ...]:
+    """Every loop some map of ``pieces`` takes, each once, in loop order.
+
+    Maps per statement that fuse loops take different loops (see
+    :meth:`Schedule.fuse`), and the step replaces all of them; a loop that is
+    not in ``order`` comes after those that are, as the maps name it, to be
+    refused as no loop of the kernel.
+    """
+    names: list[str] = []
+    for piece in pieces:
+        for name in _dim_names(piece, isl.dim_type.in_):
+            if name not in names:
+                names.append(name)
+    rank = {name: k for k, name in enumerate(order)}
+    return tuple(
+        sorted(names, key=lambda name: (rank.get(name, len(rank)), names.index(name)))
+    )
 
 
 def _inherited(mapping: isl.Map) -> dict[str, set[str]]:
@@ -2371,6 +2391,12 @@ class Schedule:
             .intersect_domain(self._instances)
             .intersect_range(self._instances)
         )
+        #: The source order on the term's instances, which a substitution
+        #: reads the direction of each dependence it carries over from
+        #: (see :meth:`substitute`).
+        self._before = before
+        #: The arrays :meth:`substitute` computed where they are read.
+        self._substituted: tuple[str, ...] = ()
         self._deps = _dependences(
             self._term, self._layout, self._instances, before, params
         )
@@ -2758,10 +2784,13 @@ class Schedule:
 
         ``pieces``, when given, is a map per statement, by statement id, and
         ``mapping`` is one of them. The statements of a loop share its loops
-        in the kernel before the step and after it, so every map has to take
-        the same loops to the same new ones, and every statement that runs in
-        those loops has to run in all of them and be given a map; anything
-        else is refused, naming the statement.
+        in the kernel before the step and after it, so maps that take a loop
+        in common take the same loops to the same new ones, and every
+        statement that runs in those loops has to run in all of them and be
+        given a map; anything else is refused, naming the statement. Maps of
+        statements in different loops may take those loops to the same new
+        ones, which fuses them (see :meth:`fuse`); each statement then gets
+        the new loops in place of its own.
 
         A loop whose extent comes from an array passes that property to each
         new loop whose value depends on it (see :func:`_inherited`): both
@@ -2771,16 +2800,23 @@ class Schedule:
         inputs = _dim_names(mapping, isl.dim_type.in_)
         outputs = _dim_names(mapping, isl.dim_type.out)
         if pieces is not None:
+            inputs = _taken_loops(pieces.values(), draft.order)
             self._check_pieces(draft, pieces, inputs, outputs, text)
         if not inputs:
             raise ValueError(f"{text}: the map names no loop to replace")
-        for side, names in (("input", inputs), ("output", outputs)):
-            doubled = sorted({name for name in names if names.count(name) > 1})
-            if doubled:
-                raise ValueError(
-                    f"{text}: {', '.join(doubled)} is named twice among the "
-                    f"map's {side}s"
-                )
+        every = [mapping] if pieces is None else list(pieces.values())
+        for piece in every:
+            for side, kind in (
+                ("input", isl.dim_type.in_),
+                ("output", isl.dim_type.out),
+            ):
+                names = _dim_names(piece, kind)
+                doubled = sorted({name for name in names if names.count(name) > 1})
+                if doubled:
+                    raise ValueError(
+                        f"{text}: {', '.join(doubled)} is named twice among the "
+                        f"map's {side}s"
+                    )
         folded = [name for name in inputs if name in draft.reductions]
         if folded:
             raise ValueError(
@@ -2794,7 +2830,6 @@ class Schedule:
                 f"{text}: not loops of {self._term.name}: {', '.join(unknown)}"
             )
         self._check_new_names(draft, outputs, inputs, text)
-        every = [mapping] if pieces is None else list(pieces.values())
         foreign = sorted(
             {
                 name
@@ -2815,7 +2850,7 @@ class Schedule:
             if not inside:
                 continue
             own = mapping if pieces is None else pieces[stmt_id]
-            if len(inside) != len(inputs):
+            if pieces is None and len(inside) != len(inputs):
                 part = _part(mapping, inside)
                 if part is None:
                     outside = [name for name in inputs if name not in coords]
@@ -2852,9 +2887,13 @@ class Schedule:
     ) -> None:
         """Refuse maps per statement that the statements' loops cannot take.
 
-        See :meth:`_reindex_into`: the maps name statements of the kernel,
-        take the same loops to the same new ones, and cover every statement
-        that runs in those loops, each of which runs in all of them.
+        See :meth:`_reindex_into`: the maps name statements of the kernel and
+        make the same new loops; two maps that take a loop in common take the
+        same loops; and every statement that runs in a loop some map takes is
+        given a map, which takes every such loop it runs in and only those.
+        Two maps that take different loops to the same new ones fuse those
+        loops (see :meth:`fuse`). ``inputs`` are every loop the maps take, and
+        ``outputs`` the loops they make.
         """
         unknown = sorted(set(pieces) - set(draft.coords))
         if unknown:
@@ -2863,39 +2902,62 @@ class Schedule:
                 f"{text}: {', '.join(unknown)} {verb} of {self._term.name}"
             )
         first = next(iter(pieces))
+        first_ins = _dim_names(pieces[first], isl.dim_type.in_)
+        taken: dict[str, tuple[str, tuple[str, ...]]] = {}
         for stmt_id, piece in pieces.items():
             ins = _dim_names(piece, isl.dim_type.in_)
             outs = _dim_names(piece, isl.dim_type.out)
-            if (ins, outs) != (tuple(inputs), tuple(outputs)):
+            shared = next((taken[name] for name in ins if name in taken), None)
+            if outs != tuple(outputs) or (shared is not None and shared[1] != ins):
+                other, other_ins = shared if shared is not None else (first, first_ins)
+                other_outs = _dim_names(pieces[other], isl.dim_type.out)
+                why = (
+                    "the statements of one loop share their loops in the kernel, "
+                    "so their maps have to take the same loops to the same new "
+                    "ones"
+                    if set(ins) & set(other_ins)
+                    else "the statements the maps fuse share the loops the maps "
+                    "make, so their maps have to make the same new ones"
+                )
                 raise ValueError(
                     f"{text}: the map of {stmt_id} takes [{', '.join(ins)}] to "
-                    f"[{', '.join(outs)}] and the map of {first} takes "
-                    f"[{', '.join(inputs)}] to [{', '.join(outputs)}]; the "
-                    "statements of one loop share their loops in the kernel, so "
-                    "their maps have to take the same loops to the same new ones"
+                    f"[{', '.join(outs)}] and the map of {other} takes "
+                    f"[{', '.join(other_ins)}] to [{', '.join(other_outs)}]; {why}"
                 )
-        loops = ", ".join(inputs)
+            for name in ins:
+                taken.setdefault(name, (stmt_id, ins))
         for stmt_id, coords in draft.coords.items():
             inside = [name for name in inputs if name in coords]
+            piece = pieces.get(stmt_id)
+            ins = () if piece is None else _dim_names(piece, isl.dim_type.in_)
             if not inside:
-                if stmt_id in pieces:
+                if piece is not None:
                     raise ValueError(
-                        f"{text}: {stmt_id} does not run in {loops}, so its map "
-                        "has no loop of it to move"
+                        f"{text}: {stmt_id} does not run in {', '.join(ins)}, so "
+                        "its map has no loop of it to move"
                     )
                 continue
-            if len(inside) != len(inputs):
-                outside = [name for name in inputs if name not in coords]
+            if piece is None:
                 raise ValueError(
-                    f"{text}: {stmt_id} runs in {', '.join(inside)} but not in "
+                    f"{text}: {stmt_id} runs in {', '.join(inside)} and is given "
+                    "no map; with a map per statement, every statement in the "
+                    "loops the maps name needs one"
+                )
+            outside = [name for name in ins if name not in coords]
+            if outside:
+                mine = [name for name in ins if name in coords]
+                raise ValueError(
+                    f"{text}: {stmt_id} runs in {', '.join(mine)} but not in "
                     f"{', '.join(outside)}, and a map per statement moves "
                     "statements that run in every loop it names"
                 )
-            if stmt_id not in pieces:
+            extra = [name for name in inside if name not in ins]
+            if extra:
+                owner = taken[extra[0]][0]
                 raise ValueError(
-                    f"{text}: {stmt_id} runs in {loops} and is given no map; "
-                    "with a map per statement, every statement in the loops "
-                    "the maps name needs one"
+                    f"{text}: {stmt_id} runs in {', '.join(extra)} as well, which "
+                    f"the map of {owner} moves and its own does not; a "
+                    "statement's map moves every loop of the step it runs in"
                 )
 
     def _check_new_names(
@@ -3192,10 +3254,29 @@ class Schedule:
         text = f"affine({recorded})"
         if pieces is not None:
             pieces = self._statements_named(pieces)
+        return self._moved(recorded, pieces, text, ("affine", (recorded,), {}))
+
+    def _moved(
+        self,
+        recorded: Any,
+        pieces: Mapping[str, isl.Map] | None,
+        text: str,
+        recipe: tuple[str, tuple, dict],
+    ) -> Schedule:
+        """The step that moves loops along one map, or a map per statement.
+
+        :meth:`affine` and :meth:`fuse` are this step, the first with the
+        map it is given and the second with the maps it builds; ``recorded``
+        is the map as the step is written, and ``recipe`` how it is replayed.
+        """
         mapping = recorded if pieces is None else next(iter(pieces.values()))
         draft = self._draft()
         self._reindex_into(draft, mapping, text, pieces)
-        inputs = _dim_names(mapping, isl.dim_type.in_)
+        inputs = (
+            _dim_names(mapping, isl.dim_type.in_)
+            if pieces is None
+            else _taken_loops(pieces.values(), draft.order)
+        )
         outputs = _dim_names(mapping, isl.dim_type.out)
         tagged = sorted(name for name in inputs if name in draft.tags)
         if tagged:
@@ -3212,7 +3293,192 @@ class Schedule:
             first = positions[0]
             draft.order = [*kept[:first], *outputs, *kept[first:]]
         self._affine_into(draft, mapping, pieces)
-        return self._commit(draft, text, ("affine", (recorded,), {}))
+        return self._commit(draft, text, recipe)
+
+    def fuse(
+        self, producer: str, consumer: str, shift: int | Sequence[int] = 0
+    ) -> Schedule:
+        """Run the consumer's loops inside the producer's, ``shift`` steps behind.
+
+        ``producer`` and ``consumer`` name statements: a statement by its id
+        (``S0``, ``flux.S0``), or a call of a program by its label (``flux``,
+        ``step@2``), which names every statement of the call. The producer's
+        come first in the term. The step is :meth:`affine` with a map per
+        statement that this method builds, and it is checked as that is. The
+        producer's loops keep their names and their values; the consumer's
+        loops, as many as both have, outermost first, become the producer's,
+        ``shift`` steps behind:
+
+            { flux_S0[j] -> [j]; divergence_S0[i] -> [j] : j = i + 1 }
+
+        is ``fuse("flux", "divergence", shift=1)``. Every other statement in
+        those loops moves with the side whose loops it runs in. Inside the
+        fused loops the producer's statements come first, as they did in the
+        term, so a value the consumer reads in the step it is written is
+        already there. One shift per fused loop, or one number for a single
+        loop.
+
+        The loops have to be in sequence, not one inside the other, and each
+        side's a loopy domain of its own, which two calls of a program always
+        are; otherwise the casts are decided and the kernel is refused as
+        unbuildable, as :meth:`affine` refuses a map it cannot write. A fusion
+        that runs a dependence backwards is refused with the pair of
+        instances and the cell between them, as every cast is, and the
+        message names the least shift at which the fusion is accepted, when
+        there is one and a number per loop gives it.
+        """
+        return self._fuse(producer, consumer, shift, hint=True)
+
+    def _fuse(
+        self,
+        producer: str,
+        consumer: str,
+        shift: int | Sequence[int],
+        hint: bool,
+    ) -> Schedule:
+        """:meth:`fuse`, with ``hint`` saying whether a refusal names a shift."""
+        given = shift if isinstance(shift, int) else tuple(shift)
+        text = f"fuse({producer}, {consumer}" + (
+            f", shift={given!r})" if given else ")"
+        )
+        recipe = ("fuse", (producer, consumer), {"shift": given} if given else {})
+        first = self._fused_side(producer, text)
+        second = self._fused_side(consumer, text)
+        both = sorted(set(first) & set(second))
+        if both:
+            raise ValueError(
+                f"{text}: {', '.join(both)} is named on both sides of the fusion"
+            )
+        position = self._layout.index
+        if max(position(s) for s in first) > min(position(s) for s in second):
+            raise ValueError(
+                f"{text}: {consumer} comes before {producer} in "
+                f"{self._term.name}; the producer is the one that comes first"
+            )
+        mine = self._fused_loops(first, producer, text)
+        theirs = self._fused_loops(second, consumer, text)
+        depth = min(len(mine), len(theirs))
+        mine, theirs = mine[:depth], theirs[:depth]
+        shared = [name for name in mine if name in theirs]
+        if shared:
+            raise ValueError(
+                f"{text}: {producer} and {consumer} already run in "
+                f"{', '.join(shared)}"
+            )
+        shifts = _shifts(given, depth, text)
+        identity = _reindexing(mine, mine, [f"b{k} = a{k}" for k in range(depth)])
+        behind = _reindexing(
+            theirs,
+            mine,
+            [f"b{k} = a{k} + ({shifts[k]})" for k in range(depth)],
+        )
+        pieces: dict[str, isl.Map] = {}
+        for stmt_id, coords in self._layout.coords.items():
+            if set(coords) & set(mine):
+                pieces[stmt_id] = identity
+            elif set(coords) & set(theirs):
+                pieces[stmt_id] = behind
+        try:
+            return self._moved(identity, pieces, text, recipe)
+        except IllegalCast as exc:
+            if not hint or exc.fact is None or exc.fact.kind != "monotone":
+                raise
+            least = self._least_shift(first, second, mine, theirs)
+            if least is None or least == shifts:
+                raise
+            suggested: int | tuple[int, ...] = least[0] if depth == 1 else least
+            try:
+                self._fuse(producer, consumer, suggested, hint=False)
+            except (IllegalCast, ValueError):
+                raise exc from None
+            message = (
+                f"{exc}; fuse({producer!r}, {consumer!r}, shift={suggested!r}) "
+                "runs every dependence between them forward"
+            )
+            provenance = {**exc.fact.provenance, "reason": message}
+            fact = dataclasses.replace(exc.fact, provenance=provenance)
+            raise IllegalCast(message, witness=exc.witness, fact=fact) from None
+
+    def _fused_side(self, name: str, text: str) -> list[str]:
+        """The statements one side of :meth:`fuse` names, in term order."""
+        ids = self._layout.stmt_ids
+        if name in ids:
+            return [name]
+        called = [stmt_id for stmt_id in ids if stmt_id.startswith(f"{name}.")]
+        if called:
+            return called
+        spelled = [stmt_id for stmt_id in ids if _sanitize(stmt_id) == name]
+        if spelled:
+            return spelled
+        raise ValueError(
+            f"{text}: {name!r} names no statement of {self._term.name} and no "
+            f"call of it; its statements are {', '.join(ids)}"
+        )
+
+    def _fused_loops(
+        self, stmts: Sequence[str], name: str, text: str
+    ) -> tuple[str, ...]:
+        """The loops every statement of one side runs in, outermost first."""
+        nests = [
+            [loop for loop in self._order if loop in self._layout.coords[stmt_id]]
+            for stmt_id in stmts
+        ]
+        common: list[str] = []
+        for loops in zip(*nests, strict=False):
+            if any(loop != loops[0] for loop in loops):
+                break
+            common.append(loops[0])
+        if not common:
+            raise ValueError(
+                f"{text}: the statements {name} names, {', '.join(stmts)}, run in "
+                "no loop all of them share, and a fusion moves loops"
+            )
+        return tuple(common)
+
+    def _least_shift(
+        self,
+        first: Sequence[str],
+        second: Sequence[str],
+        mine: Sequence[str],
+        theirs: Sequence[str],
+    ) -> tuple[int, ...] | None:
+        """The least shift per loop that runs the dependences of two sides forward.
+
+        For each fused loop, the largest distance, the producer's value less
+        the consumer's, over the dependences from a statement of ``first`` to
+        one of ``second``, at the loops as they are now; ``None`` when one of
+        them is not a number for every value of the sizes. Each loop is asked
+        on its own, which is enough for a shift to be legal for these
+        dependences, and :meth:`fuse` asks the checker before it names one.
+        """
+        layout = self._layout
+        width = layout.width + 1
+        source = ", ".join(f"a{k}" for k in range(width))
+        target = ", ".join(f"b{k}" for k in range(width))
+        least: list[int] = []
+        for mine_loop, their_loop in zip(mine, theirs, strict=True):
+            best: int | None = None
+            for dep in self._deps:
+                if dep.source not in first or dep.sink not in second:
+                    continue
+                relation = dep.relation.apply_domain(self._reindex).apply_range(
+                    self._reindex
+                )
+                a = layout.coords[dep.source].index(mine_loop) + 1
+                b = layout.coords[dep.sink].index(their_loop) + 1
+                distance = isl.Map(
+                    f"{{ [{source}, {target}] -> [d] : d = a{a} - b{b} }}"
+                ).align_params(relation.get_space())
+                values = relation.wrap().flatten().apply(distance)
+                if values.is_empty():
+                    continue
+                for _piece, value in values.dim_max(0).get_pieces():
+                    if not value.is_cst():
+                        return None
+                    found = value.get_constant_val().to_python()
+                    best = found if best is None else max(best, found)
+            least.append(0 if best is None else int(best))
+        return tuple(least)
 
     def _statements_named(self, pieces: Mapping[str, isl.Map]) -> dict[str, isl.Map]:
         """The maps per statement of :meth:`affine`, by statement id.
@@ -3320,6 +3586,307 @@ class Schedule:
         out._examples = None if self._examples is None else dict(self._examples)
         return out
 
+    def substitute(self, array: str) -> Schedule:
+        """Compute an array the program makes where it is read, and store none of it.
+
+        ``f = Arr.zeros_like(u)`` in a program is a temporary of its kernel
+        (:mod:`loopy.compose`), stored in full between the call that writes
+        it and the calls that read it. When one statement writes it, one
+        value per cell at the cell its loop variables name (``f[j] = 0.5 *
+        u[j] * u[j]``), every read ``f[i + 1]`` can be that value instead,
+        computed where it is read: ``0.5 * u[i + 1] * u[i + 1]``. The kernel
+        is rewritten with loopy's own ``assignment_to_subst``, which turns the
+        statement into a substitution rule and drops it and the temporary,
+        once the statement that zeroes the array where the program made it
+        is dropped too.
+
+        That is a storage decision and not a reordering, and it is legal when
+        three things hold, each asked before anything is rewritten:
+
+        * the array is the program's own, which no caller sees, and one
+          statement writes it besides the zeros: a ``ValueError`` names what
+          stands in the way otherwise, as it does a statement that is not
+          pointwise (a cell other than its loop variables, each once, a sum,
+          a guard isl cannot state, a read of the array itself);
+        * every cell of the array any statement reads, that statement wrote
+          before the read, so no read sees the zeros: the ``definedness``
+          fact, decided by isl, or refuted with the cell, and the read, that
+          shows otherwise;
+        * nothing writes what the statement read between its run and a
+          read of what it stored, in the order the schedule has now: each
+          dependence of the statement's reads is carried over to the reads
+          that compute it again, and the order has to run every one of them
+          forward, which is the ``monotone`` fact, refuted with the pair of
+          instances and the cell between them, as every cast is.
+
+        The schedule keeps the statements it no longer runs, with no
+        dependence to or from them, so a later step names their loops as
+        before, and every later step is checked against the dependences of
+        the program as it now runs: the reads of the array are gone, and
+        the reads that replace them are there. Contracting an array to the
+        window of cells that are live at once is the other way of storing it
+        less, and is not done.
+        """
+        text = f"substitute({array!r})"
+        recipe = ("substitute", (array,), {})
+        term = self._term
+        if array not in dict(term.temporaries) or array in dict(term.checks):
+            what = (
+                f"a parameter of {term.name}, which its caller passes and sees"
+                if array in term.param_names
+                else f"the flag of a checked point of {term.name}"
+                if array in dict(term.checks)
+                else f"no array of {term.name}"
+            )
+            raise ValueError(
+                f"{text}: {array} is {what}, and only an array the program "
+                "makes with Arr.zeros_like is its own to store or not"
+            )
+        if array in self._substituted:
+            raise ValueError(f"{text}: {array} is substituted already")
+        zeros = f"{array}.zeros"
+        writers = [stmt for stmt in term.stmts if stmt.assignee.array == array]
+        producers = [stmt for stmt in writers if stmt.id != zeros]
+        if len(producers) != 1:
+            which = ", ".join(stmt.id for stmt in producers) or "no statement"
+            raise ValueError(
+                f"{text}: {array} is written by {which}, and a substitution "
+                "computes the value of the one statement that stores it"
+            )
+        (producer,) = producers
+        why = _not_pointwise(producer, array, term)
+        if why is not None:
+            raise ValueError(f"{text}: {why}")
+        readers = [
+            stmt
+            for stmt in term.stmts
+            if stmt not in writers
+            and any(
+                kind == "read" and name == array
+                for kind, name, _indices, _part in _accesses(stmt, term)
+            )
+        ]
+        if not readers:
+            raise ValueError(f"{text}: nothing in {term.name} reads {array}")
+
+        fact = self._definedness_fact(producer, readers, array, text, recipe)
+        if fact.status.value == "refuted":
+            raise IllegalCast(
+                fact.provenance["reason"],
+                witness=fact.provenance.get("witness"),
+                fact=fact,
+            )
+        gone = {stmt.id for stmt in writers}
+        staged = self._clone()
+        staged._deps, staged._within = self._carried_over(
+            producer, gone, readers, array
+        )
+        staged._deps_total = _union(dep.relation for dep in staged._deps)
+        staged._flow_note = (
+            f"those of {term.name} with {array} computed where it is read: the "
+            f"dependences of {', '.join(sorted(gone))} dropped, and those of "
+            f"{producer.id}'s reads carried over to the reads of {array}"
+        )
+        staged._substituted = (*self._substituted, array)
+        draft = staged._draft()
+        if draft.kernel is not None:
+            ids = self._lowering.insn_ids
+            removed = [ids[stmt.id] for stmt in writers if stmt.id == zeros]
+            kernel, reason = _substituted_kernel(draft.kernel, array, removed)
+            draft.kernel = kernel
+            if reason is not None:
+                draft.unbuildable = reason
+        return staged._commit(draft, text, recipe, leading=(fact,))
+
+    @property
+    def substituted(self) -> tuple[str, ...]:
+        """The arrays :meth:`substitute` computes where they are read, in order."""
+        return self._substituted
+
+    def _definedness_fact(
+        self,
+        producer: Stmt,
+        readers: Sequence[Stmt],
+        array: str,
+        text: str,
+        recipe: tuple[str, tuple, dict],
+    ) -> Any:
+        """The ``definedness`` fact of :meth:`substitute`, decided or refuted.
+
+        Two questions about the reads of ``array``: are their cells cells
+        ``producer`` writes (:func:`loopty.flow.definedness`), and does any
+        read come before the write of its cell, a dependence from the read
+        to the producer, which would read the zeros. The first refutation is
+        the fact's.
+        """
+        from loopty.flow import definedness
+
+        statement = (
+            f"every cell of {array} that {self._term.name} reads, {producer.id} "
+            "has stored by the time it is read"
+        )
+        verdict = definedness(self._term, array, [producer], readers)
+        message = ""
+        witness: Any = None
+        detail = "every read of the array is of a cell the statement stores, after it"
+        if verdict.ok is not True:
+            witness = verdict.witness
+            detail = verdict.detail
+            message = (
+                f"{text} illegal: {verdict.detail}, so the read would see the "
+                "zeros the array was made with, and computing it again would not"
+                if verdict.ok is False
+                else f"{text} illegal: {verdict.detail}"
+            )
+        else:
+            early = next(
+                (
+                    dep
+                    for dep in self._deps
+                    if dep.kind == "war"
+                    and dep.array == array
+                    and dep.sink == producer.id
+                ),
+                None,
+            )
+            if early is not None:
+                witness = self._pair_in(early.relation)
+                (reader, coords), (_, stored), params = witness
+                cell = _cell_text(early.source_indices, coords, params)
+                detail = f"{reader} reads {array} before {producer.id} stores it"
+                message = (
+                    f"{text} illegal: instance {_instance_text(reader, coords)} "
+                    f"reads {array}[{cell}] before "
+                    f"{_instance_text(producer.id, stored)} stores it"
+                    f"{_sizes_text(params, self._sizes)}, so the read sees the "
+                    "zeros the array was made with, and computing it again would not"
+                )
+        return self._fact(
+            "definedness",
+            statement,
+            status="refuted" if message else "decided",
+            witness=witness,
+            detail=detail,
+            step=recipe,
+            reason=message,
+            about=array,
+        )
+
+    def _carried_over(
+        self, producer: Stmt, gone: set[str], readers: Sequence[Stmt], array: str
+    ) -> tuple[tuple[_Dep, ...], tuple[_Dep, ...]]:
+        """The dependences of the program once ``array`` is computed where it is read.
+
+        Those of the statements that no longer run (``gone``: the producer and
+        the zeros) are dropped, and the reads of ``array`` are reads of what
+        the producer read, at the cells the producer read at the instance
+        that stored the cell: ``f[i + 1]`` read for ``f[j] = 0.5 * u[j] *
+        u[j]`` reads ``u[i + 1]``. Each of those reads has a dependence with
+        every write of its cell, in the direction the producer's read had:
+        after a write that came before the producer's instance (``raw``), and
+        before one that came after it (``war``), since the value read has to
+        be the one the producer read. A statement whose sum reads such a cell
+        that its own instruction writes has the pair :func:`_within_instances`
+        lists, as it would for a read written out.
+        """
+        term = self._term
+        layout = self._origin_layout
+        instances = self._origin
+        params = set(self._params)
+        identity = isl.Map.identity(instances.get_space().map_from_set())
+        kept = [
+            dep for dep in self._deps if dep.source not in gone and dep.sink not in gone
+        ]
+        within = [dep for dep in self._within if dep.source not in gone]
+        stored = producer.assignee.indices
+        reads = [
+            (name, indices, part)
+            for kind, name, indices, part in _accesses(producer, term)
+            if kind == "read"
+        ]
+        writes = [
+            (stmt, name, indices, part)
+            for stmt in term.stmts
+            if stmt.id not in gone
+            for kind, name, indices, part in _accesses(stmt, term)
+            if kind == "write"
+        ]
+        carried: list[_Dep] = []
+        for reader in readers:
+            for kind, name, at, part in _accesses(reader, term):
+                if kind != "read" or name != array:
+                    continue
+                renaming = {
+                    index.name: _plain(value)
+                    for index, value in zip(stored, at, strict=True)
+                }
+                to_producer = (
+                    _same_cell(reader, producer, at, stored, layout, params)
+                    .intersect_domain(instances)
+                    .intersect_range(instances)
+                )
+                later = to_producer.apply_range(self._before)
+                earlier = to_producer.apply_range(self._before.reverse())
+                for read, indices, _producer_part in reads:
+                    moved = tuple(
+                        substitute(_plain(index), renaming) for index in indices
+                    )
+                    for writer, written, cells, writer_part in writes:
+                        if written != read or len(cells) != len(moved):
+                            continue
+                        same = (
+                            _same_cell(reader, writer, moved, cells, layout, params)
+                            .intersect_domain(instances)
+                            .intersect_range(instances)
+                        )
+                        after = same.intersect(later).subtract(identity).coalesce()
+                        if not after.is_empty():
+                            carried.append(
+                                _Dep(
+                                    kind="war",
+                                    array=read,
+                                    source=reader.id,
+                                    sink=writer.id,
+                                    source_indices=moved,
+                                    sink_indices=cells,
+                                    relation=after,
+                                    source_part=part,
+                                    sink_part=writer_part,
+                                )
+                            )
+                        before = same.intersect(earlier).subtract(identity).coalesce()
+                        if not before.is_empty():
+                            carried.append(
+                                _Dep(
+                                    kind="raw",
+                                    array=read,
+                                    source=writer.id,
+                                    sink=reader.id,
+                                    source_indices=cells,
+                                    sink_indices=moved,
+                                    relation=before.reverse(),
+                                    source_part=writer_part,
+                                    sink_part=part,
+                                )
+                            )
+                        if writer is reader and part == "sum" and writer_part == "":
+                            mine = same.intersect(identity)
+                            if not mine.is_empty():
+                                within.append(
+                                    _Dep(
+                                        kind="war",
+                                        array=read,
+                                        source=reader.id,
+                                        sink=reader.id,
+                                        source_indices=cells,
+                                        sink_indices=cells,
+                                        relation=mine.coalesce(),
+                                        source_part="sum",
+                                        sink_part="",
+                                    )
+                                )
+        return (*kept, *carried), tuple(within)
+
     def realize(self, var: str, tree: bool = True) -> Schedule:
         """Realize an accumulation, optionally as a reduction tree.
 
@@ -3387,19 +3954,22 @@ class Schedule:
         draft: _Draft,
         text: str,
         recipe: tuple[str, tuple, dict],
+        leading: Sequence[Any] = (),
     ) -> Schedule:
         """Check one transformation and return the schedule it produces.
 
         ``recipe`` is how the transformation would be written in Python, as
         ``(method, args, kwargs)``, kept so that :meth:`retarget` can replay it,
         and so that the facts about this step name it (see :attr:`key`).
+        ``leading`` are facts the step decided before it came here, which go
+        before the ones decided here (see :meth:`substitute`).
         """
         layout = _Layout(
             stmt_ids=self._layout.stmt_ids, coords=dict(draft.coords)
         )
         step = _step_map(self._layout, layout, draft.mappings)
 
-        facts: list[Any] = []
+        facts: list[Any] = list(leading)
 
         # Defined on every instance, and one for one there: a map that misses
         # an instance drops it from the program as surely as one that merges
@@ -3583,11 +4153,19 @@ class Schedule:
         lex = isl.Map.lex_lt(timed.get_space().domain())
         violating_times = timed.subtract(lex)
         inverse = schedule.reverse()
-        bad = self._at_hint(
+        return self._pair_in(
             violating_times.apply_domain(inverse)
             .apply_range(inverse)
             .intersect(relation)
         )
+
+    def _pair_in(self, relation: isl.Map) -> tuple:
+        """One pair of instances ``relation`` holds, named, and its sizes.
+
+        Read off at the size hint where the relation has a pair there, as a
+        witness is (see :meth:`_witness`), and at isl's choice otherwise.
+        """
+        bad = self._at_hint(relation)
         n_params = bad.dim(isl.dim_type.param)
         n_in = bad.dim(isl.dim_type.in_)
         wrapped = bad.wrap()
@@ -4046,6 +4624,112 @@ def _element_exactness(term: Term, name: str) -> str:
     return "approx"
 
 
+def _not_pointwise(stmt: Stmt, array: str, term: Term) -> str | None:
+    """Why :meth:`Schedule.substitute` cannot compute ``stmt`` where it is read.
+
+    ``None`` when it can: an assignment of one cell per instance, at its own
+    loop variables, each once (``f[j]``, or ``f[k, j]`` in loops ``j`` and
+    ``k``), of an expression with no sum in it, under no guard isl cannot
+    state, and reading nothing of ``array``. Then each read ``f[e]`` is the
+    expression with the loop variables replaced by ``e``, which is what
+    loopy's ``assignment_to_subst`` writes.
+    """
+    indices = stmt.assignee.indices
+    names = [
+        index.name if isinstance(index, prim.Variable) else None for index in indices
+    ]
+    if stmt.kind != "assign":
+        return (
+            f"{stmt.id} accumulates into {array}, and a substitution computes a "
+            "value stored once"
+        )
+    if None in names or len(set(names)) != len(names) or set(names) != set(stmt.inames):
+        shown = ", ".join(str(index) for index in indices)
+        return (
+            f"{stmt.id} stores {array}[{shown}], and a substitution computes a "
+            "statement that stores one cell per instance, at its own loop "
+            f"variables ({', '.join(stmt.inames)}), each once"
+        )
+    if reductions_of(stmt.expr):
+        return (
+            f"{stmt.id} stores a sum, which a substitution would compute again "
+            "at every read of it; only a pointwise statement is substituted"
+        )
+    if stmt.unnarrowed:
+        conjuncts = ", ".join(conjunct for conjunct, _why in stmt.unnarrowed)
+        return (
+            f"{stmt.id} runs under a guard isl cannot state ({conjuncts}), so "
+            "which cells it stores is not known"
+        )
+    if any(
+        kind == "read" and name == array
+        for kind, name, _indices, _part in _accesses(stmt, term)
+    ):
+        return f"{stmt.id} reads {array} as well as storing it"
+    return None
+
+
+def _substituted_kernel(
+    kernel: Any, array: str, removed: Sequence[str]
+) -> tuple[Any, str | None]:
+    """``kernel`` with ``array`` computed where it is read, or why not.
+
+    The instructions ``removed`` go first: they zero the array where the
+    program made it, and loopy's ``assignment_to_subst`` takes an array
+    whose every read has one writer before it. That writer becomes a
+    substitution rule, and loopy drops it, the temporary and the loops it
+    leaves empty once no read is left; the loops the zeros leave empty go
+    too, which loopy would otherwise warn of. Returns the kernel, or ``None``
+    and loopy's refusal in words.
+    """
+    try:
+        if removed:
+            entry = kernel.default_entrypoint
+            loops = {
+                name
+                for insn in entry.instructions
+                if insn.id in removed
+                for name in insn.within_inames
+            }
+            kernel = lp.remove_instructions(kernel, set(removed))
+            kernel = lp.remove_unused_inames(kernel, loops)
+        kernel = lp.assignment_to_subst(kernel, array)
+    except Exception as exc:  # noqa: BLE001 - loopy's refusals are of many kinds
+        return None, (
+            f"loopy could not compute {array} where it is read: "
+            f"{type(exc).__name__}: {exc}"
+        )
+    return kernel, None
+
+
+def _shifts(shift: int | tuple[int, ...], depth: int, text: str) -> tuple[int, ...]:
+    """The shift of each loop :meth:`Schedule.fuse` fuses, as it was given.
+
+    A number shifts the one loop of a fusion of one loop, and ``0`` every
+    loop of any fusion; otherwise there is one number per loop, outermost
+    first.
+    """
+    if isinstance(shift, bool):
+        raise TypeError(f"{text}: a shift is a whole number, not {shift!r}")
+    if isinstance(shift, int):
+        if depth == 1 or shift == 0:
+            return (shift,) * depth
+        raise ValueError(
+            f"{text}: the fusion fuses {depth} loops, so it takes one shift per "
+            f"loop, outermost first, such as shift=({shift}, 0)"
+        )
+    values = tuple(shift)
+    if len(values) != depth or not all(
+        isinstance(value, int) and not isinstance(value, bool) for value in values
+    ):
+        raise ValueError(
+            f"{text}: the fusion fuses {depth} loop{'s' if depth > 1 else ''}, "
+            f"so it takes {depth} whole number{'s' if depth > 1 else ''} as its "
+            f"shift, outermost first, not {shift!r}"
+        )
+    return values
+
+
 def _check_factor(factor: int) -> None:
     """A split or tile factor has to be a positive integer."""
     if factor < 1:
@@ -4094,6 +4778,13 @@ def _affine_kernel(
     have one, and so does the instruction that computes a ragged row's length
     for the fiber of those instructions (see :func:`_with_bound_maps`).
 
+    Maps per statement that take different loops to the same new ones fuse
+    those loops (see :meth:`Schedule.fuse`), and each statement's loops are
+    then a domain of their own: two loops in sequence. The new loops get one
+    domain all the same, the union of every statement's image as above, in
+    place of the domains the maps take, and a domain nested in one of those
+    moves along the map of the statements in it (see :func:`_fused_plan`).
+
     The map is the same object the checker reasons about, so the two cannot
     drift apart. What cannot be written this way comes back as the reason, and
     the kernel unchanged: loops that no one domain defines, an image that is
@@ -4101,7 +4792,8 @@ def _affine_kernel(
     the mapped loops and not the others, and, with maps per statement, a
     nested domain whose instructions move by different maps, a row's length
     that bounds fibers whose statements do, or an instruction in the loops
-    that is no statement's and bounds none of their loops.
+    that is no statement's and bounds none of their loops; and, for maps
+    that fuse, loops that share a domain with a loop no map takes.
     """
     from loopy.match import Id, parse_stack_match
     from loopy.symbolic import (
@@ -4110,64 +4802,20 @@ def _affine_kernel(
     )
     from pymbolic.mapper.substitutor import make_subst_func
 
-    inputs = _dim_names(mapping, isl.dim_type.in_)
-    outputs = _dim_names(mapping, isl.dim_type.out)
-    mapped = set(inputs)
-    loops = ", ".join(inputs)
     entry = kernel.default_entrypoint
-
-    homes = [
-        k
-        for k, domain in enumerate(entry.domains)
-        if mapped & set(domain.get_var_names(isl.dim_type.set))
-    ]
-    if len(homes) != 1 or not mapped <= set(
-        entry.domains[homes[0]].get_var_names(isl.dim_type.set)
-    ):
-        return kernel, (
-            f"the loops {loops} are not all defined by one loopy domain, and "
-            "the kernel is rewritten along a map only in the domain that "
-            "defines every loop the map replaces"
-        )
-    home = homes[0]
-    before = entry.domains[home]
-    if pieces is not None:
-        first = next(iter(pieces.values()))
-        if all(piece.is_equal(first) for piece in pieces.values()):
-            mapping, pieces = first, None
-
-    insns = []
-    for insn in entry.instructions:
-        inside = mapped & insn.within_inames
-        if inside and inside != mapped:
-            return kernel, (
-                f"instruction {insn.id} runs in {', '.join(sorted(inside))} "
-                f"and not in all of {loops}"
-            )
-        if inside:
-            insn = insn.copy(
-                within_inames=(insn.within_inames - mapped) | set(outputs)
-            )
-        insns.append(insn)
-
+    taken = (
+        set()
+        if pieces is None
+        else {_dim_names(piece, isl.dim_type.in_) for piece in pieces.values()}
+    )
     try:
-        if pieces is not None:
-            pieces = _with_bound_maps(entry, mapped, pieces)
-        domains = list(entry.domains)
-        predicates: dict[str, Any] = {}
-        if pieces is None:
-            domains[home] = _image(before, mapping)
-            substitutions = {None: _substitution(mapping, before)}
+        if len(taken) > 1:
+            assert pieces is not None
+            domains, insns, substitutions, predicates = _fused_plan(entry, pieces)
         else:
-            images = {key: _image_set(before, piece) for key, piece in pieces.items()}
-            domains[home], predicates = _shared_image(images, before)
-            substitutions = {
-                key: _substitution(piece, before) for key, piece in pieces.items()
-            }
-        for k, domain in enumerate(entry.domains):
-            if k != home and mapped & set(domain.get_var_names(isl.dim_type.param)):
-                moved = mapping if pieces is None else _governing(entry, domain, pieces)
-                domains[k] = _image_of_params(domain, moved)
+            domains, insns, substitutions, predicates = _shared_plan(
+                entry, mapping, pieces
+            )
     except _Inexpressible as exc:
         return kernel, str(exc)
     except isl.Error as exc:
@@ -4203,6 +4851,173 @@ def _affine_kernel(
             ]
         )
     return kernel.with_kernel(entry), None
+
+
+#: What a plan of :func:`_affine_kernel` gives: the new domains, the
+#: instructions in their new loops, each instruction's substitution of its old
+#: loops (``None`` for every instruction), and the predicate of each that runs
+#: at fewer points than the loops it shares.
+_Plan = tuple[list[Any], list[Any], dict[Any, dict[str, Any]], dict[str, Any]]
+
+
+def _shared_plan(
+    entry: Any, mapping: isl.Map, pieces: Mapping[str, isl.Map] | None
+) -> _Plan:
+    """The rewrite along one map, or maps per statement over the same loops.
+
+    One domain defines every loop the map takes, and the new loops replace
+    them there; see :func:`_affine_kernel`. Raises :class:`_Inexpressible`
+    with what cannot be written.
+    """
+    inputs = _dim_names(mapping, isl.dim_type.in_)
+    outputs = _dim_names(mapping, isl.dim_type.out)
+    mapped = set(inputs)
+    loops = ", ".join(inputs)
+
+    homes = [
+        k
+        for k, domain in enumerate(entry.domains)
+        if mapped & set(domain.get_var_names(isl.dim_type.set))
+    ]
+    if len(homes) != 1 or not mapped <= set(
+        entry.domains[homes[0]].get_var_names(isl.dim_type.set)
+    ):
+        raise _Inexpressible(
+            f"the loops {loops} are not all defined by one loopy domain, and "
+            "the kernel is rewritten along a map only in the domain that "
+            "defines every loop the map replaces"
+        )
+    home = homes[0]
+    before = entry.domains[home]
+    if pieces is not None:
+        first = next(iter(pieces.values()))
+        if all(piece.is_equal(first) for piece in pieces.values()):
+            mapping, pieces = first, None
+
+    insns = []
+    for insn in entry.instructions:
+        inside = mapped & insn.within_inames
+        if inside and inside != mapped:
+            raise _Inexpressible(
+                f"instruction {insn.id} runs in {', '.join(sorted(inside))} "
+                f"and not in all of {loops}"
+            )
+        if inside:
+            insn = insn.copy(
+                within_inames=(insn.within_inames - mapped) | set(outputs)
+            )
+        insns.append(insn)
+
+    if pieces is not None:
+        pieces = _with_bound_maps(entry, mapped, pieces)
+    domains = list(entry.domains)
+    predicates: dict[str, Any] = {}
+    substitutions: dict[Any, dict[str, Any]]
+    if pieces is None:
+        domains[home] = _image(before, mapping)
+        substitutions = {None: _substitution(mapping, before)}
+    else:
+        images = {key: _image_set(before, piece) for key, piece in pieces.items()}
+        domains[home], predicates = _shared_image(images, before)
+        substitutions = {
+            key: _substitution(piece, before) for key, piece in pieces.items()
+        }
+    for k, domain in enumerate(entry.domains):
+        if k != home and mapped & set(domain.get_var_names(isl.dim_type.param)):
+            moved = mapping if pieces is None else _governing(entry, domain, pieces)
+            domains[k] = _image_of_params(domain, moved)
+    return domains, insns, substitutions, predicates
+
+
+def _fused_plan(entry: Any, pieces: Mapping[str, isl.Map]) -> _Plan:
+    """The rewrite along maps per statement that fuse loops of two domains.
+
+    The maps take different loops to the same new ones, and the statements
+    of each take loops that one domain defines and no other loop: two loops
+    the lowering wrote one after the other, ``{ [j] }`` and ``{ [i] }``.
+    Each such domain goes, and the new loops get one domain in place of the
+    first of them, the union of every statement's image under its own map,
+    or its polyhedral hull, with each statement predicated on its own image
+    and given its own inverse, as for maps per statement over one domain
+    (see :func:`_shared_image`). A domain nested in the loops a map takes
+    moves along that map; the list is then nested again, since a domain
+    nested in the second loop now hangs from the first
+    (:func:`loopty.lower._nest_domains`). Raises :class:`_Inexpressible`
+    with what cannot be written.
+    """
+    from loopty.lower import _nest_domains
+
+    outputs = _dim_names(next(iter(pieces.values())), isl.dim_type.out)
+    groups: dict[tuple[str, ...], list[str]] = {}
+    for key, piece in pieces.items():
+        groups.setdefault(_dim_names(piece, isl.dim_type.in_), []).append(key)
+    mapped = {name for inputs in groups for name in inputs}
+    homes: dict[tuple[str, ...], int] = {}
+    for inputs in groups:
+        defining = [
+            k
+            for k, domain in enumerate(entry.domains)
+            if set(inputs) & set(domain.get_var_names(isl.dim_type.set))
+        ]
+        names = (
+            set(entry.domains[defining[0]].get_var_names(isl.dim_type.set))
+            if len(defining) == 1
+            else set()
+        )
+        if names != set(inputs):
+            raise _Inexpressible(
+                f"the loops {', '.join(inputs)} are not a loopy domain of their "
+                "own, and maps that fuse loops rewrite the kernel only where "
+                "each statement's loops are one domain with no other loop in it"
+            )
+        homes[inputs] = defining[0]
+
+    pieces = _with_bound_maps(entry, mapped, pieces)
+    home_of = {
+        key: homes[_dim_names(piece, isl.dim_type.in_)] for key, piece in pieces.items()
+    }
+    insns = []
+    for insn in entry.instructions:
+        inside = mapped & insn.within_inames
+        if not inside:
+            insns.append(insn)
+            continue
+        piece = pieces.get(insn.id)
+        if piece is None or inside != set(_dim_names(piece, isl.dim_type.in_)):
+            raise _Inexpressible(
+                f"instruction {insn.id} runs in {', '.join(sorted(inside))}, "
+                "which no one map of the step takes"
+            )
+        insns.append(
+            insn.copy(within_inames=(insn.within_inames - inside) | set(outputs))
+        )
+
+    images = {
+        key: _image_set(entry.domains[home_of[key]], piece)
+        for key, piece in pieces.items()
+    }
+    common = next(iter(images.values()))
+    for image in images.values():
+        common = common.align_params(image.get_space())
+    images = {
+        key: image.align_params(common.get_space()) for key, image in images.items()
+    }
+    first = min(homes.values())
+    shared, predicates = _shared_image(images, entry.domains[first])
+    substitutions: dict[Any, dict[str, Any]] = {
+        key: _substitution(piece, entry.domains[home_of[key]])
+        for key, piece in pieces.items()
+    }
+    domains: list[Any] = []
+    for k, domain in enumerate(entry.domains):
+        if k in homes.values():
+            if k == first:
+                domains.append(shared)
+            continue
+        if mapped & set(domain.get_var_names(isl.dim_type.param)):
+            domain = _image_of_params(domain, _governing(entry, domain, pieces))
+        domains.append(domain)
+    return _nest_domains(domains), insns, substitutions, predicates
 
 
 def _first(own: Any, others: frozenset[Any]) -> frozenset[Any]:

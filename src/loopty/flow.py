@@ -1128,6 +1128,145 @@ def footprints(term: Term) -> tuple[Footprint, ...]:
 # }}}
 
 
+# {{{ definedness
+
+
+@dataclass(frozen=True)
+class Definedness:
+    """Whether the cells some statements read of an array are cells others store.
+
+    ``ok`` is ``True`` when isl shows that every cell read is a cell
+    stored, and ``False`` when it shows one that is not: ``witness`` is that
+    cell, ``parameters`` the sizes it is one at, and ``reader`` the
+    statement that reads it. ``None`` means it cannot tell: a read whose
+    index is not affine reaches cells nobody can list, and a write whose
+    index is not affine, or under a guard isl cannot state, stores cells
+    nobody can list either, so none of them counts as stored. ``detail``
+    says which, in words, or names the cell. ``read`` and ``stored`` are the
+    two sets of cells when ``ok`` is ``True``, the question isl answered.
+    """
+
+    ok: bool | None
+    witness: tuple[int, ...] | None = None
+    parameters: tuple[tuple[str, int], ...] = ()
+    reader: str = ""
+    detail: str = ""
+    read: Any = None
+    stored: Any = None
+
+
+def definedness(
+    term: Term, array: str, writers: Sequence[Stmt], readers: Sequence[Stmt]
+) -> Definedness:
+    """Are the cells of ``array`` that ``readers`` read cells ``writers`` store?
+
+    The question a program's intermediate is asked: its consumer reads only
+    cells its producer wrote, and the zeros it was made with reach no read
+    (see :func:`loopty.typing.definedness_facts`, and
+    :meth:`loopty.schedule.Schedule.substitute`, which asks it too). It is
+    an isl subset question between two sets of cells, the cells every read
+    reaches, over the domain the read is made in (a guard's over the loops
+    before the guard narrows them, a sum's over the sum's), and the cells
+    every write stores; a read is taken to reach only cells the array has,
+    which the in-bounds facts are about. A read is over-approximated when
+    its index is not affine, which can only make the answer ``None``; a
+    write that cannot be listed counts for nothing, which can only make it
+    ``None`` too, so ``True`` and ``False`` are both exact.
+    """
+    from loopty.domain import dimension_names
+
+    arrtype = term.array_types[array]
+    names = dimension_names(len(arrtype.axes), _names_in(arrtype.axes))
+    universe = cell_set(arrtype, names=names)
+    unknown: list[str] = []
+
+    def cells(stmt: Stmt, kinds: tuple[str, ...], writing: bool) -> isl.Set | None:
+        out: isl.Set | None = None
+        for name, indices, kind, inames, domain in statement_accesses(stmt, term):
+            if name != array or kind not in kinds:
+                continue
+            try:
+                for index in indices:
+                    expr_text(index, None, None)
+            except NonAffine:
+                shown = ", ".join(str(index) for index in indices)
+                unknown.append(
+                    f"{stmt.id} {'stores' if writing else 'reads'} {array}[{shown}], "
+                    "whose index is not affine"
+                )
+                if writing:
+                    continue
+            if writing and stmt.unnarrowed:
+                conjuncts = ", ".join(conjunct for conjunct, _ in stmt.unnarrowed)
+                unknown.append(
+                    f"{stmt.id} stores {array} under a guard isl cannot state "
+                    f"({conjuncts})"
+                )
+                continue
+            reached = access_relation(inames, domain, indices).range()
+            for k, dim in enumerate(names):
+                reached = reached.set_dim_name(isl.dim_type.set, k, dim)
+            reached = _align(reached, universe.get_space())
+            reached = reached.intersect(_align(universe, reached.get_space()))
+            out = reached if out is None else _align(out, reached.get_space()).union(
+                _align(reached, out.get_space())
+            )
+        return out
+
+    stored = universe.subtract(universe)
+    for stmt in writers:
+        found = cells(stmt, ("write", "acc"), writing=True)
+        if found is not None:
+            stored = _align(stored, found.get_space()).union(
+                _align(found, stored.get_space())
+            )
+    who = " and ".join(stmt.id for stmt in writers)
+    read = universe.subtract(universe)
+    for stmt in readers:
+        found = cells(stmt, ("read", "acc"), writing=False)
+        if found is None:
+            continue
+        read = _align(read, found.get_space()).union(_align(found, read.get_space()))
+        outside = found.subtract(_align(stored, found.get_space()))
+        if outside.is_empty():
+            continue
+        if unknown:
+            return Definedness(None, detail="; ".join(dict.fromkeys(unknown)))
+        point = outside.sample_point()
+        witness = tuple(
+            point.get_coordinate_val(isl.dim_type.set, k).to_python()
+            for k in range(outside.dim(isl.dim_type.set))
+        )
+        parameters = tuple(
+            (
+                outside.get_dim_name(isl.dim_type.param, k),
+                point.get_coordinate_val(isl.dim_type.param, k).to_python(),
+            )
+            for k in range(outside.dim(isl.dim_type.param))
+        )
+        at = ", ".join(f"{name}={value}" for name, value in parameters)
+        cell = ", ".join(str(value) for value in witness)
+        return Definedness(
+            False,
+            witness=witness,
+            parameters=parameters,
+            reader=stmt.id,
+            detail=(
+                f"{stmt.id} reads {array}[{cell}], which {who} does not store"
+                + (f" (at {at})" if at else "")
+            ),
+        )
+    return Definedness(
+        True,
+        detail=f"every cell of {array} read is one {who} stores",
+        read=read.coalesce(),
+        stored=_align(stored, read.get_space()).coalesce(),
+    )
+
+
+# }}}
+
+
 # {{{ order and dependences
 
 
