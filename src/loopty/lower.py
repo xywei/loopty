@@ -66,6 +66,7 @@ from loopy.symbolic import Reduction as LoopyReduction
 from loopy.symbolic import set_to_cond_expr
 from pymbolic.mapper import Mapper
 
+from loopty.contract import compiled_storage
 from loopty.domain import STORAGES, Union
 from loopty.flow import (
     access_relation,
@@ -172,33 +173,15 @@ def numpy_dtype(sort: Any) -> np.dtype:
     column-index array, is stored as an integer like any other index. A numpy
     dtype or scalar type is itself, and Python's ``float`` and ``complex`` are
     double precision, which is how :func:`loopty.contract.native_storage` has
-    them stored natively too.
+    them stored natively too. The rule is
+    :func:`loopty.contract.compiled_storage`, which the contract reads too:
+    a value of an integral sort outside the 32-bit range is refused there
+    (:data:`loopty.contract.INTEGRAL_RANGE`).
     """
-    if isinstance(sort, np.dtype):
-        return sort
-    if isinstance(sort, type) and issubclass(sort, np.generic):
-        return np.dtype(sort)
-    if sort is float:
-        return np.dtype(np.float64)
-    if sort is complex:
-        return np.dtype(np.complex128)
-    if sort is int:
-        return np.dtype(np.int32)
-    if sort is bool:
-        return np.dtype(np.int8)
-    base = getattr(sort, "base", None)  # a lanky refinement T & prop
-    if base is not None and base is not sort:
-        return numpy_dtype(base)
-    name = getattr(sort, "name", None)
-    if name in ("Real",):
-        return np.dtype(np.float64)
-    if name in ("Nat", "Int"):
-        return np.dtype(np.int32)
-    if name in ("Bool",):
-        return np.dtype(np.int8)
-    if hasattr(sort, "bound") or hasattr(sort, "size"):  # an index type Fin[m]
-        return np.dtype(np.int32)
-    raise LoweringError(f"no numpy dtype for {sort!r}")
+    dtype = compiled_storage(sort)
+    if dtype is None:
+        raise LoweringError(f"no numpy dtype for {sort!r}")
+    return dtype
 
 
 def target_for(target: str = "c") -> Any:

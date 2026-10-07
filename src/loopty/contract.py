@@ -35,7 +35,10 @@ which is a property of the data and of nothing else. :func:`element_types`
 enforces it on the way in, so the ledger's ``decided by type`` row is backed by
 a check rather than by a hope. Being a point is two questions and not one: a
 range test is a pair of comparisons, and ``nan`` fails both of them, so
-integrality (:func:`_not_an_integer`) is asked first and separately.
+integrality (:func:`_not_an_integer`) is asked first and separately. Being a
+point of an integral sort is also being inside :data:`INTEGRAL_RANGE`, the
+32-bit integers the compiled run stores one in, since the native run holds it
+in 64 bits and would compute with a value the compiled run narrows.
 
 *An array over a domain is over that domain.* ``L: Arr[Where[i: Fin[n], j:
 Fin[n], j < i], Real]`` has its in-bounds obligations decided over the exact
@@ -90,8 +93,11 @@ from loopty.term import ArrType
 
 __all__ = [
     "INT64_RANGE",
+    "INTEGRAL_RANGE",
+    "INTEGRAL_STORAGE",
     "axis_extents",
     "check_arguments",
+    "compiled_storage",
     "counts_family",
     "disjoint_arguments",
     "domain_arguments",
@@ -433,11 +439,66 @@ def sizes_not_negative(
             )
 
 
+#: The dtype the lowering stores an integral sort in, ``Fin[m]``, ``Nat`` and
+#: ``Int`` alike: an index into an array is 32 bits wide on every target loopy
+#: generates for. See :func:`compiled_storage`.
+INTEGRAL_STORAGE = np.dtype(np.int32)
+
+#: The half-open range of the values an integral sort holds compiled, those of
+#: :data:`INTEGRAL_STORAGE`. The native run holds such a value in 64 bits
+#: (:func:`native_storage`), so one outside this range would run natively as
+#: it is and be narrowed by the compiled run's conversion: ``2**32 + 5`` is
+#: ``5`` compiled. The contract refuses it (:func:`element_types`,
+#: :func:`scalar_parameters`).
+INTEGRAL_RANGE = (
+    int(np.iinfo(INTEGRAL_STORAGE).min),
+    int(np.iinfo(INTEGRAL_STORAGE).max) + 1,
+)
+
+
+def compiled_storage(sort: Any) -> np.dtype | None:
+    """The dtype the compiled run stores ``sort`` in, or ``None`` for no sort.
+
+    ``Real`` is double precision, ``Nat``, ``Int`` and an index type such as
+    ``Fin[m]`` are :data:`INTEGRAL_STORAGE`, ``Bool`` is a byte (OpenCL takes
+    no ``bool`` argument), and a numpy dtype or scalar type is itself.
+    Python's ``float`` and ``complex`` are double precision and its ``int``
+    is integral. :func:`loopty.lower.numpy_dtype` is this, refusing a sort
+    with none; it lives here because the contract and
+    :mod:`loopty.promotion` ask it without importing loopy.
+    """
+    if isinstance(sort, np.dtype):
+        return sort
+    if isinstance(sort, type) and issubclass(sort, np.generic):
+        return np.dtype(sort)
+    if sort is float:
+        return np.dtype(np.float64)
+    if sort is complex:
+        return np.dtype(np.complex128)
+    if sort is int:
+        return INTEGRAL_STORAGE
+    if sort is bool:
+        return np.dtype(np.int8)
+    base = getattr(sort, "base", None)  # a lanky refinement T & prop
+    if base is not None and base is not sort:
+        return compiled_storage(base)
+    name = getattr(sort, "name", None)
+    if name == "Real":
+        return np.dtype(np.float64)
+    if name in ("Nat", "Int"):
+        return INTEGRAL_STORAGE
+    if name == "Bool":
+        return np.dtype(np.int8)
+    if hasattr(sort, "bound") or hasattr(sort, "size"):  # an index type Fin[m]
+        return INTEGRAL_STORAGE
+    return None
+
+
 def native_storage(sort: Any) -> np.dtype | None:
     """The dtype a native array of ``sort`` holds values in as the compiled one does.
 
     A program's temporary is stored compiled as the lowering stores its
-    element sort (:func:`loopty.lower.numpy_dtype`), and natively in whatever
+    element sort (:func:`compiled_storage`), and natively in whatever
     dtype ``Arr.zeros_like`` gave it. The two runs compute one thing only when
     the native array holds every value written into it as the compiled one
     does, which is this dtype:
@@ -453,7 +514,8 @@ def native_storage(sort: Any) -> np.dtype | None:
     * an integral sort, ``Fin[m]``, ``Nat``, ``Int`` or ``int``, is ``int64``,
       and any signed integer of 32 bits or more holds it
       (:func:`holds_natively`): the compiled one is 32 bits wide, and a
-      native argument of such a sort is 64 bits wide as a rule.
+      native argument of such a sort is 64 bits wide as a rule. Its values
+      are inside the narrower range (:data:`INTEGRAL_RANGE`).
 
     Anything else is ``None``, and is not asked.
     """
@@ -557,7 +619,7 @@ def written_storage(
     """Refuse an array argument that is written and not stored as its sort is.
 
     The compiled run converts every array argument into the dtype the
-    lowering stores its element sort in (:func:`loopty.lower.numpy_dtype`),
+    lowering stores its element sort in (:func:`compiled_storage`),
     computes in that, and writes the results back; the native run computes in
     the array it was given. An array that is written holds what each run
     writes into it, and the two hold one thing only when the native array is
@@ -643,7 +705,7 @@ def native_scalar(sort: Any, value: Any) -> Any:
     """A scalar argument as the native run computes with it, for ``sort``.
 
     The compiled run passes a scalar as the C type the lowering declares for
-    its sort (:func:`loopty.lower.numpy_dtype`), and the native run used to
+    its sort (:func:`compiled_storage`), and the native run used to
     compute with whatever it was given: ``np.int64(2**32)`` for ``a: Real``
     overflowed at ``a * a`` where the compiled run squares a double,
     ``np.int8(100)`` for ``a: Nat`` wrapped at ``a + a``, and a ``np.float32``
@@ -753,7 +815,7 @@ def truth_sort(sort: Any) -> bool:
     """Whether the points of ``sort`` are truth values compiled code keeps in a byte.
 
     ``Bool``, and Python's ``bool``, which the lowering stores as a byte
-    (:func:`loopty.lower.numpy_dtype`) because OpenCL takes no ``bool``
+    (:func:`compiled_storage`) because OpenCL takes no ``bool``
     argument, and the native run as a numpy bool (:func:`native_storage`).
     The two hold one value only while the byte is ``0`` or ``1``: C converts
     ``0.5`` into a byte as ``0`` and keeps ``2`` as ``2``, where a bool holds
@@ -912,6 +974,12 @@ def element_types(
     And a ``Bool`` entry stored as a number has to be ``0`` or ``1``
     (:func:`truth_sort`), because the compiled run converts it into a byte as
     it is, and the native run reads it as a truth value.
+
+    An entry of an integral sort is also inside :data:`INTEGRAL_RANGE`, the
+    32-bit integers the compiled run stores it in. The native run holds it in
+    64 bits, so ``2**32 + 5`` of a ``Nat`` used to run natively as it is and be
+    ``5`` compiled, and a ``uint64`` entry from ``2**63`` on was read natively
+    through an ``int64`` copy as a negative number.
     """
     sizes = resolve_sizes(types, supplied) if sizes is None else sizes
     extents = axis_extents(types, supplied) if extents is None else extents
@@ -988,23 +1056,52 @@ def element_types(
                     "declared"
                 )
         limits = element_bound(typ, sizes, extents)
-        if limits is None:
-            continue
-        low, high = limits
-        outside = flat < low if high is None else (flat < low) | (flat >= high)
-        offenders = np.flatnonzero(outside)
-        if not offenders.size:
-            continue
-        position = int(offenders[0])
-        where = _cell_label(name, value, position)
-        allowed = f"{low} <= v" if high is None else f"{low} <= v < {high}"
-        raise ValueError(
-            f"{where} is {flat[position]}, which is not a value of "
-            f"{typ.dtype}: an element of {name} has to satisfy {allowed}. "
-            "loopty discharges an indirection through this array as in bounds "
-            "*by type*, with no check in the generated code, so the element "
-            "type has to hold of the data that is passed in"
-        )
+        if limits is not None:
+            low, high = limits
+            outside = flat < low if high is None else (flat < low) | (flat >= high)
+            offenders = np.flatnonzero(outside)
+            if offenders.size:
+                position = int(offenders[0])
+                where = _cell_label(name, value, position)
+                allowed = f"{low} <= v" if high is None else f"{low} <= v < {high}"
+                raise ValueError(
+                    f"{where} is {flat[position]}, which is not a value of "
+                    f"{typ.dtype}: an element of {name} has to satisfy {allowed}. "
+                    "loopty discharges an indirection through this array as in "
+                    "bounds *by type*, with no check in the generated code, so the "
+                    "element type has to hold of the data that is passed in"
+                )
+        if integral_sort(typ.dtype):
+            low, high = INTEGRAL_RANGE
+            offenders = np.flatnonzero((flat < low) | (flat >= high))
+            if offenders.size:
+                position = int(offenders[0])
+                raise ValueError(
+                    _integral_range_message(
+                        _cell_label(name, value, position),
+                        flat[position],
+                        typ.dtype,
+                        f"the elements of {name}",
+                    )
+                )
+
+
+def _integral_range_message(where: str, value: Any, sort: Any, held: str) -> str:
+    """The refusal of a value of an integral sort outside :data:`INTEGRAL_RANGE`.
+
+    ``held`` names what is declared of the sort: an argument, or the elements
+    of an array.
+    """
+    low, high = INTEGRAL_RANGE
+    return (
+        f"{where} is {value}, which is outside {low} <= v < {high}, the range of "
+        f"the 32-bit integers the compiled run stores a value of {sort} in. The "
+        "native run holds it in 64 bits, so it would run natively as it is and "
+        "be narrowed by the compiled run's conversion, and the two runs would "
+        "compute different things. Pass a value inside that range, or declare "
+        f"{held} as a numpy integer such as np.int64, which both runs store as "
+        "it is"
+    )
 
 
 def _cell_label(name: str, value: Any, position: int) -> str:
@@ -1071,7 +1168,9 @@ def scalar_parameters(
     compiled run passes it to a C integer argument, which a float cannot be
     converted to, and the native run indexes with it, which numpy refuses.
     Converting it would be the caller's choice to make, so the message says
-    ``int(...)``.
+    ``int(...)``. It is inside :data:`INTEGRAL_RANGE` too, which is what the
+    compiled run's C integer argument holds; the native run computes with it
+    as it is, so a value outside would be narrowed by one run only.
 
     A scalar of any other sort is asked what :func:`element_types` asks an
     entry, because both runs convert it into its sort's dtype
@@ -1117,19 +1216,24 @@ def scalar_parameters(
                 f"integer argument, and the native run cannot index with one. {advice}"
             )
         limits = sort_bound(sort, sizes, extents)
-        if limits is None:
-            continue
-        low, high = limits
-        if low <= number and (high is None or number < high):
-            continue
-        allowed = f"{low} <= {name}" if high is None else f"{low} <= {name} < {high}"
-        raise ValueError(
-            f"the argument {name} is {supplied[name]}, which is not a value of "
-            f"{sort}: {name} has to satisfy {allowed}. loopty discharges an "
-            f"access indexed by {name} as in bounds *by type*, with no check in "
-            "the generated code, so the parameter's type has to hold of the "
-            "value that is passed in"
-        )
+        if limits is not None:
+            low, high = limits
+            if not (low <= number and (high is None or number < high)):
+                allowed = (
+                    f"{low} <= {name}" if high is None else f"{low} <= {name} < {high}"
+                )
+                raise ValueError(
+                    f"the argument {name} is {supplied[name]}, which is not a value "
+                    f"of {sort}: {name} has to satisfy {allowed}. loopty discharges "
+                    f"an access indexed by {name} as in bounds *by type*, with no "
+                    "check in the generated code, so the parameter's type has to "
+                    "hold of the value that is passed in"
+                )
+        low, high = INTEGRAL_RANGE
+        if not low <= int(value) < high:
+            raise ValueError(
+                _integral_range_message(f"the argument {name}", value, sort, name)
+            )
 
 
 def _scalar_value(name: str, sort: Any, value: Any) -> None:
