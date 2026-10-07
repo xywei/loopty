@@ -16,6 +16,8 @@ from lanky.prelude import Nat, Real
 import hand_terms as ht
 from loopty import Arr, Fin, kernel
 from loopty.lower import (
+    InKernelOpenCLTarget,
+    InProcessCTarget,
     LoweringError,
     count_param_names,
     lower,
@@ -280,6 +282,13 @@ def test_the_opencl_target_is_named_but_not_imported() -> None:
     assert isinstance(target_for("c"), lp.ExecutableCTarget)
     with pytest.raises(LoweringError):
         target_for("cuda")
+    # Neither target's host code holds a condition, which loopy would hoist
+    # a guard naming no loop variable into (#90). The OpenCL target imports
+    # pyopencl when it is built, so its host code builder is asked of the
+    # class.
+    assert not InProcessCTarget().get_host_ast_builder().can_implement_conditionals
+    opencl_host = InKernelOpenCLTarget.get_host_ast_builder(None)
+    assert not opencl_host.can_implement_conditionals
     # Importing loopty, lowering, and running must never pull in pyopencl.
     assert "pyopencl" not in sys.modules
 

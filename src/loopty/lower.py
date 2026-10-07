@@ -65,6 +65,7 @@ import pymbolic.primitives as prim
 from loopy.symbolic import Reduction as LoopyReduction
 from loopy.symbolic import set_to_cond_expr
 from loopy.target.c import CFamilyASTBuilder
+from loopy.target.pyopencl import PyOpenCLPythonASTBuilder
 from pymbolic.mapper import Mapper
 
 from loopty.domain import STORAGES, Union
@@ -98,6 +99,7 @@ __all__ = [
     "RESERVED_PREFIX",
     "RESERVED_WORDS",
     "ExpressionLowerer",
+    "InKernelOpenCLTarget",
     "InProcessCTarget",
     "LoweringError",
     "Lowering",
@@ -230,25 +232,48 @@ class InProcessCTarget(lp.ExecutableCTarget):
         return _HostCodeWithoutConditionals(self)
 
 
+class _LaunchWithoutConditionals(PyOpenCLPythonASTBuilder):
+    """The host code of :class:`InKernelOpenCLTarget`, which holds no ``if``."""
+
+    @property
+    def can_implement_conditionals(self) -> bool:
+        return False
+
+
+class InKernelOpenCLTarget(lp.PyOpenCLTarget):
+    """``lp.PyOpenCLTarget``, with every condition in the kernel.
+
+    The PyOpenCL target's host code is Python that runs, and a condition
+    hoisted into it, as on the C target (#90), wraps the kernel's launch and
+    the line that names the launch's event. The host code returns that event
+    either way, so a run whose guard is false raised ``UnboundLocalError``
+    instead of writing nothing. With host code that cannot hold a condition,
+    the guard is emitted in the kernel, as it is for ``lp.OpenCLTarget``,
+    which generates no host code. Building one imports pyopencl, as
+    ``lp.PyOpenCLTarget`` does; defining the class does not.
+    """
+
+    def get_host_ast_builder(self) -> Any:
+        return _LaunchWithoutConditionals(self)
+
+
 def target_for(target: str = "c") -> Any:
     """The loopy target named by ``target``.
 
     ``"c"`` is :class:`InProcessCTarget`, ``lp.ExecutableCTarget`` with every
     condition in the device function, which compiles with the system toolchain
     and runs in process; it is the only target a laptop or CI ever uses.
-    ``"opencl"`` is ``lp.PyOpenCLTarget``, and pyopencl is imported here and
-    nowhere else, inside the branch, so that importing loopty on a machine
-    without a device costs nothing and can never fail. Its host code is Python
-    that runs, so a guard hoisted around the kernel's launch is honoured there.
+    ``"opencl"`` is :class:`InKernelOpenCLTarget`, ``lp.PyOpenCLTarget`` with
+    every condition in the kernel, and pyopencl is imported when it is built,
+    here and nowhere else, inside the branch, so that importing loopty on a
+    machine without a device costs nothing and can never fail.
     """
     if target in ("c", None):
         return InProcessCTarget()
     if target == "c-source":
         return lp.CTarget()
     if target == "opencl":
-        from loopy.target.pyopencl import PyOpenCLTarget
-
-        return PyOpenCLTarget()
+        return InKernelOpenCLTarget()
     raise LoweringError(f"unknown target {target!r}; expected 'c' or 'opencl'")
 
 

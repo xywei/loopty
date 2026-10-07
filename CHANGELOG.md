@@ -1412,10 +1412,14 @@ with a pair of statement instances.
   code around its call, and `lp.ExecutableCTarget` generates that host code
   and never runs it. So the compiled run wrote every cell whatever the scalar
   said, where the native run wrote none: the differential test refuted such
-  a kernel and the `trace-faithful` fact did not. Target `c` is now
+  a kernel and the `trace-faithful` fact did not. A guard on one cell of an
+  array (`when(x[0] > 0.5)`) was dropped the same way. Target `c` is now
   `loopty.lower.InProcessCTarget`, whose host code cannot hold a condition, so
-  the guard is emitted around the loop in the function that runs. See note 18
-  in `docs/loopy-notes.md`.
+  the guard is emitted around the loop in the function that runs. On the
+  PyOpenCL target the hoisted guard wrapped the launch and the event the host
+  code returns, so a false guard raised `UnboundLocalError`; target `opencl`
+  is now `loopty.lower.InKernelOpenCLTarget`, which keeps the guard in the
+  kernel the same way. See note 18 in `docs/loopy-notes.md`.
 - A whole array stored into a cell is refused while tracing (#85).
   `y[i] = u` traced, with the symbolic array itself as the statement's
   right-hand side, where natively numpy refuses to store a sequence in a

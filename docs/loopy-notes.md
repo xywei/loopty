@@ -814,8 +814,9 @@ for (int32_t i = 0; i <= -1 + n; ++i)
 ```
 
 for `lp.ExecutableCTarget`, so the compiled run writes `y` at `a = 0.0`,
-where the native run writes nothing. `when(flag)` of a `Bool` scalar, and a
-guarded statement outside any loop (`y[0] = 1.0`), are the same. A guard that
+where the native run writes nothing. `when(flag)` of a `Bool` scalar, a guard
+on one cell of an array (`when(x[0] > 0.5)`), and a guarded statement outside
+any loop (`y[0] = 1.0`), are the same. A guard that
 names a loop variable (`when(a > i)`) is emitted, as is a guard on one
 statement of several.
 
@@ -828,13 +829,18 @@ can hold an `if`, and the hoisted guard ends up there, `if (a > 0.5) { }`
 around a call it does not emit (`get_kernel_call` is `None`), while the device
 function, which is what the C executor compiles and calls, is generated as if
 the guard were implemented. `lp.CTarget`'s host builder cannot hold a
-condition, so the guard stays in the device function there, and the PyOpenCL
-target's host code is Python that runs, so a guard hoisted around the launch is
-honoured.
+condition, so the guard stays in the device function there. The PyOpenCL
+target's host code is Python that runs, and the hoisted `if a > 0.5:` wraps
+the launch and the line that assigns its event, `_lpy_evt`, which the host
+function returns after the `if`: a run whose guard is false raises
+`UnboundLocalError` instead of writing nothing.
 
 **Local fix.** Target `c` is `lower.InProcessCTarget`, a subclass of
 `lp.ExecutableCTarget` whose host AST builder says it cannot implement a
 conditional. loopy then hoists the guard no further than the device function's
 body, `if (a > 0.5)` around the loop. Nothing else about the target changes:
 the host code was never run, and the device function is the same for every
-kernel loopy hoisted nothing out of.
+kernel loopy hoisted nothing out of. Target `opencl` is
+`lower.InKernelOpenCLTarget`, `lp.PyOpenCLTarget` with a Python host builder
+that cannot implement a conditional either, so the guard is in the kernel, as
+it is for `lp.OpenCLTarget`, and the launch always happens.
