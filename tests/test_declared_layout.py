@@ -761,21 +761,16 @@ def second_block_moved(
                 val[r, s, j] = 1.0
 
 
-def test_a_start_of_a_two_axis_family_leaves_the_layout_assumed() -> None:
-    # The rows are the n * m cells of the counts, and off[n] starts one of
-    # them when m > 1. Counted by the first axis alone, n rows, it was past
-    # the last start and the fact was decided.
-    from lanky.ledger import Status
+def test_a_two_axis_family_is_refused_before_any_layout_fact() -> None:
+    # The rows would be the n * m cells of the counts, and off[n] starts one
+    # of them when m > 1. Counted by the first axis alone, n rows, it was past
+    # the last start and the fact was decided; then left assumed. Nothing
+    # builds such an array, and lowering indexes none, so tracing refuses the
+    # type before any fact is stated about its layout (#112).
+    from loopty.trace import TraceError
 
-    from loopty.typing import layout_facts
-
-    (layout,) = layout_facts(term_of(second_block_moved), "second_block_moved")
-    assert layout.status is Status.ASSUMED, layout.provenance
-    assert layout.term is None
-    assert layout.provenance["reason"].endswith(
-        "cnt has 2 axes, and the rule follows the starts of the rows of a counts "
-        "array with one"
-    )
+    with pytest.raises(TraceError, match="is ragged in axis 2 of 3"):
+        term_of(second_block_moved)
 
 
 def test_a_row_shortened_in_its_own_loop_leaves_its_reads_assumed() -> None:
