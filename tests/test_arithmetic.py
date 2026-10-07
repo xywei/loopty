@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from lanky.prelude import Int, Nat
+from lanky.prelude import Int, Nat, Real
 
-from loopty import Arr, Fin, Schedule, kernel
+from loopty import Arr, Fin, Schedule, TraceError, kernel, reduce_sum, when
 from loopty.contract import INTEGRAL_RANGE
 from loopty.executor import LoopyExecutor
 from loopty.lower import numpy_dtype
@@ -34,6 +34,98 @@ def agrees(kern, make) -> None:
             assert np.array_equal(value, compiled[name]), (name, value, compiled[name])
     fact = LoopyExecutor().differential(kern, Schedule(kern), make())
     assert fact.status.value == "tested", fact.provenance
+
+
+# {{{ a connective of integers (#83)
+
+
+@kernel
+def masked_scale(
+    k: Arr[Fin[n], Int],  # noqa: F821
+    x: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The low bit of an integer as a factor: bitwise natively, ``and`` traced."""
+    for i in k.dom:
+        y[i] = (k[i] & 1) * x[i]
+
+
+@kernel
+def odd_compared(k: Arr[Fin[n], Int], y: Arr[Fin[n], Real]):  # noqa: F821
+    """A connective of an integer inside a comparison, in a guard."""
+    for i in k.dom:
+        with when((k[i] & 1) != 0):
+            y[i] = 1.0
+
+
+@kernel
+def guarded_bits(k: Arr[Fin[n], Int], y: Arr[Fin[n], Real]):  # noqa: F821
+    """A connective of an integer and a comparison, as a guard."""
+    for i in k.dom:
+        with when((k[i] > 0) | k[i]):
+            y[i] = 1.0
+
+
+@kernel
+def summed_bits(k: Arr[Fin[n], Int], y: Arr[Fin[n], Int]):  # noqa: F821
+    """``~`` of an integer, in a sum's body."""
+    for i in k.dom:
+        y[i] = reduce_sum(~k[j] for j in k.dom)
+
+
+@kernel
+def low_bits(
+    k: Arr[Fin[n], Int],  # noqa: F821
+    x: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The fix: the low bit as arithmetic, and as a comparison in a guard."""
+    for i in k.dom:
+        y[i] = (k[i] % 2) * x[i]
+        with when((k[i] % 2 != 0) & (x[i] > 0.5)):
+            y[i] = y[i] + 1.0
+
+
+def test_a_connective_of_an_integer_is_refused_by_the_trace():
+    # Natively 2 & 1 is 0, and the compiled kernel computed 2 and 1, true.
+    def make() -> dict:
+        return {"k": np.array([2, 3]), "x": np.ones(2), "y": np.zeros(2)}
+
+    native = make()
+    masked_scale(**native)
+    assert list(native["y"]) == [0.0, 1.0]
+    for kern, operand in (
+        (masked_scale, r"k\[i\]"),
+        (odd_compared, r"k\[i\]"),
+        (guarded_bits, r"k\[i\]"),
+        (summed_bits, r"k\[j\]"),
+    ):
+        with pytest.raises(TraceError) as refused:
+            kern.trace()
+        message = str(refused.value)
+        assert "is a connective, and its operand" in message
+        assert f"{operand.replace(chr(92), '')} != 0" in message
+        assert "k % 2 for k & 1" in message
+        (fact,) = kern.facts()
+        assert fact.kind == "trace" and fact.status.value == "refuted"
+        assert "is not a truth value" in fact.provenance["reason"]
+
+
+def test_the_named_fix_agrees():
+    def make() -> dict:
+        return {
+            "k": np.array([2, 3, -3, 4]),
+            "x": np.array([1.0, 1.0, 0.25, 0.75]),
+            "y": np.zeros(4),
+        }
+
+    native = make()
+    low_bits(**native)
+    assert list(native["y"]) == [0.0, 2.0, 0.25, 0.0]
+    agrees(low_bits, make)
+
+
+# }}}
 
 
 # {{{ an integral value outside 32 bits (#92)

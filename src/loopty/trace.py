@@ -2433,6 +2433,7 @@ class SymArr:
         tracer = self.tracer
         expr = lower_reductions(value, tracer, where=where)
         self._refuse_untruthful(key, value, where)
+        _refuse_bitwise(expr, {**tracer.params, **tracer.array_types}, where)
         assignee = Access(self.name, indices)
         kind = "accumulate" if _reads_assignee(expr, assignee) else "assign"
         tracer.record(assignee, expr, kind, where, source=value)
@@ -2641,6 +2642,62 @@ def _untruthful_operand(value: Any, params: Mapping[str, Any]) -> Any:
         inner = _untruthful_operand(child, params)
         return child if inner is None else inner
     return None
+
+
+def _connectives(expr: Any) -> Iterator[Any]:
+    """Every ``and``, ``or`` and ``not`` in an expression, outermost first.
+
+    Into the bodies of reductions and the indices of subscripts, since a
+    connective there is computed natively as anywhere else.
+    """
+    if isinstance(expr, prim.LogicalAnd | prim.LogicalOr | prim.LogicalNot):
+        yield expr
+    if isinstance(expr, Reduction):
+        yield from _connectives(expr.body)
+    elif isinstance(expr, Access):
+        yield from _connectives(expr.indices)
+    elif isinstance(expr, prim.ExpressionNode):
+        for arg in init_args(expr):
+            yield from _connectives(arg)
+    elif isinstance(expr, tuple | list):
+        for item in expr:
+            yield from _connectives(item)
+
+
+def _refuse_bitwise(expr: Any, params: Mapping[str, Any], where: str) -> None:
+    """Refuse a connective with an operand that is not a truth value, wherever it is.
+
+    lanky builds ``and``, ``or`` and ``not`` for ``&``, ``|`` and ``~``,
+    whatever the operands are, so the trace records a connective and the
+    compiled kernel computes it logically. Natively Python and numpy compute
+    ``&`` and ``|`` bitwise on an integer, and ``~`` too: ``(k[i] & 1) *
+    x[i]`` is ``0`` at ``k[i] = 2`` natively, and ``2 and 1``, true, compiled.
+    So every operand of a connective has to be a truth value
+    (:func:`_truth_valued`), in a stored value, a guard, a sum's body, an
+    index or a comparison alike, and the fix named is a comparison or the
+    arithmetic the bitwise operation stands for.
+
+    ``~`` of a comparison passes, since a comparison is a truth value. On a
+    comparison of Python ints, such as ``~(i > 0)`` of a loop variable, it is
+    bitwise natively all the same, and the native run refuses the integer it
+    makes where a truth value is asked for: a guard (:class:`when`) or a cell
+    of an array of truth values (:func:`_refuse_integer_truth`).
+    """
+    for node in _connectives(expr):
+        operand = _untruthful_operand(node, params)
+        if operand is None:
+            continue
+        shown = _shown(operand)
+        raise TraceError(
+            f"{_shown(node)} at {where} is a connective, and its operand {shown} "
+            "is not a truth value. The trace reads '&', '|' and '~' as 'and', "
+            "'or' and 'not', and the compiled kernel computes them so, while "
+            "natively they are bitwise on an integer: 2 & 1 is 0 natively and "
+            "true compiled, so the two runs would compute different things. Make "
+            f"every operand a truth value ({_compared(shown)}), or write a "
+            "bitwise operation as the arithmetic it is (k % 2 for k & 1, the "
+            "low bit of an integer k)"
+        )
 
 
 def _compared(shown: str) -> str:
@@ -3288,7 +3345,13 @@ class when:  # noqa: N801 - a context manager written like a statement
                 _integer_guard_message(self.condition, _location(sys._getframe(1)))
             )
         if self.tracer is not None:
-            self.tracer.push_guard(self.condition)
+            tracer = self.tracer
+            _refuse_bitwise(
+                self.condition,
+                {**tracer.params, **tracer.array_types},
+                _location(sys._getframe(1)),
+            )
+            tracer.push_guard(self.condition)
         else:
             _MASKS.append(bool(self.condition))
         return self
