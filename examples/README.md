@@ -1,6 +1,6 @@
 # The loopty demos
 
-Six files, each of which runs three ways. Every console block below is a
+Eight files, each of which runs three ways. Every console block below is a
 snapshot of real output, not prose about it, and it is produced mechanically:
 
 ```console
@@ -25,6 +25,7 @@ marked with `...` is an excerpt and the lines it keeps are checked verbatim.
 | `p2p.py` | the near field of a fast multipole method: a two-level interaction list flattened into one ragged level, with the self-interaction guarded by `when` |
 | `pairs.py` | symmetric pair interactions over the lower triangle, an array argument over the domain `Where[i: Fin[n], j: Fin[n], j < i]`, decided in bounds over the exact triangle and run boxed and packed |
 | `composition.py` | two kernels composed by a program and lowered as one loopy kernel, with the intermediate a temporary of it and the edge between the kernels found in the footprints |
+| `travel.py` | facts that travel between a program's calls: a requirement decided under the postcondition of the call before, one checked by the compiled program between the calls, and a flat access in bounds where it follows the scan |
 
 Run them with `uv run` from the repository root:
 
@@ -100,42 +101,45 @@ device schedule: Schedule(spmv, target='c').tag(r='g.0').split(j, 32).tag(j_in='
 
 ### lanky check examples/spmv.py
 
-The two `assumed` rows are the honest ones: nothing in the term decides the
-scan's recurrence, and `lanky` says so rather than passing over it. The theorem
-beside it is `tested` here, and `proved` on a machine with the Lean extra
-installed. The last row of each kernel, `tested` by `interpreter`, is the one
-fact about the trace itself: the traced term, run by loopty's interpreter,
-agrees with the body run natively, on this file's `example_inputs()` and on
-three inputs drawn from the declared types. The program `solve` has that fact
-too, about the term its two calls compose into.
+The scan's postcondition is `tested` by `native`: it held after every native
+run of `scan`, on this file's example inputs and on drawn ones, and the
+restatement of it in `solve` is `decided` by the call and worth `tested`, as
+the `EFFECTIVE` column shows, since it rests on that fact. Nothing decides the
+recurrence from the term yet, and `lanky` says how it was established rather
+than passing over it. The theorem beside it is `tested` here, and `proved` on a
+machine with the Lean extra installed. The last row of each kernel, `tested` by
+`interpreter`, is the one fact about the trace itself: the traced term, run by
+loopty's interpreter, agrees with the body run natively, on this file's
+`example_inputs()` and on three inputs drawn from the declared types. The
+program `solve` has that fact too, about the term its two calls compose into.
 
 ```console
 $ uv run lanky check examples/spmv.py
-STATUS                                    BY             WHERE        OWNER          STATEMENT
-----------------------------------------  -------------  -----------  -------------  ------------------------------------------------------------------------
-decided                                   isl            spmv.py:79   scan           off[0] is in bounds for every instance of S0
-decided                                   isl            spmv.py:81   scan           off[r + 1] is in bounds for every instance of S1
-decided                                   isl            spmv.py:81   scan           off[r] is in bounds for every instance of S1
-decided                                   isl            spmv.py:81   scan           cnt[r] is in bounds for every instance of S1
-decided                                   isl            spmv.py:79   scan           distinct instances of S0 write distinct cells of off
-decided                                   isl            spmv.py:81   scan           distinct instances of S1 write distinct cells of off
-decided                                   isl            spmv.py:69   scan           the source order runs every dependence forward in time
-assumed                                   -              spmv.py:69   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
-tested                                    interpreter    spmv.py:69   scan           the traced term computes what the body computes
-tested                                    property-test  spmv.py:84   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat] | off(0) ==...
-decided                                   isl            spmv.py:112  spmv           y[r] is in bounds for every instance of S0
-decided                                   isl            spmv.py:112  spmv           val[r, j] is in bounds for every instance of S0
-decided                                   type           spmv.py:112  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
-decided                                   isl            spmv.py:112  spmv           col[r, j] is in bounds for every instance of S0
-decided                                   isl            spmv.py:112  spmv           cnt[r], the length of row r that bounds the loop over j, is in bounds...
-decided                                   isl            spmv.py:112  spmv           distinct instances of S0 write distinct cells of y
-decided                                   isl            spmv.py:102  spmv           the source order runs every dependence forward in time
-decided                                   type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
-tested                                    interpreter    spmv.py:102  spmv           the traced term computes what the body computes
-assumed under postcondition:spmv.scan@69  -              spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
-tested                                    interpreter    spmv.py:115  solve          the traced term computes what the body computes
+STATUS   EFFECTIVE  BY             WHERE        OWNER          STATEMENT
+-------  ---------  -------------  -----------  -------------  ------------------------------------------------------------------------
+decided  decided    isl            spmv.py:79   scan           off[0] is in bounds for every instance of S0
+decided  decided    isl            spmv.py:81   scan           off[r + 1] is in bounds for every instance of S1
+decided  decided    isl            spmv.py:81   scan           off[r] is in bounds for every instance of S1
+decided  decided    isl            spmv.py:81   scan           cnt[r] is in bounds for every instance of S1
+decided  decided    isl            spmv.py:79   scan           distinct instances of S0 write distinct cells of off
+decided  decided    isl            spmv.py:81   scan           distinct instances of S1 write distinct cells of off
+decided  decided    isl            spmv.py:69   scan           the source order runs every dependence forward in time
+tested   tested     native         spmv.py:69   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+tested   tested     interpreter    spmv.py:69   scan           the traced term computes what the body computes
+tested   tested     property-test  spmv.py:84   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat] | off(0) ==...
+decided  decided    isl            spmv.py:112  spmv           y[r] is in bounds for every instance of S0
+decided  decided    isl            spmv.py:112  spmv           val[r, j] is in bounds for every instance of S0
+decided  decided    type           spmv.py:112  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
+decided  decided    isl            spmv.py:112  spmv           col[r, j] is in bounds for every instance of S0
+decided  decided    isl            spmv.py:112  spmv           cnt[r], the length of row r that bounds the loop over j, is in bounds...
+decided  decided    isl            spmv.py:112  spmv           distinct instances of S0 write distinct cells of y
+decided  decided    isl            spmv.py:102  spmv           the source order runs every dependence forward in time
+decided  decided    type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
+tested   tested     interpreter    spmv.py:102  spmv           the traced term computes what the body computes
+decided  tested     call           spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
+tested   tested     interpreter    spmv.py:115  solve          the traced term computes what the body computes
 
-21 facts: 2 assumed, 15 decided, 4 tested
+21 facts: 16 decided, 5 tested
 ```
 
 ### loopty run examples/spmv.py
@@ -597,6 +601,166 @@ tested  loopy  composition.py:73  divergence   the scheduled run of divergence a
 tested  loopy  composition.py:76  burgers_rhs  the scheduled run of burgers_rhs agrees with the native run to the ac...
 
 3 facts: 3 tested
+```
+
+## travel.py
+
+Facts that travel between the calls of a program. A kernel's requirements on
+its inputs are its argument types: `gather` reads `x[perm[i]]`, in bounds by
+the element type of `perm`, and natively its contract checks that every cell
+of `perm` is a point of `Fin[n]` when it is called. A program is one compiled
+call, whose contract checks its arguments when it starts, so where an earlier
+call wrote `perm`, the check is a `requirement` of the program: decided by isl
+under what held at the call, or made by the compiled program between the two
+calls.
+
+Four programs. In `permuted` (#65's), `number` writes a permutation and says
+what it writes, and `gather`'s requirement is decided under that
+postcondition. In `through`, `scan` computes the offsets `rowsums` reads its
+rows through, and the layout requirement is `scan`'s postcondition verbatim;
+the program cites `scan_monotone` with `uses=`, and the fact does not rest on
+it, because the requirement does not need it. In `checked`, `number_quiet`
+writes the same permutation and says nothing, so the compiled program checks
+`perm` between the calls. In `flat`, `weigh` reads a flat buffer,
+`val[off[r] + j]`, after a scan: alone its in-bounds fact is `assumed`, and in
+the program it is decided under the scan's postcondition and the element type
+of `off`, which the program checks, since nothing says the scan's offsets stay
+below `nnz`.
+
+### python examples/travel.py
+
+Each program natively, how each of its requirements was met, and its compiled
+run against its native one; then the code of `checked`, whose check sets a
+flag that guards the call after it.
+
+```console
+$ uv run python examples/travel.py
+permuted:
+  the elements of perm are points of Fin(n) where gather is called at travel.py:99, after number at travel.py:98 wrote perm
+    decided under the postcondition of number, after number at travel.py:98
+  perm: difference 0 within 0 (exact) -> tested
+  y: difference 0 within 1.1e-05 (approx) -> tested
+through:
+  off holds the offsets the counts in cnt give the rows of val (off[0] == 0 and off[r + 1] == off[r] + cnt[r]) where rowsums is called at travel.py:152, after scan at travel.py:151 wrote off
+    decided under the postcondition of scan, after scan at travel.py:151
+  off: difference 0 within 0 (exact) -> tested
+  y: difference 0 within 1e-06 (approx) -> tested
+checked:
+  the elements of perm are points of Fin(n) where gather is called at travel.py:106, after number_quiet at travel.py:105 wrote perm
+    checked when it runs
+  perm: difference 0 within 0 (exact) -> tested
+  y: difference 0 within 1.1e-05 (approx) -> tested
+flat:
+  off holds the offsets the counts in cnt give the rows of wt (off[0] == 0 and off[r + 1] == off[r] + cnt[r]) where weigh is called at travel.py:193, after scan_flat at travel.py:192 wrote off
+    decided under the postcondition of scan_flat, after scan_flat at travel.py:192
+  the elements of off are points of Fin(nnz + 1) where weigh is called at travel.py:193, after scan_flat at travel.py:192 wrote off
+    checked when it runs
+  val[off[r_0] + j] is in bounds for every instance of weigh.S0, where weigh is called at travel.py:193
+    decided under the postcondition of scan_flat, after scan_flat at travel.py:192, the requirement on off where weigh is called
+  off: difference 0 within 0 (exact) -> tested
+  y: difference 0 within 1e-06 (approx) -> tested
+
+number's postcondition, forall i in Fin(n). perm[i] == n - 1 - i: tested
+
+#pragma STDC FP_CONTRACT OFF
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC optimize ("fp-contract=off")
+#endif
+#include <stdint.h>
+#include <stdbool.h>
+
+void checked(int32_t const n, int32_t *__restrict__ perm, double const *__restrict__ x, double *__restrict__ y, int32_t *__restrict__ gather_perm_ok)
+{
+  for (int32_t i = 0; i <= -1 + n; ++i)
+    perm[i] = n + -1 + -1 * i;
+  for (int32_t i_1 = 0; i_1 <= -1 + n; ++i_1)
+    if ((perm[i_1] < 0 || perm[i_1] >= n))
+      gather_perm_ok[0] = 1;
+  if (gather_perm_ok[0] == 0)
+    for (int32_t i_0 = 0; i_0 <= -1 + n; ++i_0)
+      y[i_0] = x[perm[i_0]];
+}
+```
+
+### lanky check examples/travel.py
+
+The postconditions are `tested` by `native`, and each requirement the
+hypotheses decide is `decided` by `isl` and worth `tested`, what the
+postcondition it rests on is worth. The two the compiled programs check are
+`assumed`, and say why in their provenance. The flat access of `flat` is
+`decided`, under the element requirement it used, which the `STATUS` column
+names, so it is worth an assumption checked when the program runs.
+
+```console
+$ uv run lanky check examples/travel.py
+STATUS                                                       EFFECTIVE  BY             WHERE          OWNER          STATEMENT
+-----------------------------------------------------------  ---------  -------------  -------------  -------------  ------------------------------------------------------------------------
+tested                                                       tested     native         travel.py:72   number         forall i in Fin(n). perm[i] == n - 1 - i
+decided                                                      decided    type           travel.py:92   gather         x[perm[i]] is in bounds by type (perm[i] : Fin(n))
+decided                                                      tested     call           travel.py:95   permuted       after number(...) in permuted: forall i in Fin(n). perm[i] == n - 1 - i
+decided                                                      tested     isl            travel.py:99   permuted       the elements of perm are points of Fin(n) where gather is called at t...
+assumed                                                      assumed    -              travel.py:106  checked        the elements of perm are points of Fin(n) where gather is called at t...
+tested                                                       tested     native         travel.py:115  scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+decided                                                      tested     call           travel.py:148  through        after scan(...) in through: off[0] == 0 and (forall r in Fin(n). off[...
+decided                                                      tested     isl            travel.py:152  through        off holds the offsets the counts in cnt give the rows of val (off[0] ...
+assumed                                                      assumed    -              travel.py:186  weigh          val[off[r] + j] is in bounds
+decided                                                      tested     call           travel.py:189  flat           after scan_flat(...) in flat: off[0] == 0 and (forall r in Fin(n). of...
+decided                                                      tested     isl            travel.py:193  flat           off holds the offsets the counts in cnt give the rows of wt (off[0] =...
+assumed                                                      assumed    -              travel.py:193  flat           the elements of off are points of Fin(nnz + 1) where weigh is called ...
+decided under requirement:travel.flat@189:weigh:element:off  assumed    isl            travel.py:186  flat           val[off[r_0] + j] is in bounds for every instance of weigh.S0, where ...
+...
+70 facts: 4 assumed, 51 decided, 15 tested
+```
+
+### loopty run examples/travel.py
+
+Every kernel alone, and every program as one kernel, compiled and compared
+with its native run.
+
+```console
+$ uv run loopty run examples/travel.py
+number: Schedule(number, target='c')
+  perm: difference 0 within 0 (exact) -> tested
+number_quiet: Schedule(number_quiet, target='c')
+  perm: difference 0 within 0 (exact) -> tested
+gather: Schedule(gather, target='c')
+  y: difference 0 within 1.1e-05 (approx) -> tested
+permuted: Schedule(permuted, target='c')
+  perm: difference 0 within 0 (exact) -> tested
+  y: difference 0 within 1.1e-05 (approx) -> tested
+checked: Schedule(checked, target='c')
+  perm: difference 0 within 0 (exact) -> tested
+  y: difference 0 within 1.1e-05 (approx) -> tested
+scan: Schedule(scan, target='c')
+  off: difference 0 within 0 (exact) -> tested
+rowsums: Schedule(rowsums, target='c')
+  y: difference 0 within 1e-06 (approx) -> tested
+through: Schedule(through, target='c')
+  off: difference 0 within 0 (exact) -> tested
+  y: difference 0 within 1e-06 (approx) -> tested
+scan_flat: Schedule(scan_flat, target='c')
+  off: difference 0 within 0 (exact) -> tested
+weigh: Schedule(weigh, target='c')
+  y: difference 0 within 1e-06 (approx) -> tested
+flat: Schedule(flat, target='c')
+  off: difference 0 within 0 (exact) -> tested
+  y: difference 0 within 1e-06 (approx) -> tested
+
+STATUS  BY     WHERE          OWNER         STATEMENT
+------  -----  -------------  ------------  ------------------------------------------------------------------------
+tested  loopy  travel.py:76   number        the scheduled run of number agrees with the native run to the accurac...
+tested  loopy  travel.py:83   number_quiet  the scheduled run of number_quiet agrees with the native run to the a...
+tested  loopy  travel.py:92   gather        the scheduled run of gather agrees with the native run to the accurac...
+tested  loopy  travel.py:95   permuted      the scheduled run of permuted agrees with the native run to the accur...
+tested  loopy  travel.py:102  checked       the scheduled run of checked agrees with the native run to the accura...
+tested  loopy  travel.py:120  scan          the scheduled run of scan agrees with the native run to the accuracy ...
+tested  loopy  travel.py:145  rowsums       the scheduled run of rowsums agrees with the native run to the accura...
+tested  loopy  travel.py:148  through       the scheduled run of through agrees with the native run to the accura...
+tested  loopy  travel.py:166  scan_flat     the scheduled run of scan_flat agrees with the native run to the accu...
+tested  loopy  travel.py:186  weigh         the scheduled run of weigh agrees with the native run to the accuracy...
+tested  loopy  travel.py:189  flat          the scheduled run of flat agrees with the native run to the accuracy ...
+
+11 facts: 11 tested
 ```
 
 ## reshape_layouts.py and p2p.py

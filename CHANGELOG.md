@@ -396,6 +396,62 @@ with a pair of statement instances.
   its reason (`loopty.faithful.no_term_fact`). The spmv and composition demos
   have one row more each, `solve`'s and `burgers_rhs`'s, both `tested`, and
   `Program.facts()` is computed once, as a kernel's is.
+- **Facts travel between a program's calls** (#65, #13). A kernel's
+  requirements on its inputs are its argument types, and two of them are
+  about what an array's cells hold: an element of a `Fin[m]` sort is a point
+  of it, and the offsets a ragged family is read through are the ones its
+  counts give. #58 refused a program in which an earlier call writes such an
+  array and a later call is passed it, since the compiled program's contract
+  checks its arguments only when it starts. The requirement is now an
+  obligation of the program (`Term.requirements`, `loopty.term.Requirement`),
+  decided by isl under the hypotheses that held at the call: the earlier
+  callees' postconditions that nothing has written over since, the zeros an
+  `Arr.zeros_like` starts an array with, the types the program's contract
+  checks of what nothing has written yet, and the theorems the program cites
+  with `@program(uses=[scan_monotone])`. `loopty.hypotheses` asks the
+  question: every cell a claim or a hypothesis reads is an isl parameter of
+  its own (`off[q]`, `cnt[q - 1]`, keyed structurally after putting the index
+  in a canonical affine form), a universal hypothesis is instantiated at the
+  cells the claim reads, for three rounds, and a part isl cannot state is
+  dropped toward the safe side, in negation normal form. A theorem is
+  instantiated at the arrays its hypotheses match, and only where each
+  array's cells are points of the family's sort when the call is made. A
+  decided requirement is a `requirement` fact whose term is the empty set isl
+  answered, resting on the facts of the hypotheses it used and on nothing it
+  did not: #65's `permuted` program has `gather`'s requirement decided under
+  `number`'s postcondition, worth `tested`, and a scan whose offsets a later
+  call reads rows through has the layout requirement decided under `scan`'s.
+  Where the hypotheses do not decide it, the requirement is a checked point:
+  the lowered program has a statement between the two calls that sets a
+  one-cell flag where a cell fails, every later statement is guarded by the
+  flag, and the executor and the interpreter raise the requirement's message
+  (`loopty.interpret.CheckFailed`), so the compiled program stops where the
+  native one is refused; the fact stays `assumed`, and says why. Offsets an
+  earlier call writes before any call reads rows through them are no longer
+  compared with the rows' own offsets when the compiled program starts
+  (`Term.deferred_offsets`), as natively the call that writes them does not
+  read through them either. A count an earlier call wrote is still refused.
+- **A callee's fact can be decided where it is called**
+  (`loopty.typing.scoped_in_bounds_facts`, `Term.scopes`). A flat access,
+  `val[off[r] + j]`, is `assumed` in its kernel's ledger; in a program that
+  calls the kernel after the scan that wrote `off`, it is decided under the
+  scan's postcondition, through the cells `off[r]`, `off[r + 1]` and `cnt[r]`,
+  as a fact of the program's resting on what it used.
+- **A kernel's postcondition is tested** (`loopty.faithful.postcondition_fact`).
+  It is evaluated at what every native run of the `trace-faithful` fact left
+  in the arguments, on the module's example inputs and the drawn ones, and is
+  `tested` by `native` when it held after each, `refuted` with the input
+  after which it did not, and `assumed`, with the reason, when nothing could
+  be evaluated. Its term is a `loopty.typing.AfterCall`, which no oracle
+  takes for a closed proposition. A program's restatement of it is `decided`
+  by the call, so it is worth what the postcondition is: `scan`'s in
+  `examples/spmv.py` reads `tested` where both rows read `assumed`. Deciding
+  a postcondition from the term, by exact dataflow, is not done yet.
+- **An eighth demo**, `examples/travel.py`: #65's permuted program, a scan
+  whose offsets a later call reads rows through, a permutation checked when
+  the compiled program runs, and a flat access in bounds where it follows the
+  scan. `examples/README.md`, the README and the quickstart describe it, and
+  the spmv transcripts are regenerated.
 
 ### Fixed
 
@@ -1548,6 +1604,11 @@ with a pair of statement instances.
   another array, a count written, a write under a guard isl cannot state, or
   counts with more than one axis leave the fact `assumed`, and its reason
   names the write.
+- A name only the bound of a `Fin` sort mentions is a size, and not
+  negative, as an axis extent is (`flow.size_names`). `nnz` in
+  `off: Arr[Fin[n + 1], Fin[nnz + 1]]` is the length of the buffer the
+  offsets point into, which no axis of a scan has to be, and the
+  `element-sort` fact of `off[0] = 0` was refuted at `nnz = -1`.
 
 ### Changed
 
@@ -1673,9 +1734,10 @@ with a pair of statement instances.
   Device runs happen elsewhere and are reported in `docs/device-runs.md`.
 - Ragged bounds are reflected into isl as one parameter per distinct bound term,
   so `cnt[r]` and `cnt[r + 1]` are unrelated. An access against flat storage,
-  `val[off[r] + j]`, is therefore reported `assumed` with the reason in its
-  provenance, never `decided`; the ragged spelling `val[r, j]` is decided. See
-  the module docstring of `loopty/flow.py`.
+  `val[off[r] + j]`, is therefore reported `assumed` in its kernel's ledger,
+  with the reason in its provenance; the ragged spelling `val[r, j]` is
+  decided, and so is the flat one in a program that calls the kernel after
+  the scan that wrote `off`. See the module docstring of `loopty/flow.py`.
 - The test suite treats `DeprecationWarning` as an error. Two exemptions are
   loopy's own and are listed in `pyproject.toml` and `tests/conftest.py`, with
   the reasons in `docs/loopy-notes.md`.
