@@ -50,7 +50,7 @@ including `math.h`, and gcc refuses the generated file.
 callable, so the header that declares it is never requested.
 
 **Local fix.** The lowering includes `math.h` itself, in a preamble, whenever
-the term has a power loopy writes as a call (note 18), so `x ** -0.5` compiles
+the term has a power loopy writes as a call (note 19), so `x ** -0.5` compiles
 now. Any other elementary function still needs its call built explicitly:
 `pymbolic.primitives.Call(Variable("sqrt"), (r2,))`, which loopy resolves
 against the target and which does pull in the header. `examples/p2p.py` has the
@@ -787,10 +787,63 @@ the body wrote it; only what loopy is handed changes. An integer is left
 alone: loopy types it `int32` or `int64` by its value, as numpy would.
 
 **What it does not cover.** A Python float next to a `float32` array is
-`float32` in numpy, and double precision by this rule alone. That is note 18,
+`float32` in numpy, and double precision by this rule alone. That is note 19,
 which types every operation, a literal's with it.
 
-## 18. C's arithmetic is not numpy's
+## 18. A guard that names no loop variable goes into host code that never runs
+
+**Symptom.** A guard that reads only scalars, around every statement of a
+kernel, is missing from the compiled code:
+
+```python
+@kernel
+def g_real(a: Real, y: Arr[Fin[n], Real]):
+    for i in y.dom:
+        with when(a > 0.5):
+            y[i] = 1.0
+```
+
+lowers to an instruction with `predicates={a > 0.5}`, still there after
+`lp.preprocess_kernel`, and loopy generates
+
+```c
+for (int32_t i = 0; i <= -1 + n; ++i)
+  y[i] = 1.0;
+```
+
+for `lp.ExecutableCTarget`, so the compiled run writes `y` at `a = 0.0`,
+where the native run writes nothing. `when(flag)` of a `Bool` scalar, a guard
+on one cell of an array (`when(x[0] > 0.5)`), and a guarded statement outside
+any loop (`y[0] = 1.0`), are the same. A guard that
+names a loop variable (`when(a > i)`) is emitted, as is a guard on one
+statement of several.
+
+**Cause.** loopy's conditional hoisting (`build_insn_group` in
+`loopy/codegen/control.py`) wraps a group of schedule items in a predicate
+they all carry, as far out as the inames the predicate names allow, which for
+none is the outermost level: the host code around the call of the device
+function. `lp.ExecutableCTarget` generates host code with a C AST builder that
+can hold an `if`, and the hoisted guard ends up there, `if (a > 0.5) { }`
+around a call it does not emit (`get_kernel_call` is `None`), while the device
+function, which is what the C executor compiles and calls, is generated as if
+the guard were implemented. `lp.CTarget`'s host builder cannot hold a
+condition, so the guard stays in the device function there. The PyOpenCL
+target's host code is Python that runs, and the hoisted `if a > 0.5:` wraps
+the launch and the line that assigns its event, `_lpy_evt`, which the host
+function returns after the `if`: a run whose guard is false raises
+`UnboundLocalError` instead of writing nothing.
+
+**Local fix.** Target `c` is `lower.InProcessCTarget`, a subclass of
+`lp.ExecutableCTarget` whose host AST builder says it cannot implement a
+conditional. loopy then hoists the guard no further than the device function's
+body, `if (a > 0.5)` around the loop. Nothing else about the target changes:
+the host code was never run, and the device function is the same for every
+kernel loopy hoisted nothing out of. Target `opencl` is
+`lower.InKernelOpenCLTarget`, `lp.PyOpenCLTarget` with a Python host builder
+that cannot implement a conditional either, so the guard is in the kernel, as
+it is for `lp.OpenCLTarget`, and the launch always happens.
+
+## 19. C's arithmetic is not numpy's
 
 **Symptom.** Four kernels whose compiled run computes something else than
 their native run, with nothing reported unless an output is compared bit for

@@ -349,7 +349,7 @@ end to end; the edges are sharp.
   conversions would pick another: a quotient of integers is a double, a Python
   float beside a `float32` is single precision (`0.1f`), a `float32` beside an
   integer array is a double, and a floating power calls `pow`, as numpy does.
-  Any power compiles on the C target, of a complex base too. See note 18 in
+  Any power compiles on the C target, of a complex base too. See note 19 in
   `docs/loopy-notes.md`.
 - Array arguments over polyhedral domains (`loopty.domain`): `Where[...]`,
   binders written as slices and then the comparisons that cut their box,
@@ -454,7 +454,7 @@ end to end; the edges are sharp.
   compiled. A scalar of `Real` or of an integral sort is a Python number
   natively when the caller passes one, and so takes a `float32`'s precision
   beside one where a numpy scalar would not; an operation whose type depends
-  on that is left as C types it. See note 18 in `docs/loopy-notes.md`.
+  on that is left as C types it. See note 19 in `docs/loopy-notes.md`.
 - A polyhedral domain is an array's whole index set, so it cannot sit beside
   a dense axis (`Arr[Fin[k], Where[...], Real]` is refused; write the axis as
   a binder of the domain). The pieces of a union have the same number of axes,
@@ -487,16 +487,21 @@ end to end; the edges are sharp.
   over `[r, j]`. Both assume the offsets lay the rows out inside the flat
   buffer and apart from each other, which the contract checks when a run
   starts. A kernel that writes its counts or its offsets can break that during
-  the run, and nothing states what it writes there, so such a kernel has a
-  `layout` fact for each counts family it rewrites, `assumed`, and the
-  in-bounds and disjoint-writes facts of the family's ragged arrays rest on
-  it, as do a fact decided by type through an index read from one of them
-  (`x[col[r, j]]`) and the `monotone` casts of its schedules: the ledger
-  shows them `decided under layout:...` and worth an assumption. Deciding
-  the layout fact needs the monotone-offsets formulation above. The native
-  run checks every cell it reads through the layout against the buffer and
-  raises `IndexError` for one outside it, but two rows moved onto the same
-  cells go unnoticed by both runs.
+  the run, so such a kernel has a `layout` fact for each counts family it
+  rewrites, and the in-bounds and disjoint-writes facts of the family's
+  ragged arrays rest on it, as do a fact decided by type through an index
+  read from one of them (`x[col[r, j]]`) and the `monotone` casts of its
+  schedules: the ledger shows them `decided under layout:...`. isl decides
+  the layout fact when the kernel writes only the offsets, each either as
+  the counts lay it out (`off[r + 1] = off[r] + cnt[r]`, which writes back
+  what the contract checked) or as a value of the loop variables and the
+  sizes, and refutes it with the instance that writes a start the counts can
+  contradict (`off[r] = 0` at `r = 1`). A start read from another array, or
+  a count written, leaves it `assumed`, and the facts on it worth an
+  assumption; deciding those needs the monotone-offsets formulation above.
+  The native run checks every cell it reads through the layout against the
+  buffer and raises `IndexError` for one outside it, but two rows moved onto
+  the same cells go unnoticed by both runs.
 - `Schedule.affine` and maps whose image has holes. The diamond
   `(t, i) -> (t + i, t - i)` reaches only the points of equal parity, and
   loopy's own `map_domain` refuses it, so loopty rewrites the kernel over the

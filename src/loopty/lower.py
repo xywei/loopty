@@ -64,6 +64,8 @@ import numpy as np
 import pymbolic.primitives as prim
 from loopy.symbolic import Reduction as LoopyReduction
 from loopy.symbolic import TypeCast, set_to_cond_expr
+from loopy.target.c import CFamilyASTBuilder
+from loopy.target.pyopencl import PyOpenCLPythonASTBuilder
 from pymbolic.mapper import Mapper
 
 from loopty.contract import compiled_storage
@@ -100,6 +102,8 @@ __all__ = [
     "RESERVED_PREFIX",
     "RESERVED_WORDS",
     "ExpressionLowerer",
+    "InKernelOpenCLTarget",
+    "InProcessCTarget",
     "LoweringError",
     "Lowering",
     "allows_contraction",
@@ -198,23 +202,75 @@ def numpy_dtype(sort: Any) -> np.dtype:
     return dtype
 
 
+class _HostCodeWithoutConditionals(CFamilyASTBuilder):
+    """The host code of :class:`InProcessCTarget`, which holds no ``if``."""
+
+    @property
+    def can_implement_conditionals(self) -> bool:
+        return False
+
+
+class InProcessCTarget(lp.ExecutableCTarget):
+    """``lp.ExecutableCTarget``, with every condition in the code that runs.
+
+    loopy hoists a condition shared by every instruction of a kernel as far out
+    as the iname it names allows, and one that names no iname, such as a
+    ``when(flag)`` or ``when(a > 0.5)`` guarding the whole body, goes out of the
+    device function into the host code around its call. ``lp.ExecutableCTarget``
+    generates that host code and never runs it: its executor calls the device
+    function directly. So the guard was gone and the body ran unconditionally
+    (#90). With host code that cannot hold a condition, loopy hoists the guard
+    no further than the device function's body, and it is emitted there.
+    Everything else is ``lp.ExecutableCTarget``'s; note 18 in
+    ``docs/loopy-notes.md`` has the details.
+    """
+
+    def get_host_ast_builder(self) -> Any:
+        return _HostCodeWithoutConditionals(self)
+
+
+class _LaunchWithoutConditionals(PyOpenCLPythonASTBuilder):
+    """The host code of :class:`InKernelOpenCLTarget`, which holds no ``if``."""
+
+    @property
+    def can_implement_conditionals(self) -> bool:
+        return False
+
+
+class InKernelOpenCLTarget(lp.PyOpenCLTarget):
+    """``lp.PyOpenCLTarget``, with every condition in the kernel.
+
+    The PyOpenCL target's host code is Python that runs, and a condition
+    hoisted into it, as on the C target (#90), wraps the kernel's launch and
+    the line that names the launch's event. The host code returns that event
+    either way, so a run whose guard is false raised ``UnboundLocalError``
+    instead of writing nothing. With host code that cannot hold a condition,
+    the guard is emitted in the kernel, as it is for ``lp.OpenCLTarget``,
+    which generates no host code. Building one imports pyopencl, as
+    ``lp.PyOpenCLTarget`` does; defining the class does not.
+    """
+
+    def get_host_ast_builder(self) -> Any:
+        return _LaunchWithoutConditionals(self)
+
+
 def target_for(target: str = "c") -> Any:
     """The loopy target named by ``target``.
 
-    ``"c"`` is ``lp.ExecutableCTarget``, which compiles with the system toolchain
+    ``"c"`` is :class:`InProcessCTarget`, ``lp.ExecutableCTarget`` with every
+    condition in the device function, which compiles with the system toolchain
     and runs in process; it is the only target a laptop or CI ever uses.
-    ``"opencl"`` is ``lp.PyOpenCLTarget``, and pyopencl is imported here and
-    nowhere else, inside the branch, so that importing loopty on a machine
-    without a device costs nothing and can never fail.
+    ``"opencl"`` is :class:`InKernelOpenCLTarget`, ``lp.PyOpenCLTarget`` with
+    every condition in the kernel, and pyopencl is imported when it is built,
+    here and nowhere else, inside the branch, so that importing loopty on a
+    machine without a device costs nothing and can never fail.
     """
     if target in ("c", None):
-        return lp.ExecutableCTarget()
+        return InProcessCTarget()
     if target == "c-source":
         return lp.CTarget()
     if target == "opencl":
-        from loopy.target.pyopencl import PyOpenCLTarget
-
-        return PyOpenCLTarget()
+        return InKernelOpenCLTarget()
     raise LoweringError(f"unknown target {target!r}; expected 'c' or 'opencl'")
 
 
@@ -372,7 +428,7 @@ class ExpressionLowerer(Mapper):
         Python float beside an integer or a double, which is what the native
         run computes with; see note 17 in ``docs/loopy-notes.md``. Beside a
         ``float32`` numpy gives it single precision, and the operation it
-        stands in writes it so (:meth:`_operation`, note 18).
+        stands in writes it so (:meth:`_operation`, note 19).
 
         Integers and booleans are left alone. A numpy scalar already says its
         type, and ``np.float64`` is a subclass of ``float``, so it is asked
@@ -409,7 +465,7 @@ class ExpressionLowerer(Mapper):
         converts everything to the left of it, as one cast around the
         operands before. An operation the plan leaves alone is rebuilt as it
         was, so a kernel whose arithmetic C and numpy type alike lowers to the
-        code it always did. See note 18 in ``docs/loopy-notes.md``.
+        code it always did. See note 19 in ``docs/loopy-notes.md``.
         """
         lowered = [self.rec(operand) for operand in operands]
         promotion = self.lowering.promotion
@@ -640,6 +696,39 @@ def is_reserved(name: str) -> bool:
 def _sanitize(name: str) -> str:
     """A loopy-safe identifier: every non-word character becomes an underscore."""
     return re.sub(r"\W", "_", name)
+
+
+def _refuse_colliding_ids(term: Term) -> None:
+    """Refuse two statements whose ids spell one instruction id (#88).
+
+    A statement's instruction is named by its id with every character other
+    than a letter, a digit or an underscore written ``_`` (:func:`_sanitize`),
+    and loopy refuses two instructions of one id from inside ``lp.make_kernel``
+    ("duplicate instruction id"), which names neither statement. A traced
+    kernel's ids (``S0``, ``S1``, ...) and a program's (its call labels, unique
+    once spelled) cannot collide; a term built by hand can, and
+    ``Schedule.affine`` reads an instruction's id as the one statement it
+    names.
+    """
+    seen: dict[str, str] = {}
+    for stmt in term.stmts:
+        insn_id = _sanitize(stmt.id)
+        first = seen.get(insn_id)
+        if first is None:
+            seen[insn_id] = stmt.id
+            continue
+        both = (
+            f"two statements have the id {stmt.id!r}"
+            if first == stmt.id
+            else f"statements {first!r} and {stmt.id!r} both spell the "
+            f"instruction id {insn_id!r}"
+        )
+        raise LoweringError(
+            f"{both} in {term.name}. A statement is lowered as the instruction "
+            "named by its id, with every character other than a letter, a "
+            "digit or an underscore written '_', and loopy needs one "
+            "instruction per id: give the statements ids that stay apart"
+        )
 
 
 def _kernel_name(name: str, taken: Sequence[str]) -> str:
@@ -1899,6 +1988,7 @@ def lower_generic(
     """
     _refuse_reserved_names(term)
     _refuse_free_name_sorts(term)
+    _refuse_colliding_ids(term)
     builder = _Builder(term, target, layouts)
     _refuse_packed_without_interval_rows(term, builder)
     _refuse_bounds_over_reduction_binders(term, builder)
@@ -2012,6 +2102,16 @@ def lower_generic(
     domains.extend(builder.extra_domains)
 
     count_insns, count_ids, count_reads = _count_inits(term, builder, domains)
+    statement_of = {insn_id: stmt_id for stmt_id, insn_id in insn_ids.items()}
+    for param, count_id in count_ids.items():
+        if count_id in statement_of:
+            raise LoweringError(
+                f"statement {statement_of[count_id]!r} of {term.name} is "
+                f"lowered as the instruction {count_id!r}, which is the id of "
+                f"the instruction that computes the row length {param}, and "
+                "loopy needs one instruction per id: give the statement "
+                "another id"
+            )
     if count_insns:
         # A bound's instruction is ordered by the same rule as the statements,
         # at the place of the first statement that needs it: after every
@@ -2199,7 +2299,7 @@ def _power_preambles(term: Term, target: str | None) -> tuple[tuple[str, str], .
     which leaves the integer definition to integer powers. A complex base
     keeps an integer exponent, and the definition's signature names
     ``double complex`` above the ``complex.h`` loopy includes, so a term with
-    complex values gets that header here too. See note 18.
+    complex values gets that header here too. See note 19.
     """
     if (target or "c") not in ("c", "c-source"):
         return ()

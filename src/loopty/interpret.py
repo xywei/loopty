@@ -22,7 +22,9 @@ does. Its reading of the term is literal:
   loop it bounds starts, each time it starts: ``for j in val.dom[r]`` reads the
   length of row ``r`` then, as the statements before have left it, and runs to
   that length whatever the loop's own statements write. So a kernel that
-  writes its counts runs here as it runs natively (:meth:`_Run.loop`).
+  writes its counts runs here as it runs natively (:meth:`_Run.loop`). A bound
+  of two loops of one statement, or of a loop and a sum inside it, is read
+  where each of them starts, as the body reads it (:meth:`_Run.read_apart`).
 * A guard is evaluated at each instance, and an instance whose guard is false
   writes nothing. Guards and connectives short-circuit, so a condition to the
   right of a false one is not read.
@@ -57,7 +59,7 @@ from typing import Any
 import islpy as isl
 import numpy as np
 import pymbolic.primitives as prim
-from lanky.terms import Abs, evaluate, render
+from lanky.terms import Abs, evaluate, init_args, render
 
 from loopty.arr import Arr
 from loopty.contract import (
@@ -344,25 +346,19 @@ class _Run:
         Its dimensions are its loop variables, outermost first. Every
         parameter of the domain is a size or a scalar, which is fixed here, or
         a reflected one, which is left until the loop it bounds starts (see
-        :meth:`loop`); one that is neither has no value anywhere.
-
-        A reflected bound is one parameter, read once, where the outermost
-        loop it bounds starts. The body reads it again where each loop inside
-        that one starts, ``for k in val.dom[r]`` inside ``for j in
-        val.dom[r]``, and where a sum over it inside that loop starts,
-        ``reduce_sum(val[r, k] for k in val.dom[r])``, which gives the same
-        value unless the term writes what the bound reads in between; so a
-        bound of two loops of one statement, or of a loop and a sum inside it,
-        that reads an array the term writes is refused, rather than given one
-        reading where the body has two.
+        :meth:`loop`); one that is neither has no value anywhere. A reflected
+        bound that reads an array the term writes is read once for each loop
+        and each sum it bounds, where that loop or sum starts, as the body
+        reads it (:meth:`read_apart`).
         """
-        domain = stmt.domain
-        names = tuple(domain.get_var_names(isl.dim_type.set))
+        names = tuple(stmt.domain.get_var_names(isl.dim_type.set))
         if names != tuple(stmt.inames):
             raise InterpretError(
                 f"the domain of {stmt.id} has the dimensions {', '.join(names)}, "
                 f"and the statement runs in the loops {', '.join(stmt.inames)}"
             )
+        stmt = self.read_apart(stmt)
+        domain = stmt.domain
         space = domain
         for position, name in enumerate(names):
             if name in known:
@@ -379,29 +375,6 @@ class _Run:
                     for level in range(len(names))
                     if bounds_dimension(domain, level, position)
                 ]
-                touched = sorted(
-                    {access.array for access in accesses_in(expr)} & self.written
-                )
-                if len(bounded) > 1 and touched:
-                    loops = " and ".join(names[level] for level in bounded)
-                    raise InterpretError(
-                        f"the bound {render(expr)} (the domain parameter {name}) "
-                        f"of {stmt.id} bounds the loops over {loops}, and "
-                        f"{self.term.name} writes {', '.join(touched)}, which it "
-                        "reads: the body reads it where each of those loops "
-                        "starts, and the interpreter reads it once for them all"
-                    )
-                summed = _summed_over(stmt, name)
-                if bounded and summed and touched:
-                    raise InterpretError(
-                        f"the bound {render(expr)} (the domain parameter {name}) "
-                        f"of {stmt.id} bounds the loop over {names[bounded[0]]} "
-                        f"and the sum over {', '.join(summed)} inside it, and "
-                        f"{self.term.name} writes {', '.join(touched)}, which it "
-                        "reads: the body reads it where the loop starts and "
-                        "again where the sum starts, and the interpreter reads "
-                        "it once for both"
-                    )
                 pending[name] = expr
                 levels[name] = bounded[0] if bounded else len(names)
             else:
@@ -418,6 +391,117 @@ class _Run:
             pending=pending,
             levels=levels,
         )
+
+    def read_apart(self, stmt: Stmt) -> Stmt:
+        """``stmt`` with a written bound read where each loop and sum starts.
+
+        A reflected bound is one parameter of a domain, read once. The body
+        reads it where each loop over it starts, ``for k in val.dom[r]``
+        inside ``for j in val.dom[r]`` as well as the loop over ``j``, and
+        where each sum over it starts, ``reduce_sum(val[r, k] for k in
+        val.dom[r])`` inside the loop over ``j``. Those readings agree unless
+        the term writes what the bound reads in between, so a bound that
+        reads an array the term writes gets a parameter of its own for each
+        of them (#87). The outermost loop it bounds keeps the parameter, and
+        each loop inside that one gets a copy, read where that loop starts
+        (:meth:`read_bounds`). The sums of the statement get one more copy,
+        which no loop reads, so :meth:`reduction` reads it where the sum
+        starts; a sum's domain repeats the bounds of the loops around it, and
+        those keep the copy of their loop, the value the loop was read at.
+
+        A constraint goes with the innermost loop or binder it mentions. One
+        on the parameters alone stays with the outermost reading, unless it
+        names the binder of an enclosing sum, which is that sum's.
+        """
+        domain = stmt.domain
+        names = tuple(stmt.inames)
+        sums = reductions_in((stmt.expr, stmt.guard))
+        # The parameter each loop reads a bound as, by depth, and the sums'.
+        loops: dict[str, dict[int, str]] = {}
+        summed: dict[str, str] = {}
+        for position, name in enumerate(domain.get_var_names(isl.dim_type.param)):
+            expr = self.reflected.get(name)
+            if expr is None:
+                continue
+            if not {access.array for access in accesses_in(expr)} & self.written:
+                continue
+            bounded = [
+                level
+                for level in range(len(names))
+                if bounds_dimension(domain, level, position)
+            ]
+            if not bounded:
+                continue
+            loops[name] = {bounded[0]: name}
+            for level in bounded[1:]:
+                loops[name][level] = self.copy_of(name, f"{name}__{names[level]}")
+            if sums:
+                summed[name] = self.copy_of(name, f"{name}__sum")
+        if not loops:
+            return stmt
+
+        for name, copies in loops.items():
+
+            def of_loop(
+                constraint: isl.Constraint, name: str = name, copies: Any = copies
+            ) -> str:
+                level = _innermost(constraint)
+                return name if level is None else copies.get(level, name)
+
+            domain = _read_apart(domain, name, of_loop)
+        if not summed:
+            return replace(stmt, domain=domain)
+
+        known = {*self.sizes, *self.scalars, *self.reflected}
+
+        def rewrite(node: Reduction) -> isl.Set:
+            """The domain of one sum of the statement, its readings apart."""
+            out = node.domain
+            own = out.dim(isl.dim_type.set) - len(node.inames)
+            binders = [
+                position
+                for position, param in enumerate(out.get_var_names(isl.dim_type.param))
+                if param not in known
+            ]
+            for name in summed:
+                if out.find_dim_by_name(isl.dim_type.param, name) < 0:
+                    continue
+                copies = loops[name]
+
+                def of_sum(
+                    constraint: isl.Constraint, name: str = name, copies: Any = copies
+                ) -> str:
+                    level = _innermost(constraint)
+                    if level is not None:
+                        return summed[name] if level >= own else copies.get(level, name)
+                    # A binder of an enclosing sum is a parameter here, and the
+                    # bound of it is that sum's reading.
+                    if any(
+                        not constraint.get_coefficient_val(
+                            isl.dim_type.param, k
+                        ).is_zero()
+                        for k in binders
+                    ):
+                        return summed[name]
+                    return name
+
+                out = _read_apart(out, name, of_sum)
+            return out
+
+        return replace(
+            stmt,
+            domain=domain,
+            expr=_with_domains(stmt.expr, rewrite),
+            guard=_with_domains(stmt.guard, rewrite),
+        )
+
+    def copy_of(self, name: str, spelled: str) -> str:
+        """A fresh parameter that reads what the reflected bound ``name`` reads."""
+        taken = {*self.sizes, *self.scalars, *self.reflected}
+        while spelled in taken:
+            spelled += "_"
+        self.reflected[spelled] = self.reflected[name]
+        return spelled
 
     def block(self, members: Sequence[_Member], level: int) -> None:
         """The statements and loops of one level of the loop tree, in order.
@@ -766,7 +850,10 @@ class _Run:
         where its loop started: ``0 <= j < nl_cnt_r`` for a sum inside ``for
         j in val.dom[r]`` holds at the ``j`` the loop reached, whatever the
         loop has written into ``cnt[r]`` since. A bound of the sum's own
-        binders is read now, where the native ``reduce_sum`` reads it.
+        binders is read now, where the native ``reduce_sum`` reads it, the
+        row's length in ``reduce_sum(val[r, k] for k in val.dom[r])`` inside
+        ``for j in val.dom[r]`` included, which is a parameter of its own
+        (:meth:`read_apart`).
         """
         if node.op != "sum":
             raise InterpretError(f"no meaning for a reduction of kind {node.op!r}")
@@ -780,23 +867,94 @@ class _Run:
     # }}}
 
 
-def _summed_over(stmt: Stmt, name: str) -> list[str]:
-    """The binders of the sums in ``stmt`` that the parameter ``name`` bounds.
+def _innermost(constraint: isl.Constraint) -> int | None:
+    """The innermost set dimension a constraint mentions, or ``None``."""
+    mentioned = [
+        level
+        for level in range(constraint.get_space().dim(isl.dim_type.set))
+        if not constraint.get_coefficient_val(isl.dim_type.set, level).is_zero()
+    ]
+    return max(mentioned, default=None)
 
-    A sum's domain has the statement's loops first and its own binders after
-    them (:meth:`_Run.reduction`), so only a constraint on one of those counts.
+
+def _read_apart(domain: isl.Set, name: str, reading: Any) -> isl.Set:
+    """``domain`` with the parameter ``name`` read as ``reading(constraint)``.
+
+    Each constraint that mentions ``name`` is stated of the parameter
+    ``reading`` names for it instead, ``name`` itself or a parameter added
+    here; the other constraints are kept as they are. A domain with local
+    variables (a stride, say) is refused: its constraints are not independent
+    of one another, and restating them one by one could lose what ties them.
     """
-    out: list[str] = []
-    for reduction in reductions_in((stmt.expr, stmt.guard)):
-        domain = reduction.domain
-        position = domain.find_dim_by_name(isl.dim_type.param, name)
-        if position < 0:
-            continue
-        dims = domain.get_var_names(isl.dim_type.set)
-        for level in range(len(stmt.inames), len(dims)):
-            if bounds_dimension(domain, level, position) and dims[level] not in out:
-                out.append(dims[level])
+    position = domain.find_dim_by_name(isl.dim_type.param, name)
+    targets: dict[str, None] = {}
+    local = False
+
+    def survey(basic: isl.BasicSet) -> None:
+        nonlocal local
+        local = local or basic.dim(isl.dim_type.div) > 0
+        for constraint in basic.get_constraints():
+            if constraint.get_coefficient_val(isl.dim_type.param, position).is_zero():
+                continue
+            target = reading(constraint)
+            if target != name:
+                targets[target] = None
+
+    domain.foreach_basic_set(survey)
+    if not targets:
+        return domain
+    if local:
+        raise InterpretError(
+            f"the domain {domain} reads the bound {name} where more than one "
+            "loop or sum starts, and its constraints have local variables, "
+            "which the interpreter cannot state of each reading apart"
+        )
+    count = domain.dim(isl.dim_type.param)
+    widened = domain.add_dims(isl.dim_type.param, len(targets))
+    index: dict[str, int] = {}
+    for offset, target in enumerate(targets):
+        widened = widened.set_dim_name(isl.dim_type.param, count + offset, target)
+        index[target] = count + offset
+    pieces: list[isl.BasicSet] = []
+
+    def rebuild(basic: isl.BasicSet) -> None:
+        piece = isl.BasicSet.universe(basic.get_space())
+        for constraint in basic.get_constraints():
+            coefficient = constraint.get_coefficient_val(isl.dim_type.param, position)
+            if not coefficient.is_zero():
+                target = reading(constraint)
+                if target != name:
+                    constraint = constraint.set_coefficient_val(
+                        isl.dim_type.param, position, 0
+                    )
+                    constraint = constraint.set_coefficient_val(
+                        isl.dim_type.param, index[target], coefficient
+                    )
+            piece = piece.add_constraint(constraint)
+        pieces.append(piece)
+
+    widened.foreach_basic_set(rebuild)
+    out = isl.Set.empty(widened.get_space())
+    for piece in pieces:
+        out = out.union(piece)
     return out
+
+
+def _with_domains(node: Any, rewrite: Any) -> Any:
+    """``node`` with each reduction's domain replaced by ``rewrite(reduction)``."""
+    if isinstance(node, Reduction):
+        return replace(
+            node, domain=rewrite(node), body=_with_domains(node.body, rewrite)
+        )
+    if isinstance(node, prim.ExpressionNode):
+        args = init_args(node)
+        rebuilt = tuple(_with_domains(arg, rewrite) for arg in args)
+        if all(new is old for new, old in zip(rebuilt, args, strict=True)):
+            return node
+        return type(node)(*rebuilt)
+    if isinstance(node, tuple):
+        return tuple(_with_domains(item, rewrite) for item in node)
+    return node
 
 
 def _fold(apply: Any, values: Sequence[Any]) -> Any:

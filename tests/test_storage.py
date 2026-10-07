@@ -478,11 +478,11 @@ def test_a_truth_value_scalar_is_a_numpy_bool_natively():
         negated(**native)
         assert list(native["b"]) == [not flag] * 2
         agrees(negated, lambda f=flag: {"flag": f, "b": np.zeros(2, dtype=bool)})
-        # Compiled, a guard that names no loop variable is dropped (#90), so
-        # only the native run of this one is compared, with the interpreter.
+        # A guard that names no loop variable is kept compiled (#90).
         native = {"flag": flag, "y": np.zeros(2)}
         unless(**native)
         assert list(native["y"]) == [0.0 if flag else 1.0] * 2
+        agrees(unless, lambda f=flag: {"flag": f, "y": np.zeros(2)})
     # The samples of the faithfulness fact draw Python bools.
     assert negated.facts()[-1].status.value == "tested"
     assert unless.facts()[-1].status.value == "tested"
