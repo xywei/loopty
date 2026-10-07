@@ -258,6 +258,14 @@ end to end; the edges are sharp.
   compiled a byte, into which C converts `0.5` as `0`: `b[i] = u[i]` is a
   `TraceError` naming `b[i] = u[i] != 0`, and an integer arriving at a bool
   array natively, `~(i > 0)` again, is refused there as it is by `when`.
+  Every operand of `&`, `|` and `~` has to be a truth value, wherever the
+  connective is, the index of the cell written included, since the trace and
+  the compiled kernel read them as `and`, `or` and `not` and natively they are
+  bitwise on an integer: `(k[i] & 1) * x[i]` is a `TraceError` naming
+  `k[i] != 0`, and `k % 2` for `k & 1`. And `~(i > 0)` used as a number
+  (`x[i] * ~(i > 0)`, in a sum's body or an index) is a `TraceError` naming
+  `i <= 0`, since natively it is the `-2` or `-1` the native run refuses only
+  where a truth value is asked for.
 - The faithfulness fact. For each kernel and each program, the traced term is
   run by an interpreter (`loopty.interpret`: statement by statement in source
   order over each statement's isl domain, each loop enumerated when the run
@@ -338,7 +346,13 @@ end to end; the edges are sharp.
   running on `lp.ExecutableCTarget`. Every argument of `LoopyExecutor.run` is
   an argument of the kernel; the target is chosen by the schedule
   (`Schedule(kernel, target="opencl")`) or by the executor
-  (`LoopyExecutor(target="opencl")`).
+  (`LoopyExecutor(target="opencl")`). Each operation is computed in the type
+  numpy computes it in natively (`loopty.promotion`, by NEP 50), where C's
+  conversions would pick another: a quotient of integers is a double, a Python
+  float beside a `float32` is single precision (`0.1f`), a `float32` beside an
+  integer array is a double, and a floating power calls `pow`, as numpy does.
+  Any power compiles on the C target, of a complex base too. See note 19 in
+  `docs/loopy-notes.md`.
 - Array arguments over polyhedral domains (`loopty.domain`): `Where[...]`,
   binders written as slices and then the comparisons that cut their box,
   joined by `&`; `Sigma[...]`, binders and an unnamed last fiber affine in
@@ -360,13 +374,16 @@ end to end; the edges are sharp.
   to have the declared domain's points at the sizes of the call, and a value
   of a refined sort such as `Fin[m]` has to be one — an array element and a
   scalar argument alike, and being one means being a finite whole number in
-  range, not merely passing two comparisons. An array the kernel writes has to
-  be stored as its element sort is natively (`float64` for `Real`, `bool` for
-  `Bool`, a signed integer of 32 bits or more for `Nat`, `Int` and `Fin[m]`, a
-  numpy sort as itself), since an integer `x` for a `Real` parameter truncates
-  every write the compiled run keeps; an array it only reads is read by the
-  native run in that dtype, as the compiled run converts it, so an integer `x`
-  no longer overflows natively where the compiled double does not. A complex
+  range, not merely passing two comparisons. A value of `Nat`, `Int` or
+  `Fin[m]` is also inside the 32 bits the compiled run stores it in, since
+  `2**32 + 5` ran natively as it was and was `5` compiled. An array the kernel
+  writes has to be stored as its element sort is natively (`float64` for
+  `Real`, `bool` for `Bool`, a signed integer of 32 bits or more for `Nat`,
+  `Int` and `Fin[m]`, a numpy sort as itself), since an integer `x` for a
+  `Real` parameter truncates every write the compiled run keeps; an array it
+  only reads is read by the native run in that dtype, as the compiled run
+  converts it, so an integer `x` no longer overflows natively where the
+  compiled double does not. A complex
   entry of a sort that is not complex has no imaginary part, and an entry of
   `Bool` stored as a number is `0` or `1`. A scalar is asked the same, and is
   converted into the dtype of its sort in both runs, since it is passed by
@@ -436,6 +453,13 @@ end to end; the edges are sharp.
   development machine.
 - Only a two-axis (row, fiber) ragged array lowers. A deeper dependent sum
   raises.
+- Integers are 64 bits wide natively and 32 bits compiled. The contract keeps
+  every integral argument inside 32 bits, but a result that leaves them
+  (`c[i] * c[i]` at `c[i] = 2**20`) is a wider number natively and wraps
+  compiled. A scalar of `Real` or of an integral sort is a Python number
+  natively when the caller passes one, and so takes a `float32`'s precision
+  beside one where a numpy scalar would not; an operation whose type depends
+  on that is left as C types it. See note 19 in `docs/loopy-notes.md`.
 - A polyhedral domain is an array's whole index set, so it cannot sit beside
   a dense axis (`Arr[Fin[k], Where[...], Real]` is refused; write the axis as
   a binder of the domain). The pieces of a union have the same number of axes,
@@ -468,16 +492,21 @@ end to end; the edges are sharp.
   over `[r, j]`. Both assume the offsets lay the rows out inside the flat
   buffer and apart from each other, which the contract checks when a run
   starts. A kernel that writes its counts or its offsets can break that during
-  the run, and nothing states what it writes there, so such a kernel has a
-  `layout` fact for each counts family it rewrites, `assumed`, and the
-  in-bounds and disjoint-writes facts of the family's ragged arrays rest on
-  it, as do a fact decided by type through an index read from one of them
-  (`x[col[r, j]]`) and the `monotone` casts of its schedules: the ledger
-  shows them `decided under layout:...` and worth an assumption. Deciding
-  the layout fact needs the monotone-offsets formulation above. The native
-  run checks every cell it reads through the layout against the buffer and
-  raises `IndexError` for one outside it, but two rows moved onto the same
-  cells go unnoticed by both runs.
+  the run, so such a kernel has a `layout` fact for each counts family it
+  rewrites, and the in-bounds and disjoint-writes facts of the family's
+  ragged arrays rest on it, as do a fact decided by type through an index
+  read from one of them (`x[col[r, j]]`) and the `monotone` casts of its
+  schedules: the ledger shows them `decided under layout:...`. isl decides
+  the layout fact when the kernel writes only the offsets, each either as
+  the counts lay it out (`off[r + 1] = off[r] + cnt[r]`, which writes back
+  what the contract checked) or as a value of the loop variables and the
+  sizes, and refutes it with the instance that writes a start the counts can
+  contradict (`off[r] = 0` at `r = 1`). A start read from another array, or
+  a count written, leaves it `assumed`, and the facts on it worth an
+  assumption; deciding those needs the monotone-offsets formulation above.
+  The native run checks every cell it reads through the layout against the
+  buffer and raises `IndexError` for one outside it, but two rows moved onto
+  the same cells go unnoticed by both runs.
 - `Schedule.affine` and maps whose image has holes. The diamond
   `(t, i) -> (t + i, t - i)` reaches only the points of equal parity, and
   loopy's own `map_domain` refuses it, so loopty rewrites the kernel over the

@@ -74,8 +74,13 @@ next step. It is not implemented, and it is not needed for in-bounds or
 disjointness on the ragged form, which is all the MVP's typing rules ask for,
 as long as the kernel leaves its layout as the contract checked it. One that
 writes its counts or its offsets can move a row out of the buffer or onto
-another, and the ragged form's facts about it rest on an ``assumed`` layout
-fact (:func:`loopty.typing.layout_facts`) until this formulation, with the
+another, and the ragged form's facts about it rest on a layout fact
+(:func:`loopty.typing.layout_facts`). That fact is decided for the writes
+that need no formulation: an offset written back as the counts lay it out,
+which keeps the layout by induction over the run, and one written as a value
+of the loop variables and the sizes, which isl can compare with the one start
+every count vector agrees on, ``off[0] = 0``. A start read from another array,
+or a count written, leaves it ``assumed`` until this formulation, with the
 writes to the offsets as hypotheses, can decide it.
 
 *Distinct parameters are distinct storage.* :func:`dependences` compares

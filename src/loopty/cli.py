@@ -474,6 +474,7 @@ class RunVerb:
         from lanky.plugins import registry
 
         from loopty.executor import LoopyExecutor, emit_code
+        from loopty.oracle import IslOracle
         from loopty.schedule import Schedule, definition_of
         from loopty.trace import TraceError
         from loopty.typing import layout_facts
@@ -516,6 +517,7 @@ class RunVerb:
         # ``target`` has to reach the kernel. Each schedule already carries the
         # target it runs on, so this only makes the executor insist on it.
         executor = LoopyExecutor(target=target)
+        oracle = IslOracle()
         ledger = Ledger()
         claims = _Claims(ledger)
         for schedule in schedules:
@@ -529,6 +531,10 @@ class RunVerb:
                 schedule.term, **definition_of(schedule, schedule.term)
             ):
                 if fact.id in resting:
+                    # A layout fact that can be decided is an isl question,
+                    # answered here as ``lanky check`` answers it.
+                    if oracle.can_establish(fact):
+                        fact = oracle.establish(fact) or fact
                     claims.add(fact, schedule)
             ok, reason = schedule.buildable
             if not ok:

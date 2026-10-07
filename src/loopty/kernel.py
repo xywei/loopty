@@ -446,13 +446,12 @@ class Kernel(_Decorated):
         of ``Real``, a float one of ``Fin``, ``Nat`` or ``Int``, an ``int8`` one
         of ``Bool``. :func:`loopty.contract.check_arguments` has already
         required every entry of those to be a value of the sort (a finite whole
-        number inside :data:`loopty.contract.INT64_RANGE`, no imaginary part,
-        ``0`` or ``1``), so the copy changes no value, except by rounding to a
-        narrower sort (a ``float64`` array of ``np.float32``), which the
-        compiled run's conversion rounds the same way. An integral sort is copied as
-        ``int64`` while the lowering stores it as ``int32``; a value between
-        the two ranges runs natively and is narrowed by the compiled run's
-        cast, as the same value stored as ``int64`` is.
+        number inside :data:`loopty.contract.INTEGRAL_RANGE`, no imaginary
+        part, ``0`` or ``1``), so the copy changes no value, except by rounding
+        to a narrower sort (a ``float64`` array of ``np.float32``), which the
+        compiled run's conversion rounds the same way. An integral sort is
+        copied as ``int64`` while the lowering stores it as ``int32``, and the
+        contract keeps its values inside the narrower range, so both hold them.
 
         An array the body *writes* is not copied. A copy is a new buffer, and
         the native run's promise is that writes land in the caller's array; an

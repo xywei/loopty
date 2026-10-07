@@ -2429,13 +2429,93 @@ class SymArr:
         self._refuse_whole(key, where, write=True)
         if self.type.domain is not None:
             self._check_domain_key(key, where, write=True)
+        self._refuse_many_values(key, value, where)
         indices = _index_tuple(key)
         tracer = self.tracer
         expr = lower_reductions(value, tracer, where=where)
         self._refuse_untruthful(key, value, where)
+        sorts = {**tracer.params, **tracer.array_types}
+        _refuse_bitwise(indices, sorts, where)
+        _refuse_bitwise(expr, sorts, where, truth=_holds_truth(self.type.dtype))
         assignee = Access(self.name, indices)
         kind = "accumulate" if _reads_assignee(expr, assignee) else "assign"
         tracer.record(assignee, expr, kind, where, source=value)
+
+    def _refuse_many_values(self, key: Any, value: Any, where: str) -> None:
+        """Refuse a store of many values into one cell.
+
+        A whole array, symbolic or one the body holds, a domain, a list,
+        tuple, set or dict, a numpy array with an axis, and a generator each
+        hold values where a statement stores one. The trace recorded such a
+        value as the statement's right-hand side, a symbolic array where a
+        term has a value (#85). Natively numpy refuses it, except into an
+        array of ``Bool``, where it stores the truth value Python makes of the
+        whole (``[False]`` is ``True``); see :meth:`_many_values_natively`. An
+        array is refused as it is when it is used whole on the right of an
+        operator, with the loop nest to write.
+        """
+        cell = f"{self.name}[{_key_text(key)}]"
+        if isinstance(value, SymArr):
+            raise TraceError(
+                _whole_array_message(
+                    value,
+                    f"{cell} = {value.name}",
+                    where,
+                    write=False,
+                    why=f"stores every cell of it into one cell of {self.name}",
+                )
+            )
+        natively = self._many_values_natively(value)
+        if isinstance(value, SymDom):
+            text = _domain_text(value)
+            raise TraceError(
+                f"{cell} = {text} at {where} stores the domain {text}, every "
+                f"index of it, into one cell of {self.name}, and {natively}. "
+                f"Iterate the domain and store one index in each cell: for j "
+                f"in {text}: ... j ..."
+            )
+        if isinstance(value, Iterator):
+            raise TraceError(
+                f"{cell} = {_shown(value)} at {where} stores a generator into "
+                f"one cell of {self.name}, and {natively}. A generator of terms "
+                "is a sum when reduce_sum(...) is around it; otherwise store "
+                "one value in each cell"
+            )
+        if isinstance(value, Arr | list | tuple | set | frozenset | dict) or (
+            isinstance(value, np.ndarray) and value.ndim > 0
+        ):
+            if isinstance(value, Arr):
+                what = "an array, every cell of it,"
+            elif isinstance(value, set | frozenset | dict):
+                what = "a collection of values"
+            else:
+                what = "a sequence of values"
+            raise TraceError(
+                f"{cell} = {_shown(value)} at {where} stores {what} into one "
+                f"cell of {self.name}, and {natively}. A statement stores one "
+                "value in each cell: store each value in a cell of its own, or "
+                "index the one you meant"
+            )
+
+    def _many_values_natively(self, value: Any) -> str:
+        """What the native run does with ``value`` stored into one cell.
+
+        numpy refuses many values for a number: a float cell says "setting an
+        array element with a sequence", an integer or complex one cannot
+        convert them. A bool cell takes the truth value Python makes of the
+        container, so ``[False]`` is stored as ``True`` and ``[]`` as
+        ``False``; only a numpy array of more than one value is refused there.
+        """
+        from loopty.contract import truth_sort
+
+        many = isinstance(value, np.ndarray) and value.size > 1
+        if truth_sort(self.type.dtype) and not many:
+            return (
+                f"natively numpy stores into {self.name}, an array of "
+                f"{self.type.dtype}, the truth value of the whole ([False] is "
+                "True), which is no value of one cell"
+            )
+        return "natively numpy refuses it"
 
     def _refuse_untruthful(self, key: Any, value: Any, where: str) -> None:
         """Refuse a store into an array of ``Bool`` of what is not a truth value.
@@ -2586,6 +2666,13 @@ def _whole_key(key: Any) -> bool:
     return any(part is Ellipsis or isinstance(part, many) for part in parts)
 
 
+def _holds_truth(sort: Any) -> bool:
+    """Whether the native run holds a value of ``sort`` as a numpy bool."""
+    from loopty.contract import native_storage
+
+    return native_storage(sort) == np.dtype(np.bool_)
+
+
 def _truth_valued(value: Any, params: Mapping[str, Any]) -> bool:
     """Whether a value stored into an array of truth values is one in both runs.
 
@@ -2601,11 +2688,6 @@ def _truth_valued(value: Any, params: Mapping[str, Any]) -> bool:
     """
     from lanky.terms import PropositionMixin
 
-    from loopty.contract import native_storage
-
-    def holds_truth(sort: Any) -> bool:
-        return native_storage(sort) == np.dtype(np.bool_)
-
     if isinstance(value, bool | np.bool_):
         return True
     if isinstance(value, prim.LogicalAnd | prim.LogicalOr):
@@ -2616,10 +2698,10 @@ def _truth_valued(value: Any, params: Mapping[str, Any]) -> bool:
         return True
     if isinstance(value, prim.Subscript) and isinstance(value.aggregate, prim.Variable):
         typ = params.get(value.aggregate.name)
-        return isinstance(typ, ArrType) and holds_truth(typ.dtype)
+        return isinstance(typ, ArrType) and _holds_truth(typ.dtype)
     if isinstance(value, prim.Variable):
         sort = params.get(value.name)
-        return sort is not None and not isinstance(sort, ArrType) and holds_truth(sort)
+        return sort is not None and not isinstance(sort, ArrType) and _holds_truth(sort)
     return False
 
 
@@ -2641,6 +2723,169 @@ def _untruthful_operand(value: Any, params: Mapping[str, Any]) -> Any:
         inner = _untruthful_operand(child, params)
         return child if inner is None else inner
     return None
+
+
+def _connectives(expr: Any) -> Iterator[Any]:
+    """Every ``and``, ``or`` and ``not`` in an expression, outermost first.
+
+    Into the bodies of reductions and the indices of subscripts, since a
+    connective there is computed natively as anywhere else.
+    """
+    if isinstance(expr, prim.LogicalAnd | prim.LogicalOr | prim.LogicalNot):
+        yield expr
+    if isinstance(expr, Reduction):
+        yield from _connectives(expr.body)
+    elif isinstance(expr, Access):
+        yield from _connectives(expr.indices)
+    elif isinstance(expr, prim.ExpressionNode):
+        for arg in init_args(expr):
+            yield from _connectives(arg)
+    elif isinstance(expr, tuple | list):
+        for item in expr:
+            yield from _connectives(item)
+
+
+def _numpy_valued(expr: Any, params: Mapping[str, Any]) -> bool:
+    """Whether the native run computes ``expr`` as a numpy scalar, whatever the call.
+
+    An array's element is one, and so is a scalar of a truth sort, which
+    :func:`loopty.contract.native_scalar` makes a numpy bool; and so is
+    arithmetic, a comparison or a connective with an operand that is one. A
+    loop variable, a size and a Python literal are Python numbers, and a
+    scalar of another sort is one when the caller passes one. Anything else
+    (a sum, which Python's ``sum`` makes ``0`` over no terms, a call, a
+    quantifier) is not asked, and counts as possibly a Python number.
+    """
+    from loopty.contract import native_storage
+
+    if isinstance(expr, np.generic):
+        return True
+    if isinstance(expr, Access):
+        return isinstance(params.get(expr.array), ArrType)
+    if isinstance(expr, prim.Subscript):
+        aggregate = expr.aggregate
+        return isinstance(aggregate, prim.Variable) and isinstance(
+            params.get(aggregate.name), ArrType
+        )
+    if isinstance(expr, prim.Variable):
+        sort = params.get(expr.name)
+        return (
+            sort is not None
+            and not isinstance(sort, ArrType)
+            and native_storage(sort) == np.dtype(np.bool_)
+        )
+    if isinstance(expr, prim.Sum | prim.Product | prim.LogicalAnd | prim.LogicalOr):
+        operands: tuple[Any, ...] = tuple(expr.children)
+    elif isinstance(expr, prim.Quotient | prim.FloorDiv | prim.Remainder):
+        operands = (expr.numerator, expr.denominator)
+    elif isinstance(expr, prim.Power):
+        operands = (expr.base, expr.exponent)
+    elif isinstance(expr, prim.Comparison):
+        operands = (expr.left, expr.right)
+    elif isinstance(expr, prim.LogicalNot):
+        operands = (expr.child,)
+    else:
+        return False
+    return any(_numpy_valued(operand, params) for operand in operands)
+
+
+def _python_nots(expr: Any, params: Mapping[str, Any], truth: bool) -> Iterator[Any]:
+    """Every ``~`` of a Python bool whose integer the native run computes with.
+
+    ``~(i > 0)`` of a loop variable is ``~`` of a Python bool natively, which is
+    bitwise: ``-2`` or ``-1``. Where a truth value is asked for, a guard or a
+    cell of an array of truth values, the native run refuses that integer
+    (:class:`when`, :func:`_refuse_integer_truth`). Anywhere else it computes
+    with it: ``x[i] * ~(i > 0)`` is ``-2 * x[i]`` natively and ``0`` compiled.
+    ``truth`` says whether ``expr`` is asked as a truth value; a connective
+    passes that on to its operands, and anything else asks its operands for a
+    number.
+    """
+    if isinstance(expr, prim.LogicalNot):
+        child = expr.child
+        if (
+            not truth
+            and _truth_valued(child, params)
+            and not _numpy_valued(child, params)
+        ):
+            yield expr
+        yield from _python_nots(child, params, truth)
+    elif isinstance(expr, prim.LogicalAnd | prim.LogicalOr):
+        for child in expr.children:
+            yield from _python_nots(child, params, truth)
+    elif isinstance(expr, Reduction):
+        yield from _python_nots(expr.body, params, False)
+    elif isinstance(expr, Access):
+        yield from _python_nots(expr.indices, params, False)
+    elif isinstance(expr, prim.ExpressionNode):
+        for arg in init_args(expr):
+            yield from _python_nots(arg, params, False)
+    elif isinstance(expr, tuple | list):
+        for item in expr:
+            yield from _python_nots(item, params, truth)
+
+
+#: The comparison that is the complement of each, for the fix a message names.
+_COMPLEMENT = {">": "<=", ">=": "<", "<": ">=", "<=": ">", "==": "!=", "!=": "=="}
+
+
+def _refuse_bitwise(
+    expr: Any, params: Mapping[str, Any], where: str, truth: bool = False
+) -> None:
+    """Refuse a connective with an operand that is not a truth value, wherever it is.
+
+    lanky builds ``and``, ``or`` and ``not`` for ``&``, ``|`` and ``~``,
+    whatever the operands are, so the trace records a connective and the
+    compiled kernel computes it logically. Natively Python and numpy compute
+    ``&`` and ``|`` bitwise on an integer, and ``~`` too: ``(k[i] & 1) *
+    x[i]`` is ``0`` at ``k[i] = 2`` natively, and ``2 and 1``, true, compiled.
+    So every operand of a connective has to be a truth value
+    (:func:`_truth_valued`), in a stored value, a guard, a sum's body, an
+    index (of a read or of the cell written) or a comparison alike, and the
+    fix named is a comparison or the arithmetic the bitwise operation stands
+    for.
+
+    ``~`` of a comparison passes, since a comparison is a truth value. On a
+    comparison of Python ints, such as ``~(i > 0)`` of a loop variable, it is
+    bitwise natively all the same. Where a truth value is asked for, which
+    ``truth`` says of ``expr`` (a guard, or a value stored into an array of
+    truth values), the native run refuses the integer it makes (:class:`when`,
+    :func:`_refuse_integer_truth`). Anywhere else the native run would compute
+    with that integer, so the trace refuses it (:func:`_python_nots`), naming
+    the complement as a comparison.
+    """
+    for node in _connectives(expr):
+        operand = _untruthful_operand(node, params)
+        if operand is None:
+            continue
+        shown = _shown(operand)
+        raise TraceError(
+            f"{_shown(node)} at {where} is a connective, and its operand {shown} "
+            "is not a truth value. The trace reads '&', '|' and '~' as 'and', "
+            "'or' and 'not', and the compiled kernel computes them so, while "
+            "natively they are bitwise on an integer: 2 & 1 is 0 natively and "
+            "true compiled, so the two runs would compute different things. Make "
+            f"every operand a truth value ({_compared(shown)}), or write a "
+            "bitwise operation as the arithmetic it is (k % 2 for k & 1, the "
+            "low bit of an integer k)"
+        )
+    for node in _python_nots(expr, params, truth):
+        child = node.child
+        complement = "'i <= 0' for '~(i > 0)'"
+        if isinstance(child, prim.Comparison) and child.operator in _COMPLEMENT:
+            spelled = (
+                f"{_shown(child.left)} {_COMPLEMENT[child.operator]} "
+                f"{_shown(child.right)}"
+            )
+            complement = f"'{spelled}' for '~({_shown(child)})'"
+        raise TraceError(
+            f"{_shown(node)} at {where} is '~' of a truth value the native run "
+            "computes as a Python bool, on which '~' is bitwise: ~True is -2 and "
+            "~False is -1, while the trace reads it as 'not' and the compiled "
+            "kernel computes 0 or 1, so the two runs would compute different "
+            f"things with it. Write the complement as a comparison ({complement}, "
+            "and '(i <= 0) | (i >= n)' for '~((i > 0) & (i < n))')"
+        )
 
 
 def _compared(shown: str) -> str:
@@ -3288,7 +3533,14 @@ class when:  # noqa: N801 - a context manager written like a statement
                 _integer_guard_message(self.condition, _location(sys._getframe(1)))
             )
         if self.tracer is not None:
-            self.tracer.push_guard(self.condition)
+            tracer = self.tracer
+            _refuse_bitwise(
+                self.condition,
+                {**tracer.params, **tracer.array_types},
+                _location(sys._getframe(1)),
+                truth=True,
+            )
+            tracer.push_guard(self.condition)
         else:
             _MASKS.append(bool(self.condition))
         return self

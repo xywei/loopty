@@ -901,6 +901,59 @@ def example_inputs():
 """
 
 
+RESCANS = """
+from __future__ import annotations
+
+import numpy as np
+from lanky.prelude import Nat, Real
+
+from loopty import Arr, Fin, Schedule, kernel, reduce_sum
+
+
+@kernel
+def rescan(
+    cnt: Arr[Fin[n], Nat],
+    off: Arr[Fin[n + 1], Nat],
+    val: Arr[Fin[n], Fin[cnt], Real],
+    y: Arr[Fin[n], Real],
+):
+    off[0] = 0
+    for r in y.dom:
+        off[r + 1] = off[r] + cnt[r]
+        y[r] = reduce_sum(val[r, j] for j in val.dom[r])
+
+
+split = Schedule(rescan).split("r", 2)
+
+
+def example_inputs():
+    counts = [2, 1, 3]
+    return {
+        "cnt": Arr.from_numpy(np.array(counts, dtype=np.int64)),
+        "off": Arr.from_numpy(np.array([0, 2, 3, 6], dtype=np.int64)),
+        "val": Arr.ragged(counts, values=np.arange(1.0, 7.0)),
+        "y": Arr.zeros(3),
+    }
+"""
+
+
+def test_run_decides_the_layout_fact_a_cast_rests_on(tmp_path, capsys) -> None:
+    """A layout the kernel writes back as the counts lay it out is decided.
+
+    ``loopty run`` adds the layout fact a cast rests on to its ledger, and
+    asks isl about it, as ``lanky check`` does (#86).
+    """
+    path = write_fixture(tmp_path, RESCANS)
+    out_path = tmp_path / "ledger.json"
+    assert main(["run", str(path), "--json", str(out_path)]) == 0
+    facts = {fact["id"]: fact for fact in json.loads(out_path.read_text("utf-8"))}
+    layout = "layout:fixture.rescan@10:cnt"
+    assert facts[layout]["status"] == "decided"
+    (monotone,) = [fact for fact in facts.values() if fact["kind"] == "monotone"]
+    assert monotone["rests_on"] == [layout]
+    assert monotone["effective"] == "decided"
+
+
 def test_run_lists_the_layout_fact_a_cast_rests_on(tmp_path, capsys) -> None:
     """The monotone cast is decided under the kernel's layout fact.
 
