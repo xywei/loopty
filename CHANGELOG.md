@@ -1616,9 +1616,13 @@ with a pair of statement instances.
   which its bound holds, so an index array stays compact. An operation that
   can leave its operands' range, a sum, a product, a power or a left shift,
   of a narrower operand, a `Fin[m]` entry or a loop variable, is computed in
-  64 bits (`(int64_t) (col[i]) * col[i]`), but in a subscript, in a guard
-  that reads no array and in a sum of loop variables and sizes alone, which
-  are index arithmetic. The sum of a `Bool` array, a count natively, was
+  64 bits (`(int64_t) (col[i]) * col[i]`), but in a subscript, which loopy
+  gives no way to widen (#129), and in a sum of loop variables, sizes and
+  literals that total less than `2**30`, which is index arithmetic. An
+  `np.uint64` beside a Python int or a loop variable is computed in `uint64`,
+  as numpy computes it, where loopy typed it in double, lost the low bits of
+  `u[i] % 3` and failed to lower `u[i] << 3`. The sum of a `Bool` array, a
+  count natively, was
   accumulated in a byte compiled and wrapped round at 128; its body is cast.
   The native run reads an integral array stored in fewer bits through an
   `int64` copy, an `int32` one of `Fin[m]` included. Note 19.
@@ -1641,11 +1645,19 @@ with a pair of statement instances.
   loops define them (`loopty.operations`), which loopty's targets call
   wherever `//`, `%`, `<<` or `>>` is, a guard included; index arithmetic by
   a positive constant stays loopy's. Target `c-source` is
-  `lower.SourceCTarget`. Note 20 in `docs/loopy-notes.md`.
+  `lower.SourceCTarget`. The definitions, the plan of conversions and the
+  lowering are hashed into loopty's targets (`operations.CODE_DIGEST`), so
+  that loopy's code cache, whose key does not tell a literal `3` from
+  `np.uint64(3)`, serves no code another version of them generated. A loop
+  variable divided by a literal zero, or shifted by a negative literal, is a
+  `TraceError`, since Python refuses it natively, and so is `//` or `%` of a
+  complex value, which numpy refuses. Note 20 in `docs/loopy-notes.md`.
 - A sum of truth values is a `TraceError` naming the fix (#106): numpy's `+`
   of two bools is `or`, so `(b[i] + b[i]) * 1.0` was `1.0` natively and
   `2.0` compiled, with the `trace-faithful` fact `tested`. The fix named is
-  `b[i] | c[i]` for `or`, or `1 * b[i] + c[i]` for a count.
+  `b[i] | c[i]` for `or`, or `1 * b[i] + c[i]` for a count. A difference of
+  truth values, which numpy refuses, is one too, naming `b[i] ^ c[i]` or
+  `1 * b[i] - c[i]`.
 - A kernel named like a function loopy or the C library knows is renamed in
   the generated code with the `_knl` suffix, as a C keyword is (#108):
   `floor` failed inside loopy with `KeyError: 'floor'`, and `cpow` over
@@ -1662,7 +1674,10 @@ with a pair of statement instances.
 - A guard on loop variables that numpy computes in another type compiles
   (`with when(i ** 0.5 > 1.5)`): loopy reads a guard naming no array into
   isl, and its reader failed on the cast the operation planning of #82 put
-  there. Such a guard is lowered with no cast in it.
+  there. Such a guard is lowered with no cast in it: an operand numpy
+  computes in double or in 64 bits is multiplied by `1.0` or by a 64-bit `1`
+  instead, so `when(s * a > t)` of a `float32` `a` is double precision, and
+  `when(i * i < m)` does not wrap round at `i = 46341`.
 - A name only the bound of a `Fin` sort mentions is a size, and not
   negative, as an axis extent is (`flow.size_names`). `nnz` in
   `off: Arr[Fin[n + 1], Fin[nnz + 1]]` is the length of the buffer the

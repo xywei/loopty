@@ -292,12 +292,15 @@ end to end; the edges are sharp.
   `k[i] != 0`, and `k % 2` for `k & 1`. And `~(i > 0)` used as a number
   (`x[i] * ~(i > 0)`, in a sum's body or an index) is a `TraceError` naming
   `i <= 0`, since natively it is the `-2` or `-1` the native run refuses only
-  where a truth value is asked for. Three more operations are refused, naming
-  what to write: `b[i] + c[i]` of two truth values, which is `or` natively and
-  `2` compiled (`b[i] | c[i]` for `or`, `1 * b[i] + c[i]` for a count); an
-  integer element or scalar to a negative integer power, which numpy refuses
-  and loopy computed as an integer (`1 / k[i] ** 2`, a real); and `^`, `<<`
-  or `>>` of a real, which numpy refuses and C cannot compile.
+  where a truth value is asked for. More operations are refused, naming what
+  to write: `b[i] + c[i]` of two truth values, which is `or` natively and `2`
+  compiled (`b[i] | c[i]` for `or`, `1 * b[i] + c[i]` for a count), and
+  `b[i] - c[i]`, which numpy refuses; an integer element or scalar to a
+  negative integer power, which numpy refuses and loopy computed as an
+  integer (`1 / k[i] ** 2`, a real); `^`, `<<` or `>>` of a real, and `//` or
+  `%` of a complex value, which numpy refuses and C cannot compile; and a
+  loop variable divided by a literal zero or shifted by a negative literal,
+  which Python refuses natively.
 - The faithfulness fact. For each kernel and each program, the traced term is
   run by an interpreter (`loopty.interpret`: statement by statement in source
   order over each statement's isl domain, each loop enumerated when the run
@@ -514,8 +517,9 @@ end to end; the edges are sharp.
   raises.
 - Integers are 64 bits wide in both runs, and a result outside 64 bits wraps
   round compiled where numpy wraps or refuses, which is numpy's limit too.
-  Index arithmetic, a subscript, a loop bound and a guard on the loops alone,
-  is loopy's, 32 bits wide, and so is a sum of loop variables and sizes. A
+  Index arithmetic, a subscript and a loop bound, is loopy's, 32 bits wide,
+  and so is a sum of loop variables, sizes and small literals: `x[(i * i) %
+  n]` reads out of bounds compiled at `i = 46341` (#129). A
   `Fin[m]` array the kernel writes may be an `int32` one natively, and an
   entry read back from it is computed with in 32 bits there. An integer to a
   negative power whose exponent is not a literal is left to numpy's refusal
