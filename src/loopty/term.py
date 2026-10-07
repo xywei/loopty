@@ -30,7 +30,10 @@ __all__ = [
     "Access",
     "ArrType",
     "Expression",
+    "Hypothesis",
     "Reduction",
+    "Requirement",
+    "Scope",
     "Stmt",
     "Term",
     "count_param_names",
@@ -288,6 +291,101 @@ class ArrType:
 
 
 @dataclass(frozen=True)
+class Hypothesis:
+    """A proposition a fact about a program may assume, and what it rests on.
+
+    ``claim`` is a proposition about the program's arrays and sizes, in the
+    program's names: a callee's postcondition after the call, a theorem the
+    program cites instantiated at its arrays, the type the program's
+    contract checks of an argument nothing has written yet, or the zeros an
+    ``Arr.zeros_like`` starts an array with. ``source`` says which, in words,
+    for a fact's provenance; ``rests_on`` names the facts the claim is
+    established by, which a fact that uses it rests on in turn (lanky's
+    ``rests_on``), and is empty for what the program's contract or its own
+    statements establish. ``mentions`` names the arrays the claim is about,
+    so that a call writing one of them can retire it.
+    """
+
+    claim: Any
+    source: str
+    rests_on: tuple[str, ...] = ()
+    mentions: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class Requirement:
+    """What a call's contract checks of an array an earlier call wrote.
+
+    A kernel's requirements on its inputs are its argument types, and two of
+    them are about what an array's cells hold: an element of a ``Fin[m]``
+    sort is a point of it (``kind="element"``), and the offsets a ragged
+    family is read through are the offsets its counts give
+    (``kind="layout"``). Natively the call's contract checks them; a program
+    is one call, so where an earlier call wrote the array, the requirement
+    is an obligation of the program (see :mod:`loopty.compose`).
+
+    ``call`` is the label of the call (``gather``, ``scan@2``) and
+    ``definition`` the callee's (``spmv.scan@69``); ``param`` is the
+    callee's parameter and ``array`` the program's array passed for it, and
+    ``writer`` says what wrote the array first. ``statement`` is the
+    requirement in words, and ``claim`` as a proposition in the program's
+    names.
+
+    ``offered`` lists the hypotheses that held at the call. When isl
+    decides the requirement under them, ``question`` is the set of cells
+    that break it where the hypotheses ``used`` hold, an empty one, and the
+    fact rests on what those rest on. Otherwise ``question`` is ``None``,
+    ``reason`` says why, and the requirement is a checked point: the
+    lowered program checks the cells between the calls and sets the cell
+    of the one-cell array ``flag`` when one fails, every later statement is
+    guarded by that cell, and the compiled run raises ``message``.
+    """
+
+    call: str
+    kernel: str
+    definition: str
+    where: str
+    param: str
+    array: str
+    kind: str
+    writer: str
+    statement: str
+    claim: Any
+    offered: tuple[Hypothesis, ...] = ()
+    used: tuple[Hypothesis, ...] = ()
+    question: Any = None
+    reason: str = ""
+    flag: str | None = None
+    message: str = ""
+
+    @property
+    def decided(self) -> bool:
+        """Whether isl decided the requirement, so that nothing checks it."""
+        return self.question is not None
+
+
+@dataclass(frozen=True)
+class Scope:
+    """What holds where one call of a program runs.
+
+    ``statements`` are the ids of the call's statements in the program's
+    term, and ``hypotheses`` what may be assumed there: the postconditions
+    of earlier calls that nothing has written over, the theorems the
+    program cites, instantiated at them, and the callee's own argument
+    types, which the program's contract checks when it starts, or a
+    requirement decides or checks at the call. A callee's fact that its own
+    term leaves ``assumed`` can be decided here; see
+    :func:`loopty.typing.scoped_in_bounds_facts`.
+    """
+
+    call: str
+    kernel: str
+    where: str
+    statements: tuple[str, ...]
+    hypotheses: tuple[Hypothesis, ...] = ()
+
+
+@dataclass(frozen=True)
 class Term:
     """A traced kernel.
 
@@ -328,6 +426,22 @@ class Term:
       Natively that dtype is whatever ``u`` is called with, so it is checked
       when the compiled term is run
       (:func:`loopty.contract.inherited_storage`).
+
+    Two more are a program's alone, and are how its callees' facts travel
+    from one call to the next:
+
+    * ``requirements`` lists what a call's contract checks of an array an
+      earlier call wrote (:class:`Requirement`), each decided under the
+      hypotheses that held at the call or checked by the lowered program
+      between the calls, through a one-cell temporary each
+      (:attr:`checks`).
+    * ``scopes`` gives, call by call, the hypotheses that held where it ran
+      (:class:`Scope`).
+    * ``deferred_offsets`` names the offsets arrays an earlier call writes
+      before any call reads rows through them. The contract of the compiled
+      program does not compare them with the rows' own offsets when it
+      starts, as a native call that does not read through them does not: a
+      layout requirement does, where they are first read.
     """
 
     name: str
@@ -340,11 +454,30 @@ class Term:
     offsets: tuple[tuple[str, str | None], ...] = ()
     where: str = ""
     temporaries_like: tuple[tuple[str, str], ...] = ()
+    requirements: tuple[Requirement, ...] = ()
+    scopes: tuple[Scope, ...] = ()
+    deferred_offsets: tuple[str, ...] = ()
 
     @property
     def param_names(self) -> tuple[str, ...]:
         """Parameter names, in signature order."""
         return tuple(name for name, _ in self.params)
+
+    @property
+    def checks(self) -> tuple[tuple[str, str], ...]:
+        """The checked points: each flag temporary, with what a failure raises.
+
+        In the order the program reaches them. A flag is a one-cell
+        temporary of the term that a check statement sets when a cell fails
+        its requirement; the lowering passes it as an argument, so that the
+        executor can read it after the run and raise the message, and the
+        interpreter raises it too (:class:`Requirement`).
+        """
+        return tuple(
+            (requirement.flag, requirement.message)
+            for requirement in self.requirements
+            if requirement.flag is not None
+        )
 
     @property
     def array_types(self) -> dict[str, ArrType]:

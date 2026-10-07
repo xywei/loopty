@@ -547,7 +547,11 @@ class Kernel(_Decorated):
         interpreted, against the native run of the body, on the module's
         example inputs and on inputs drawn from the declared types. Every other
         fact is about the term, and this one is about whether the term is the
-        body; see :mod:`loopty.faithful`.
+        body; see :mod:`loopty.faithful`. The postcondition is tested on the
+        same native runs: it is evaluated at what each of them left in the
+        arguments, and is ``tested`` when it held after every one
+        (:func:`loopty.faithful.postcondition_fact`), which is what a program
+        that calls the kernel counts it as.
 
         A body that cannot be traced is itself reported as a fact rather than as
         a crash, so that ``lanky check`` on a file with one broken kernel still
@@ -583,15 +587,23 @@ class Kernel(_Decorated):
                 ),
             )
             return self._facts
-        from loopty.faithful import faithfulness_fact
+        from loopty.faithful import faithfulness_fact, postcondition_fact
 
         key = {"module": self.module, "line": self.line}
-        self._facts = (
-            *rules.facts_for(term, owner=self.qualname, where=self.where, **key),
-            faithfulness_fact(
-                self, term, owner=self.qualname, where=self.where, **key
-            ),
+        observed: list[Any] = []
+        faithful = faithfulness_fact(
+            self, term, owner=self.qualname, where=self.where, observed=observed, **key
         )
+        stated = rules.facts_for(term, owner=self.qualname, where=self.where, **key)
+        tested = [
+            postcondition_fact(
+                self, term, observed, owner=self.qualname, where=self.where, **key
+            )
+            if fact.kind == "postcondition"
+            else fact
+            for fact in stated
+        ]
+        self._facts = (*tested, faithful)
         return self._facts
 
     def __repr__(self) -> str:
@@ -614,17 +626,30 @@ class Program(_Decorated):
     (``LoopyExecutor().run(solve, ...)``), scheduled (``Schedule(solve)``)
     and compared with its native run, which is what ``loopty run`` does with
     every program in a file. Fusing the calls is not done: it is a cast over
-    this term, and waits for facts that travel.
+    this term, which is the next step of facts that travel.
 
-    What it adds to the ledger is mostly bookkeeping rather than reasoning:
-    the postcondition of every kernel it calls is restated as a fact *in the
-    scope of the program*, which rests on the callee's own fact. That is lanky's
-    ``rests_on``, so the ledger names the callee's postcondition beside the
-    restatement (``assumed under postcondition:spmv.scan@69``) and counts it
-    in what the restatement is worth, and a reader can see which claims the
-    program depends on. The id names the callee's definition, so a callee
-    imported from another module under another name is named by its own
-    fact there, and never by a kernel of the same name in the program's file.
+    The postcondition of every kernel it calls is restated as a fact *in the
+    scope of the program*: after the call, the callee's claim holds of what
+    the call passed it. The restatement is ``decided`` by the call, and rests
+    on the callee's own fact (lanky's ``rests_on``), so the ledger counts that
+    fact in what the restatement is worth: ``tested`` when the callee's
+    postcondition was tested against its native runs. The id names the
+    callee's definition, so a callee imported from another module under
+    another name is named by its own fact there, and never by a kernel of the
+    same name in the program's file.
+
+    The postconditions are hypotheses as well. A call whose contract checks
+    the cells of an array an earlier call wrote (a ``Fin[m]`` element sort,
+    the offsets a ragged family is read through) has that check as a
+    requirement of the program, decided by isl under the postconditions that
+    held at the call and the theorems the program cites
+    (``@program(uses=[scan_monotone])``), or checked by the compiled program
+    between the two calls where it is not (:mod:`loopty.compose`). Each is a
+    ``requirement`` fact, resting on the facts it used. A callee's in-bounds
+    fact its own term leaves ``assumed``, a flat ``val[off[r] + j]``, is
+    decided under the same hypotheses where they decide it
+    (:func:`loopty.typing.scoped_in_bounds_facts`).
+
     The last fact is the program's ``trace-faithful`` fact, as a kernel's is:
     its term, interpreted, against its body run natively, on the module's
     example inputs for it and on inputs drawn from the term's parameters
@@ -633,18 +658,17 @@ class Program(_Decorated):
     placeholder sees (``isinstance(x, Arr)``, say), so this is the fact that
     catches a term that is not what the body computes.
 
-    What it does not do yet is use those postconditions as hypotheses. Carrying
-    the scan's recurrence into the in-bounds proof of the product is the
-    interesting case, and it needs the isl oracle to accept a hypothesis, which
-    the offsets formulation in :mod:`loopty.flow` does not yet provide. Until
-    then the facts are recorded and left ``ASSUMED``, which is visible in the
-    ledger rather than quietly assumed to be handled.
+    ``uses`` are the theorems the program cites, lanky's
+    :class:`~lanky.theory.Theorem` objects (an axiom is one): a theorem is
+    offered as a hypothesis by its statement, so an id or a fact, which name
+    a claim without stating it, is refused.
     """
 
-    def __init__(self, fn: Any) -> None:
+    def __init__(self, fn: Any, *, uses: Any = ()) -> None:
         super().__init__(fn)
         self._term: Term | None = None
         self._facts: tuple[Fact, ...] | None = None
+        self.uses = _theorems(uses, self.qualname)
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """Run the body natively; its kernel calls run natively too.
@@ -700,10 +724,12 @@ class Program(_Decorated):
         return tuple(out)
 
     def facts(self) -> tuple[Fact, ...]:
-        """One fact per callee postcondition, then the ``trace-faithful`` fact.
+        """The restatements, the requirements, then the ``trace-faithful`` fact.
 
-        Each rests on the callee's postcondition fact, named by the id the
-        callee's own facts give it (:func:`loopty.typing.postcondition_id`),
+        One restatement per callee postcondition, ``decided`` by the call
+        (see :class:`Program`). Each rests on the callee's postcondition fact,
+        named by the id the callee's own facts give it
+        (:func:`loopty.typing.postcondition_id`),
         which is keyed by the callee's definition: the module its file's path
         gives it, its qualified name and its line. When the callee is checked
         in the same file, that fact is in the same ledger, and the
@@ -716,6 +742,12 @@ class Program(_Decorated):
 
         The restatement's own id names the program and then the callee's
         definition, so two callees of one name get a restatement each.
+
+        Then one ``requirement`` fact per requirement of the term
+        (:func:`loopty.typing.requirement_facts`), each resting on the
+        restatements and theorems it was decided by, or ``assumed`` and
+        checked when the program runs; and the in-bounds facts its calls'
+        hypotheses decide (:func:`loopty.typing.scoped_in_bounds_facts`).
 
         The ``trace-faithful`` fact compares the program's term, interpreted,
         with its body, run natively, as a kernel's does
@@ -742,21 +774,28 @@ class Program(_Decorated):
 
             out.append(
                 Fact(
-                    id=fact_id(
-                        "postcondition-in-scope",
+                    id=rules.restatement_id(
                         self.qualname,
+                        callee.definition,
                         module=self.module,
                         line=self.line,
-                        detail=callee.definition,
                     ),
                     kind="postcondition-in-scope",
                     statement=(
                         f"after {callee.__name__}(...) in {self.__name__}: "
                         f"{render(post)}"
                     ),
-                    term=post,
-                    status=Status.ASSUMED,
-                    provenance={"callee": callee.qualname},
+                    term=rules.AfterCall(callee.__name__, post),
+                    status=Status.DECIDED,
+                    decided_by="call",
+                    provenance={
+                        "callee": callee.qualname,
+                        "rule": (
+                            f"every call of {callee.__name__} leaves its "
+                            "postcondition true of what it was passed, so it "
+                            "holds after each call the program makes"
+                        ),
+                    },
                     where=self.where,
                     owner=self.qualname,
                     rests_on=(
@@ -782,6 +821,8 @@ class Program(_Decorated):
                 )
             )
         else:
+            out.extend(rules.requirement_facts(term, self.qualname, **key))
+            out.extend(rules.scoped_in_bounds_facts(term, self.qualname, **key))
             out.extend(rules.layout_facts(term, self.qualname, **key))
             out.append(
                 faithfulness_fact(
@@ -858,7 +899,62 @@ def kernel(fn: Any) -> Kernel:
     return ensure_registered()(fn)
 
 
-def program(fn: Any) -> Program:
-    """Decorate ``fn`` as a sequence of kernel calls and register it."""
+def program(fn: Any = None, /, *, uses: Any = ()) -> Any:
+    """Decorate ``fn`` as a sequence of kernel calls and register it.
+
+    ``@program`` alone, or ``@program(uses=[scan_monotone])`` to cite
+    theorems, which are offered as hypotheses wherever the program's
+    requirements are decided (see :class:`Program`).
+    """
     ensure_registered()
-    return registry.register_object(Program(fn))
+    if fn is None:
+        theorems = _theorems(uses, "the program")
+
+        def decorate(function: Any) -> Program:
+            return registry.register_object(Program(function, uses=theorems))
+
+        return decorate
+    if not callable(fn) or getattr(fn, "__code__", None) is None:
+        raise TypeError(
+            f"@program decorates a function, and was given {fn!r}; the theorems "
+            "a program cites go in uses=[...]"
+        )
+    return registry.register_object(Program(fn, uses=uses))
+
+
+def _theorems(uses: Any, owner: str) -> tuple[Any, ...]:
+    """The theorems a ``uses=`` argument names, checked to be statements.
+
+    A theorem is offered to a program's requirements as a hypothesis, which
+    takes its statement: its variables, its hypotheses and its goal. An id
+    or a :class:`~lanky.ledger.Fact` names a claim without stating it in
+    that form, so it is refused, naming the fix.
+    """
+    if uses is None:
+        raise TypeError(
+            f"uses=None names no theorem for {owner}; a program that cites none "
+            "leaves uses= out"
+        )
+    entries = [uses] if _is_statement(uses) or isinstance(uses, str) else list(uses)
+    out: list[Any] = []
+    for entry in entries:
+        if not _is_statement(entry):
+            raise TypeError(
+                f"uses= of {owner} names theorems, which are offered as "
+                f"hypotheses by their statements, and {entry!r} states nothing a "
+                "program can instantiate; pass the theorem itself, as "
+                "uses=[scan_monotone]"
+            )
+        if not any(entry is seen for seen in out):
+            out.append(entry)
+    return tuple(out)
+
+
+def _is_statement(entry: Any) -> bool:
+    """Whether ``entry`` is a theorem a program can instantiate."""
+    return (
+        hasattr(entry, "variables")
+        and hasattr(entry, "hypotheses")
+        and hasattr(entry, "goal")
+        and isinstance(getattr(entry, "fact_id", None), str)
+    )

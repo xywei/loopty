@@ -71,9 +71,18 @@ differential test is allowed to use. The class is read off the term, so the fact
 is ``DECIDED`` by the type rather than by an oracle.
 
 *The postcondition.* The return annotation of a kernel is a claim about its
-parameters. It is emitted as a fact with its term, for whatever oracle can take
-it, and stays ``ASSUMED`` when none can, which is the honest outcome and is
-visible in the ledger rather than lost.
+parameters once the kernel has run. It is emitted as a fact whose term is an
+:class:`AfterCall`, and stays ``ASSUMED`` here; a kernel tests it against its
+native runs (:func:`loopty.faithful.postcondition_fact`), where it is
+``tested``, and that is the status a program's facts that rest on it count.
+
+*What travels into a program.* A program's term records what each call's
+contract checks of an array an earlier call wrote, decided under what held at
+the call or checked when the program runs (:class:`loopty.term.Requirement`),
+and :func:`requirement_facts` states each; a decided one rests on the facts
+of the hypotheses it used. :func:`scoped_in_bounds_facts` decides, under
+those hypotheses, an in-bounds fact a callee's own term leaves ``assumed``:
+a flat ``val[off[r] + j]`` after the call that wrote ``off``.
 
 The in-bounds, disjointness and ordering facts are stated over statement
 domains, and a guard narrows a domain only where isl can state it. A conjunct
@@ -94,6 +103,7 @@ kernel behind it leaves the module and the line out.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import islpy as isl
@@ -108,6 +118,7 @@ from loopty.term import ArrType, Term
 from loopty.trace import reductions_in
 
 __all__ = [
+    "AfterCall",
     "element_sort_facts",
     "facts_for",
     "in_bounds_facts",
@@ -119,6 +130,10 @@ __all__ = [
     "postcondition_id",
     "reduction_facts",
     "render_instance",
+    "requirement_facts",
+    "requirement_id",
+    "restatement_id",
+    "scoped_in_bounds_facts",
     "write_disjointness_facts",
 ]
 
@@ -806,6 +821,30 @@ def layout_facts(
             )
             provenance["restated"] = restated
             provenance["fixed"] = fixed
+        # In a program, the offsets a call reads rows through after an
+        # earlier call wrote them are a requirement of that call, decided or
+        # checked there (loopty.compose); the rows lie as the counts say
+        # wherever they are read on the strength of those too.
+        offsets = term.offsets_of(counts)
+        checked = tuple(
+            requirement_id(
+                owner,
+                requirement.call,
+                requirement.kind,
+                requirement.param,
+                module=module,
+                line=line,
+            )
+            for requirement in term.requirements
+            if requirement.kind == "layout" and requirement.array == offsets
+        )
+        if offsets in term.deferred_offsets:
+            provenance["deferred"] = (
+                f"{offsets} is written before any call reads rows through it, so "
+                "the program's contract does not compare it with the rows' own "
+                "offsets when it starts; the calls that read through it after a "
+                "write require it, and this fact rests on those requirements"
+            )
         facts.append(
             Fact(
                 id=fact_id("layout", owner, module=module, line=line, detail=counts),
@@ -819,6 +858,7 @@ def layout_facts(
                 provenance=provenance,
                 where=family["statements"][0].where,
                 owner=owner,
+                rests_on=checked,
             )
         )
     return facts
@@ -1222,6 +1262,25 @@ def postcondition_id(
     return fact_id("postcondition", owner, module=module, line=line)
 
 
+@dataclass(frozen=True)
+class AfterCall:
+    """A kernel's postcondition as the term of a fact: a claim about a call.
+
+    ``claim`` names the kernel's parameters, which have values only once a
+    call has passed them and the body has run, so it is no closed
+    proposition, and an oracle that samples or proves closed propositions
+    has nothing to bind its names to. Wrapped, it is offered to no oracle,
+    and the fact's status is what running the kernel established
+    (:func:`loopty.faithful.postcondition_fact`). It prints as the claim.
+    """
+
+    kernel: str
+    claim: Any
+
+    def __str__(self) -> str:
+        return render(self.claim)
+
+
 def postcondition_facts(
     term: Term,
     owner: str,
@@ -1230,7 +1289,7 @@ def postcondition_facts(
     module: str | None = None,
     line: int | None = None,
 ) -> list[Fact]:
-    """The return annotation as a fact, for whatever oracle can take it."""
+    """The return annotation as a fact, ``assumed`` until a run tests it."""
     if term.post is None:
         return []
     return [
@@ -1238,13 +1297,273 @@ def postcondition_facts(
             id=postcondition_id(owner, module=module, line=line),
             kind="postcondition",
             statement=render(term.post),
-            term=term.post,
+            term=AfterCall(term.name, term.post),
             status=Status.ASSUMED,
             provenance={"kernel": term.name},
             where=where,
             owner=owner,
         )
     ]
+
+
+def restatement_id(
+    owner: str,
+    callee: str,
+    *,
+    module: str | None = None,
+    line: int | None = None,
+) -> str:
+    """The id of a program's restatement of a callee's postcondition.
+
+    ``owner``, ``module`` and ``line`` are the program's definition and
+    ``callee`` the callee's (``spmv.scan@69``), so two callees of one name
+    get a restatement each. One builder, because a requirement the
+    postcondition decides rests on the restatement by this id
+    (:mod:`loopty.compose`).
+    """
+    return fact_id(
+        "postcondition-in-scope", owner, module=module, line=line, detail=callee
+    )
+
+
+def requirement_id(
+    owner: str,
+    call: str,
+    kind: str,
+    param: str,
+    *,
+    module: str | None = None,
+    line: int | None = None,
+) -> str:
+    """The id of a program's requirement on the array a call passes for ``param``.
+
+    ``requirement:spmv.solve@115:gather:element:perm``: the program's
+    definition, the call's label, what is required (``element`` or
+    ``layout``) and the callee's parameter.
+    """
+    return fact_id(
+        "requirement",
+        owner,
+        module=module,
+        line=line,
+        detail=f"{call}:{kind}:{param}",
+    )
+
+
+def _rests_on(hypotheses: Sequence[Any]) -> tuple[str, ...]:
+    """The facts a set of hypotheses rests on, each once, in order."""
+    return tuple(
+        dict.fromkeys(fact for hypothesis in hypotheses for fact in hypothesis.rests_on)
+    )
+
+
+def requirement_facts(
+    term: Term, owner: str, *, module: str | None = None, line: int | None = None
+) -> list[Fact]:
+    """One fact per requirement of a program's term.
+
+    A requirement isl decided under the hypotheses that held at its call has
+    the question it decided as its term, an :class:`~loopty.oracle.Empty`
+    over the points at which a cell would break it where the hypotheses it
+    used hold, for the isl oracle to answer again, and rests on the facts
+    those hypotheses rest on: a callee's postcondition restated in the
+    program, a theorem the program cites. One isl did not decide is a
+    checked point of the compiled program, and stays ``assumed``, with the
+    reason and the check in its provenance.
+    """
+    facts: list[Fact] = []
+    for requirement in term.requirements:
+        identifier = requirement_id(
+            owner,
+            requirement.call,
+            requirement.kind,
+            requirement.param,
+            module=module,
+            line=line,
+        )
+        provenance: dict[str, Any] = {
+            "call": requirement.call,
+            "kernel": requirement.kernel,
+            "param": requirement.param,
+            "array": requirement.array,
+            "requirement": requirement.kind,
+            "writer": requirement.writer,
+            "offered": [hypothesis.source for hypothesis in requirement.offered],
+        }
+        if requirement.decided:
+            provenance["used"] = [h.source for h in requirement.used]
+            facts.append(
+                Fact(
+                    id=identifier,
+                    kind="requirement",
+                    statement=requirement.statement,
+                    term=requirement.question,
+                    status=Status.ASSUMED,
+                    provenance=provenance,
+                    where=requirement.where,
+                    owner=owner,
+                    rests_on=_rests_on(requirement.used),
+                )
+            )
+            continue
+        provenance["reason"] = requirement.reason
+        provenance["checked"] = (
+            f"the compiled program checks {requirement.array} before "
+            f"{requirement.call} and stops there if a cell fails: "
+            f"{requirement.message}"
+        )
+        facts.append(
+            Fact(
+                id=identifier,
+                kind="requirement",
+                statement=f"{requirement.statement} (checked when it runs)",
+                term=None,
+                status=Status.ASSUMED,
+                provenance=provenance,
+                where=requirement.where,
+                owner=owner,
+            )
+        )
+    return facts
+
+
+def scoped_in_bounds_facts(
+    term: Term, owner: str, *, module: str | None = None, line: int | None = None
+) -> list[Fact]:
+    """In-bounds facts of a program's calls that hold where the calls are made.
+
+    A callee's in-bounds fact of an access whose index is not quasi-affine,
+    and which no type bounds, is ``assumed`` in the callee's own ledger: a
+    flat ``val[off[r] + j]`` is in bounds only for some ``off``. In a
+    program, the call is made where the hypotheses of its
+    :class:`~loopty.term.Scope` hold, the postcondition of the call that
+    wrote ``off`` and the callee's own argument types among them, and those
+    may decide it: ``off[r] + j < off[r] + cnt[r] == off[r + 1] <= nnz``,
+    through the cells ``off[r]``, ``off[r + 1]`` and ``cnt[r]``
+    (:func:`loopty.hypotheses.discharge`). Such an access gets a fact of the
+    program's, keyed by the program's statement, resting on the facts the
+    hypotheses it used rest on. One the hypotheses do not decide gets none;
+    the callee's own fact says what is known of it.
+
+    An access to a ragged array, or one read at several domains, is left to
+    the callee's facts.
+    """
+    from loopty.hypotheses import discharge
+
+    types = dict(term.params)
+    types.update(term.temporaries)
+    by_id = {stmt.id: stmt for stmt in term.stmts}
+    sizes = flow.size_names(term)
+    reflected = dict(term.reflected)
+    integral = {
+        name
+        for name, typ in types.items()
+        if isinstance(typ, ArrType) and _integral(typ.dtype)
+    }
+    known = set(term.sizes) | {
+        name
+        for name, typ in term.params
+        if not isinstance(typ, ArrType) and _integral(typ)
+    }
+    facts: list[Fact] = []
+    for scope in term.scopes:
+        for stmt_id in scope.statements:
+            stmt = by_id.get(stmt_id)
+            if stmt is None:
+                continue
+            listed: dict[tuple[str, str, str], list[Any]] = {}
+            for array, indices, kind, inames, domain in flow.statement_accesses(
+                stmt, term
+            ):
+                arrtype = types.get(array)
+                if not isinstance(arrtype, ArrType) or any(arrtype.ragged):
+                    continue
+                if arrtype.domain is not None:
+                    continue
+                text = _access_text(array, indices)
+                listed.setdefault((array, kind, text), []).append(
+                    (tuple(indices), inames, domain)
+                )
+            for (array, kind, text), places in listed.items():
+                if len(places) != 1:
+                    continue
+                ((indices, inames, domain),) = places
+                arrtype = types[array]
+                if _justified_by_type(indices, arrtype, types) is not None:
+                    continue
+                try:
+                    relation = flow.access_relation(inames, domain, indices)
+                except Exception:  # noqa: BLE001 - not a question to ask, then
+                    continue
+                if not _is_widened(relation, indices):
+                    continue
+                goal = _in_cells(indices, arrtype)
+                if goal is None:
+                    continue
+                params = set(domain.get_var_names(isl.dim_type.param))
+                outcome = discharge(
+                    domain,
+                    goal,
+                    scope.hypotheses,
+                    integral=integral,
+                    known=known,
+                    nonneg=set(sizes),
+                    reflected={k: v for k, v in reflected.items() if k in params},
+                    description=(
+                        f"instances of {stmt.id} at which {text} leaves {array} "
+                        "where the hypotheses used hold"
+                    ),
+                )
+                if not outcome.decided:
+                    continue
+                facts.append(
+                    Fact(
+                        id=fact_id(
+                            "in-bounds",
+                            owner,
+                            module=module,
+                            line=line,
+                            detail=f"{stmt.id}:{kind}:{text}",
+                        ),
+                        kind="in-bounds",
+                        statement=(
+                            f"{text} is in bounds for every instance of {stmt.id}, "
+                            f"where {scope.call} is called at {scope.where}"
+                        ),
+                        term=outcome.question,
+                        status=Status.ASSUMED,
+                        provenance={
+                            "access": text,
+                            "statement": stmt.id,
+                            "call": scope.call,
+                            "used": [h.source for h in outcome.used],
+                        },
+                        where=stmt.where,
+                        owner=owner,
+                        rests_on=_rests_on(outcome.used),
+                    )
+                )
+    return facts
+
+
+def _integral(sort: Any) -> bool:
+    """Whether the points of ``sort`` are integers, which isl can compare."""
+    from loopty.contract import integral_sort
+
+    return integral_sort(sort)
+
+
+def _in_cells(indices: Sequence[Any], arrtype: ArrType) -> Any:
+    """``0 <= i_k < n_k`` for every index: the access is a cell the array has."""
+    from lanky.terms import Comparison, LogicalAnd
+
+    parts = []
+    for index, axis in zip(indices, arrtype.axes, strict=False):
+        parts.append(Comparison(0, "<=", index))
+        parts.append(Comparison(index, "<", axis))
+    if len(indices) != len(arrtype.axes) or not parts:
+        return None
+    return LogicalAnd(tuple(parts))
 
 
 # }}}

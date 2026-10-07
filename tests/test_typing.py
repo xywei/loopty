@@ -176,10 +176,11 @@ def test_the_ledger_of_the_ragged_kernel_names_isl_and_the_type() -> None:
     # what a schedule lowers it to when it reorders the accumulation.
     assert "is approx" in statements
 
-    # The postcondition is nobody's yet, and says so rather than disappearing.
+    # The postcondition is tested against the kernel's native runs.
     posts = [f for f in ledger if f.kind == "postcondition"]
     assert len(posts) == 1
-    assert posts[0].status is Status.ASSUMED
+    assert posts[0].status is Status.TESTED
+    assert posts[0].decided_by == "native"
 
 
 def test_the_ragged_in_bounds_fact_is_decided_by_isl() -> None:
