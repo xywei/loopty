@@ -331,6 +331,34 @@ def test_a_postcondition_some_run_cannot_evaluate_is_not_tested() -> None:
     assert fact.status is Status.TESTED
 
 
+def test_a_postcondition_is_tested_past_the_inputs_the_term_differs_at() -> None:
+    # The term counts up and the body reverses, so the comparison is settled
+    # at the first input. The body breaks its postcondition on every run
+    # after the first, which the postcondition used to be tested on alone.
+    runs: list[int] = []
+
+    @kernel
+    def drifting(perm: Arr[Fin[n], Fin[n]]) -> all(  # noqa: F821
+        perm[i] == n - 1 - i for i in Fin[n]  # noqa: F821
+    ):
+        for i in perm.dom:
+            perm[i] = perm.dom.size - 1 - i
+        if isinstance(perm, Arr):
+            runs.append(1)
+            if len(runs) > 1:
+                perm[0] = perm.dom.size
+        else:
+            for i in perm.dom:
+                perm[i] = i + 1
+
+    facts = {fact.kind: fact for fact in drifting.facts()}
+    assert facts["trace-faithful"].status is Status.REFUTED
+    assert len(runs) > 1
+    post = facts["postcondition"]
+    assert post.status is Status.REFUTED, post.provenance
+    assert post.provenance["inputs"][0]["outcome"] == "held"
+
+
 def test_gathers_requirement_is_decided_under_numbers_postcondition() -> None:
     # #65's permuted program: number writes perm, gather reads x[perm[i]].
     (requirement,) = facts_of("permuted", "requirement")

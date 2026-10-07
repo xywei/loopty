@@ -439,7 +439,9 @@ with a pair of statement instances.
   as a fact of the program's resting on what it used.
 - **A kernel's postcondition is tested** (`loopty.faithful.postcondition_fact`).
   It is evaluated at what every native run of the `trace-faithful` fact left
-  in the arguments, on the module's example inputs and the drawn ones, and is
+  in the arguments, on the module's example inputs and the drawn ones (those
+  after an input the term differs at run natively too, since that settles
+  the comparison and not the postcondition), and is
   `tested` by `native` when it held after each, `refuted` with the input
   after which it did not, and `assumed`, with the reason, when nothing ran or
   it could not be evaluated after some run (it reads a cell the run's arrays

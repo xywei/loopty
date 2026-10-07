@@ -128,7 +128,9 @@ def faithfulness_fact(
 
     ``observed``, when given, collects every native run that ran, as
     ``(label, record, arguments)``, the arguments as the run left them, for
-    :func:`postcondition_fact` to evaluate the postcondition at.
+    :func:`postcondition_fact` to evaluate the postcondition at: on every
+    input, those after a disagreement too, which settles this fact and not
+    the postcondition.
     """
     identifier = fact_id(KIND, owner, module=module, line=line)
     inputs: list[dict[str, Any]] = []
@@ -151,10 +153,18 @@ def faithfulness_fact(
             owner=owner,
         )
 
+    # The comparison is settled at the first input the term cannot be judged
+    # on or differs at; the inputs after it still run natively when
+    # ``observed`` is asked for, since the postcondition is tested on every
+    # input, and a run past a disagreement can refute it.
+    verdict: Fact | None = None
     try:
         for label, arguments, recorded in _inputs(kernel, term):
+            if verdict is not None and observed is None:
+                break
             if isinstance(arguments, str):
-                inputs.append({"input": label, "outcome": f"skipped: {arguments}"})
+                if verdict is None:
+                    inputs.append({"input": label, "outcome": f"skipped: {arguments}"})
                 continue
             after = None
             if observed is not None:
@@ -165,6 +175,8 @@ def faithfulness_fact(
                     observed.append((label, recorded, native))
 
             outcome = _compare(kernel, term, label, arguments, after)
+            if verdict is not None:
+                continue
             if outcome is None:
                 inputs.append({"input": label, "outcome": "agreed"})
                 continue
@@ -173,18 +185,24 @@ def faithfulness_fact(
                 inputs.append({"input": label, "outcome": f"skipped: {detail}"})
                 continue
             if kind == "unknown":
-                return fact(Status.ASSUMED, reason=detail)
+                verdict = fact(Status.ASSUMED, reason=detail)
+                continue
             counterexample, reason = detail
             inputs.append({"input": label, "outcome": "differed"})
             extra = {"arguments": recorded} if recorded is not None else {}
-            return fact(
+            verdict = fact(
                 Status.REFUTED, counterexample=counterexample, reason=reason, **extra
             )
     except Exception as exc:  # noqa: BLE001 - a fact, never a crash of the check
-        return fact(
-            Status.ASSUMED,
-            reason=f"the comparison could not be made: {type(exc).__name__}: {exc}",
-        )
+        if verdict is None:
+            return fact(
+                Status.ASSUMED,
+                reason=(
+                    f"the comparison could not be made: {type(exc).__name__}: {exc}"
+                ),
+            )
+    if verdict is not None:
+        return verdict
     agreed = sum(entry["outcome"] == "agreed" for entry in inputs)
     if not agreed:
         skipped = "; ".join(f"{e['input']}: {e['outcome']}" for e in inputs)
