@@ -296,6 +296,47 @@ def test_a_parallel_tag_that_would_read_a_stale_row_length_is_rejected(fn) -> No
     assert caught.value.fact.status.value == "refuted"
 
 
+def sums_at_i_then_next_count(
+    x: Arr[Fin[m], Real],  # noqa: F821
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """Each ``i`` sums entry ``i`` of row ``r``; the next row's length cleared."""
+    for r in y.dom:
+        for i in x.dom:
+            y[r] = y[r] + x[i] * reduce_sum(val[r, t] for t in val.dom[r] if t == i)
+        with when(r + 1 < y.dom.size):
+            cnt[r + 1] = 0
+
+
+def test_a_tag_that_would_read_a_sums_bound_before_it_is_written_is_rejected() -> None:
+    # The sum reads the length of row ``r``, and ``S1[r - 1]`` clears it. Its
+    # clause ``t == i`` leaves no constraint of its own bound in its domain,
+    # ``t = i, i < nl_cnt_r``, and no loop of the statement is bounded by
+    # it, so the read was in no footprint, and the tag was accepted, its
+    # ``monotone`` fact decided (#111). The bound is read over the sum's
+    # domain before the clause narrowed it.
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(
+        sums_at_i_then_next_count, evaluate_annotations(sums_at_i_then_next_count)
+    )
+    schedule = Schedule(term, sizes={"n": 4, "m": 3})
+    with pytest.raises(IllegalCast) as caught:
+        schedule.tag(r="l.0")
+    message = str(caught.value)
+    assert message.startswith("tag(r='l.0') illegal: instance S1[r=")
+    assert "writes cnt[" in message
+    assert "read by S0[" in message
+    (source_id, source), (sink_id, sink), _params = caught.value.witness
+    assert (source_id, sink_id) == ("S1", "S0")
+    assert sink["r"] == source["r"] + 1
+    assert caught.value.fact.kind == "monotone"
+
+
 def offsets_stored_then_row_sums(
     s: Arr[Fin[n], Nat],  # noqa: F821
     cnt: Arr[Fin[n], Nat],  # noqa: F821

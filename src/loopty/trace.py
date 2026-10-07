@@ -3215,8 +3215,34 @@ def lower_reductions(
             ),
             reflections=tracer.reflections,
         )
+        loop_domain = None
+        if tracer.guard() is not None or expr.guard is not None:
+            # Where the sum starts and reads its bounds: the statement's guard
+            # masks the write, and the clause is tested after the range is
+            # read, so neither narrows it. An outer generator's clause does:
+            # the inner sum is in its body, which runs only where it holds.
+            loop_domain = domain_set(
+                (*tracer.inames, *inames),
+                (*tracer.bounds, *bounds),
+                constraints=(
+                    *tracer.loop_constraints(),
+                    *texts,
+                    *_binder_constraints(enclosing, tracer),
+                    *(
+                        piece
+                        for guard in outer_guards
+                        for piece in constraints_of(guard, tracer, bound)
+                    ),
+                ),
+                reflections=tracer.reflections,
+            )
         return Reduction(
-            "sum", tuple(inames), domain, body, reduction_exactness(body, tracer)
+            "sum",
+            tuple(inames),
+            domain,
+            body,
+            reduction_exactness(body, tracer),
+            loop_domain=loop_domain,
         )
     if isinstance(expr, prim.ExpressionNode):
         return type(expr)(

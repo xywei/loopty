@@ -214,6 +214,11 @@ def rename_expr(expr: Any, names: Mapping[str, str], exprs: Mapping[str, Any]) -
             domain=rename_set(expr.domain, names, exprs),
             body=rename_expr(expr.body, names, exprs),
             exactness=expr.exactness,
+            loop_domain=(
+                None
+                if expr.loop_domain is None
+                else rename_set(expr.loop_domain, names, exprs)
+            ),
         )
     if isinstance(expr, prim.Variable):
         if expr.name in exprs:

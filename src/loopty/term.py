@@ -167,6 +167,17 @@ class Reduction:
     the row. ``exactness`` is the floating-point contract of the accumulation:
     ``exact`` forbids reassociation (no trees, no atomics), ``reassoc`` permits
     it and marks the result, ``approx`` carries a tolerance.
+
+    ``loop_domain`` is ``domain`` before the statement's guard and the
+    generator's own ``if`` clause narrowed it, as :attr:`Stmt.loop_domain` is
+    a statement's: the points at which the sum starts and reads its bounds,
+    since a ``when`` masks the write and does not skip the right-hand side,
+    and ``for k in val.dom[r] if k == j`` reads the row's length before it
+    tests ``k``. isl simplifies the narrowed set, and ``k == j`` leaves no
+    constraint of the sum's own bound in it, so what reads a bound reads it
+    here (#111). ``None`` means "the same as ``domain``", which is right for
+    a sum with no guard around it and no clause, and for a term written by
+    hand.
     """
 
     op: str
@@ -174,6 +185,7 @@ class Reduction:
     domain: isl.Set
     body: Expression
     exactness: str
+    loop_domain: isl.Set | None = None
 
 
 @dataclass(frozen=True)

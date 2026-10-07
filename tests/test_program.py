@@ -1705,3 +1705,51 @@ def test_check_refutes_a_program_whose_term_is_not_its_body(tmp_path, capsys) ->
 
 
 # }}}
+
+
+# {{{ a sum's domain before its clause, renamed with it (#111)
+
+
+@kernel
+def first_entries(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The first entry of each row, by a sum whose clause picks it."""
+    for r in y.dom:
+        y[r] = reduce_sum(val[r, t] for t in val.dom[r] if t == 0)
+
+
+@program
+def first_entries_twice(cnt, val, y, cnt_b, val_b, y_b):
+    """Two calls whose sizes are renamed apart."""
+    first_entries(cnt, val, y)
+    first_entries(cnt_b, val_b, y_b)
+
+
+def test_a_sums_domain_before_its_clause_is_renamed_with_its_domain() -> None:
+    # The clause narrows the sum's domain to t = 0, so the sum keeps the
+    # domain it reads its bounds over beside it (#111). A program renames the
+    # second call's sizes and bounds apart, in both.
+    from loopty.trace import reductions_in
+
+    sums = [
+        reduction
+        for stmt in first_entries_twice.term.stmts
+        for reduction in reductions_in(stmt.expr)
+    ]
+    assert len(sums) == 2
+    names = []
+    for reduction in sums:
+        assert reduction.loop_domain is not None
+        params = set(reduction.domain.get_var_names(isl.dim_type.param))
+        assert set(reduction.loop_domain.get_var_names(isl.dim_type.param)) == params
+        names.append(params)
+    assert names[0] != names[1]
+    fact = first_entries_twice.facts()
+    (faithful,) = [f for f in fact if f.kind == "trace-faithful"]
+    assert faithful.status.value == "tested", faithful.provenance
+
+
+# }}}

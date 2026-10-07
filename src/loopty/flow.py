@@ -922,8 +922,9 @@ def _bounded_domains(stmt: Stmt) -> list[tuple[isl.Set, tuple[str | None, ...], 
     Then the domain of every reduction it evaluates, in the right-hand side,
     the assignee's subscripts or the guard, over the loop variables and then
     the reduction's binders, from the first binder, since a bound of a loop
-    variable there is the statement's own again. A dimension whose name cannot
-    be told is ``None``.
+    variable there is the statement's own again, and before the statement's
+    guard or the sum's clause narrowed it (its ``loop_domain``), for the same
+    reason. A dimension whose name cannot be told is ``None``.
     """
     from loopty.trace import reductions_in
 
@@ -935,12 +936,17 @@ def _bounded_domains(stmt: Stmt) -> list[tuple[isl.Set, tuple[str | None, ...], 
         if source is None:
             continue
         for reduction in reductions_in(source):
+            summed = (
+                reduction.domain
+                if reduction.loop_domain is None
+                else reduction.loop_domain
+            )
             names: tuple[str | None, ...] = (*stmt.inames, *reduction.inames)
-            n_dim = reduction.domain.dim(isl.dim_type.set)
+            n_dim = summed.dim(isl.dim_type.set)
             if len(names) != n_dim:
                 lead = n_dim - len(reduction.inames)
                 names = (*(None,) * max(lead, 0), *reduction.inames)[-n_dim:]
-            out.append((reduction.domain, names, n_dim - len(reduction.inames)))
+            out.append((summed, names, n_dim - len(reduction.inames)))
     return out
 
 

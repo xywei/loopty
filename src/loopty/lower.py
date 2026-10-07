@@ -1874,22 +1874,30 @@ def _count_inits(
 
 
 def _loops_before_fiber(loops: isl.Set, param: str) -> int:
-    """How many loops of a statement enclose the first loop ``param`` bounds.
+    """How many loops of a statement enclose the innermost loop ``param`` bounds.
 
-    ``loops`` is the statement's domain over its loop variables. A loop over a
-    ragged fiber reads its bound where it starts, once per iteration of the
-    loops around it, so those are the loops across whose iterations the body
-    sees a row length change. When ``param`` bounds none of them, all of them
-    count.
+    ``loops`` is the statement's loop nest over its loop variables, before a
+    guard narrowed it (its ``loop_domain``). A loop over a ragged fiber reads
+    its bound where it starts, once per iteration of the loops around it, so
+    those are the loops across whose iterations the body sees a row length
+    change, and the innermost loop the length bounds has the most of them:
+    in ``for j in val.dom[r]: for k in val.dom[r]:`` the loop over ``k``
+    reads the length once per ``j``, and only counting the loop over ``j``
+    missed a rewrite inside it (#111). A guard can make that loop's bound
+    follow from another's, ``when(k == j)``, which isl then leaves out of the
+    narrowed domain, and the body still reads it. When ``param`` bounds none
+    of the loops, all of them count.
     """
     index = loops.find_dim_by_name(isl.dim_type.param, param)
     total = loops.dim(isl.dim_type.set)
     if index < 0:
         return total
-    for position in range(total):
-        if bounds_dimension(loops, position, index):
-            return position
-    return total
+    bounded = [
+        position
+        for position in range(total)
+        if bounds_dimension(loops, position, index)
+    ]
+    return bounded[-1] if bounded else total
 
 
 def _refuse_bounds_rewritten_in_a_loop(
@@ -1925,8 +1933,8 @@ def _refuse_bounds_rewritten_in_a_loop(
     starts.
 
     ``uses`` maps a bound's instruction to each statement bounded by it, with
-    how many of the statement's loops enclose the start of the loop the bound
-    bounds (:func:`_loops_before_fiber`, or every loop for a sum).
+    how many of the statement's loops enclose the start of the innermost loop
+    the bound bounds (:func:`_loops_before_fiber`, or every loop for a sum).
     """
     rows = {insn.id: len(insn.within_inames) for insn in count_insns}
     families = set(counts_families(term))
@@ -2146,6 +2154,11 @@ def lower_generic(
         for stmt in term.stmts:
             insn = by_id[insn_ids[stmt.id]]
             loops = _domain_over(stmt.domain, stmt.inames)
+            nest = (
+                loops
+                if stmt.loop_domain is None
+                else _domain_over(stmt.loop_domain, stmt.inames)
+            )
             needed = {
                 count_ids[param]
                 for param in _domain_params(loops)
@@ -2153,7 +2166,7 @@ def lower_generic(
             }
             for count_id in needed:
                 uses.setdefault(count_id, []).append(
-                    (stmt, _loops_before_fiber(loops, count_params[count_id]))
+                    (stmt, _loops_before_fiber(nest, count_params[count_id]))
                 )
             for reduction in reductions_of(stmt.expr):
                 for param in _domain_params(reduction.domain):

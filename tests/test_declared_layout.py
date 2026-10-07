@@ -530,6 +530,129 @@ def test_a_written_bound_of_a_loop_and_a_sum_inside_it_is_read_at_each(
     assert fact.status is Status.TESTED, fact.provenance
 
 
+def diagonal_recounted(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The kernel of #111: the guard makes the bound of ``k`` follow from ``j``'s."""
+    for r in y.dom:
+        for j in val.dom[r]:
+            for k in val.dom[r]:
+                with when(k == j):
+                    y[r] = y[r] + val[r, k]
+            cnt[r] = 1
+
+
+def lower_triangle_recounted(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """``k <= j``, which leaves the bound of ``k`` in the domain."""
+    for r in y.dom:
+        for j in val.dom[r]:
+            for k in val.dom[r]:
+                with when(k <= j):
+                    y[r] = y[r] + val[r, k]
+            cnt[r] = 1
+
+
+def next_entry_recounted(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The bound of ``k`` read after it grew, the domain stated by ``j``'s."""
+    for r in y.dom:
+        for j in val.dom[r]:
+            cnt[r] = 3
+            for k in val.dom[r]:
+                with when(k == j + 1):
+                    y[r] = y[r] + val[r, k]
+
+
+def diagonal_sum_recounted(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The sum's clause makes its bound follow from the loop's."""
+    for r in y.dom:
+        for j in val.dom[r]:
+            y[r] = y[r] + reduce_sum(val[r, t] for t in val.dom[r] if t == j)
+            cnt[r] = 1
+
+
+@pytest.mark.parametrize(
+    ("fn", "native", "tested"),
+    [
+        (diagonal_recounted, [1.0, 3.0, 4.0], True),
+        (lower_triangle_recounted, [2.0, 3.0, 12.0], True),
+        (next_entry_recounted, [5.0, 4.0, 11.0], False),
+        (diagonal_sum_recounted, [1.0, 3.0, 4.0], True),
+    ],
+)
+def test_a_written_bound_a_guard_makes_redundant_is_read_at_its_loop(
+    fn, native, tested
+) -> None:
+    # isl states the domain of the first kernel as k = j, 0 <= j < nl_cnt_r:
+    # the bound of the loop over ``k`` follows from the one over ``j`` and is
+    # gone, so the loop over ``k`` had no reading of its own. The interpreter
+    # ran ``k = 1`` past row 0's new length and raised, which refuted the
+    # faithful trace by an exception rather than a comparison; with ``k <=
+    # j`` isl kept the bound, and the same kernel was tested (#111). The
+    # bounds are read apart over the loop nest before the guard narrowed it,
+    # and the sum's over its domain before its clause did. The third kernel's
+    # drawn inputs make its body read past a row (its count grows), so its
+    # fact compares nothing, and only the run here says the two agree.
+    from lanky.ledger import Status
+
+    arguments = row_loop_input()
+    del arguments["x"]
+    copies = {name: value.copy() for name, value in arguments.items()}
+    Kernel(fn)(**arguments)
+    assert arguments["y"].numpy().tolist() == native
+    interpret(term_of(fn), copies)
+    for name, value in arguments.items():
+        assert copies[name].numpy().tobytes() == value.numpy().tobytes(), name
+    fact = Kernel(fn).facts()[-1]
+    assert fact.kind == KIND
+    if tested:
+        assert fact.status is Status.TESTED, fact.provenance
+    else:
+        assert fact.status is Status.ASSUMED, fact.provenance
+        assert "no input ran natively" in fact.provenance["reason"]
+
+
+@pytest.mark.parametrize(
+    "fn",
+    [
+        diagonal_recounted,
+        lower_triangle_recounted,
+        diagonal_sum_recounted,
+        pairs_in_a_row_recounted,
+    ],
+)
+def test_a_length_rewritten_around_an_inner_loop_it_bounds_is_not_lowered(fn) -> None:
+    # The lowered kernel computes the length of row ``r`` once per row; the
+    # body reads it where each loop over the row starts, and the loop over
+    # ``k`` starts once per ``j``, after ``cnt[r] = 1``. Only the first loop
+    # the length bounds was counted, so these were lowered and their compiled
+    # runs disagreed with the native ones ([3, 3, 15] for the first, against
+    # [1, 3, 4]); and for the first, the loop over ``k`` was not in the
+    # narrowed domain at all (#111).
+    pytest.importorskip("loopy")
+    from loopty.lower import LoweringError, lower_generic
+
+    with pytest.raises(LoweringError) as caught:
+        lower_generic(term_of(fn))
+    message = str(caught.value)
+    assert message.startswith("statement S0 is bounded by the row length ")
+    assert "once per row, before the loop over j" in message
+    assert "S1 rewrites that row's cnt inside that loop" in message
+
+
 def test_the_faithfulness_fact_of_a_kernel_writing_its_counts_is_tested() -> None:
     # The issue's kernel: the next row's length cleared after each row is
     # summed. Its differential run was tested and its faithfulness fact was
