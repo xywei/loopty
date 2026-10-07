@@ -1423,6 +1423,14 @@ with a pair of statement instances.
   whole on the right of an operator is, and a domain (`y[i] = u.dom`), a list
   or tuple of values, and a numpy array of more than one value are refused
   the same way.
+- Two statements whose ids spell one instruction id are refused by the
+  lowering, naming both (#88). A statement's instruction is named by its id
+  with every character other than a letter, a digit or an underscore written
+  `_`, so a hand-built term with statements `a.S0` and `a@S0` failed inside
+  `lp.make_kernel` with loopy's "duplicate instruction id: 'a_S0'", which
+  names neither. A statement whose id spells the instruction that computes a
+  row length (`nl_cnt_r_init`) is refused the same way. A traced kernel's ids
+  and a program's call labels cannot collide.
 
 ### Changed
 

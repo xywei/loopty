@@ -615,6 +615,39 @@ def _sanitize(name: str) -> str:
     return re.sub(r"\W", "_", name)
 
 
+def _refuse_colliding_ids(term: Term) -> None:
+    """Refuse two statements whose ids spell one instruction id (#88).
+
+    A statement's instruction is named by its id with every character other
+    than a letter, a digit or an underscore written ``_`` (:func:`_sanitize`),
+    and loopy refuses two instructions of one id from inside ``lp.make_kernel``
+    ("duplicate instruction id"), which names neither statement. A traced
+    kernel's ids (``S0``, ``S1``, ...) and a program's (its call labels, unique
+    once spelled) cannot collide; a term built by hand can, and
+    ``Schedule.affine`` reads an instruction's id as the one statement it
+    names.
+    """
+    seen: dict[str, str] = {}
+    for stmt in term.stmts:
+        insn_id = _sanitize(stmt.id)
+        first = seen.get(insn_id)
+        if first is None:
+            seen[insn_id] = stmt.id
+            continue
+        both = (
+            f"two statements have the id {stmt.id!r}"
+            if first == stmt.id
+            else f"statements {first!r} and {stmt.id!r} both spell the "
+            f"instruction id {insn_id!r}"
+        )
+        raise LoweringError(
+            f"{both} in {term.name}. A statement is lowered as the instruction "
+            "named by its id, with every character other than a letter, a "
+            "digit or an underscore written '_', and loopy needs one "
+            "instruction per id: give the statements ids that stay apart"
+        )
+
+
 def _kernel_name(name: str, taken: Sequence[str]) -> str:
     """A C-safe function name for a lowered term, renamed where it has to be.
 
@@ -1866,6 +1899,7 @@ def lower_generic(
     """
     _refuse_reserved_names(term)
     _refuse_free_name_sorts(term)
+    _refuse_colliding_ids(term)
     builder = _Builder(term, target, layouts)
     _refuse_packed_without_interval_rows(term, builder)
     _refuse_bounds_over_reduction_binders(term, builder)
@@ -1979,6 +2013,16 @@ def lower_generic(
     domains.extend(builder.extra_domains)
 
     count_insns, count_ids, count_reads = _count_inits(term, builder, domains)
+    statement_of = {insn_id: stmt_id for stmt_id, insn_id in insn_ids.items()}
+    for param, count_id in count_ids.items():
+        if count_id in statement_of:
+            raise LoweringError(
+                f"statement {statement_of[count_id]!r} of {term.name} is "
+                f"lowered as the instruction {count_id!r}, which is the id of "
+                f"the instruction that computes the row length {param}, and "
+                "loopy needs one instruction per id: give the statement "
+                "another id"
+            )
     if count_insns:
         # A bound's instruction is ordered by the same rule as the statements,
         # at the place of the first statement that needs it: after every
