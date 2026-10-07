@@ -1449,6 +1449,40 @@ with a pair of statement instances.
   onto two work items is refused as well. A monotone fact about a schedule
   with a loop on a hardware axis says "within one work item", and the
   transcripts are regenerated.
+- `Schedule.split` and `Schedule.tile` refuse a loop that carries a tag, with
+  a `ValueError` naming the fix, before loopy is asked (#93): `split(r, 2): r
+  carries the tag 'g.0'; split it before tagging the loops it makes`. loopy
+  refuses to split a loop with any tag but `for`, so with a kernel the
+  refusal was loopy's `LoopyError`, which named no fix, and it splits a loop
+  tagged `for` into two with no tag. Without a kernel (after an `affine` step
+  the kernel rewrite could not write) nothing refused. Either way the tag
+  stayed in `Schedule.tags` on a loop the schedule no longer has, and the
+  checker read the loops that replaced it as untagged: sequential in the
+  order, and on no hardware axis, so a monotone fact no longer said "within
+  one work item". Every tag is refused, `for` included, and a sum's loop as
+  well, as `affine` refuses a map over a tagged loop: a tag goes on the loops
+  a step makes, after it.
+- `loopty run` refuses two kernels' claims of one fact id, as `lanky check`
+  does since lanky's #52 (#95). Two kernels one definition makes, as a
+  factory does each time it is called, share every id, and the run built its
+  ledger with `Ledger.add`, which replaces a fact of the same id: a file
+  scheduling both with the same steps kept one set of facts for the two,
+  the second kernel's in place of the first's, a refuted one as readily as a
+  decided one, and exited 0. The first kernel's fact is kept now, the other
+  kernel's claim is recorded on it, by its statement, as `duplicate_claims`
+  in its provenance (the key `lanky check` records it under, so `--json`
+  carries it), and a `DUPLICATE` block under the table names the kernel,
+  each id, and the claims of it in the table and not, and says how to give
+  each kernel an id of its own; the command exits 1. The run has decided
+  every claim by then, so one not in the table that was refuted, such as
+  the other kernel's run, is said to be, with what explains it under it,
+  since no row and no `REFUTED` block shows it. The fix named is a
+  definition or a `__qualname__` of the kernel's own, or, for a term
+  scheduled with no kernel behind it, which is named by its name, a name of
+  its own. One kernel scheduled several times is not refused, nor a
+  schedule of a schedule of it: its schedules that share their first steps
+  share the facts about them, and a schedule run twice keeps both agreement
+  facts, the second with `#2` after its id.
 - A guard that reads only scalars is kept in the compiled kernel (#90).
   `when(flag)` of a `Bool` scalar, or `when(a > 0.5)` of a `Real` one, around
   every statement of a kernel was lowered as an instruction predicate naming

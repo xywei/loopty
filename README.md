@@ -303,7 +303,9 @@ end to end; the edges are sharp.
 - `Schedule`: `tag`, `split`, `interchange`, `prioritize`, `tile`, `skew`,
   `affine`, `realize`, each checked as a cast, each emitting its fact;
   `retarget`, which replays every step against another loopy target and
-  re-checks it. `affine(map)` takes an isl map from loops to the loops that
+  re-checks it. A tag belongs to a loop, so `split`, `tile` and `affine`
+  refuse a loop that carries one, and the loops they make are tagged after
+  them. `affine(map)` takes an isl map from loops to the loops that
   replace them, refuses one that misses or merges an instance or runs a
   dependence backwards, and rewrites the kernel over the map's image; `skew` is
   that method with a particular map. A union map whose tuples name statements,
@@ -399,7 +401,10 @@ end to end; the edges are sharp.
   says so by name when one cannot be retargeted; without it each schedule keeps
   the target it was written for. A refuted fact is repeated under the ledger
   with what explains it, the block `lanky check` prints (a compiled run that
-  disagrees names the outputs and by how much), and the command exits 1.
+  disagrees names the outputs and by how much), and the command exits 1. So
+  it does when two kernels claim one fact id, as two kernels one definition
+  makes (a factory) do: a `DUPLICATE` block names the kernel and its ids, as
+  `lanky check` names them.
 
 **Partial.**
 

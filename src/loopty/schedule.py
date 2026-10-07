@@ -26,7 +26,9 @@ map as an isl map from the loops it replaces to the loops that replace them, and
 isl decides whether it is a bijection on the instances that exist. ``.affine``
 takes that map from the caller, so split, tile and skew are three ways of
 writing particular affine maps, and the diamond ``(t, i) -> (t + i, t - i)`` is
-a fourth that none of them can write.
+a fourth that none of them can write. A tag belongs to a loop, so a step that
+replaces loops (``.split``, ``.tile``, ``.affine``) refuses a loop that carries
+one, and the loops it makes are tagged after it.
 
 *An order as a map into logical time.* The time of an instance is
 ``[c_0, i_0, c_1, i_1, ..., c_k]``: the loop values interleaved with constants
@@ -134,8 +136,11 @@ two kernels of one name, one defined in a file and one imported into it, keep
 their schedules' facts apart. Two schedules of one kernel in one file keep
 theirs apart too, since a ledger keeps one fact per id, while two that share
 their first steps share the facts about those steps, which are the same
-claims. :attr:`Schedule.key` is the readable call text, which names the
-kernel by its name.
+claims. Two kernels one definition makes, as a factory does each time it is
+called, share every id, and their schedules' facts are two claims of each,
+which ``loopty run`` refuses as ``lanky check`` does (see :mod:`loopty.cli`).
+:attr:`Schedule.key` is the readable call text, which names the kernel by its
+name.
 
 Maps whose image has holes
 --------------------------
@@ -2619,6 +2624,10 @@ class Schedule:
         left the schedule with no kernel (see :attr:`kernel`), and the steps
         after that one are still checked, so that their facts say what the
         schedule is.
+
+        A tag goes on after the steps that replace its loop: :meth:`split`,
+        :meth:`tile` and :meth:`affine` refuse a loop that carries one, and
+        the loops they make are tagged for themselves.
         """
         from loopy.kernel.data import parse_tag
 
@@ -2682,9 +2691,19 @@ class Schedule:
         inner: str | None = None,
         outer: str | None = None,
     ) -> Schedule:
-        """Split ``iname`` by ``factor`` into an outer and an inner iname."""
+        """Split ``iname`` by ``factor`` into an outer and an inner iname.
+
+        A loop that carries a tag is refused with a ``ValueError``, a sum's
+        loop as well, whether or not the schedule still has a kernel: split
+        it before tagging the loops it makes (see :meth:`_refuse_tagged`).
+        """
         inner = inner or f"{iname}_inner"
         outer = outer or f"{iname}_outer"
+        self._refuse_tagged(
+            (iname,),
+            f"split({iname}, {factor})",
+            "split it before tagging the loops it makes",
+        )
         if iname in self._reductions:
             return self._split_reduction(iname, factor, inner, outer)
         if iname not in self._order:
@@ -2916,6 +2935,31 @@ class Schedule:
                     f"{self._term.name}"
                 )
 
+    def _refuse_tagged(self, inames: Sequence[str], text: str, fix: str) -> None:
+        """Refuse a step that replaces a loop carrying a tag, naming ``fix``.
+
+        A tag belongs to a loop, and a split or a tiling replaces the loop by
+        new ones, which no tag names. loopy refuses to split a loop with any
+        tag but ``for``, with a ``LoopyError`` that named no fix, and splits a
+        loop tagged ``for`` into two with no tag. Once a step had left the
+        schedule with no kernel (see :attr:`kernel`) nothing refused, and
+        either way the tag stayed on a loop the schedule no longer has, so
+        the checker read the loops that replaced it as untagged (#93): the
+        order made them sequential, and a loop on a hardware axis was no
+        longer one. So the step is refused here, before loopy is asked, with
+        a kernel or without one, as :meth:`affine` refuses a map over a
+        tagged loop. A sum's loop is refused the same way, and any tag,
+        ``for`` included, since the loops the step makes are to be tagged for
+        themselves.
+        """
+        tagged = [name for name in inames if name in self._tags]
+        if not tagged:
+            return
+        carried = " and ".join(
+            f"{name} carries the tag {self._tags[name]!r}" for name in tagged
+        )
+        raise ValueError(f"{text}: {carried}; {fix}")
+
     def _split_reduction(
         self, iname: str, factor: int, inner: str, outer: str
     ) -> Schedule:
@@ -2995,7 +3039,9 @@ class Schedule:
         witness of a rejection names the tiling and not the interchange inside
         it. The reindexing is one affine map, the two splits side by side,
         and the kernel is split with loopy's own ``split_iname``, whose loop
-        bounds loopy knows how to simplify.
+        bounds loopy knows how to simplify. So a loop that carries a tag is
+        refused, as :meth:`split` refuses one: tile the loops before tagging
+        the loops the tiling makes.
         """
         for iname in (first, second):
             if iname not in self._order:
@@ -3004,8 +3050,11 @@ class Schedule:
             raise ValueError(f"tile() needs two different loops, not {first!r} twice")
         for factor in (first_factor, second_factor):
             _check_factor(factor)
-        draft = self._draft()
         text = f"tile({first},{second},{first_factor},{second_factor})"
+        self._refuse_tagged(
+            (first, second), text, "tile before tagging the loops the tiling makes"
+        )
+        draft = self._draft()
         outer_first, inner_first = f"{first}_outer", f"{first}_inner"
         outer_second, inner_second = f"{second}_outer", f"{second}_inner"
         self._reindex_into(
