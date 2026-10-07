@@ -427,7 +427,7 @@ def _reduction_nesting(expr: Any) -> list[tuple[Reduction, tuple[int, ...]]]:
 class ExpressionLowerer(Mapper):
     """Rebuild a term's expression out of plain pymbolic nodes.
 
-    Five jobs in one walk. lanky's subclasses are replaced by pymbolic's, so
+    Four jobs in one walk. lanky's subclasses are replaced by pymbolic's, so
     that loopy's structural comparisons work (lanky's ``==`` builds a
     proposition). :class:`~loopty.term.Access` and bare subscripts are turned
     into flat storage accesses, which is where a ragged layout's ``off[r] + j``
@@ -491,7 +491,6 @@ class ExpressionLowerer(Mapper):
             return tuple(self.rec(index) for index in indices)
         finally:
             self._subscripts -= 1
-
 
     # The dispatcher: two of our node types are not pymbolic nodes at all, so
     # they are recognized before the mapper method lookup.
@@ -607,8 +606,10 @@ class ExpressionLowerer(Mapper):
         was, so a kernel whose arithmetic C and numpy type alike lowers to the
         code it always did. See note 19 in ``docs/loopy-notes.md``.
 
-        Inside a subscript an integer is not widened (see the class): a step
-        converting to an integer dtype is left out there.
+        Inside a subscript and a guard on the loops an integer is not widened
+        (see the class): a step converting to an integer dtype is left out
+        there. In such a guard nothing but a literal is converted at all
+        (:meth:`condition`).
         """
         lowered = [self.rec(operand) for operand in operands]
         promotion = self.lowering.promotion

@@ -1548,9 +1548,70 @@ with a pair of statement instances.
   another array, a count written, a write under a guard isl cannot state, or
   counts with more than one axis leave the fact `assumed`, and its reason
   names the write.
+- An integer result outside 32 bits is computed in 64 compiled too, as numpy
+  computes it (#101): `c[i] * c[i] // 1024` of an `Int` at `c[i] = 2**20`
+  stored `2**30` natively and `0` compiled. `Nat`, `Int` and Python's `int`
+  are stored in 64 bits compiled (`contract.INTEGRAL_STORAGE`), and the
+  contract's range for them rises to 64 bits (`contract.INTEGRAL_RANGE`);
+  `Fin[m]` stays 32 bits wide (`contract.INDEX_STORAGE`, `INDEX_RANGE`),
+  which its bound holds, so an index array stays compact. An operation that
+  can leave its operands' range, a sum, a product, a power or a left shift,
+  of a narrower operand, a `Fin[m]` entry or a loop variable, is computed in
+  64 bits (`(int64_t) (col[i]) * col[i]`), but in a subscript, in a guard
+  that reads no array and in a sum of loop variables and sizes alone, which
+  are index arithmetic. The sum of a `Bool` array, a count natively, was
+  accumulated in a byte compiled and wrapped round at 128; its body is cast.
+  The native run reads an integral array stored in fewer bits through an
+  `int64` copy, an `int32` one of `Fin[m]` included. Note 19.
+- A scalar argument has one native meaning however it is passed (#102): a
+  Python number is converted into a numpy scalar of its sort's dtype, as a
+  numpy scalar of another dtype was, so `x[i] * a` of a `float32` `x` is a
+  double natively for `a=0.7` as for `a=np.float64(0.7)`, and for a Python
+  `int` beside it as for `np.int64`, which is what the compiled run computes.
+  `~` of a comparison of a scalar is then a numpy bool's, logical, and the
+  trace no longer refuses it as a Python bool's.
+- Floating `%` and `//` lower, and compute what numpy computes (#104): loopy
+  raised `NotImplementedError` from its code generator. Integer `//` and `%`
+  by zero give numpy's `0` compiled too, where C's division killed the
+  process with `SIGFPE`, and so does the smallest `int64` by `-1`, numpy's
+  smallest `int64` and `0` (#105); loopy's own floor division also overflowed
+  near the ends of the range. `<<` and `>>` lower as numpy computes them, `0`
+  (or `-1`) for a shift past the width or by a negative amount, and `^` as
+  C's, which is numpy's (#107); each failed with an empty
+  `NotImplementedError`. The operations are functions defined as numpy's
+  loops define them (`loopty.operations`), which loopty's targets call
+  wherever `//`, `%`, `<<` or `>>` is, a guard included; index arithmetic by
+  a positive constant stays loopy's. Target `c-source` is
+  `lower.SourceCTarget`. Note 20 in `docs/loopy-notes.md`.
+- A sum of truth values is a `TraceError` naming the fix (#106): numpy's `+`
+  of two bools is `or`, so `(b[i] + b[i]) * 1.0` was `1.0` natively and
+  `2.0` compiled, with the `trace-faithful` fact `tested`. The fix named is
+  `b[i] | c[i]` for `or`, or `1 * b[i] + c[i]` for a count.
+- A kernel named like a function loopy or the C library knows is renamed in
+  the generated code with the `_knl` suffix, as a C keyword is (#108):
+  `floor` failed inside loopy with `KeyError: 'floor'`, and `cpow` over
+  complex arrays with a power in gcc. The names are every function loopy
+  resolves on the C and OpenCL targets, what `math.h` and `complex.h`
+  declare with their `f` and `l` forms, what they and `stdint.h` define as a
+  macro or a type, and loopy's and loopty's helpers (`lower.is_library_name`).
+- An integer element or scalar to a negative integer power is a `TraceError`
+  naming `1 / k[i] ** 2`, a real (#109): numpy refuses it at every point, and
+  the compiled run stored `1`, `-1` or `0`. A loop variable to one is a
+  Python int's power natively, a real, and is computed so compiled. `^`, `<<`
+  and `>>` of a real are a `TraceError` too, since numpy refuses them and C
+  cannot compile them.
+- A guard on loop variables that numpy computes in another type compiles
+  (`with when(i ** 0.5 > 1.5)`): loopy reads a guard naming no array into
+  isl, and its reader failed on the cast the operation planning of #82 put
+  there. Such a guard is lowered with no cast in it.
 
 ### Changed
 
+- **`Nat` and `Int` are 64 bits wide compiled** (#101). An array of them the
+  kernel writes, or a program's temporary of them, has to be an `int64` one
+  natively, where a signed integer of 32 bits or more was accepted: an
+  `int32` one wraps round where the compiled one does not. `Fin[m]` keeps the
+  old rule. The C code of a kernel over them declares `int64_t`.
 - **Executor options are separate from kernel arguments.** Every argument of
   `LoopyExecutor.run` is an argument of the kernel, and the target is chosen by
   the schedule (`Schedule(kernel, target="opencl")`) or by the executor

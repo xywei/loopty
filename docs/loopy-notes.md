@@ -1,6 +1,6 @@
 # Notes on loopy and islpy
 
-Eighteen interactions with loopty's dependencies that cost real debugging
+Twenty interactions with loopty's dependencies that cost real debugging
 time, each with the local workaround and the reason it is local. No upstream
 issues were filed: these are notes so that the next person meets the answer
 instead of the symptom.
@@ -896,15 +896,27 @@ header at `10_complex`, after it. An operation C and
 numpy type alike is lowered exactly as before, so no kernel over `Real` and
 integers changes but for its quotients and powers.
 
-**What it does not cover.** Integers are 64 bits wide natively and 32 bits
-compiled. The contract keeps every integral argument inside 32 bits
-(`contract.INTEGRAL_RANGE`), but a result that leaves them, `c[i] * c[i]` at
-`c[i] = 2**20`, is a wider number natively and wraps compiled. A scalar
-argument of `Real` or of an integral sort is a Python number natively when
-the caller passed one and a numpy scalar otherwise
-(`contract.native_scalar`), so beside a `float32` it is weak or strong by the
-call; an operation whose type depends on that is left as C types it. The
-interpreter's functions (`sqrt`, `exp`, ...) are typed as numpy types them,
+**Integers.** The same planning widens an integer operation: numpy computes
+integers in 64 bits, and `Nat` and `Int` are stored in 64 bits compiled too
+(`contract.compiled_storage`, #101), but `Fin[m]` is stored in 32, which its
+bound holds, and a loop variable is loopy's 32-bit index type. An operation
+that can leave its operands' range, a sum, a product, a power or a left
+shift, has a narrower operand cast to `int64_t`: `col[i] * col[i]` of a
+`Fin[m]` array is `(int64_t) (col[i]) * col[i]`, and `i * i` is
+`(int64_t) (i) * i`, which wrapped round at `i = 46341`. A sum of loop
+variables, sizes and literals alone is left as it is, as index arithmetic
+loopy computes every loop bound in; so is a floor division, a remainder, an
+`^` and a right shift, whose result is inside 32 bits when its operands are;
+and so is everything inside a subscript and in a guard that reads no array
+(note 20). A sum of a `Bool` array's elements, which natively is a count and
+compiled was accumulated in a byte, has its body cast. A scalar argument is a
+numpy scalar of its sort natively however the caller passed it
+(`contract.native_scalar`, #102), so beside a `float32` it is strong, and the
+operation is planned as numpy computes it.
+
+**What it does not cover.** A result outside 64 bits wraps round compiled,
+and natively wraps or is refused, as numpy does. The interpreter's
+functions (`sqrt`, `exp`, ...) are typed as numpy types them,
 and a call of anything else is not typed, nor is anything around it. On the
 OpenCL target a `float32` kernel that numpy computes partly in double is
 compiled partly in double too, and needs `cl_khr_fp64` there. A complex power
@@ -912,3 +924,84 @@ keeps an integer exponent, and loopy's power multiplies in the order numpy's
 complex power does for a positive one, so `z[i] ** 3` agrees bit for bit; a
 negative exponent is inverted first, where numpy inverts the power, a last bit
 away.
+
+## 20. C leaves arithmetic undefined that numpy defines, and loopy's ways around it
+
+**Symptom.** Five kernels whose compiled run differs from the native one in
+another way than a type:
+
+- `a[i] = k[i] // m[i]` of integers at `m[i] = 0` kills the process with
+  `SIGFPE`, natively `0` with a warning, and `%` the same (#105); so does the
+  smallest `int64` by `-1`, natively the smallest `int64` and `0`;
+- `y[i] = x[i] % 2.0` of reals fails inside loopy's code generator with
+  `NotImplementedError: remainder and floordiv for floating-point types`
+  (#104);
+- `y[i] = k[i] ^ 3`, `k[i] << 2` and `k[i] >> 1` fail with an empty
+  `NotImplementedError` (#107), and `k << 64` is undefined in C, natively `0`;
+- a kernel named `floor` fails with `KeyError: 'floor'` inside loopy, and one
+  named `cpow` over complex arrays with a power in gcc, `conflicting types
+  for 'cpow'` (#108);
+- `with when(i ** 0.5 > 1.5)` on a loop variable fails in loopy's bounds
+  check with `PwAffEvaluationMapper cannot handle expressions of type
+  TypeCast`.
+
+**Cause.** C's `/` and `%` of integers are undefined for a zero divisor and
+for the smallest value by `-1`, which trap on x86. loopy writes an integer
+`//` as C's `/` when isl finds both operands non-negative, as
+`loopy_floor_div_pos_b_<type>` when the divisor is, and as
+`loopy_floor_div_<type>` otherwise; the last two compute `a - (b - 1)` or
+`a - (b + 1)` first, which overflows near the ends of the range, and none
+asks about zero. `ExpressionToCExpressionMapper._map_integer_div_operator`
+raises for a floating operand. A shift past the width, or by a negative
+amount, is undefined in C, and so is a left shift of a negative value; numpy
+gives `0` past the width, or `-1` for a negative value shifted right.
+`ExpressionLowerer` had no case for `^`, `<<` and `>>`. loopy resolves a call
+by its name among its own functions, the target's and the translation
+unit's, the kernel itself included, and the target's win
+(`translation_unit.resolve_callables`): a kernel named `floor` is looked up as
+C's `floor`. And loopy reads a guard that names only loop variables and
+domain parameters as an isl set (`symbolic.condition_to_set`), whose
+evaluator raises `UnsupportedExpressionError` on a cast, which the guard
+around it (`with_aff_conversion_guard`) does not catch; the plan of note 19
+cast `i` to `double` there.
+
+A function given to loopy as a callable (`lp.register_callable`) would
+define the operations, but not in a guard: loopy's type inference visits an
+instruction's expression and never its predicates, so a callable called only
+in a guard is dropped from the translation unit, and
+`infer_arg_descr` fails with `KeyError: 'loopty_mod'`.
+
+**Local fix.** `loopty.operations` defines each operation as a C function of
+two operands of one type, as numpy's loops define it (`floor_div`,
+`npy_remainder`, `npy_divmod`, `npy_lshift`, `npy_rshift`):
+`loopty_floor_div_int64`, `loopty_mod_float64`, `loopty_lshift_int64`, and
+so on. loopty's targets (`lower.InProcessCTarget`, `lower.SourceCTarget` for
+`c-source`, `lower.InKernelOpenCLTarget`) generate device code with
+`operations.NumpyArithmetic`, a mixin over loopy's C expression code
+generator that writes `//`, `%`, `<<` and `>>` as calls of them, in the type
+loopy infers for the node, and records each among the code generator's seen
+functions, from which a preamble generator writes the definitions, as loopy
+does for its own floor division. That reaches a guard as well as a value. A
+floor division or remainder by a positive constant of loopy's 32-bit index
+type whose numerator reads no array is index arithmetic, a loop bound isl
+generates (`(1 + n) / 2`) or a subscript `x[i // 2]`, and is left to loopy,
+which writes it as it always did; it is exact there. The module's source is
+hashed into the targets' persistent hash, so loopy's code cache serves no
+code generated by another version of the definitions. `^` is C's, which
+agrees with numpy's on integers and truth values. A kernel named like a
+function loopy resolves on a C or OpenCL target, like one the headers the
+generated code includes declare (`math.h`, `complex.h`, with their `f` and
+`l` forms) or define as a macro or type (`stdint.h`), or like a helper loopy
+or loopty defines in a preamble, is renamed with the `_knl` suffix, as a C
+keyword is (`lower.is_library_name`). And a guard that reads no array is
+lowered with no cast in it (`ExpressionLowerer.condition`): a literal is
+still written in numpy's dtype, loopy computes a quotient of integers in
+double inside a comparison of its own accord, and a floating power of a loop
+variable calls `pow`.
+
+**What it does not cover.** loopty's targets are needed for numpy's
+arithmetic: a kernel lowered by `lower.lower` for another loopy target gets
+loopy's. The OpenCL definitions are generated and not run from a development
+machine. A function given to loopy as a callable inside a guard is still
+dropped by loopy's type inference.
+

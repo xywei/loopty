@@ -742,6 +742,17 @@ def scale_by(
         z[i] = x[i] * s
 
 
+@kernel
+def complement_scalar(
+    x: Arr[Fin[n], Real],  # noqa: F821
+    a: Real,
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """``~`` of a comparison of a real scalar, used as a number."""
+    for i in x.dom:
+        y[i] = x[i] * ~(a > 0.5)
+
+
 def test_a_scalar_has_one_native_meaning_however_it_is_passed():
     # a=0.7 was a weak Python float natively, so x * a was single precision,
     # and a=np.float64(0.7) a strong one, double; the compiled run computes in
@@ -767,6 +778,14 @@ def test_a_scalar_has_one_native_meaning_however_it_is_passed():
     assert np.array_equal(results[0]["y"], results[1]["y"])
     assert np.array_equal(results[0]["z"], results[1]["z"])
     assert results[0]["z"][0] == np.float64(x[0]) * 3
+
+    # So ~ of a comparison of a scalar is a numpy bool's, logical, however a
+    # was passed, and the trace no longer refuses it as a Python bool's.
+    def masked(a) -> dict:
+        return {"x": np.array([0.25, 0.75]), "a": a, "y": np.zeros(2)}
+
+    for a in (0.7, 0.2, np.float64(0.7)):
+        agrees(complement_scalar, lambda a=a: masked(a))
 
 
 # }}}
@@ -1163,7 +1182,7 @@ def test_an_integer_to_a_negative_power_is_refused_by_the_trace():
 def on_the_loops(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     """Guards on loop variables alone that numpy computes in other types."""
     for i in x.dom:
-        with when((i ** 0.5 > 1.5) & (i * i < 40) & (i / 2 > 1)):
+        with when((i**0.5 > 1.5) & (i * i < 40) & (i / 2 > 1) & ((i + 1) ** -1 < 0.3)):
             y[i] = 2.0 * x[i]
 
 

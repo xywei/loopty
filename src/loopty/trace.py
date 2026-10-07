@@ -2749,13 +2749,13 @@ def _connectives(expr: Any) -> Iterator[Any]:
 def _numpy_valued(expr: Any, params: Mapping[str, Any]) -> bool:
     """Whether the native run computes ``expr`` as a numpy scalar, whatever the call.
 
-    An array's element is one, and so is a scalar of a truth sort, which
-    :func:`loopty.contract.native_scalar` makes a numpy bool; and so is
-    arithmetic, a comparison or a connective with an operand that is one. A
-    loop variable, a size and a Python literal are Python numbers, and a
-    scalar of another sort is one when the caller passes one. Anything else
-    (a sum, which Python's ``sum`` makes ``0`` over no terms, a call, a
-    quantifier) is not asked, and counts as possibly a Python number.
+    An array's element is one, and so is a scalar of a sort with a native
+    storage, which :func:`loopty.contract.native_scalar` makes a numpy scalar
+    however the caller passed it (#102); and so is arithmetic, a comparison
+    or a connective with an operand that is one. A loop variable, a size and
+    a Python literal are Python numbers. Anything else (a sum, which Python's
+    ``sum`` makes ``0`` over no terms, a call, a quantifier) is not asked,
+    and counts as possibly a Python number.
     """
     from loopty.contract import native_storage
 
@@ -2773,7 +2773,7 @@ def _numpy_valued(expr: Any, params: Mapping[str, Any]) -> bool:
         return (
             sort is not None
             and not isinstance(sort, ArrType)
-            and native_storage(sort) == np.dtype(np.bool_)
+            and native_storage(sort) is not None
         )
     if isinstance(expr, prim.Sum | prim.Product | prim.LogicalAnd | prim.LogicalOr):
         operands: tuple[Any, ...] = tuple(expr.children)
