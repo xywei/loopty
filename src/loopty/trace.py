@@ -2441,12 +2441,15 @@ class SymArr:
     def _refuse_many_values(self, key: Any, value: Any, where: str) -> None:
         """Refuse a store of many values into one cell.
 
-        A whole array, a domain, and a list, tuple or numpy array of values
-        are each many values, and natively numpy refuses to store one into a
-        cell ("setting an array element with a sequence"). The trace recorded
-        it as the statement's right-hand side, a symbolic array where a term
-        has a value (#85). An array is refused as it is when it is used whole
-        on the right of an operator, with the loop nest to write.
+        A whole array, symbolic or one the body holds, a domain, a list,
+        tuple, set or dict, a numpy array with an axis, and a generator each
+        hold values where a statement stores one. The trace recorded such a
+        value as the statement's right-hand side, a symbolic array where a
+        term has a value (#85). Natively numpy refuses it, except into an
+        array of ``Bool``, where it stores the truth value Python makes of the
+        whole (``[False]`` is ``True``); see :meth:`_many_values_natively`. An
+        array is refused as it is when it is used whole on the right of an
+        operator, with the loop nest to write.
         """
         cell = f"{self.name}[{_key_text(key)}]"
         if isinstance(value, SymArr):
@@ -2459,25 +2462,57 @@ class SymArr:
                     why=f"stores every cell of it into one cell of {self.name}",
                 )
             )
+        natively = self._many_values_natively(value)
         if isinstance(value, SymDom):
             text = _domain_text(value)
             raise TraceError(
                 f"{cell} = {text} at {where} stores the domain {text}, every "
-                f"index of it, into one cell of {self.name}, which numpy "
-                "refuses natively (setting an array element with a sequence). "
+                f"index of it, into one cell of {self.name}, and {natively}. "
                 f"Iterate the domain and store one index in each cell: for j "
                 f"in {text}: ... j ..."
             )
-        if isinstance(value, list | tuple) or (
+        if isinstance(value, Iterator):
+            raise TraceError(
+                f"{cell} = {_shown(value)} at {where} stores a generator into "
+                f"one cell of {self.name}, and {natively}. A generator of terms "
+                "is a sum when reduce_sum(...) is around it; otherwise store "
+                "one value in each cell"
+            )
+        if isinstance(value, Arr | list | tuple | set | frozenset | dict) or (
             isinstance(value, np.ndarray) and value.ndim > 0
         ):
+            if isinstance(value, Arr):
+                what = "an array, every cell of it,"
+            elif isinstance(value, set | frozenset | dict):
+                what = "a collection of values"
+            else:
+                what = "a sequence of values"
             raise TraceError(
-                f"{cell} = {_shown(value)} at {where} stores a sequence of "
-                f"values into one cell of {self.name}, which numpy refuses "
-                "natively (setting an array element with a sequence). A "
-                "statement stores one value in each cell: store each value in "
-                "a cell of its own, or index the one you meant"
+                f"{cell} = {_shown(value)} at {where} stores {what} into one "
+                f"cell of {self.name}, and {natively}. A statement stores one "
+                "value in each cell: store each value in a cell of its own, or "
+                "index the one you meant"
             )
+
+    def _many_values_natively(self, value: Any) -> str:
+        """What the native run does with ``value`` stored into one cell.
+
+        numpy refuses many values for a number: a float cell says "setting an
+        array element with a sequence", an integer or complex one cannot
+        convert them. A bool cell takes the truth value Python makes of the
+        container, so ``[False]`` is stored as ``True`` and ``[]`` as
+        ``False``; only a numpy array of more than one value is refused there.
+        """
+        from loopty.contract import truth_sort
+
+        many = isinstance(value, np.ndarray) and value.size > 1
+        if truth_sort(self.type.dtype) and not many:
+            return (
+                f"natively numpy stores into {self.name}, an array of "
+                f"{self.type.dtype}, the truth value of the whole ([False] is "
+                "True), which is no value of one cell"
+            )
+        return "natively numpy refuses it"
 
     def _refuse_untruthful(self, key: Any, value: Any, where: str) -> None:
         """Refuse a store into an array of ``Bool`` of what is not a truth value.

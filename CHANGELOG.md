@@ -1424,9 +1424,12 @@ with a pair of statement instances.
   `y[i] = u` traced, with the symbolic array itself as the statement's
   right-hand side, where natively numpy refuses to store a sequence in a
   cell. It is now a `TraceError` naming the loop nest to write, as `u` used
-  whole on the right of an operator is, and a domain (`y[i] = u.dom`), a list
-  or tuple of values, and a numpy array of more than one value are refused
-  the same way.
+  whole on the right of an operator is, and a domain (`y[i] = u.dom`), a
+  list, tuple, set or dict, a numpy array with an axis, an array the body
+  holds, and a generator (with `reduce_sum(...)` named as the fix) are refused
+  the same way. Natively numpy refuses each of them for a number, and stores
+  into a `Bool` cell the truth value of the whole (`[False]` is `True`),
+  which the message says.
 - Two statements whose ids spell one instruction id are refused by the
   lowering, naming both (#88). A statement's instruction is named by its id
   with every character other than a letter, a digit or an underscore written

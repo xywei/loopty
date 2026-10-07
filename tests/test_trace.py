@@ -1182,6 +1182,69 @@ def test_a_whole_array_stored_into_a_cell_is_refused() -> None:
             Kernel(body)(**arguments)
 
 
+def test_an_array_held_a_generator_or_a_dict_stored_into_a_cell_is_refused() -> None:
+    # Each traced, with the object itself as the statement's right-hand side,
+    # and the trace-faithful fact was left assumed; natively numpy refuses
+    # each of them for a cell of Real.
+    from loopty.kernel import Kernel
+
+    held = Arr.from_numpy(np.ones(2))
+
+    def copied(y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = held
+
+    def summed(u: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in u.dom:
+            y[i] = (u[j] for j in u.dom)
+
+    def chosen(u: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in u.dom:
+            y[i] = {"value": u[i]}
+
+    with pytest.raises(TraceError, match="stores an array, every cell of it, into"):
+        term_of(copied)
+    with pytest.raises(TraceError) as caught:
+        term_of(summed)
+    assert "stores a generator into one cell of y" in str(caught.value)
+    assert "reduce_sum(...) is around it" in str(caught.value)
+    with pytest.raises(TraceError, match=r"y\[i\] = \{'value': u\[i\]\} at .* a col"):
+        term_of(chosen)
+    for body in (copied, summed, chosen):
+        arguments = {"u": Arr.from_numpy(np.ones(2)), "y": Arr.zeros(2)}
+        if body is copied:
+            del arguments["u"]
+        with pytest.raises((TypeError, ValueError)):
+            Kernel(body)(**arguments)
+
+
+def test_a_sequence_stored_into_a_cell_of_bool_is_refused_for_what_it_does() -> None:
+    # Natively numpy stores into a bool cell the truth value Python makes of
+    # the list, so [False] is True: no refusal to point at, and no value of
+    # one cell either.
+    from lanky.prelude import Bool
+
+    from loopty.kernel import Kernel
+
+    def boxed(u: Arr[Fin[n], Real], b: Arr[Fin[n], Bool]):  # noqa: F821
+        for i in u.dom:
+            b[i] = [u[i] > 0.0]
+
+    with pytest.raises(TraceError) as caught:
+        term_of(boxed)
+    message = str(caught.value)
+    assert "natively numpy stores into b, an array of Bool, the truth value" in (
+        message
+    )
+    assert "refuses" not in message
+    arguments = {
+        "u": Arr.from_numpy(np.array([-1.0, 1.0])),
+        "b": Arr.from_numpy(np.zeros(2, dtype=bool)),
+    }
+    Kernel(boxed)(**arguments)
+    assert arguments["b"].numpy().tolist() == [True, True]
+
+
 def test_fewer_indices_than_axes_name_a_row_and_are_refused() -> None:
     # ``u[t]`` of a two-axis array is a whole row, natively as in numpy.
     def rows(u: Arr[Fin[nt], Fin[nx], Real]):  # noqa: F821
