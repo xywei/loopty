@@ -149,7 +149,13 @@ from loopty.contract import (
     storage_wanted,
 )
 from loopty.flow import NonAffine, domain_set, expr_text, free_names
-from loopty.hypotheses import discharge, linear, substitute, theorem_instances
+from loopty.hypotheses import (
+    discharge,
+    linear,
+    mentioned,
+    substitute,
+    theorem_instances,
+)
 from loopty.idx import Reflections
 from loopty.term import (
     Access,
@@ -1829,7 +1835,11 @@ class _Composer:
                             self.requirement_id(slot.label, want.kind, want.param),
                         ),
                         mentions=frozenset(
-                            {want.array, *([want.counts] if want.counts else [])}
+                            {
+                                want.array,
+                                *([want.counts] if want.counts else []),
+                                *self.arrays_in(requirement.claim),
+                            }
                         ),
                     )
                 )
@@ -1903,8 +1913,12 @@ class _Composer:
         return _rename_type(self.types[name], {}, self.resolved)
 
     def arrays_in(self, claim: Any) -> set[str]:
-        """The program arrays a proposition names."""
-        return {name for name in _names_in(claim) if self.kinds.get(name) == "array"}
+        """The program arrays a proposition names, in a binder's sort too.
+
+        ``all(perm[i] == 0 for i in Fin[lim[0]])`` is about ``lim`` as much
+        as about ``perm``, and a call that writes either retires it.
+        """
+        return {name for name in mentioned(claim) if self.kinds.get(name) == "array"}
 
     def integral_arrays(self) -> set[str]:
         """The program arrays whose cells are integers, which isl may read."""

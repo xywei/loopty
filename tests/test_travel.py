@@ -644,6 +644,36 @@ def test_a_flat_access_is_not_decided_under_a_contradicted_layout() -> None:
     assert [f for f in wrong.gapped_flat.facts() if f.kind == "in-bounds"] == []
 
 
+def test_a_write_to_an_array_a_binders_sort_reads_retires_the_claim() -> None:
+    # clear_some says perm[i] == 0 for i < lim[0], with lim[0] == 1, and
+    # every_cell then makes lim[0] == n. Read after that write, the claim
+    # would say every cell of perm is 0, where clear_some put n in all but
+    # the first: gather's requirement was decided, and the compiled program
+    # read x[n]. The write to lim retires the claim, and the requirement is
+    # checked.
+    (requirement,) = [
+        r for r in wrong.cleared.term.requirements if r.call == "gather"
+    ]
+    assert not requirement.decided
+    assert all(
+        not h.source.startswith("the postcondition of clear_some")
+        for h in requirement.offered
+    )
+
+    def inputs():
+        return {
+            "perm": Arr.zeros(4, dtype=np.int64),
+            "lim": Arr.zeros(1, dtype=np.int64),
+            "x": Arr.from_numpy(np.arange(4.0)),
+            "y": Arr.zeros(4),
+        }
+
+    with pytest.raises(ValueError, match=r"perm\[1\] is 4"):
+        wrong.cleared(**inputs())
+    with pytest.raises(ValueError, match="stops before gather"):
+        LoopyExecutor().run(wrong.cleared, **inputs())
+
+
 def test_a_size_only_an_element_sort_names_is_renamed_apart() -> None:
     # Both calls of scan_flat name their buffer nnz, which no axis of
     # scan_flat is as long as. Taken as one name, the two buffers would be

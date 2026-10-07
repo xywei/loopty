@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from lanky.prelude import Nat, Real
 
-from loopty import Arr, Fin, kernel, program, reduce_sum
+from loopty import Arr, Fin, kernel, program, reduce_sum, when
 
 # {{{ an index array, and the reads through it
 
@@ -147,6 +147,44 @@ def at_some_then_gather(perm, x, y):
 @program
 def both_then_gather(perm, x, y):
     both(perm)
+    gather(perm, x, y)
+
+
+# }}}
+
+
+# {{{ a claim about the cells another array counts
+
+
+@kernel
+def one_cell(lim: Arr[Fin[1], Nat]) -> lim[0] == 1:
+    """Say how many cells the next call clears."""
+    lim[0] = 1
+
+
+@kernel
+def clear_some(perm: Arr[Fin[n], Fin[n]], lim: Arr[Fin[1], Nat]) -> all(
+    perm[i] == 0 for i in Fin[lim[0]]
+):
+    """Clear the first ``lim[0]`` cells, and put ``n`` in the others."""
+    for i in perm.dom:
+        perm[i] = perm.dom.size
+        with when(i < lim[0]):
+            perm[i] = 0
+
+
+@kernel
+def every_cell(lim: Arr[Fin[1], Nat], x: Arr[Fin[n], Real]) -> lim[0] == n:
+    """Make ``lim[0]`` say every cell, after the cells were cleared."""
+    lim[0] = x.dom.size
+
+
+@program
+def cleared(perm, lim, x, y):
+    """clear_some's claim is about lim[0] cells, and every_cell changes lim."""
+    one_cell(lim)
+    clear_some(perm, lim)
+    every_cell(lim, x)
     gather(perm, x, y)
 
 

@@ -1624,6 +1624,12 @@ with a pair of statement instances.
   hypotheses. A reason also names what isl could not state of a hypothesis
   or of the claim, which was read as saying nothing, and the values only of
   the cells the claim reads, not of every cell an instance reached.
+- A call that writes an array a postcondition names only in a binder's sort
+  retires the postcondition (`loopty.hypotheses.mentioned`).
+  `all(perm[i] == 0 for i in Fin[lim[0]])` stayed a hypothesis after a later
+  call made `lim[0]` larger, and then said that cells nobody cleared were 0:
+  a requirement on `perm` read `decided` under two true postconditions, and
+  the compiled program read past `x` where the native one was refused.
 
 ### Changed
 

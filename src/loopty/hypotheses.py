@@ -105,6 +105,7 @@ __all__ = [
     "discharge",
     "linear",
     "linear_expr",
+    "mentioned",
     "structural_key",
     "substitute",
     "theorem_instances",
@@ -251,6 +252,17 @@ def _names(expr: Any) -> set[str]:
 
     visit(expr)
     return out
+
+
+def mentioned(expr: Any) -> set[str]:
+    """Every name ``expr`` mentions, a binder's sort included.
+
+    ``all(perm[i] == 0 for i in Fin[lim[0]])`` mentions ``lim`` as much as
+    ``perm``: a call that writes ``lim`` changes which cells of ``perm`` the
+    claim is about, so it retires the claim as a write of ``perm`` does.
+    Bound names are among those returned.
+    """
+    return _names(expr)
 
 
 def _sort_terms(sort: Any) -> tuple[Any, ...]:
