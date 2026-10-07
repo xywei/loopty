@@ -164,7 +164,10 @@ def test_a_program_runs_natively_and_records_its_callees_claims() -> None:
         "postcondition-in-scope",
         "trace-faithful",
     ]
-    assert facts[0].status is Status.ASSUMED
+    # After the call, scan's claim holds of what the call passed it: the
+    # restatement is decided by the call, and worth what scan's fact is.
+    assert facts[0].status is Status.DECIDED
+    assert facts[0].decided_by == "call"
     assert facts[0].owner.endswith("both")
 
 
@@ -179,15 +182,26 @@ def test_a_programs_restatement_rests_on_the_callees_own_fact() -> None:
     ]
     (post,) = [fact for fact in scan.facts() if fact.kind == "postcondition"]
     assert restated.rests_on == (post.id,)
-    assert restated.provenance == {"callee": scan.qualname}
+    assert restated.provenance["callee"] == scan.qualname
 
+    # scan's postcondition is tested against its native runs, and the
+    # restatement is worth that.
+    assert post.status is Status.TESTED
     ledger = Ledger([*scan.facts(), restated])
+    assert ledger.support(restated).under == ()
+    assert ledger.support(restated).effective is Status.TESTED
+
+    # Where the callee's claim is only assumed, the restatement says so: the
+    # kernel owns several facts, so the one meant is named by its id.
+    assumed = post.with_status(Status.ASSUMED)
+    ledger = Ledger(
+        [*(fact for fact in scan.facts() if fact.id != post.id), assumed, restated]
+    )
     assert ledger.support(restated).under == (post.id,)
     assert ledger.support(restated).effective is Status.ASSUMED
-    # the kernel owns several facts, so the one meant is named by its id
     lines = ledger.render().splitlines()
     (row,) = [line for line in lines if "after scan(...)" in line]
-    assert row.startswith(f"assumed under {post.id}  ")
+    assert row.startswith(f"decided under {post.id}  ")
 
 
 def test_the_ledger_of_a_file_says_what_its_program_rests_on() -> None:
@@ -198,12 +212,16 @@ def test_the_ledger_of_a_file_says_what_its_program_rests_on() -> None:
     (restated,) = [fact for fact in ledger if fact.kind == "postcondition-in-scope"]
     (post,) = [fact for fact in ledger if fact.kind == "postcondition"]
     assert restated.rests_on == (post.id,)
-    assert ledger.support(restated).under == (post.id,)
+    # The scan's postcondition is tested, so it is no assumption of the
+    # restatement's, and the restatement is worth a test.
+    assert post.status is Status.TESTED
+    assert ledger.support(restated).under == ()
     data = json.loads(ledger.to_json())
     (row,) = [row for row in data if row["kind"] == "postcondition-in-scope"]
     assert row["rests_on"] == [post.id]
-    assert row["under"] == [post.id]
-    assert row["effective"] == "assumed"
+    assert row["under"] == []
+    assert row["status"] == "decided"
+    assert row["effective"] == "tested"
 
 
 CALLEE = '''
@@ -263,7 +281,7 @@ def test_a_callee_of_another_file_is_an_id_this_ledger_does_not_hold(
     (row,) = [line for line in printed if "after scan(...)" in line]
     # the id names the callee's definition, by the module its file's path gives it
     post = f"postcondition:loopty_test_callee.scan@{_decorated_at(CALLEE)}"
-    assert row.startswith(f"assumed under {post}  ")
+    assert row.startswith(f"decided under {post}  ")
     unresolved = f"rests on {post}, which this ledger does not hold"
     assert any(
         line.startswith("UNRESOLVED solve at caller.py:") and line.endswith(unresolved)
@@ -353,7 +371,7 @@ def test_a_restatement_rests_on_the_callees_fact_and_not_a_namesake(
 
     # the helper's fact is in its own ledger, and this one says so
     (row,) = [line for line in printed if "after scan(...) in solve:" in line]
-    assert row.startswith(f"assumed under {theirs}  ")
+    assert row.startswith(f"decided under {theirs}  ")
     assert any(
         line.startswith("UNRESOLVED solve at crossmod.py:")
         and line.endswith(f"rests on {theirs}, which this ledger does not hold")

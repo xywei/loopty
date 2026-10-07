@@ -119,31 +119,31 @@ row per work group, is the schedule for this shape that does build and did run.
 
 ```console
 $ uv run lanky check examples/spmv.py
-STATUS                                    BY             WHERE        OWNER          STATEMENT
-----------------------------------------  -------------  -----------  -------------  ------------------------------------------------------------------------
-decided                                   isl            spmv.py:79   scan           off[0] is in bounds for every instance of S0
-decided                                   isl            spmv.py:81   scan           off[r + 1] is in bounds for every instance of S1
-decided                                   isl            spmv.py:81   scan           off[r] is in bounds for every instance of S1
-decided                                   isl            spmv.py:81   scan           cnt[r] is in bounds for every instance of S1
-decided                                   isl            spmv.py:79   scan           distinct instances of S0 write distinct cells of off
-decided                                   isl            spmv.py:81   scan           distinct instances of S1 write distinct cells of off
-decided                                   isl            spmv.py:69   scan           the source order runs every dependence forward in time
-assumed                                   -              spmv.py:69   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
-tested                                    interpreter    spmv.py:69   scan           the traced term computes what the body computes
-tested                                    property-test  spmv.py:84   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat] | off(0) ==...
-decided                                   isl            spmv.py:112  spmv           y[r] is in bounds for every instance of S0
-decided                                   isl            spmv.py:112  spmv           val[r, j] is in bounds for every instance of S0
-decided                                   type           spmv.py:112  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
-decided                                   isl            spmv.py:112  spmv           col[r, j] is in bounds for every instance of S0
-decided                                   isl            spmv.py:112  spmv           cnt[r], the length of row r that bounds the loop over j, is in bounds...
-decided                                   isl            spmv.py:112  spmv           distinct instances of S0 write distinct cells of y
-decided                                   isl            spmv.py:102  spmv           the source order runs every dependence forward in time
-decided                                   type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
-tested                                    interpreter    spmv.py:102  spmv           the traced term computes what the body computes
-assumed under postcondition:spmv.scan@69  -              spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
-tested                                    interpreter    spmv.py:115  solve          the traced term computes what the body computes
+STATUS   EFFECTIVE  BY             WHERE        OWNER          STATEMENT
+-------  ---------  -------------  -----------  -------------  ------------------------------------------------------------------------
+decided  decided    isl            spmv.py:79   scan           off[0] is in bounds for every instance of S0
+decided  decided    isl            spmv.py:81   scan           off[r + 1] is in bounds for every instance of S1
+decided  decided    isl            spmv.py:81   scan           off[r] is in bounds for every instance of S1
+decided  decided    isl            spmv.py:81   scan           cnt[r] is in bounds for every instance of S1
+decided  decided    isl            spmv.py:79   scan           distinct instances of S0 write distinct cells of off
+decided  decided    isl            spmv.py:81   scan           distinct instances of S1 write distinct cells of off
+decided  decided    isl            spmv.py:69   scan           the source order runs every dependence forward in time
+tested   tested     native         spmv.py:69   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+tested   tested     interpreter    spmv.py:69   scan           the traced term computes what the body computes
+tested   tested     property-test  spmv.py:84   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat] | off(0) ==...
+decided  decided    isl            spmv.py:112  spmv           y[r] is in bounds for every instance of S0
+decided  decided    isl            spmv.py:112  spmv           val[r, j] is in bounds for every instance of S0
+decided  decided    type           spmv.py:112  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
+decided  decided    isl            spmv.py:112  spmv           col[r, j] is in bounds for every instance of S0
+decided  decided    isl            spmv.py:112  spmv           cnt[r], the length of row r that bounds the loop over j, is in bounds...
+decided  decided    isl            spmv.py:112  spmv           distinct instances of S0 write distinct cells of y
+decided  decided    isl            spmv.py:102  spmv           the source order runs every dependence forward in time
+decided  decided    type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
+tested   tested     interpreter    spmv.py:102  spmv           the traced term computes what the body computes
+decided  tested     call           spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
+tested   tested     interpreter    spmv.py:115  solve          the traced term computes what the body computes
 
-21 facts: 2 assumed, 15 decided, 4 tested
+21 facts: 16 decided, 5 tested
 ```
 
 Read the `BY` column.
@@ -171,17 +171,24 @@ Read the `BY` column.
   the program the term is the two calls composed. `--json` lists the inputs; a
   body that kept state where tracing does not look would make this row
   `refuted`, with the input and the first cell that differs.
-- Two facts are `assumed`: `scan`'s postcondition, which needs the recurrence,
-  and the restatement of it inside `solve`. Nothing established them and nothing
-  pretends otherwise. The restatement rests on `scan`'s fact, and its row says
-  so, `assumed under postcondition:spmv.scan@69`: whatever `scan`'s
-  postcondition comes to be worth, the restatement is worth no more. The id
-  names `scan`'s definition, the module `spmv` that the file's path gives it,
-  and line 69, as lanky names a theorem's, so a program that calls a `scan`
-  of another file rests on that file's fact, whatever it imported it as, and
-  never on a kernel of its own file that happens to share the name.
-  `lanky check` still exits 0, because `ASSUMED` is not a failure; only
-  `REFUTED` is.
+- `native` tested `scan`'s postcondition. A postcondition is a claim about
+  the arguments once the kernel has run, so it is evaluated at what each of
+  those native runs left in them, and it held after every one. Deciding it
+  from the term instead, by which statement last writes each cell, is not
+  done yet.
+- `call` decided the restatement of that postcondition inside `solve`: every
+  call of `scan` leaves it true of what the call passed, so it holds after
+  the call `solve` makes. It rests on `scan`'s own fact,
+  `postcondition:spmv.scan@69`, and the `EFFECTIVE` column says what that
+  makes it worth: `tested`, the weakest of what it rests on. The id names
+  `scan`'s definition, the module `spmv` that the file's path gives it, and
+  line 69, as lanky names a theorem's, so a program that calls a `scan` of
+  another file rests on that file's fact, whatever it imported it as, and
+  never on a kernel of its own file that happens to share the name. A later
+  call of the program may assume it too: `examples/travel.py` has programs
+  whose calls' requirements are decided under the postcondition of the call
+  before, or checked when the compiled program runs where nothing decides
+  them.
 
 `lanky check --verbose` prints each oracle and whether it is available first.
 
@@ -464,6 +471,7 @@ native run.
 | the Term IR | `src/loopty/term.py` |
 | tracing a body | `src/loopty/trace.py` |
 | a program's term, composed from its calls | `src/loopty/compose.py` |
+| facts that travel: hypotheses decided by isl | `src/loopty/hypotheses.py` |
 | footprints and dependences | `src/loopty/flow.py` |
 | typing rules, the facts | `src/loopty/typing.py` |
 | the isl oracle and its witnesses | `src/loopty/oracle.py` |

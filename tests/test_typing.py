@@ -176,10 +176,11 @@ def test_the_ledger_of_the_ragged_kernel_names_isl_and_the_type() -> None:
     # what a schedule lowers it to when it reorders the accumulation.
     assert "is approx" in statements
 
-    # The postcondition is nobody's yet, and says so rather than disappearing.
+    # The postcondition is tested against the kernel's native runs.
     posts = [f for f in ledger if f.kind == "postcondition"]
     assert len(posts) == 1
-    assert posts[0].status is Status.ASSUMED
+    assert posts[0].status is Status.TESTED
+    assert posts[0].decided_by == "native"
 
 
 def test_the_ragged_in_bounds_fact_is_decided_by_isl() -> None:
@@ -854,6 +855,34 @@ def test_a_value_isl_cannot_state_leaves_the_read_assumed() -> None:
     ledger = Ledger(settled(facts))
     assert ledger.support(read).effective is Status.ASSUMED
     assert ledger.support(read).under == (sort.id,)
+
+
+def offsets_into(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    off: Arr[Fin[n + 1], Fin[nnz + 1]],  # noqa: F821
+):
+    """Offsets into a buffer of ``nnz`` cells, which no axis here is as long as."""
+    off[0] = 0
+    for r in cnt.dom:
+        off[r + 1] = off[r] + cnt[r]
+
+
+def test_a_size_only_an_element_sort_names_is_not_negative() -> None:
+    # nnz is the length of the buffer the offsets point into. It was no size
+    # because no axis of this kernel is that long, and off[0] = 0 was refuted
+    # at nnz = -1, where Fin(nnz + 1) has no points at all.
+    from lanky.ledger import Ledger
+
+    from loopty.flow import size_names
+
+    term, facts = facts_of(offsets_into)
+    assert "nnz" in size_names(term)
+    start = next(
+        fact
+        for fact in facts
+        if fact.kind == "element-sort" and fact.statement.startswith("the value S0")
+    )
+    assert Ledger(settled(facts))[start.id].status is Status.DECIDED
 
 
 def test_an_index_array_only_read_owes_nothing() -> None:

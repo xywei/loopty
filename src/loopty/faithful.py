@@ -38,12 +38,22 @@ The fact, of kind ``trace-faithful``, is
 An input the body itself cannot run (a sampled input can break an assumption
 the types do not state, such as offsets consistent with counts) says nothing
 either way, and is listed in the provenance as skipped.
+
+A kernel's postcondition is tested on the same runs (:func:`postcondition_fact`):
+its return annotation is a claim about its parameters once the body has run,
+so it is evaluated at what every native run left in them, and the fact of kind
+``postcondition`` is ``tested`` by ``native`` when it held after every run that
+ran and after one at least, ``refuted`` at the first run after which it is
+false, and ``assumed``, with the reason, when nothing ran or it could not be
+evaluated after some run. Deciding it from the term instead, by which
+statement writes each cell last, is a question for isl that is not asked yet.
 """
 
 from __future__ import annotations
 
 import warnings
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -52,7 +62,7 @@ from lanky.prelude import FinType, Refined
 from lanky.terms import evaluate, free_variables
 
 from loopty.arr import Arr
-from loopty.interpret import InterpretError, TooLarge, interpret
+from loopty.interpret import CheckFailed, InterpretError, TooLarge, interpret
 from loopty.term import ArrType, Term, declared_layout
 from loopty.tolerance import disagreement, output_class
 from loopty.trace import TraceError
@@ -63,8 +73,10 @@ __all__ = [
     "SAMPLES",
     "SEED",
     "SIZES",
+    "Stopped",
     "faithfulness_fact",
     "no_term_fact",
+    "postcondition_fact",
     "sample_arguments",
 ]
 
@@ -105,6 +117,7 @@ def faithfulness_fact(
     *,
     module: str | None = None,
     line: int | None = None,
+    observed: list[tuple[str, Any, dict[str, Any]]] | None = None,
 ) -> Fact:
     """The ``trace-faithful`` fact of one kernel, established by running it.
 
@@ -114,6 +127,12 @@ def faithfulness_fact(
     theirs (see :func:`loopty.typing.facts_for`). Nothing here raises: an
     input that cannot be run is skipped, and anything unexpected leaves the
     fact ``assumed`` with the error as its reason.
+
+    ``observed``, when given, collects every native run that ran, as
+    ``(label, record, arguments)``, the arguments as the run left them, for
+    :func:`postcondition_fact` to evaluate the postcondition at: on every
+    input, those after a disagreement too, which settles this fact and not
+    the postcondition.
     """
     identifier = fact_id(KIND, owner, module=module, line=line)
     inputs: list[dict[str, Any]] = []
@@ -136,12 +155,30 @@ def faithfulness_fact(
             owner=owner,
         )
 
+    # The comparison is settled at the first input the term cannot be judged
+    # on or differs at; the inputs after it still run natively when
+    # ``observed`` is asked for, since the postcondition is tested on every
+    # input, and a run past a disagreement can refute it.
+    verdict: Fact | None = None
     try:
         for label, arguments, recorded in _inputs(kernel, term):
+            if verdict is not None and observed is None:
+                break
             if isinstance(arguments, str):
-                inputs.append({"input": label, "outcome": f"skipped: {arguments}"})
+                if verdict is None:
+                    inputs.append({"input": label, "outcome": f"skipped: {arguments}"})
                 continue
-            outcome = _compare(kernel, term, label, arguments)
+            after = None
+            if observed is not None:
+
+                def after(
+                    native: dict[str, Any], label: str = label, recorded: Any = recorded
+                ) -> None:
+                    observed.append((label, recorded, native))
+
+            outcome = _compare(kernel, term, label, arguments, after)
+            if verdict is not None:
+                continue
             if outcome is None:
                 inputs.append({"input": label, "outcome": "agreed"})
                 continue
@@ -150,18 +187,30 @@ def faithfulness_fact(
                 inputs.append({"input": label, "outcome": f"skipped: {detail}"})
                 continue
             if kind == "unknown":
-                return fact(Status.ASSUMED, reason=detail)
+                verdict = fact(Status.ASSUMED, reason=detail)
+                continue
             counterexample, reason = detail
             inputs.append({"input": label, "outcome": "differed"})
             extra = {"arguments": recorded} if recorded is not None else {}
-            return fact(
+            verdict = fact(
                 Status.REFUTED, counterexample=counterexample, reason=reason, **extra
             )
     except Exception as exc:  # noqa: BLE001 - a fact, never a crash of the check
-        return fact(
-            Status.ASSUMED,
-            reason=f"the comparison could not be made: {type(exc).__name__}: {exc}",
-        )
+        if observed is not None:
+            # The inputs after this one were never run: the postcondition is
+            # not tested on what was collected so far alone.
+            observed.append(
+                ("the inputs left", None, Stopped(f"{type(exc).__name__}: {exc}"))
+            )
+        if verdict is None:
+            return fact(
+                Status.ASSUMED,
+                reason=(
+                    f"the comparison could not be made: {type(exc).__name__}: {exc}"
+                ),
+            )
+    if verdict is not None:
+        return verdict
     agreed = sum(entry["outcome"] == "agreed" for entry in inputs)
     if not agreed:
         skipped = "; ".join(f"{e['input']}: {e['outcome']}" for e in inputs)
@@ -196,6 +245,138 @@ def no_term_fact(
         where=where,
         owner=owner,
     )
+
+
+@dataclass(frozen=True)
+class Stopped:
+    """In place of a run's arguments: the runs stopped here, and why.
+
+    :func:`faithfulness_fact` ends what it collects with one when an input
+    raised past what it catches, so that :func:`postcondition_fact` counts
+    the inputs never run as runs it could not evaluate the postcondition
+    after, and leaves it ``assumed``.
+    """
+
+    reason: str
+
+
+def postcondition_fact(
+    kernel: Any,
+    term: Term,
+    observed: Sequence[tuple[str, Any, Mapping[str, Any]]],
+    owner: str,
+    where: str,
+    *,
+    module: str | None = None,
+    line: int | None = None,
+) -> Fact:
+    """A kernel's postcondition, tested against what its native runs left.
+
+    ``observed`` is what :func:`faithfulness_fact` collected: for every input
+    the body ran, its label, what the provenance keeps of it, and the
+    arguments as the run left them. The postcondition is evaluated there,
+    each array by its cells and each size as the arguments determine it
+    (:func:`loopty.contract.resolve_sizes`). The fact keeps the id, the
+    statement and the kind of the one :func:`loopty.typing.postcondition_facts`
+    states, and its term is an :class:`~loopty.typing.AfterCall`, which no
+    oracle mistakes for a closed proposition.
+
+    It is ``tested`` only when it held after every run: one after which it
+    cannot be evaluated (it reads a cell the run's arrays do not have, or a
+    name nothing gives a value) leaves it ``assumed``, however many others
+    it held after, since a program that calls the kernel skips a check on the
+    strength of a ``tested`` postcondition (see :mod:`loopty.compose`).
+    """
+    from lanky.terms import render, truth_value
+
+    from loopty.contract import resolve_sizes
+    from loopty.typing import AfterCall, postcondition_id
+
+    post = term.post
+    inputs: list[dict[str, Any]] = []
+
+    def fact(status: Status, **provenance: Any) -> Fact:
+        return Fact(
+            id=postcondition_id(owner, module=module, line=line),
+            kind="postcondition",
+            statement=render(post),
+            term=AfterCall(term.name, post),
+            status=status,
+            decided_by="native" if status is not Status.ASSUMED else None,
+            provenance={
+                "kernel": term.name,
+                "inputs": inputs,
+                "seed": SEED,
+                "samples": SAMPLES,
+                **provenance,
+            },
+            where=where,
+            owner=owner,
+        )
+
+    held = 0
+    for label, recorded, arguments in observed:
+        if isinstance(arguments, Stopped):
+            inputs.append({"input": label, "outcome": f"not run: {arguments.reason}"})
+            continue
+        context: dict[str, Any] = dict(arguments)
+        try:
+            sizes = resolve_sizes(getattr(kernel, "arg_types", {}), arguments)
+        except Exception:  # noqa: BLE001 - a size the claim names is missed below
+            sizes = {}
+        for name, value in sizes.items():
+            context.setdefault(name, value)
+        try:
+            with np.errstate(all="ignore"), warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                holds = truth_value(evaluate(post, context), post)
+        except Exception as exc:  # noqa: BLE001 - said in the provenance
+            inputs.append(
+                {
+                    "input": label,
+                    "outcome": f"not evaluated: {type(exc).__name__}: {exc}",
+                }
+            )
+            continue
+        if not holds:
+            inputs.append({"input": label, "outcome": "false"})
+            extra = {"arguments": recorded} if recorded is not None else {}
+            return fact(
+                Status.REFUTED,
+                counterexample={"input": label},
+                reason=(
+                    f"on {label}, the body run natively leaves {render(post)} "
+                    f"false, so {term.name} does not establish its postcondition"
+                ),
+                **extra,
+            )
+        inputs.append({"input": label, "outcome": "held"})
+        held += 1
+    if not held:
+        tried = "; ".join(f"{e['input']}: {e['outcome']}" for e in inputs)
+        return fact(
+            Status.ASSUMED,
+            reason=(
+                "no native run left anything to evaluate it at"
+                + (f" ({tried})" if tried else "")
+            ),
+        )
+    unevaluated = [e for e in inputs if e["outcome"] != "held"]
+    if unevaluated:
+        # A run after which the claim cannot be evaluated is one it says
+        # nothing of: it reads a cell the run's arrays do not have, say,
+        # which an empty input never reaches. Held after the others, it is
+        # not borne out by every run, and a program would skip a check on it.
+        tried = "; ".join(f"{e['input']}: {e['outcome']}" for e in unevaluated)
+        return fact(
+            Status.ASSUMED,
+            compared=held,
+            reason=(
+                f"it held after {held} native run{'s' if held != 1 else ''}, and "
+                f"could not be evaluated after the others ({tried})"
+            ),
+        )
+    return fact(Status.TESTED, compared=held)
 
 
 # {{{ inputs
@@ -443,7 +624,11 @@ def _cell(name: str, value: Any, position: int) -> str:
 
 
 def _compare(
-    kernel: Any, term: Term, label: str, arguments: Mapping[str, Any]
+    kernel: Any,
+    term: Term,
+    label: str,
+    arguments: Mapping[str, Any],
+    after: Any = None,
 ) -> tuple[str, Any] | None:
     """Run both meanings on one input; ``None`` when they agree.
 
@@ -452,13 +637,19 @@ def _compare(
     be interpreted at all, and ``("differ", (counterexample, reason))`` when
     the two disagree. A :class:`~loopty.trace.TraceError` from the native run
     is a disagreement and not a skipped input: it refuses the body's spelling,
-    not the values it was given.
+    not the values it was given. So is a checked point of a program's term
+    that stops the interpreted run where the body ran
+    (:class:`~loopty.interpret.CheckFailed`), since the compiled program
+    would refuse an input the native one takes.
 
     The interpreter runs first, because it is the one with a bound on its work
     (:data:`MAX_INSTANCES`): an example input written for a benchmark is
     skipped without running the body on it either. What it raised is judged
     only once the body has run, since an input the body refuses says nothing
     about the term.
+
+    ``after``, when given, is called with the native run's arguments once the
+    body has run them without an error, as the run left them.
     """
     native = {name: _copy(value) for name, value in arguments.items()}
     interpreted = {name: _copy(value) for name, value in arguments.items()}
@@ -494,6 +685,15 @@ def _compare(
             )
         except Exception as exc:  # noqa: BLE001 - an input the body refuses
             return "skipped", f"the body raised {type(exc).__name__}: {exc}"
+    if after is not None:
+        after(native)
+    if isinstance(failure, CheckFailed):
+        error = f"{type(failure).__name__}: {failure}"
+        return "differ", (
+            {"input": label, "term raised": error},
+            f"on {label} the body runs, and the traced term, interpreted, "
+            f"stops at a checked point the native run passes: {failure}",
+        )
     if isinstance(failure, InterpretError):
         return "unknown", f"the term cannot be interpreted: {failure}"
     if isinstance(failure, IndexError | ArithmeticError):

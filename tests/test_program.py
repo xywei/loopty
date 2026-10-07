@@ -15,6 +15,7 @@ import loopy as lp
 import numpy as np
 import pytest
 from lanky.prelude import Bool, Int, Nat, Real
+from lanky.terms import render
 
 from loopty import (
     Arr,
@@ -929,70 +930,105 @@ def test_a_number_is_checked_against_the_programs_sizes() -> None:
         pokes_past.trace()
 
 
-@pytest.mark.parametrize(
-    ("body", "said"),
-    [
-        # number writes n into perm[n - 1], and gather reads x[perm[i]] in
-        # bounds by type; natively gather's contract refuses perm.
-        (
-            lambda perm, cnt, col, val, x, y, off: (
-                number(perm),
-                gather(perm, x, y),
-            ),
-            "number at .* writes first, and the elements of perm are declared",
-        ),
-        # lengthen makes the rows longer than val stores them.
-        (
-            lambda perm, cnt, col, val, x, y, off: (
-                lengthen(cnt),
-                spmv(cnt, col, val, x, y),
-            ),
-            "cnt is the row lengths of col",
-        ),
-        # move shifts the row starts spmv_declared reads val through.
-        (
-            lambda perm, cnt, col, val, x, y, off: (
-                move(off),
-                spmv_declared(cnt, off, val, x, y),
-            ),
-            "off is the offsets of the rows of val",
-        ),
-    ],
-)
-def test_contract_data_an_earlier_call_writes_is_refused(body, said) -> None:
-    def writes_then_reads(perm, cnt, col, val, x, y, off):
-        body(perm, cnt, col, val, x, y, off)
-
-    writes_then_reads.__name__ = "writes_then_reads"
-    with pytest.raises(TraceError, match=said) as refused:
-        program(writes_then_reads).trace()
-    assert "nothing would check" in str(refused.value)
-
-
-def test_an_index_array_the_program_makes_is_refused() -> None:
-    # Zeros are no point of Fin[0], and nothing checks them against n.
+def test_a_count_an_earlier_call_writes_is_refused() -> None:
+    # lengthen makes the rows longer than val stores them. Whether a count
+    # still says how long its row is stored is a question about the buffer
+    # the program is given, which no hypothesis about its arrays answers.
     @program
-    def gathers(x, y):
-        perm = Arr.zeros_like(y)
-        gather(perm, x, y)
+    def lengthened(cnt, col, val, x, y):
+        lengthen(cnt)
+        spmv(cnt, col, val, x, y)
 
-    with pytest.raises(TraceError, match="the Arr.zeros_like at .* writes first"):
-        gathers.trace()
+    with pytest.raises(TraceError, match="cnt is the row lengths of col") as refused:
+        lengthened.trace()
+    assert "nothing in the program's term can check" in str(refused.value)
 
 
-def test_the_native_program_stops_where_the_refused_term_would_not() -> None:
-    # Natively gather's contract refuses the perm number wrote. The term would
-    # run gather on it unchecked and read x[4], which is why it is refused.
+def test_an_element_an_earlier_call_writes_is_checked_between_the_calls() -> None:
+    # #65: number writes n into perm[n - 1] and says nothing about perm, and
+    # gather reads x[perm[i]] in bounds by type. The program used to be
+    # refused; now gather's requirement on perm is checked between the calls.
     @program
     def permuted(perm, x, y):
         number(perm)
         gather(perm, x, y)
 
+    term = permuted.term
+    assert [stmt.id for stmt in term.stmts] == [
+        "number.S0",
+        "gather.check.perm",
+        "gather.S0",
+    ]
+    ((flag, message),) = term.checks
+    assert "stops before gather" in message
+    (requirement,) = term.requirements
+    assert not requirement.decided
+    assert requirement.kind == "element"
+    # gather's statement runs only where the check found nothing.
+    assert flag in render(term.stmt("gather.S0").guard)
+
     perm = Arr.zeros(4, dtype=np.int64)
     with pytest.raises(ValueError, match=r"perm\[3\] is 4"):
         permuted(perm, Arr.zeros(4), Arr.zeros(4))
-    with pytest.raises(TraceError, match="nothing would check"):
-        permuted.trace()
+    perm = Arr.zeros(4, dtype=np.int64)
+    y = Arr.zeros(4)
+    with pytest.raises(ValueError, match="stops before gather"):
+        LoopyExecutor().run(permuted, perm=perm, x=Arr.zeros(4), y=y)
+    # What number wrote is where the caller looks, as natively; gather never ran.
+    assert list(perm.numpy()) == [1, 2, 3, 4]
+    assert list(y.numpy()) == [0.0, 0.0, 0.0, 0.0]
+
+
+def test_offsets_an_earlier_call_moves_are_checked_between_the_calls() -> None:
+    # move shifts the row starts spmv_declared reads val through.
+    @program
+    def moved(cnt, off, val, x, y):
+        move(off)
+        spmv_declared(cnt, off, val, x, y)
+
+    term = moved.term
+    assert [stmt.id for stmt in term.stmts] == [
+        "move.S0",
+        "spmv_declared.check.off.start",
+        "spmv_declared.check.off.rows",
+        "spmv_declared.S0",
+    ]
+    (requirement,) = term.requirements
+    assert requirement.kind == "layout" and not requirement.decided
+    counts = [2, 1, 3]
+    inputs = {
+        "cnt": Arr.from_numpy(np.array(counts, dtype=np.int64)),
+        "off": Arr.from_numpy(np.array([0, 2, 3, 6], dtype=np.int64)),
+        "val": Arr.ragged(counts, values=np.arange(1.0, 7.0)),
+        "x": Arr.zeros(3),
+        "y": Arr.zeros(3),
+    }
+    with pytest.raises(ValueError, match="the offsets argument off holds"):
+        moved(**{name: value.copy() for name, value in inputs.items()})
+    with pytest.raises(ValueError, match="does not hold the offsets the counts"):
+        LoopyExecutor().run(moved, **inputs)
+
+
+def test_an_index_array_the_program_makes_is_zeros() -> None:
+    # Zeros are points of Fin[n] wherever perm has a cell, which isl decides
+    # from the zeros the Arr.zeros_like starts perm with.
+    @program
+    def gathers(x, y):
+        perm = Arr.zeros_like(y, dtype=np.int64)
+        gather(perm, x, y)
+
+    (requirement,) = gathers.term.requirements
+    assert requirement.decided
+    assert [h.source for h in requirement.used] == [
+        f"the zeros the Arr.zeros_like at {requirement.writer.split(' at ')[1]} "
+        "starts perm with"
+    ]
+    assert gathers.term.checks == ()
+    x = Arr.from_numpy(np.array([5.0, 6.0, 7.0]))
+    fact = LoopyExecutor().differential(
+        gathers, Schedule(gathers), {"x": x, "y": Arr.zeros(3)}
+    )
+    assert fact.status.value == "tested", fact.provenance
 
 
 def test_a_natural_array_an_earlier_call_writes_is_passed_on() -> None:

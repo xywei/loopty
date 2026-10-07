@@ -166,6 +166,23 @@ def _copy(value: Any) -> Any:
     return value
 
 
+def _entry_offsets(term: Term, lowering: Lowering) -> dict[str, str]:
+    """The offsets each ragged argument is compared with when the run starts.
+
+    The lowering's flattening map, less the offsets a program writes before
+    any of its calls reads rows through them (:attr:`Term.deferred_offsets`):
+    what they hold on entry is overwritten before it is used, and the layout
+    requirement of the first call that reads through them checks them there,
+    as that call's contract does natively (see :mod:`loopty.compose`).
+    """
+    deferred = set(term.deferred_offsets)
+    return {
+        array: offsets
+        for array, offsets in lowering.ragged.items()
+        if offsets not in deferred
+    }
+
+
 def _declared_layouts(
     term: Term, lowering: Lowering, supplied: Mapping[str, Any]
 ) -> dict[str, Fixed]:
@@ -255,6 +272,9 @@ def _call_arguments(
             out[name] = _as_numpy(value, dtypes.get(name))
         else:
             out[name] = _as_scalar(value, dtypes.get(name))
+    for flag in lowering.checks:
+        # A checked point's flag starts clear; see loopty.compose.
+        out[flag] = np.zeros(1, dtype=dtypes.get(flag, np.dtype(np.int32)))
     for argument, (array, piece) in lowering.bases.items():
         layout = layouts[array]
         packed = lowering.storage[array] == "packed"
@@ -354,7 +374,10 @@ class LoopyExecutor:
         names = [name for name, _ in term.params]
         supplied = {**dict(zip(names, args, strict=False)), **kwargs}
         check_arguments(
-            dict(term.params), supplied, lowering.ragged, written=lowering.outputs
+            dict(term.params),
+            supplied,
+            _entry_offsets(term, lowering),
+            written=lowering.results,
         )
         inherited_storage(term.array_types, term.temporaries_like, supplied)
         layouts = _declared_layouts(term, lowering, supplied)
@@ -372,11 +395,21 @@ class LoopyExecutor:
             # caller comparing outputs sees the array it passed in.
             if name in out:
                 out[name] = original
+        failed = [
+            message
+            for flag, message in lowering.checks.items()
+            if np.asarray(out.pop(flag)).reshape(-1)[0]
+        ]
         self._write_back(supplied, out, lowering.storage, layouts)
         for name in out:
             # An output over a domain is its cells, whatever layout it ran in.
             if name in lowering.storage:
                 out[name] = supplied[name].cells()
+        if failed:
+            # A checked point of a program: the statements after it did not
+            # run, and what the ones before it wrote is where the caller
+            # looks, as natively, where the call after it is refused.
+            raise ValueError(failed[0])
         return out
 
     def _collect(
@@ -509,13 +542,16 @@ class LoopyExecutor:
         # which is exactly what hides an alias between two of them, and the
         # native run would otherwise be the first thing to meet a bad index.
         check_arguments(
-            dict(term.params), args, lowering.ragged, written=lowering.outputs
+            dict(term.params),
+            args,
+            _entry_offsets(term, lowering),
+            written=lowering.results,
         )
         inherited_storage(term.array_types, term.temporaries_like, args)
         native = dict(reference or {})
         if native:
-            missing = [name for name in lowering.outputs if name not in native]
-            extra = [name for name in native if name not in lowering.outputs]
+            missing = [name for name in lowering.results if name not in native]
+            extra = [name for name in native if name not in lowering.results]
             if missing or extra:
                 parts = []
                 if missing:
@@ -524,7 +560,7 @@ class LoopyExecutor:
                     parts.append(f"names {', '.join(extra)}, which is not an output")
                 raise ValueError(
                     f"the reference given for {term.name} " + " and ".join(parts)
-                    + f"; {term.name} writes {', '.join(lowering.outputs)}, and "
+                    + f"; {term.name} writes {', '.join(lowering.results)}, and "
                     "every one of them has to be compared or the agreement fact "
                     "would claim more than was tested"
                 )
@@ -551,7 +587,7 @@ class LoopyExecutor:
                 raise TypeError(
                     f"{kernel!r} is not callable and no reference was given"
                 )
-            native = {name: native_args[name] for name in lowering.outputs}
+            native = {name: native_args[name] for name in lowering.results}
         scheduled_args = {name: _copy(value) for name, value in args.items()}
         got = self.run(schedule, **scheduled_args)
         return agreement(term, schedule, got, native, target=target)

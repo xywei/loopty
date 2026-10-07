@@ -59,11 +59,46 @@ reads its rows through, which the calls have to agree on.
 The compiled program is one call, so its contract checks the program's
 arguments once, when it starts, where natively every kernel's contract checks
 its own when it is called. What a kernel's contract checks of the cells of an
-array (that a ``Fin[m]`` element is a point of ``Fin[m]``, that the counts and
-offsets of a ragged family lay its rows out inside the buffer) is what its
-in-bounds facts rest on, so an array of that kind that an earlier call wrote,
-or that the program made, is refused when it is passed on: nothing would check
-it.
+array (that a ``Fin[m]`` element is a point of ``Fin[m]``, that the offsets a
+ragged family is read through are the ones its counts give) is what its
+in-bounds facts rest on. A kernel's requirements on its inputs are its
+argument types, so where an earlier call wrote such an array, or the program
+made it, the requirement is an obligation of the program
+(:class:`~loopty.term.Requirement`), and facts travel to discharge it.
+
+*A requirement is decided under what held at the call.* The postconditions of
+the earlier calls whose arrays nothing has written over since, the zeros an
+``Arr.zeros_like`` starts an array with, the types the program's contract
+checks of the arrays nothing has written yet, and the theorems the program
+cites (``@program(uses=[scan_monotone])``), instantiated at those, are its
+hypotheses, and isl decides it under them (:mod:`loopty.hypotheses`): ``gather``
+reads ``x[perm[i]]`` in bounds by the element type of ``perm``, and
+``number``'s postcondition says what ``number`` left in ``perm``. The fact
+rests on the facts it used.
+
+*Where it is not decided, the program checks it.* The lowered program gets
+the contract's cell checks for that array between the two calls: a statement
+of its own that sets a one-cell flag when a cell fails, with every later
+statement guarded by the flag, so the compiled program runs no further where
+the native one is refused, and the executor raises the requirement's message.
+The requirement stays ``assumed``, and its fact says why. A count an earlier
+call wrote is still refused: the rows of the ragged array it bounds are laid
+out in a buffer the program was given, which nothing in the term can state.
+
+*The compiled program trusts no more than a run has borne out.* A decided
+requirement whose fact rests on something not at least ``tested`` (a
+postcondition its kernel's runs refute, a cited theorem the property tester
+does not pass, an axiom) keeps its checked point, and stays ``decided`` in
+the ledger, worth what it rests on (#115). And a postcondition is tested on
+the runs its kernel's contract lets in, so it is a hypothesis only after a
+call at which that contract held: where an earlier call wrote an array of the
+callee's of a ``Nat`` element sort, which the native contract checks and no
+requirement does, the postcondition is not offered (:meth:`_Composer.unchecked`).
+
+The hypotheses that held where each call ran are kept with the term too
+(:class:`~loopty.term.Scope`), so that a callee's fact its own term leaves
+``assumed`` can be decided in the program's scope (see
+:func:`loopty.typing.scoped_in_bounds_facts`).
 
 What a program's body may do is pass things to kernels, make arrays with
 ``Arr.zeros_like``, and run Python that touches neither. Reading or writing a
@@ -103,8 +138,18 @@ from typing import Any, NoReturn
 import islpy as isl
 import numpy as np
 import pymbolic.primitives as prim
-from lanky.prelude import FinType, Refined
-from lanky.terms import Var, init_args, render, structurally_equal
+from lanky.prelude import FinType, Nat, Refined
+from lanky.terms import (
+    Comparison,
+    Forall,
+    LogicalAnd,
+    LogicalOr,
+    Subscript,
+    Var,
+    init_args,
+    render,
+    structurally_equal,
+)
 
 from loopty.contract import (
     holds_natively,
@@ -114,7 +159,25 @@ from loopty.contract import (
     storage_wanted,
 )
 from loopty.flow import NonAffine, domain_set, expr_text, free_names
-from loopty.term import Access, ArrType, Reduction, Stmt, Term
+from loopty.hypotheses import (
+    discharge,
+    free_in,
+    linear,
+    mentioned,
+    substitute,
+    theorem_instances,
+)
+from loopty.idx import Reflections
+from loopty.term import (
+    Access,
+    ArrType,
+    Hypothesis,
+    Reduction,
+    Requirement,
+    Scope,
+    Stmt,
+    Term,
+)
 from loopty.trace import TraceError
 
 __all__ = [
@@ -573,6 +636,48 @@ class _Made:
     dtype: Any = None
 
 
+@dataclass
+class _Want:
+    """A requirement of one call on an array an earlier call wrote.
+
+    ``kind`` is ``"element"`` (the callee declares the array's elements of a
+    ``Fin[m]`` sort) or ``"layout"`` (the callee reads the rows of ``owner``,
+    counted by ``counts``, through the array as offsets). ``writer`` is the
+    call, or the ``Arr.zeros_like``, that wrote it last.
+    """
+
+    kind: str
+    param: str
+    array: str
+    writer: str
+    owner: str = ""
+    counts: str = ""
+
+
+@dataclass
+class _Done:
+    """One composed call: its statements and what it means to the calls after it.
+
+    ``stmts`` are in the program's names, their blocks counted from
+    ``start``, which the checked points before the call shift
+    (:meth:`_Composer.travel`). ``post`` is the callee's postcondition in the
+    program's names, ``types`` its parameters' types and ``arrays`` the
+    program array passed for each, ``written`` the program arrays it writes,
+    and ``wants`` its requirements on arrays written before it.
+    """
+
+    label: str
+    kernel: Any
+    where: str
+    start: int
+    stmts: list[Stmt]
+    post: Any
+    types: dict[str, Any]
+    arrays: dict[str, str]
+    written: set[str]
+    wants: list[_Want]
+
+
 class _Recorder:
     """What one run of a program's body against placeholders did, in order."""
 
@@ -644,6 +749,11 @@ def trace_program(program: Any) -> Term:
     recorder is closed before anything is composed, because composing traces
     the callees, and a callee's body calling a kernel is not the program's
     call.
+
+    The theorems the program cites (``program.uses``) are offered as
+    hypotheses wherever a requirement is decided, and the facts the program's
+    requirements rest on are named by the ids its own facts give them, which
+    are keyed by its definition (``qualname``, ``module`` and ``line``).
     """
     function = program.fn
     names: list[str] = []
@@ -689,7 +799,7 @@ def trace_program(program: Any) -> Term:
             "the compiled program keeps to itself; write the result into a "
             "parameter instead"
         )
-    return _Composer(recorder).term()
+    return _Composer(recorder, program).term()
 
 
 def _made_in(value: Any) -> ProgramValue | None:
@@ -720,6 +830,10 @@ def _made_in(value: Any) -> ProgramValue | None:
 #: No identifier starts with it, so a callee's ``n`` can never be taken for
 #: the program's ``n``.
 _CALLEE = "@"
+
+#: Why a guard conjunct that reads an array leaves a domain as it is, in the
+#: words :mod:`loopty.trace` uses for a ``when`` of the body.
+_NOT_AFFINE = "reads an array or is not affine"
 
 
 def _is_number(value: Any) -> bool:
@@ -786,9 +900,64 @@ def _own_names(term: Term) -> list[str]:
     return out
 
 
+def _fin_bound(sort: Any) -> Any:
+    """The bound of a ``Fin`` sort, a refinement's included, or ``None``."""
+    base = sort.base if isinstance(sort, Refined) else sort
+    return base.bound if isinstance(base, FinType) else None
+
+
 def _through(offsets: str | None) -> str:
     """How a message says which offsets rows are read through."""
     return "through its own offsets" if offsets is None else f"through {offsets}"
+
+
+#: What :func:`_theorem_standing` found of each theorem, by identity.
+_THEOREM_STANDINGS: dict[int, tuple[Any, str | None]] = {}
+
+
+def _theorem_standing(theorem: Any) -> str | None:
+    """``None`` when lanky's property tester passes ``theorem``, else why not.
+
+    That is the least a ``lanky check`` of the theorem gives it, ``tested``,
+    and what a program that skips a check on the strength of the theorem
+    asks of it. An axiom is ``assumed`` on its citation, and a theorem that
+    rests on facts of its own (``uses=``) is worth what they are, which the
+    program does not see; neither is enough. A stronger oracle that would
+    prove what the tester cannot sample is not asked, so the check stays.
+    """
+    found = _THEOREM_STANDINGS.get(id(theorem))
+    if found is not None and found[0] is theorem:
+        return found[1]
+    name = getattr(theorem, "__name__", None) or getattr(theorem, "qualname", "theorem")
+    try:
+        from lanky.ledger import STATUS_STRENGTH
+        from lanky.oracles.test import TestOracle
+
+        fact = theorem.fact()
+        if fact.is_axiom:
+            why: str | None = f"the axiom {name} is assumed on its citation"
+        elif fact.rests_on:
+            why = (
+                f"{name} rests on {', '.join(fact.rests_on)}, whose status the "
+                "program does not know"
+            )
+        else:
+            tested = TestOracle().establish(fact) or fact
+            if STATUS_STRENGTH[tested.status] < 1:
+                reason = tested.provenance.get("untested") or tested.provenance.get(
+                    "reason"
+                )
+                why = f"{name} is {tested.status.value}" + (
+                    f" ({reason})" if reason else ""
+                )
+            elif tested.provenance.get("goal_reached") == 0:
+                why = f"{name} passed no draw at which its goal's guard held"
+            else:
+                why = None
+    except Exception as exc:  # noqa: BLE001 - then it stands on nothing
+        why = f"{name} could not be tested: {type(exc).__name__}: {exc}"
+    _THEOREM_STANDINGS[id(theorem)] = (theorem, why)
+    return why
 
 
 def _reflected_spelling(expr: Any) -> str | None:
@@ -810,9 +979,33 @@ def _reflected_spelling(expr: Any) -> str | None:
 class _Composer:
     """The program's term, built one recorded event at a time."""
 
-    def __init__(self, recorder: _Recorder) -> None:
+    def __init__(self, recorder: _Recorder, program: Any = None) -> None:
         self.recorder = recorder
         self.program = recorder.name
+        #: What keys the program's facts: its qualified name, module and line.
+        self.owner = {
+            "owner": getattr(program, "qualname", recorder.name),
+            "module": getattr(program, "module", None),
+            "line": getattr(program, "line", None),
+        }
+        #: The theorems the program cites, offered as hypotheses.
+        self.uses: tuple[Any, ...] = tuple(getattr(program, "uses", ()))
+        #: The callee each restated postcondition is the postcondition of, by
+        #: the restatement's id, and why each fact a decision rests on is not
+        #: at least ``tested`` (``None`` when it is), by id.
+        self.postconditions: dict[str, Any] = {}
+        #: The callee each ``trace-faithful`` fact a postcondition hypothesis
+        #: rests on is the fact of, by its id.
+        self.faithfuls: dict[str, Any] = {}
+        self.standings: dict[str, str | None] = {}
+        #: What last wrote each program array, by name.
+        self.last_writer: dict[str, str] = {}
+        #: The offsets some call has read rows through so far, and those an
+        #: earlier call wrote before the first of them did, which the
+        #: program's contract does not compare with the rows' own offsets on
+        #: entry: a requirement does, where they are first read.
+        self.read_through: set[str] = set()
+        self.deferred: list[str] = []
         self.taken: set[str] = set(recorder.taken)
         #: What each program name is, ``"array"`` or ``"scalar"``, and its
         #: type in program names, with the call that first gave it one.
@@ -826,7 +1019,7 @@ class _Composer:
         #: The offsets each counts family is read through, and who said so.
         self.layout: dict[str, str | None] = {}
         self.layout_origin: dict[str, str] = {}
-        self.slots: list[list[Stmt] | tuple[_Made, int]] = []
+        self.slots: list[_Done | tuple[_Made, int]] = []
         self.reflected: list[tuple[str, Any]] = []
         self.made: dict[str, _Made] = {}
         #: Every program array something has written so far, with what wrote
@@ -932,6 +1125,9 @@ class _Composer:
                 self.writers.setdefault(
                     event.value.name, f"the Arr.zeros_like at {event.where}"
                 )
+                self.last_writer[event.value.name] = (
+                    f"the Arr.zeros_like at {event.where}"
+                )
                 self.slots.append((event, self.blocks))
                 self.blocks += 1
             else:
@@ -956,8 +1152,13 @@ class _Composer:
             f"{self.program} calls {call.kernel.__name__} at {call.where}: {message}"
         )
 
-    def call(self, call: _Call) -> list[Stmt]:
-        """One call's statements, in the program's names."""
+    def call(self, call: _Call) -> _Done:
+        """One call's statements, in the program's names, and what it means.
+
+        Its requirements on the arrays earlier calls wrote are recorded here
+        and decided once every call is composed, when the sizes are final
+        (:meth:`travel`).
+        """
         kernel = call.kernel
         try:
             term = kernel.term
@@ -1035,7 +1236,24 @@ class _Composer:
             renamed = _rename_type(_rename_type(typ, names, exprs), {}, self.resolved)
             self.literal(call, term, param, renamed, exprs[param])
         self.settle_layout(call, term, arrays)
-        self.checked_at_entry(call, term, arrays)
+        wants = self.requirements_of(call, term, arrays)
+        # The postcondition and the types in the program's names: its
+        # parameters are what the call passed, its sizes what they unified to.
+        claimed = {
+            param: Var(names[param]) for param, _typ in term.params if param in names
+        }
+        claimed.update(exprs)
+        if term.post is not None:
+            # A name the postcondition leaves free that is neither a
+            # parameter nor a size of the callee has no value natively, and
+            # nothing of the program's is meant by it: it is spelled so that
+            # no name of the program is, and isl cannot state it.
+            for name in sorted(free_in(term.post) - set(claimed)):
+                claimed[name] = Var(f"{name}@{label}")
+        post = None if term.post is None else substitute(term.post, claimed)
+        types = {
+            param: _rename_type(typ, names, exprs) for param, typ in term.params
+        }
 
         for name in _own_names(term):
             if name not in names and name not in exprs:
@@ -1045,6 +1263,7 @@ class _Composer:
             names[symbol] = self.fresh(spelled or symbol)
             self.reflected.append((names[symbol], rename_expr(expr, names, exprs)))
 
+        start = self.blocks
         stmts: list[Stmt] = []
         top = 0
         for stmt in term.stmts:
@@ -1078,7 +1297,19 @@ class _Composer:
             self.writers.setdefault(
                 stmt.assignee.array, f"{kernel.__name__} at {call.where}"
             )
-        return stmts
+            self.last_writer[stmt.assignee.array] = f"{kernel.__name__} at {call.where}"
+        return _Done(
+            label=label,
+            kernel=kernel,
+            where=call.where,
+            start=start,
+            stmts=stmts,
+            post=post,
+            types=types,
+            arrays=dict(arrays),
+            written={stmt.assignee.array for stmt in stmts},
+            wants=wants,
+        )
 
     def claim(self, name: str, kind: str, call: _Call, param: str) -> None:
         """Say that program name ``name`` is an array, or a scalar."""
@@ -1159,27 +1390,34 @@ class _Composer:
                 f"contract of {term.name} would say at the call",
             )
 
-    def checked_at_entry(
+    def requirements_of(
         self, call: _Call, term: Term, arrays: Mapping[str, str]
-    ) -> None:
-        """Refuse an array whose cells the call's contract checks, once written.
+    ) -> list[_Want]:
+        """The call's requirements on the arrays earlier calls wrote.
 
         Natively a kernel's contract checks its arguments when it is called,
         and two of the checks are about what the cells hold, which the
         kernel's facts rest on. The cells of an array of a ``Fin[m]`` element
         sort are points of ``Fin[m]``, so an access indexed by one is in bounds
-        by type, with no test in the generated code. And the counts and the
-        offsets of a ragged family lay its rows out inside its buffer, so an
-        access inside a row is inside the buffer. The compiled program is one
-        call, whose contract checks the program's arguments once, when it
-        starts. An array that an earlier call wrote, or that the program made,
-        holds whatever was written into it by the time this call reads it, and
-        nothing checks that: ``perm[i] = i + 1`` in one kernel is an address
+        by type, with no test in the generated code. And the offsets a ragged
+        family is read through are the ones its counts give, so an access
+        inside a row is inside the buffer. The compiled program is one call,
+        whose contract checks the program's arguments once, when it starts,
+        so an array that an earlier call wrote, or that the program made,
+        owes the check here: ``perm[i] = i + 1`` in one kernel is an address
         past the end of ``x`` in the next one's ``x[perm[i]]``, where the
-        native run is refused by the second kernel's contract. So the program
-        is refused here, when its term is built.
+        native run is refused by the second kernel's contract. Each such
+        array is a requirement, decided or checked once the program is
+        composed (:meth:`travel`).
+
+        An array that is the row lengths of a ragged array the call reads is
+        refused instead, when an earlier call wrote it: the rows are laid out
+        in a buffer the program is given, and whether a count still says how
+        long its row is there is a question about that buffer, which no
+        hypothesis about the program's arrays can answer.
         """
-        layout: dict[str, str] = {}
+        counts: dict[str, str] = {}
+        offsets_of: dict[str, tuple[str, str]] = {}
         for owner, typ in term.params:
             if not isinstance(typ, ArrType):
                 continue
@@ -1187,37 +1425,57 @@ class _Composer:
                 if not ragged or not isinstance(size, prim.Variable):
                     continue
                 if size.name in arrays:
-                    layout.setdefault(size.name, f"the row lengths of {owner}")
+                    counts.setdefault(size.name, owner)
                 offsets = term.offsets_of(size.name)
                 if offsets is not None and offsets in arrays:
-                    layout.setdefault(offsets, f"the offsets of the rows of {owner}")
+                    offsets_of.setdefault(offsets, (owner, size.name))
+        wants: list[_Want] = []
         for param, typ in term.params:
             if not isinstance(typ, ArrType):
                 continue
             name = arrays[param]
-            writer = self.writers.get(name)
+            writer = self.last_writer.get(name)
             if writer is None:
+                if param in offsets_of:
+                    self.read_through.add(name)
                 continue
             element = typ.dtype.base if isinstance(typ.dtype, Refined) else typ.dtype
-            if param in layout:
-                what = f"{param} is {layout[param]}"
-                rests = "an access inside a row is inside the buffer"
-            elif isinstance(element, FinType):
-                what = f"the elements of {param} are declared {typ.dtype}"
-                rests = f"an access indexed by a cell of {param} is in bounds by type"
-            else:
-                continue
-            self.refuse(
-                call,
-                f"it is given {name}, which {writer} writes first, and {what}. "
-                f"Natively the contract of {term.name} checks {name} when it is "
-                f"called, and its facts rest on that check: {rests}. The "
-                "compiled program is one call, whose contract checks its "
-                f"arguments when it starts, so nothing would check what "
-                f"{writer} leaves in {name} before {term.name} reads it. Call "
-                f"{term.name} on its own, outside the program, where its "
-                "contract checks it",
-            )
+            if param in counts:
+                owner = counts[param]
+                self.refuse(
+                    call,
+                    f"it is given {name}, which {writer} writes, and {param} is "
+                    f"the row lengths of {owner}. Natively the contract of "
+                    f"{term.name} checks them against the rows {owner} is "
+                    "stored in when it is called, and its facts rest on that "
+                    "check: an access inside a row is inside the buffer. The "
+                    "compiled program is one call, whose contract checks its "
+                    "arguments when it starts, and whether a count still says "
+                    "how long its row is stored is a question about the "
+                    "buffer, which nothing in the program's term can check "
+                    f"before {term.name} reads it. Call {term.name} on its "
+                    "own, outside the program, where its contract checks it",
+                )
+            if isinstance(element, FinType):
+                wants.append(_Want("element", param, name, writer))
+            if param in offsets_of:
+                owner, family = offsets_of[param]
+                if name not in self.read_through and name not in self.deferred:
+                    self.deferred.append(name)
+                wants.append(
+                    _Want(
+                        "layout",
+                        param,
+                        name,
+                        writer,
+                        owner=arrays[owner],
+                        counts=arrays[family],
+                    )
+                )
+                self.read_through.add(name)
+        # A layout is checked before an element read through it, which the
+        # check of the element reads its cells through.
+        return sorted(wants, key=lambda want: want.kind != "layout")
 
     def settle_type(self, name: str, typ: Any, call: _Call, param: str) -> None:
         """Give ``name`` its type, or check the type it already has."""
@@ -1272,6 +1530,15 @@ class _Composer:
         }
         sizes = [name for name in term.sizes if name not in params]
         for _, typ in term.params:
+            # The bound of a Fin sort names a size too, an element sort's
+            # (``nnz`` in ``off: Arr[Fin[n + 1], Fin[nnz + 1]]``) or a
+            # scalar's, even where no axis of the callee is that long: it is
+            # renamed apart like any other, or two calls that each name a
+            # buffer ``nnz`` would be given one size.
+            bound = _fin_bound(typ.dtype if isinstance(typ, ArrType) else typ)
+            for name in _names_in(bound):
+                if name not in params and name not in sizes:
+                    sizes.append(name)
             if not isinstance(typ, ArrType):
                 continue
             for axis, ragged in zip(typ.axes, typ.ragged, strict=True):
@@ -1304,6 +1571,20 @@ class _Composer:
                         ragged,
                         known.axes[k],
                         known.ragged[k],
+                    )
+                )
+            # The bound of a Fin element sort is a size too: an offsets array
+            # of Fin[nnz + 1] is the same array in every call it is passed to.
+            mine_bound, theirs_bound = _fin_bound(typ.dtype), _fin_bound(known.dtype)
+            if mine_bound is not None and theirs_bound is not None:
+                pending.append(
+                    (
+                        param,
+                        None,
+                        rename_expr(mine_bound, marked, exprs),
+                        False,
+                        theirs_bound,
+                        False,
                     )
                 )
         while pending:
@@ -1349,10 +1630,14 @@ class _Composer:
         self,
         call: _Call,
         arrays: Mapping[str, str],
-        item: tuple[str, int, Any, bool, Any, bool],
+        item: tuple[str, int | None, Any, bool, Any, bool],
         bound: dict[str, Any],
     ) -> bool:
-        """Settle one axis equation, or say that it has to wait."""
+        """Settle one axis equation, or say that it has to wait.
+
+        ``k`` is the axis, or ``None`` for the bound of the array's ``Fin``
+        element sort, which is settled the way an axis is.
+        """
         param, k, mine, ragged, theirs, known_ragged = item
         name = arrays[param]
         theirs = self.resolve(theirs)
@@ -1381,6 +1666,14 @@ class _Composer:
             return False
         if _same(mine, theirs) or self.equate(mine, theirs):
             return True
+        if k is None:
+            self.refuse(
+                call,
+                f"it declares the elements of its {param} points of "
+                f"Fin({_shown(mine)}), and the elements of {name}, which it is "
+                f"given there, are points of Fin({_shown(theirs)}) as "
+                f"{self.origin[name]}; nothing says the two agree",
+            )
         self.refuse(
             call,
             f"axis {k} of its {param} is {_shown(mine)} long, and that axis of "
@@ -1525,15 +1818,7 @@ class _Composer:
                 "nothing anybody sees, and comparing it with the native one "
                 "would compare nothing; write the result into a parameter"
             )
-        stmts: list[Stmt] = []
-        for slot in self.slots:
-            if isinstance(slot, list):
-                stmts.extend(slot)
-                continue
-            made, block = slot
-            name = made.value.name
-            if name in self.types:
-                stmts.append(self.zeros(name, self.types[name], made, block))
+        stmts, requirements, scopes, flags = self.travel()
         resolved = self.resolved
         return Term(
             name=self.program,
@@ -1544,13 +1829,782 @@ class _Composer:
             reflected=tuple(
                 (name, self.resolve(expr)) for name, expr in self.reflected
             ),
-            temporaries=tuple(
-                (name, _rename_type(t, {}, resolved)) for name, t in temporaries
+            temporaries=(
+                *((name, _rename_type(t, {}, resolved)) for name, t in temporaries),
+                *flags,
             ),
             offsets=tuple(self.layout.items()),
             where=self.recorder.where,
             temporaries_like=tuple(self.inherits),
+            requirements=tuple(requirements),
+            scopes=tuple(scopes),
+            deferred_offsets=tuple(self.deferred),
         )
+
+    # {{{ facts that travel
+
+    def travel(
+        self,
+    ) -> tuple[list[Stmt], list[Requirement], list[Scope], list[tuple[str, ArrType]]]:
+        """The statements in order, each call's requirements decided or checked.
+
+        The events are walked in order, keeping the hypotheses that hold
+        between them: a call's postcondition holds after it until a later
+        call writes an array it mentions, and so do the zeros an
+        ``Arr.zeros_like`` makes. At each call, those, the types the
+        program's contract checks of the arrays nothing has written yet, and
+        the theorems the program cites, instantiated at them, are what its
+        requirements are decided under (:meth:`requirement`). A requirement
+        isl does not decide is checked: its check statements come before the
+        call's, each in a block of its own, and every statement after them is
+        guarded by its flag (:meth:`guarded`). The hypotheses at each call,
+        with the call's own argument types, are its :class:`Scope`.
+
+        Returns the statements, the requirements, the scopes and the flag
+        temporaries.
+        """
+        valid: list[Hypothesis] = []
+        written: set[str] = set()
+        #: The arrays a call has written so far, which ``written`` holds
+        #: with the ones only an ``Arr.zeros_like`` has.
+        called: set[str] = set()
+        #: The postconditions held back by :meth:`unchecked`, each with the
+        #: arrays it names, for the reason of a requirement on one of them.
+        withheld: list[tuple[frozenset[str], str]] = []
+        flags: list[str] = []
+        flag_types: list[tuple[str, ArrType]] = []
+        shift = 0
+        stmts: list[Stmt] = []
+        requirements: list[Requirement] = []
+        scopes: list[Scope] = []
+        for slot in self.slots:
+            if not isinstance(slot, _Done):
+                made, block = slot
+                name = made.value.name
+                if name in self.types:
+                    zeros = self.zeros(name, self.types[name], made, block + shift)
+                    stmts.append(self.guarded(zeros, flags))
+                    valid = [h for h in valid if name not in h.mentions]
+                    valid.append(self.zeros_hypothesis(name, made))
+                    written.add(name)
+                continue
+            offered, notes = self.offered(valid, written)
+            types_here: list[Hypothesis] = []
+            for want in slot.wants:
+                held_back = [note for names, note in withheld if want.array in names]
+                requirement, checks = self.requirement(
+                    slot, want, offered, [*held_back, *notes]
+                )
+                requirements.append(requirement)
+                for check in checks:
+                    order = (slot.start + shift, *(0,) * len(check.inames))
+                    stmts.append(
+                        self.guarded(dataclasses.replace(check, order=order), flags)
+                    )
+                    shift += 1
+                if requirement.flag is not None:
+                    flags.append(requirement.flag)
+                    flag_types.append(
+                        (
+                            requirement.flag,
+                            ArrType(axes=(1,), dtype=Nat, ragged=(False,)),
+                        )
+                    )
+                types_here.append(
+                    Hypothesis(
+                        claim=requirement.claim,
+                        source=f"the requirement on {want.array} where {slot.label} "
+                        "is called",
+                        rests_on=(
+                            self.requirement_id(slot.label, want.kind, want.param),
+                        ),
+                        mentions=frozenset(
+                            {
+                                want.array,
+                                *([want.counts] if want.counts else []),
+                                *self.arrays_in(requirement.claim),
+                            }
+                        ),
+                    )
+                )
+            ids = []
+            for stmt in slot.stmts:
+                moved = dataclasses.replace(
+                    stmt, order=(stmt.order[0] + shift, *stmt.order[1:])
+                )
+                stmts.append(self.guarded(moved, flags))
+                ids.append(stmt.id)
+            # What held when the call started holds of the arrays it reads
+            # throughout, and of those it writes only until it writes them.
+            scopes.append(
+                Scope(
+                    call=slot.label,
+                    kernel=slot.kernel.__name__,
+                    where=slot.where,
+                    statements=tuple(ids),
+                    hypotheses=tuple(
+                        hypothesis
+                        for hypothesis in (*offered, *types_here)
+                        if not (hypothesis.mentions & slot.written)
+                    ),
+                )
+            )
+            unchecked = self.unchecked(slot, called)
+            written |= slot.written
+            called |= slot.written
+            valid = [h for h in valid if not (h.mentions & slot.written)]
+            withheld = [
+                (names, note) for names, note in withheld if not (names & slot.written)
+            ]
+            if slot.post is not None:
+                identifier = self.restatement_id(slot.kernel)
+                self.postconditions[identifier] = slot.kernel
+                # The postcondition is tested on the callee's body, and the
+                # program runs the callee's term: it says what the term leaves
+                # only where the two compute alike.
+                faithful = self.faithful_id(slot.kernel)
+                self.faithfuls[faithful] = slot.kernel
+                claim = self.resolve_claim(slot.post)
+                if unchecked:
+                    # The postcondition was tested on runs its contract let
+                    # in, and here a cell the contract checks natively is
+                    # checked by nothing: it says nothing of this call.
+                    withheld.append(
+                        (
+                            frozenset(self.arrays_in(claim)),
+                            f"the postcondition of {slot.kernel.__name__} after "
+                            f"{slot.label} at {slot.where} is no hypothesis, since "
+                            + "; ".join(unchecked),
+                        )
+                    )
+                else:
+                    valid.append(
+                        Hypothesis(
+                            claim=claim,
+                            source=f"the postcondition of {slot.kernel.__name__}, "
+                            f"after {slot.label} at {slot.where}",
+                            rests_on=(identifier, faithful),
+                            mentions=frozenset(self.arrays_in(claim)),
+                        )
+                    )
+        return stmts, requirements, scopes, flag_types
+
+    def unchecked(self, slot: _Done, called: set[str]) -> list[str]:
+        """What the call's contract checks natively that nothing checks here.
+
+        A postcondition is tested on the runs the kernel's contract lets in,
+        so it holds after a call only where the contract held at it. In a
+        program it does for an array nothing wrote before the call, which the
+        program's contract checks on entry, and for one whose ``Fin`` element
+        sort or layout is a requirement of the call, decided or checked
+        (:meth:`requirement`). A ``Nat`` element sort is neither: an earlier
+        call can leave a negative cell in such an array, which the native
+        call refuses and the compiled program passes on. Zeros are naturals,
+        so an array only an ``Arr.zeros_like`` wrote is not counted.
+        """
+        out = []
+        for param, typ in slot.types.items():
+            if not isinstance(typ, ArrType):
+                continue
+            array = slot.arrays.get(param)
+            if array is None or array not in called:
+                continue
+            sort = typ.dtype.base if isinstance(typ.dtype, Refined) else typ.dtype
+            if getattr(sort, "name", None) == "Nat":
+                out.append(
+                    f"its contract checks that the elements of {param} are "
+                    f"naturals, and {self.last_writer_before(array, slot)} wrote "
+                    f"{array} before the call, which no requirement checks"
+                )
+        return out
+
+    def last_writer_before(self, array: str, slot: _Done) -> str:
+        """What wrote ``array`` last before the call ``slot``, in words."""
+        writer = None
+        for other in self.slots:
+            if other is slot:
+                break
+            if isinstance(other, _Done) and array in other.written:
+                writer = f"{other.kernel.__name__} at {other.where}"
+        return writer or "an earlier call"
+
+    def weakly_supported(self, used: Sequence[Hypothesis]) -> list[str]:
+        """Why the facts ``used`` rest on are not all at least ``tested``.
+
+        A requirement isl decided under hypotheses is skipped by the compiled
+        program, which trusts what the hypotheses rest on. A postcondition its
+        kernel's native runs refuted, or that nothing tested, is no ground for
+        that, nor one of a kernel whose term is not shown to compute what its
+        body does, nor a cited theorem that the property tester does not pass,
+        or an axiom: the requirement keeps its checked point (#115).
+        """
+        out: list[str] = []
+        for hypothesis in used:
+            for identifier in hypothesis.rests_on:
+                why = self.standing(identifier)
+                if why is not None and why not in out:
+                    out.append(why)
+        return out
+
+    def standing(self, identifier: str) -> str | None:
+        """``None`` when the fact ``identifier`` is at least ``tested``, else why."""
+        if identifier in self.standings:
+            return self.standings[identifier]
+        why = self.look_up(identifier)
+        self.standings[identifier] = why
+        return why
+
+    def look_up(self, identifier: str) -> str | None:
+        """The standing of one fact a hypothesis rests on (see :meth:`standing`)."""
+        from lanky.ledger import STATUS_STRENGTH
+
+        from loopty.faithful import KIND as FAITHFUL
+
+        tables = ((self.postconditions, "postcondition"), (self.faithfuls, FAITHFUL))
+        for table, kind in tables:
+            kernel = table.get(identifier)
+            if kernel is None:
+                continue
+            try:
+                facts = kernel.facts()
+            except Exception as exc:  # noqa: BLE001 - then it stands on nothing
+                return (
+                    f"the facts of {kernel.__name__} could not be established: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+            fact = next((f for f in facts if f.kind == kind), None)
+            if fact is not None and STATUS_STRENGTH[fact.status] >= 1:
+                return None
+            status = fact.status.value if fact is not None else "assumed"
+            if kind == FAITHFUL:
+                return (
+                    f"that the term of {kernel.__name__} computes what its body "
+                    f"computes, on which its postcondition was tested, is {status}"
+                )
+            return f"the postcondition of {kernel.__name__} is {status}"
+        for theorem in self.uses:
+            if theorem.fact_id == identifier:
+                return _theorem_standing(theorem)
+        return f"{identifier} is a fact whose status the program does not know"
+
+    @staticmethod
+    def faithful_id(kernel: Any) -> str:
+        """The id of ``kernel``'s ``trace-faithful`` fact, as its own facts give it."""
+        from lanky.ledger import fact_id
+
+        from loopty.faithful import KIND as FAITHFUL
+
+        return fact_id(
+            FAITHFUL,
+            getattr(kernel, "qualname", kernel.__name__),
+            module=getattr(kernel, "module", None),
+            line=getattr(kernel, "line", None),
+        )
+
+    def restatement_id(self, kernel: Any) -> str:
+        """The id of the program's restatement of ``kernel``'s postcondition."""
+        from loopty.typing import restatement_id
+
+        return restatement_id(
+            self.owner["owner"],
+            kernel.definition,
+            module=self.owner["module"],
+            line=self.owner["line"],
+        )
+
+    def requirement_id(self, label: str, kind: str, param: str) -> str:
+        """The id of the requirement of the call ``label`` on its ``param``."""
+        from loopty.typing import requirement_id
+
+        return requirement_id(
+            self.owner["owner"],
+            label,
+            kind,
+            param,
+            module=self.owner["module"],
+            line=self.owner["line"],
+        )
+
+    def resolve_claim(self, claim: Any) -> Any:
+        """A proposition in the sizes still standing."""
+        return substitute(claim, self.resolved) if self.resolved else claim
+
+    def program_type(self, name: str) -> Any:
+        """The type of a program array or scalar, in the sizes still standing."""
+        return _rename_type(self.types[name], {}, self.resolved)
+
+    def arrays_in(self, claim: Any) -> set[str]:
+        """The program arrays a proposition names, in a binder's sort too.
+
+        ``all(perm[i] == 0 for i in Fin[lim[0]])`` is about ``lim`` as much
+        as about ``perm``, and a call that writes either retires it.
+        """
+        return {name for name in mentioned(claim) if self.kinds.get(name) == "array"}
+
+    def integral_arrays(self) -> set[str]:
+        """The program arrays whose cells are integers, which isl may read."""
+        out = set()
+        for name, typ in self.types.items():
+            if isinstance(typ, ArrType) and integral_sort(typ.dtype):
+                out.add(name)
+        return out
+
+    def known_names(self) -> set[str]:
+        """The names a hypothesis may compare: the sizes and the integral scalars."""
+        out = set(self.sizes)
+        for name, typ in self.types.items():
+            if not isinstance(typ, ArrType) and integral_sort(typ):
+                out.add(name)
+        return out
+
+    def cells_hypothesis(
+        self, array: str, body: Any, source: str, mentions: set[str]
+    ) -> Hypothesis | None:
+        """``body`` of every cell of ``array``, as a universal over its cells.
+
+        ``body`` maps the cell, ``array[c0, c1]``, to the proposition about it.
+        """
+        typ = self.program_type(array)
+        if not isinstance(typ, ArrType) or typ.domain is not None:
+            return None
+        names = [f"c{k}" for k in range(len(typ.axes))]
+        binders = []
+        for k, (axis, ragged) in enumerate(zip(typ.axes, typ.ragged, strict=True)):
+            if ragged:
+                if k == 0 or not isinstance(axis, prim.Variable):
+                    return None
+                bound = Subscript(Var(axis.name), Var(names[k - 1]))
+                mentions = {*mentions, axis.name}
+            else:
+                bound = axis
+            binders.append((Var(names[k]), FinType(bound)))
+        index = tuple(Var(name) for name in names)
+        cell = Subscript(Var(array), index[0] if len(index) == 1 else index)
+        return Hypothesis(
+            claim=Forall(tuple(binders), body(cell)),
+            source=source,
+            mentions=frozenset({array, *mentions}),
+        )
+
+    def entry_types(self, written: set[str]) -> list[Hypothesis]:
+        """What the program's contract checks of what nothing has written yet.
+
+        Every element of an argument of a ``Fin[m]`` sort is a point of it,
+        and one of ``Nat`` is not negative, until a call writes it; so is a
+        scalar argument of those sorts, which nothing writes.
+        """
+        out: list[Hypothesis] = []
+        for value in self.recorder.params:
+            name = value.name
+            if name not in self.types or name in written:
+                continue
+            typ = self.program_type(name)
+            sort = typ.dtype if isinstance(typ, ArrType) else typ
+            bound = _fin_bound(sort)
+            base = sort.base if isinstance(sort, Refined) else sort
+            if bound is not None:
+
+                def body(cell: Any, bound: Any = bound) -> Any:
+                    return LogicalAnd(
+                        (Comparison(0, "<=", cell), Comparison(cell, "<", bound))
+                    )
+
+            elif getattr(base, "name", None) == "Nat":
+
+                def body(cell: Any) -> Any:
+                    return Comparison(cell, ">=", 0)
+
+            else:
+                continue
+            source = (
+                f"the type of {name}, which the contract of {self.program} "
+                "checks when it starts"
+            )
+            if isinstance(typ, ArrType):
+                found = self.cells_hypothesis(name, body, source, set())
+                if found is not None:
+                    out.append(found)
+            else:
+                out.append(Hypothesis(body(Var(name)), source))
+        return out
+
+    def zeros_hypothesis(self, name: str, made: _Made) -> Hypothesis:
+        """Every cell of an array the program made is zero, until a call writes it."""
+        found = self.cells_hypothesis(
+            name,
+            lambda cell: Comparison(cell, "==", 0),
+            f"the zeros the Arr.zeros_like at {made.where} starts {name} with",
+            set(),
+        )
+        assert found is not None  # a temporary is dense, see zeros()
+        return found
+
+    def offered(
+        self, valid: Sequence[Hypothesis], written: set[str]
+    ) -> tuple[list[Hypothesis], list[str]]:
+        """The hypotheses at a call, and why a cited theorem gave none.
+
+        ``valid`` and the types of what nothing has written yet, then each
+        theorem the program cites, instantiated at them
+        (:func:`loopty.hypotheses.theorem_instances`). A family of a theorem
+        stands for a program array only where the array's cells are points of
+        the family's sort when the call is made: an array of one axis as long
+        as the family's domain, whose element sort the program's contract
+        checks on entry and nothing has written since, or a family of
+        ``Int``.
+        """
+        base = [*valid, *self.entry_types(written)]
+        out = list(base)
+        notes: list[str] = []
+
+        def applicable(array: str, domain: Any, codomain: Any) -> str | None:
+            typ = self.program_type(array) if array in self.types else None
+            if (
+                not isinstance(typ, ArrType)
+                or typ.domain is not None
+                or len(typ.axes) != 1
+                or typ.ragged[0]
+            ):
+                return f"{array} is no array of one dense axis"
+            if not isinstance(domain, FinType) or not _same(
+                self.resolve(domain.bound), typ.axes[0]
+            ):
+                return (
+                    f"{array} has {_shown(typ.axes[0])} cells, and the family it "
+                    f"would stand for ranges over {domain}"
+                )
+            element = typ.dtype.base if isinstance(typ.dtype, Refined) else typ.dtype
+            if not integral_sort(element):
+                return f"the elements of {array} are not integers"
+            wanted = getattr(codomain, "name", None)
+            if wanted == "Int":
+                return None
+            if array in written:
+                return (
+                    f"{array} is written before the call, and nothing establishes "
+                    f"that its cells are points of {codomain}, which the family "
+                    "it would stand for ranges over"
+                )
+            if wanted == "Nat" and (
+                isinstance(element, FinType) or getattr(element, "name", None) == "Nat"
+            ):
+                return None
+            if isinstance(codomain, FinType) and isinstance(element, FinType):
+                if _same(self.resolve(element.bound), codomain.bound):
+                    return None
+            return (
+                f"the elements of {array} are points of {typ.dtype}, and the family "
+                f"it would stand for ranges over {codomain}"
+            )
+
+        def nonnegative(expr: Any) -> bool:
+            form = linear(expr)
+            if form is None:
+                return False
+            names, constant = form
+            return constant >= 0 and all(
+                coefficient >= 0 and name in self.sizes
+                for name, coefficient in names.items()
+            )
+
+        for theorem in self.uses:
+            instances, reasons = theorem_instances(
+                theorem, base, applicable, nonnegative
+            )
+            out.extend(instances)
+            if not instances:
+                notes.extend(reasons)
+        return out, notes
+
+    def requirement(
+        self,
+        slot: _Done,
+        want: _Want,
+        offered: Sequence[Hypothesis],
+        notes: Sequence[str],
+    ) -> tuple[Requirement, list[Stmt]]:
+        """One requirement, decided under ``offered``, or its check statements.
+
+        An element requirement is about every cell of the array: it is a
+        point of the sort the callee declares, ``0 <= perm[i] < n``. A layout
+        requirement is what the contract compares the offsets with, the
+        offsets the counts give the rows: ``off[0] == 0``, and ``off[q] ==
+        off[q - 1] + cnt[q - 1]`` for ``1 <= q <= n``. Its check is two
+        statements, one for the start and one for the rows.
+        """
+        kernel = slot.kernel.__name__
+        array = want.array
+        typ = self.program_type(array)
+        where = slot.where
+        checks: list[tuple[str, tuple[str, ...], isl.Set, Any]] = []
+        if want.kind == "element":
+            sort = _rename_type(slot.types[want.param].dtype, {}, self.resolved)
+            bound = _fin_bound(sort)
+            dims = tuple(self.fresh("i") for _ in typ.axes)
+            bounds = [
+                Subscript(Var(axis.name), Var(dims[k - 1])) if ragged else axis
+                for k, (axis, ragged) in enumerate(
+                    zip(typ.axes, typ.ragged, strict=True)
+                )
+            ]
+            table = self.reflections(dims)
+            domain = domain_set(dims, bounds, reflections=table)
+            index = tuple(Var(d) for d in dims)
+            cell = Subscript(Var(array), index[0] if len(index) == 1 else index)
+            goal = LogicalAnd(
+                (Comparison(0, "<=", cell), Comparison(cell, "<", bound))
+            )
+            breaks = LogicalOr(
+                (Comparison(cell, "<", 0), Comparison(cell, ">=", bound))
+            )
+            checks.append((f"{slot.label}.check.{want.param}", dims, domain, breaks))
+            what = f"the elements of {array} are points of {sort}"
+            found = self.cells_hypothesis(
+                array,
+                lambda cell: LogicalAnd(
+                    (Comparison(0, "<=", cell), Comparison(cell, "<", bound))
+                ),
+                "",
+                set(),
+            )
+            claimed = found.claim if found is not None else goal
+            failure = f"an element of {array} is not a point of {sort}"
+            used = set(domain.get_var_names(isl.dim_type.param))
+            reflected = {name: expr for name, expr in table.items() if name in used}
+        else:
+            counts = want.counts
+            owner = self.program_type(want.owner)
+            rows = owner.axes[0]
+            q = self.fresh("q")
+            domain = domain_set((q,), (_plus(rows, 1),))
+            at = Var(q)
+            before = _plus(at, -1)
+            goal = LogicalAnd(
+                (
+                    LogicalOr(
+                        (
+                            Comparison(at, ">", 0),
+                            Comparison(Subscript(Var(array), 0), "==", 0),
+                        )
+                    ),
+                    LogicalOr(
+                        (
+                            Comparison(at, "==", 0),
+                            Comparison(
+                                Subscript(Var(array), at),
+                                "==",
+                                Subscript(Var(array), before)
+                                + Subscript(Var(counts), before),
+                            ),
+                        )
+                    ),
+                )
+            )
+            r = self.fresh("r")
+            rv = Var(r)
+            stem = f"{slot.label}.check.{want.param}"
+            checks.append(
+                (
+                    f"{stem}.start",
+                    (),
+                    isl.Set("{ [] }"),
+                    Comparison(Subscript(Var(array), 0), "!=", 0),
+                )
+            )
+            checks.append(
+                (
+                    f"{stem}.rows",
+                    (r,),
+                    domain_set((r,), (rows,)),
+                    Comparison(
+                        Subscript(Var(array), _plus(rv, 1)),
+                        "!=",
+                        Subscript(Var(array), rv) + Subscript(Var(counts), rv),
+                    ),
+                )
+            )
+            what = (
+                f"{array} holds the offsets the counts in {counts} give the rows "
+                f"of {want.owner} ({array}[0] == 0 and {array}[r + 1] == "
+                f"{array}[r] + {counts}[r])"
+            )
+            rr = Var("r")
+            claimed = LogicalAnd(
+                (
+                    Comparison(Subscript(Var(array), 0), "==", 0),
+                    Forall(
+                        ((rr, FinType(rows)),),
+                        Comparison(
+                            Subscript(Var(array), _plus(rr, 1)),
+                            "==",
+                            Subscript(Var(array), rr) + Subscript(Var(counts), rr),
+                        ),
+                    ),
+                )
+            )
+            failure = (
+                f"{array} does not hold the offsets the counts in {counts} give "
+                f"the rows of {want.owner}"
+            )
+            reflected = {}
+        statement = (
+            f"{what} where {slot.label} is called at {where}, after {want.writer} "
+            f"wrote {array}"
+        )
+        outcome = discharge(
+            domain,
+            goal,
+            offered,
+            integral=self.integral_arrays(),
+            known=self.known_names(),
+            nonneg=set(self.sizes),
+            reflected=reflected,
+            description=(
+                f"points at which a cell of {array} breaks the requirement of "
+                f"{slot.label} where the hypotheses used hold"
+            ),
+        )
+        common = {
+            "call": slot.label,
+            "kernel": kernel,
+            "definition": slot.kernel.definition,
+            "where": where,
+            "param": want.param,
+            "array": array,
+            "kind": want.kind,
+            "writer": want.writer,
+            "statement": statement,
+            "claim": claimed,
+            "offered": tuple(offered),
+        }
+        weak = self.weakly_supported(outcome.used) if outcome.decided else []
+        if outcome.decided and not weak:
+            return (
+                Requirement(**common, used=outcome.used, question=outcome.question),
+                [],
+            )
+        if weak:
+            # Decided, and the fact rests on something no run has borne out:
+            # the compiled program does not skip the check on its strength.
+            reason = (
+                "decided under "
+                + "; ".join(hypothesis.source for hypothesis in outcome.used)
+                + ", and checked all the same, since "
+                + "; ".join(weak)
+            )
+            common["used"] = outcome.used
+            common["question"] = outcome.question
+        elif outcome.contradicting:
+            # A false hypothesis decides everything; the check decides nothing
+            # it does not see.
+            reason = outcome.reason
+        elif offered:
+            reason = (
+                "the hypotheses that held at the call leave room for a cell that "
+                f"breaks it: {outcome.reason}"
+            )
+        else:
+            reason = (
+                f"nothing that held at the call says what {want.writer} left "
+                f"in {array}"
+            )
+        if outcome.unstated:
+            shown = list(outcome.unstated[:3])
+            more = len(outcome.unstated) - len(shown)
+            reason += (
+                "; isl cannot state "
+                + "; ".join(shown)
+                + (f"; and {more} more" if more else "")
+                + ", which is read as saying nothing"
+            )
+        if notes and not weak:
+            reason += "; " + "; ".join(notes)
+        spelled = re.sub(r"\W", "_", slot.label)
+        flag = self.fresh(f"{spelled}_{want.param}_ok")
+        why = (
+            f"what decided it rests on facts no run bore out ({'; '.join(weak)})"
+            if weak
+            else "nothing decided what it left there"
+        )
+        message = (
+            f"the compiled program {self.program} stops before {slot.label} at "
+            f"{where}: {failure}, which the contract of {kernel} checks when it "
+            f"is called. {want.writer} wrote {array} before the call, and {why}, "
+            f"so the program checks it where the native {kernel} is refused"
+        )
+        statements = []
+        for check_id, inames, check_domain, breaks in checks:
+            self.register(check_domain)
+            statements.append(
+                Stmt(
+                    id=check_id,
+                    inames=tuple(inames),
+                    domain=check_domain,
+                    assignee=Access(flag, (0,)),
+                    expr=1,
+                    kind="assign",
+                    guard=breaks,
+                    where=where,
+                    order=(0, *(0,) * len(inames)),
+                    unnarrowed=((render(breaks), _NOT_AFFINE),),
+                )
+            )
+        if want.kind == "element":
+            self.adopt(table)
+        return (
+            Requirement(**common, reason=reason, flag=flag, message=message),
+            statements,
+        )
+
+    def reflections(self, dims: Sequence[str]) -> Reflections:
+        """A table of reflected parameters that knows every name of the program."""
+        table = Reflections()
+        table.reserve(self.taken)
+        table.reserve(dims)
+        table.reserve(self.sizes)
+        for name, expr in self.reflected:
+            table.adopt(name, expr)
+        return table
+
+    def adopt(self, table: Reflections) -> None:
+        """Make the parameters ``table`` allocated parameters of the term."""
+        known = {name for name, _ in self.reflected}
+        for name, expr in table.items():
+            if name not in known:
+                self.reflected.append((name, expr))
+                self.taken.add(name)
+
+    def register(self, domain: isl.Set) -> None:
+        """Keep the names of a check statement's loops from later statements."""
+        for name in domain.get_var_names(isl.dim_type.set):
+            self.taken.add(name)
+
+    @staticmethod
+    def guarded(stmt: Stmt, flags: Sequence[str]) -> Stmt:
+        """``stmt``, run only where no checked point before it has failed.
+
+        The flags come first in the guard, which short-circuits in the
+        interpreter and in the generated C, so that a condition of the
+        statement's own, which may read the array that failed, is not
+        evaluated either. A guard that reads an array is no constraint isl
+        can state, so the domain is unchanged and the conjuncts are listed
+        as ``unnarrowed``.
+        """
+        if not flags:
+            return stmt
+        oks = [Comparison(Subscript(Var(flag), 0), "==", 0) for flag in flags]
+        parts = [*oks, *([stmt.guard] if stmt.guard is not None else [])]
+        guard = parts[0] if len(parts) == 1 else LogicalAnd(tuple(parts))
+        return dataclasses.replace(
+            stmt,
+            guard=guard,
+            unnarrowed=(
+                *((render(ok), _NOT_AFFINE) for ok in oks),
+                *stmt.unnarrowed,
+            ),
+        )
+
+    # }}}
 
     def zeros(self, name: str, typ: ArrType, made: _Made, block: int) -> Stmt:
         """The statement that zeroes an array the program made, where it made it.

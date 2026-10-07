@@ -60,19 +60,27 @@ The visible consequence is the flat CSR layout. An access written against flat
 storage, ``val[off[r] + j]``, is not quasi-affine (``off[r]`` is an array read)
 and its element type does not bound it either, so :mod:`loopty.typing` states
 the obligation and reports it **ASSUMED**, with the reason in its provenance.
-It is not ``DECIDED``, and it must not be: deciding it needs the scan kernel's
-postcondition (``off`` is monotone and ends at ``nnz``) as a hypothesis, and no
-oracle here can take one. Widening the reflected parameter until isl could
-answer would turn "unknown" into "proved", which is the one failure mode a
-ledger exists to prevent. The ragged form, ``val[r, j]`` over ``0 <= j <
-cnt[r]``, *is* decided, because raggedness is in the type there rather than in
-the arithmetic; that is the form the demos and the tracer use.
+It is not ``DECIDED`` in the kernel's own ledger, and it must not be:
+deciding it needs the scan kernel's postcondition as a hypothesis, and the
+kernel alone has none. Widening the reflected parameter until isl could answer
+would turn "unknown" into "proved", which is the one failure mode a ledger
+exists to prevent. The ragged form, ``val[r, j]`` over ``0 <= j < cnt[r]``,
+*is* decided, because raggedness is in the type there rather than in the
+arithmetic; that is the form the demos and the tracer use.
 
-The alternative formulation, ``off[r] <= a < off[r + 1]`` with the offsets
-constrained by the scan recurrence, keeps those relations and is the natural
-next step. It is not implemented, and it is not needed for in-bounds or
-disjointness on the ragged form, which is all the MVP's typing rules ask for,
-as long as the kernel leaves its layout as the contract checked it. One that
+A program has the hypothesis. Where the kernel is called after the scan, the
+scan's postcondition holds, and :mod:`loopty.hypotheses` asks isl the
+question with every cell it reads as a parameter of its own, ``off[r]``,
+``off[r + 1]`` and ``cnt[r]``, and the recurrence instantiated at them, which
+is an affine constraint between those parameters:
+:func:`loopty.typing.scoped_in_bounds_facts` decides the flat access there,
+as a fact of the program's resting on the postcondition.
+
+Within one kernel, the formulation that keeps those relations, ``off[r] <= a
+< off[r + 1]`` with the offsets constrained by the scan recurrence, is not
+implemented, and it is not needed for in-bounds or disjointness on the ragged
+form, which is all the typing rules of a kernel ask for, as long as the
+kernel leaves its layout as the contract checked it. One that
 writes its counts or its offsets can move a row out of the buffer or onto
 another, and the ragged form's facts about it rest on a layout fact
 (:func:`loopty.typing.layout_facts`). That fact is decided for the writes
@@ -252,7 +260,12 @@ def size_names(term: Term) -> frozenset[str]:
     An array axis extent (``n`` in ``Arr[Fin[n], Real]``), the free sizes the
     term records, and the parameter a ragged bound reflects to (``nl_cnt_r``,
     which stands for ``cnt[r]`` and is therefore a number of cells) are all
-    non-negative, and :func:`assume_sizes` may say so.
+    non-negative, and :func:`assume_sizes` may say so. So is a name the bound
+    of a ``Fin`` sort mentions, an array's element sort or a scalar's: ``nnz``
+    in ``off: Arr[Fin[n + 1], Fin[nnz + 1]]`` is the size of the buffer the
+    offsets point into, a size like any other, even when no axis of the
+    kernel's is that long, and the value ``0`` written into ``off[0]`` is a
+    point of ``Fin[nnz + 1]`` for every such size.
 
     A scalar the kernel takes as a parameter is not one of those. ``a : Int`` is
     signed, and a guard ``with when(a < 0)`` puts it among the parameters of a
@@ -263,14 +276,25 @@ def size_names(term: Term) -> frozenset[str]:
     """
     scalars = {name for name, typ in term.params if not isinstance(typ, ArrType)}
     out: set[str] = set(term.sizes)
-    for _, typ in term.params:
+    for _, typ in (*term.params, *term.temporaries):
         if isinstance(typ, ArrType):
             out |= _names_in(typ.shape_terms)
+            out |= _names_in(_fin_bound(typ.dtype))
+        else:
+            out |= _names_in(_fin_bound(typ))
     for stmt in term.stmts:
         out |= set(stmt.domain.get_var_names(isl.dim_type.param))
         for reduction in _reductions_in(stmt.expr):
             out |= set(reduction.domain.get_var_names(isl.dim_type.param))
     return frozenset(out - scalars)
+
+
+def _fin_bound(sort: Any) -> Any:
+    """The bound of a ``Fin`` sort, a refinement's included, or ``None``."""
+    from lanky.prelude import FinType, Refined
+
+    base = sort.base if isinstance(sort, Refined) else sort
+    return base.bound if isinstance(base, FinType) else None
 
 
 def _names_in(expr: Any) -> set[str]:
