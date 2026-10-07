@@ -1031,10 +1031,45 @@ def test_an_index_array_the_program_makes_is_zeros() -> None:
     assert fact.status.value == "tested", fact.provenance
 
 
-def test_a_natural_array_an_earlier_call_writes_is_passed_on() -> None:
-    # No fact rests on a Nat cell being non-negative, and off is no layout of
-    # shift's: the both program of the unification test stands.
-    assert [stmt.id for stmt in both.term.stmts] == ["scan.S0", "scan.S1", "shift.S0"]
+def test_a_natural_array_an_earlier_call_writes_is_checked_where_undecided() -> None:
+    # shift's contract checks that the cells of x are naturals, and scan wrote
+    # off before the call, so the program checks them there (#119): scan's
+    # postcondition says off[q + 1] == off[q] + cnt[q], which makes off[q] a
+    # natural only by induction over q, which isl does not do. The both
+    # program of the unification test gains a checked point, and still runs.
+    assert [stmt.id for stmt in both.term.stmts] == [
+        "scan.S0",
+        "scan.S1",
+        "shift.check.x",
+        "shift.S0",
+    ]
+    (requirement,) = both.term.requirements
+    assert (requirement.call, requirement.kind, requirement.param) == (
+        "shift",
+        "nat",
+        "x",
+    )
+    assert not requirement.decided
+    assert requirement.statement.startswith(
+        "the elements of off are naturals where shift is called at "
+    )
+    def inputs() -> dict:
+        counts = np.array([2, 0, 3], dtype=np.int64)
+        return {
+            "cnt": Arr.from_numpy(counts),
+            "off": Arr.zeros(4, dtype=np.int64),
+            "a": 2,
+        }
+
+    native, compiled = inputs(), inputs()
+    both(**native)
+    LoopyExecutor().run(both, **compiled)
+    assert compiled["off"].numpy().tolist() == native["off"].numpy().tolist() == [
+        2,
+        4,
+        4,
+        7,
+    ]
 
 
 def test_a_default_is_refused() -> None:

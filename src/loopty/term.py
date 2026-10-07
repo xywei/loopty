@@ -331,11 +331,12 @@ class Hypothesis:
 class Requirement:
     """What a call's contract checks of an array an earlier call wrote.
 
-    A kernel's requirements on its inputs are its argument types, and two of
-    them are about what an array's cells hold: an element of a ``Fin[m]``
-    sort is a point of it (``kind="element"``), and the offsets a ragged
-    family is read through are the offsets its counts give
-    (``kind="layout"``). Natively the call's contract checks them; a program
+    A kernel's requirements on its inputs are its argument types, and three
+    of them are about what an array's cells hold: an element of a ``Fin[m]``
+    sort is a point of it (``kind="element"``), one of the ``Nat`` sort is
+    not negative (``kind="nat"``), and the offsets a ragged family is read
+    through are the offsets its counts give (``kind="layout"``), which makes
+    them naturals too. Natively the call's contract checks them; a program
     is one call, so where an earlier call wrote the array, the requirement
     is an obligation of the program (see :mod:`loopty.compose`).
 
@@ -496,6 +497,26 @@ class Term:
         """
         return tuple(
             (requirement.flag, requirement.message)
+            for requirement in self.requirements
+            if requirement.flag is not None
+        )
+
+    @property
+    def checked_arrays(self) -> frozenset[str]:
+        """The arrays a checked point reads, each stored in 64 bits compiled.
+
+        A checked point reads, between two calls, the cells an earlier call
+        wrote, so that the compiled program stops where the later call's
+        native contract refuses them. The native run holds every integer in
+        64 bits, and the compiled one stores an index in fewer: ``perm[i] =
+        2**32`` was narrowed to ``0`` by the store, and the checked point read
+        a point of ``Fin[n]`` where the native contract refuses ``2**32``
+        (#128). So the lowering stores an integral array a checked point reads
+        in 64 bits (:func:`loopty.contract.array_storage`), and the checked
+        point reads what the native contract reads.
+        """
+        return frozenset(
+            requirement.array
             for requirement in self.requirements
             if requirement.flag is not None
         )

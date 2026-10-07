@@ -68,7 +68,7 @@ from loopy.target.c import CFamilyASTBuilder
 from loopy.target.pyopencl import PyOpenCLPythonASTBuilder
 from pymbolic.mapper import Mapper
 
-from loopty.contract import compiled_storage
+from loopty.contract import array_storage, compiled_storage
 from loopty.domain import STORAGES, Union
 from loopty.flow import (
     access_relation,
@@ -107,6 +107,7 @@ __all__ = [
     "LoweringError",
     "Lowering",
     "allows_contraction",
+    "array_dtype",
     "count_param_name",
     "count_param_names",
     "is_reserved",
@@ -197,6 +198,19 @@ def numpy_dtype(sort: Any) -> np.dtype:
     (:data:`loopty.contract.INTEGRAL_RANGE`).
     """
     dtype = compiled_storage(sort)
+    if dtype is None:
+        raise LoweringError(f"no numpy dtype for {sort!r}")
+    return dtype
+
+
+def array_dtype(term: Term, name: str, sort: Any) -> np.dtype:
+    """The numpy dtype the array ``name`` of ``term`` is stored in.
+
+    :func:`numpy_dtype` of its element sort, except for an integral array a
+    checked point of a program reads, which is 64 bits wide
+    (:func:`loopty.contract.array_storage`, #128).
+    """
+    dtype = array_storage(term, name, sort)
     if dtype is None:
         raise LoweringError(f"no numpy dtype for {sort!r}")
     return dtype
@@ -2761,7 +2775,7 @@ def _arguments(
         args.append(
             lp.GlobalArg(
                 name,
-                numpy_dtype(typ.dtype),
+                array_dtype(term, name, typ.dtype),
                 shape=shape_of(typ, ragged, name),
                 is_input=True,
                 is_output=is_output,
@@ -2840,7 +2854,7 @@ def _temporary(
         )
     space = lp.AddressSpace.GLOBAL if target == "opencl" else lp.AddressSpace.PRIVATE
     return lp.TemporaryVariable(
-        name, numpy_dtype(typ.dtype), shape=shape, address_space=space
+        name, array_dtype(term, name, typ.dtype), shape=shape, address_space=space
     )
 
 

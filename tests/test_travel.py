@@ -498,9 +498,14 @@ def test_offsets_written_before_they_are_read_are_not_checked_on_entry() -> None
 
 def test_a_write_after_the_scan_retires_its_postcondition() -> None:
     # bump writes off after scan, so scan's claim about off no longer holds
-    # where rowsums reads through it, and the requirement is checked.
+    # where rowsums reads through it, and the requirement is checked. bump's
+    # own contract checks that off holds naturals, which scan's postcondition
+    # says only by induction, so that is checked too (#119).
     term = travel.bumped.term
-    (requirement,) = term.requirements
+    natural, requirement = term.requirements
+    assert (natural.call, natural.kind, natural.array) == ("bump", "nat", "off")
+    assert not natural.decided
+    assert requirement.kind == "layout"
     assert not requirement.decided
     assert "the postcondition of scan" not in [h.source for h in requirement.offered]
     (layout,) = facts_of("bumped", "layout")
@@ -988,28 +993,115 @@ def test_a_theorems_binder_does_not_capture_the_size_it_is_instantiated_at() -> 
         LoopyExecutor().run(wrong.captured, **_permutation_inputs())
 
 
-def test_a_postcondition_is_no_hypothesis_where_its_contract_went_unchecked() -> None:
-    # clamp's postcondition holds of every run its contract lets in, where
-    # src holds naturals. below_zero leaves -4 in src, which clamp's contract
-    # refuses natively and nothing checks compiled; the postcondition then
-    # decided gather's requirement, and the compiled program read x[-4].
+def test_a_natural_array_an_earlier_call_wrote_is_a_requirement() -> None:
+    # clamp's contract checks that src holds naturals, and below_zero leaves
+    # -4 in it: natively clamp is refused, and compiled nothing checked src,
+    # so clamp ran on the negative cells. Its postcondition, tested on the
+    # runs its contract lets in, was then withheld, and gather's requirement
+    # checked (#119). The Nat element sort is now a requirement of clamp's,
+    # checked before it, so the compiled program stops where the native one
+    # is refused; and gather's requirement is decided under clamp's
+    # postcondition, which holds wherever the program gets past the check.
     (post,) = [fact for fact in wrong.clamp.facts() if fact.kind == "postcondition"]
     assert post.status is Status.TESTED
-    (requirement,) = wrong.clamped.term.requirements
-    assert not requirement.decided
-    assert not any(
-        h.source.startswith("the postcondition of clamp") for h in requirement.offered
+    natural, element = wrong.clamped.term.requirements
+    assert (natural.call, natural.kind, natural.param, natural.array) == (
+        "clamp",
+        "nat",
+        "src",
+        "src",
     )
-    assert "the postcondition of clamp after clamp at" in requirement.reason
-    assert "elements of src are naturals, and below_zero at" in requirement.reason
+    assert not natural.decided
+    assert natural.flag is not None
+    assert natural.statement.startswith(
+        "the elements of src are naturals where clamp is called at "
+    )
+    assert natural.reason.startswith(
+        "the hypotheses that held at the call leave room for a cell that breaks "
+        "it: "
+    )
+    assert "] = -1" in natural.reason
+    assert render(natural.claim) == "forall c0 in Fin(n). src[c0] >= 0"
+    assert (element.call, element.kind) == ("gather", "element")
+    assert element.decided and element.flag is None
+    assert [h.source.split(",")[0] for h in element.used] == [
+        "the postcondition of clamp"
+    ]
 
     inputs = {**_permutation_inputs(), "src": Arr.zeros(4, dtype=np.int64)}
     with pytest.raises(ValueError, match=r"src\[0\] is -4"):
         wrong.clamped(**{name: value.copy() for name, value in inputs.items()})
-    with pytest.raises(ValueError, match="stops before gather"):
+    with pytest.raises(ValueError, match="stops before clamp") as caught:
         LoopyExecutor().run(
             wrong.clamped, **{name: value.copy() for name, value in inputs.items()}
         )
+    assert "an element of src is not a natural" in str(caught.value)
+    with pytest.raises(CheckFailed, match="stops before clamp"):
+        interpret(
+            wrong.clamped.term,
+            {name: value.copy() for name, value in inputs.items()},
+        )
+
+
+def test_a_natural_array_a_postcondition_describes_is_decided() -> None:
+    # counted leaves src[i] == i, so clamp's requirement is decided under
+    # its postcondition, and gather's under clamp's: no checked point.
+    natural, element = wrong.counted_then_clamped.term.requirements
+    assert natural.kind == "nat" and natural.decided and natural.flag is None
+    assert [h.source.split(",")[0] for h in natural.used] == [
+        "the postcondition of counted"
+    ]
+    assert element.decided and element.flag is None
+    assert not wrong.counted_then_clamped.term.checks
+    inputs = {**_permutation_inputs(), "src": Arr.zeros(4, dtype=np.int64)}
+    native = {name: value.copy() for name, value in inputs.items()}
+    compiled = {name: value.copy() for name, value in inputs.items()}
+    wrong.counted_then_clamped(**native)
+    LoopyExecutor().run(wrong.counted_then_clamped, **compiled)
+    for name in ("src", "perm", "y"):
+        assert compiled[name].numpy().tolist() == native[name].numpy().tolist(), name
+    (fact,) = [
+        fact
+        for fact in wrong.counted_then_clamped.facts()
+        if fact.kind == "requirement" and fact.provenance["requirement"] == "nat"
+    ]
+    assert fact.id.endswith(":clamp:nat:src")
+    assert fact.rests_on
+    assert all(".counted@" in identifier for identifier in fact.rests_on)
+
+
+@pytest.mark.parametrize(
+    ("prog", "arguments"),
+    [(wrong.narrowed, ("perm", "x", "y")), (wrong.narrowed_made, ("x", "y"))],
+    ids=lambda value: getattr(value, "__name__", ""),
+)
+def test_a_checked_point_reads_a_value_past_32_bits_as_written(prog, arguments) -> None:
+    # past_32_bits writes 2**32 + i into perm, which gather's contract refuses
+    # natively. The compiled program stored it in 32 bits, as i, and the
+    # checked point between the calls read a point of Fin(n): gather ran
+    # where the native one is refused (#128). An integral array a checked
+    # point reads is stored in 64 bits, so the point reads what was written.
+    assert prog.term.checked_arrays == frozenset({"perm"})
+    code = emit_code(prog)
+    assert "int64_t *__restrict__ perm" in code or "int64_t perm[" in code
+    assert "(int32_t) (4294967296 + i)" not in code
+
+    def inputs():
+        made = _permutation_inputs()
+        return {name: made[name] for name in arguments}
+
+    with pytest.raises(ValueError, match=r"perm\[0\] is 4294967296"):
+        prog(**inputs())
+    with pytest.raises(ValueError, match="stops before gather") as caught:
+        LoopyExecutor().run(prog, **inputs())
+    assert "an element of perm is not a point of Fin(n)" in str(caught.value)
+
+
+def test_an_array_no_checked_point_reads_keeps_its_storage() -> None:
+    # number's postcondition decides gather's requirement, so nothing reads
+    # perm between the calls, and it is stored as Fin(n) is, 32 bits.
+    assert travel.permuted.term.checked_arrays == frozenset()
+    assert "int32_t *__restrict__ perm" in emit_code(travel.permuted)
 
 
 def test_a_requirement_decided_under_an_axiom_is_checked_all_the_same() -> None:

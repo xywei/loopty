@@ -92,9 +92,11 @@ from loopty.idx import is_affine
 from loopty.term import ArrType
 
 __all__ = [
+    "CHECKED_STORAGE",
     "INT64_RANGE",
     "INTEGRAL_RANGE",
     "INTEGRAL_STORAGE",
+    "array_storage",
     "axis_extents",
     "check_arguments",
     "compiled_storage",
@@ -492,6 +494,27 @@ def compiled_storage(sort: Any) -> np.dtype | None:
     if hasattr(sort, "bound") or hasattr(sort, "size"):  # an index type Fin[m]
         return INTEGRAL_STORAGE
     return None
+
+
+#: The dtype an integral array that a program's checked point reads is stored
+#: in compiled, whatever its sort: 64 bits, as the native run holds it, so
+#: that the checked point reads the value written and not one the store
+#: narrowed (:attr:`loopty.term.Term.checked_arrays`, #128).
+CHECKED_STORAGE = np.dtype(np.int64)
+
+
+def array_storage(term: Any, name: str, sort: Any) -> np.dtype | None:
+    """The dtype the compiled run stores the array ``name`` of ``term`` in.
+
+    :func:`compiled_storage` of its element sort, except for an array of an
+    integral sort that a checked point of the term reads, which is
+    :data:`CHECKED_STORAGE` (:attr:`loopty.term.Term.checked_arrays`). The
+    lowering declares the array so, and :mod:`loopty.promotion` types its
+    elements so.
+    """
+    if integral_sort(sort) and name in getattr(term, "checked_arrays", ()):
+        return CHECKED_STORAGE
+    return compiled_storage(sort)
 
 
 def native_storage(sort: Any) -> np.dtype | None:

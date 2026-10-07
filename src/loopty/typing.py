@@ -1338,7 +1338,7 @@ def requirement_id(
     """The id of a program's requirement on the array a call passes for ``param``.
 
     ``requirement:spmv.solve@115:gather:element:perm``: the program's
-    definition, the call's label, what is required (``element`` or
+    definition, the call's label, what is required (``element``, ``nat`` or
     ``layout``) and the callee's parameter.
     """
     return fact_id(
