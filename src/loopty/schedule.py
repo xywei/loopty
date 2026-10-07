@@ -749,6 +749,10 @@ def _same_cell(
     ``a_indices`` and ``b_indices`` are the two accesses' subscripts, compared
     axis by axis; an axis either one cannot state in isl is left
     unconstrained (see :func:`_index_text`), which can only add pairs.
+
+    A subscript may name a size, ``x[x.dom.size - 1]``, so the map declares
+    ``params``, every name a subscript may use besides the loop variables:
+    isl reads an undeclared name as a syntax error (#110).
     """
     source_dims = layout.dims("x")
     target_dims = layout.dims("y", suffix="_")
@@ -768,6 +772,7 @@ def _same_cell(
             continue
         constraints.append(f"{left} = {right}")
     return isl.Map(
+        f"[{', '.join(sorted(params))}] -> "
         f"{{ [{source_dims}] -> [{target_dims}] : {' and '.join(constraints)} }}"
     )
 

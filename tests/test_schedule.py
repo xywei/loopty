@@ -2059,3 +2059,83 @@ def test_lanky_prints_the_reason_of_every_refuted_cast_fact() -> None:
 
 
 # }}}
+
+
+# {{{ an access indexed by a size (#110)
+
+
+def last_then_all(x: Arr[Fin[n], Real]):  # noqa: F821
+    """The kernel of #110: the last cell, then every cell."""
+    x[x.dom.size - 1] = 0.0
+    for i in x.dom:
+        x[i] = x[i] + 1.0
+
+
+def into_the_last(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """Every iteration adds into the last cell of ``y``."""
+    for i in x.dom:
+        y[y.dom.size - 1] = y[y.dom.size - 1] + x[i]
+
+
+def last_offset_beside_rows(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    off: Arr[Fin[n + 1], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The last offset, which starts no row, stored before the rows are summed."""
+    off[cnt.dom.size] = off[cnt.dom.size - 1] + cnt[cnt.dom.size - 1]
+    for r in y.dom:
+        y[r] = reduce_sum(val[r, j] for j in val.dom[r])
+
+
+def test_a_schedule_of_an_access_indexed_by_a_size_is_built() -> None:
+    # The pairs of instances that touch one cell named the size n, which the
+    # map did not declare, and isl read the text as a syntax error (#110).
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(last_then_all, evaluate_annotations(last_then_all))
+    schedule = Schedule(term, sizes={"n": 6}).split("i", 2)
+    assert {fact.kind: fact.status.value for fact in schedule.facts()} == {
+        "bijective": "decided",
+        "monotone": "decided",
+    }
+
+
+def test_a_dependence_through_a_cell_a_size_names_is_found() -> None:
+    # Every instance writes y[n - 1]: run in parallel, the sums race.
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(into_the_last, evaluate_annotations(into_the_last))
+    schedule = Schedule(term, sizes={"n": 4})
+    with pytest.raises(IllegalCast) as caught:
+        schedule.tag(i="g.0")
+    message = str(caught.value)
+    assert message.startswith("tag(i='g.0') illegal: instance S0[i=")
+    assert "y[3]" in message
+    assert caught.value.fact.kind == "monotone"
+    assert caught.value.fact.status.value == "refuted"
+
+
+def test_a_write_of_the_last_offset_beside_a_ragged_read_is_scheduled() -> None:
+    # off[n] starts no row, so the rows read no cell it writes, and the loop
+    # over them is parallel; the map of the write named n, as above.
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(last_offset_beside_rows, evaluate_annotations(last_offset_beside_rows))
+    schedule = Schedule(term, sizes={"n": 3}).tag(r="g.0")
+    casts = {
+        fact.kind: fact.status.value
+        for fact in schedule.facts()
+        if fact.kind in ("bijective", "monotone")
+    }
+    assert casts == {"bijective": "decided", "monotone": "decided"}
+
+
+# }}}
