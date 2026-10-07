@@ -908,17 +908,22 @@ def test_a_float_stored_count_outside_the_int64_range_is_refused() -> None:
         scale_counts(counts, np.zeros(3))
     with pytest.raises(ValueError, match=r"c\[1\] is 1e\+20.*64-bit integer"):
         executor().run(scale_counts.trace(), c=counts, y=np.zeros(3))
-    # Whole floats inside the range still convert, exactly, at both ends.
-    from loopty.contract import element_types
+    # A whole float inside the int64 range is a whole number, and is refused
+    # only for the 32 bits the compiled run stores a Nat in (#92). Whole floats
+    # inside that range still convert, exactly, at both ends.
+    from loopty.contract import INTEGRAL_RANGE, element_types
 
     types = scale_counts.arg_types
     edge = np.nextafter(2.0**63, 0.0)
-    element_types(types, {"c": np.array([edge, 0.0]), "y": np.zeros(2)})
+    with pytest.raises(ValueError, match=r"outside -2147483648 <= v < 2147483648"):
+        element_types(types, {"c": np.array([edge, 0.0]), "y": np.zeros(2)})
     with pytest.raises(ValueError, match=r"64-bit integer"):
         element_types(types, {"c": np.array([2.0**63, 0.0]), "y": np.zeros(2)})
+    top = float(INTEGRAL_RANGE[1] - 1)
+    element_types(types, {"c": np.array([top, 0.0]), "y": np.zeros(2)})
     y = np.zeros(2)
-    scale_counts(np.array([edge, 3.0]), y)
-    assert y.tolist() == [2.0 * edge, 6.0]
+    scale_counts(np.array([top, 3.0]), y)
+    assert y.tolist() == [2.0 * top, 6.0]
 
 
 def test_the_native_run_checks_scalar_parameters_too() -> None:

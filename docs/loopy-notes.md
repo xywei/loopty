@@ -49,12 +49,13 @@ including `math.h`, and gcc refuses the generated file.
 **Cause.** loopy emits the call but does not register `pow` as a target
 callable, so the header that declares it is never requested.
 
-**Local fix.** Do not write `x ** -0.5`. Build the call to the target's library
-function explicitly: `pymbolic.primitives.Call(Variable("sqrt"), (r2,))`, which
-loopy resolves against the target and which does pull in the header.
-`examples/p2p.py` has the dual-mode pattern (numpy on numbers, a `Call` on a
-term), and it is the pattern any elementary function needs until loopty grows a
-surface of its own for them.
+**Local fix.** The lowering includes `math.h` itself, in a preamble, whenever
+the term has a power loopy writes as a call (note 19), so `x ** -0.5` compiles
+now. Any other elementary function still needs its call built explicitly:
+`pymbolic.primitives.Call(Variable("sqrt"), (r2,))`, which loopy resolves
+against the target and which does pull in the header. `examples/p2p.py` has the
+dual-mode pattern (numpy on numbers, a `Call` on a term), and it is the pattern
+any elementary function needs until loopty grows a surface of its own for them.
 
 **Related.** The callee of a `prim.Call` must not be collected as a *used name*,
 or `sqrt` is declared as a value argument and loopy refuses the kernel with
@@ -786,11 +787,8 @@ the body wrote it; only what loopy is handed changes. An integer is left
 alone: loopy types it `int32` or `int64` by its value, as numpy would.
 
 **What it does not cover.** A Python float next to a `float32` array is
-`float32` in numpy and double precision here, so a kernel over a numpy
-`float32` sort computes such a product in double and rounds it when it is
-stored, where numpy rounds the constant to single precision first. The two
-differ in the last bit of a single, within the `approx` class a bare floating
-dtype is compared by (`tolerance.element_class`).
+`float32` in numpy, and double precision by this rule alone. That is note 19,
+which types every operation, a literal's with it.
 
 ## 18. A guard that names no loop variable goes into host code that never runs
 
@@ -844,3 +842,73 @@ kernel loopy hoisted nothing out of. Target `opencl` is
 `lower.InKernelOpenCLTarget`, `lp.PyOpenCLTarget` with a Python host builder
 that cannot implement a conditional either, so the guard is in the kernel, as
 it is for `lp.OpenCLTarget`, and the launch always happens.
+
+## 19. C's arithmetic is not numpy's
+
+**Symptom.** Four kernels whose compiled run computes something else than
+their native run, with nothing reported unless an output is compared bit for
+bit:
+
+- `h[i] = k[i] / 2 * 2` of an integer `k` stores `3` natively at `k = 3` and
+  `2` compiled (#82);
+- `y[i] = x[i] * 0.1 + 0.3` of a `float32` `x` is single precision natively and
+  double compiled, rounded at the store, a bit away (#91), and `x[i] / k[i]` of
+  a `float32` `x` and an integer `k` is double natively and single compiled;
+- `x[i] ** 3` differs from numpy's in the last bit at about one `x` in four;
+- any power but `x ** 0`, `1` and `2` fails to compile on the C target,
+  `x[i] ** -1` as `unknown type name 'int32_t'` and `x[i] ** 0.5` as an
+  implicit declaration of `pow` (#84, and note 2).
+
+**Cause.** numpy types an operation by NEP 50: a numpy scalar is strong and
+keeps its dtype, a Python number is weak and takes the dtype of what stands
+beside it, a strong integer beside a `float32` makes a double, and true
+division of two integers is a double. The native run reads an array's element
+as a numpy scalar and a loop variable as a Python `int`. C converts by its
+usual arithmetic conversions: a `float` beside any integer is a `float`, and
+`/` of two integers is integer division. loopy writes a term's operation as
+the C operator, and casts the operands of a quotient of integers to a floating
+type only when the type context it is handed is one
+(`ExpressionToCExpressionMapper.map_quotient`), which on the right-hand side of
+an integer assignment it is not. A power with an integer exponent other than
+`0`, `1` or `2` is a call of a `loopy_pow_<base>_<exponent>` loopy defines in a
+preamble tagged `07_...`, which multiplies repeatedly and rounds at every
+step, where numpy calls the C library's `pow` (or `powf`) with the exponent
+converted; the definition's signature names `int32_t`, and loopy includes
+`stdint.h` in a preamble tagged `10_stdint`, which sorts after it. A floating
+exponent is a call of `pow`, and loopy includes no `math.h` for it.
+
+**Local fix.** `loopty.promotion` reads both types off the term. The native
+one is found by doing the operation in numpy on a sample of each operand's
+type, the literal itself for a literal, so the rules are numpy's own rather
+than a table of them; the compiled one is C's conversions over the dtypes the
+lowering declares (`contract.compiled_storage`). Where numpy's type is floating
+and C's is not the same, `lower.ExpressionLowerer` converts operands: a literal
+is written in numpy's dtype (`0.10000000149011612f`), anything else is cast
+(`(double) (k[i]) / 2`, `(double) (x[i]) / k[i]`, `(float) (0.3 + i)`), and a
+floating power gets a floating exponent, so that loopy calls `pow`
+(`pow(x[i], 3.0)`). A sum or a product of several operands is planned from
+the left, as both evaluate it. A term with a power loopy writes as a call gets
+`#include <stdint.h>` and `#include <math.h>` in a preamble tagged
+`06_loopty_power`, which sorts before loopy's definitions, and a term with
+complex values `#include <complex.h>` there too, since loopy's power of a
+complex base names `double complex` in its signature and loopy includes the
+header at `10_complex`, after it. An operation C and
+numpy type alike is lowered exactly as before, so no kernel over `Real` and
+integers changes but for its quotients and powers.
+
+**What it does not cover.** Integers are 64 bits wide natively and 32 bits
+compiled. The contract keeps every integral argument inside 32 bits
+(`contract.INTEGRAL_RANGE`), but a result that leaves them, `c[i] * c[i]` at
+`c[i] = 2**20`, is a wider number natively and wraps compiled. A scalar
+argument of `Real` or of an integral sort is a Python number natively when
+the caller passed one and a numpy scalar otherwise
+(`contract.native_scalar`), so beside a `float32` it is weak or strong by the
+call; an operation whose type depends on that is left as C types it. The
+interpreter's functions (`sqrt`, `exp`, ...) are typed as numpy types them,
+and a call of anything else is not typed, nor is anything around it. On the
+OpenCL target a `float32` kernel that numpy computes partly in double is
+compiled partly in double too, and needs `cl_khr_fp64` there. A complex power
+keeps an integer exponent, and loopy's power multiplies in the order numpy's
+complex power does for a positive one, so `z[i] ** 3` agrees bit for bit; a
+negative exponent is inverted first, where numpy inverts the power, a last bit
+away.
