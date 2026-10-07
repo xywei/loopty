@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -72,6 +73,7 @@ __all__ = [
     "SAMPLES",
     "SEED",
     "SIZES",
+    "Stopped",
     "faithfulness_fact",
     "no_term_fact",
     "postcondition_fact",
@@ -194,6 +196,12 @@ def faithfulness_fact(
                 Status.REFUTED, counterexample=counterexample, reason=reason, **extra
             )
     except Exception as exc:  # noqa: BLE001 - a fact, never a crash of the check
+        if observed is not None:
+            # The inputs after this one were never run: the postcondition is
+            # not tested on what was collected so far alone.
+            observed.append(
+                ("the inputs left", None, Stopped(f"{type(exc).__name__}: {exc}"))
+            )
         if verdict is None:
             return fact(
                 Status.ASSUMED,
@@ -237,6 +245,19 @@ def no_term_fact(
         where=where,
         owner=owner,
     )
+
+
+@dataclass(frozen=True)
+class Stopped:
+    """In place of a run's arguments: the runs stopped here, and why.
+
+    :func:`faithfulness_fact` ends what it collects with one when an input
+    raised past what it catches, so that :func:`postcondition_fact` counts
+    the inputs never run as runs it could not evaluate the postcondition
+    after, and leaves it ``assumed``.
+    """
+
+    reason: str
 
 
 def postcondition_fact(
@@ -295,6 +316,9 @@ def postcondition_fact(
 
     held = 0
     for label, recorded, arguments in observed:
+        if isinstance(arguments, Stopped):
+            inputs.append({"input": label, "outcome": f"not run: {arguments.reason}"})
+            continue
         context: dict[str, Any] = dict(arguments)
         try:
             sizes = resolve_sizes(getattr(kernel, "arg_types", {}), arguments)

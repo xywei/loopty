@@ -359,6 +359,42 @@ def test_a_postcondition_is_tested_past_the_inputs_the_term_differs_at() -> None
     assert post.provenance["inputs"][0]["outcome"] == "held"
 
 
+def test_a_postcondition_is_not_tested_on_the_runs_before_a_crash(monkeypatch) -> None:
+    # An input that raises past what the comparison catches stops the runs;
+    # the postcondition held after the ones before, and was never tried on
+    # the rest, so it is not tested (Codex, on #118).
+    import loopty.faithful as faithful
+
+    @kernel
+    def reversed_(perm: Arr[Fin[n], Fin[n]]) -> all(  # noqa: F821
+        perm[i] == n - 1 - i for i in Fin[n]  # noqa: F821
+    ):
+        for i in perm.dom:
+            perm[i] = perm.dom.size - 1 - i
+
+    original = faithful._compare
+    calls: list[int] = []
+
+    def falls_over(*args, **kwargs):
+        calls.append(1)
+        if len(calls) > 1:
+            raise RuntimeError("the machine fell over")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(faithful, "_compare", falls_over)
+    observed: list = []
+    fact = faithful.faithfulness_fact(
+        reversed_, reversed_.term, owner="reversed_", where="-", observed=observed
+    )
+    assert fact.status is Status.ASSUMED
+    post = faithful.postcondition_fact(
+        reversed_, reversed_.term, observed, owner="reversed_", where="-"
+    )
+    assert post.status is Status.ASSUMED
+    assert post.provenance["compared"] == 1
+    assert "not run: RuntimeError: the machine fell over" in post.provenance["reason"]
+
+
 def test_gathers_requirement_is_decided_under_numbers_postcondition() -> None:
     # #65's permuted program: number writes perm, gather reads x[perm[i]].
     (requirement,) = facts_of("permuted", "requirement")
