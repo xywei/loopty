@@ -85,7 +85,7 @@ from loopty.flow import (
 )
 from loopty.idx import linearize
 from loopty.operations import (
-    DEFINITIONS_DIGEST,
+    CODE_DIGEST,
     OPERATIONS,
     NumpyArithmetic,
     numpy_arithmetic_preambles,
@@ -256,12 +256,13 @@ class InProcessCTarget(lp.ExecutableCTarget):
     Note 18 in ``docs/loopy-notes.md`` has the details.
 
     Its device code writes ``//``, ``%``, ``<<`` and ``>>`` as numpy computes
-    them (:class:`_CCode`, note 20), and the definitions are hashed in, so
-    that loopy's cache keeps no code of other ones.
+    them (:class:`_CCode`, note 20), and the definitions are hashed in, with
+    the plan and the lowering, so that loopy's cache keeps no code of other
+    ones (:data:`loopty.operations.CODE_DIGEST`).
     """
 
     hash_fields = (*lp.ExecutableCTarget.hash_fields, "arithmetic")
-    arithmetic = DEFINITIONS_DIGEST
+    arithmetic = CODE_DIGEST
 
     def get_host_ast_builder(self) -> Any:
         return _HostCodeWithoutConditionals(self)
@@ -278,7 +279,7 @@ class SourceCTarget(lp.CTarget):
     """
 
     hash_fields = (*lp.CTarget.hash_fields, "arithmetic")
-    arithmetic = DEFINITIONS_DIGEST
+    arithmetic = CODE_DIGEST
 
     def get_device_ast_builder(self) -> Any:
         return _CCode(self)
@@ -321,7 +322,7 @@ class InKernelOpenCLTarget(lp.PyOpenCLTarget):
     """
 
     hash_fields = (*lp.PyOpenCLTarget.hash_fields, "arithmetic")
-    arithmetic = DEFINITIONS_DIGEST
+    arithmetic = CODE_DIGEST
 
     def get_host_ast_builder(self) -> Any:
         return _LaunchWithoutConditionals(self)
@@ -439,12 +440,14 @@ class ExpressionLowerer(Mapper):
     ``(double) (k[i]) / 2``, ``0.1`` beside a ``float32`` is ``0.1f``, and
     ``col[i] * col[i]`` of a ``Fin[m]`` array is computed in 64 bits, but in a
     subscript: an index is index arithmetic, which loopy computes in 32 bits
-    and isl reasons about, so an integer is not widened inside one. A guard
-    that reads no array is a condition on the loops, which loopy reads into
-    isl too, and whose reader refuses a cast (note 20 in
+    and reads into isl, whose reader raises on a cast, and which loopy
+    simplifies, dropping a product with a 64-bit ``1``, so an integer is not
+    widened inside one, a limit (#129). A guard that reads no array is a
+    condition on the loops, which loopy reads into isl too (note 20 in
     ``docs/loopy-notes.md``), so nothing in one is cast at all: a literal is
-    still written in numpy's dtype, and loopy computes a quotient of integers
-    in double in a comparison of its own accord (:meth:`condition`). An
+    still written in numpy's dtype, an operand is converted by a product with
+    ``1.0`` or a 64-bit ``1``, and loopy computes a quotient of integers in
+    double in a comparison of its own accord (:meth:`condition`). An
     operation C leaves undefined where numpy does not, ``//``, ``%``, ``<<``
     and ``>>``, is rebuilt as it is, and loopty's targets write it as numpy
     computes it (:mod:`loopty.operations`, :func:`target_for`).
@@ -474,9 +477,10 @@ class ExpressionLowerer(Mapper):
         double exactly as it would the cast, and the reader declines it as it
         declines any real. ``s * a`` of an ``Int`` ``s`` and a ``float32``
         ``a`` is computed in double so, as numpy computes it, where C computed
-        it in single precision when the cast was left out. Such a guard is
-        index arithmetic otherwise, and its integers are left in 32 bits as a
-        subscript's are.
+        it in single precision when the cast was left out. An integer is
+        widened so too, by a product with a 64-bit ``1``: ``when(i * i <
+        m)`` is ``1l * i * i < m``, which wrapped round at ``i = 46341`` when
+        its integers were left in 32 bits as a subscript's are.
         """
         reads = any(isinstance(node, Access | prim.Subscript) for node in walk(guard))
         if reads:
@@ -614,14 +618,14 @@ class ExpressionLowerer(Mapper):
         was, so a kernel whose arithmetic C and numpy type alike lowers to the
         code it always did. See note 19 in ``docs/loopy-notes.md``.
 
-        Inside a subscript and a guard on the loops an integer is not widened
-        (see the class): a step converting to an integer dtype is left out
-        there. In such a guard no operand is cast at all (:meth:`condition`).
+        Inside a subscript an integer is not widened (see the class): a step
+        converting to an integer dtype is left out there. In a guard on the
+        loops no operand is cast at all (:meth:`_convert`).
         """
         lowered = [self.rec(operand) for operand in operands]
         promotion = self.lowering.promotion
         steps = () if promotion is None else promotion.steps(expr)
-        if self.in_subscript or self._on_loops:
+        if self.in_subscript:
             steps = tuple(_without_widening(step) for step in steps)
         if not any(step.converts for step in steps):
             return build(lowered)
@@ -638,16 +642,21 @@ class ExpressionLowerer(Mapper):
     def _convert(self, operand: Any, dtype: np.dtype) -> Any:
         """``operand`` computed in ``dtype``, as a guard on the loops allows.
 
-        See :meth:`condition`: there a literal is written in the dtype, a
-        double is had by a product with ``1.0``, and nothing else converts.
-        The ``1.0`` comes first: loopy prints ``s * (1.0 * a)`` as
-        ``s * 1.0 * a``, which C computes in double from the left as well,
-        where ``s * a * 1.0`` would multiply ``s * a`` in single precision.
+        A literal is written in the dtype, and anything else is cast, but in a
+        guard on the loops, whose cast loopy's isl reader raises on (see
+        :meth:`condition`): there a double is had by a product with ``1.0``,
+        and an integer by a product with ``1`` in its dtype, which C computes
+        from the left in that type exactly as it would the cast, and which the
+        reader takes as the number it is, or declines with any product of two
+        variables; nothing else converts. The ``1.0`` comes first: loopy
+        prints ``s * (1.0 * a)`` as ``s * 1.0 * a``, which C computes in
+        double from the left as well, where ``s * a * 1.0`` would multiply ``s
+        * a`` in single precision, and ``1l * i * i`` is a product of longs.
         """
         if not self._on_loops or _is_literal(operand):
             return _converted(operand, dtype)
-        if dtype == np.float64:
-            return prim.Product((np.float64(1.0), operand))
+        if dtype == np.float64 or dtype.kind in "iu":
+            return prim.Product((dtype.type(1), operand))
         return operand
 
     def map_sum(self, expr: Any) -> prim.Expression:

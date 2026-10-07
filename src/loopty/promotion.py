@@ -46,11 +46,14 @@ in 32) or a loop variable's, has one converted. A floor division, a
 remainder, an ``^`` and a right shift stay inside their operands' range and
 are left as they are, and so is a sum of loop variables, sizes and literals
 alone, the index arithmetic loopy computes every loop bound in, 32 bits wide;
-a product of them is not, since ``i * i`` leaves 32 bits at ``i = 46341``.
-The lowering leaves a subscript's arithmetic as it is too, and a guard's that
-reads no array (:class:`loopty.lower.ExpressionLowerer`). A result outside 64
-bits wraps round compiled and is refused or wraps natively, which is numpy's
-limit too.
+a product of them is not, since ``i * i`` leaves 32 bits at ``i = 46341``,
+and nor is a sum whose literals total ``2**30`` or more (``i + 2**31 - 1``).
+The lowering widens an integer in a guard that reads no array as everywhere
+else, with no cast (``when(i * i < m)`` wrapped round at ``i = 46341``), and
+leaves a subscript's arithmetic in 32 bits, which loopy gives it no way to
+widen, a limit (#129; :class:`loopty.lower.ExpressionLowerer`). A result
+outside 64 bits wraps round compiled and is refused or wraps natively, which
+is numpy's limit too.
 """
 
 from __future__ import annotations
@@ -191,6 +194,48 @@ def _precision(dtype: np.dtype) -> int:
     return 0
 
 
+#: The magnitude from which the integer literals of a sum are not index
+#: arithmetic: beside a loop variable they can leave 32 bits, ``i + 2**31 - 1``
+#: at ``i = 1``, and so can several smaller ones, ``i + 2**29 + ... + 2**29``.
+_INDEX_LITERAL = 2**30
+
+
+def _integer_literal(expr: Any) -> bool:
+    """Whether ``expr`` is an integer literal, a truth value not counted."""
+    return isinstance(expr, int | np.integer) and not isinstance(expr, bool | np.bool_)
+
+
+def _literal_total(expr: Any) -> int:
+    """The magnitude of the integer literals of a sum, the sums in it included.
+
+    lanky builds ``i + a + b`` as ``(i + a) + b``, so the literals of a sum
+    written in one line are spread over the sums inside it.
+    """
+    if _integer_literal(expr):
+        return abs(int(expr))
+    if isinstance(expr, prim.Sum):
+        return sum(_literal_total(child) for child in expr.children)
+    return 0
+
+
+def _large_literals(expr: Any) -> bool:
+    """Whether the integer literals of a sum total :data:`_INDEX_LITERAL` or more."""
+    return _literal_total(expr) >= _INDEX_LITERAL
+
+
+def _negation(expr: Any) -> bool:
+    """Whether a product is a negation, ``-i``, which pymbolic builds as ``-1 * i``.
+
+    It is planned as a sum is (:func:`_plan`): ``n - 1 - i`` is index
+    arithmetic, and a negated loop variable stays inside 32 bits.
+    """
+    return (
+        isinstance(expr, prim.Product)
+        and len(expr.children) == 2
+        and any(_integer_literal(child) and child == -1 for child in expr.children)
+    )
+
+
 def _weak_integers(*natives: Native) -> bool:
     """Whether every sample of every native type is a Python int (or bool).
 
@@ -260,8 +305,10 @@ def _plan(
     Python ints alone (loop variables, sizes and literals): that is index
     arithmetic, which loopy computes in 32 bits as it does every loop bound
     and subscript, and a sum of a few of them stays inside 32 bits while the
-    sizes do. A product, a power or a left shift of them does not, and is
-    converted.
+    sizes do; the caller plans a negation, ``-1 * i``, as a sum too. A
+    product, a power or a left shift of them does not, and is converted, and
+    so is a sum whose literals total ``2**30`` or more, which the caller
+    plans as ``"growing"``: ``i + 2**31 - 1`` left 32 bits at ``i = 1``.
     """
     (_, lc), (_, rc) = left, right
     compiled = _c_result(lc, rc)
@@ -303,9 +350,17 @@ def _widened(
 
     See :func:`_plan`: the narrower operands are converted when C computes in
     fewer bits, but for a comparison, a bounded operation and a sum of Python
-    ints alone.
+    ints alone. Where the compiled type is no integer at all, every operand
+    of another type is converted, whatever the operation: loopy types an
+    ``np.uint64`` beside a signed integer as numpy types two arrays, in
+    double, where numpy keeps a Python int or a loop variable beside it weak,
+    and computes ``u[i] % 3`` in ``uint64``.
     """
     (left_native, lc), (right_native, rc) = left, right
+    if compiled.kind not in "biu":
+        to_left = target if lc != target else None
+        to_right = target if rc != target else None
+        return Step(to_left, to_right, native, target)
     narrower = compiled.kind in "biu" and compiled.itemsize < target.itemsize
     if not narrower or kind in ("comparison", "bounded"):
         return Step(None, None, native, compiled)
@@ -502,6 +557,8 @@ class Promotion:
         if isinstance(expr, prim.Power):
             kind = "power"
         elif isinstance(expr, prim.Sum):
+            kind = "growing" if _large_literals(expr) else "sum"
+        elif _negation(expr):
             kind = "sum"
         elif isinstance(expr, prim.Product | prim.LeftShift):
             kind = "growing"

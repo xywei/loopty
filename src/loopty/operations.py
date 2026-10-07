@@ -25,14 +25,16 @@ loopy as a callable is not found there. A floor division or remainder of a
 non-negative integer by a positive constant, which C's ``/`` and ``%`` compute
 exactly, stays C's, as loopy writes it for an index ``i // 2``.
 
-This module's source is hashed into the targets' persistent hash
-(:data:`DEFINITIONS_DIGEST`), so loopy's cache of generated code never serves
-code generated from another definition.
+This module's source, and that of the modules that decide what a lowered
+kernel holds, is hashed into the targets' persistent hash
+(:data:`CODE_DIGEST`), so loopy's cache of generated code never serves code
+generated from another definition or another plan.
 """
 
 from __future__ import annotations
 
 import hashlib
+import os
 from collections.abc import Iterator, Mapping
 from typing import Any
 
@@ -43,7 +45,7 @@ from loopy.types import NumpyType
 from pymbolic import var
 
 __all__ = [
-    "DEFINITIONS_DIGEST",
+    "CODE_DIGEST",
     "OPERATIONS",
     "NumpyArithmetic",
     "definition",
@@ -192,23 +194,39 @@ _SPELLED = {
 #: includes (``10_``), since a definition names their types.
 _TAG = "11_loopty"
 
+#: The modules whose source decides the code loopty's targets generate: the
+#: definitions and the code generator that calls them, here, the plan of
+#: conversions (:mod:`loopty.promotion`) and the lowering (:mod:`loopty.lower`).
+_SOURCES = ("operations.py", "promotion.py", "lower.py")
+
+
 def _digest() -> str:
-    """A digest of this module's source: the definitions and how they are used.
+    """A digest of the sources in :data:`_SOURCES`.
 
-    The definitions alone, if the source cannot be read.
+    A module's name stands for it if its source cannot be read, and the
+    definitions for this one's.
     """
-    try:
-        with open(__file__, "rb") as source:
-            text = source.read()
-    except OSError:  # pragma: no cover - a module with no source on disk
-        text = repr(sorted(_DEFINITIONS.items())).encode()
-    return hashlib.sha256(text).hexdigest()[:16]
+    digest = hashlib.sha256()
+    for name in _SOURCES:
+        try:
+            with open(os.path.join(os.path.dirname(__file__), name), "rb") as source:
+                digest.update(source.read())
+        except OSError:  # pragma: no cover - a module with no source on disk
+            digest.update(name.encode())
+            if name == "operations.py":
+                digest.update(repr(sorted(_DEFINITIONS.items())).encode())
+    return digest.hexdigest()[:16]
 
 
-#: A digest of every definition and of the code generator that calls them,
-#: which loopty's targets hash in, so that loopy's persistent cache serves no
-#: code another version of either generated.
-DEFINITIONS_DIGEST = _digest()
+#: A digest of every definition, of the code generator that calls them, and
+#: of the modules that decide what the lowered kernel holds, which loopty's
+#: targets hash in, so that loopy's persistent cache serves no code another
+#: version of them generated. A cache key cannot tell that by the kernel
+#: alone: pymbolic's persistent hash reads a numpy scalar as the Python number
+#: it equals, so a kernel that writes ``u[i] % 3`` with a ``3`` and one that
+#: writes it with an ``np.uint64(3)``, which loopy types and prints otherwise
+#: (``3ul``), share an entry (note 20 in ``docs/loopy-notes.md``).
+CODE_DIGEST = _digest()
 
 
 def operation_name(operation: str, dtype: np.dtype) -> str:

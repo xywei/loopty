@@ -667,6 +667,19 @@ def index_squares(
 
 
 @kernel
+def past_the_index(
+    y: Arr[Fin[n], Int],  # noqa: F821
+    z: Arr[Fin[n], Int],  # noqa: F821
+    w: Arr[Fin[n], Int],  # noqa: F821
+):
+    """A loop variable beside a literal near 2**31, a small one, and several."""
+    for i in y.dom:
+        y[i] = i + 2147483647
+        z[i] = i + 1
+        w[i] = i + 2**29 + 2**29 + 2**29 + 2**29
+
+
+@kernel
 def counted(b: Arr[Fin[n], Bool], c: Arr[Fin[n], Int]):  # noqa: F821
     """The number of true entries: a sum of truth values, which is a count."""
     for i in b.dom:
@@ -720,6 +733,66 @@ def test_integer_arithmetic_is_64_bits_wide_compiled_too():
     counted(**native)
     assert native["c"][0] == 300
     agrees(counted, truths)
+
+    # A sum of loop variables and literals is index arithmetic, left in 32
+    # bits, but where its literals total 2**30 or more: i + 2**31 - 1 wrapped
+    # round at i = 1 compiled, and so did i + 2**29 + ... + 2**29, which
+    # lanky builds as sums of one literal each.
+    code = emit_code(past_the_index)
+    assert "y[i] = (int64_t) (i) + 2147483647" in code
+    assert "z[i] = (int64_t) (i + 1)" in code
+    assert "w[i] = (int64_t) (i + 536870912) + 536870912 + 536870912" in code
+    native = {name: np.zeros(3, np.int64) for name in "yzw"}
+    past_the_index(**native)
+    assert native["w"][0] == 2**31
+    agrees(past_the_index, lambda: {name: np.zeros(3, np.int64) for name in "yzw"})
+
+
+@kernel
+def guarded_squares(
+    x: Arr[Fin[n], Real],  # noqa: F821
+    k: Fin[m],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+    w: Arr[Fin[n], Real],  # noqa: F821
+):
+    """Guards on the loops and on a scalar whose products leave 32 bits."""
+    for i in x.dom:
+        with when(i * i < 2**31 + 5):
+            y[i] = x[i]
+        with when(k * k > i + 2**31):
+            z[i] = x[i]
+        with when(100_000 * i < 2**31):
+            w[i] = x[i]
+
+
+def test_a_guard_on_the_loops_computes_a_product_in_64_bits():
+    # loopy reads such a guard into isl, so no cast goes there, and its
+    # integers were left in 32 bits: i * i wrapped round at i = 46341, to a
+    # negative number below the bound, and so did k * k of a Fin[m] scalar
+    # and 100_000 * i at i = 21475. A product with a 64-bit 1, or a literal
+    # written in 64 bits, is what isl reads as it reads the number, or
+    # declines as it declines i * i.
+    rows = 46_345
+
+    def make() -> dict:
+        return {
+            "x": np.arange(rows, dtype=np.float64),
+            "k": 46_341,
+            **{name: np.zeros(rows) for name in "yzw"},
+        }
+
+    native = make()
+    guarded_squares(**native)
+    assert native["y"][46_340] == 46_340.0 and native["y"][46_341] == 0.0
+    # k * k is 2**31 + 4633.
+    assert native["z"][4632] == 4632.0 and native["z"][4633] == 0.0
+    assert native["w"][21_474] == 21_474.0 and native["w"][21_475] == 0.0
+    code = emit_code(guarded_squares)
+    assert "if (1l * i * i < 2147483653)" in code
+    assert "if (1l * k * k > " in code
+    assert "if (100000l * i < 2147483648" in code
+    agrees(guarded_squares, make)
 
 
 # }}}
@@ -928,6 +1001,66 @@ def test_integer_division_by_zero_and_by_minus_one_is_numpys():
         return {"k": np.array(k), "m": np.array(m), "y": np.zeros(len(k))}
 
     agrees(divisible, guarded)
+
+
+@kernel
+def by_zero(
+    k: Arr[Fin[n], Int],  # noqa: F821
+    a: Arr[Fin[n], Int],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A numpy integer by a literal zero, which numpy divides."""
+    for i in k.dom:
+        a[i] = k[i] // 0 + k[i] % 0
+        y[i] = k[i] / 0
+
+
+@kernel
+def index_by_zero(y: Arr[Fin[n], Int]):  # noqa: F821
+    """A loop variable by a literal zero, which Python refuses."""
+    for i in y.dom:
+        y[i] = i // 0
+
+
+@kernel
+def real_index_by_zero(y: Arr[Fin[n], Real]):  # noqa: F821
+    """A loop variable modulo a real zero, which Python refuses."""
+    for i in y.dom:
+        y[i] = i % 0.0
+
+
+@kernel
+def guard_by_zero(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """A loop variable divided by zero in a guard."""
+    for i in x.dom:
+        with when(i / 0 > 1):
+            y[i] = x[i]
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_a_python_number_by_a_literal_zero_is_refused_by_the_trace():
+    # Python refuses i // 0 of a loop variable, an int, with
+    # ZeroDivisionError, where the compiled run computed numpy's 0 for it.
+    # A numpy integer by zero is numpy's 0, inf or nan in both runs.
+    agrees(
+        by_zero,
+        lambda: {
+            "k": np.array([5, -5, 0]),
+            "a": np.zeros(3, np.int64),
+            "y": np.zeros(3),
+        },
+    )
+    with pytest.raises(ZeroDivisionError):
+        index_by_zero(y=np.zeros(3, np.int64))
+    for kern, symbol in (
+        (index_by_zero, "//"),
+        (real_index_by_zero, "%"),
+        (guard_by_zero, "/"),
+    ):
+        with pytest.raises(TraceError, match="divides by zero") as refused:
+            kern.trace()
+        assert f"Python refuses '{symbol}' by zero" in str(refused.value)
+        assert "Divide by a value that is not zero" in str(refused.value)
 
 
 # }}}
@@ -1171,6 +1304,52 @@ def test_a_shift_python_refuses_and_a_complex_remainder_are_refused():
 # }}}
 
 
+# {{{ an unsigned integer beside a Python int
+
+
+@kernel
+def unsigned_arithmetic(
+    u: Arr[Fin[n], np.uint64],  # noqa: F821
+    v: Arr[Fin[n], np.uint64],  # noqa: F821
+    y: Arr[Fin[n], np.uint64],  # noqa: F821
+    z: Arr[Fin[n], np.uint64],  # noqa: F821
+    c: Arr[Fin[n], Bool],  # noqa: F821
+):
+    """``uint64`` arithmetic with literals and a loop variable beside it."""
+    for i in u.dom:
+        y[i] = u[i] // v[i] + u[i] % 3 + u[i] * i
+        z[i] = (u[i] >> v[i]) + (u[i] << 3) + (u[i] ^ 5)
+        c[i] = u[i] > 18446744073709551614
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_an_unsigned_integer_beside_a_python_int_stays_unsigned():
+    # numpy keeps a Python int or a loop variable beside a uint64 weak, and
+    # computes in uint64; loopy types a uint64 beside a signed integer as
+    # numpy types two arrays, in double, so u % 3 lost the low bits and
+    # u << 3 failed to lower. The literal is written as a uint64.
+    def make() -> dict:
+        return {
+            "u": np.array([2**64 - 1, 5, 2**63], np.uint64),
+            "v": np.array([0, 70, 63], np.uint64),
+            "y": np.zeros(3, np.uint64),
+            "z": np.zeros(3, np.uint64),
+            "c": np.zeros(3, bool),
+        }
+
+    native = make()
+    unsigned_arithmetic(**native)
+    assert native["y"][0] == (2**64 - 1) % 3 == 0
+    assert list(native["c"]) == [True, False, False]
+    code = emit_code(unsigned_arithmetic)
+    assert "loopty_mod_uint64(u[i], 3ul)" in code
+    assert "loopty_lshift_uint64(u[i], 3ul)" in code
+    agrees(unsigned_arithmetic, make)
+
+
+# }}}
+
+
 # {{{ a kernel named like a function loopy or the C library knows (#108)
 
 
@@ -1311,7 +1490,7 @@ def on_the_scalars(
     s: Int,
     y: Arr[Fin[n], Real],  # noqa: F821
 ):
-    """A guard on scalars no domain names, which loopy does not read into isl."""
+    """A guard on scalars, which loopy reads into isl as it does one on the loops."""
     for i in x.dom:
         with when(s * a > 0.300000008):
             y[i] = x[i]
@@ -1319,10 +1498,10 @@ def on_the_scalars(
 
 def test_a_guard_on_scalars_is_computed_as_numpy_computes_it():
     # numpy computes s * a of an int64 s and a float32 a in double, and C in
-    # single precision, so the cast stays: a guard naming a scalar no domain
-    # names is not read into isl by loopy. Without it, 3 * 0.1f was
-    # 0.3000000119 compiled and 0.3000000045 natively, either side of the
-    # bound.
+    # single precision. loopy reads a guard on scalars into isl, whose reader
+    # raises on a cast, so the double is had by a product with 1.0 instead.
+    # Without either, 3 * 0.1f was 0.3000000119 compiled and 0.3000000045
+    # natively, either side of the bound.
     def make() -> dict:
         return {"x": np.ones(3), "a": np.float32(0.1), "s": 3, "y": np.zeros(3)}
 

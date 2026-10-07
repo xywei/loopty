@@ -2937,8 +2937,11 @@ def _refuse_arithmetic(expr: Any, params: Mapping[str, Any], where: str) -> None
     * a difference of two truth values, ``b[i] - c[i]``, which numpy refuses
       at every point and C computes (#106). pymbolic builds ``b - c`` as
       ``b + -1 * c``, so that sum is refused too, though numpy computes it;
-      ``1 * b[i] - c[i]`` is not. A negated truth value alone, ``-b[i]``, is
-      ``-1 * b[i]`` in the term, which numpy computes, and is not refused;
+      ``1 * b[i] - c[i]`` is not. A negated truth value alone is not
+      refused: it is ``-1 * b[i]`` in the term, which numpy computes, whether
+      it was written so or as ``-b[i]``, which numpy refuses natively
+      (``The numpy boolean negative ... is not supported``) and the compiled
+      run computes as ``-1 * b[i]``; the trace cannot tell the two apart;
     * a numpy integer to a negative integer power, ``k[i] ** -1``: numpy
       refuses it at every point, and loopy's integer power inverts the base
       into an integer, ``0`` for every base but ``1`` and ``-1`` (#109). A
@@ -2948,7 +2951,12 @@ def _refuse_arithmetic(expr: Any, params: Mapping[str, Any], where: str) -> None
       int, a loop variable's, by a negative literal, which Python refuses and
       C computes as numpy shifts a numpy integer;
     * ``//`` or ``%`` with a complex operand, which numpy refuses and C has
-      no operation for.
+      no operation for;
+    * ``/``, ``//`` or ``%`` of a Python number, a loop variable's, by a
+      literal zero, which Python refuses and C computes as numpy divides a
+      numpy number by zero, to ``0``, ``inf`` or ``nan`` (#105). A divisor
+      that is zero only at run time is left to the native refusal, as an
+      exponent whose sign the trace does not know is.
     """
     from loopty.promotion import Promotion
 
@@ -2963,6 +2971,9 @@ def _refuse_arithmetic(expr: Any, params: Mapping[str, Any], where: str) -> None
             _refuse_negative_shift(node, promotion, where)
         elif isinstance(node, prim.FloorDiv | prim.Remainder):
             _refuse_complex_division(node, promotion, where)
+            _refuse_division_by_zero(node, promotion, where)
+        elif isinstance(node, prim.Quotient):
+            _refuse_division_by_zero(node, promotion, where)
 
 
 def _negated(expr: Any) -> Any:
@@ -3086,6 +3097,37 @@ def _refuse_negative_shift(node: Any, promotion: Any, where: str) -> None:
         "shifts it as numpy shifts an integer by a negative amount, to 0 or -1, "
         "so the compiled run would compute a value where the native one has "
         f"none. Write '{shiftee} {opposite} {-shift}' to shift the other way"
+    )
+
+
+def _refuse_division_by_zero(node: Any, promotion: Any, where: str) -> None:
+    """Refuse a Python number divided by a literal zero.
+
+    See :func:`_refuse_arithmetic`. numpy divides a numpy number by zero, to
+    ``0`` for integers and to ``inf`` or ``nan`` for reals, with a warning,
+    which the compiled run computes too (:mod:`loopty.operations`).
+    """
+    divisor = node.denominator
+    if not isinstance(divisor, int | float) or isinstance(divisor, np.generic):
+        return
+    if divisor != 0:
+        return
+    native = promotion.types(node.numerator)[0]
+    if not native or any(isinstance(sample, np.generic) for sample in native):
+        return
+    if isinstance(node, prim.FloorDiv):
+        symbol = "//"
+    elif isinstance(node, prim.Remainder):
+        symbol = "%"
+    else:
+        symbol = "/"
+    raise TraceError(
+        f"{_shown(node)} at {where} divides by zero. Natively "
+        f"{_shown(node.numerator)} is a Python number, and Python refuses "
+        f"'{symbol}' by zero (ZeroDivisionError), while the compiled kernel "
+        "computes what numpy computes for a numpy number divided by zero, 0, "
+        "inf or nan, so the compiled run would compute a value where the "
+        "native one has none. Divide by a value that is not zero"
     )
 
 
