@@ -1418,6 +1418,23 @@ with a pair of statement instances.
   one work item". Every tag is refused, `for` included, and a sum's loop as
   well, as `affine` refuses a map over a tagged loop: a tag goes on the loops
   a step makes, after it.
+- `loopty run` refuses two kernels' claims of one fact id, as `lanky check`
+  does since lanky's #52 (#95). Two kernels one definition makes, as a
+  factory does each time it is called, share every id, and the run built its
+  ledger with `Ledger.add`, which replaces a fact of the same id: a file
+  scheduling both with the same steps kept one set of facts for the two,
+  the second kernel's in place of the first's, a refuted one as readily as a
+  decided one, and exited 0. The first kernel's fact is kept now, the other
+  kernel's claim is recorded on it, by its statement, as `duplicate_claims`
+  in its provenance (the key `lanky check` records it under, so `--json`
+  carries it), and a `DUPLICATE` block under the table names the kernel,
+  each id, and the claims of it in the table and not, and says how to give
+  each kernel an id of its own; the command exits 1. One kernel scheduled
+  several times is not refused, nor a schedule of a schedule of it: its
+  schedules that share their first steps share the facts about them, and a
+  schedule run twice keeps both agreement facts, the second with `#2` after
+  its id.
+
 ### Changed
 
 - **Executor options are separate from kernel arguments.** Every argument of

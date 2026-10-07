@@ -62,7 +62,7 @@ repeated under the table the way ``lanky check`` repeats it, with lanky's own
 one, the fact's ``reason`` (the limit a ``buildable`` fact hits, or the outputs
 a compiled run disagreed on), or a line saying nothing was recorded. The
 command then exits 1, as it does when a kernel cannot be scheduled, a schedule
-cannot be retargeted, or a run raises.
+cannot be retargeted, a run raises, or two kernels claim one fact id (below).
 
 A run that raises, whatever it raises, is reported by the exception's type and
 message, the kernel counts as failed, and the file's other kernels are still
@@ -81,6 +81,23 @@ fact of a kernel that rewrites its ragged layout
 (:func:`loopty.typing.layout_facts`) has that fact beside it in the ledger, as
 ``lanky check`` lists it among the kernel's, so that the assumption it is
 decided under is a row of the table and not only an id.
+
+Two kernels one definition makes
+--------------------------------
+
+A function that decorates a nested definition each time it is called makes
+kernels that share that definition, and so every fact id: two schedules of
+them with the same steps make two claims of each id, and a ledger holds one
+fact per id. ``lanky check`` refuses such claims (lanky's #52), and so does
+this command: the first kernel's fact is kept, the other's claim is recorded
+on it as ``duplicate_claims`` in its provenance, as ``lanky check`` records
+it, and a ``DUPLICATE`` block under the table names the kernel, each id and
+the claims of it, in the table and not, and the command exits 1. Each kernel
+needs an id of its own: a definition of its own, or a ``__qualname__`` of its
+own given to the function before it is decorated. One kernel scheduled
+several times is not refused: two of its schedules that share their first
+steps share the facts about them, and a schedule run twice keeps both
+agreement facts, the second under its id with ``#2`` after it.
 """
 
 from __future__ import annotations
@@ -238,6 +255,148 @@ def _native(obj: Any) -> Any:
     return source if callable(source) else None
 
 
+#: The provenance key a fact records the other claims of its id under, as
+#: :func:`lanky.check.check_path` records them. Read here rather than through
+#: ``Ledger.duplicated``, which lanky added after the version loopty requires.
+DUPLICATE_CLAIMS = "duplicate_claims"
+
+
+def _kernel_of(schedule: Any) -> Any:
+    """The kernel, program or term a schedule is of, through any schedule of it.
+
+    ``Schedule(Schedule(k))`` is a schedule of ``k``, as its fact ids say
+    (see :func:`loopty.schedule.definition_of`), so it and ``Schedule(k)``
+    are claims about one kernel.
+    """
+    from loopty.schedule import Schedule
+
+    source = schedule.source
+    while isinstance(source, Schedule):
+        source = source.source
+    return source
+
+
+class _Claims:
+    """The ledger of one ``loopty run``, and the kernel each of its ids is about.
+
+    A fact's id names the kernel's definition and the schedule it is about
+    (see :meth:`loopty.schedule.Schedule.fact_id`), and a ledger holds one
+    fact per id. Two schedules of one kernel that share their first steps
+    share the facts about those steps, which are the same claims, and the
+    ledger holds them once. Two kernels that one definition makes, as a
+    factory does each time it is called, share every id and are two
+    kernels: the second one's facts replaced the first's, a refuted one by
+    a decided one as readily, and the run exited 0 (#95). So the first
+    kernel to claim an id keeps it, and the claim of any other kernel is
+    recorded on that fact, by its statement, under ``duplicate_claims`` in
+    its provenance, as :func:`lanky.check.check_path` records the claims
+    ``lanky check`` refuses (lanky's #52); the run then fails (see
+    :func:`_report_duplicates`). The first claim stays in the ledger
+    whatever claims the id after it: :meth:`lanky.ledger.Ledger.add` would
+    replace it, and the record of the other kernel's claim with it.
+
+    A kernel is what a schedule was built from, through any schedule of it
+    (:func:`_kernel_of`), told apart from another by identity, as
+    :func:`collect` tells them apart. Two kernels with one id are refused
+    even when their claims read alike, as ``lanky check`` refuses them: one
+    of them is not in the table, and nothing says it is the same claim.
+    """
+
+    def __init__(self, ledger: Any) -> None:
+        self.ledger = ledger
+        #: Each id, with the kernels that claimed it, by identity, the one
+        #: whose fact the ledger holds first.
+        self._kernels: dict[str, list[int]] = {}
+        #: How many runs recorded an agreement fact under each id.
+        self._runs: dict[str, int] = {}
+
+    def add(self, fact: Any, kernel: Any) -> None:
+        """Add a fact about ``kernel``, unless its id is claimed already.
+
+        By another schedule of ``kernel``, whose fact is the same claim, or by
+        another kernel, whose fact is kept with this claim recorded on it.
+        """
+        if not self._another(fact, kernel) and fact.id not in self.ledger:
+            self.ledger.add(fact)
+
+    def add_run(self, fact: Any, kernel: Any) -> Any:
+        """Add the agreement fact of one run of ``kernel``, and return it.
+
+        Two schedules of one kernel with one id are one schedule, but a file
+        may run it twice, on two sets of inputs: each run keeps its fact, the
+        second under the id with ``#2`` after it, so that a refuted one is not
+        replaced by a later tested one. A run of another kernel whose
+        agreement has the id is that kernel's claim, recorded and not kept.
+        """
+        if self._another(fact, kernel):
+            return fact
+        count = self._runs[fact.id] = self._runs.get(fact.id, 0) + 1
+        if count > 1:
+            fact = dataclasses.replace(fact, id=f"{fact.id}#{count}")
+        self.ledger.add(fact)
+        return fact
+
+    def _another(self, fact: Any, kernel: Any) -> bool:
+        """Whether another kernel claimed ``fact.id`` first; records the claim if so.
+
+        A kernel's claim is recorded once per id, however many of its
+        schedules make it.
+        """
+        kernels = self._kernels.setdefault(fact.id, [id(kernel)])
+        if kernels[0] == id(kernel):
+            return False
+        if id(kernel) not in kernels:
+            kernels.append(id(kernel))
+            kept = self.ledger[fact.id]
+            claims = [*kept.provenance.get(DUPLICATE_CLAIMS, ()), fact.statement]
+            self.ledger.add(kept.with_status(kept.status, **{DUPLICATE_CLAIMS: claims}))
+        return True
+
+
+def _report_duplicates(ledger: Any) -> bool:
+    """Name each kernel whose id another kernel's claims had; whether there was one.
+
+    The ``DUPLICATE`` block ``lanky check`` prints, one per owner, with each
+    id and the claims of it by their statements, and what to do about it.
+    The words differ in one place: ``lanky check`` leaves a later claim of an
+    id unchecked, and ``loopty run`` has decided every schedule's casts by
+    the time the file is imported, and runs every schedule, so a claim is
+    said to be in the table or not in it. Either way the claim not in the
+    table may be one that does not hold, and the run fails.
+    """
+    duplicated = [fact for fact in ledger if fact.provenance.get(DUPLICATE_CLAIMS)]
+    by_owner: dict[str, list[Any]] = {}
+    for fact in duplicated:
+        by_owner.setdefault(fact.owner, []).append(fact)
+    for owner, facts in by_owner.items():
+        first = facts[0]
+        print()
+        if len(facts) == 1:
+            count = len(first.provenance[DUPLICATE_CLAIMS]) + 1
+            print(
+                f"DUPLICATE {owner} at {first.where}: {count} claims have the id "
+                f"{first.id}"
+            )
+            indent = "  "
+        else:
+            print(
+                f"DUPLICATE {owner} at {first.where}: several claims have each of "
+                f"the {len(facts)} ids below"
+            )
+            indent = "    "
+        for fact in facts:
+            if len(facts) > 1:
+                print(f"  {fact.id}")
+            print(f"{indent}in the table: {fact.statement}")
+            for statement in fact.provenance[DUPLICATE_CLAIMS]:
+                print(f"{indent}not in the table: {statement}")
+        print(
+            "  each kernel needs an id of its own: a definition of its own, or a "
+            "__qualname__ of its own before it is decorated"
+        )
+    return bool(duplicated)
+
+
 class RunVerb:
     """The ``run`` subcommand, registered with lanky under ``lanky.verbs``."""
 
@@ -317,19 +476,20 @@ class RunVerb:
         # target it runs on, so this only makes the executor insist on it.
         executor = LoopyExecutor(target=target)
         ledger = Ledger()
-        runs: dict[str, int] = {}
+        claims = _Claims(ledger)
         for schedule in schedules:
             name = _name_of(schedule)
             print(f"{name}: {schedule!r}")
+            of = _kernel_of(schedule)
             facts = schedule.facts()
             for fact in facts:
-                ledger.add(fact)
+                claims.add(fact, of)
             resting = {identifier for fact in facts for identifier in fact.rests_on}
             for fact in layout_facts(
                 schedule.term, **definition_of(schedule, schedule.term)
             ):
                 if fact.id in resting:
-                    ledger.add(fact)
+                    claims.add(fact, of)
             ok, reason = schedule.buildable
             if not ok:
                 print(f"  not buildable for the {schedule.target} target: {reason}")
@@ -358,14 +518,7 @@ class RunVerb:
                 print(f"  {type(exc).__name__}: {exc}")
                 failures += 1
                 continue
-            runs[fact.id] = runs.get(fact.id, 0) + 1
-            if runs[fact.id] > 1:
-                # Two schedules with one id are one schedule of one kernel,
-                # but a file may run it twice, on two sets of inputs: each run
-                # keeps its fact, so that a refuted one is not replaced by a
-                # later tested one.
-                fact = dataclasses.replace(fact, id=f"{fact.id}#{runs[fact.id]}")
-            ledger.add(fact)
+            fact = claims.add_run(fact, of)
             outputs = fact.provenance.get("outputs", {})
             for output, detail in outputs.items():
                 print(
@@ -379,6 +532,7 @@ class RunVerb:
             print(ledger.render())
         if args.json_out:
             Path(args.json_out).write_text(ledger.to_json(), encoding="utf-8")
+        duplicated = _report_duplicates(ledger)
         # The same block ``lanky check`` prints, through lanky's own printer:
         # what explains each refutation belongs under its line, and not only
         # in the JSON ledger.
@@ -389,7 +543,7 @@ class RunVerb:
             print(f"REFUTED {fact.owner} at {fact.where}: {fact.statement}")
             for line in refutation_lines(fact):
                 print(f"  {line}")
-        return 1 if refuted or failures else 0
+        return 1 if refuted or failures or duplicated else 0
 
     # lanky's Verb protocol calls ``run``; ``loopty run`` used to call the verb
     # itself, and both spellings are kept so that neither caller has to know.

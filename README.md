@@ -384,7 +384,10 @@ end to end; the edges are sharp.
   says so by name when one cannot be retargeted; without it each schedule keeps
   the target it was written for. A refuted fact is repeated under the ledger
   with what explains it, the block `lanky check` prints (a compiled run that
-  disagrees names the outputs and by how much), and the command exits 1.
+  disagrees names the outputs and by how much), and the command exits 1. So
+  it does when two kernels claim one fact id, as two kernels one definition
+  makes (a factory) do: a `DUPLICATE` block names the kernel and its ids, as
+  `lanky check` names them.
 
 **Partial.**
 

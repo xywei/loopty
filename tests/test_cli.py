@@ -652,6 +652,167 @@ def test_two_kernels_of_one_name_keep_their_schedules_facts_apart(tmp_path) -> N
 # }}}
 
 
+# {{{ two kernels one definition makes (#95)
+
+
+FACTORY = """
+from __future__ import annotations
+
+import numpy as np
+from lanky.prelude import Real
+
+from loopty import Arr, Fin, Schedule, kernel
+
+
+def make(scale):
+    @kernel
+    def double(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
+        for i in x.dom:
+            y[i] = scale * x[i] + 0.0 * x[i]
+
+    return double
+
+
+first = make(2.0)
+second = make(3.0)
+s1 = Schedule(first).split("i", 2)
+s2 = Schedule(second).split("i", 2)
+s3 = Schedule(first).split("i", 2).example(x=Arr.from_numpy(np.ones(4)), y=Arr.zeros(4))
+
+
+def example_inputs():
+    return {"x": Arr.from_numpy(np.arange(4.0)), "y": Arr.zeros(4)}
+"""
+
+
+def test_two_kernels_one_factory_makes_are_refused_as_lanky_check_refuses_them(
+    tmp_path, capsys
+) -> None:
+    """The issue's file, with inputs, and the first kernel scheduled again.
+
+    The two kernels share their definition, and so every id: the run kept
+    one set of facts for both, the second kernel's replacing the first's,
+    and exited 0 (#95). It refuses them now, as ``lanky check`` does since
+    lanky's #52: the first kernel's facts are kept, the second's claims are
+    recorded on them, and a ``DUPLICATE`` block names the kernel. The first
+    kernel's own second schedule is not a claim of another kernel: its casts
+    are the ones in the table, and its run keeps its ``#2``, so the record of
+    the second kernel's claims is not replaced with them.
+    """
+    path = write_fixture(tmp_path, FACTORY)
+    out_path = tmp_path / "ledger.json"
+    assert main(["run", str(path), "--json", str(out_path)]) == 1
+    out = capsys.readouterr().out
+    # Every schedule ran, each kernel against its own body.
+    assert out.count("  y: difference 0 ") == 3
+    facts = json.loads(out_path.read_text(encoding="utf-8"))
+    definition = "fixture.make.<locals>.double@11"
+    steps = "[c].split('i', 2, inner='i_inner', outer='i_outer')"
+    bijective = "split(i, 2) renames the instances of double one for one"
+    monotone = "the order after split(i, 2) runs every dependence of double forward"
+    (agreement,) = {
+        fact["statement"] for fact in facts if fact["kind"] == "agreement"
+    }
+    assert [
+        (fact["id"], fact["provenance"].get("duplicate_claims")) for fact in facts
+    ] == [
+        (f"cast:{definition}:{steps}:bijective", [bijective]),
+        (f"cast:{definition}:{steps}:monotone", [monotone]),
+        (f"agreement:{definition}:{steps}", [agreement]),
+        (f"agreement:{definition}:{steps}#2", None),
+    ]
+    block = out[out.index("DUPLICATE") :].splitlines()
+    assert block == [
+        "DUPLICATE double at fixture.py:14: several claims have each of the 3 "
+        "ids below",
+        f"  cast:{definition}:{steps}:bijective",
+        f"    in the table: {bijective}",
+        f"    not in the table: {bijective}",
+        f"  cast:{definition}:{steps}:monotone",
+        f"    in the table: {monotone}",
+        f"    not in the table: {monotone}",
+        f"  agreement:{definition}:{steps}",
+        f"    in the table: {agreement}",
+        f"    not in the table: {agreement}",
+        "  each kernel needs an id of its own: a definition of its own, or a "
+        "__qualname__ of its own before it is decorated",
+    ]
+
+
+def test_one_claim_of_an_id_prints_it_on_the_duplicate_line(tmp_path, capsys) -> None:
+    # Two kernels one factory makes, run with no schedule: each is run through
+    # the identity schedule, which makes no cast, so the one id they share is
+    # the agreement's, and the block says so on its first line, as lanky's does.
+    body = FACTORY.split("s1 = ")[0] + (
+        "\n\ndef example_inputs():\n"
+        '    return {"x": Arr.from_numpy(np.arange(4.0)), "y": Arr.zeros(4)}\n'
+    )
+    path = write_fixture(tmp_path, body)
+    assert main(["run", str(path)]) == 1
+    out = capsys.readouterr().out
+    block = out[out.index("DUPLICATE") :].splitlines()
+    assert block[0] == (
+        "DUPLICATE double at fixture.py:14: 2 claims have the id "
+        "agreement:fixture.make.<locals>.double@11:[c]"
+    )
+    assert [line.split(":")[0] for line in block[1:3]] == [
+        "  in the table",
+        "  not in the table",
+    ]
+
+
+def test_kernels_a_factory_names_apart_keep_their_facts(tmp_path, capsys) -> None:
+    # The fix the block names: a __qualname__ of each kernel's own, given
+    # before it is decorated.
+    body = (
+        FACTORY.replace(
+            "def make(scale):\n    @kernel\n    def double(",
+            "def make(scale, name):\n    def double(",
+        )
+        .replace(
+            "\n    return double\n",
+            "\n    double.__qualname__ = name\n    return kernel(double)\n",
+        )
+        .replace("make(2.0)", 'make(2.0, "double_two")')
+        .replace("make(3.0)", 'make(3.0, "double_three")')
+    )
+    path = write_fixture(tmp_path, body)
+    out_path = tmp_path / "ledger.json"
+    assert main(["run", str(path), "--json", str(out_path)]) == 0
+    assert "DUPLICATE" not in capsys.readouterr().out
+    facts = json.loads(out_path.read_text(encoding="utf-8"))
+    ids = [fact["id"] for fact in facts]
+    assert len(set(ids)) == len(ids) == 7
+    for name, count in (("double_two", 4), ("double_three", 3)):
+        assert len([i for i in ids if f":fixture.{name}@" in i]) == count
+    assert not [fact for fact in facts if "duplicate_claims" in fact["provenance"]]
+
+
+def test_a_schedule_of_a_schedule_is_a_schedule_of_its_kernel(tmp_path, capsys) -> None:
+    # ``Schedule(Schedule(double))`` names its facts by ``double``, so its
+    # casts are the plain schedule's claims, and not another kernel's.
+    body = TWICE.split("from {helpers}")[0] + (
+        "\n\n@kernel\n"
+        "def double(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):\n"
+        "    for i in x.dom:\n"
+        "        y[i] = 2.0 * x[i]\n\n\n"
+        'plain = Schedule(double).split("i", 2)\n'
+        'nested = Schedule(Schedule(double)).split("i", 2)\n\n\n'
+        "def example_inputs():\n"
+        '    return {"x": Arr.from_numpy(np.arange(4.0)), "y": Arr.zeros(4)}\n'
+    )
+    path = write_fixture(tmp_path, body)
+    out_path = tmp_path / "ledger.json"
+    assert main(["run", str(path), "--json", str(out_path)]) == 0
+    assert "DUPLICATE" not in capsys.readouterr().out
+    facts = json.loads(out_path.read_text(encoding="utf-8"))
+    kinds = [fact["kind"] for fact in facts]
+    assert kinds.count("bijective") == kinds.count("monotone") == 1
+
+
+# }}}
+
+
 # {{{ a cast decided under a layout the kernel rewrites (#51)
 
 

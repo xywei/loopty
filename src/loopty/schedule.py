@@ -136,8 +136,11 @@ two kernels of one name, one defined in a file and one imported into it, keep
 their schedules' facts apart. Two schedules of one kernel in one file keep
 theirs apart too, since a ledger keeps one fact per id, while two that share
 their first steps share the facts about those steps, which are the same
-claims. :attr:`Schedule.key` is the readable call text, which names the
-kernel by its name.
+claims. Two kernels one definition makes, as a factory does each time it is
+called, share every id, and their schedules' facts are two claims of each,
+which ``loopty run`` refuses as ``lanky check`` does (see :mod:`loopty.cli`).
+:attr:`Schedule.key` is the readable call text, which names the kernel by its
+name.
 
 Maps whose image has holes
 --------------------------
