@@ -305,7 +305,10 @@ def test_gathers_requirement_is_decided_under_numbers_postcondition() -> None:
         "the elements of perm are points of Fin(n) where gather is called"
     )
     (restated,) = facts_of("permuted", "postcondition-in-scope")
-    assert requirement.rests_on == (restated.id,)
+    # The postcondition is tested on number's body, and the program runs its
+    # term: the requirement rests on the two computing alike, too.
+    (faithful,) = facts_of("number", "trace-faithful")
+    assert requirement.rests_on == (restated.id, faithful.id)
     (used,) = requirement.provenance["used"]
     assert used.startswith("the postcondition of number, after number at travel.py:")
     assert requirement.status is Status.DECIDED
@@ -374,7 +377,8 @@ def test_the_layout_requirement_is_decided_under_scans_postcondition() -> None:
     (restated,) = facts_of("through", "postcondition-in-scope")
     # The program cites scan_monotone, and the requirement does not need it:
     # it is the contract's equality, which the postcondition states.
-    assert requirement.rests_on == (restated.id,)
+    (faithful,) = facts_of("scan", "trace-faithful")
+    assert requirement.rests_on == (restated.id, faithful.id)
     assert travel.through.uses == (travel.scan_monotone,)
     assert not any("scan_monotone" in h for h in requirement.provenance["used"])
     assert ledger().support(requirement).effective is Status.TESTED
@@ -838,7 +842,32 @@ def test_a_requirement_decided_under_a_refuted_postcondition_is_checked() -> Non
     (restated,) = [
         f for f in wrong.lied_to.facts() if f.kind == "postcondition-in-scope"
     ]
-    assert fact.rests_on == (restated.id,)
+    assert restated.id in fact.rests_on
+
+
+def test_a_postcondition_of_a_body_its_term_does_not_compute_is_checked() -> None:
+    # two_faced's postcondition holds of its body, and its term, which the
+    # compiled program runs, counts up to n: gather's requirement, decided
+    # under the postcondition, skipped its check, and the compiled program
+    # read x[n] where the native one ran.
+    facts = {fact.kind: fact for fact in wrong.two_faced.facts()}
+    assert facts["postcondition"].status is Status.TESTED
+    assert facts["trace-faithful"].status is Status.REFUTED
+    term = wrong.faced.term
+    (requirement,) = term.requirements
+    assert requirement.decided and requirement.flag is not None
+    assert (
+        "that the term of two_faced computes what its body computes, on which "
+        "its postcondition was tested, is refuted"
+    ) in requirement.reason
+    # The fact rests on the callee's trace-faithful fact, as well as on the
+    # restatement of its postcondition.
+    (fact,) = [f for f in wrong.faced.facts() if f.kind == "requirement"]
+    assert facts["trace-faithful"].id in fact.rests_on
+
+    wrong.faced(**_permutation_inputs())
+    with pytest.raises(ValueError, match="stops before gather"):
+        LoopyExecutor().run(wrong.faced, **_permutation_inputs())
 
 
 def test_a_theorems_binder_does_not_capture_the_size_it_is_instantiated_at() -> None:

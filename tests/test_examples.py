@@ -785,8 +785,9 @@ def test_the_travel_demo_decides_its_requirements_or_checks_them() -> None:
         requirement = requirements[key]
         assert requirement["status"] == "decided"
         assert requirement["effective"] == "tested"
-        (rests_on,) = requirement["rests_on"]
-        assert rests_on.startswith(f"postcondition-in-scope:travel.{key[0]}@")
+        restated, faithful = requirement["rests_on"]
+        assert restated.startswith(f"postcondition-in-scope:travel.{key[0]}@")
+        assert faithful.startswith("trace-faithful:travel.")
     # Nothing says what number_quiet writes, or that the scan's offsets stay
     # below nnz, so the program checks them.
     for key in (("checked", "element"), ("flat", "element")):

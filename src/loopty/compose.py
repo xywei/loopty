@@ -994,6 +994,9 @@ class _Composer:
         #: the restatement's id, and why each fact a decision rests on is not
         #: at least ``tested`` (``None`` when it is), by id.
         self.postconditions: dict[str, Any] = {}
+        #: The callee each ``trace-faithful`` fact a postcondition hypothesis
+        #: rests on is the fact of, by its id.
+        self.faithfuls: dict[str, Any] = {}
         self.standings: dict[str, str | None] = {}
         #: What last wrote each program array, by name.
         self.last_writer: dict[str, str] = {}
@@ -1956,6 +1959,11 @@ class _Composer:
             if slot.post is not None:
                 identifier = self.restatement_id(slot.kernel)
                 self.postconditions[identifier] = slot.kernel
+                # The postcondition is tested on the callee's body, and the
+                # program runs the callee's term: it says what the term leaves
+                # only where the two compute alike.
+                faithful = self.faithful_id(slot.kernel)
+                self.faithfuls[faithful] = slot.kernel
                 claim = self.resolve_claim(slot.post)
                 if unchecked:
                     # The postcondition was tested on runs its contract let
@@ -1975,7 +1983,7 @@ class _Composer:
                             claim=claim,
                             source=f"the postcondition of {slot.kernel.__name__}, "
                             f"after {slot.label} at {slot.where}",
-                            rests_on=(identifier,),
+                            rests_on=(identifier, faithful),
                             mentions=frozenset(self.arrays_in(claim)),
                         )
                     )
@@ -2026,7 +2034,8 @@ class _Composer:
         A requirement isl decided under hypotheses is skipped by the compiled
         program, which trusts what the hypotheses rest on. A postcondition its
         kernel's native runs refuted, or that nothing tested, is no ground for
-        that, nor is a cited theorem that the property tester does not pass,
+        that, nor one of a kernel whose term is not shown to compute what its
+        body does, nor a cited theorem that the property tester does not pass,
         or an axiom: the requirement keeps its checked point (#115).
         """
         out: list[str] = []
@@ -2047,26 +2056,50 @@ class _Composer:
 
     def look_up(self, identifier: str) -> str | None:
         """The standing of one fact a hypothesis rests on (see :meth:`standing`)."""
-        from lanky.ledger import STATUS_STRENGTH, Status
+        from lanky.ledger import STATUS_STRENGTH
 
-        kernel = self.postconditions.get(identifier)
-        if kernel is not None:
+        from loopty.faithful import KIND as FAITHFUL
+
+        tables = ((self.postconditions, "postcondition"), (self.faithfuls, FAITHFUL))
+        for table, kind in tables:
+            kernel = table.get(identifier)
+            if kernel is None:
+                continue
             try:
                 facts = kernel.facts()
             except Exception as exc:  # noqa: BLE001 - then it stands on nothing
                 return (
-                    f"the postcondition of {kernel.__name__} could not be tested: "
+                    f"the facts of {kernel.__name__} could not be established: "
                     f"{type(exc).__name__}: {exc}"
                 )
-            post = next((f for f in facts if f.kind == "postcondition"), None)
-            if post is not None and STATUS_STRENGTH[post.status] >= 1:
+            fact = next((f for f in facts if f.kind == kind), None)
+            if fact is not None and STATUS_STRENGTH[fact.status] >= 1:
                 return None
-            status = post.status.value if post is not None else Status.ASSUMED.value
+            status = fact.status.value if fact is not None else "assumed"
+            if kind == FAITHFUL:
+                return (
+                    f"that the term of {kernel.__name__} computes what its body "
+                    f"computes, on which its postcondition was tested, is {status}"
+                )
             return f"the postcondition of {kernel.__name__} is {status}"
         for theorem in self.uses:
             if theorem.fact_id == identifier:
                 return _theorem_standing(theorem)
         return f"{identifier} is a fact whose status the program does not know"
+
+    @staticmethod
+    def faithful_id(kernel: Any) -> str:
+        """The id of ``kernel``'s ``trace-faithful`` fact, as its own facts give it."""
+        from lanky.ledger import fact_id
+
+        from loopty.faithful import KIND as FAITHFUL
+
+        return fact_id(
+            FAITHFUL,
+            getattr(kernel, "qualname", kernel.__name__),
+            module=getattr(kernel, "module", None),
+            line=getattr(kernel, "line", None),
+        )
 
     def restatement_id(self, kernel: Any) -> str:
         """The id of the program's restatement of ``kernel``'s postcondition."""

@@ -8,10 +8,10 @@ of them may decide the requirement, so each program checks it between the
 calls (``loopty.compose``).
 
 The programs at the end are decided, or would be, on the strength of
-something no run bears out: a postcondition its kernel's runs refute, a
-theorem instantiated with a size its own binder captures, a postcondition of
-a call whose contract nothing checks in the program, and an axiom. Each is
-checked when the program runs.
+something no run bears out: a postcondition its kernel's runs refute, one of
+a kernel whose term is not its body, a theorem instantiated with a size its
+own binder captures, a postcondition of a call whose contract nothing checks
+in the program, and an axiom. Each is checked when the program runs.
 """
 
 from __future__ import annotations
@@ -348,6 +348,28 @@ def liar(perm: Arr[Fin[n], Fin[n]]) -> all(perm[i] == n - 1 - i for i in Fin[n])
 def lied_to(perm, x, y):
     """Decided under liar's postcondition, which its own runs refute."""
     liar(perm)
+    gather(perm, x, y)
+
+
+@kernel
+def two_faced(perm: Arr[Fin[n], Fin[n]]) -> all(perm[i] == n - 1 - i for i in Fin[n]):
+    """Reverses the cells natively, and counts up to ``n`` in its traced term.
+
+    The postcondition is true of every native run, and the compiled program
+    runs the term, which an ``isinstance`` the trace takes the other way makes
+    another kernel: its ``trace-faithful`` fact is refuted.
+    """
+    for i in perm.dom:
+        perm[i] = perm.dom.size - 1 - i
+    if not isinstance(perm, Arr):
+        for i in perm.dom:
+            perm[i] = i + 1
+
+
+@program
+def faced(perm, x, y):
+    """Decided under a postcondition of the body, which the term does not keep."""
+    two_faced(perm)
     gather(perm, x, y)
 
 
