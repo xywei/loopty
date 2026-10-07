@@ -13,7 +13,7 @@ from __future__ import annotations
 import islpy as isl
 import numpy as np
 import pytest
-from lanky.prelude import Nat, Real
+from lanky.prelude import Bool, Nat, Real
 
 from loopty import Arr, Fin, kernel, when
 from loopty import sum as reduce_sum
@@ -1542,3 +1542,67 @@ def test_a_natural_scalar_does_not_make_a_loop_free_access_unprovable() -> None:
     off = Arr.zeros(3, dtype=np.int64)
     run(seeded, a=1, cnt=Arr.from_numpy(np.array([1, 2], dtype=np.int64)), off=off)
     assert list(off.numpy()) == [1, 2, 4]
+
+
+# {{{ a guard that names no loop variable (#90)
+
+
+def test_a_guard_that_reads_only_scalars_is_kept_in_the_compiled_kernel() -> None:
+    # loopy hoisted a guard shared by every instruction of the kernel and
+    # naming no iname out of the device function, into host code that
+    # lp.ExecutableCTarget generates and never runs, so every one of these
+    # wrote its cells whatever the scalar said.
+    from loopty.executor import LoopyExecutor, emit_code
+    from loopty.schedule import Schedule
+
+    @kernel
+    def g_flag(flag: Bool, y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(flag):
+                y[i] = 1.0
+
+    @kernel
+    def g_real(a: Real, y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(a > 0.5):
+                y[i] = 1.0
+
+    @kernel
+    def g_cell(flag: Bool, y: Arr[Fin[n + 1], Real]):  # noqa: F821
+        with when(flag):
+            y[0] = 1.0
+
+    @kernel
+    def g_two(flag: Bool, x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in x.dom:
+            with when(flag):
+                x[i] = 1.0
+        for i in y.dom:
+            with when(flag):
+                y[i] = 2.0
+
+    cases = (
+        (g_flag, "flag", (False, True), {"y": 2}),
+        (g_real, "a", (0.0, 1.0), {"y": 2}),
+        (g_cell, "flag", (False, True), {"y": 3}),
+        (g_two, "flag", (False, True), {"x": 2, "y": 2}),
+    )
+    for k, scalar, values, sizes in cases:
+        for value in values:
+            arguments = {scalar: value, **{a: np.zeros(m) for a, m in sizes.items()}}
+            fact = LoopyExecutor().differential(k, Schedule(k), arguments)
+            assert fact.status.value == "tested", (k, value, fact.provenance)
+            native = {scalar: value, **{a: np.zeros(m) for a, m in sizes.items()}}
+            k(**native)
+            out = LoopyExecutor().run(
+                k, **{scalar: value, **{a: np.zeros(m) for a, m in sizes.items()}}
+            )
+            for name in sizes:
+                assert np.array_equal(out[name], native[name]), (k, value, name)
+    # The guard is in the function that runs, around the loop it guards.
+    code = emit_code(Schedule(g_real))
+    assert "if (a > 0.5)" in code
+    assert code.index("if (a > 0.5)") < code.index("for (")
+
+
+# }}}

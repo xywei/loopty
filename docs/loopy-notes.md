@@ -1,6 +1,6 @@
 # Notes on loopy and islpy
 
-Seventeen interactions with loopty's dependencies that cost real debugging
+Eighteen interactions with loopty's dependencies that cost real debugging
 time, each with the local workaround and the reason it is local. No upstream
 issues were filed: these are notes so that the next person meets the answer
 instead of the symptom.
@@ -791,3 +791,50 @@ alone: loopy types it `int32` or `int64` by its value, as numpy would.
 stored, where numpy rounds the constant to single precision first. The two
 differ in the last bit of a single, within the `approx` class a bare floating
 dtype is compared by (`tolerance.element_class`).
+
+## 18. A guard that names no loop variable goes into host code that never runs
+
+**Symptom.** A guard that reads only scalars, around every statement of a
+kernel, is missing from the compiled code:
+
+```python
+@kernel
+def g_real(a: Real, y: Arr[Fin[n], Real]):
+    for i in y.dom:
+        with when(a > 0.5):
+            y[i] = 1.0
+```
+
+lowers to an instruction with `predicates={a > 0.5}`, still there after
+`lp.preprocess_kernel`, and loopy generates
+
+```c
+for (int32_t i = 0; i <= -1 + n; ++i)
+  y[i] = 1.0;
+```
+
+for `lp.ExecutableCTarget`, so the compiled run writes `y` at `a = 0.0`,
+where the native run writes nothing. `when(flag)` of a `Bool` scalar, and a
+guarded statement outside any loop (`y[0] = 1.0`), are the same. A guard that
+names a loop variable (`when(a > i)`) is emitted, as is a guard on one
+statement of several.
+
+**Cause.** loopy's conditional hoisting (`build_insn_group` in
+`loopy/codegen/control.py`) wraps a group of schedule items in a predicate
+they all carry, as far out as the inames the predicate names allow, which for
+none is the outermost level: the host code around the call of the device
+function. `lp.ExecutableCTarget` generates host code with a C AST builder that
+can hold an `if`, and the hoisted guard ends up there, `if (a > 0.5) { }`
+around a call it does not emit (`get_kernel_call` is `None`), while the device
+function, which is what the C executor compiles and calls, is generated as if
+the guard were implemented. `lp.CTarget`'s host builder cannot hold a
+condition, so the guard stays in the device function there, and the PyOpenCL
+target's host code is Python that runs, so a guard hoisted around the launch is
+honoured.
+
+**Local fix.** Target `c` is `lower.InProcessCTarget`, a subclass of
+`lp.ExecutableCTarget` whose host AST builder says it cannot implement a
+conditional. loopy then hoists the guard no further than the device function's
+body, `if (a > 0.5)` around the loop. Nothing else about the target changes:
+the host code was never run, and the device function is the same for every
+kernel loopy hoisted nothing out of.

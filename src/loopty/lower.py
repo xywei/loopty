@@ -64,6 +64,7 @@ import numpy as np
 import pymbolic.primitives as prim
 from loopy.symbolic import Reduction as LoopyReduction
 from loopy.symbolic import set_to_cond_expr
+from loopy.target.c import CFamilyASTBuilder
 from pymbolic.mapper import Mapper
 
 from loopty.domain import STORAGES, Union
@@ -97,6 +98,7 @@ __all__ = [
     "RESERVED_PREFIX",
     "RESERVED_WORDS",
     "ExpressionLowerer",
+    "InProcessCTarget",
     "LoweringError",
     "Lowering",
     "allows_contraction",
@@ -201,17 +203,46 @@ def numpy_dtype(sort: Any) -> np.dtype:
     raise LoweringError(f"no numpy dtype for {sort!r}")
 
 
+class _HostCodeWithoutConditionals(CFamilyASTBuilder):
+    """The host code of :class:`InProcessCTarget`, which holds no ``if``."""
+
+    @property
+    def can_implement_conditionals(self) -> bool:
+        return False
+
+
+class InProcessCTarget(lp.ExecutableCTarget):
+    """``lp.ExecutableCTarget``, with every condition in the code that runs.
+
+    loopy hoists a condition shared by every instruction of a kernel as far out
+    as the iname it names allows, and one that names no iname, such as a
+    ``when(flag)`` or ``when(a > 0.5)`` guarding the whole body, goes out of the
+    device function into the host code around its call. ``lp.ExecutableCTarget``
+    generates that host code and never runs it: its executor calls the device
+    function directly. So the guard was gone and the body ran unconditionally
+    (#90). With host code that cannot hold a condition, loopy hoists the guard
+    no further than the device function's body, and it is emitted there.
+    Everything else is ``lp.ExecutableCTarget``'s; note 18 in
+    ``docs/loopy-notes.md`` has the details.
+    """
+
+    def get_host_ast_builder(self) -> Any:
+        return _HostCodeWithoutConditionals(self)
+
+
 def target_for(target: str = "c") -> Any:
     """The loopy target named by ``target``.
 
-    ``"c"`` is ``lp.ExecutableCTarget``, which compiles with the system toolchain
+    ``"c"`` is :class:`InProcessCTarget`, ``lp.ExecutableCTarget`` with every
+    condition in the device function, which compiles with the system toolchain
     and runs in process; it is the only target a laptop or CI ever uses.
     ``"opencl"`` is ``lp.PyOpenCLTarget``, and pyopencl is imported here and
     nowhere else, inside the branch, so that importing loopty on a machine
-    without a device costs nothing and can never fail.
+    without a device costs nothing and can never fail. Its host code is Python
+    that runs, so a guard hoisted around the kernel's launch is honoured there.
     """
     if target in ("c", None):
-        return lp.ExecutableCTarget()
+        return InProcessCTarget()
     if target == "c-source":
         return lp.CTarget()
     if target == "opencl":

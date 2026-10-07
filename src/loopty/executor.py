@@ -1,14 +1,15 @@
 """Running kernels: the loopy executor and the differential test.
 
 The executor is an ordinary lanky executor: give it a kernel or a schedule and
-numpy arguments and it runs them. Target ``c`` uses ``lp.ExecutableCTarget``,
-which compiles and runs locally and is what the test suite and the demos use at
-tiny sizes. Target ``opencl`` uses ``lp.PyOpenCLTarget`` and belongs on a machine
-with a device; pyopencl is an optional extra for that reason, is imported inside
-one branch of one function, and is never reached by importing loopty. loopy
-itself is imported the first time something is lowered, not with this module:
-lanky loads the executor through its entry point for every command it runs,
-including a check of a file that has no kernels in it.
+numpy arguments and it runs them. Target ``c`` uses ``lp.ExecutableCTarget``
+(as :class:`loopty.lower.InProcessCTarget`, which keeps every guard in the code
+that runs), which compiles and runs locally and is what the test suite and the
+demos use at tiny sizes. Target ``opencl`` uses ``lp.PyOpenCLTarget`` and
+belongs on a machine with a device; pyopencl is an optional extra for that
+reason, is imported inside one branch of one function, and is never reached by
+importing loopty. loopy itself is imported the first time something is lowered,
+not with this module: lanky loads the executor through its entry point for
+every command it runs, including a check of a file that has no kernels in it.
 
 Executor options and kernel arguments are kept apart. Every positional and
 keyword argument of :meth:`LoopyExecutor.run` is an argument of the kernel, so a

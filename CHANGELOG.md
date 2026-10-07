@@ -1405,6 +1405,17 @@ with a pair of statement instances.
   onto two work items is refused as well. A monotone fact about a schedule
   with a loop on a hardware axis says "within one work item", and the
   transcripts are regenerated.
+- A guard that reads only scalars is kept in the compiled kernel (#90).
+  `when(flag)` of a `Bool` scalar, or `when(a > 0.5)` of a `Real` one, around
+  every statement of a kernel was lowered as an instruction predicate naming
+  no loop variable, which loopy hoists out of the device function into host
+  code around its call, and `lp.ExecutableCTarget` generates that host code
+  and never runs it. So the compiled run wrote every cell whatever the scalar
+  said, where the native run wrote none: the differential test refuted such
+  a kernel and the `trace-faithful` fact did not. Target `c` is now
+  `loopty.lower.InProcessCTarget`, whose host code cannot hold a condition, so
+  the guard is emitted around the loop in the function that runs. See note 18
+  in `docs/loopy-notes.md`.
 
 ### Changed
 
