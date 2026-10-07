@@ -1,6 +1,6 @@
 # Notes on loopy and islpy
 
-Twenty interactions with loopty's dependencies that cost real debugging
+Twenty-one interactions with loopty's dependencies that cost real debugging
 time, each with the local workaround and the reason it is local. No upstream
 issues were filed: these are notes so that the next person meets the answer
 instead of the symptom.
@@ -937,3 +937,27 @@ with `lp.remove_unused_inames`, and calls `assignment_to_subst`
 sound; loopy's own resolution of the definition is by instruction
 dependencies, which are by array and not by cell, so it would accept the
 removal whatever the reads are.
+
+## 21. After a fusion, dependencies drawn by array can leave loopy no order
+
+**What happens.** The lowering draws an instruction's dependencies by array:
+a statement depends on every earlier one that writes an array it reads, at
+whatever cells (`lower_generic`, and note 12 for why they are final). While a
+program's loops run in sequence that is only the program's order. A fusion
+puts two of them in one loop, and a call between them in the term can then be
+ordered both ways: after the fused loop, because it reads what the first
+fused statement writes, and before it, because the second reads an array it
+writes, at cells it never writes. The casts are decided, since no cell passes
+from it to the second, and loopy fails in code generation with
+`CycleError: EnterLoop(iname='x')`. Dropping the dependency is not enough
+alone: loopy then asks that two instructions touching one variable be ordered
+or said to need no order, and raises `VariableAccessNotOrdered` ("No
+dependency relationship found between 'front_S0' which writes the variable
+'h' and 'back_S0' which also accesses the variable 'h'").
+
+**Local fix.** After a fusion, `Schedule._ordered_as_the_term` keeps an
+instruction's dependency on another statement only where the dependences the
+casts were checked against order an instance of one before an instance of the
+other, and puts each pair it drops in the other's `no_sync_with` with scope
+`any`: they touch no cell in common, so they need no order and no barrier.
+The instructions that compute a ragged row's length keep their dependencies.

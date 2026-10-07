@@ -71,6 +71,22 @@ def doubled(f: Arr[Fin[n], Real], g: Arr[Fin[n], Real]):  # noqa: F821
 
 
 @kernel
+def front(f: Arr[Fin[n], Real], h: Arr[Fin[n], Real]):  # noqa: F821
+    """The front half of ``f``."""
+    for x in h.dom:
+        with when(2 * x < h.dom.size):
+            h[x] = f[x]
+
+
+@kernel
+def back(h: Arr[Fin[n], Real], rhs: Arr[Fin[n], Real]):  # noqa: F821
+    """The back half of ``h``, plus one."""
+    for i in rhs.dom:
+        with when(2 * i >= rhs.dom.size):
+            rhs[i] = h[i] + 1.0
+
+
+@kernel
 def bump(u: Arr[Fin[n], Real]):  # noqa: F821
     """Add one to every cell, in place."""
     for k in u.dom:
@@ -134,6 +150,16 @@ def down(
 
 
 @kernel
+def row_total(
+    g: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The sum of each row."""
+    for w in z.dom:
+        z[w] = reduce_sum(g[w, q] for q in g.dom[w])
+
+
+@kernel
 def rows_then_cells(
     a: Arr[Fin[n], Fin[m], Real],  # noqa: F821
     s: Arr[Fin[n], Real],  # noqa: F821
@@ -189,12 +215,31 @@ def chained(u, rhs):
 
 
 @program
+def between(u, rhs):
+    """A call between the two fused that the second reads only by array."""
+    f = Arr.zeros_like(u)
+    h = Arr.zeros_like(u)
+    flux(u, f)
+    front(f, h)
+    back(h, rhs)
+
+
+@program
 def bumped(u, rhs):
     """The producer's input written between the producer and the consumer."""
     f = Arr.zeros_like(u)
     flux(u, f)
     bump(u)
     divergence(f, rhs)
+
+
+@program
+def bumped_after(u, rhs):
+    """The producer's input written after the consumer has read the array."""
+    f = Arr.zeros_like(u)
+    flux(u, f)
+    divergence(f, rhs)
+    bump(u)
 
 
 @program
@@ -267,6 +312,14 @@ def squares(a, b):
     g = Arr.zeros_like(a)
     square2(a, g)
     down(g, b)
+
+
+@program
+def squared_rows(a, z):
+    """Every cell squared, then each row summed."""
+    g = Arr.zeros_like(a)
+    square2(a, g)
+    row_total(g, z)
 
 
 @program
@@ -468,6 +521,45 @@ def test_a_statement_deeper_in_the_producer_moves_with_its_row() -> None:
         )
 
 
+def test_the_outer_loop_of_a_nest_fuses_with_a_loop_of_one_level() -> None:
+    # square2's two loops are one domain of the kernel, since no statement
+    # leaves the nest; the fusion takes the outer one and cuts the domain
+    # after it, as the lowering cuts a nest a statement leaves. Each row is
+    # squared and then summed, in one loop over the rows.
+    fused = Schedule(squared_rows).fuse("square2", "row_total")
+    assert statements(fused) == [("bijective", "decided"), ("monotone", "decided")]
+    assert fused.buildable == (True, "")
+    loop = squared_rows.term.stmt("square2.S0").inames[0]
+    entry = fused.kernel.default_entrypoint
+    insns = {insn.id: insn for insn in entry.instructions}
+    assert loop in insns["row_total_S0"].within_inames
+    for rows, cols in ((1, 1), (3, 4), (5, 2)):
+        a = np.arange(rows * cols, dtype=float).reshape(rows, cols) / 3.0
+        agrees(squared_rows, fused, {"a": Arr.from_numpy(a), "z": Arr.zeros(rows)})
+    # And with the squares computed where the sum reads them, no g at all.
+    substituted = fused.substitute("g")
+    assert "g" not in substituted.kernel.default_entrypoint.temporary_variables
+    a = np.arange(12, dtype=float).reshape(3, 4)
+    agrees(squared_rows, substituted, {"a": Arr.from_numpy(a), "z": Arr.zeros(3)})
+
+
+def test_a_call_between_the_fused_runs_after_their_loop() -> None:
+    # front reads the f flux stores, so it runs after the fused loop; back
+    # reads h, which front writes, but at cells front does not write. The
+    # lowering's instruction dependencies are by array, and loopy found no
+    # order for the three (a CycleError) until those were cut back to the
+    # dependences the casts were checked against.
+    fused = Schedule(between).fuse("flux", "back")
+    assert statements(fused) == [("bijective", "decided"), ("monotone", "decided")]
+    entry = fused.kernel.default_entrypoint
+    insns = {insn.id: insn for insn in entry.instructions}
+    assert "front_S0" not in insns["back_S0"].depends_on
+    assert "flux_S0" in insns["front_S0"].depends_on
+    for size in (1, 2, 5, 8):
+        inputs = {"u": Arr.from_numpy(velocity(size)), "rhs": Arr.zeros(size)}
+        agrees(between, fused, inputs)
+
+
 @pytest.mark.parametrize(
     ("producer", "consumer", "shift", "error", "message"),
     [
@@ -582,6 +674,32 @@ def test_a_write_between_the_producer_and_a_read_is_refused() -> None:
     assert message.startswith("substitute('f') illegal: instance divergence.S0[")
     assert " reads u[" in message
     assert "overwritten by bump.S0[" in message
+
+
+def test_a_later_write_of_what_the_producer_read_waits_for_the_reads() -> None:
+    # bump writes u after divergence has read f; computed again at the
+    # read, f reads u, so bump has to wait for divergence, which nothing in
+    # the lowered kernel said: bump depended on flux, which is gone.
+    schedule = Schedule(bumped_after).substitute("f")
+    insns = {
+        insn.id: insn for insn in schedule.kernel.default_entrypoint.instructions
+    }
+    assert "divergence_S0" in insns["bump_S0"].depends_on
+    for size in (1, 3, 8):
+        agrees(bumped_after, schedule, burgers_inputs(size))
+    # Fused one step behind the divergence, bump writes u[k] in the step in
+    # which the divergence reads it to compute f[k]: the divergence has to
+    # come first in the step, and the kernel says so.
+    fused = Schedule(bumped_after).fuse("divergence", "bump", shift=1)
+    with pytest.raises(IllegalCast):
+        Schedule(bumped_after).fuse("divergence", "bump").substitute("f")
+    substituted = fused.substitute("f")
+    insns = {
+        insn.id: insn for insn in substituted.kernel.default_entrypoint.instructions
+    }
+    assert "divergence_S0" in insns["bump_S0"].depends_on
+    for size in (1, 2, 6):
+        agrees(bumped_after, substituted, burgers_inputs(size))
 
 
 def test_an_in_place_consumer_cannot_have_the_array_computed_again() -> None:

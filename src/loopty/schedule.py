@@ -3340,7 +3340,107 @@ class Schedule:
             first = positions[0]
             draft.order = [*kept[:first], *outputs, *kept[first:]]
         self._affine_into(draft, mapping, pieces)
+        if pieces is not None and len(
+            {_dim_names(piece, isl.dim_type.in_) for piece in pieces.values()}
+        ) > 1:
+            draft.kernel = self._ordered_by_dependences(draft)
         return self._commit(draft, text, recipe)
+
+    def _ordered_by_dependences(self, draft: _Draft) -> Any:
+        """The draft's kernel, its statements ordered as the dependences order them.
+
+        The lowering draws an instruction's dependencies by array, in the
+        order of the term: a statement depends on every earlier one that
+        writes what it reads, whatever the cells. While the loops run as the
+        term runs them that is enough, and two steps change that. A fusion
+        puts two loops in one, and a statement between them in the term can
+        then be ordered after the loop by the cells and before it by an
+        array the second reads at cells it never writes: loopy, given both,
+        finds no order (a ``CycleError`` from code generation). A
+        substitution takes out the producer, and a later write of what it
+        read depended on the producer and on nothing that now reads it: loopy
+        may then run the write first.
+
+        So every dependency between two statements is drawn again from the
+        dependences the casts are checked against, the ones of the program as
+        it runs now (see :meth:`substitute`): one statement's instruction
+        depends on another's where a dependence joins an instance of one to
+        an instance of the other, in either direction, and in the order the
+        schedule puts the two in a step of the loops they share, which is
+        the order of their constants in the time map (see
+        :func:`_coefficients`). Two that touch one variable and that no
+        dependence joins are said to need no order (loopy's ``no_sync_with``,
+        which loopy asks for), and no barrier either. The instructions that
+        compute a ragged row's length keep their dependencies, and so do the
+        statements' on them.
+        """
+        kernel = draft.kernel
+        if kernel is None:
+            return None
+        total = self._deps_total
+        statement_of = {insn: stmt for stmt, insn in self._lowering.insn_ids.items()}
+        layout = self._origin_layout
+        instances = {
+            stmt_id: _embed(self._domains[stmt_id], layout.index(stmt_id), layout)
+            for stmt_id in layout.stmt_ids
+        }
+        joined: set[frozenset[str]] = set()
+        if total is not None:
+            for first in layout.stmt_ids:
+                for second in layout.stmt_ids:
+                    if first == second:
+                        continue
+                    pairs = total.intersect_domain(
+                        instances[first].align_params(total.get_space().domain())
+                    ).intersect_range(
+                        instances[second].align_params(total.get_space().range())
+                    )
+                    if not pairs.is_empty():
+                        joined.add(frozenset((first, second)))
+        current = _Layout(stmt_ids=self._layout.stmt_ids, coords=dict(draft.coords))
+        position = _coefficients(current.stmt_ids, _nests(current, draft.order, {}))
+        entry = kernel.default_entrypoint
+        present = {
+            statement_of[insn.id]: insn
+            for insn in entry.instructions
+            if insn.id in statement_of
+        }
+        touched = {
+            stmt_id: (
+                set(insn.assignee_var_names()),
+                set(insn.assignee_var_names()) | set(insn.read_dependency_names()),
+            )
+            for stmt_id, insn in present.items()
+        }
+        insns = []
+        for insn in entry.instructions:
+            mine = statement_of.get(insn.id)
+            if mine is None:
+                insns.append(insn)
+                continue
+            kept = {other for other in insn.depends_on if other not in statement_of}
+            free: set[str] = set()
+            for theirs, other in present.items():
+                if theirs == mine:
+                    continue
+                if frozenset((mine, theirs)) in joined:
+                    if position[theirs] < position[mine]:
+                        kept.add(other.id)
+                    continue
+                writes, reads = touched[mine]
+                their_writes, their_reads = touched[theirs]
+                if writes & their_reads or their_writes & reads:
+                    free.add(other.id)
+            insns.append(
+                insn.copy(
+                    depends_on=frozenset(kept),
+                    no_sync_with=frozenset(
+                        item for item in insn.no_sync_with if item[0] not in free
+                    )
+                    | frozenset((other, "any") for other in free),
+                )
+            )
+        return kernel.with_kernel(entry.copy(instructions=insns))
 
     def fuse(
         self, producer: str, consumer: str, shift: int | Sequence[int] = 0
@@ -3365,10 +3465,12 @@ class Schedule:
         already there. One shift per fused loop, or one number for a single
         loop.
 
-        The loops have to be in sequence, not one inside the other, and each
-        side's a loopy domain of its own, which two calls of a program always
-        are; otherwise the casts are decided and the kernel is refused as
-        unbuildable, as :meth:`affine` refuses a map it cannot write. A fusion
+        The two sides' loops have to be in sequence, not one inside the
+        other. The fused loops are the outer loops of each side's nest, and a
+        nest the lowering wrote as one domain is cut after them (see
+        :func:`_cut_for`); a fusion the kernel rewrite cannot write otherwise
+        leaves the casts decided and the kernel refused as unbuildable, as
+        :meth:`affine` leaves a map it cannot write. A fusion
         that runs a dependence backwards is refused with the pair of
         instances and the cell between them, as every cast is, and the
         message names the least shift at which the fusion is accepted, when
@@ -3801,6 +3903,7 @@ class Schedule:
             draft.kernel = kernel
             if reason is not None:
                 draft.unbuildable = reason
+            draft.kernel = staged._ordered_by_dependences(draft)
         return staged._commit(draft, text, recipe, leading=(fact,))
 
     @property
@@ -4898,7 +5001,8 @@ def _affine_kernel(
     nested domain whose instructions move by different maps, a row's length
     that bounds fibers whose statements do, or an instruction in the loops
     that is no statement's and bounds none of their loops; and, for maps
-    that fuse, loops that share a domain with a loop no map takes.
+    that fuse, loops that share a domain with a loop no map takes, and that
+    are not its outer ones (see :func:`_cut_for`).
     """
     from loopy.match import Id, parse_stack_match
     from loopy.symbolic import (
@@ -5039,7 +5143,9 @@ def _fused_plan(entry: Any, pieces: Mapping[str, isl.Map]) -> _Plan:
 
     The maps take different loops to the same new ones, and the statements
     of each take loops that one domain defines and no other loop: two loops
-    the lowering wrote one after the other, ``{ [j] }`` and ``{ [i] }``.
+    the lowering wrote one after the other, ``{ [j] }`` and ``{ [i] }``, or
+    the outer loops of a domain, which is cut after them first
+    (:func:`_cut_for`).
     Each such domain goes, and the new loops get one domain in place of the
     first of them, the union of every statement's image under its own map,
     or its polyhedral hull, with each statement predicated on its own image
@@ -5057,6 +5163,7 @@ def _fused_plan(entry: Any, pieces: Mapping[str, isl.Map]) -> _Plan:
     for key, piece in pieces.items():
         groups.setdefault(_dim_names(piece, isl.dim_type.in_), []).append(key)
     mapped = {name for inputs in groups for name in inputs}
+    entry = entry.copy(domains=_cut_for(entry.domains, groups))
     homes: dict[tuple[str, ...], int] = {}
     for inputs in groups:
         defining = [
@@ -5123,6 +5230,47 @@ def _fused_plan(entry: Any, pieces: Mapping[str, isl.Map]) -> _Plan:
             domain = _image_of_params(domain, _governing(entry, domain, pieces))
         domains.append(domain)
     return _nest_domains(domains), insns, substitutions, predicates
+
+
+def _cut_for(domains: Sequence[Any], groups: Iterable[Sequence[str]]) -> list[Any]:
+    """``domains``, with each one whose outer loops a map takes cut after them.
+
+    A fusion of the outer loop of a nest, ``{ [i, j] }``, with a loop of one
+    level, ``{ [w] }``, takes ``i`` and not ``j``, and the two share one
+    domain because no statement of the kernel left the nest between them.
+    The domain is cut as the lowering cuts it when one does
+    (:func:`loopty.lower._statement_domains`): ``{ [i] }`` over the loops the
+    map takes, which are the first of the domain's, and ``[i] -> { [j] }``,
+    nested in it, with every constraint of the domain. A domain whose loops
+    a map takes are not its first ones is left as it is, and refused by
+    :func:`_fused_plan`.
+    """
+    from loopty.lower import _outer_part
+
+    out = list(domains)
+    for inputs in groups:
+        defining = [
+            k
+            for k, domain in enumerate(out)
+            if set(inputs) & set(domain.get_var_names(isl.dim_type.set))
+        ]
+        if len(defining) != 1:
+            continue
+        (k,) = defining
+        names = list(out[k].get_var_names(isl.dim_type.set))
+        keep = len(inputs)
+        if len(names) <= keep or set(names[:keep]) != set(inputs):
+            continue
+        outer = _outer_part(out[k], keep)
+        inner = out[k].move_dims(
+            isl.dim_type.param,
+            out[k].dim(isl.dim_type.param),
+            isl.dim_type.set,
+            0,
+            keep,
+        )
+        out[k : k + 1] = [outer, inner]
+    return out
 
 
 def _first(own: Any, others: frozenset[Any]) -> frozenset[Any]:

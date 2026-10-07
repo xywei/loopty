@@ -492,10 +492,11 @@ end to end; the edges are sharp.
   facts reach isl; a hypothesis isl cannot state is dropped, which assumes
   less, never more.
 - A program lowers sequentially: its calls' loops run one after another, as
-  the program runs them, until a schedule fuses them. A fusion moves loops
-  that are each a loopy domain of their own, which two calls' loops always
-  are; a loop that shares its domain with a loop the fusion does not move
-  leaves the casts decided and the kernel unbuildable. Only a pointwise
+  the program runs them, until a schedule fuses them. A fusion moves the
+  outer loops of each side, as many as both have, and a nest the lowering
+  wrote as one domain is cut after them; loops a map takes that are not the
+  outer loops of their domain leave the casts decided and the kernel
+  unbuildable. Only a pointwise
   producer is substituted (one cell per instance, at its loop variables, no
   sum, no guard isl cannot state), and the array is either stored in full
   or not at all: contracting it to the cells live at once is not done. The

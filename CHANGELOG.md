@@ -480,9 +480,17 @@ with a pair of statement instances.
   the cell, and the message names the least shift the checker accepts, when
   a number per loop gives one. The kernel rewrite replaces the two loops'
   domains by one, the union of the images, each statement predicated on its
-  own and given its own inverse, and nests the domains again; loops that
-  share a domain with a loop no map takes leave the kernel unbuildable, with
-  the reason. Maps per statement that take a loop in common still have to
+  own and given its own inverse, and nests the domains again. A nest the
+  lowering wrote as one domain, `{ [i, j] }`, is cut after the loops the
+  maps take when they are its outer ones, so the rows of a two-loop
+  producer fuse with a one-loop consumer of each row; other loops that share
+  a domain with a loop no map takes leave the kernel unbuildable, with the
+  reason. After a fusion an instruction depends on another statement's only
+  where a dependence of the term orders the two, and a pair that shares no
+  cell is marked as needing no order (`no_sync_with`): the lowering draws
+  dependencies by array, and a call between the fused ones that the second
+  reads only at cells it never writes left loopy no order (a `CycleError`;
+  note 21 of `docs/loopy-notes.md`). Maps per statement that take a loop in common still have to
   take the same loops, and every statement in a loop some map takes has to
   be given one that takes all of them.
 - **Storing an intermediate, or not** (#13). `Schedule.substitute(array)`
