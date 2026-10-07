@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 from lanky.prelude import Bool, Int, Nat, Real
 
-from loopty import Arr, Fin, Schedule, TraceError, kernel, reduce_sum, when
+from loopty import Arr, Fin, Schedule, TraceError, kernel, program, reduce_sum, when
 from loopty.contract import INTEGRAL_RANGE
 from loopty.executor import LoopyExecutor, emit_code
 from loopty.lower import numpy_dtype
@@ -87,6 +87,72 @@ def test_an_integer_quotient_is_true_division_compiled_too():
     # A numpy scalar divides as a Python int does: the cast does not depend
     # on how the caller passed it.
     agrees(quotients, lambda: {**scaled(), "m": np.int64(2)})
+
+
+@program
+def halved_twice(k, h):
+    """``int_quot`` twice, through an integer array the program makes."""
+    g = Arr.zeros_like(k)
+    int_quot(k, g)
+    int_quot(g, h)
+
+
+def test_a_quotient_through_a_program_temporary_is_true_division():
+    # The program's term types its temporary as the kernel's argument, and the
+    # quotient of that temporary is a double compiled, as natively.
+    def make() -> dict:
+        return {"k": np.array([3, -3, 4, 7]), "h": np.zeros(4, np.int64)}
+
+    native = make()
+    halved_twice(**native)
+    assert list(native["h"]) == [3, -3, 4, 7]
+    assert "(double) (g[" in emit_code(halved_twice)
+    agrees(halved_twice, make)
+
+
+@kernel
+def floors(
+    k: Arr[Fin[n], Int],  # noqa: F821
+    m: Arr[Fin[n], Int],  # noqa: F821
+    s: Int,
+    a: Arr[Fin[n], Int],  # noqa: F821
+    b: Arr[Fin[n], Int],  # noqa: F821
+    c: Arr[Fin[n], Int],  # noqa: F821
+    d: Arr[Fin[n], Int],  # noqa: F821
+    e: Arr[Fin[n], Int],  # noqa: F821
+    f: Arr[Fin[n], Int],  # noqa: F821
+):
+    """Floor division and remainder by a constant of each sign, an array, a scalar."""
+    for i in k.dom:
+        a[i] = k[i] // 3 - k[i] % 3
+        b[i] = k[i] // -3
+        c[i] = k[i] % -3
+        d[i] = k[i] // m[i]
+        e[i] = k[i] % m[i]
+        f[i] = k[i] // s + 100 * (k[i] % s)
+
+
+def test_floor_division_and_remainder_follow_python_on_negatives():
+    # loopy lowers // and % of integers to its floor division and modulo,
+    # which round toward minus infinity as Python does whatever the signs:
+    # the operation planning around them leaves an integer operation alone.
+    k = [7, -7, 6, -6, 0, -1, 1, 5]
+    m = [2, 2, -4, -4, 3, -3, -2, 5]
+
+    def make(s) -> dict:
+        outputs = {name: np.zeros(len(k), np.int64) for name in "abcdef"}
+        return {"k": np.array(k), "m": np.array(m), "s": s, **outputs}
+
+    for s in (3, -3, np.int64(-3)):
+        native = make(s)
+        floors(**native)
+        assert list(native["a"]) == [p // 3 - p % 3 for p in k]
+        assert list(native["b"]) == [p // -3 for p in k]
+        assert list(native["c"]) == [p % -3 for p in k]
+        assert list(native["d"]) == [p // q for p, q in zip(k, m, strict=True)]
+        assert list(native["e"]) == [p % q for p, q in zip(k, m, strict=True)]
+        assert list(native["f"]) == [p // int(s) + 100 * (p % int(s)) for p in k]
+        agrees(floors, lambda s=s: make(s))
 
 
 # }}}
@@ -441,6 +507,43 @@ def test_a_float32_beside_an_integer_or_a_python_float_is_what_numpy_makes():
     assert "(double) (x[i]) / k[i]" in code
     assert "(float) (0.3 + i)" in code
     agrees(f32_mixed, make)
+
+
+@kernel
+def f32_compared(
+    x: Arr[Fin[n], np.float32],  # noqa: F821
+    k: Arr[Fin[n], Int],  # noqa: F821
+    b: Arr[Fin[n], Bool],  # noqa: F821
+    y: Arr[Fin[n], np.float32],  # noqa: F821
+):
+    """A ``float32`` compared with a Python float, and in a guard with an integer."""
+    for i in x.dom:
+        b[i] = x[i] > 0.1
+        with when(x[i] < k[i]):
+            y[i] = 1.0
+
+
+def test_a_float32_comparison_is_what_numpy_compares():
+    # numpy compares 0.1f with 0.1 in single precision, where they are equal,
+    # and C compared them in double, where 0.1f is larger; and it compares a
+    # float32 with a 64-bit integer in double, where C rounded 2**24 + 1 to a
+    # float, equal to 2**24.
+    def make() -> dict:
+        return {
+            "x": np.array([0.1, 2.0**24, 0.5], np.float32),
+            "k": np.array([0, 2**24 + 1, 1]),
+            "b": np.zeros(3, bool),
+            "y": np.zeros(3, np.float32),
+        }
+
+    native = make()
+    f32_compared(**native)
+    assert list(native["b"]) == [False, True, True]
+    assert list(native["y"]) == [0.0, 1.0, 1.0]
+    code = emit_code(f32_compared)
+    assert "x[i] > 0.10000000149011612f" in code
+    assert "(double) (x[i]) < k[i]" in code
+    agrees(f32_compared, make)
 
 
 # }}}
