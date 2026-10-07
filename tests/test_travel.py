@@ -15,8 +15,9 @@ from pathlib import Path
 import islpy as isl
 import numpy as np
 import pytest
+from lanky import theorem
 from lanky.ledger import Ledger, Status
-from lanky.prelude import Fin, Nat, Real
+from lanky.prelude import Fin, Fn, Nat, Real
 from lanky.terms import (
     Add,
     Comparison,
@@ -231,6 +232,44 @@ def test_a_theorem_is_instantiated_at_the_arrays_its_hypotheses_match() -> None:
         travel.scan_monotone, [post], lambda *_: "off is written", lambda e: True
     )
     assert found == [] and reasons == ["off is written"]
+
+
+def test_a_theorems_family_is_checked_against_its_sorts_in_the_programs_names() -> None:
+    # bounded's f ranges over Fin[m], and its hypothesis binds m to the k of
+    # the program's perm: the family's codomain is Fin(k) there, not Fin(m),
+    # which would compare equal with an element sort the program calls m.
+    @theorem
+    def bounded(
+        n: Nat,  # noqa: F821
+        m: Nat,  # noqa: F821
+        f: Fn[Fin[n], Fin[m]],  # noqa: F821
+        h: all((f(i) >= 0) & (f(i) < m) for i in Fin[n]),  # noqa: F821
+    ) -> all(f(i) <= m for i in Fin[n]):  # noqa: F821
+        """A point of Fin[m] is at most m."""
+
+    entry = Hypothesis(
+        Forall(
+            ((a0, Fin[n]),),
+            LogicalAnd(
+                (
+                    Comparison(0, "<=", Subscript(perm, a0)),
+                    Comparison(Subscript(perm, a0), "<", Var("k")),
+                )
+            ),
+        ),
+        "the type of perm",
+    )
+    seen = []
+
+    def applicable(array, domain, codomain):
+        seen.append((array, str(domain), str(codomain)))
+        return None
+
+    found, reasons = theorem_instances(bounded, [entry], applicable, lambda e: True)
+    assert reasons == []
+    assert seen == [("perm", "Fin(n)", "Fin(k)")]
+    (instance,) = found
+    assert render(instance.claim) == "forall i in Fin(n). perm[i] <= k"
 
 
 # }}}

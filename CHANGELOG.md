@@ -1638,6 +1638,10 @@ with a pair of statement instances.
   then every row's. A hypothesis is also never read as speaking of the
   claim's own binders (`loopty.hypotheses.discharge`): a name of one it
   leaves free is renamed apart.
+- A theorem a program cites has a family's codomain checked in the
+  program's names, as its domain is (`loopty.hypotheses.theorem_instances`):
+  `f: Fn[Fin[n], Fin[m]]` was compared with an array's element sort as
+  `Fin(m)`, the theorem's own `m`, whatever its hypotheses had bound `m` to.
 
 ### Changed
 

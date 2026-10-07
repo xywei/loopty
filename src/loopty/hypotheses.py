@@ -1316,8 +1316,12 @@ def theorem_instances(
         why = None
         for var, sort in variables.items():
             if var in functions:
+                # Both sorts in the program's names: a codomain Fin[m] is
+                # about the m the theorem's hypotheses bound, which the
+                # program may spell otherwise, or spell m and mean another.
                 domain = _apply_sort(sort.domain, sigma, functions)
-                why = applicable(sigma[var], domain, sort.codomain)
+                codomain = _apply_sort(sort.codomain, sigma, functions)
+                why = applicable(sigma[var], domain, codomain)
             elif getattr(sort, "name", None) == "Nat":
                 if not nonnegative(sigma[var]):
                     why = (
