@@ -42,6 +42,7 @@ from loopty.executor import LoopyExecutor, emit_code  # noqa: E402
 KERNELS = Path(__file__).parent / "kernels"
 
 travel = importlib.import_module("kernels.travel")
+wrong = importlib.import_module("kernels.travel_wrong")
 
 
 def _ledger():
@@ -546,3 +547,128 @@ def test_a_failed_check_in_the_term_is_a_disagreement_where_the_body_runs() -> N
     kind, (counterexample, reason) = _compare(kept, term, "hand", inputs)
     assert kind == "differ"
     assert "stops at a checked point the native run passes" in reason
+
+
+# {{{ what does not follow is never decided
+
+
+def test_hypotheses_that_contradict_each_other_decide_nothing() -> None:
+    # off[q] == 0 and off[q] == 1 hold of no cell, so every claim follows
+    # from the two: a decision under them would be vacuous.
+    zero = Hypothesis(
+        Forall(((r, Fin[n + 1]),), Comparison(Subscript(off, r), "==", 0)), "zero"
+    )
+    one = Hypothesis(
+        Forall(((r, Fin[n + 1]),), Comparison(Subscript(off, r), "==", 1)), "one"
+    )
+    goal = Comparison(Subscript(off, q), "==", 7)
+    found = discharge(
+        LAYOUT, goal, [zero, one], integral={"off"}, known={"n"}, nonneg={"n"}
+    )
+    assert not found.decided
+    assert found.question is None
+    assert found.contradicting == (zero, one)
+    assert "contradict each other" in found.reason
+    # A claim about a domain with no points is decided, with nothing used.
+    nowhere = isl.Set("[n] -> { [q] : 0 <= q < 0 }")
+    found = discharge(
+        nowhere, goal, [zero, one], integral={"off"}, known={"n"}, nonneg={"n"}
+    )
+    assert found.decided and found.used == ()
+
+
+@pytest.mark.parametrize(
+    "prog",
+    [
+        wrong.past_the_end_then_gather,
+        wrong.the_other_then_gather,
+        wrong.all_but_the_last_then_gather,
+        wrong.all_but_the_first_then_gather,
+        wrong.either_then_gather,
+        wrong.doubled_then_gather,
+        wrong.squared_then_gather,
+        wrong.at_some_then_gather,
+        wrong.both_then_gather,
+    ],
+    ids=lambda prog: prog.__name__,
+)
+def test_a_postcondition_short_of_the_requirement_leaves_it_checked(prog) -> None:
+    (requirement,) = prog.term.requirements
+    assert not requirement.decided
+    assert prog.term.checks
+    assert requirement.reason
+
+
+def test_a_false_postcondition_is_named_rather_than_used() -> None:
+    # perm[0] == 0 and perm[0] == 1: a contradiction would decide gather's
+    # requirement vacuously, and the compiled program would read x[perm[i]]
+    # unchecked. It is checked, and the reason names the postcondition.
+    (requirement,) = wrong.both_then_gather.term.requirements
+    assert not requirement.decided
+    assert requirement.reason.startswith("no cells satisfy the postcondition of both")
+    assert "decided vacuously" in requirement.reason
+
+
+def test_what_isl_cannot_state_is_named_in_the_reason() -> None:
+    (requirement,) = wrong.squared_then_gather.term.requirements
+    assert "isl cannot state perm[" in requirement.reason
+    assert "(of the postcondition of squared, after squared at" in requirement.reason
+    (requirement,) = wrong.at_some_then_gather.term.requirements
+    assert "isl cannot state exists i in Fin(n). perm[i] == 0" in requirement.reason
+
+
+def test_a_scan_with_the_wrong_step_is_checked_three_ways() -> None:
+    (requirement,) = wrong.gapped.term.requirements
+    assert requirement.kind == "layout" and not requirement.decided
+    # The room the hypotheses leave names the cells the requirement reads,
+    # not every cell an instance of the recurrence reached.
+    assert "off[q]" in requirement.reason
+    assert "off[q + 2]" not in requirement.reason
+
+    def inputs():
+        return travel.csr([2, 0, 3])
+
+    with pytest.raises(ValueError, match="the offsets argument off holds"):
+        wrong.gapped(**inputs())
+    with pytest.raises(ValueError, match="does not hold the offsets the counts"):
+        LoopyExecutor().run(wrong.gapped, **inputs())
+    with pytest.raises(CheckFailed, match="does not hold the offsets the counts"):
+        interpret(wrong.gapped.term, inputs())
+
+
+def test_a_flat_access_is_not_decided_under_a_contradicted_layout() -> None:
+    # weigh reads wt through off, so its layout requirement says off[r + 1]
+    # == off[r] + cnt[r], and the gapped scan says off[r + 1] == off[r] +
+    # cnt[r] + 1: together they hold nowhere, and would decide val[off[r] +
+    # j] in bounds vacuously.
+    assert [f for f in wrong.gapped_flat.facts() if f.kind == "in-bounds"] == []
+
+
+def test_a_size_only_an_element_sort_names_is_renamed_apart() -> None:
+    # Both calls of scan_flat name their buffer nnz, which no axis of
+    # scan_flat is as long as. Taken as one name, the two buffers would be
+    # one size, and the compiled program would refuse val2 of another length.
+    types = dict(wrong.two_buffers.term.params)
+    first, second = types["val"].axes[0], types["val2"].axes[0]
+    assert render(first) != render(second)
+    assert render(types["off"].dtype.bound) == f"{render(first)} + 1"
+    assert render(types["off2"].dtype.bound) == f"{render(second)} + 1"
+
+    def matrix(counts, seed):
+        rng = np.random.default_rng(seed)
+        data = travel.csr(counts, seed)
+        data["wt"] = data.pop("val")
+        data["val"] = Arr.from_numpy(rng.normal(size=sum(counts)))
+        return data
+
+    inputs = {
+        **matrix([2, 0, 3], 0),
+        **{f"{name}2": value for name, value in matrix([1, 1], 1).items()},
+    }
+    fact = LoopyExecutor().differential(
+        wrong.two_buffers, Schedule(wrong.two_buffers), inputs
+    )
+    assert fact.status is Status.TESTED, fact.provenance
+
+
+# }}}

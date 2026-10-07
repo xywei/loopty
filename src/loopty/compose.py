@@ -1449,6 +1449,15 @@ class _Composer:
         }
         sizes = [name for name in term.sizes if name not in params]
         for _, typ in term.params:
+            # The bound of a Fin sort names a size too, an element sort's
+            # (``nnz`` in ``off: Arr[Fin[n + 1], Fin[nnz + 1]]``) or a
+            # scalar's, even where no axis of the callee is that long: it is
+            # renamed apart like any other, or two calls that each name a
+            # buffer ``nnz`` would be given one size.
+            bound = _fin_bound(typ.dtype if isinstance(typ, ArrType) else typ)
+            for name in _names_in(bound):
+                if name not in params and name not in sizes:
+                    sizes.append(name)
             if not isinstance(typ, ArrType):
                 continue
             for axis, ragged in zip(typ.axes, typ.ragged, strict=True):
@@ -2238,7 +2247,11 @@ class _Composer:
                 Requirement(**common, used=outcome.used, question=outcome.question),
                 [],
             )
-        if offered:
+        if outcome.contradicting:
+            # A false hypothesis decides everything; the check decides nothing
+            # it does not see.
+            reason = outcome.reason
+        elif offered:
             reason = (
                 "the hypotheses that held at the call leave room for a cell that "
                 f"breaks it: {outcome.reason}"
@@ -2247,6 +2260,15 @@ class _Composer:
             reason = (
                 f"nothing that held at the call says what {want.writer} left "
                 f"in {array}"
+            )
+        if outcome.unstated:
+            shown = list(outcome.unstated[:3])
+            more = len(outcome.unstated) - len(shown)
+            reason += (
+                "; isl cannot state "
+                + "; ".join(shown)
+                + (f"; and {more} more" if more else "")
+                + ", which is read as saying nothing"
             )
         if notes:
             reason += "; " + "; ".join(notes)

@@ -49,10 +49,18 @@ fact decided this way rests on the facts the remaining ones rest on, and
 nothing else, so a cited theorem the claim does not need does not count in
 what the fact is worth.
 
+*Hypotheses that contradict each other decide nothing.* If the ones a claim
+used leave no point of its domain, whatever the cells hold, they are never
+all true where the claim has a point (an instance of a true universal is
+true at the cells a run holds), and every claim would follow from them. Such
+a claim is not decided, and the hypotheses are named as contradicting each
+other, which says that one of them is false.
+
 A set that is not empty is no refutation: the hypotheses are what a program
 knows, not all that is true of it. Its sample is reported as the room the
-hypotheses leave, and a requirement left so is checked when the program
-runs instead (:mod:`loopty.compose`).
+hypotheses leave, with the values of the cells the claim reads, and a
+requirement left so is checked when the program runs instead
+(:mod:`loopty.compose`). What isl could not state is reported beside it.
 """
 
 from __future__ import annotations
@@ -478,21 +486,28 @@ def _text(expr: Any, cells: _Cells, known: Collection[str]) -> str | None:
 
 
 def _encode(
-    prop: Any, cells: _Cells, known: Collection[str], negate: bool = False
+    prop: Any,
+    cells: _Cells,
+    known: Collection[str],
+    negate: bool = False,
+    dropped: list[Any] | None = None,
 ) -> str:
     """``prop``, or its negation, in negation normal form as isl text.
 
     A part isl cannot state is ``true`` (see the module docstring): every
     part of a formula in negation normal form occurs positively, so what is
-    stated is implied by what was meant.
+    stated is implied by what was meant. Each such part is appended to
+    ``dropped``, when given, so that a reason can say what was not used.
     """
     if isinstance(prop, bool | np.bool_):
         return "1 = 1" if bool(prop) != negate else "1 = 0"
     if isinstance(prop, prim.LogicalNot):
-        return _encode(prop.child, cells, known, not negate)
+        return _encode(prop.child, cells, known, not negate, dropped)
     if isinstance(prop, prim.LogicalAnd | prim.LogicalOr):
         conjunction = isinstance(prop, prim.LogicalAnd) != negate
-        parts = [_encode(child, cells, known, negate) for child in prop.children]
+        parts = [
+            _encode(child, cells, known, negate, dropped) for child in prop.children
+        ]
         if not parts:
             return "1 = 1" if conjunction else "1 = 0"
         joiner = " and " if conjunction else " or "
@@ -502,12 +517,16 @@ def _encode(
         left = _text(prop.left, cells, known)
         right = _text(prop.right, cells, known)
         if left is None or right is None or operator not in _FLIPPED:
+            if dropped is not None:
+                dropped.append(prop)
             return "1 = 1"
         if operator == "==":
             return f"({left} = {right})"
         if operator == "!=":
             return f"({left} < {right} or {left} > {right})"
         return f"({left} {operator} {right})"
+    if dropped is not None:
+        dropped.append(prop)
     return "1 = 1"
 
 
@@ -690,14 +709,21 @@ class Discharge:
     ``decided`` when no point of the claim's domain breaks it where the
     hypotheses hold; ``question`` is then that set, empty, built from the
     hypotheses ``used`` alone, for the isl oracle to answer again in the
-    ledger. Otherwise ``question`` is ``None`` and ``reason`` names a point
-    the hypotheses leave room for, with the values of the cells there.
+    ledger. Otherwise ``question`` is ``None`` and ``reason`` says why: the
+    point the hypotheses leave room for, with the values of the cells the
+    claim reads there, or, where the hypotheses contradict each other at
+    every point of the domain, which ones do (``contradicting``), since a
+    claim decided under them would be decided vacuously. ``unstated`` lists
+    the parts of the hypotheses and of the claim that isl cannot state,
+    each with where it comes from, which were read as saying nothing.
     """
 
     decided: bool
     question: Empty | None
     used: tuple[Hypothesis, ...]
     reason: str
+    contradicting: tuple[Hypothesis, ...] = ()
+    unstated: tuple[str, ...] = ()
 
 
 def _align(first: Any, second: Any) -> tuple[Any, Any]:
@@ -727,6 +753,7 @@ def _assume(
     cells: _Cells,
     known: Collection[str],
     dims: Sequence[str],
+    dropped: list[Any] | None = None,
 ) -> isl.Set:
     """``found`` where ``prop`` holds, or a set that contains it.
 
@@ -746,7 +773,7 @@ def _assume(
     ):
         antecedent = prop.children[0].child
         consequent = prop.children[1]
-        outside = _encode(antecedent, cells, known, negate=True)
+        outside = _encode(antecedent, cells, known, negate=True, dropped=dropped)
         if outside == "1 = 1":
             return found
         escaped = _formula_set(outside, dims)
@@ -754,12 +781,14 @@ def _assume(
         escaped = found.intersect(escaped)
         if escaped.is_equal(found):
             return found
-        held = _intersect(found, _encode(consequent, cells, known), dims)
+        held = _intersect(
+            found, _encode(consequent, cells, known, dropped=dropped), dims
+        )
         if escaped.is_empty():
             return held
         escaped, held = _align(escaped, held)
         return escaped.union(held).coalesce()
-    return _intersect(found, _encode(prop, cells, known), dims)
+    return _intersect(found, _encode(prop, cells, known, dropped=dropped), dims)
 
 
 def _run(
@@ -770,8 +799,19 @@ def _run(
     known: Collection[str],
     nonneg: Collection[str],
     reflected: Mapping[str, Any],
+    *,
+    negated: bool = True,
+    unstated: list[str] | None = None,
 ) -> tuple[isl.Set, _Cells]:
-    """The bad set of ``goal`` over ``domain`` under ``hypotheses``."""
+    """The bad set of ``goal`` over ``domain`` under ``hypotheses``.
+
+    With ``negated=False``, the points of ``domain`` where the hypotheses
+    hold, instantiated at the cells ``goal`` reads as they would be for the
+    bad set, whether ``goal`` holds there or not: that set is empty when the
+    hypotheses contradict each other at every point. ``unstated``, when
+    given, collects what isl cannot state, each part with where it comes
+    from.
+    """
     dims = list(domain.get_var_names(isl.dim_type.set))
     params = list(domain.get_var_names(isl.dim_type.param))
     reserved = set(dims) | set(params) | set(known) | _names(goal)
@@ -786,8 +826,22 @@ def _run(
     names = set(dims) | set(known) | set(params)
     for cell in cells_in(goal):
         cells.param(cell)
+
+    def note(dropped: list[Any], where: str) -> None:
+        if unstated is None:
+            return
+        for part in dropped:
+            said = f"{render(part)} ({where})"
+            if said not in unstated:
+                unstated.append(said)
+
     found = domain
-    found = _intersect(found, _encode(goal, cells, names, negate=True), dims)
+    if negated:
+        dropped: list[Any] = []
+        found = _intersect(
+            found, _encode(goal, cells, names, negate=True, dropped=dropped), dims
+        )
+        note(dropped, "of the claim")
     found = assume_sizes(found, set(nonneg) | set(reflected))
     seen: set[Any] = set()
     pending = list(hypotheses)
@@ -803,7 +857,9 @@ def _run(
                 grew = True
                 for cell in cells_in(instance):
                     cells.param(cell)
-                found = _assume(found, instance, cells, names, dims)
+                dropped = []
+                found = _assume(found, instance, cells, names, dims, dropped)
+                note(dropped, f"of {hypothesis.source}")
                 if found.is_empty():
                     return found, cells
         if not grew:
@@ -834,10 +890,26 @@ def discharge(
     is about the bound of the domain too.
     """
     reflected = dict(reflected or {})
-    found, cells = _run(domain, goal, hypotheses, integral, known, nonneg, reflected)
+    unstated: list[str] = []
+    found, cells = _run(
+        domain,
+        goal,
+        hypotheses,
+        integral,
+        known,
+        nonneg,
+        reflected,
+        unstated=unstated,
+    )
     dims = tuple(domain.get_var_names(isl.dim_type.set))
     if not found.is_empty():
-        return Discharge(False, None, (), _room(found, cells, dims))
+        return Discharge(
+            False,
+            None,
+            (),
+            _room(found, cells, dims, goal, domain),
+            unstated=tuple(unstated),
+        )
     used = list(hypotheses)
     # Last first: what a call derives from others (a theorem's instance, the
     # requirement a call is checked for) goes before what it derives from,
@@ -850,13 +922,51 @@ def discharge(
         )
         if found_without.is_empty():
             used = trial
+    if used:
+        # Hypotheses that leave no point of the domain at all contradict each
+        # other there, and decide every claim about it: vacuously, which is
+        # no decision. A domain empty without them is a claim about nothing,
+        # and is decided as such.
+        held, _ = _run(
+            domain, goal, used, integral, known, nonneg, reflected, negated=False
+        )
+        if held.is_empty():
+            alone, _ = _run(
+                domain, goal, (), integral, known, nonneg, reflected, negated=False
+            )
+            if not alone.is_empty():
+                sources = "; ".join(hypothesis.source for hypothesis in used)
+                said = (
+                    f"no cells satisfy {sources} at any point of the claim's "
+                    "domain, so it is false wherever the claim has a point"
+                    if len(used) == 1
+                    else f"no cells satisfy all of {sources} at any point of the "
+                    "claim's domain, so they contradict each other there and one "
+                    "of them is false"
+                )
+                return Discharge(
+                    False,
+                    None,
+                    (),
+                    f"{said}; a claim decided under that would be decided vacuously",
+                    contradicting=tuple(used),
+                    unstated=tuple(unstated),
+                )
     final, _ = _run(domain, goal, used, integral, known, nonneg, reflected)
     question = Empty(final, description=description, labels=dims)
     return Discharge(True, question, tuple(used), "")
 
 
-def _room(found: isl.Set, cells: _Cells, dims: Sequence[str]) -> str:
-    """The point the hypotheses leave room for, with its cells, in words."""
+def _room(
+    found: isl.Set, cells: _Cells, dims: Sequence[str], goal: Any, domain: isl.Set
+) -> str:
+    """The point the hypotheses leave room for, with its cells, in words.
+
+    Only the cells the claim reads or its domain is bounded by are named,
+    with the sizes: the cells an instance of a hypothesis reads beyond those
+    are what the instantiation reached, and say little about why the claim
+    fails.
+    """
     point = sample_point(found)
     parameters = sample_parameters(found)
     parts = []
@@ -864,9 +974,13 @@ def _room(found: isl.Set, cells: _Cells, dims: Sequence[str]) -> str:
         parts.append(
             "[" + ", ".join(f"{d}={v}" for d, v in zip(dims, point, strict=True)) + "]"
         )
+    read = {cells.param(cell) for cell in cells_in(goal)}
+    read |= set(domain.get_var_names(isl.dim_type.param))
     values = []
     for name, value in parameters.items():
         cell = cells.cells.get(name)
+        if cell is not None and name not in read:
+            continue
         values.append(f"{render(cell) if cell is not None else name} = {value}")
     where = " ".join(parts)
     if values:

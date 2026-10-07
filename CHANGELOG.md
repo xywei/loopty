@@ -1609,6 +1609,21 @@ with a pair of statement instances.
   `off: Arr[Fin[n + 1], Fin[nnz + 1]]` is the length of the buffer the
   offsets point into, which no axis of a scan has to be, and the
   `element-sort` fact of `off[0] = 0` was refuted at `nnz = -1`.
+- In a program, such a name is renamed apart as a callee's other sizes are
+  (`loopty.compose`). It kept its own spelling, so two calls of a scan that
+  each name their buffer `nnz` gave two unrelated buffers one size, and the
+  compiled program refused a second matrix of another length with a shape
+  mismatch, where the native one ran.
+- Hypotheses that contradict each other decide nothing
+  (`loopty.hypotheses.discharge`). A postcondition no run can satisfy, or a
+  postcondition and a requirement that hold together nowhere, left no point
+  of the claim's domain, and every requirement and every flat access under
+  them read `decided`, vacuously; with a false postcondition the compiled
+  program then skipped the check the native callee refuses on. Such a
+  requirement is now checked when the program runs, and its reason names the
+  hypotheses. A reason also names what isl could not state of a hypothesis
+  or of the claim, which was read as saying nothing, and the values only of
+  the cells the claim reads, not of every cell an instance reached.
 
 ### Changed
 
