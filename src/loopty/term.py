@@ -290,7 +290,7 @@ class ArrType:
         return tuple(Var(name) for name in sorted(self.domain.size_names()))
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class Hypothesis:
     """A proposition a fact about a program may assume, and what it rests on.
 
@@ -304,6 +304,9 @@ class Hypothesis:
     ``rests_on``), and is empty for what the program's contract or its own
     statements establish. ``mentions`` names the arrays the claim is about,
     so that a call writing one of them can retire it.
+
+    Compared by identity, as :class:`Requirement` and :class:`Scope` are: a
+    claim is a lanky term, whose ``==`` builds a proposition.
     """
 
     claim: Any
@@ -312,7 +315,7 @@ class Hypothesis:
     mentions: frozenset[str] = frozenset()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class Requirement:
     """What a call's contract checks of an array an earlier call wrote.
 
@@ -364,7 +367,7 @@ class Requirement:
         return self.question is not None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class Scope:
     """What holds where one call of a program runs.
 

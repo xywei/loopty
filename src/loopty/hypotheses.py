@@ -43,7 +43,8 @@ claim looks for more bad instances. Neither can empty a set that is not
 empty.
 
 *A fact rests on what it used.* When the set is empty, every hypothesis is
-left out in turn, and kept only if the set is no longer empty without it. A
+left out in turn, the last first, and kept only if the set is no longer
+empty without it. A
 fact decided this way rests on the facts the remaining ones rest on, and
 nothing else, so a cited theorem the claim does not need does not count in
 what the fact is worth.
@@ -96,6 +97,7 @@ __all__ = [
     "discharge",
     "linear",
     "linear_expr",
+    "structural_key",
     "substitute",
     "theorem_instances",
 ]
@@ -182,6 +184,35 @@ def linear_expr(names: Mapping[str, int], constant: int) -> Any:
     if constant or not terms:
         terms.append(constant)
     return terms[0] if len(terms) == 1 else Add(tuple(terms))
+
+
+def structural_key(expr: Any) -> Any:
+    """A hashable key that two terms share exactly when they are one term.
+
+    Not ``repr``, which pymbolic abbreviates past a depth (``Add((..., 1))``),
+    so that ``off[r + 1]`` and ``off[r + 2]`` would share a key, and with it
+    an isl parameter, which asserts the two cells equal. A node is keyed by
+    its mapper method, so lanky's ``Add`` and pymbolic's ``Sum`` are one
+    kind, and by the keys of its constructor arguments.
+    """
+    if isinstance(expr, prim.ExpressionNode):
+        kind = getattr(expr, "mapper_method", None) or type(expr).__name__
+        return (kind, tuple(structural_key(arg) for arg in init_args(expr)))
+    if isinstance(expr, tuple | list):
+        return ("tuple", tuple(structural_key(item) for item in expr))
+    if isinstance(expr, FinType):
+        return ("Fin", structural_key(expr.bound))
+    if isinstance(expr, Refined):
+        return ("Refined", structural_key(expr.base), structural_key(tuple(expr.props)))
+    if isinstance(expr, bool | np.bool_):
+        return ("bool", bool(expr))
+    if isinstance(expr, int | np.integer):
+        return ("int", int(expr))
+    if isinstance(expr, float | np.floating):
+        return ("float", float(expr))
+    if isinstance(expr, str):
+        return ("str", expr)
+    return ("other", type(expr).__name__, str(expr))
 
 
 def _canonical(expr: Any) -> Any:
@@ -351,17 +382,13 @@ class _Cells:
     def __init__(self, reserved: Collection[str], integral: Collection[str]) -> None:
         self.taken = set(reserved)
         self.integral = set(integral)
-        self.by_key: dict[str, str] = {}
+        self.by_key: dict[Any, str] = {}
         #: Each parameter's cell, in its canonical spelling.
         self.cells: dict[str, Subscript] = {}
 
-    @staticmethod
-    def key(cell: prim.Subscript) -> str:
-        return repr(_cell(cell.aggregate.name, _indices(cell)))
-
     def adopt(self, name: str, cell: prim.Subscript) -> None:
         canonical = _cell(cell.aggregate.name, _indices(cell))
-        self.by_key[repr(canonical)] = name
+        self.by_key[structural_key(canonical)] = name
         self.cells[name] = canonical
         self.taken.add(name)
 
@@ -371,7 +398,7 @@ class _Cells:
         if array not in self.integral:
             return None
         canonical = _cell(array, _indices(cell))
-        key = repr(canonical)
+        key = structural_key(canonical)
         found = self.by_key.get(key)
         if found is not None:
             return found
@@ -526,7 +553,7 @@ def _candidates(
     for cell in cells:
         by_array.setdefault(cell.aggregate.name, []).append(cell)
     out: dict[str, list[Any]] = {name: [] for name in binders}
-    seen: dict[str, set[str]] = {name: set() for name in binders}
+    seen: dict[str, set[Any]] = {name: set() for name in binders}
     for pattern in patterns:
         indices = _indices(pattern)
         for position, index in enumerate(indices):
@@ -555,7 +582,7 @@ def _candidates(
                     value = linear_expr(values, found[1] - constant)
                 if _names(value) & set(binders):
                     continue
-                key = repr(value)
+                key = structural_key(value)
                 if key not in seen[binder]:
                     seen[binder].add(key)
                     out[binder].append(value)
@@ -762,14 +789,14 @@ def _run(
     found = domain
     found = _intersect(found, _encode(goal, cells, names, negate=True), dims)
     found = assume_sizes(found, set(nonneg) | set(reflected))
-    seen: set[str] = set()
+    seen: set[Any] = set()
     pending = list(hypotheses)
     for _round in range(ROUNDS):
         known_cells = cells.known()
         grew = False
         for hypothesis in pending:
             for instance in _instances(hypothesis.claim, known_cells):
-                key = repr(instance)
+                key = structural_key(instance)
                 if key in seen:
                     continue
                 seen.add(key)
@@ -812,7 +839,11 @@ def discharge(
     if not found.is_empty():
         return Discharge(False, None, (), _room(found, cells, dims))
     used = list(hypotheses)
-    for hypothesis in list(hypotheses):
+    # Last first: what a call derives from others (a theorem's instance, the
+    # requirement a call is checked for) goes before what it derives from,
+    # so that a fact rests on the postcondition rather than on a restatement
+    # of it whenever either would do.
+    for hypothesis in reversed(list(hypotheses)):
         trial = [kept for kept in used if kept is not hypothesis]
         found_without, _ = _run(
             domain, goal, trial, integral, known, nonneg, reflected
@@ -1104,7 +1135,7 @@ def theorem_instances(
     search(0, {}, ())
     out: list[Hypothesis] = []
     reasons: list[str] = []
-    seen: set[str] = set()
+    seen: set[Any] = set()
     for sigma, used in matches:
         missing = [var for var in variables if var not in sigma]
         if missing:
@@ -1135,7 +1166,7 @@ def theorem_instances(
             reasons.append(why)
             continue
         claim = _apply(goal, sigma, functions)
-        key = repr(claim)
+        key = structural_key(claim)
         if key in seen:
             continue
         seen.add(key)

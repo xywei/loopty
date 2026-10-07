@@ -719,6 +719,217 @@ def test_calls_reading_one_family_through_two_offsets_are_refused() -> None:
 # {{{ what a program's body may not do
 
 
+@pytest.mark.parametrize(
+    ("body", "said"),
+    [
+        (lambda u, rhs: u[0], "reads a cell of its parameter u"),
+        (lambda u, rhs: rhs.dom, "asks for .dom of its parameter rhs"),
+        (lambda u, rhs: u * 2.0, "computes with its parameter u"),
+        (lambda u, rhs: bool(u), "branches on its parameter u"),
+        (lambda u, rhs: list(range(u)), "uses as an integer"),
+        (lambda u, rhs: np.sum(u), "hands numpy"),
+    ],
+)
+def test_a_body_that_touches_an_argument_is_refused(body, said) -> None:
+    def touches(u, rhs):
+        body(u, rhs)
+        flux(u, rhs)
+
+    touches.__name__ = "touches"
+    with pytest.raises(TraceError, match=said) as refused:
+        program(touches).trace()
+    assert "Do the work in a kernel" in str(refused.value)
+
+
+def test_an_array_from_outside_the_program_is_refused() -> None:
+    outside = Arr.zeros(4)
+
+    @program
+    def borrows(u):
+        flux(u, outside)
+
+    with pytest.raises(TraceError, match="neither a parameter of borrows"):
+        borrows.trace()
+
+
+def test_one_array_for_two_parameters_of_a_call_is_refused() -> None:
+    @program
+    def aliased(u):
+        flux(u, u)
+
+    with pytest.raises(TraceError, match="may not share storage"):
+        aliased.trace()
+
+
+def test_an_array_passed_as_a_scalar_is_refused() -> None:
+    @program
+    def confused(a, x):
+        scale(a, x)
+        scale(x, a)
+
+    with pytest.raises(TraceError, match="scalar parameter"):
+        confused.trace()
+
+
+def test_a_parameter_no_kernel_is_given_is_refused() -> None:
+    @program
+    def idle(u, rhs, spare):
+        burgers(u, rhs)
+
+    with pytest.raises(TraceError, match="never passes its parameter spare"):
+        idle.trace()
+
+
+def test_a_callee_that_cannot_be_traced_is_named() -> None:
+    @kernel
+    def branchy(u: Arr[Fin[n], Real]):  # noqa: F821
+        for i in u.dom:
+            if i > 0:
+                u[i] = 1.0
+
+    @program
+    def calls_branchy(u):
+        branchy(u)
+
+    with pytest.raises(TraceError, match="calls branchy at .*cannot be traced"):
+        calls_branchy.trace()
+
+
+@pytest.mark.parametrize(
+    ("body", "said"),
+    [
+        # Natively, poke's contract refuses 7 for a Fin[3]; compiled, the 7 is
+        # no argument, and would be written to x[7].
+        (lambda x: poke(7, x), "depends on n, which is known only when"),
+        (lambda x: poke(1.0, x), r"not an integer.*pass int\(1.0\)"),
+        (lambda x: shift(-1, x), "has to satisfy 0 <= a"),
+        (lambda x: shift(True, x), "not an integer"),
+    ],
+)
+def test_a_number_for_a_scalar_is_checked_against_its_sort(body, said) -> None:
+    def literal(x):
+        body(x)
+
+    literal.__name__ = "literal"
+    with pytest.raises(TraceError, match=said):
+        program(literal).trace()
+
+
+def test_a_number_the_sort_allows_is_substituted() -> None:
+    @program
+    def shifted(x):
+        shift(2, x)
+
+    x = Arr.from_numpy(np.array([1, 2, 3], dtype=np.int64))
+    fact = LoopyExecutor().differential(shifted, Schedule(shifted), {"x": x})
+    assert fact.status.value == "tested", fact.provenance
+
+
+def test_an_index_the_program_is_passed_is_checked_by_its_contract() -> None:
+    @program
+    def pokes(i, x):
+        poke(i, x)
+
+    assert str(dict(pokes.term.params)["i"].bound) == "n"
+    with pytest.raises(ValueError, match="0 <= i < 3"):
+        LoopyExecutor().run(pokes, i=7, x=Arr.zeros(3))
+    x = Arr.zeros(3)
+    LoopyExecutor().run(pokes, i=2, x=x)
+    assert list(x.numpy()) == [0.0, 0.0, 1.0]
+
+
+def test_a_scalar_that_sizes_an_array_sizes_it_in_the_programs_names() -> None:
+    # fill's x is m long, and m is its scalar: in the program, x is as long as
+    # whatever the program passed for m, as the loop over it is. Left in the
+    # callee's name, x's length was nobody's, and a k longer than x ran the
+    # loop past the end of it.
+    @program
+    def numbered(k, x):
+        fill(k, x)
+
+    term = numbered.term
+    assert str(dict(term.params)["x"].axes[0]) == "k"
+    fact = LoopyExecutor().differential(
+        numbered, Schedule(numbered), {"k": 4, "x": Arr.zeros(4)}
+    )
+    assert fact.status.value == "tested", fact.provenance
+    with pytest.raises(ValueError, match="shape mismatch"):
+        LoopyExecutor().run(numbered, k=5, x=Arr.zeros(4))
+
+    @program
+    def five(x):
+        fill(5, x)
+
+    ((_, typ),) = five.term.params
+    assert typ.axes == (5,)
+    x = Arr.zeros(5)
+    LoopyExecutor().run(five, x=x)
+    assert list(x.numpy()) == [1.0, 2.0, 3.0, 4.0, 5.0]
+    with pytest.raises(ValueError, match="shape mismatch"):
+        LoopyExecutor().run(five, x=Arr.zeros(4))
+
+
+def test_a_program_that_returns_something_is_refused() -> None:
+    # Natively it returns the array it made; compiled, it is one kernel, which
+    # returns what it writes into its parameters.
+    @program
+    def made_and_returned(u):
+        f = Arr.zeros_like(u)
+        flux(u, f)
+        return f
+
+    with pytest.raises(TraceError, match="returns <f of the program"):
+        made_and_returned.trace()
+
+    # Called by a program, it hands the caller an array to pass on.
+    @program
+    def passes_it_on(u, rhs):
+        divergence(made_and_returned(u), rhs)
+
+    term = passes_it_on.term
+    assert [name for name, _ in term.temporaries] == ["f"]
+    fact = LoopyExecutor().differential(
+        passes_it_on, Schedule(passes_it_on), burgers_inputs()
+    )
+    assert fact.status.value == "tested", fact.provenance
+
+
+def test_an_index_bounded_through_an_offset_axis_is_checked() -> None:
+    # i: Fin[n] beside off: Arr[Fin[n + 1]] alone. The program's sizes are
+    # lanky's variables, as a kernel's are, so the contract solves n from
+    # off's four cells and holds i below 3, and the lowering can say so.
+    @program
+    def pokes_offsets(i, off):
+        poke_offsets(i, off)
+
+    with pytest.raises(ValueError, match="0 <= i < 3"):
+        LoopyExecutor().run(pokes_offsets, i=100, off=Arr.zeros(4, dtype=np.int64))
+    off = Arr.zeros(4, dtype=np.int64)
+    LoopyExecutor().run(pokes_offsets, i=2, off=off)
+    assert list(off.numpy()) == [0, 0, 1, 0]
+
+
+def test_a_number_is_checked_against_the_programs_sizes() -> None:
+    # fill makes x five cells long, so poke's n is 5 there, and 3 is a point
+    # of Fin[5] and 7 is not.
+    @program
+    def fills_and_pokes(x):
+        fill(5, x)
+        poke(3, x)
+
+    x = Arr.zeros(5)
+    LoopyExecutor().run(fills_and_pokes, x=x)
+    assert list(x.numpy()) == [1.0, 2.0, 3.0, 1.0, 5.0]
+
+    @program
+    def pokes_past(x):
+        fill(5, x)
+        poke(7, x)
+
+    with pytest.raises(TraceError, match="has to satisfy 0 <= i < 5"):
+        pokes_past.trace()
+
+
 def test_a_count_an_earlier_call_writes_is_refused() -> None:
     # lengthen makes the rows longer than val stores them. Whether a count
     # still says how long its row is stored is a question about the buffer

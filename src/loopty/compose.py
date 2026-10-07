@@ -1392,7 +1392,9 @@ class _Composer:
                     )
                 )
                 self.read_through.add(name)
-        return wants
+        # A layout is checked before an element read through it, which the
+        # check of the element reads its cells through.
+        return sorted(wants, key=lambda want: want.kind != "layout")
 
     def settle_type(self, name: str, typ: Any, call: _Call, param: str) -> None:
         """Give ``name`` its type, or check the type it already has."""
@@ -1829,13 +1831,19 @@ class _Composer:
                 )
                 stmts.append(self.guarded(moved, flags))
                 ids.append(stmt.id)
+            # What held when the call started holds of the arrays it reads
+            # throughout, and of those it writes only until it writes them.
             scopes.append(
                 Scope(
                     call=slot.label,
                     kernel=slot.kernel.__name__,
                     where=slot.where,
                     statements=tuple(ids),
-                    hypotheses=(*offered, *types_here),
+                    hypotheses=tuple(
+                        hypothesis
+                        for hypothesis in (*offered, *types_here)
+                        if not (hypothesis.mentions & slot.written)
+                    ),
                 )
             )
             written |= slot.written
