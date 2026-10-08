@@ -955,9 +955,15 @@ or said to need no order, and raises `VariableAccessNotOrdered` ("No
 dependency relationship found between 'front_S0' which writes the variable
 'h' and 'back_S0' which also accesses the variable 'h'").
 
-**Local fix.** After a fusion, `Schedule._ordered_as_the_term` keeps an
-instruction's dependency on another statement only where the dependences the
-casts were checked against order an instance of one before an instance of the
-other, and puts each pair it drops in the other's `no_sync_with` with scope
-`any`: they touch no cell in common, so they need no order and no barrier.
-The instructions that compute a ragged row's length keep their dependencies.
+**Local fix.** After a fusion, `Schedule._ordered_by_dependences` draws the
+dependencies between statements again from the dependences the casts were
+checked against: one statement's instruction depends on another's where a
+dependence joins an instance of one to an instance of the other, in either
+direction, ordered as the schedule's time map orders the two within a step
+of the loops they share; two that touch one variable and that no dependence
+joins go in each other's `no_sync_with`, with scope `any`, since they touch
+no cell in common and need no order and no barrier. The instructions that
+compute a ragged row's length keep their dependencies. The same is done
+after a substitution, which takes the producer's instruction out: a later
+write of what the producer read depended on the producer, and on nothing that
+now reads it, and loopy was free to run it first.

@@ -193,7 +193,10 @@ from the producer to a consumer that would now run first is refused with the
 pair. :meth:`Schedule.fuse` builds that map from the two statements' loops and
 a shift. In the kernel each statement's loops were a domain of their own;
 they go, and the new loops get one domain, the union of the images, each
-statement predicated on its own (:func:`_fused_plan`).
+statement predicated on its own (:func:`_fused_plan`). The instructions'
+dependencies, which the lowering drew by array in the order of the term, are
+drawn again from the dependences in the new order
+(:meth:`Schedule._ordered_by_dependences`).
 
 Storing less
 ------------
@@ -3780,11 +3783,14 @@ class Schedule:
           forward, which is the ``monotone`` fact, refuted with the pair of
           instances and the cell between them, as every cast is.
 
-        The schedule keeps the statements it no longer runs, with no
-        dependence to or from them, so a later step names their loops as
-        before, and every later step is checked against the dependences of
-        the program as it now runs: the reads of the array are gone, and
-        the reads that replace them are there. Contracting an array to the
+        The statements it no longer runs have no instances left, and the
+        loops only they ran in are no loops of the schedule, so no later step
+        can name them, and every later step is checked against the
+        dependences of the program as it now runs: the reads of the array are
+        gone, and the reads that replace them are there. The kernel's
+        instructions are ordered by those too
+        (:meth:`_ordered_by_dependences`). A substitution through two arrays,
+        one computed from the other, is refused. Contracting an array to the
         window of cells that are live at once is the other way of storing it
         less, and is not done.
         """

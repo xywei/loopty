@@ -485,12 +485,14 @@ with a pair of statement instances.
   maps take when they are its outer ones, so the rows of a two-loop
   producer fuse with a one-loop consumer of each row; other loops that share
   a domain with a loop no map takes leave the kernel unbuildable, with the
-  reason. After a fusion an instruction depends on another statement's only
-  where a dependence of the term orders the two, and a pair that shares no
-  cell is marked as needing no order (`no_sync_with`): the lowering draws
-  dependencies by array, and a call between the fused ones that the second
-  reads only at cells it never writes left loopy no order (a `CycleError`;
-  note 21 of `docs/loopy-notes.md`). Maps per statement that take a loop in common still have to
+  reason. After a fusion, and after a substitution, the statements'
+  instruction dependencies are drawn again from the dependences the casts
+  are checked against, in the order the schedule puts the statements, and
+  two that touch one variable and that no dependence joins are marked as
+  needing no order (`no_sync_with`): the lowering draws them by array, in
+  term order, and a call between the fused ones that the second reads only
+  at cells it never writes left loopy no order (a `CycleError`; note 21 of
+  `docs/loopy-notes.md`). Maps per statement that take a loop in common still have to
   take the same loops, and every statement in a loop some map takes has to
   be given one that takes all of them.
 - **Storing an intermediate, or not** (#13). `Schedule.substitute(array)`
@@ -507,7 +509,9 @@ with a pair of statement instances.
   the producer's reads are carried over to the reads that replace them, and
   every later step is checked against the result, so a fused loop that
   carried the array from step to step may take a hardware axis once it is
-  substituted. Contraction to the cells live at once is not done.
+  substituted; the kernel's instruction dependencies are drawn again from
+  them, so a later write of what the producer read waits for the reads that
+  compute it again. Contraction to the cells live at once is not done.
 - **A ninth demo**, `examples/fusion.py`: the Burgers flux and divergence of
   the closed #6, rebuilt on these. The fusion without a shift is refused with
   its pair, the fusion one step behind is decided and compiled to one loop,

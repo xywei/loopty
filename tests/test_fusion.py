@@ -577,6 +577,20 @@ def test_a_fusion_names_two_sides_in_order(
         Schedule(burgers).fuse(producer, consumer, shift=shift)
 
 
+def test_a_statement_s_map_moves_every_loop_of_the_step_it_runs_in() -> None:
+    # rows_then_cells.S1 runs in the row loop, which S0's map takes, and in
+    # its cell loop: a map of the cell loop alone would leave it in a row
+    # loop the step replaces.
+    term = rows.term
+    row = term.stmt("rows_then_cells.S0").inames[0]
+    cell = term.stmt("rows_then_cells.S1").inames[1]
+    with pytest.raises(ValueError, match=f"S1 runs in {row} as well"):
+        Schedule(rows).affine(
+            f"{{ rows_then_cells_S0[{row}] -> [q] : q = {row}; "
+            f"rows_then_cells_S1[{cell}] -> [q] : q = {cell} }}"
+        )
+
+
 def test_statements_of_one_loop_cannot_be_fused_into_it() -> None:
     fused = Schedule(burgers).fuse("flux", "divergence", shift=1)
     with pytest.raises(ValueError, match="already run in"):
