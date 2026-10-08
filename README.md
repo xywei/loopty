@@ -55,7 +55,7 @@ decided  decided    type           spmv.py:112  spmv           the accumulation 
 tested   tested     interpreter    spmv.py:102  spmv           the traced term computes what the body computes
 decided  tested     call           spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
 ...
-21 facts: 16 decided, 5 tested
+22 facts: 16 decided, 6 tested
 ```
 
 Look at the `x[col[r, j]]` row, and at what decided it. That indirection is the
