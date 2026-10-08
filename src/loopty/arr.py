@@ -43,7 +43,23 @@ from loopty.domain import STORAGES, Fixed, index_domain
 from loopty.idx import axis_size
 from loopty.term import ArrType
 
-__all__ = ["Arr", "ArrSpec", "Dom"]
+__all__ = ["Arr", "ArrSpec", "Dom", "LayoutError"]
+
+
+class LayoutError(IndexError):
+    """A row of a ragged array read through a layout that puts it off its buffer.
+
+    Raised where a read follows the counts and the offsets a kernel declares,
+    as the run has left them, and they put the row before the buffer or past
+    its end. The contract checks them when the call starts, so only a kernel
+    that writes its layout can move a row there, and its ``layout`` fact is
+    refuted by the run (:func:`loopty.faithful.layout_fact`). ``array`` is the
+    parameter the row was read as, when the read knows it.
+    """
+
+    def __init__(self, message: str, array: str | None = None) -> None:
+        super().__init__(message)
+        self.array = array
 
 
 @dataclass(frozen=True)
@@ -156,7 +172,7 @@ class Arr:
     :mod:`loopty.domain`).
     """
 
-    __slots__ = ("_domain", "_layout", "_offsets", "_storage", "_values")
+    __slots__ = ("_domain", "_layout", "_offsets", "_read_as", "_storage", "_values")
 
     def __init__(
         self, values: np.ndarray, offsets: np.ndarray | None = None
@@ -195,6 +211,7 @@ class Arr:
             self._values = values
             self._offsets = offsets
         self._layout: tuple[Any, Any] | None = None
+        self._read_as: str | None = None
         self._domain: Fixed | None = None
         self._storage: str | None = None
 
@@ -267,6 +284,7 @@ class Arr:
         array._values = values
         array._offsets = None
         array._layout = None
+        array._read_as = None
         array._domain = fixed
         array._storage = storage
         return array
@@ -362,7 +380,9 @@ class Arr:
 
     # -- the declared layout ------------------------------------------------
 
-    def through(self, counts: Any = None, offsets: Any = None) -> Arr:
+    def through(
+        self, counts: Any = None, offsets: Any = None, name: str | None = None
+    ) -> Arr:
         """This ragged array, read through the layout a kernel declares.
 
         ``counts`` and ``offsets`` are the arguments a kernel declares beside
@@ -387,12 +407,14 @@ class Arr:
         The number of rows stays this array's own, and every read is still
         checked: a column against the length of its row, and the cell it lands
         on against the flat buffer, since offsets a kernel has rewritten can
-        point anywhere.
+        point anywhere: a row there is a :class:`LayoutError`, which names
+        the parameter the array is read as, ``name``, when it is given.
         """
         if self._offsets is None:
             raise TypeError("a dense array has no layout to read through")
         view = self._shared(type(self))
         view._layout = (counts, offsets)
+        view._read_as = name
         return view
 
     def _shared(self, kind: type[Arr]) -> Arr:
@@ -459,10 +481,11 @@ class Arr:
         start = self._row_start(row)
         stop = start + self._row_length(row)
         if start < 0 or stop > self._values.size:
-            raise IndexError(
+            raise LayoutError(
                 f"row {row} occupies cells {start} to {stop} of the flat buffer "
                 f"by {self._described_layout()}, and the buffer has "
-                f"{self._values.size}"
+                f"{self._values.size}",
+                self._read_as,
             )
         return slice(start, stop)
 
@@ -654,10 +677,11 @@ class Arr:
             )
         flat = self._row_start(row) + column
         if not 0 <= flat < self._values.size:
-            raise IndexError(
+            raise LayoutError(
                 f"[{row}, {column}] is cell {flat} of the flat buffer by "
                 f"{self._described_layout()}, and the buffer has "
-                f"{self._values.size}"
+                f"{self._values.size}",
+                self._read_as,
             )
         return flat
 

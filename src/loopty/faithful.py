@@ -47,6 +47,14 @@ ran and after one at least, ``refuted`` at the first run after which it is
 false, and ``assumed``, with the reason, when nothing ran or it could not be
 evaluated after some run. Deciding it from the term instead, by which
 statement writes each cell last, is a question for isl that is not asked yet.
+
+A ``layout`` fact the typing rules leave ``assumed`` is tried on the same runs
+(:func:`layout_fact`): the claim that the rows of a ragged family stay inside
+their buffer and apart while the kernel writes its counts or its offsets is
+``refuted`` by ``native`` at the first run that reads a row the layout puts off
+the buffer (a :class:`~loopty.arr.LayoutError`), or after which two rows share
+a cell or one lies off the buffer. A run that keeps them so is no test of it,
+since the claim is about every state of the run and not only its last.
 """
 
 from __future__ import annotations
@@ -61,7 +69,7 @@ from lanky.ledger import Fact, Status, fact_id
 from lanky.prelude import FinType, Refined
 from lanky.terms import evaluate, free_variables
 
-from loopty.arr import Arr
+from loopty.arr import Arr, LayoutError
 from loopty.interpret import CheckFailed, InterpretError, TooLarge, interpret
 from loopty.term import ArrType, Term, declared_layout
 from loopty.tolerance import disagreement, output_class
@@ -74,7 +82,9 @@ __all__ = [
     "SEED",
     "SIZES",
     "Stopped",
+    "Raised",
     "faithfulness_fact",
+    "layout_fact",
     "no_term_fact",
     "postcondition_fact",
     "sample_arguments",
@@ -132,7 +142,8 @@ def faithfulness_fact(
     ``(label, record, arguments)``, the arguments as the run left them, for
     :func:`postcondition_fact` to evaluate the postcondition at: on every
     input, those after a disagreement too, which settles this fact and not
-    the postcondition.
+    the postcondition. A run the body raised in is collected too, with a
+    :class:`Raised` in place of the arguments, for :func:`layout_fact`.
     """
     identifier = fact_id(KIND, owner, module=module, line=line)
     inputs: list[dict[str, Any]] = []
@@ -168,7 +179,7 @@ def faithfulness_fact(
                 if verdict is None:
                     inputs.append({"input": label, "outcome": f"skipped: {arguments}"})
                 continue
-            after = None
+            after = failed = None
             if observed is not None:
 
                 def after(
@@ -176,7 +187,12 @@ def faithfulness_fact(
                 ) -> None:
                     observed.append((label, recorded, native))
 
-            outcome = _compare(kernel, term, label, arguments, after)
+                def failed(
+                    error: Exception, label: str = label, recorded: Any = recorded
+                ) -> None:
+                    observed.append((label, recorded, Raised(error)))
+
+            outcome = _compare(kernel, term, label, arguments, after, failed)
             if verdict is not None:
                 continue
             if outcome is None:
@@ -248,6 +264,19 @@ def no_term_fact(
 
 
 @dataclass(frozen=True)
+class Raised:
+    """In place of a run's arguments: the body raised ``error`` on the input.
+
+    :func:`faithfulness_fact` collects one for an input the body cannot run,
+    which says nothing of the term or of the postcondition, and
+    :func:`layout_fact` reads, since a body that reads a row off its buffer
+    is one whose layout the run broke.
+    """
+
+    error: Exception
+
+
+@dataclass(frozen=True)
 class Stopped:
     """In place of a run's arguments: the runs stopped here, and why.
 
@@ -316,6 +345,9 @@ def postcondition_fact(
 
     held = 0
     for label, recorded, arguments in observed:
+        if isinstance(arguments, Raised):
+            # The body refused the input: no run the contract let in.
+            continue
         if isinstance(arguments, Stopped):
             inputs.append({"input": label, "outcome": f"not run: {arguments.reason}"})
             continue
@@ -377,6 +409,108 @@ def postcondition_fact(
             ),
         )
     return fact(Status.TESTED, compared=held)
+
+
+def layout_fact(
+    term: Term,
+    fact: Fact,
+    observed: Sequence[tuple[str, Any, Any]],
+) -> Fact:
+    """A ``layout`` fact the typing rules left ``assumed``, tried on native runs.
+
+    ``fact`` is one :func:`loopty.typing.layout_facts` states, and
+    ``observed`` what :func:`faithfulness_fact` collected. A fact with an isl
+    question is the isl oracle's, and is returned as it is, as is one with
+    another status. Otherwise the runs are read in order: one in which the
+    body read a row of the family's arrays off its buffer, through the
+    counts and the offsets the kernel declares as the run had left them,
+    refutes the fact with that input, as does one that leaves two rows of
+    the family on one cell, or one off the buffer. The rows are where the
+    native run reads them: row ``q`` starts at ``off[q]``, or at the array's
+    own offset when the kernel declares none, and is ``cnt[q]`` long, or
+    ``off[q + 1] - off[q]`` without counts, and an empty row is nowhere.
+    A run that leaves them apart and inside is no test of the fact, which is
+    about every state the run passes through; the fact stays ``assumed``.
+    """
+    if fact.status is not Status.ASSUMED or fact.term is not None:
+        return fact
+    provenance = fact.provenance
+    arrays = list(provenance.get("arrays", ()))
+    counts = provenance.get("counts")
+    if not arrays or counts is None:
+        return fact
+    for label, recorded, arguments in observed:
+        if isinstance(arguments, Stopped):
+            continue
+        if isinstance(arguments, Raised):
+            error = arguments.error
+            if not (isinstance(error, LayoutError) and error.array in arrays):
+                continue
+            why = (
+                f"on {label}, the body run natively reads {error.array} through "
+                f"the layout it has written, and {error}"
+            )
+        else:
+            broken = _broken_layout(term, counts, arrays, arguments)
+            if broken is None:
+                continue
+            why = f"on {label}, the body run natively leaves {broken}"
+        extra = {"arguments": recorded} if recorded is not None else {}
+        return fact.with_status(
+            Status.REFUTED,
+            decided_by="native",
+            counterexample={"input": label},
+            reason=f"{why}, so the rows do not stay inside the buffer and apart",
+            **extra,
+        )
+    return fact
+
+
+def _broken_layout(
+    term: Term, counts: str, arrays: Sequence[str], arguments: Mapping[str, Any]
+) -> str | None:
+    """How the rows of a family lie off their buffer or on one another, or ``None``.
+
+    Read off what a native run left in ``arguments``, as :func:`layout_fact`
+    says.
+    """
+    first = arguments.get(arrays[0])
+    if not isinstance(first, Arr) or not first.is_ragged:
+        return None
+    size = int(np.asarray(first.numpy()).size)
+    offsets_name = term.offsets_of(counts)
+    declared = arguments.get(offsets_name) if offsets_name is not None else None
+    starts = (
+        np.asarray(declared.numpy() if isinstance(declared, Arr) else declared)
+        if declared is not None
+        else np.asarray(first.offsets)
+    ).reshape(-1)
+    held = arguments.get(counts)
+    rows = int(np.asarray(first.offsets).size) - 1
+    if held is not None:
+        cells = np.asarray(held.numpy() if isinstance(held, Arr) else held)
+        lengths = [max(int(cells.reshape(-1)[q]), 0) for q in range(rows)]
+    else:
+        lengths = [max(int(starts[q + 1]) - int(starts[q]), 0) for q in range(rows)]
+    laid = [
+        (int(starts[q]), int(starts[q]) + lengths[q], q)
+        for q in range(rows)
+        if lengths[q] > 0
+    ]
+    for start, stop, q in laid:
+        if start < 0 or stop > size:
+            return (
+                f"row {q} of {arrays[0]} at cells {start} to {stop} of a buffer of "
+                f"{size}"
+            )
+    laid.sort()
+    for (start, stop, q), (other, _end, p) in zip(laid, laid[1:], strict=False):
+        if other < stop:
+            return (
+                f"rows {q} and {p} of {arrays[0]} on cell {other}, row {q} at cells "
+                f"{start} to {stop} and row {p} from {other} on"
+            )
+    return None
 
 
 # {{{ inputs
@@ -629,6 +763,7 @@ def _compare(
     label: str,
     arguments: Mapping[str, Any],
     after: Any = None,
+    failed: Any = None,
 ) -> tuple[str, Any] | None:
     """Run both meanings on one input; ``None`` when they agree.
 
@@ -649,7 +784,8 @@ def _compare(
     about the term.
 
     ``after``, when given, is called with the native run's arguments once the
-    body has run them without an error, as the run left them.
+    body has run them without an error, as the run left them, and
+    ``failed`` with what the body raised on an input it cannot run.
     """
     native = {name: _copy(value) for name, value in arguments.items()}
     interpreted = {name: _copy(value) for name, value in arguments.items()}
@@ -684,6 +820,8 @@ def _compare(
                 f"term is not what the body computes. {error}",
             )
         except Exception as exc:  # noqa: BLE001 - an input the body refuses
+            if failed is not None:
+                failed(exc)
             return "skipped", f"the body raised {type(exc).__name__}: {exc}"
     if after is not None:
         after(native)

@@ -240,10 +240,11 @@ end to end; the edges are sharp.
   to an argument but pass it to a kernel, or make an array like it, is refused
   with a `TraceError` naming the fix.
 - Facts that travel between a program's calls (`loopty.hypotheses`). A
-  kernel's requirements on its inputs are its argument types, and two of them
-  are about what an array's cells hold: an element of a `Fin[m]` sort is a
-  point of it, and the offsets a ragged family is read through are the ones
-  its counts give. Where an earlier call wrote the array, the requirement is
+  kernel's requirements on its inputs are its argument types, and three of
+  them are about what an array's cells hold: an element of a `Fin[m]` sort is
+  a point of it, one of the `Nat` sort is not negative, and the offsets a
+  ragged family is read through are the ones its counts give. Where an
+  earlier call wrote the array, the requirement is
   a `requirement` fact of the program, decided by isl under what held at the
   call: the earlier callees' postconditions that nothing has written over
   since, the zeros an `Arr.zeros_like` starts an array with, the types the
@@ -431,7 +432,11 @@ end to end; the edges are sharp.
   disagrees names the outputs and by how much), and the command exits 1. So
   it does when two kernels claim one fact id, as two kernels one definition
   makes (a factory) do: a `DUPLICATE` block names the kernel and its ids, as
-  `lanky check` names them.
+  `lanky check` names them, and the `--json` ledger keeps each claim not in
+  the table under `refused_claims`, with its status and what explains it. A
+  schedule of a schedule, `Schedule(Schedule(k))`, is a schedule of `k`: its
+  run is compared with `k`'s body, and `k` is not run again through the
+  identity.
 
 **Partial.**
 
@@ -474,11 +479,16 @@ end to end; the edges are sharp.
   compiled program is one call, so the contract checks its arguments when it
   starts and not at every call. What a callee's contract checks of the cells
   of an array an earlier call wrote, or the program made (an element sort
-  `Fin[m]`, the offsets a ragged family is read through), is a `requirement`
-  of the program: decided by isl under the hypotheses that held at the call,
-  or, where they do not decide it, checked by the compiled program between
-  the two calls, which then stops with the requirement's message where the
-  native callee is refused (`examples/travel.py`). The counts of a ragged
+  `Fin[m]` or `Nat`, the offsets a ragged family is read through), is a
+  `requirement` of the program: decided by isl under the hypotheses that held
+  at the call, or, where they do not decide it, checked by the compiled
+  program between the two calls, which then stops with the requirement's
+  message where the native callee is refused (`examples/travel.py`). An
+  integral array such a check reads is stored in 64 bits, as the native run
+  holds it, so that a value written outside 32 bits is read as written and
+  not as the store narrowed it. Offsets a scan computes and a later call
+  declares `Nat` without reading rows through them are checked: that they
+  are naturals follows from the scan's recurrence only by induction. The counts of a ragged
   family an earlier call wrote are still refused: its rows are laid out in a
   buffer the program is given, which no hypothesis about the program's
   arrays can speak of. The kernels an array is passed to have to declare the same
@@ -495,8 +505,10 @@ end to end; the edges are sharp.
   its size (note 16 in `docs/loopy-notes.md`); on OpenCL it is a global
   temporary, which is generated but, like every device path, not run from a
   development machine.
-- Only a two-axis (row, fiber) ragged array lowers. A deeper dependent sum
-  raises.
+- Only a two-axis (row, fiber) ragged array, its rows counted by an array of
+  one axis, is built and lowered; tracing refuses any other ragged type, a
+  fiber after two dense axes, a dense axis after the fiber, or counts of two
+  axes, before any fact is stated about it.
 - Integers are 64 bits wide natively and 32 bits compiled. The contract keeps
   every integral argument inside 32 bits, but a result that leaves them
   (`c[i] * c[i]` at `c[i] = 2**20`) is a wider number natively and wraps
@@ -545,13 +557,19 @@ end to end; the edges are sharp.
   the counts lay it out (`off[r + 1] = off[r] + cnt[r]`, which writes back
   what the contract checked) or as a value of the loop variables and the
   sizes, and refutes it with the instance that writes a start the counts can
-  contradict (`off[r] = 0` at `r = 1`). A start read from another array, or
-  a count written, leaves it `assumed`, and the facts on it worth an
-  assumption; deciding those needs the monotone-offsets formulation of
-  `loopty/flow.py`, within the kernel.
-  The native run checks every cell it reads through the layout against the
-  buffer and raises `IndexError` for one outside it, but two rows moved onto
-  the same cells go unnoticed by both runs.
+  contradict (`off[r] = 0` at `r = 1`). Any other write, a count, a start
+  read from another array, one under a guard isl cannot state, is decided by
+  induction over the run when isl shows it keeps the rows in order (each
+  starting no earlier than the row before it ends, inside the buffer)
+  wherever they were before it: `cnt[r] = 0` does, and so does a start moved
+  within the room its row leaves. One isl cannot show does leaves the fact
+  `assumed`, and the facts on it worth an assumption, unless a native run of
+  the kernel refutes it: one that reads a row off the buffer through the
+  layout it has written (`off[r + 1] = off[r] + cnt[r] + 1`, which moves the
+  last row past the end), or that leaves two rows on one cell
+  (`off[r] = s[r]`). The order is more than the rows' staying apart, so a
+  kernel that permutes its rows inside the buffer is left `assumed`. A
+  program's layout facts are not tried on runs.
 - `Schedule.affine` and maps whose image has holes. The diamond
   `(t, i) -> (t + i, t - i)` reaches only the points of equal parity, and
   loopy's own `map_domain` refuses it, so loopty rewrites the kernel over the

@@ -1064,20 +1064,65 @@ def test_run_lists_the_layout_fact_a_cast_rests_on(tmp_path, capsys) -> None:
 
     The table said so, ``decided under layout:fixture.clear_next@10:cnt``,
     and the fact it named was in no row of it: ``lanky check`` lists it among
-    the kernel's facts, and ``loopty run`` lists the schedules' only.
+    the kernel's facts, and ``loopty run`` lists the schedules' only. A count
+    cleared keeps the rows in order, so the fact is decided by induction over
+    the run, and the cast is worth decided; both were assumed (#103).
     """
     path = write_fixture(tmp_path, CLEARS_NEXT)
     out_path = tmp_path / "ledger.json"
     assert main(["run", str(path), "--json", str(out_path)]) == 0
     facts = {fact["id"]: fact for fact in json.loads(out_path.read_text("utf-8"))}
     layout = "layout:fixture.clear_next@10:cnt"
-    assert facts[layout]["status"] == "assumed"
+    assert facts[layout]["status"] == "decided"
+    assert facts[layout]["provenance"]["ordered"] == ["S1"]
     (monotone,) = [fact for fact in facts.values() if fact["kind"] == "monotone"]
     assert monotone["rests_on"] == [layout]
-    assert monotone["effective"] == "assumed"
+    assert monotone["effective"] == "decided"
     assert [fact["kind"] for fact in facts.values()].count("layout") == 1
     out = capsys.readouterr().out
     assert "stay inside their buffers and apart while S1 write cnt" in out
+
+
+MOVES_ROWS = (
+    CLEARS_NEXT.replace(
+        "    cnt: Arr[Fin[n], Nat],\n    val:",
+        "    cnt: Arr[Fin[n], Nat],\n"
+        "    off: Arr[Fin[n + 1], Nat],\n"
+        "    s: Arr[Fin[n], Nat],\n"
+        "    val:",
+    )
+    .replace(
+        "        with when(r + 1 < y.dom.size):\n            cnt[r + 1] = 0\n",
+        "        off[r] = s[r]\n",
+    )
+    .replace(
+        '        "cnt": Arr.from_numpy(np.array(counts, dtype=np.int64)),\n',
+        '        "cnt": Arr.from_numpy(np.array(counts, dtype=np.int64)),\n'
+        '        "off": Arr.from_numpy(np.array([0, 2, 3, 6], dtype=np.int64)),\n'
+        '        "s": Arr.from_numpy(np.array([0, 2, 3], dtype=np.int64)),\n',
+    )
+)
+
+
+def test_run_lists_a_layout_fact_a_run_refuted(tmp_path, capsys) -> None:
+    # The start read from s is no isl question, and a native run of the
+    # kernel's on a drawn input leaves two rows on one cell: the layout fact
+    # loopty run lists is the kernel's own, refuted, and so is the cast that
+    # rests on it, and the run exits 1, as lanky check does (#103).
+    assert "off[r] = s[r]" in MOVES_ROWS
+    path = write_fixture(tmp_path, MOVES_ROWS)
+    out_path = tmp_path / "ledger.json"
+    assert main(["run", str(path), "--json", str(out_path)]) == 1
+    facts = {fact["id"]: fact for fact in json.loads(out_path.read_text("utf-8"))}
+    layout = "layout:fixture.clear_next@10:cnt"
+    assert facts[layout]["status"] == "refuted"
+    assert facts[layout]["decided_by"] == "native"
+    (monotone,) = [fact for fact in facts.values() if fact["kind"] == "monotone"]
+    assert monotone["rests_on"] == [layout]
+    assert monotone["effective"] == "refuted"
+    out = capsys.readouterr().out
+    assert "REFUTED clear_next at fixture.py:" in out
+    assert "the body run natively leaves rows " in out
 
 
 # }}}

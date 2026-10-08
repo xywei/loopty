@@ -12,6 +12,9 @@ layout.
 
 from __future__ import annotations
 
+import dataclasses
+
+import islpy as isl
 import numpy as np
 import pytest
 from lanky.prelude import Nat, Real
@@ -125,6 +128,25 @@ def test_a_view_refuses_a_cell_its_layout_puts_outside_the_buffer() -> None:
         view[1, 1]
     with pytest.raises(IndexError, match="row 2 occupies cells 5 to 8"):
         view[2]
+
+
+def test_a_row_off_the_buffer_names_the_array_it_is_read_as() -> None:
+    # A read the layout puts off the buffer is a LayoutError, an IndexError
+    # that says which parameter was read, so that a native run that raises it
+    # refutes that family's layout fact (#103); a column past its row is not.
+    from loopty.arr import LayoutError
+
+    val = Arr.ragged(COUNTS, values=np.arange(1.0, 7.0))
+    view = val.through(np.array(COUNTS), np.array([0, 2, 5, 6]), "val")
+    with pytest.raises(LayoutError, match="cell 6 of the flat buffer") as caught:
+        view[2, 1]
+    assert caught.value.array == "val"
+    with pytest.raises(LayoutError, match="row 2 occupies cells 5 to 8") as caught:
+        view[2]
+    assert caught.value.array == "val"
+    with pytest.raises(IndexError) as caught:
+        view[1, 1]
+    assert not isinstance(caught.value, LayoutError)
 
 
 def test_a_dense_array_has_no_layout_to_read_through() -> None:
@@ -859,15 +881,212 @@ def test_a_start_written_past_the_end_refutes_the_layout() -> None:
         Kernel(first_row_moved)(**arguments)
 
 
-def test_a_start_read_from_another_array_leaves_the_layout_assumed() -> None:
+def test_a_start_read_from_another_array_is_refuted_by_a_run() -> None:
+    # isl has no question about the write alone, nor about it in order: the
+    # rows in order before it leave room for s[r] before the row ahead of it.
+    # So the typing rules leave the fact assumed, with both reasons, and a
+    # native run of the kernel's own, on a drawn input, leaves two rows on one
+    # cell, which refutes it (#103).
     from lanky.ledger import Status
 
     _term, _ledger, (layout,) = layout_of(gather_through_moved_rows)
     assert layout.status is Status.ASSUMED
-    assert layout.provenance["reason"].endswith(
+    assert layout.term is None
+    reason = layout.provenance["reason"]
+    assert (
         "S0 writes off[r] = s[r], which is neither the start the counts give "
         "the row, off[q - 1] + cnt[q - 1] at q >= 1, nor a value of the loop "
-        "variables and the sizes alone"
+        "variables and the sizes alone; and by induction over the run, S0 "
+        "writes off[r] = s[r], and the rows in order before it leave room for "
+        "a write out of order: [r="
+    ) in reason
+    (ran,) = [
+        fact
+        for fact in Kernel(gather_through_moved_rows).facts()
+        if fact.kind == "layout"
+    ]
+    assert ran.status is Status.REFUTED, ran.provenance
+    assert ran.decided_by == "native"
+    assert ran.provenance["counterexample"]["input"].startswith("sample ")
+    # A row moved onto another, or off the buffer and read there.
+    assert (
+        "the body run natively leaves rows " in ran.provenance["reason"]
+        or "the body run natively reads col through the layout it has written"
+        in ran.provenance["reason"]
+    )
+    assert ran.provenance["reason"].endswith(
+        "so the rows do not stay inside the buffer and apart"
+    )
+
+
+def one_further_on(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    off: Arr[Fin[n + 1], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The issue's second kernel: each row a cell further on than its counts say."""
+    for r in y.dom:
+        off[r + 1] = off[r] + cnt[r] + 1
+        y[r] = reduce_sum(val[r, j] for j in val.dom[r])
+
+
+def counts_grown(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """Every row one entry longer, onto the next row or past the buffer."""
+    for r in y.dom:
+        cnt[r] = cnt[r] + 1
+        y[r] = reduce_sum(val[r, j] for j in val.dom[r])
+
+
+@pytest.mark.parametrize("fn", [one_further_on, counts_grown])
+def test_a_row_moved_past_the_buffer_is_refuted_by_the_run_that_reads_it(fn) -> None:
+    # Each row a cell further on, or a cell longer: the last one past the end
+    # of the buffer. The native run reads it there and raises, which skipped
+    # the input and said nothing of the layout (#103).
+    from lanky.ledger import Status
+
+    _term, _ledger, (layout,) = layout_of(fn)
+    assert layout.status is Status.ASSUMED
+    (ran,) = [fact for fact in Kernel(fn).facts() if fact.kind == "layout"]
+    assert ran.status is Status.REFUTED, ran.provenance
+    assert ran.decided_by == "native"
+    reason = ran.provenance["reason"]
+    assert "the body run natively reads val through the layout it has written" in (
+        reason
+    )
+    assert "of the flat buffer by the counts and offsets the kernel declares" in (
+        reason
+    )
+
+
+def counts_cleared(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    off: Arr[Fin[n + 1], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The issue's third kernel: each row's length cleared once it is summed."""
+    for r in y.dom:
+        y[r] = reduce_sum(val[r, j] for j in val.dom[r])
+        cnt[r] = 0
+
+
+def counts_halved(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """Every row half as long, from where it starts, by its own offsets."""
+    for r in y.dom:
+        cnt[r] = cnt[r] // 2
+        y[r] = reduce_sum(val[r, j] for j in val.dom[r])
+
+
+def counts_cleared_where_flagged(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    flag: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A row's length cleared under a guard isl cannot state."""
+    for r in y.dom:
+        with when(flag[r] != 0):
+            cnt[r] = 0
+        y[r] = reduce_sum(val[r, j] for j in val.dom[r])
+
+
+def start_within_its_slack(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    off: Arr[Fin[n + 1], Nat],  # noqa: F821
+    s: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A start moved on by ``s[r]`` where the moved row ends before the next."""
+    for r in y.dom:
+        with when(
+            (r + 1 < y.dom.size) & (off[r] + cnt[r] + s[r] <= off[r + 1] - cnt[r])
+        ):
+            off[r] = off[r] + s[r]
+        y[r] = reduce_sum(val[r, j] for j in val.dom[r])
+
+
+@pytest.mark.parametrize(
+    ("fn", "writers"),
+    [
+        (counts_cleared, ["S1"]),
+        (counts_halved, ["S0"]),
+        (counts_cleared_where_flagged, ["S0"]),
+        (start_within_its_slack, ["S0"]),
+        (shortened_in_its_own_loop, ["S1"]),
+    ],
+)
+def test_a_write_that_keeps_the_rows_in_order_decides_the_layout(fn, writers) -> None:
+    # A count written, a start read from another array, a write under a guard
+    # isl cannot state: each left the fact assumed (#103). The rows in order,
+    # each starting no earlier than the row before it ends, inside the buffer,
+    # hold when the call starts, and isl shows that each of these writes keeps
+    # them so wherever they held before it, so they hold throughout the run.
+    from lanky.ledger import Status
+
+    _term, ledger, (layout,) = layout_of(fn)
+    assert layout.status is Status.DECIDED, layout.provenance
+    assert layout.decided_by == "isl"
+    assert layout.provenance["ordered"] == writers
+    assert layout.provenance["rule"].startswith(
+        "every write keeps the rows of val in order inside the buffer: "
+    )
+    assert layout.provenance["rule"].endswith(
+        "rows so laid out are inside the buffer and apart"
+    )
+    reads = [fact for fact in ledger if layout.id in fact.rests_on]
+    assert reads
+    for fact in reads:
+        assert ledger.support(fact).effective is Status.DECIDED, fact.id
+    (ran,) = [fact for fact in Kernel(fn).facts() if fact.kind == "layout"]
+    assert ran.status is Status.ASSUMED and ran.term is not None
+
+
+def test_offsets_with_no_counts_are_kept_in_order_by_induction() -> None:
+    # A family whose rows are as long as the differences of their offsets
+    # (a term written by hand; tracing names counts): starting row 0 at 0
+    # keeps the offsets in order, and moving it past row 1's start does not.
+    from lanky.ledger import Status
+
+    import hand_terms as ht
+    from loopty import typing as rules
+    from loopty.oracle import IslOracle
+    from loopty.term import Access, Stmt
+
+    base = ht.spmv_term()
+    oracle = IslOracle()
+
+    def layout_with(value) -> object:
+        stmt = Stmt(
+            id="S1",
+            inames=(),
+            domain=isl.Set("{ [] }"),
+            assignee=Access("off", (0,)),
+            expr=value,
+            kind="assign",
+            guard=None,
+            where="hand.py:2",
+        )
+        term = dataclasses.replace(base, stmts=(*base.stmts, stmt))
+        (fact,) = rules.layout_facts(term, "spmv")
+        return oracle.establish(fact) if oracle.can_establish(fact) else fact
+
+    kept = layout_with(0)
+    assert kept.status is Status.DECIDED, kept.provenance
+    assert "off[q] <= off[q + 1] for every row q" in kept.provenance["rule"]
+    moved = layout_with(ht.S("off", 1) + 1)
+    assert moved.status is Status.ASSUMED
+    assert "by induction over the run, S1 writes off[0] = off[1] + 1" in (
+        moved.provenance["reason"]
     )
 
 
@@ -896,15 +1115,18 @@ def test_a_two_axis_family_is_refused_before_any_layout_fact() -> None:
         term_of(second_block_moved)
 
 
-def test_a_row_shortened_in_its_own_loop_leaves_its_reads_assumed() -> None:
+def test_a_row_shortened_in_its_own_loop_decides_its_reads() -> None:
+    # A row's length set to zero keeps the rows in order, so the layout is
+    # decided by induction, and the reads that rest on it are worth decided;
+    # they were worth assumed (#103).
     from lanky.ledger import Status
 
     _term, ledger, (layout,) = layout_of(shortened_in_its_own_loop)
     assert layout.provenance["written"] == ["cnt"]
     (read,) = [fact for fact in ledger if fact.id.endswith(":S0:read:val[r, j]")]
     assert read.status is Status.DECIDED
-    assert ledger.support(read).effective is Status.ASSUMED
-    assert ledger.support(read).under == (layout.id,)
+    assert ledger.support(read).effective is Status.DECIDED
+    assert read.rests_on == (layout.id,)
 
 
 @pytest.mark.parametrize("fn", [row_sums_then_next_offset, row_sums_then_next_count])

@@ -390,6 +390,7 @@ class Kernel(_Decorated):
             view = value.through(
                 prepared.get(counts) if counts else None,
                 prepared.get(offsets) if offsets else None,
+                name,
             )
             if name in keywords:
                 keywords[name] = view
@@ -551,7 +552,9 @@ class Kernel(_Decorated):
         same native runs: it is evaluated at what each of them left in the
         arguments, and is ``tested`` when it held after every one
         (:func:`loopty.faithful.postcondition_fact`), which is what a program
-        that calls the kernel counts it as.
+        that calls the kernel counts it as. So is a ``layout`` fact no isl
+        question decides, which a run that moves a row off its buffer or onto
+        another refutes (:func:`loopty.faithful.layout_fact`).
 
         A body that cannot be traced is itself reported as a fact rather than as
         a crash, so that ``lanky check`` on a file with one broken kernel still
@@ -587,7 +590,7 @@ class Kernel(_Decorated):
                 ),
             )
             return self._facts
-        from loopty.faithful import faithfulness_fact, postcondition_fact
+        from loopty.faithful import faithfulness_fact, layout_fact, postcondition_fact
 
         key = {"module": self.module, "line": self.line}
         observed: list[Any] = []
@@ -600,6 +603,8 @@ class Kernel(_Decorated):
                 self, term, observed, owner=self.qualname, where=self.where, **key
             )
             if fact.kind == "postcondition"
+            else layout_fact(term, fact, observed)
+            if fact.kind == "layout"
             else fact
             for fact in stated
         ]

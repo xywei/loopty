@@ -305,6 +305,26 @@ def _claim_record(fact: Any) -> dict[str, Any]:
     return record
 
 
+def _tried(schedule: Any, fact: Any) -> Any:
+    """``fact`` as the facts of the kernel the schedule is of state it.
+
+    A ``layout`` fact no isl question decides is tried on the kernel's
+    native runs (:func:`loopty.faithful.layout_fact`), which a kernel's
+    :meth:`~loopty.kernel.Kernel.facts` makes; a term or anything else with
+    no facts of its own keeps ``fact``.
+    """
+    facts = getattr(_kernel_of(schedule), "facts", None)
+    if not callable(facts):
+        return fact
+    try:
+        for own in facts():
+            if own.id == fact.id:
+                return own
+    except Exception:  # noqa: BLE001 - the kernel's own facts report it
+        return fact
+    return fact
+
+
 def _kernel_of(schedule: Any) -> Any:
     """The kernel, program or term a schedule is of, through any schedule of it.
 
@@ -582,9 +602,13 @@ class RunVerb:
             ):
                 if fact.id in resting:
                     # A layout fact that can be decided is an isl question,
-                    # answered here as ``lanky check`` answers it.
+                    # answered here as ``lanky check`` answers it; one that
+                    # cannot is tried on the kernel's native runs, as its
+                    # own facts try it.
                     if oracle.can_establish(fact):
                         fact = oracle.establish(fact) or fact
+                    else:
+                        fact = _tried(schedule, fact)
                     claims.add(fact, schedule)
             ok, reason = schedule.buildable
             if not ok:
