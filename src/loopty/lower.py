@@ -587,13 +587,14 @@ class ExpressionLowerer(Mapper):
         the index: ``x[2 * i]`` stays readable, and its bounds checked, as it
         always was, and C computes its sums and products modulo ``2**32``
         under ``-fwrapv`` (:data:`WRAP_FLAG`), which gives the cell a
-        subscript in bounds names. Otherwise it is lowered again with every
+        subscript in bounds names, but for a division of an intermediate past
+        32 bits (#149). Otherwise it is lowered again with every
         widening the plan asks for, as anywhere else (#129):
-        ``x[(i * i) % n]`` is ``x[loopty_mod_int64((int64_t) (i) * i, n)]``,
-        which wrapped round at ``i = 46341``. loopy's reader declines the
-        cast (:mod:`loopty.isl_reading`), so the subscript is generated with
-        it. A reduction's domain the first walk recorded is dropped before
-        the second records it again.
+        ``x[(i * i) % n]`` is ``x[loopty_mod_int64((int64_t) (i) * i,
+        (int64_t) (n))]``, where ``i * i`` wrapped round at ``i = 46341``.
+        loopy's reader declines the cast (:mod:`loopty.isl_reading`), so the
+        subscript is generated with it. A reduction's domain the first walk
+        recorded is dropped before the second records it again.
         """
         outer = self._widened_index
         domains = getattr(self.lowering, "extra_domains", None)

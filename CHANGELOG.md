@@ -17,11 +17,13 @@ All notable changes to loopty are recorded here. The format follows
   that widens an operand anywhere else. `loopty.isl_reading` makes the reader
   decline a cast, as it declines a call, and loopy generates such a
   subscript as written: `x[loopty_mod_int64((int64_t) (i) * i, (int64_t)
-  (n))]`. A subscript loopy reads as affine without the widening is left
-  without it (`x[2 * i]`): loopy replaces it by the affine expression isl
-  gives back, in its 32-bit index type, and checks its bounds, which a cast
-  would stop. A division in such a subscript whose numerator leaves 32 bits
-  is filed as #149 (note 23 of `docs/loopy-notes.md`).
+  (n))]`. So is a sum of a 32-bit entry and a loop variable, as `travel.py`
+  reads its flat buffer, `val[(int64_t) (off[r]) + j]`. A subscript loopy
+  reads as affine without the widening is left without it (`x[2 * i]`):
+  loopy replaces it by the affine expression isl gives back, in its 32-bit
+  index type, and checks its bounds, which a cast would stop. A division in
+  such a subscript whose numerator leaves 32 bits is filed as #149 (note 23
+  of `docs/loopy-notes.md`).
 - loopy no longer reads a non-integer literal in a guard on the loops by its
   integer part (#137). Its bounds check reads such a guard into isl, and read
   `0.5` as `0`: `when(i * 0.5 >= 1)` as false everywhere, so the check passed
