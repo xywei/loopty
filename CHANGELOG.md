@@ -90,11 +90,11 @@ All notable changes to loopty are recorded here. The format follows
   (`cl_khr_fp64`), `pipe`, the image types, and `barrier` beside a sum on a
   local axis, which loopy syncs with `barrier()`, failed too, and are refused
   (`ATOMIC_FLAG_INIT`, `MAX_WORK_DIM` and the other macros OpenCL C or PoCL
-  define). A size or an integral scalar named like one of isl's keywords
-  (`max`, `min`, `floor`, `mod`, read whatever their case) failed inside the
-  trace with `isl_set_read_from_str failed: syntax error`, and is refused
-  naming them; a loop variable of such a name is renamed in the term
-  (`max_0`). A size that names something the module or Python already
+  define). A size, an integral scalar or a reduction binder named like one
+  of isl's keywords (`max`, `min`, `floor`, `mod`, read whatever their case)
+  failed inside the trace with `isl_set_read_from_str failed: syntax error`,
+  and is refused naming them; a loop variable of such a name is renamed in
+  the term (`max_0`). A size that names something the module or Python already
   defines (`Fin[abs]`, lanky's `abs`) was that object, and lowering failed
   on it as a foreign object; it is a `TraceError` asking for another name.
 - `-b[i]` of a truth value is a `TraceError` naming `~b[i]` for `not` and

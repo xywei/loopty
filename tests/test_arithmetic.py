@@ -2336,6 +2336,11 @@ def _isl_loop(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
         y[max] = x[max] * 2.0
 
 
+def _isl_binder(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    for i in x.dom:
+        y[i] = reduce_sum(x[max] for max in x.dom)  # noqa: A001
+
+
 def _object_size(x: Arr[Fin[abs], Real], y: Arr[Fin[abs], Real]):  # noqa: F821
     for i in x.dom:
         y[i] = x[i]
@@ -2353,6 +2358,9 @@ def test_a_name_isl_reads_as_a_keyword():
     looped = kernel(_isl_loop)
     assert looped.term.stmts[0].assignee.indices[0].name == "max_0"
     agrees(looped, lambda: {"x": np.array([0.5, -2.0, 3.0]), "y": np.zeros(3)})
+    # A reduction binder is refused, which failed in the trace the same way.
+    with pytest.raises(TraceError, match="the reduction binder 'max'"):
+        kernel(_isl_binder).trace()
     # A size abs is lanky's abs, which lowering failed on as a foreign object.
     with pytest.raises(TraceError, match="neither a name nor a number"):
         kernel(_object_size).trace()

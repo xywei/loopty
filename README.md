@@ -445,10 +445,10 @@ end to end; the edges are sharp.
   renamed in the generated code, and a parameter, size or loop variable
   named like a macro the headers define (`I` with complex values, `NAN`,
   `INT32_MAX`, `M_PI`, `NULL`) or a function the kernel calls (`pow` with a
-  power) is refused, naming what the code means by it. So is a size or an
-  integral scalar named like a keyword of isl's (`max`, `floor`, `mod`), and
-  a loop variable of such a name is renamed. See notes 19, 20 and 23 in
-  `docs/loopy-notes.md`.
+  power) is refused, naming what the code means by it. So is a size, an
+  integral scalar or a reduction binder named like a keyword of isl's (`max`,
+  `floor`, `mod`), and a loop variable of such a name is renamed. See notes
+  19, 20 and 23 in `docs/loopy-notes.md`.
 - Array arguments over polyhedral domains (`loopty.domain`): `Where[...]`,
   binders written as slices and then the comparisons that cut their box,
   joined by `&`; `Sigma[...]`, binders and an unnamed last fiber affine in

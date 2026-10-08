@@ -110,6 +110,7 @@ from lanky.terms import (
 from loopty.arr import Arr, ArrSpec
 from loopty.domain import Polyhedron, Union, index_domain
 from loopty.flow import (
+    ISL_KEYWORDS,
     NonAffine,
     domain_set,
     expr_text,
@@ -3728,6 +3729,15 @@ def lower_reductions(
         for var, domain in expr.binders:
             if isinstance(domain, SymDom):
                 fibers.extend(domain.constraints_for(var))
+            if is_isl_keyword(var.name):
+                at = f" at {where}" if where else ""
+                raise TraceError(
+                    f"the reduction binder {var.name!r}{at} is named like one of "
+                    "isl's keywords, which its reader takes as its own whatever "
+                    f"their case ({', '.join(sorted(ISL_KEYWORDS))}): the "
+                    "reduction's domain is stated to isl as text, and failed "
+                    "with a syntax error. Rename the binder"
+                )
             if var.name in tracer.inames:
                 raise TraceError(
                     f"the reduction binder {var.name!r} shadows the enclosing "
