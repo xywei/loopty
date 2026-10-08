@@ -1118,7 +1118,7 @@ def test_a_temporary_of_reals_is_stored_as_the_compiled_one_is() -> None:
         (np.complex128, np.complex128, [np.complex128], [np.float64, np.complex64]),
         (complex, np.complex128, [np.complex128], [np.float64]),
         (Bool, np.bool_, [np.bool_], [np.int8, np.float64]),
-        (Nat, np.int64, [np.int64, np.int32], [np.int16, np.uint64, np.float64]),
+        (Nat, np.int64, [np.int64], [np.int32, np.int16, np.uint64, np.float64]),
         (Fin[4], np.int64, [np.int64, np.int32], [np.float64, np.bool_]),
         (np.int32, np.int32, [np.int32], [np.int64]),
     ],
@@ -1316,8 +1316,8 @@ def test_a_temporary_of_truth_values_is_a_bool_natively() -> None:
 
 
 def test_a_temporary_of_naturals_is_an_integer_natively() -> None:
-    # A real u would keep the fraction truncate drops compiled. Any signed
-    # integer of 32 bits or more holds a Nat as the compiled one does.
+    # A real u would keep the fraction truncate drops compiled. Only int64
+    # holds a Nat as the compiled one does, which is 64 bits wide (#101).
     @program
     def counted(u, y):
         c = Arr.zeros_like(u)
@@ -1328,10 +1328,10 @@ def test_a_temporary_of_naturals_is_an_integer_natively() -> None:
         return {"u": Arr.from_numpy(np.array([1.5, 2.0, 0.25])), "y": Arr.zeros(3)}
 
     assert counted.term.temporaries_like == (("c", "u"),)
-    with pytest.raises(ValueError, match="a signed integer of 32 bits or more"):
+    with pytest.raises(ValueError, match="has to store as int64"):
         LoopyExecutor().run(counted, **make())
 
-    for dtype in (np.int64, np.int32):
+    for dtype in (np.int64,):
 
         @program
         def counted_given(u, y):
@@ -1347,7 +1347,7 @@ def test_a_temporary_of_naturals_is_an_integer_natively() -> None:
         )
         assert fact.status.value == "tested", fact.provenance
 
-    for dtype in (np.float64, np.int16):
+    for dtype in (np.float64, np.int16, np.int32):
 
         @program
         def counted_other(u, y):

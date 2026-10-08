@@ -29,28 +29,38 @@ is then computed in numpy's type.
 
 A leaf's native type is the one the native run gives it. An array element is a
 numpy scalar of :func:`loopty.contract.native_storage`'s dtype (64 bits for an
-integral sort, which promotes with a ``float32`` as a 32-bit integer does). A
-loop variable, a size and a reduction binder are Python ints. A scalar
-argument is converted by :func:`loopty.contract.native_scalar`, which leaves a
-Python ``int`` of an integral sort and a Python ``float`` of ``Real`` as they
-are, so such a scalar is either weak or strong, by what the caller passed; an
-operation whose native type depends on that is left as it is, and its type is
-unknown above it. So is anything whose type is not known here (a call of a
-function the interpreter does not know, a ``min``), and an operation numpy
-refuses (an integer to a negative integer power), which the native run raises
-on whatever the compiled run does.
+integral sort). A loop variable, a size and a reduction binder are Python
+ints. A scalar argument is a numpy scalar of that dtype too, however the
+caller passed it (:func:`loopty.contract.native_scalar`, #102). Anything whose
+type is not known here (a call of a function the interpreter does not know, a
+``min``) is left as it is, and its type is unknown above it, and so is an
+operation numpy refuses (an integer to a negative integer power, which the
+trace refuses, #109), which the native run raises on whatever the compiled run
+does.
 
-Only floating results are converted. An integer operation is computed in
-64 bits natively and in 32 compiled, which the contract makes agree on the
-arguments (:data:`loopty.contract.INTEGRAL_RANGE`) and which is a stated limit
-for a result that leaves 32 bits.
+Integer arithmetic is computed in 64 bits (#101), as numpy computes an
+element's: ``Nat`` and ``Int`` are stored so compiled, and an operation that
+can leave the range of its operands (a sum, a product, a power, a left shift)
+whose operands C would compute in fewer bits, a ``Fin[m]`` element's (stored
+in 32) or a loop variable's, has one converted. A floor division, a
+remainder, an ``^`` and a right shift stay inside their operands' range and
+are left as they are, and so is a sum of loop variables, sizes and literals
+alone, the index arithmetic loopy computes every loop bound in, 32 bits wide;
+a product of them is not, since ``i * i`` leaves 32 bits at ``i = 46341``,
+and nor is a sum whose literals total ``2**30`` or more (``i + 2**31 - 1``).
+The lowering widens an integer in a guard that reads no array as everywhere
+else, with no cast (``when(i * i < m)`` wrapped round at ``i = 46341``), and
+leaves a subscript's arithmetic in 32 bits, which loopy gives it no way to
+widen, a limit (#129; :class:`loopty.lower.ExpressionLowerer`). A result
+outside 64 bits wraps round compiled and is refused or wraps natively, which
+is numpy's limit too.
 """
 
 from __future__ import annotations
 
 import operator
 import warnings
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -75,6 +85,9 @@ _ARITHMETIC: dict[type, Callable[[Any, Any], Any]] = {
     prim.FloorDiv: operator.floordiv,
     prim.Remainder: operator.mod,
     prim.Power: operator.pow,
+    prim.BitwiseXor: operator.xor,
+    prim.LeftShift: operator.lshift,
+    prim.RightShift: operator.rshift,
 }
 
 
@@ -153,6 +166,17 @@ def _apply(function: Callable[..., Any], *operands: Native) -> Native:
     return tuple(out)
 
 
+def _operands(expr: Any) -> tuple[Any, ...]:
+    """The operands of an arithmetic node, in the order both runs take them."""
+    if isinstance(expr, prim.Sum | prim.Product | prim.BitwiseXor):
+        return tuple(expr.children)
+    if isinstance(expr, prim.Power):
+        return (expr.base, expr.exponent)
+    if isinstance(expr, prim.LeftShift | prim.RightShift):
+        return (expr.shiftee, expr.shift)
+    return (expr.numerator, expr.denominator)
+
+
 def _one_dtype(native: Native) -> np.dtype | None:
     """The dtype of a native type, when every sample of it has the same one."""
     if not native:
@@ -168,6 +192,64 @@ def _precision(dtype: np.dtype) -> int:
     if dtype.kind == "c":
         return dtype.itemsize // 2
     return 0
+
+
+#: The magnitude from which the integer literals of a sum are not index
+#: arithmetic: beside a loop variable they can leave 32 bits, ``i + 2**31 - 1``
+#: at ``i = 1``, and so can several smaller ones, ``i + 2**29 + ... + 2**29``.
+_INDEX_LITERAL = 2**30
+
+
+def _integer_literal(expr: Any) -> bool:
+    """Whether ``expr`` is an integer literal, a truth value not counted."""
+    return isinstance(expr, int | np.integer) and not isinstance(expr, bool | np.bool_)
+
+
+def _literal_total(expr: Any) -> int:
+    """The magnitude of the integer literals of a sum, the sums in it included.
+
+    lanky builds ``i + a + b`` as ``(i + a) + b``, so the literals of a sum
+    written in one line are spread over the sums inside it.
+    """
+    if _integer_literal(expr):
+        return abs(int(expr))
+    if isinstance(expr, prim.Sum):
+        return sum(_literal_total(child) for child in expr.children)
+    return 0
+
+
+def _large_literals(expr: Any) -> bool:
+    """Whether the integer literals of a sum total :data:`_INDEX_LITERAL` or more."""
+    return _literal_total(expr) >= _INDEX_LITERAL
+
+
+def _negation(expr: Any) -> bool:
+    """Whether a product is a negation, ``-i``, which pymbolic builds as ``-1 * i``.
+
+    It is planned as a sum is (:func:`_plan`): ``n - 1 - i`` is index
+    arithmetic, and a negated loop variable stays inside 32 bits.
+    """
+    return (
+        isinstance(expr, prim.Product)
+        and len(expr.children) == 2
+        and any(_integer_literal(child) and child == -1 for child in expr.children)
+    )
+
+
+def _weak_integers(*natives: Native) -> bool:
+    """Whether every sample of every native type is a Python int (or bool).
+
+    Loop variables, sizes, reduction binders and integer literals are, and
+    arithmetic of them alone is index arithmetic (see :func:`_plan`).
+    """
+    return all(
+        native is not None
+        and all(
+            isinstance(sample, int) and not isinstance(sample, np.generic)
+            for sample in native
+        )
+        for native in natives
+    )
 
 
 def _c_result(left: np.dtype | None, right: np.dtype | None) -> np.dtype | None:
@@ -192,28 +274,52 @@ def _plan(
     right: tuple[Native, np.dtype | None],
     common: Native,
     native: Native,
-    power: bool = False,
+    kind: str,
 ) -> Step:
     """Which operands to convert so that C computes in numpy's type ``common``.
 
     ``common`` is the type numpy computes the operation in, and ``native`` the
-    type of its result, which differ for a comparison. Nothing is converted
-    unless ``common`` is one floating dtype and C would compute in another.
-    Then each floating operand of another precision is converted to it, and
-    if C would still compute in another type (two integers), the left one is.
+    type of its result, which differ for a comparison. ``kind`` is
+    ``"comparison"``, ``"power"``, ``"sum"``, ``"growing"`` (a product or a
+    left shift, which can leave the range of its operands) or ``"bounded"``
+    (a quotient, a floor division, a remainder, an ``^`` or a right shift,
+    which cannot).
+
+    Where ``common`` is one floating dtype and C would compute in another,
+    each floating operand of another precision is converted to it, and if C
+    would still compute in another type (two integers), the left one is.
 
     A power with a floating result is computed by numpy with the C library's
     ``pow``, its exponent converted too, where loopy computes an integer
     exponent by repeated multiplication, which rounds at every step and
     differs from ``pow`` in the last bit. So both of its operands are
     converted, which makes loopy call ``pow`` (``powf`` in single precision).
+
+    Where ``common`` is one integer dtype wider than the integer C would
+    compute in, which is 64 bits against a ``Fin[m]`` element's 32 or a loop
+    variable's, and the operation can leave the range of its operands, the
+    narrower operands are converted to it, so that the compiled run computes
+    integer arithmetic in 64 bits as numpy does (#101); of a power, the base.
+    A comparison and a ``"bounded"`` operation are not converted, since their
+    result is inside 32 bits when their operands are, and neither is a sum of
+    Python ints alone (loop variables, sizes and literals): that is index
+    arithmetic, which loopy computes in 32 bits as it does every loop bound
+    and subscript, and a sum of a few of them stays inside 32 bits while the
+    sizes do; the caller plans a negation, ``-1 * i``, as a sum too. A
+    product, a power or a left shift of them does not, and is converted, and
+    so is a sum whose literals total ``2**30`` or more, which the caller
+    plans as ``"growing"``: ``i + 2**31 - 1`` left 32 bits at ``i = 1``.
     """
     (_, lc), (_, rc) = left, right
     compiled = _c_result(lc, rc)
     target = _one_dtype(common)
-    if target is None or compiled is None or target.kind not in "fc":
+    if target is None or compiled is None:
         return Step(None, None, native, compiled)
-    if power:
+    if target.kind in "iu":
+        return _widened(left, right, native, compiled, target, kind)
+    if target.kind not in "fc":
+        return Step(None, None, native, compiled)
+    if kind == "power":
         if target.kind != "f":
             return Step(None, None, native, compiled)
         to_left = target if lc != target else None
@@ -229,6 +335,44 @@ def _plan(
     after = _c_result(to_left or lc, to_right or rc)
     if after != target:
         to_left = target
+    return Step(to_left, to_right, native, target)
+
+
+def _widened(
+    left: tuple[Native, np.dtype | None],
+    right: tuple[Native, np.dtype | None],
+    native: Native,
+    compiled: np.dtype,
+    target: np.dtype,
+    kind: str,
+) -> Step:
+    """The plan for an operation numpy computes in the integer dtype ``target``.
+
+    See :func:`_plan`: the narrower operands are converted when C computes in
+    fewer bits, but for a comparison, a bounded operation and a sum of Python
+    ints alone. Where the compiled type is no integer at all, every operand
+    of another type is converted, whatever the operation: loopy types an
+    ``np.uint64`` beside a signed integer as numpy types two arrays, in
+    double, where numpy keeps a Python int or a loop variable beside it weak,
+    and computes ``u[i] % 3`` in ``uint64``.
+    """
+    (left_native, lc), (right_native, rc) = left, right
+    if compiled.kind not in "biu":
+        to_left = target if lc != target else None
+        to_right = target if rc != target else None
+        return Step(to_left, to_right, native, target)
+    narrower = compiled.kind in "biu" and compiled.itemsize < target.itemsize
+    if not narrower or kind in ("comparison", "bounded"):
+        return Step(None, None, native, compiled)
+    if kind == "sum" and _weak_integers(left_native, right_native):
+        return Step(None, None, native, compiled)
+    assert lc is not None and rc is not None
+    to_left = target if lc != target else None
+    if kind == "power":
+        return Step(to_left, None, native, target)
+    to_right = None
+    if _c_result(to_left or lc, rc) != target:
+        to_right = target
     return Step(to_left, to_right, native, target)
 
 
@@ -255,6 +399,26 @@ class Promotion:
         self._steps: dict[int, tuple[Step, ...]] = {}
         #: Every node a memo is keyed by, kept alive so that its id stays its.
         self._seen: list[Any] = []
+
+    @classmethod
+    def of_sorts(cls, sorts: Mapping[str, Any]) -> Promotion:
+        """The promotion of expressions over named sorts, before there is a term.
+
+        ``sorts`` maps an array's name to its :class:`~loopty.term.ArrType`
+        and a scalar's to its sort, as the tracer holds them; the trace asks
+        it of an expression it is about to record (:mod:`loopty.trace`).
+        """
+        promotion = cls.__new__(cls)
+        promotion.arrays = {
+            name: typ for name, typ in sorts.items() if isinstance(typ, ArrType)
+        }
+        promotion.scalars = {
+            name: sort for name, sort in sorts.items() if not isinstance(sort, ArrType)
+        }
+        promotion._types = {}
+        promotion._steps = {}
+        promotion._seen = []
+        return promotion
 
     def steps(self, expr: Any) -> tuple[Step, ...]:
         """The plan for one node: empty for a node that is no operation."""
@@ -300,10 +464,8 @@ class Promotion:
         """A scalar argument by its sort; a loop variable or a size is an int.
 
         :func:`loopty.contract.native_scalar` converts a scalar into a numpy
-        scalar of its sort's native dtype, except a Python number whose own
-        dtype is that one already (an ``int`` of an integral sort, a ``float``
-        of ``Real``), which it passes on as it is. So such a sort is weak or
-        strong by what the caller passed, and a truth value is always strong.
+        scalar of its sort's native dtype, however the caller passed it, so
+        it is strong (#102).
         """
         if name in self.arrays:
             return self._element(name)
@@ -314,10 +476,7 @@ class Promotion:
         stored = native_storage(sort)
         if stored is None:
             return None, compiled
-        strong = _sample(stored, False)
-        weak = _sample(stored, True)
-        kept = stored.kind != "b" and _kind(weak) == (stored, True)
-        return ((weak, strong) if kept else (strong,)), compiled
+        return (_sample(stored, False),), compiled
 
     # }}}
 
@@ -331,12 +490,12 @@ class Promotion:
         if isinstance(expr, prim.Variable):
             return self._variable(expr.name)
         if isinstance(expr, Reduction):
-            return self._summed(expr.body)
+            return self._summed(expr, expr.body)
         from lanky.terms import Abs
         from lanky.terms import Sum as LankySum
 
         if isinstance(expr, LankySum):
-            return self._summed(expr.body)
+            return self._summed(expr, expr.body)
         if isinstance(expr, Abs):
             native, compiled = self.types(expr.operand)
             return _apply(abs, native), compiled
@@ -368,30 +527,49 @@ class Promotion:
             return self._call(expr)
         return None, None
 
-    def _summed(self, body: Any) -> tuple[Native, np.dtype | None]:
+    def _summed(self, expr: Any, body: Any) -> tuple[Native, np.dtype | None]:
         """A sum of ``body``: natively ``reduce_sum`` adds the terms to ``0``.
 
-        loopy accumulates in the type of the body.
+        loopy accumulates in the type of the body. Where numpy adds the terms
+        in a wider integer, the body is converted to it, a :class:`Step`
+        whose ``right`` is the body: the sum of a ``Bool`` array's elements is
+        a count natively, which a byte holds up to 127, and the sum of a
+        ``Fin[m]`` array's or of a binder leaves 32 bits as readily.
         """
-        native, compiled = self.types(body)
-        return _apply(operator.add, (0,), native), compiled
+        body_native, compiled = self.types(body)
+        native = _apply(operator.add, (0,), body_native)
+        target = _one_dtype(native)
+        if (
+            target is not None
+            and compiled is not None
+            and target.kind in "iu"
+            and compiled.kind in "biu"
+            and compiled.itemsize < target.itemsize
+        ):
+            self._steps[id(expr)] = (Step(None, target, native, target),)
+            return native, target
+        return native, compiled
 
     def _arithmetic(
         self, expr: Any, function: Callable[[Any, Any], Any]
     ) -> tuple[Native, np.dtype | None]:
-        if isinstance(expr, prim.Sum | prim.Product):
-            operands: Sequence[Any] = expr.children
-        elif isinstance(expr, prim.Power):
-            operands = (expr.base, expr.exponent)
+        operands = _operands(expr)
+        if isinstance(expr, prim.Power):
+            kind = "power"
+        elif isinstance(expr, prim.Sum):
+            kind = "growing" if _large_literals(expr) else "sum"
+        elif _negation(expr):
+            kind = "sum"
+        elif isinstance(expr, prim.Product | prim.LeftShift):
+            kind = "growing"
         else:
-            operands = (expr.numerator, expr.denominator)
-        power = isinstance(expr, prim.Power)
+            kind = "bounded"
         accumulated = self.types(operands[0])
         steps: list[Step] = []
         for operand in operands[1:]:
             right = self.types(operand)
             native = _apply(function, accumulated[0], right[0])
-            step = _plan(accumulated, right, native, native, power=power)
+            step = _plan(accumulated, right, native, native, kind)
             steps.append(step)
             accumulated = (step.native, step.compiled)
         self._steps[id(expr)] = tuple(steps)
@@ -402,7 +580,7 @@ class Promotion:
         left, right = self.types(expr.left), self.types(expr.right)
         common = _apply(operator.add, left[0], right[0])
         native = _apply(operator.eq, left[0], right[0])
-        step = _plan(left, right, common, native)
+        step = _plan(left, right, common, native, "comparison")
         self._steps[id(expr)] = (step,)
         return native, np.dtype(np.bool_)
 

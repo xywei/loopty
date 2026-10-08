@@ -799,6 +799,13 @@ class _Run:
             return _fold(operator.add, [self.value(c, env) for c in node.children])
         if isinstance(node, prim.Product):
             return _fold(operator.mul, [self.value(c, env) for c in node.children])
+        if isinstance(node, prim.BitwiseXor):
+            return _fold(operator.xor, [self.value(c, env) for c in node.children])
+        if isinstance(node, prim.LeftShift | prim.RightShift):
+            shift = (
+                operator.lshift if isinstance(node, prim.LeftShift) else operator.rshift
+            )
+            return shift(self.value(node.shiftee, env), self.value(node.shift, env))
         for kind, apply in _BINARY:
             if isinstance(node, kind):
                 return apply(
@@ -987,8 +994,9 @@ def _fix_param(space: isl.Set, name: str, value: Any) -> isl.Set:
         if isinstance(value, float | np.floating) and float(value).is_integer():
             value = int(value)
         else:
+            shown = value.item() if isinstance(value, np.generic) else value
             raise InterpretError(
-                f"the domain parameter {name} is {value!r}, which is not an integer"
+                f"the domain parameter {name} is {shown!r}, which is not an integer"
             )
     position = space.find_dim_by_name(isl.dim_type.param, name)
     return space.fix_val(isl.dim_type.param, position, int(value))

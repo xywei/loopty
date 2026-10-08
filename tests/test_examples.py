@@ -834,7 +834,7 @@ def test_the_travel_demo_decides_a_flat_access_where_the_scan_was_called() -> No
 def test_the_travel_demo_prints_the_check_it_compiles() -> None:
     result, _ = _invoke("travel", "python")
     assert "checked when it runs" in result.stdout
-    assert "gather_perm_ok[0] = 1" in result.stdout
+    assert "gather_perm_ok[0] = (int64_t) (1)" in result.stdout
 
 
 # }}}

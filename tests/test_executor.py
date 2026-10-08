@@ -64,9 +64,16 @@ def test_positional_arguments_follow_the_term_signature() -> None:
 
 @kernel
 def add_index(c: Arr[Fin[n], Nat]):  # noqa: F821
-    """``c[i] = c[i] + i``: an output of naturals, lowered as 32-bit integers."""
+    """``c[i] = c[i] + i``: an output of naturals, lowered as 64-bit integers."""
     for i in c.dom:
         c[i] = c[i] + i
+
+
+@kernel
+def reverse_index(p: Arr[Fin[n], Fin[n]]):  # noqa: F821
+    """``p[i] = n - 1 - i``: an output of indices, lowered as 32-bit integers."""
+    for i in p.dom:
+        p[i] = p.dom.size - 1 - i
 
 
 def test_a_strided_or_differently_typed_output_is_updated_in_place() -> None:
@@ -83,11 +90,16 @@ def test_a_strided_or_differently_typed_output_is_updated_in_place() -> None:
     assert np.allclose(z, 3.0 * x + y)
     assert np.all(storage[:, 1] == 0.0)
 
-    # A Nat output stored as int64 is lowered as int32, and copied.
+    # A Nat output is lowered as int64 (#101), so an int64 one is not copied;
+    # a Fin[n] output stored as int64 is lowered as int32, and copied.
     c = np.array([5, 6, 7], dtype=np.int64)
     executor().run(add_index, c=c)
     assert c.dtype == np.int64
     assert list(c) == [5, 7, 9]
+    p = np.zeros(3, dtype=np.int64)
+    executor().run(reverse_index, p=p)
+    assert p.dtype == np.int64
+    assert list(p) == [2, 1, 0]
 
     # A float32 z for a float64 one used to be copied too, and the native run
     # rounded every write the compiled one kept; it is refused now.
@@ -509,8 +521,8 @@ def test_nans_of_either_sign_and_complex_infinities_are_judged_by_the_cell() -> 
 
 
 def test_outputs_of_different_integer_widths_still_agree_by_value() -> None:
-    # loopy writes a Nat output as int32, and the native run fills whatever the
-    # caller passed; the comparison is in the type both promote to.
+    # An output of another integer width than the native one, as a numpy
+    # sort's can be; the comparison is in the type both promote to.
     term = doubled_exact.trace()
     fact = agreement(
         term,
@@ -908,22 +920,21 @@ def test_a_float_stored_count_outside_the_int64_range_is_refused() -> None:
         scale_counts(counts, np.zeros(3))
     with pytest.raises(ValueError, match=r"c\[1\] is 1e\+20.*64-bit integer"):
         executor().run(scale_counts.trace(), c=counts, y=np.zeros(3))
-    # A whole float inside the int64 range is a whole number, and is refused
-    # only for the 32 bits the compiled run stores a Nat in (#92). Whole floats
-    # inside that range still convert, exactly, at both ends.
-    from loopty.contract import INTEGRAL_RANGE, element_types
+    # A whole float inside the int64 range is a whole number, and a Nat, which
+    # both runs hold in 64 bits (#101): the largest float below 2**63 converts
+    # exactly into both, and 2**63 itself into neither.
+    from loopty.contract import element_types
 
     types = scale_counts.arg_types
     edge = np.nextafter(2.0**63, 0.0)
-    with pytest.raises(ValueError, match=r"outside -2147483648 <= v < 2147483648"):
-        element_types(types, {"c": np.array([edge, 0.0]), "y": np.zeros(2)})
+    element_types(types, {"c": np.array([edge, 0.0]), "y": np.zeros(2)})
     with pytest.raises(ValueError, match=r"64-bit integer"):
         element_types(types, {"c": np.array([2.0**63, 0.0]), "y": np.zeros(2)})
-    top = float(INTEGRAL_RANGE[1] - 1)
-    element_types(types, {"c": np.array([top, 0.0]), "y": np.zeros(2)})
     y = np.zeros(2)
-    scale_counts(np.array([top, 3.0]), y)
-    assert y.tolist() == [2.0 * top, 6.0]
+    scale_counts(np.array([edge, 3.0]), y)
+    assert y.tolist() == [2.0 * edge, 6.0]
+    out = executor().run(scale_counts.trace(), c=np.array([edge, 3.0]), y=np.zeros(2))
+    assert out["y"].tolist() == [2.0 * edge, 6.0]
 
 
 def test_the_native_run_checks_scalar_parameters_too() -> None:

@@ -269,8 +269,11 @@ def test_dtypes_come_from_the_sorts() -> None:
     from lanky.prelude import Fin, Int, Nat, Real
 
     assert numpy_dtype(Real) == np.dtype(np.float64)
-    assert numpy_dtype(Nat) == np.dtype(np.int32)
-    assert numpy_dtype(Int) == np.dtype(np.int32)
+    # Nat and Int are 64 bits wide, as numpy computes integers (#101); an
+    # index type stays 32 bits wide, which its bound holds.
+    assert numpy_dtype(Nat) == np.dtype(np.int64)
+    assert numpy_dtype(Int) == np.dtype(np.int64)
+    assert numpy_dtype(int) == np.dtype(np.int64)
     assert numpy_dtype(Fin[8]) == np.dtype(np.int32)
     with pytest.raises(LoweringError):
         numpy_dtype(object())
