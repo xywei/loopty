@@ -2295,6 +2295,7 @@ def test_a_kernel_named_like_an_opencl_builtin_is_renamed(plain_opencl):
         "size_t",
         "event_t",
         "ATOMIC_VAR_INIT",
+        "main",
     ):
         kern = _named(name, _doubled)
         assert f"void {name}_knl(" in emit_code(kern)

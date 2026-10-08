@@ -1329,6 +1329,11 @@ _OPENCL_FUNCTIONS = frozenset(
     """.split()
 )
 
+#: Names no kernel may take: OpenCL C refuses a kernel called ``main``
+#: ("kernel cannot be called 'main'"), and C has the program's entry point by
+#: that name.
+_KERNEL_NAMES_TAKEN = frozenset({"main"})
+
 #: The families of OpenCL C built-ins named by a pattern: conversions
 #: (``convert_int4_sat_rte``), reinterpretations (``as_float``), vector loads
 #: and stores, atomics, work-group and sub-group functions, images, and the
@@ -1392,11 +1397,13 @@ def is_library_name(name: str) -> bool:
     'cpow'``), #108. So does a built-in function, a macro or a type of OpenCL
     C, on the OpenCL target (``get_global_id``, ``clamp``, ``convert_int``,
     ``NULL``, ``size_t``, #131), whatever target the kernel is lowered for, as
-    a keyword of either is.
+    a keyword of either is, and so does ``main``.
     """
     if name in _known_functions() or name in _C_LIBRARY_FUNCTIONS:
         return True
     if name in _C_LIBRARY_MACROS or name in _OPENCL_FUNCTIONS:
+        return True
+    if name in _KERNEL_NAMES_TAKEN:
         return True
     return bool(
         _STDINT_TYPE.match(name)

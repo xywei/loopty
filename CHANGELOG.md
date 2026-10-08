@@ -2043,7 +2043,7 @@ with a pair of statement instances.
   `as_float` or `M_PI` failed to build or to be found in the program, and so
   did one named like a macro OpenCL C defines (`NULL`, `ATOMIC_VAR_INIT`) or
   a type it declares (`size_t`, `event_t`, `memory_order`), which are renamed
-  too.
+  too, as is `main`, which OpenCL C refuses as a kernel's name.
 - An integer literal past 64 bits lowers where numpy computes it in a type
   that holds it (#140): `x[i] * 2**70` failed inside loopy's type inference
   (`integer constant too large`), and is written as a double now, as numpy
