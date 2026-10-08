@@ -1136,13 +1136,15 @@ class Definedness:
     """Whether the cells some statements read of an array are cells others store.
 
     ``ok`` is ``True`` when isl shows that every cell read is a cell
-    stored, and ``False`` when it shows one that is not: ``witness`` is that
-    cell, ``parameters`` the sizes it is one at, and ``reader`` the
-    statement that reads it. ``None`` means it cannot tell: a read whose
-    index is not affine reaches cells nobody can list, a read under a guard
-    isl cannot state is listed where the guard may not hold, and a write
-    whose index is not affine, or under such a guard, stores cells nobody
-    can list either, so none of them counts as stored. ``detail`` says
+    stored, and ``False`` when it shows one that is not, and that nothing
+    else the question was told of stores either: ``witness`` is that cell,
+    ``parameters`` the sizes it is one at, and ``reader`` the statement that
+    reads it. ``None`` means it cannot tell: a read whose index is not
+    affine reaches cells nobody can list, a read under a guard isl cannot
+    state is listed where the guard may not hold, and a write whose index is
+    not affine, or under such a guard, stores cells nobody can list either,
+    so none of them counts as stored; and a cell the reader's own call
+    stores may have been stored before the read or after it. ``detail`` says
     which, in words, or names the cell. ``read`` and ``stored`` are the two
     sets of cells when ``ok`` is ``True``, the question isl answered.
     """
@@ -1157,14 +1159,19 @@ class Definedness:
 
 
 def definedness(
-    term: Term, array: str, writers: Sequence[Stmt], readers: Sequence[Stmt]
+    term: Term,
+    array: str,
+    writers: Sequence[Stmt],
+    readers: Sequence[Stmt],
+    own: Sequence[Stmt] = (),
 ) -> Definedness:
     """Are the cells of ``array`` that ``readers`` read cells ``writers`` store?
 
     The question a program's intermediate is asked: its consumer reads only
     cells its producer wrote, and the zeros it was made with reach no read
-    (see :func:`loopty.typing.definedness_facts`, and
-    :meth:`loopty.schedule.Schedule.substitute`, which asks it too). It is
+    but through a write that adds to a cell (``f[j] += ...``); see
+    :func:`loopty.typing.definedness_facts`, and
+    :meth:`loopty.schedule.Schedule.substitute`, which asks it too. It is
     an isl subset question between two sets of cells, the cells every read
     reaches, over the domain the read is made in (a guard's over the loops
     before the guard narrows them, a sum's over the sum's), and the cells
@@ -1179,6 +1186,13 @@ def definedness(
     program puts before a call (``term.checks``) is the one such guard that
     is left out: wherever it is set, the program stops, and no statement
     after it runs, reader or writer.
+
+    ``own`` are the statements that store into the array in the call the
+    readers belong to, which may store a cell before it is read there
+    (``f[0] = ...``, then ``... f[0] ...``) or after. Whether they did is
+    not asked: they count for nothing towards ``True``, and a cell they
+    store, or may store, is no witness of ``False``, which is then a cell
+    that nothing stores before the read, so that the read sees the zeros.
     """
     from lanky.terms import Comparison, Subscript, Var, render
 
@@ -1240,6 +1254,16 @@ def definedness(
                 _align(found, stored.get_space())
             )
     who = " and ".join(stmt.id for stmt in writers)
+    # What the readers' own call stores, which may come before a read: no
+    # witness of a cell nothing stored. One of them that cannot be listed
+    # leaves every cell outside the stored ones unknown.
+    theirs = universe.subtract(universe)
+    for stmt in own:
+        found = cells(stmt, ("write", "acc"), writing=True)
+        if found is not None:
+            theirs = _align(theirs, found.get_space()).union(
+                _align(found, theirs.get_space())
+            )
     read = universe.subtract(universe)
     for stmt in readers:
         found = cells(stmt, ("read", "acc"), writing=False)
@@ -1251,6 +1275,18 @@ def definedness(
             continue
         if unknown:
             return Definedness(None, detail="; ".join(dict.fromkeys(unknown)))
+        unstored = outside.subtract(_align(theirs, outside.get_space()))
+        if unstored.is_empty():
+            mine = " or ".join(other.id for other in own)
+            return Definedness(
+                None,
+                detail=(
+                    f"{stmt.id} reads cells of {array} that {who} does not store "
+                    f"and that {mine} stores, before the read or after it, which "
+                    "is not asked"
+                ),
+            )
+        outside = unstored
         point = outside.sample_point()
         witness = tuple(
             point.get_coordinate_val(isl.dim_type.set, k).to_python()
@@ -1272,6 +1308,11 @@ def definedness(
             reader=stmt.id,
             detail=(
                 f"{stmt.id} reads {array}[{cell}], which {who} does not store"
+                + (
+                    f", nor {' or '.join(other.id for other in own)}"
+                    if own
+                    else ""
+                )
                 + (f" (at {at})" if at else "")
             ),
         )

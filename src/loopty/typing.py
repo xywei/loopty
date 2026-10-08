@@ -1466,20 +1466,28 @@ def definedness_facts(
     For each call that reads such an array after some call wrote it, one
     fact asks the question :func:`loopty.flow.definedness` answers: are the
     cells it reads cells the calls before it stored? Then the zeros the
-    program made the array with reach none of its reads, and the array is
-    whatever the producer made of it, which is what lets a schedule compute
-    it where it is read instead (:meth:`loopty.schedule.Schedule.substitute`).
+    program made the array with reach none of its reads, but through a call
+    that added to a cell (``f[j] += ...``) rather than storing it, and the
+    array is whatever the producers made of it, which is what lets a
+    schedule compute it where it is read instead
+    (:meth:`loopty.schedule.Schedule.substitute`, which takes a producer
+    that stores).
 
     When isl shows it, the fact is the subset question, for the isl oracle
-    to decide. When isl shows a cell it reads that no call before it stored,
-    the program reads the zeros there, which is no error: the fact says so,
-    ``decided`` by isl, with the cell. When a read or a write is not affine,
-    or is made under a guard isl cannot state, it stays ``assumed``, with the
+    to decide. When isl shows a cell the call reads that no call before it
+    stored and that the call does not store itself, the read sees the zeros
+    there, and the fact is ``refuted`` by isl with that cell, as a kernel
+    that writes one cell twice has its ``disjoint-writes`` fact refuted:
+    the program runs as written, natively and compiled, but the edge does
+    not carry what is read, and the producer that stores those cells, zeros
+    included, is what makes it. When a read or a write is not affine, or is
+    made under a guard isl cannot state, it stays ``assumed``, with the
     reason: such a read is listed where it may not be made, so a cell it
-    seems to read is no cell it is shown to read. The flags of the checked
-    points, which the program's own statements set, are no edge, and the
-    guard they put on every later statement is no such guard, since no
-    statement runs where one is set.
+    seems to read is no cell it is shown to read. So does a read of a cell
+    the call stores itself, before the read or after it, which is not asked.
+    The flags of the checked points, which the program's own statements set,
+    are no edge, and the guard they put on every later statement is no such
+    guard, since no statement runs where one is set.
     """
     flags = dict(term.checks)
     facts: list[Fact] = []
@@ -1500,14 +1508,14 @@ def definedness_facts(
                     )
                 )
             ]
+            wrote = [stmt for stmt in stmts if stmt.assignee.array == array]
             if reading and writers:
                 facts.append(
                     _definedness_fact(
-                        term, owner, array, scope, writers, calls, reading,
+                        term, owner, array, scope, writers, calls, reading, wrote,
                         module=module, line=line,
                     )
                 )
-            wrote = [stmt for stmt in stmts if stmt.assignee.array == array]
             if wrote:
                 writers.extend(wrote)
                 if scope.call not in calls:
@@ -1523,12 +1531,18 @@ def _definedness_fact(
     writers: Sequence[Any],
     calls: Sequence[str],
     reading: Sequence[Any],
+    own: Sequence[Any],
     *,
     module: str | None,
     line: int | None,
 ) -> Fact:
-    """One fact of :func:`definedness_facts`: one call reading one array."""
-    verdict = flow.definedness(term, array, writers, reading)
+    """One fact of :func:`definedness_facts`: one call reading one array.
+
+    ``own`` are the call's statements that store into the array, whose
+    cells may have been stored before the call reads them (see
+    :func:`loopty.flow.definedness`).
+    """
+    verdict = flow.definedness(term, array, writers, reading, own)
     stored_by = " or ".join(calls)
     provenance: dict[str, Any] = {
         "array": array,
@@ -1561,24 +1575,22 @@ def _definedness_fact(
     if verdict.ok is False:
         cell = ", ".join(str(value) for value in verdict.witness or ())
         at = ", ".join(f"{name}={value}" for name, value in verdict.parameters)
-        writes_it = any(stmt.assignee.array == array for stmt in reading)
         provenance["witness"] = verdict.witness
+        provenance["witness_text"] = f"{array}[{cell}]" + (f" at {at}" if at else "")
         provenance["witness_params"] = dict(verdict.parameters)
-        provenance["reads"] = (
-            f"the cells {stored_by} did not store hold the zeros {array} was "
-            "made with"
-            + ("" if not writes_it else f", or what {scope.call} stored there")
-            + " when they are read"
+        provenance["reason"] = (
+            f"{verdict.detail}, so the read sees the zeros {array} was made "
+            f"with. The program runs so, natively and compiled, but {array} "
+            f"does not carry {stored_by}'s values there: have {stored_by} "
+            f"store every cell {scope.call} reads, zeros included where they "
+            "are meant"
         )
         return Fact(
             id=identifier,
             kind="definedness",
-            statement=(
-                f"{scope.call} reads cells of {array} that {stored_by} did not "
-                f"store, such as {array}[{cell}]" + (f" at {at}" if at else "")
-            ),
+            statement=statement,
             term=None,
-            status=Status.DECIDED,
+            status=Status.REFUTED,
             decided_by="isl",
             provenance=provenance,
             where=scope.where,

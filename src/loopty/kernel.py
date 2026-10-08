@@ -766,7 +766,8 @@ class Program(_Decorated):
         each call that reads it after another call wrote it
         (:func:`loopty.typing.definedness_facts`): whether the cells it
         reads are cells stored before it, so that the zeros the array was
-        made with reach none of its reads.
+        made with reach none of its reads, but through a call that added to
+        a cell.
         """
         if self._facts is not None:
             return self._facts

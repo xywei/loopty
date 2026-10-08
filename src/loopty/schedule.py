@@ -3714,7 +3714,9 @@ class Schedule:
         if pieces is not None:
             ids = self._lowering.insn_ids
             pieces = {ids[stmt_id]: piece for stmt_id, piece in pieces.items()}
-        kernel, reason = _affine_kernel(draft.kernel, mapping, pieces)
+        kernel, reason = _affine_kernel(
+            draft.kernel, mapping, pieces, self._term.sizes
+        )
         if reason is None:
             draft.kernel = kernel
         else:
@@ -5083,6 +5085,7 @@ def _affine_kernel(
     kernel: Any,
     mapping: isl.Map,
     pieces: Mapping[str, isl.Map] | None = None,
+    sizes: Sequence[str] = (),
 ) -> tuple[Any, str | None]:
     """The loopy kernel reindexed along ``mapping``, or why it cannot be.
 
@@ -5151,10 +5154,12 @@ def _affine_kernel(
     try:
         if len(taken) > 1:
             assert pieces is not None
-            domains, insns, substitutions, predicates = _fused_plan(entry, pieces)
+            domains, insns, substitutions, predicates = _fused_plan(
+                entry, pieces, sizes
+            )
         else:
             domains, insns, substitutions, predicates = _shared_plan(
-                entry, mapping, pieces
+                entry, mapping, pieces, sizes
             )
     except _Inexpressible as exc:
         return kernel, str(exc)
@@ -5201,7 +5206,10 @@ _Plan = tuple[list[Any], list[Any], dict[Any, dict[str, Any]], dict[str, Any]]
 
 
 def _shared_plan(
-    entry: Any, mapping: isl.Map, pieces: Mapping[str, isl.Map] | None
+    entry: Any,
+    mapping: isl.Map,
+    pieces: Mapping[str, isl.Map] | None,
+    sizes: Sequence[str] = (),
 ) -> _Plan:
     """The rewrite along one map, or maps per statement over the same loops.
 
@@ -5258,7 +5266,7 @@ def _shared_plan(
         substitutions = {None: _substitution(mapping, before)}
     else:
         images = {key: _image_set(before, piece) for key, piece in pieces.items()}
-        domains[home], predicates = _shared_image(images, before)
+        domains[home], predicates = _shared_image(images, before, sizes)
         substitutions = {
             key: _substitution(piece, before) for key, piece in pieces.items()
         }
@@ -5269,7 +5277,9 @@ def _shared_plan(
     return domains, insns, substitutions, predicates
 
 
-def _fused_plan(entry: Any, pieces: Mapping[str, isl.Map]) -> _Plan:
+def _fused_plan(
+    entry: Any, pieces: Mapping[str, isl.Map], sizes: Sequence[str] = ()
+) -> _Plan:
     """The rewrite along maps per statement that fuse loops of two domains.
 
     The maps take different loops to the same new ones, and the statements
@@ -5346,7 +5356,7 @@ def _fused_plan(entry: Any, pieces: Mapping[str, isl.Map]) -> _Plan:
         key: image.align_params(common.get_space()) for key, image in images.items()
     }
     first = min(homes.values())
-    shared, predicates = _shared_image(images, entry.domains[first])
+    shared, predicates = _shared_image(images, entry.domains[first], sizes)
     substitutions: dict[Any, dict[str, Any]] = {
         key: _substitution(piece, entry.domains[home_of[key]])
         for key, piece in pieces.items()
@@ -5459,7 +5469,7 @@ def _substitution(mapping: isl.Map, domain: Any) -> dict[str, Any]:
 
 
 def _shared_image(
-    images: Mapping[str, isl.Set], before: Any
+    images: Mapping[str, isl.Set], before: Any, sizes: Sequence[str] = ()
 ) -> tuple[isl.BasicSet, dict[str, Any]]:
     """One domain for loops whose statements move by maps of their own.
 
@@ -5476,6 +5486,15 @@ def _shared_image(
     than dropped, since the instruction would then run at points it does not
     have.
 
+    The hull of two loops that run to two sizes, ``{ [j] : 0 <= j < n }``
+    and ``{ [j] : 0 <= j < m }`` fused, has no upper bound where a size may
+    be negative, and loopy can write no loop over it. ``sizes``, the
+    program's sizes, are never negative (the contract refuses an argument
+    that would make one so, :func:`loopty.contract.sizes_not_negative`), and
+    the hull is taken where they are not: ``j < n + m``, the statements
+    predicated on their own images within it. A hull that is unbounded all
+    the same is refused, with the union.
+
     Returns the domain and the predicate of each instruction that needs one.
     """
     from loopy.symbolic import set_to_cond_expr
@@ -5489,6 +5508,24 @@ def _shared_image(
         (shared,) = union.get_basic_sets()
     else:
         shared = union.polyhedral_hull()
+        known = [
+            name
+            for name in sizes
+            if name in union.get_var_names(isl.dim_type.param)
+        ]
+        if not shared.is_bounded() and known:
+            context = isl.Set(
+                f"[{', '.join(known)}] -> "
+                f"{{ : {' and '.join(f'{name} >= 0' for name in known)} }}"
+            )
+            shared = union.intersect_params(
+                context.align_params(union.get_space())
+            ).polyhedral_hull()
+        if not shared.is_bounded():
+            raise _Inexpressible(
+                f"the new loops run over every point of the images, {union}, "
+                "and no one loopy domain bounds them: their hull is unbounded"
+            )
     wide = _as_set(shared)
     predicates: dict[str, Any] = {}
     for key, image in images.items():

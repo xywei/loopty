@@ -265,8 +265,9 @@ end to end; the edges are sharp.
   program makes and one call writes and a later call reads is an internal
   edge, and the program has a `definedness` fact for it, decided by isl:
   every cell the reader reads, a call before it stored, so the zeros the
-  array was made with reach no read (or, `decided` all the same, the cell
-  where they do). `Schedule(program).fuse("flux", "divergence", shift=1)`
+  array was made with reach no read but through a call that adds to a cell
+  (or `refuted`, with the cell where they do).
+  `Schedule(program).fuse("flux", "divergence", shift=1)`
   runs the reader's loop inside the writer's, one step behind, and is
   `affine` with the map per statement it builds, `{ flux_S0[j] -> [j];
   divergence_S0[i] -> [j] : j = i + 1 }`, checked on the dependences between

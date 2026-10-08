@@ -461,13 +461,18 @@ with a pair of statement instances.
   later one, is an internal edge of the program, and the program has a
   `definedness` fact for each call that reads it after another wrote it:
   every cell the call reads, a call before it stored, so that the zeros the
-  array was made with reach none of its reads. The fact's term is the isl
-  subset question between the two sets of cells, for the isl oracle; a call
-  that does read the zeros somewhere has the fact `decided` by isl all the
-  same, saying so with a cell, since reading them is no error; and a read or
-  a write isl cannot list (an index that is not affine, a guard it cannot
-  state) leaves it `assumed`, with the reason. The composition demo has one
-  row more, `decided`.
+  array was made with reach none of its reads but through a call that adds
+  to a cell. The fact's term is the isl subset question between the two
+  sets of cells, for the isl oracle. A call that reads a cell no call before
+  it stored, and that it does not store itself, reads the zeros there, and
+  the fact is `refuted` by isl with that cell, as a kernel that writes one
+  cell twice has its `disjoint-writes` fact refuted: the program runs as
+  written, but the edge does not carry what is read, and the reason names
+  the fix, a producer that stores those cells too. A read or a write isl
+  cannot list (an index that is not affine, a guard it cannot state), or a
+  read of a cell the reading call stores itself, before the read or after
+  it, leaves the fact `assumed`, with the reason. The composition demo has
+  one row more, `decided`.
 - **Fusion as a checked cast** (#13). `Schedule.affine` takes maps per
   statement whose statements run in different loops, each taking its own
   loops to the same new ones, which is a fusion: `{ flux_S0[j] -> [j];
@@ -478,9 +483,15 @@ with a pair of statement instances.
   labels, and their loops, outermost first, one shift per loop. A fusion
   that runs a dependence backwards is refused with the pair of instances and
   the cell, and the message names the least shift the checker accepts, when
-  a number per loop gives one. The kernel rewrite replaces the two loops'
+  a number per loop gives one. A label names the call's own statements and
+  not the checked points a program puts before it, so a fusion that would
+  run the call before such a check is refused for the flag the check sets
+  and the call reads; the check fuses with the producer instead, and stays
+  before the reads. The kernel rewrite replaces the two loops'
   domains by one, the union of the images, each statement predicated on its
-  own and given its own inverse, and nests the domains again. A nest the
+  own and given its own inverse, and nests the domains again; the union of
+  two loops that run to two sizes, `n` and `m`, is bounded by `n + m`, its
+  hull where the sizes are not negative, which they never are. A nest the
   lowering wrote as one domain, `{ [i, j] }`, is cut after the loops the
   maps take when they are its outer ones, so the rows of a two-loop
   producer fuse with a one-loop consumer of each row; other loops that share
@@ -499,7 +510,11 @@ with a pair of statement instances.
   computes an array the program makes where it is read: the one statement
   that writes it, pointwise, becomes a substitution rule through loopy's
   `assignment_to_subst`, after the statement that zeroes the array is
-  dropped, and the temporary and the loops left empty go with it. It is
+  dropped, and the temporary and the loops left empty go with it. Each read
+  gets the value converted to the array's element type, as the store
+  converted it (a `float32` intermediate rounds it); where that conversion
+  would sit in a subscript, which loopy cannot simplify through, the kernel
+  is left unwritten with the reason. It is
   refused with a `ValueError` for a parameter, an array two statements
   write, or a producer that is not pointwise, and with an `IllegalCast` when
   a read is of a cell the producer does not store, or stores after the read

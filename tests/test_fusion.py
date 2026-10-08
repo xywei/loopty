@@ -23,7 +23,7 @@ import islpy as isl
 import numpy as np
 import pytest
 from lanky.ledger import Status
-from lanky.prelude import Nat, Real
+from lanky.prelude import Int, Nat, Real
 
 from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum, when
 from loopty.executor import LoopyExecutor
@@ -361,6 +361,84 @@ def marked(u, y):
 
 
 @kernel
+def bounded(f: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """Store the first and last cells of ``f``, then read every cell."""
+    for k in f.dom:
+        with when(k == 0):
+            f[k] = 1.0
+    for e in f.dom:
+        with when(e + 1 == f.dom.size):
+            f[e] = 2.0
+    for i in y.dom:
+        y[i] = f[i] + 1.0
+
+
+@kernel
+def first_edge(f: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """Store the first cell of ``f``, then read every cell."""
+    for k in f.dom:
+        with when(k == 0):
+            f[k] = 1.0
+    for i in y.dom:
+        y[i] = f[i] + 1.0
+
+
+@program
+def edged(u, y):
+    """The inside of f stored by one call, its edges by the one that reads it."""
+    f = Arr.zeros_like(u)
+    interior_flux(u, f)
+    bounded(f, y)
+
+
+@program
+def half_edged(u, y):
+    """The same, with the last cell stored by nobody."""
+    f = Arr.zeros_like(u)
+    interior_flux(u, f)
+    first_edge(f, y)
+
+
+@kernel
+def plus_one(w: Arr[Fin[m], Real], y: Arr[Fin[m], Real]):  # noqa: F821
+    """Every cell of ``w``, plus one."""
+    for i in y.dom:
+        y[i] = w[i] + 1.0
+
+
+@program
+def two_sizes(u, w, y, z):
+    """A call over ``n`` and one over ``m`` between the two ends of an edge."""
+    f = Arr.zeros_like(u)
+    doubled(u, f)
+    plus_one(w, y)
+    shifted(f, z)
+
+
+@kernel
+def triple(u: Arr[Fin[n], Int], f: Arr[Fin[n], Int]):  # noqa: F821
+    """Three times each cell, plus one."""
+    for j in u.dom:
+        f[j] = u[j] * 3 + 1
+
+
+@kernel
+def forward(f: Arr[Fin[n], Int], y: Arr[Fin[n], Int]):  # noqa: F821
+    """Each cell less the one before it, but the last."""
+    for i in y.dom:
+        with when(i + 1 < y.dom.size):
+            y[i] = f[i + 1] - f[i]
+
+
+@program
+def whole(u, y):
+    """The same edge in integers, which every run has to agree on exactly."""
+    f = Arr.zeros_like(u)
+    triple(u, f)
+    forward(f, y)
+
+
+@kernel
 def reverse_quiet(idx: Arr[Fin[n], Fin[n]]):  # noqa: F821
     """Reverse the cells, and say nothing about it."""
     for i in idx.dom:
@@ -539,19 +617,50 @@ def test_the_consumer_reads_only_cells_the_producer_stored() -> None:
     assert fact.id.endswith(":f:divergence")
 
 
-def test_a_consumer_that_reads_the_zeros_is_told_so_and_not_refuted() -> None:
-    # Reading the zeros the program made the array with is no error, so the
-    # fact says what happens, decided, with a cell that shows it.
+def test_a_consumer_that_reads_the_zeros_is_refuted_with_the_cell() -> None:
+    # shifted reads every cell, and interior_flux stores the inside ones: the
+    # boundary cells hold the zeros f was made with when they are read. The
+    # program runs so, but the edge does not carry them, and the fact is
+    # refuted with a boundary cell, as a kernel that writes a cell twice has
+    # its disjoint-writes fact refuted.
     (fact,) = definedness(padded)
-    assert fact.status is Status.DECIDED
+    assert fact.status is Status.REFUTED
     assert fact.decided_by == "isl"
-    assert fact.statement.startswith(
-        "shifted reads cells of f that interior_flux did not store, such as f["
+    assert fact.statement == (
+        "every cell of f that shifted reads, interior_flux stored before it"
     )
-    cell = fact.provenance["witness"]
+    (cell,) = fact.provenance["witness"]
     size = fact.provenance["witness_params"]["n"]
-    assert cell[0] in (0, size - 1)
-    assert "zeros" in fact.provenance["reads"]
+    assert cell in (0, size - 1)
+    assert fact.provenance["witness_text"] == f"f[{cell}] at n={size}"
+    reason = fact.provenance["reason"]
+    assert reason.startswith(f"shifted.S0 reads f[{cell}], which interior_flux.S0 ")
+    assert "sees the zeros f was made with" in reason
+    assert "have interior_flux store every cell shifted reads" in reason
+    # Both of the halves an edge can go wrong at are refuted.
+    (back_half,) = definedness(between)[1:]
+    assert back_half.provenance["array"] == "h"
+    assert back_half.status is Status.REFUTED
+
+
+def test_a_cell_the_reader_stores_itself_is_no_witness() -> None:
+    # bounded stores f's first and last cells and then reads every cell:
+    # interior_flux stored the others, and whether bounded stored its own
+    # before it read them is not asked, so the fact stays assumed. Storing
+    # only the first, the last cell is read unstored by anyone: refuted there.
+    (fact,) = definedness(edged)
+    assert fact.status is Status.ASSUMED
+    assert fact.term is None
+    assert fact.provenance["reason"] == (
+        "bounded.S2 reads cells of f that interior_flux.S0 does not store and "
+        "that bounded.S0 or bounded.S1 stores, before the read or after it, "
+        "which is not asked"
+    )
+    (fact,) = definedness(half_edged)
+    assert fact.status is Status.REFUTED
+    (cell,) = fact.provenance["witness"]
+    assert cell == fact.provenance["witness_params"]["n"] - 1
+    assert "nor first_edge.S0" in fact.provenance["reason"]
 
 
 def test_a_read_under_a_guard_isl_cannot_state_is_not_shown_to_see_zeros() -> None:
@@ -647,6 +756,21 @@ def test_the_fused_loop_is_one_loop_and_agrees_with_the_native_run() -> None:
     assert len(owners) == 1
     for size in (1, 2, 3, 5, 16):
         agrees(burgers, fused, burgers_inputs(size))
+
+
+def test_a_fused_and_substituted_edge_of_integers_agrees_exactly() -> None:
+    # Integers are exact: each schedule's run is compared bit for bit.
+    fused = Schedule(whole).fuse("triple", "forward", shift=1)
+    for schedule in (fused, fused.substitute("f")):
+        for size in (1, 2, 7):
+            inputs = {
+                "u": Arr.from_numpy(np.arange(size, dtype=np.int64) * 7 - 3),
+                "y": Arr.from_numpy(np.zeros(size, dtype=np.int64)),
+            }
+            fact = LoopyExecutor().differential(whole, schedule, inputs)
+            assert fact.status is Status.TESTED, fact.provenance
+            (output,) = fact.provenance["outputs"].values()
+            assert (output["exactness"], output["difference"]) == ("exact", 0)
 
 
 def test_a_fusion_is_a_map_per_statement_and_affine_takes_it_as_well() -> None:
@@ -839,6 +963,28 @@ def test_a_statement_s_map_moves_every_loop_of_the_step_it_runs_in() -> None:
             f"{{ rows_then_cells_S0[{row}] -> [q] : q = {row}; "
             f"rows_then_cells_S1[{cell}] -> [q] : q = {cell} }}"
         )
+
+
+def test_loops_over_two_sizes_fuse_into_one_loop_bounded_by_both() -> None:
+    # The union of { [j] : 0 <= j < n } and { [j] : 0 <= j < m } is no one
+    # domain, and its hull is bounded only where the sizes are not negative,
+    # which they never are: the fused loop runs to n + m, each statement on
+    # its own points. Without that, the schedule was decided and loopy could
+    # write no loop ("unbounded optimum").
+    for shift in (0, 2, -2):
+        fused = Schedule(two_sizes).fuse("doubled", "plus_one", shift=shift)
+        assert fused.buildable == (True, ""), fused.buildable
+        for n, m in ((1, 3), (3, 1), (2, 5), (5, 2), (1, 1)):
+            agrees(
+                two_sizes,
+                fused,
+                {
+                    "u": Arr.from_numpy(np.arange(n) + 0.5),
+                    "w": Arr.from_numpy(np.arange(m) * 0.25),
+                    "y": Arr.zeros(m),
+                    "z": Arr.zeros(n),
+                },
+            )
 
 
 def test_statements_of_one_loop_cannot_be_fused_into_it() -> None:
