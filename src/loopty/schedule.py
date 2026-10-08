@@ -749,18 +749,28 @@ def _same_cell(
     ``a_indices`` and ``b_indices`` are the two accesses' subscripts, compared
     axis by axis; an axis either one cannot state in isl is left
     unconstrained (see :func:`_index_text`), which can only add pairs.
+
+    A subscript may name a size, ``x[x.dom.size - 1]``, so the map declares
+    ``params``, every name a subscript may use besides the loop variables:
+    isl reads an undeclared name as a syntax error (#110). Its dimensions
+    have primed names, which no size can have, since a Python identifier
+    cannot hold a prime: isl reads a dimension named like a declared
+    parameter as that parameter, so a size ``s`` or ``x0`` made ``s = 0``
+    a constraint on the size, and the pairs of a kernel over ``Fin[s]`` were
+    the empty set.
     """
-    source_dims = layout.dims("x")
-    target_dims = layout.dims("y", suffix="_")
+    width = layout.width
+    source_dims = ", ".join(["s'", *(f"x{k}'" for k in range(width))])
+    target_dims = ", ".join(["s_'", *(f"y{k}'" for k in range(width))])
     renaming_a = {
-        iname: prim.Variable(f"x{k}") for k, iname in enumerate(layout.coords[a.id])
+        iname: prim.Variable(f"x{k}'") for k, iname in enumerate(layout.coords[a.id])
     }
-    allowed_a = {f"x{k}" for k in range(len(layout.coords[a.id]))} | params
+    allowed_a = {f"x{k}'" for k in range(len(layout.coords[a.id]))} | params
     renaming_b = {
-        iname: prim.Variable(f"y{k}") for k, iname in enumerate(layout.coords[b.id])
+        iname: prim.Variable(f"y{k}'") for k, iname in enumerate(layout.coords[b.id])
     }
-    allowed_b = {f"y{k}" for k in range(len(layout.coords[b.id]))} | params
-    constraints = [f"s = {layout.index(a.id)}", f"s_ = {layout.index(b.id)}"]
+    allowed_b = {f"y{k}'" for k in range(len(layout.coords[b.id]))} | params
+    constraints = [f"s' = {layout.index(a.id)}", f"s_' = {layout.index(b.id)}"]
     for a_index, b_index in zip(a_indices, b_indices, strict=True):
         left = _index_text(a_index, renaming_a, allowed_a)
         right = _index_text(b_index, renaming_b, allowed_b)
@@ -768,6 +778,7 @@ def _same_cell(
             continue
         constraints.append(f"{left} = {right}")
     return isl.Map(
+        f"[{', '.join(sorted(params))}] -> "
         f"{{ [{source_dims}] -> [{target_dims}] : {' and '.join(constraints)} }}"
     )
 

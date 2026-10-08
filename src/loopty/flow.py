@@ -78,18 +78,25 @@ as a fact of the program's resting on the postcondition.
 
 Within one kernel, the formulation that keeps those relations, ``off[r] <= a
 < off[r + 1]`` with the offsets constrained by the scan recurrence, is not
-implemented, and it is not needed for in-bounds or disjointness on the ragged
-form, which is all the typing rules of a kernel ask for, as long as the
-kernel leaves its layout as the contract checked it. One that
-writes its counts or its offsets can move a row out of the buffer or onto
-another, and the ragged form's facts about it rest on a layout fact
-(:func:`loopty.typing.layout_facts`). That fact is decided for the writes
-that need no formulation: an offset written back as the counts lay it out,
-which keeps the layout by induction over the run, and one written as a value
-of the loop variables and the sizes, which isl can compare with the one start
-every count vector agrees on, ``off[0] = 0``. A start read from another array,
-or a count written, leaves it ``assumed`` until this formulation, with the
-writes to the offsets as hypotheses, can decide it.
+needed for in-bounds or disjointness on the ragged form, which is all the
+typing rules of a kernel ask for, as long as the kernel leaves its layout as
+the contract checked it. One that writes its counts or its offsets can move a
+row out of the buffer or onto another, and the ragged form's facts about it
+rest on a layout fact (:func:`loopty.typing.layout_facts`). That fact is
+decided for an offset written back as the counts lay it out, and for one
+written as a value of the loop variables and the sizes, which isl can compare
+with the one start every count vector agrees on, ``off[0] = 0``. Any other
+write is asked in the monotone-offsets formulation, by induction over the
+run: the offsets nondecreasing by the counts and inside the buffer, which the
+contract checks on entry, are hypotheses about the cells a write reads, and
+isl decides whether the write keeps them (#103). A write that keeps every row
+inside the buffer and apart in that order is decided; one isl cannot show
+does is left ``assumed``, and a native run that moves a row past the end or
+onto another refutes it (:func:`loopty.faithful.layout_fact`). A kernel
+whose rows move while it writes the family's arrays is left ``assumed`` too,
+since the cells ``[r, j]`` this module compares are one cell of the buffer
+each only while no row moves, and so is one that writes a row's length
+inside a loop the length bounds.
 
 *Distinct parameters are distinct storage.* :func:`dependences` compares
 footprints array by array and reports nothing between two differently named
@@ -922,8 +929,9 @@ def _bounded_domains(stmt: Stmt) -> list[tuple[isl.Set, tuple[str | None, ...], 
     Then the domain of every reduction it evaluates, in the right-hand side,
     the assignee's subscripts or the guard, over the loop variables and then
     the reduction's binders, from the first binder, since a bound of a loop
-    variable there is the statement's own again. A dimension whose name cannot
-    be told is ``None``.
+    variable there is the statement's own again, and before the statement's
+    guard or the sum's clause narrowed it (its ``loop_domain``), for the same
+    reason. A dimension whose name cannot be told is ``None``.
     """
     from loopty.trace import reductions_in
 
@@ -935,12 +943,17 @@ def _bounded_domains(stmt: Stmt) -> list[tuple[isl.Set, tuple[str | None, ...], 
         if source is None:
             continue
         for reduction in reductions_in(source):
+            summed = (
+                reduction.domain
+                if reduction.loop_domain is None
+                else reduction.loop_domain
+            )
             names: tuple[str | None, ...] = (*stmt.inames, *reduction.inames)
-            n_dim = reduction.domain.dim(isl.dim_type.set)
+            n_dim = summed.dim(isl.dim_type.set)
             if len(names) != n_dim:
                 lead = n_dim - len(reduction.inames)
                 names = (*(None,) * max(lead, 0), *reduction.inames)[-n_dim:]
-            out.append((reduction.domain, names, n_dim - len(reduction.inames)))
+            out.append((summed, names, n_dim - len(reduction.inames)))
     return out
 
 

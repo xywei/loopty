@@ -416,8 +416,23 @@ def clamp(
 
 @program
 def clamped(src, perm, x, y):
-    """clamp's contract refuses src natively; nothing checks it compiled."""
+    """clamp's contract refuses src natively; the program checks it compiled."""
     below_zero(src)
+    clamp(src, perm)
+    gather(perm, x, y)
+
+
+@kernel
+def counted(src: Arr[Fin[n], Nat]) -> all(src[i] == i for i in Fin[n]):
+    """Leaves each cell its index, and says so."""
+    for i in src.dom:
+        src[i] = i
+
+
+@program
+def counted_then_clamped(src, perm, x, y):
+    """clamp's requirement on src is decided under counted's postcondition."""
+    counted(src)
     clamp(src, perm)
     gather(perm, x, y)
 
@@ -461,6 +476,34 @@ def picked_on_a_citation(cnt, off, x, y):
     """Decided under the axiom, which is assumed: checked all the same."""
     scan_unit(cnt, off)
     pick(off, x, y)
+
+
+# }}}
+
+
+# {{{ a value past 32 bits, read by a checked point (#128)
+
+
+@kernel
+def past_32_bits(perm: Arr[Fin[n], Fin[n]]):
+    """Writes ``2**32 + i``, which a store of 32 bits would make ``i``."""
+    for i in perm.dom:
+        perm[i] = 2**32 + i
+
+
+@program
+def narrowed(perm, x, y):
+    """gather's contract refuses 2**32 natively; the program checks it."""
+    past_32_bits(perm)
+    gather(perm, x, y)
+
+
+@program
+def narrowed_made(x, y):
+    """The same, through an array the program makes."""
+    perm = Arr.zeros_like(x, dtype=int)
+    past_32_bits(perm)
+    gather(perm, x, y)
 
 
 # }}}

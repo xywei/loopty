@@ -296,6 +296,47 @@ def test_a_parallel_tag_that_would_read_a_stale_row_length_is_rejected(fn) -> No
     assert caught.value.fact.status.value == "refuted"
 
 
+def sums_at_i_then_next_count(
+    x: Arr[Fin[m], Real],  # noqa: F821
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """Each ``i`` sums entry ``i`` of row ``r``; the next row's length cleared."""
+    for r in y.dom:
+        for i in x.dom:
+            y[r] = y[r] + x[i] * reduce_sum(val[r, t] for t in val.dom[r] if t == i)
+        with when(r + 1 < y.dom.size):
+            cnt[r + 1] = 0
+
+
+def test_a_tag_that_would_read_a_sums_bound_before_it_is_written_is_rejected() -> None:
+    # The sum reads the length of row ``r``, and ``S1[r - 1]`` clears it. Its
+    # clause ``t == i`` leaves no constraint of its own bound in its domain,
+    # ``t = i, i < nl_cnt_r``, and no loop of the statement is bounded by
+    # it, so the read was in no footprint, and the tag was accepted, its
+    # ``monotone`` fact decided (#111). The bound is read over the sum's
+    # domain before the clause narrowed it.
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(
+        sums_at_i_then_next_count, evaluate_annotations(sums_at_i_then_next_count)
+    )
+    schedule = Schedule(term, sizes={"n": 4, "m": 3})
+    with pytest.raises(IllegalCast) as caught:
+        schedule.tag(r="l.0")
+    message = str(caught.value)
+    assert message.startswith("tag(r='l.0') illegal: instance S1[r=")
+    assert "writes cnt[" in message
+    assert "read by S0[" in message
+    (source_id, source), (sink_id, sink), _params = caught.value.witness
+    assert (source_id, sink_id) == ("S1", "S0")
+    assert sink["r"] == source["r"] + 1
+    assert caught.value.fact.kind == "monotone"
+
+
 def offsets_stored_then_row_sums(
     s: Arr[Fin[n], Nat],  # noqa: F821
     cnt: Arr[Fin[n], Nat],  # noqa: F821
@@ -2056,6 +2097,126 @@ def test_lanky_prints_the_reason_of_every_refuted_cast_fact() -> None:
         lines = refutation_lines(fact)
         assert fact.provenance["reason"] in lines
         assert "no witness recorded" not in lines
+
+
+# }}}
+
+
+# {{{ an access indexed by a size (#110)
+
+
+def last_then_all(x: Arr[Fin[n], Real]):  # noqa: F821
+    """The kernel of #110: the last cell, then every cell."""
+    x[x.dom.size - 1] = 0.0
+    for i in x.dom:
+        x[i] = x[i] + 1.0
+
+
+def into_the_last(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """Every iteration adds into the last cell of ``y``."""
+    for i in x.dom:
+        y[y.dom.size - 1] = y[y.dom.size - 1] + x[i]
+
+
+def last_offset_beside_rows(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    off: Arr[Fin[n + 1], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The last offset, which starts no row, stored before the rows are summed."""
+    off[cnt.dom.size] = off[cnt.dom.size - 1] + cnt[cnt.dom.size - 1]
+    for r in y.dom:
+        y[r] = reduce_sum(val[r, j] for j in val.dom[r])
+
+
+def test_a_schedule_of_an_access_indexed_by_a_size_is_built() -> None:
+    # The pairs of instances that touch one cell named the size n, which the
+    # map did not declare, and isl read the text as a syntax error (#110).
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(last_then_all, evaluate_annotations(last_then_all))
+    schedule = Schedule(term, sizes={"n": 6}).split("i", 2)
+    assert {fact.kind: fact.status.value for fact in schedule.facts()} == {
+        "bijective": "decided",
+        "monotone": "decided",
+    }
+
+
+def test_a_dependence_through_a_cell_a_size_names_is_found() -> None:
+    # Every instance writes y[n - 1]: run in parallel, the sums race.
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(into_the_last, evaluate_annotations(into_the_last))
+    schedule = Schedule(term, sizes={"n": 4})
+    with pytest.raises(IllegalCast) as caught:
+        schedule.tag(i="g.0")
+    message = str(caught.value)
+    assert message.startswith("tag(i='g.0') illegal: instance S0[i=")
+    assert "y[3]" in message
+    assert caught.value.fact.kind == "monotone"
+    assert caught.value.fact.status.value == "refuted"
+
+
+def test_a_write_of_the_last_offset_beside_a_ragged_read_is_scheduled() -> None:
+    # off[n] starts no row, so the rows read no cell it writes, and the loop
+    # over them is parallel; the map of the write named n, as above.
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(last_offset_beside_rows, evaluate_annotations(last_offset_beside_rows))
+    schedule = Schedule(term, sizes={"n": 3}).tag(r="g.0")
+    casts = {
+        fact.kind: fact.status.value
+        for fact in schedule.facts()
+        if fact.kind in ("bijective", "monotone")
+    }
+    assert casts == {"bijective": "decided", "monotone": "decided"}
+
+
+def chain_over_s(x: Arr[Fin[s], Real]):  # noqa: F821
+    """Each cell adds the one before it, over a size named like a dimension."""
+    for i in x.dom:
+        x[i] = x[i] + x[i - 1]
+
+
+def into_the_last_of_x0(x: Arr[Fin[x0], Real], y: Arr[Fin[x0], Real]):  # noqa: F821
+    """Every iteration adds into the last cell of ``y``, of a size named x0."""
+    for i in x.dom:
+        y[y.dom.size - 1] = y[y.dom.size - 1] + x[i]
+
+
+@pytest.mark.parametrize(
+    ("fn", "size", "cell"),
+    [(chain_over_s, "s", "x[2]"), (into_the_last_of_x0, "x0", "y[3]")],
+)
+def test_a_size_named_like_a_dimension_keeps_its_dependences(fn, size, cell) -> None:
+    # The map of the pairs that touch one cell declares the sizes, and isl
+    # reads a dimension named like one as that parameter: the statement's
+    # index ``s = 0`` became a constraint on the size, and every dependence of
+    # a kernel over Fin[s] was empty. The tag was refused only by flow's
+    # dependences, with no pair of instances to name. The dimensions are
+    # primed now, which no size can be (#110).
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(fn, evaluate_annotations(fn))
+    schedule = Schedule(term, sizes={size: 4})
+    with pytest.raises(IllegalCast) as caught:
+        schedule.tag(i="g.0")
+    message = str(caught.value)
+    assert message.startswith("tag(i='g.0') illegal: instance S0[i=")
+    assert cell in message
+    assert message.endswith(f"scheduled earlier (at {size}=4, as hinted)")
+    (source_id, _source), (sink_id, _sink), params = caught.value.witness
+    assert source_id == sink_id == "S0"
+    assert params == {size: 4}
 
 
 # }}}

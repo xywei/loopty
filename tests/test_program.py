@@ -28,7 +28,7 @@ from loopty import (
     reduce_sum,
     when,
 )
-from loopty.executor import LoopyExecutor
+from loopty.executor import LoopyExecutor, emit_code
 from loopty.flow import dependences
 from loopty.lower import lower_generic
 from loopty.term import declared_layout
@@ -1031,10 +1031,45 @@ def test_an_index_array_the_program_makes_is_zeros() -> None:
     assert fact.status.value == "tested", fact.provenance
 
 
-def test_a_natural_array_an_earlier_call_writes_is_passed_on() -> None:
-    # No fact rests on a Nat cell being non-negative, and off is no layout of
-    # shift's: the both program of the unification test stands.
-    assert [stmt.id for stmt in both.term.stmts] == ["scan.S0", "scan.S1", "shift.S0"]
+def test_a_natural_array_an_earlier_call_writes_is_checked_where_undecided() -> None:
+    # shift's contract checks that the cells of x are naturals, and scan wrote
+    # off before the call, so the program checks them there (#119): scan's
+    # postcondition says off[q + 1] == off[q] + cnt[q], which makes off[q] a
+    # natural only by induction over q, which isl does not do. The both
+    # program of the unification test gains a checked point, and still runs.
+    assert [stmt.id for stmt in both.term.stmts] == [
+        "scan.S0",
+        "scan.S1",
+        "shift.check.x",
+        "shift.S0",
+    ]
+    (requirement,) = both.term.requirements
+    assert (requirement.call, requirement.kind, requirement.param) == (
+        "shift",
+        "nat",
+        "x",
+    )
+    assert not requirement.decided
+    assert requirement.statement.startswith(
+        "the elements of off are naturals where shift is called at "
+    )
+    def inputs() -> dict:
+        counts = np.array([2, 0, 3], dtype=np.int64)
+        return {
+            "cnt": Arr.from_numpy(counts),
+            "off": Arr.zeros(4, dtype=np.int64),
+            "a": 2,
+        }
+
+    native, compiled = inputs(), inputs()
+    both(**native)
+    LoopyExecutor().run(both, **compiled)
+    assert compiled["off"].numpy().tolist() == native["off"].numpy().tolist() == [
+        2,
+        4,
+        4,
+        7,
+    ]
 
 
 def test_a_default_is_refused() -> None:
@@ -1331,22 +1366,27 @@ def test_a_temporary_of_naturals_is_an_integer_natively() -> None:
     with pytest.raises(ValueError, match="has to store as int64"):
         LoopyExecutor().run(counted, **make())
 
-    for dtype in (np.int64,):
+    @program
+    def counted_given(u, y):
+        c = Arr.zeros_like(u, dtype=np.int64)
+        truncate(u, c)
+        count(c, y)
 
-        @program
-        def counted_given(u, y):
-            c = Arr.zeros_like(u, dtype=dtype)
-            truncate(u, c)
-            count(c, y)
+    native = make()
+    counted_given(**native)
+    assert list(native["y"].numpy()) == [1.0, 2.0, 0.0]
+    fact = LoopyExecutor().differential(counted_given, Schedule(counted_given), make())
+    assert fact.status.value == "tested", fact.provenance
 
-        native = make()
-        counted_given(**native)
-        assert list(native["y"].numpy()) == [1.0, 2.0, 0.0]
-        fact = LoopyExecutor().differential(
-            counted_given, Schedule(counted_given), make()
-        )
-        assert fact.status.value == "tested", fact.provenance
+    # count's contract checks that c holds naturals, and truncate wrote it,
+    # so a checked point reads c between the calls (#119), and the compiled
+    # program stores it in 64 bits for that (#128), as it stores a Nat.
+    assert counted_given.term.checked_arrays == frozenset({"c"})
+    assert "int64_t c[" in emit_code(counted_given)
 
+    # A 32-bit c would narrow u[i] = 3e9 natively, negative, where the
+    # compiled store keeps it: refused as a Nat's storage (#101) before the
+    # checked point is asked of it (#128).
     for dtype in (np.float64, np.int16, np.int32):
 
         @program
@@ -1702,6 +1742,54 @@ def test_check_refutes_a_program_whose_term_is_not_its_body(tmp_path, capsys) ->
     assert code == 1
     assert "REFUTED probing at probing.py:" in out
     assert "the traced term computes what the body computes" in out
+
+
+# }}}
+
+
+# {{{ a sum's domain before its clause, renamed with it (#111)
+
+
+@kernel
+def first_entries(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The first entry of each row, by a sum whose clause picks it."""
+    for r in y.dom:
+        y[r] = reduce_sum(val[r, t] for t in val.dom[r] if t == 0)
+
+
+@program
+def first_entries_twice(cnt, val, y, cnt_b, val_b, y_b):
+    """Two calls whose sizes are renamed apart."""
+    first_entries(cnt, val, y)
+    first_entries(cnt_b, val_b, y_b)
+
+
+def test_a_sums_domain_before_its_clause_is_renamed_with_its_domain() -> None:
+    # The clause narrows the sum's domain to t = 0, so the sum keeps the
+    # domain it reads its bounds over beside it (#111). A program renames the
+    # second call's sizes and bounds apart, in both.
+    from loopty.trace import reductions_in
+
+    sums = [
+        reduction
+        for stmt in first_entries_twice.term.stmts
+        for reduction in reductions_in(stmt.expr)
+    ]
+    assert len(sums) == 2
+    names = []
+    for reduction in sums:
+        assert reduction.loop_domain is not None
+        params = set(reduction.domain.get_var_names(isl.dim_type.param))
+        assert set(reduction.loop_domain.get_var_names(isl.dim_type.param)) == params
+        names.append(params)
+    assert names[0] != names[1]
+    fact = first_entries_twice.facts()
+    (faithful,) = [f for f in fact if f.kind == "trace-faithful"]
+    assert faithful.status.value == "tested", faithful.provenance
 
 
 # }}}

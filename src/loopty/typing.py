@@ -45,12 +45,24 @@ per counts family it rewrites (:func:`layout_facts`). isl decides it where the
 kernel writes only the offsets, each as the counts lay it out
 (``off[r + 1] = off[r] + cnt[r]``) or as a value of its loop variables and the
 sizes alone, of which only ``off[0] = 0`` is right whatever the counts, and
-refutes it with an instance that writes another; any other write leaves it
-``assumed`` with the reason. The in-bounds and disjoint-writes facts of the
-family's ragged arrays rest on it, as does a fact decided by type through an
-index read from one of them (``x[col[r, j]]``), and the ``monotone`` casts of
-a schedule of the kernel (:mod:`loopty.schedule`). The ledger then shows them
-decided under the layout, and worth no more than it.
+refutes it with an instance that writes another. Any other write, a count, a
+start read from another array, one under a guard isl cannot state, is asked
+by induction over the run: the rows in order (each starting no earlier than
+the row before it ends, inside the buffer), which the contract checks when
+the call starts, kept by every write wherever they held before it. A write
+isl cannot show keeps them leaves the fact ``assumed`` with the reason, and
+the kernel's native runs may refute it (:func:`loopty.faithful.layout_fact`):
+one that reads a row off its buffer, or leaves two rows on one cell. The
+order is not asked where what rests on the layout needs more than it: in a
+kernel that writes the offsets and an array of the family, whose cells
+``[r, j]`` are one cell of the buffer each only while no row moves, and in
+one that writes a row's length inside a loop the length bounds, whose
+entries' in-bounds facts are against the length the loop read. The
+in-bounds and disjoint-writes facts of the family's ragged arrays rest on it,
+as does a fact decided by type through an index read from one of them
+(``x[col[r, j]]``), and the ``monotone`` casts of a schedule of the kernel
+(:mod:`loopty.schedule`). The ledger then shows them decided under the
+layout, and worth no more than it.
 
 *Write disjointness.* Distinct instances of a statement must write distinct
 cells, or the loop cannot be run in parallel and the order of the writes is
@@ -786,10 +798,19 @@ def layout_facts(
     with a count of 1 in that row alone, a row past the end of a buffer of one
     cell; and 0 at another row, with a count of 1 in it and in row 0, two rows
     on cell 0. The last offset, ``off[n]``, starts no row: a row is as long as
-    its count says, natively and compiled, so a write there moves nothing. Any
-    other write (the counts themselves, a start read from another array, a
-    value under a guard isl cannot state) leaves the fact ``assumed``, with
-    the reason, and the facts that rest on it say so in the ledger.
+    its count says, natively and compiled, so a write there moves nothing.
+
+    Any other write (the counts themselves, a start read from another array,
+    a value under a guard isl cannot state), and a family with no counts
+    array, whose rows are as long as the differences of its offsets, is asked
+    by induction over the run (:func:`_layout_by_induction`, #103): the rows
+    in order hold when the call starts, and the fact is decided when isl
+    shows that every write keeps them so where they held before it. Where it
+    cannot, or where the facts resting on the layout need more than the
+    order (rows that move under writes of the family's arrays, a length
+    written inside a loop it bounds), the fact stays ``assumed``, with both
+    reasons, and the facts that rest on it say so in the ledger; a kernel's
+    native runs may still refute it (:func:`loopty.faithful.layout_fact`).
     """
     facts: list[Fact] = []
     for counts, family in _rewritten_layouts(term).items():
@@ -805,15 +826,22 @@ def layout_facts(
         }
         question = _row_starts_question(term, counts, family)
         if isinstance(question, str):
-            provenance["reason"] = (
-                f"{_listed(writers)} write {written}, which the rows of "
-                f"{arrays} are read through. Their accesses are in bounds "
-                "against the length of their row, and their cells are told "
-                "apart as [r, j], which holds of the flat buffer while every "
-                "row lies inside it and apart from the others, as the contract "
-                "checks when the call starts; nothing states what the kernel "
-                f"writes there during the run: {question}"
-            )
+            induced = _layout_by_induction(term, counts, family)
+            if isinstance(induced, str):
+                provenance["reason"] = (
+                    f"{_listed(writers)} write {written}, which the rows of "
+                    f"{arrays} are read through. Their accesses are in bounds "
+                    "against the length of their row, and their cells are told "
+                    "apart as [r, j], which holds of the flat buffer while every "
+                    "row lies inside it and apart from the others, as the "
+                    "contract checks when the call starts; nothing states what "
+                    f"the kernel writes there during the run: {question}; and "
+                    f"{induced}"
+                )
+            else:
+                question, rule, ordered = induced
+                provenance["rule"] = rule
+                provenance["ordered"] = ordered
         else:
             question, restated, fixed = question
             provenance["rule"] = _row_starts_rule(
@@ -1078,6 +1106,414 @@ def _fixed_starts(stmt: Any, rows: str, allowed: set[str]) -> isl.Set | None:
     return relation.intersect_range(elsewhere).domain()
 
 
+#: What a layout fact decided by induction over the run rests on, in words.
+_INDUCTION_RULE = (
+    "every write keeps the rows of {arrays} in order inside the buffer: "
+    "{laid}, which the contract checks when the call starts, and which isl "
+    "shows each of {writers} leaves true where it held before the write, so "
+    "it holds throughout the run; rows so laid out are inside the buffer and "
+    "apart"
+)
+
+
+def _beyond_the_order(
+    term: Term, lengths: str, offsets: str | None, family: Mapping[str, Any]
+) -> str | None:
+    """Why the rows in order would not carry what rests on the layout, if so.
+
+    The order keeps every row inside the buffer and apart from the others at
+    every point of the run, which is what the layout fact states and what an
+    access needs to be inside the buffer. Two kinds of fact rest on the
+    layout for more than that:
+
+    * The disjoint writes and the dependences of a ragged array tell its
+      cells apart as ``[r, j]``, which is one cell of the buffer each only
+      while every row keeps its start. A kernel that writes the offsets and
+      an array of the family can write ``val[r + 1, 0]`` on the cell it
+      wrote as ``val[r, 0]``: row ``r`` emptied, ``cnt[r] = 0``, and row
+      ``r + 1`` moved onto its start, ``off[r + 1] = off[r] + cnt[r]``, with
+      the rows in order all the while, and the disjoint writes of the
+      statement were decided.
+    * A loop over a row reads the row's length once, when it starts, natively
+      and compiled, and the in-bounds facts of the row's entries are stated
+      against that reading. A write of the length inside such a loop can
+      shorten the row under it, and the loop then reads entries past the
+      row's end, which the native run refuses (``cnt[r] = 0`` inside ``for j
+      in val.dom[r]``), with the rows in order all the while.
+
+    So the layout is not asked by induction for such a kernel, and its fact
+    stays ``assumed``. ``lengths`` is the array the rows' lengths are read
+    from: the counts, or the offsets of a family with none. Returns the
+    reason, or ``None``.
+    """
+    from loopty.trace import accesses_in
+
+    def verb(ids: Sequence[str]) -> str:
+        return "writes" if len(ids) == 1 else "write"
+
+    statements = family["statements"]
+    arrays = list(family["arrays"])
+    if offsets is not None:
+        movers = [stmt.id for stmt in statements if stmt.assignee.array == offsets]
+        stored = [
+            name
+            for name in arrays
+            if any(stmt.assignee.array == name for stmt in term.stmts)
+        ]
+        if movers and stored:
+            writers = [stmt.id for stmt in term.stmts if stmt.assignee.array in stored]
+            return (
+                f"{_listed(movers)} {verb(movers)} {offsets}, which can move a row "
+                f"of {_listed(arrays)}, and {_listed(writers)} {verb(writers)} "
+                f"{_listed(stored)}, whose disjoint writes and dependences tell "
+                "its cells apart as [r, j]: one cell of the buffer each only "
+                "while every row keeps its start, which the rows in order do not "
+                "say"
+            )
+    reads = {
+        name: {access.array for access in accesses_in(expr)}
+        for name, expr in term.reflected
+    }
+    for stmt in statements:
+        if stmt.assignee.array != lengths:
+            continue
+        # The loops around the write, before a guard narrowed them.
+        nest = stmt.domain if stmt.loop_domain is None else stmt.loop_domain
+        bounds = [
+            name
+            for index, name in enumerate(nest.get_var_names(isl.dim_type.param))
+            if lengths in reads.get(name, ())
+            and any(
+                flow.bounds_dimension(nest, position, index)
+                for position in range(nest.dim(isl.dim_type.set))
+            )
+        ]
+        if bounds:
+            return (
+                f"{stmt.id} writes {lengths} inside a loop over a row, which runs "
+                f"to the length it read as {_listed(bounds)} when it started: the "
+                "in-bounds facts of the row's entries are stated against that "
+                "reading, which a write that shortens the row leaves behind, and "
+                "which the rows in order do not keep"
+            )
+    return None
+
+
+def _layout_by_induction(
+    term: Term, counts: str, family: Mapping[str, Any]
+) -> tuple[Empty, str, list[str]] | str:
+    """The question that decides a layout by induction over the run, or why not.
+
+    A write of a start that reads another array (``off[r] = s[r]``), or of
+    a count, has no value the contract checked, and no isl question about
+    the write alone says where it leaves the rows. The rows stay inside the
+    buffer and apart while they stay *in order*: each row's start no less
+    than the end of the row before it, every row inside the buffer, and no
+    count negative. That holds when the call starts, where the contract
+    checks that the offsets are the counts' prefix sums and the buffer is
+    as long as the last of them; so it holds throughout the run if every
+    write leaves it true where it held before the write. That is one isl
+    question per statement that writes the offsets or the counts
+    (:func:`loopty.hypotheses.discharge`): the order before the write, as
+    hypotheses over the cells the claim reads, ``off[r]`` and ``cnt[r - 1]``
+    each an isl parameter of its own, together with the element sorts of
+    the arrays nothing writes and the statement's guard, and the order
+    after it, at the cell written, as the claim. The buffer's length is a
+    parameter too, since nothing in the term names it.
+
+    A family with no counts array has rows as long as the differences of
+    its offsets, and the order is their monotonicity, inside the buffer.
+
+    The facts that rest on the layout take two more things for granted than
+    the order gives, and a kernel that can break them is not asked
+    (:func:`_beyond_the_order`): the cells of a ragged array the kernel
+    writes are told apart as ``[r, j]``, which stays one cell of the buffer
+    each only while no row moves; and a loop over a row runs to the length
+    it read when it started, which the in-bounds facts of the row's entries
+    are stated against, and which a row shortened inside the loop leaves
+    behind.
+
+    Returns the question, an :class:`Empty` of the instances whose write
+    breaks the order where it held, empty when every write keeps it; the
+    rule in words; and the statements, by id. A statement whose question
+    isl does not decide makes the fact ``assumed``: the reason names it,
+    with the room the hypotheses leave, which is no refutation, since the
+    order is more than the rows' staying apart, and the state before the
+    write is one the order allows and not one the run is known to reach.
+    """
+    from lanky.prelude import Refined
+    from lanky.terms import (
+        Comparison,
+        Forall,
+        LogicalAnd,
+        LogicalNot,
+        LogicalOr,
+        Subscript,
+        Var,
+    )
+
+    from loopty.contract import integral_sort
+    from loopty.hypotheses import discharge
+    from loopty.term import Hypothesis
+    from loopty.trace import accesses_in
+
+    types = term.array_types
+    arrays = list(family["arrays"])
+    counts_type = types.get(counts)
+    offsets = term.offsets_of(counts)
+    by_counts = isinstance(counts_type, ArrType)
+    if by_counts:
+        if len(counts_type.axes) != 1:
+            return (
+                f"{counts} has {len(counts_type.axes)} axes, and the order of the "
+                "rows is stated of a counts array with one"
+            )
+        rows = counts_type.axes[0]
+    else:
+        if offsets is None:
+            return "nothing names the offsets of the rows"
+        rows = types[arrays[0]].axes[0]
+    unchecked = [
+        name
+        for name in ((counts if by_counts else None), offsets)
+        if name is not None and name not in term.param_names
+    ]
+    if unchecked:
+        return (
+            f"{_listed(unchecked)} {'is' if len(unchecked) == 1 else 'are'} no "
+            "argument, so the contract checks nothing about them on entry"
+        )
+    sizes = flow.size_names(term)
+    written = {stmt.assignee.array for stmt in term.stmts}
+    beyond = _beyond_the_order(term, counts if by_counts else offsets, offsets, family)
+    if beyond is not None:
+        return beyond
+    taken = {
+        *term.param_names,
+        *sizes,
+        *types,
+        *(name for name, _ in term.reflected),
+        *(name for stmt in term.stmts for name in stmt.inames),
+    }
+
+    def fresh(stem: str) -> str:
+        name, suffix = stem, 2
+        while name in taken:
+            name = f"{stem}_{suffix}"
+            suffix += 1
+        taken.add(name)
+        return name
+
+    # A family whose offsets are its arrays' own: nothing in the term names
+    # them, and nothing writes them, but the order is about them all the same.
+    starts = offsets if offsets is not None else fresh(f"{arrays[0]}_off")
+    buffer = Var(fresh(f"{arrays[0]}_cells"))
+    q = Var(fresh("q"))
+    verb = "is" if len(arrays) == 1 else "are"
+    named = (
+        f"{buffer.name} the cells of the buffer"
+        if offsets is not None
+        else f"{starts} the offsets {_listed(arrays)} {verb} stored by and "
+        f"{buffer.name} the cells of its buffer"
+    )
+
+    def at(array: str, index: Any) -> Any:
+        return Subscript(Var(array), index)
+
+    def below(left: Any, right: Any) -> Any:
+        return Comparison(left, "<=", right)
+
+    def rows_of(bound: Any) -> Any:
+        return FinType(bound)
+
+    off = starts
+    if by_counts:
+        laid = (
+            f"{off}[q] + {counts}[q] <= {off}[q + 1] for every row q but the "
+            f"last, and 0 <= {off}[q], 0 <= {counts}[q] and {off}[q] + "
+            f"{counts}[q] <= {buffer.name} for every row, {named}"
+        )
+        order = LogicalAnd(
+            (
+                Forall(
+                    ((q, rows_of(rows - 1)),),
+                    below(at(off, q) + at(counts, q), at(off, q + 1)),
+                ),
+                Forall(
+                    ((q, rows_of(rows)),), below(at(off, q) + at(counts, q), buffer)
+                ),
+                Forall(((q, rows_of(rows)),), below(0, at(off, q))),
+                Forall(((q, rows_of(rows)),), below(0, at(counts, q))),
+            )
+        )
+    else:
+        laid = (
+            f"{off}[q] <= {off}[q + 1] for every row q, and 0 <= {off}[q] <= "
+            f"{buffer.name} for every q up to the number of rows, {named}"
+        )
+        order = LogicalAnd(
+            (
+                Forall(((q, rows_of(rows)),), below(at(off, q), at(off, q + 1))),
+                Forall(((q, rows_of(rows + 1)),), below(at(off, q), buffer)),
+                Forall(((q, rows_of(rows + 1)),), below(0, at(off, q))),
+            )
+        )
+    before = Hypothesis(
+        claim=order,
+        source=f"the rows of {_listed(arrays)} in order inside the buffer before "
+        "the write",
+    )
+    sorts: list[Hypothesis] = []
+    for name, typ in types.items():
+        if name in written or name in (starts, counts) or any(typ.ragged):
+            continue
+        if name not in term.param_names:
+            # A program's temporary: no contract checked its type on entry.
+            continue
+        if typ.domain is not None or not integral_sort(typ.dtype):
+            continue
+        sort = typ.dtype.base if isinstance(typ.dtype, Refined) else typ.dtype
+        binders = tuple(
+            (Var(fresh(f"c{k}")), FinType(axis)) for k, axis in enumerate(typ.axes)
+        )
+        index = tuple(var for var, _ in binders)
+        cell = at(name, index[0] if len(index) == 1 else index)
+        if isinstance(sort, FinType):
+            body = LogicalAnd((below(0, cell), Comparison(cell, "<", sort.bound)))
+        else:
+            if getattr(sort, "name", None) != "Nat":
+                continue
+            body = below(0, cell)
+        sorts.append(
+            Hypothesis(
+                claim=Forall(binders, body) if binders else body,
+                source=f"the type of {name}, which the contract checks when the "
+                "call starts and nothing writes",
+            )
+        )
+    integral = {
+        name
+        for name, typ in types.items()
+        if integral_sort(getattr(typ, "dtype", None))
+    } | {starts}
+    scalars = {
+        name
+        for name, sort in term.params
+        if not isinstance(sort, ArrType) and integral_sort(sort)
+    }
+    known = {*sizes, *scalars, buffer.name}
+
+    def unless(*conditions: Any) -> Any:
+        return lambda claim: LogicalOr((*conditions, claim))
+
+    questions: list[tuple[int, Any, Any]] = []
+    writers: list[str] = []
+    for index, stmt in enumerate(term.stmts):
+        if not any(stmt is writer for writer in family["statements"]):
+            continue
+        writers.append(stmt.id)
+        cell_text = _access_text(stmt.assignee.array, stmt.assignee.indices)
+        if len(stmt.assignee.indices) != 1:
+            return f"{stmt.id} writes {cell_text}, which has more than one index"
+        (c,) = stmt.assignee.indices
+        v = stmt.expr
+        inside = unless(Comparison(c, "<", 0), Comparison(c, ">=", rows))
+        if stmt.assignee.array == starts and by_counts:
+            parts = [
+                inside(below(0, v)),
+                inside(below(v + at(counts, c), buffer)),
+                unless(Comparison(c, "<", 0), Comparison(c + 1, ">=", rows))(
+                    below(v + at(counts, c), at(off, c + 1))
+                ),
+                unless(Comparison(c, "<", 1), Comparison(c, ">=", rows))(
+                    below(at(off, c - 1) + at(counts, c - 1), v)
+                ),
+            ]
+        elif stmt.assignee.array == starts:
+            up_to = unless(Comparison(c, "<", 0), Comparison(c, ">", rows))
+            parts = [
+                up_to(below(0, v)),
+                up_to(below(v, buffer)),
+                inside(below(v, at(off, c + 1))),
+                unless(Comparison(c, "<", 1), Comparison(c, ">", rows))(
+                    below(at(off, c - 1), v)
+                ),
+            ]
+        else:
+            parts = [
+                inside(below(0, v)),
+                inside(below(at(off, c) + v, buffer)),
+                unless(Comparison(c, "<", 0), Comparison(c + 1, ">=", rows))(
+                    below(at(off, c) + v, at(off, c + 1))
+                ),
+            ]
+        claim: Any = LogicalAnd(tuple(parts))
+        if stmt.guard is not None:
+            # The guard is about this instance, so it is the claim's
+            # antecedent, read toward the safe side where isl cannot state it.
+            claim = LogicalOr((LogicalNot(stmt.guard), claim))
+        params = set(stmt.domain.get_var_names(isl.dim_type.param))
+        # A bound read from an array the term writes is the value its loop
+        # read, which need not be the cell's value at the write.
+        reflected = {
+            name: expr
+            for name, expr in term.reflected
+            if name in params
+            and not ({access.array for access in accesses_in(expr)} & written)
+        }
+        outcome = discharge(
+            stmt.domain,
+            claim,
+            [before, *sorts],
+            integral=integral,
+            known=known | params,
+            nonneg={*sizes, buffer.name},
+            reflected=reflected,
+            description=(
+                f"instances of {stmt.id} whose write of {cell_text} breaks the "
+                f"order of the rows of {_listed(arrays)} where it held"
+            ),
+        )
+        if not outcome.decided:
+            reason = outcome.reason
+            if outcome.unstated:
+                shown = list(outcome.unstated[:3])
+                reason += "; isl cannot state " + "; ".join(shown)
+            return (
+                f"by induction over the run, {stmt.id} writes {cell_text} = "
+                f"{render(v)}, and the rows in order before it leave room for a "
+                f"write out of order: {reason}"
+            )
+        questions.append((index, stmt, outcome.question.obj))
+    if len(questions) == 1 and questions[0][1].inames:
+        ((_index, stmt, found),) = questions
+        labels: tuple[str, ...] = tuple(stmt.inames)
+    else:
+        labels = instance_labels(term)
+        depth = flow.instance_space_depth(term)
+        found = None
+        for index, stmt, piece in questions:
+            pad = flow.pad_map(len(stmt.inames), index, depth)
+            piece = piece.apply(pad.align_params(piece.get_space()))
+            if found is None:
+                found = piece
+            else:
+                found, piece = _align_both(found, piece)
+                found = found.union(piece)
+    question = Empty(
+        flow.assume_sizes(found, {*sizes, buffer.name}),
+        description=(
+            f"instances of {_listed(writers)} whose write breaks the order of the "
+            f"rows of {_listed(arrays)} where it held"
+        ),
+        labels=labels,
+    )
+    rule = _INDUCTION_RULE.format(
+        arrays=_listed(arrays), laid=laid, writers=_listed(writers)
+    )
+    return question, rule, writers
+
+
 # }}}
 
 
@@ -1338,7 +1774,7 @@ def requirement_id(
     """The id of a program's requirement on the array a call passes for ``param``.
 
     ``requirement:spmv.solve@115:gather:element:perm``: the program's
-    definition, the call's label, what is required (``element`` or
+    definition, the call's label, what is required (``element``, ``nat`` or
     ``layout``) and the callee's parameter.
     """
     return fact_id(

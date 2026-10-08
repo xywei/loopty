@@ -167,6 +167,17 @@ class Reduction:
     the row. ``exactness`` is the floating-point contract of the accumulation:
     ``exact`` forbids reassociation (no trees, no atomics), ``reassoc`` permits
     it and marks the result, ``approx`` carries a tolerance.
+
+    ``loop_domain`` is ``domain`` before the statement's guard and the
+    generator's own ``if`` clause narrowed it, as :attr:`Stmt.loop_domain` is
+    a statement's: the points at which the sum starts and reads its bounds,
+    since a ``when`` masks the write and does not skip the right-hand side,
+    and ``for k in val.dom[r] if k == j`` reads the row's length before it
+    tests ``k``. isl simplifies the narrowed set, and ``k == j`` leaves no
+    constraint of the sum's own bound in it, so what reads a bound reads it
+    here (#111). ``None`` means "the same as ``domain``", which is right for
+    a sum with no guard around it and no clause, and for a term written by
+    hand.
     """
 
     op: str
@@ -174,6 +185,7 @@ class Reduction:
     domain: isl.Set
     body: Expression
     exactness: str
+    loop_domain: isl.Set | None = None
 
 
 @dataclass(frozen=True)
@@ -319,11 +331,12 @@ class Hypothesis:
 class Requirement:
     """What a call's contract checks of an array an earlier call wrote.
 
-    A kernel's requirements on its inputs are its argument types, and two of
-    them are about what an array's cells hold: an element of a ``Fin[m]``
-    sort is a point of it (``kind="element"``), and the offsets a ragged
-    family is read through are the offsets its counts give
-    (``kind="layout"``). Natively the call's contract checks them; a program
+    A kernel's requirements on its inputs are its argument types, and three
+    of them are about what an array's cells hold: an element of a ``Fin[m]``
+    sort is a point of it (``kind="element"``), one of the ``Nat`` sort is
+    not negative (``kind="nat"``), and the offsets a ragged family is read
+    through are the offsets its counts give (``kind="layout"``), which makes
+    them naturals too. Natively the call's contract checks them; a program
     is one call, so where an earlier call wrote the array, the requirement
     is an obligation of the program (see :mod:`loopty.compose`).
 
@@ -484,6 +497,29 @@ class Term:
         """
         return tuple(
             (requirement.flag, requirement.message)
+            for requirement in self.requirements
+            if requirement.flag is not None
+        )
+
+    @property
+    def checked_arrays(self) -> frozenset[str]:
+        """The arrays a checked point reads, each stored in 64 bits compiled.
+
+        A checked point reads, between two calls, the cells an earlier call
+        wrote, so that the compiled program stops where the later call's
+        native contract refuses them. The native run holds an integer in 64
+        bits as a rule, and the compiled one stores an index in fewer
+        (``Fin[m]`` in 32, where ``Nat`` and ``Int`` are 64 bits wide, #101):
+        ``perm[i] = 2**32`` was narrowed to ``0`` by the store, and the
+        checked point read a point of ``Fin[n]`` where the native contract
+        refuses ``2**32`` (#128). So the lowering stores an integral array a
+        checked point reads in 64 bits (:func:`loopty.contract.array_storage`),
+        and the compiled run refuses one passed in fewer, which the native run
+        would narrow (:func:`loopty.contract.checked_storage`): the checked
+        point reads what the native contract reads.
+        """
+        return frozenset(
+            requirement.array
             for requirement in self.requirements
             if requirement.flag is not None
         )

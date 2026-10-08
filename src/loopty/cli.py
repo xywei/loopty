@@ -95,7 +95,9 @@ it, and a ``DUPLICATE`` block under the table names the kernel, each id and
 the claims of it, in the table and not, and the command exits 1. The command
 has decided and run every claim by then, so a claim not in the table that was
 refuted is said to be, with what explains it, as the ``REFUTED`` block would
-explain it. Each kernel needs an id of its own: a definition of its own, or a
+explain it; the ``--json`` ledger keeps the same under ``refused_claims``,
+each claim with its status and the counterexample, witness or reason it has
+(#99). Each kernel needs an id of its own: a definition of its own, or a
 ``__qualname__`` of its own given to the function before it is decorated; a
 term scheduled with no kernel behind it, or any object with no definition to
 name, is named by its name, and needs a name of its own. One kernel scheduled
@@ -253,9 +255,16 @@ def _retargeted(schedules: list, target: str) -> tuple[list, int]:
     return out, failures
 
 
-def _native(obj: Any) -> Any:
-    """The Python body of a scheduled kernel, if there is one to compare with."""
-    source = getattr(obj, "source", obj)
+def _native(schedule: Any) -> Any:
+    """The Python body of a scheduled kernel, if there is one to compare with.
+
+    Through any schedule of a schedule (:func:`_kernel_of`): the body of
+    ``Schedule(Schedule(k)).split("i", 2)`` is ``k``'s, and a run of it is
+    compared with ``k`` as a run of ``Schedule(k).split("i", 2)`` is (#98).
+    A term scheduled with no kernel behind it has no body, and its run is
+    only executed.
+    """
+    source = _kernel_of(schedule)
     return source if callable(source) else None
 
 
@@ -263,6 +272,57 @@ def _native(obj: Any) -> Any:
 #: :func:`lanky.check.check_path` records them. Read here rather than through
 #: ``Ledger.duplicated``, which lanky added after the version loopty requires.
 DUPLICATE_CLAIMS = "duplicate_claims"
+
+#: loopty's own provenance key beside :data:`DUPLICATE_CLAIMS`: each claim
+#: recorded there, as ``loopty run`` decided or ran it, with its status and
+#: what explains it (see :func:`_claim_record`). ``lanky check`` leaves a
+#: later claim unchecked and records its statement alone; ``loopty run`` has
+#: decided every claim by the time it records one, and a claim not in the
+#: table that was refuted is said to be in the JSON as on the console (#99).
+REFUSED_CLAIMS = "refused_claims"
+
+#: The provenance keys that explain a refutation, as
+#: :func:`lanky.cli.refutation_lines` reads them.
+_EXPLAINING = ("counterexample", "witness", "reason")
+
+
+def _claim_record(fact: Any) -> dict[str, Any]:
+    """One claim not in the table, as :data:`REFUSED_CLAIMS` keeps it.
+
+    Its statement, status and deciding oracle, and each of the keys that
+    explain a refutation that it has a value under: what the ``DUPLICATE``
+    block prints under a refuted claim, and the reason of an ``assumed`` one.
+    """
+    record: dict[str, Any] = {
+        "statement": fact.statement,
+        "status": fact.status.value,
+        "decided_by": fact.decided_by,
+    }
+    for key in _EXPLAINING:
+        value = fact.provenance.get(key)
+        if value is not None and value != {} and value != "":
+            record[key] = value
+    return record
+
+
+def _tried(schedule: Any, fact: Any) -> Any:
+    """``fact`` as the facts of the kernel the schedule is of state it.
+
+    A ``layout`` fact no isl question decides is tried on the kernel's
+    native runs (:func:`loopty.faithful.layout_fact`), which a kernel's
+    :meth:`~loopty.kernel.Kernel.facts` makes; a term or anything else with
+    no facts of its own keeps ``fact``.
+    """
+    facts = getattr(_kernel_of(schedule), "facts", None)
+    if not callable(facts):
+        return fact
+    try:
+        for own in facts():
+            if own.id == fact.id:
+                return own
+    except Exception:  # noqa: BLE001 - the kernel's own facts report it
+        return fact
+    return fact
 
 
 def _kernel_of(schedule: Any) -> Any:
@@ -294,10 +354,12 @@ class _Claims:
     kernel to claim an id keeps it, and the claim of any other kernel is
     recorded on that fact, by its statement, under ``duplicate_claims`` in
     its provenance, as :func:`lanky.check.check_path` records the claims
-    ``lanky check`` refuses (lanky's #52); the run then fails (see
-    :func:`_report_duplicates`). The first claim stays in the ledger
-    whatever claims the id after it: :meth:`lanky.ledger.Ledger.add` would
-    replace it, and the record of the other kernel's claim with it.
+    ``lanky check`` refuses (lanky's #52), and with its status and what
+    explains it under ``refused_claims`` (:func:`_claim_record`); the run
+    then fails (see :func:`_report_duplicates`). The first claim stays in
+    the ledger whatever claims the id after it:
+    :meth:`lanky.ledger.Ledger.add` would replace it, and the record of the
+    other kernel's claim with it.
 
     A kernel is what a schedule was built from, through any schedule of it
     (:func:`_kernel_of`), told apart from another by identity, as
@@ -368,7 +430,13 @@ class _Claims:
             kernels.append(id(kernel))
             kept = self.ledger[fact.id]
             claims = [*kept.provenance.get(DUPLICATE_CLAIMS, ()), fact.statement]
-            self.ledger.add(kept.with_status(kept.status, **{DUPLICATE_CLAIMS: claims}))
+            records = [*kept.provenance.get(REFUSED_CLAIMS, ()), _claim_record(fact)]
+            self.ledger.add(
+                kept.with_status(
+                    kept.status,
+                    **{DUPLICATE_CLAIMS: claims, REFUSED_CLAIMS: records},
+                )
+            )
             self.refused.setdefault(fact.id, []).append(fact)
         return True
 
@@ -484,7 +552,9 @@ class RunVerb:
         module = import_path(args.file)
         schedules, kernels = collect(module, registry.objects[before:])
 
-        scheduled = {id(schedule.source) for schedule in schedules}
+        # A kernel some schedule is of, through any schedule of a schedule,
+        # is scheduled, and is not run again through the identity (#98).
+        scheduled = {id(_kernel_of(schedule)) for schedule in schedules}
         unscheduled = 0
         for kernel in kernels:
             if id(kernel) in scheduled:
@@ -532,9 +602,13 @@ class RunVerb:
             ):
                 if fact.id in resting:
                     # A layout fact that can be decided is an isl question,
-                    # answered here as ``lanky check`` answers it.
+                    # answered here as ``lanky check`` answers it; one that
+                    # cannot is tried on the kernel's native runs, as its
+                    # own facts try it.
                     if oracle.can_establish(fact):
                         fact = oracle.establish(fact) or fact
+                    else:
+                        fact = _tried(schedule, fact)
                     claims.add(fact, schedule)
             ok, reason = schedule.buildable
             if not ok:

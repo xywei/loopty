@@ -24,7 +24,9 @@ does. Its reading of the term is literal:
   that length whatever the loop's own statements write. So a kernel that
   writes its counts runs here as it runs natively (:meth:`_Run.loop`). A bound
   of two loops of one statement, or of a loop and a sum inside it, is read
-  where each of them starts, as the body reads it (:meth:`_Run.read_apart`).
+  where each of them starts, as the body reads it (:meth:`_Run.read_apart`),
+  each loop's and each sum's own bound read off the loop nest before a guard
+  or a clause narrowed it, where isl has not merged it into another's.
 * A guard is evaluated at each instance, and an instance whose guard is false
   writes nothing. Guards and connectives short-circuit, so a condition to the
   right of a false one is not read.
@@ -373,7 +375,7 @@ class _Run:
                 f"the domain of {stmt.id} has the dimensions {', '.join(names)}, "
                 f"and the statement runs in the loops {', '.join(stmt.inames)}"
             )
-        stmt = self.read_apart(stmt)
+        stmt, given = self.read_apart(stmt)
         domain = stmt.domain
         space = domain
         for position, name in enumerate(names):
@@ -392,7 +394,9 @@ class _Run:
                     if bounds_dimension(domain, level, position)
                 ]
                 pending[name] = expr
-                levels[name] = bounded[0] if bounded else len(names)
+                levels[name] = given.get(
+                    name, bounded[0] if bounded else len(names)
+                )
             else:
                 raise InterpretError(
                     f"the domain {domain} has a parameter {name} that no argument "
@@ -408,7 +412,7 @@ class _Run:
             levels=levels,
         )
 
-    def read_apart(self, stmt: Stmt) -> Stmt:
+    def read_apart(self, stmt: Stmt) -> tuple[Stmt, dict[str, int]]:
         """``stmt`` with a written bound read where each loop and sum starts.
 
         A reflected bound is one parameter of a domain, read once. The body
@@ -428,8 +432,23 @@ class _Run:
         A constraint goes with the innermost loop or binder it mentions. One
         on the parameters alone stays with the outermost reading, unless it
         names the binder of an enclosing sum, which is that sum's.
+
+        The loops and the sums a bound bounds, and their constraints, are read
+        off the sets before a guard or a clause narrowed them, the
+        statement's ``loop_domain`` and each sum's: isl simplifies the
+        narrowed set, and ``when(k == j)`` inside the two loops above leaves
+        no constraint of the bound of ``k`` in it, so ``k`` had no reading of
+        its own and ran past its row's new length (#111). What the guard or
+        the clause adds is the narrowed set's gist in the other, which is
+        intersected back once the bounds are read apart. A gist that still
+        names a bound read apart is refused (:func:`_narrowing`): which loop's
+        reading it is cannot be told.
+
+        Returns the statement, and the loop each reading of a written bound
+        is read where it starts, by depth, which the narrowed set may no
+        longer show: ``j < nl_cnt_r__k`` is about ``k`` once ``k = j``.
         """
-        domain = stmt.domain
+        domain = stmt.loop_domain if stmt.loop_domain is not None else stmt.domain
         names = tuple(stmt.inames)
         sums = reductions_in((stmt.expr, stmt.guard))
         # The parameter each loop reads a bound as, by depth, and the sums'.
@@ -454,25 +473,38 @@ class _Run:
             if sums:
                 summed[name] = self.copy_of(name, f"{name}__sum")
         if not loops:
-            return stmt
+            return stmt, {}
+        levels = {
+            reading: level
+            for copies in loops.values()
+            for level, reading in copies.items()
+        }
 
-        for name, copies in loops.items():
+        def of_loops(domain: isl.Set) -> isl.Set:
+            for name, copies in loops.items():
 
-            def of_loop(
-                constraint: isl.Constraint, name: str = name, copies: Any = copies
-            ) -> str:
-                level = _innermost(constraint)
-                return name if level is None else copies.get(level, name)
+                def of_loop(
+                    constraint: isl.Constraint, name: str = name, copies: Any = copies
+                ) -> str:
+                    level = _innermost(constraint)
+                    return name if level is None else copies.get(level, name)
 
-            domain = _read_apart(domain, name, of_loop)
+                domain = _read_apart(domain, name, of_loop)
+            return domain
+
+        domain = of_loops(domain)
+        if stmt.loop_domain is not None:
+            domain = _intersected(
+                domain, _narrowing(stmt.domain, stmt.loop_domain, loops, stmt.id)
+            )
         if not summed:
-            return replace(stmt, domain=domain)
+            return replace(stmt, domain=domain), levels
 
         known = {*self.sizes, *self.scalars, *self.reflected}
 
         def rewrite(node: Reduction) -> isl.Set:
             """The domain of one sum of the statement, its readings apart."""
-            out = node.domain
+            out = node.domain if node.loop_domain is None else node.loop_domain
             own = out.dim(isl.dim_type.set) - len(node.inames)
             binders = [
                 position
@@ -502,13 +534,26 @@ class _Run:
                     return name
 
                 out = _read_apart(out, name, of_sum)
+            if node.loop_domain is not None:
+                out = _intersected(
+                    out,
+                    _narrowing(
+                        node.domain,
+                        node.loop_domain,
+                        {name: {} for name in summed},
+                        f"the sum over {', '.join(node.inames)} in {stmt.id}",
+                    ),
+                )
             return out
 
-        return replace(
-            stmt,
-            domain=domain,
-            expr=_with_domains(stmt.expr, rewrite),
-            guard=_with_domains(stmt.guard, rewrite),
+        return (
+            replace(
+                stmt,
+                domain=domain,
+                expr=_with_domains(stmt.expr, rewrite),
+                guard=_with_domains(stmt.guard, rewrite),
+            ),
+            levels,
         )
 
     def copy_of(self, name: str, spelled: str) -> str:
@@ -898,6 +943,42 @@ def _innermost(constraint: isl.Constraint) -> int | None:
         if not constraint.get_coefficient_val(isl.dim_type.set, level).is_zero()
     ]
     return max(mentioned, default=None)
+
+
+def _narrowing(
+    narrowed: isl.Set,
+    loops: isl.Set,
+    apart: Mapping[str, Any],
+    where: str,
+) -> isl.Set:
+    """What a guard or a clause adds to ``loops``: ``narrowed``'s gist in it.
+
+    ``narrowed`` is ``loops`` intersected with what the guard states, and
+    the gist is a set that gives ``narrowed`` back when it is intersected
+    with ``loops``, with what ``loops`` already says left out: the loops'
+    bounds, which :meth:`_Run.read_apart` reads apart. One that still names
+    a bound in ``apart`` is one isl could not leave out, and which reading
+    of the bound it is about cannot be told, so it is refused.
+    """
+    narrowed = narrowed.align_params(loops.get_space())
+    loops = loops.align_params(narrowed.get_space())
+    gist = narrowed.gist(loops)
+    for name in apart:
+        position = gist.find_dim_by_name(isl.dim_type.param, name)
+        if position >= 0 and gist.involves_dims(isl.dim_type.param, position, 1):
+            raise InterpretError(
+                f"the guard of {where} narrows it by {gist}, which names the "
+                f"bound {name}: the term writes what {name} reads, the loops "
+                "it bounds read it apart, and the interpreter cannot tell which "
+                "reading the guard is about"
+            )
+    return gist
+
+
+def _intersected(first: isl.Set, second: isl.Set) -> isl.Set:
+    """``first`` intersected with ``second``, their parameters aligned."""
+    first = first.align_params(second.get_space())
+    return first.intersect(second.align_params(first.get_space()))
 
 
 def _read_apart(domain: isl.Set, name: str, reading: Any) -> isl.Set:

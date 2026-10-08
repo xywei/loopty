@@ -812,6 +812,49 @@ def test_a_claim_not_in_the_table_that_was_refuted_is_said_to_be(
     ]
 
 
+def test_the_json_says_a_claim_not_in_the_table_was_refuted_and_why(
+    tmp_path, capsys
+) -> None:
+    """The ledger kept only the refuted claim's statement (#99).
+
+    A consumer of the JSON could tell that the run failed, and not that the
+    other claim was refuted, or why. Each claim not in the table is kept with
+    its status and what explains it, under a key of loopty's own beside
+    ``duplicate_claims``, which keeps reading as lanky's.
+    """
+    body = FIXTURE + (
+        "\n\nclass Triple(Scale):\n"
+        "    def __call__(self, x, y):\n"
+        "        y[...] = 3.0 * x\n\n\n"
+        'tripled = Schedule(Triple()).split("i", 4)\n'
+    )
+    path = write_fixture(tmp_path, body)
+    out_path = tmp_path / "ledger.json"
+    assert main(["run", str(path), "--json", str(out_path)]) == 1
+    capsys.readouterr()
+    facts = {
+        fact["kind"]: fact for fact in json.loads(out_path.read_text(encoding="utf-8"))
+    }
+    agreement = facts["agreement"]
+    assert agreement["status"] == "tested"
+    statement = agreement["statement"]
+    assert agreement["provenance"]["duplicate_claims"] == [statement]
+    assert agreement["provenance"]["refused_claims"] == [
+        {
+            "statement": statement,
+            "status": "refuted",
+            "decided_by": agreement["decided_by"],
+            "reason": "y differs from the native run: difference 7, allowed "
+            "2.2e-05 (approx)",
+        }
+    ]
+    # A decided claim not in the table is kept with its status too.
+    (bijective,) = facts["bijective"]["provenance"]["refused_claims"]
+    assert bijective["status"] == "decided"
+    assert bijective["statement"] == facts["bijective"]["statement"]
+    assert "reason" not in bijective
+
+
 def test_kernels_a_factory_names_apart_keep_their_facts(tmp_path, capsys) -> None:
     # The fix the block names: a __qualname__ of each kernel's own, given
     # before it is decorated.
@@ -859,6 +902,68 @@ def test_a_schedule_of_a_schedule_is_a_schedule_of_its_kernel(tmp_path, capsys) 
     facts = json.loads(out_path.read_text(encoding="utf-8"))
     kinds = [fact["kind"] for fact in facts]
     assert kinds.count("bijective") == kinds.count("monotone") == 1
+
+
+NESTED = (
+    TWICE.split("from {helpers}")[0]
+    + "\n\n@kernel\n"
+    "def double(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):\n"
+    "    for i in x.dom:\n"
+    "        y[i] = 2.0 * x[i]\n\n\n"
+    "{schedules}\n\n\n"
+    "def example_inputs():\n"
+    '    return {{"x": Arr.from_numpy(np.arange(4.0)), "y": Arr.zeros(4)}}\n'
+)
+
+
+def test_a_run_of_a_schedule_of_a_schedule_is_compared_with_its_kernel(
+    tmp_path, capsys
+) -> None:
+    """The issue's file: the nested run was only executed, and recorded nothing.
+
+    Its body is the kernel's, through the schedule it is of, so it is compared
+    like the plain one, and its agreement is kept under ``#2``, as a second run
+    of one schedule of one kernel is (#98).
+    """
+    body = NESTED.format(
+        schedules='plain = Schedule(double).split("i", 2)\n'
+        'nested = Schedule(Schedule(double)).split("i", 2)'
+    )
+    path = write_fixture(tmp_path, body)
+    out_path = tmp_path / "ledger.json"
+    assert main(["run", str(path), "--json", str(out_path)]) == 0
+    out = capsys.readouterr().out
+    assert "ran double on the c target" not in out
+    assert out.count("  y: difference 0 within 1e-06 (approx) -> tested") == 2
+    facts = json.loads(out_path.read_text(encoding="utf-8"))
+    steps = "[c].split('i', 2, inner='i_inner', outer='i_outer')"
+    agreements = [
+        (fact["id"].split(":", 2)[2], fact["status"])
+        for fact in facts
+        if fact["kind"] == "agreement"
+    ]
+    assert agreements == [(steps, "tested"), (f"{steps}#2", "tested")]
+
+
+def test_a_kernel_only_a_schedule_of_a_schedule_names_is_scheduled(
+    tmp_path, capsys
+) -> None:
+    # The set of scheduled kernels was built from each schedule's source, the
+    # inner schedule here, so double also ran through the identity, as if
+    # nothing scheduled it (#98).
+    body = NESTED.format(schedules='nested = Schedule(Schedule(double)).split("i", 2)')
+    path = write_fixture(tmp_path, body)
+    out_path = tmp_path / "ledger.json"
+    assert main(["run", str(path), "--json", str(out_path)]) == 0
+    out = capsys.readouterr().out
+    assert [line for line in out.splitlines() if line.startswith("double: ")] == [
+        "double: Schedule(double, target='c').split(i, 2)"
+    ]
+    facts = json.loads(out_path.read_text(encoding="utf-8"))
+    (agreement,) = [fact for fact in facts if fact["kind"] == "agreement"]
+    steps = "[c].split('i', 2, inner='i_inner', outer='i_outer')"
+    assert agreement["id"].endswith(f":{steps}")
+    assert agreement["status"] == "tested"
 
 
 # }}}
@@ -959,20 +1064,65 @@ def test_run_lists_the_layout_fact_a_cast_rests_on(tmp_path, capsys) -> None:
 
     The table said so, ``decided under layout:fixture.clear_next@10:cnt``,
     and the fact it named was in no row of it: ``lanky check`` lists it among
-    the kernel's facts, and ``loopty run`` lists the schedules' only.
+    the kernel's facts, and ``loopty run`` lists the schedules' only. A count
+    cleared keeps the rows in order, so the fact is decided by induction over
+    the run, and the cast is worth decided; both were assumed (#103).
     """
     path = write_fixture(tmp_path, CLEARS_NEXT)
     out_path = tmp_path / "ledger.json"
     assert main(["run", str(path), "--json", str(out_path)]) == 0
     facts = {fact["id"]: fact for fact in json.loads(out_path.read_text("utf-8"))}
     layout = "layout:fixture.clear_next@10:cnt"
-    assert facts[layout]["status"] == "assumed"
+    assert facts[layout]["status"] == "decided"
+    assert facts[layout]["provenance"]["ordered"] == ["S1"]
     (monotone,) = [fact for fact in facts.values() if fact["kind"] == "monotone"]
     assert monotone["rests_on"] == [layout]
-    assert monotone["effective"] == "assumed"
+    assert monotone["effective"] == "decided"
     assert [fact["kind"] for fact in facts.values()].count("layout") == 1
     out = capsys.readouterr().out
     assert "stay inside their buffers and apart while S1 write cnt" in out
+
+
+MOVES_ROWS = (
+    CLEARS_NEXT.replace(
+        "    cnt: Arr[Fin[n], Nat],\n    val:",
+        "    cnt: Arr[Fin[n], Nat],\n"
+        "    off: Arr[Fin[n + 1], Nat],\n"
+        "    s: Arr[Fin[n], Nat],\n"
+        "    val:",
+    )
+    .replace(
+        "        with when(r + 1 < y.dom.size):\n            cnt[r + 1] = 0\n",
+        "        off[r] = s[r]\n",
+    )
+    .replace(
+        '        "cnt": Arr.from_numpy(np.array(counts, dtype=np.int64)),\n',
+        '        "cnt": Arr.from_numpy(np.array(counts, dtype=np.int64)),\n'
+        '        "off": Arr.from_numpy(np.array([0, 2, 3, 6], dtype=np.int64)),\n'
+        '        "s": Arr.from_numpy(np.array([0, 2, 3], dtype=np.int64)),\n',
+    )
+)
+
+
+def test_run_lists_a_layout_fact_a_run_refuted(tmp_path, capsys) -> None:
+    # The start read from s is no isl question, and a native run of the
+    # kernel's on a drawn input leaves two rows on one cell: the layout fact
+    # loopty run lists is the kernel's own, refuted, and so is the cast that
+    # rests on it, and the run exits 1, as lanky check does (#103).
+    assert "off[r] = s[r]" in MOVES_ROWS
+    path = write_fixture(tmp_path, MOVES_ROWS)
+    out_path = tmp_path / "ledger.json"
+    assert main(["run", str(path), "--json", str(out_path)]) == 1
+    facts = {fact["id"]: fact for fact in json.loads(out_path.read_text("utf-8"))}
+    layout = "layout:fixture.clear_next@10:cnt"
+    assert facts[layout]["status"] == "refuted"
+    assert facts[layout]["decided_by"] == "native"
+    (monotone,) = [fact for fact in facts.values() if fact["kind"] == "monotone"]
+    assert monotone["rests_on"] == [layout]
+    assert monotone["effective"] == "refuted"
+    out = capsys.readouterr().out
+    assert "REFUTED clear_next at fixture.py:" in out
+    assert "the body run natively leaves rows " in out
 
 
 # }}}

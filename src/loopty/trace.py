@@ -3514,8 +3514,34 @@ def lower_reductions(
             ),
             reflections=tracer.reflections,
         )
+        loop_domain = None
+        if tracer.guard() is not None or expr.guard is not None:
+            # Where the sum starts and reads its bounds: the statement's guard
+            # masks the write, and the clause is tested after the range is
+            # read, so neither narrows it. An outer generator's clause does:
+            # the inner sum is in its body, which runs only where it holds.
+            loop_domain = domain_set(
+                (*tracer.inames, *inames),
+                (*tracer.bounds, *bounds),
+                constraints=(
+                    *tracer.loop_constraints(),
+                    *texts,
+                    *_binder_constraints(enclosing, tracer),
+                    *(
+                        piece
+                        for guard in outer_guards
+                        for piece in constraints_of(guard, tracer, bound)
+                    ),
+                ),
+                reflections=tracer.reflections,
+            )
         return Reduction(
-            "sum", tuple(inames), domain, body, reduction_exactness(body, tracer)
+            "sum",
+            tuple(inames),
+            domain,
+            body,
+            reduction_exactness(body, tracer),
+            loop_domain=loop_domain,
         )
     if isinstance(expr, prim.ExpressionNode):
         return type(expr)(
@@ -3907,7 +3933,48 @@ def array_type(
         ragged.append(
             bool(position >= 1 and named and isinstance(counts, ArrSpec))
         )
+    _refuse_unbuilt_ragged(spec, axes, ragged, parameters, name)
     return ArrType(axes=axes, dtype=spec.dtype, ragged=tuple(ragged))
+
+
+def _refuse_unbuilt_ragged(
+    spec: ArrSpec,
+    axes: Sequence[Any],
+    ragged: Sequence[bool],
+    parameters: Mapping[str, Any],
+    name: str,
+) -> None:
+    """Refuse a ragged type that no array is built as and nothing lowers.
+
+    A ragged array is a row axis and a fiber, ``val: Arr[Fin[n], Fin[cnt],
+    Real]`` beside ``cnt: Arr[Fin[n], Nat]``: :meth:`loopty.arr.Arr.ragged`
+    builds one from counts of one axis, and lowering indexes it as
+    ``val[off[r] + j]``. Any other shape, a fiber after two dense axes, a
+    dense axis after the fiber, or counts of two axes, has no layout either
+    of them knows, and the typing rules stated facts about one anyway: the
+    start of a row read through the inner index alone (#112). So it is
+    refused here, with the limit lowering states, before any fact is.
+    """
+    if not any(ragged):
+        return
+    at = f" of {name}" if name else ""
+    axis = list(ragged).index(True)
+    if len(axes) != 2 or axis != 1:
+        raise TraceError(
+            f"the type{at}, {spec!r}, is ragged in axis {axis} of {len(axes)}: "
+            "only a two-axis ragged array (row, fiber) is built and lowered "
+            "today, as Arr.ragged builds it, so write the array as one, such "
+            "as Arr[Fin[n], Fin[cnt], Real] beside cnt: Arr[Fin[n], Nat], and "
+            "index the rows of any other axis by hand"
+        )
+    counts_name = axes[axis].name
+    counts = parameters[counts_name]
+    if len(counts.axes) != 1:
+        raise TraceError(
+            f"the type{at}, {spec!r}, has the rows counted by {counts_name}, "
+            f"which has {len(counts.axes)} axes: a ragged array's counts are "
+            "one count per row, an array of one axis, as Arr.ragged takes them"
+        )
 
 
 def _free_size_names(axes: Sequence[Any]) -> set[str]:
