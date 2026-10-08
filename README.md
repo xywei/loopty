@@ -606,8 +606,11 @@ end to end; the edges are sharp.
   and `u[i] + -1` as one term, read as the difference: of an unsigned `u`
   numpy refuses the second at every point, and the compiled run computes it
   as the first; `a - b` and `a + -b` of an `int8` `b` likewise differ
-  natively at `b = -128` alone (#151). See notes 19, 20 and 23 in
-  `docs/loopy-notes.md`.
+  natively at `b = -128` alone (#151). A loop variable's arithmetic beside
+  a numpy integer whose type does not hold its value at some point,
+  `u[i] + (i - 3)` of a `uint32` `u`, is refused natively there and
+  computed compiled (#153), and `abs` of a real in a guard fails inside
+  loopy (#154). See notes 19, 20 and 23 in `docs/loopy-notes.md`.
 - A polyhedral domain is an array's whole index set, so it cannot sit beside
   a dense axis (`Arr[Fin[k], Where[...], Real]` is refused; write the axis as
   a binder of the domain). The pieces of a union have the same number of axes,

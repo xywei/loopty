@@ -2001,7 +2001,11 @@ with a pair of statement instances.
   operand. An operand with a sum in it is written without a branch, `(k ^ s)
   - s` with `s = k >> 63`, since loopy sums a reduction in a branch of an
   `If` only where the branch's condition holds of the partial sum (note 23).
-  `abs` of a loop variable is a Python int's, natively and to the plan.
+  An operand that reads no array is compared with zero as a guard on the
+  loops is lowered, `1l * i * i < 0`, since loopy's bounds check reads an
+  `If`'s condition into isl, whose reader raised on the cast that widens
+  `i * i` in `abs(i * i - m)`. `abs` of a loop variable is a Python int's,
+  natively and to the plan.
 - A parameter, a size or a loop variable named like a macro a header the
   generated code includes defines, or like a function the kernel calls, is
   refused, naming what the code means by it (#124): `I` with complex values
@@ -2033,10 +2037,11 @@ with a pair of statement instances.
   `TraceError` naming `np.int64(-1)` (#141): numpy refuses `u[i] // -1` of a
   `uint64` at every point (NEP 50), and the compiled run computed it in
   double; so it refuses `(b[i] // c[i]) * 200` of two truth values, which is
-  an `int8` natively (#122). A sum is refused only where the literal's
-  negation is not held either, since `u[i] - 1` is built as `u[i] + -1`, a
-  negation not at all, and a comparison not at all, which numpy and the
-  compiled run decide exactly. `^`, `<<` or `>>` of a `uint64` and a signed
+  an `int8` natively (#122). A literal after the first operand of a sum is
+  refused only where its negation is not held either, since `u[i] - 1` is
+  built as `u[i] + -1`; one first, `-7 + u[i]` or `2**31 + k[i]` of an
+  `int32` `k`, as it stands. A negation is not refused, nor a comparison,
+  which numpy and the compiled run decide exactly. `^`, `<<` or `>>` of a `uint64` and a signed
   integer, which numpy refuses, since only a double holds both, is a
   `TraceError` too.
 

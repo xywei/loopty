@@ -1176,7 +1176,12 @@ an `^` of integers hands its operands the integer context `"i"`
 `3u` (`NumpyArithmetic.map_constant`). `abs` of an integer is written `k < 0 ?
 -1 * k : k`, of a truth value or an unsigned integer as the operand, and of
 an operand with a sum in it without a branch, `(k ^ s) - s` with `s = k >>
-63` (`ExpressionLowerer._absolute`). loopty's printer brackets a sum or a
+63` (`ExpressionLowerer._absolute`). loopy's bounds check reads an `If`'s
+condition into isl as it reads a guard on the loops (`check_bounds` and
+`condition_to_set`), and its reader raises on a cast, so the comparison of
+an operand that reads no array is lowered as such a guard is (note 20):
+`abs(i * i - m)` compares `1l * i * i + -1 * m` with zero
+(`ExpressionLowerer._sign_operand`). loopty's printer brackets a sum or a
 product that stands after the first operand of another (`lower._CText`). A
 term nested to the left prints as before. Of the examples' code, only
 `fusion.py`'s substituted kernel changes in what it computes, by a bracket

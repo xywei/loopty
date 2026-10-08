@@ -874,8 +874,10 @@ class ExpressionLowerer(Mapper):
         (:meth:`loopty.promotion.Promotion._absolute`). An operand with a sum
         in it is written without a branch, which loopy computes a sum in
         wrongly (note 23): ``(k ^ s) - s``, where ``s = k >> 63`` is ``-1``
-        for a negative ``k`` and ``0`` otherwise. The operand is written three
-        times either way; a sum in it is computed for each.
+        for a negative ``k`` and ``0`` otherwise; so is one whose comparison
+        with zero has no form loopy's bounds check reads
+        (:meth:`_sign_operand`). The operand is written three times either
+        way; a sum in it is computed for each.
         """
         promotion = self.lowering.promotion
         native, compiled = (
@@ -890,7 +892,10 @@ class ExpressionLowerer(Mapper):
         if compiled.kind in "bu" or truths:
             return lowered
         value: Any
-        if reductions_of(operand):
+        compared = None if reductions_of(operand) else self._sign_operand(
+            operand, lowered
+        )
+        if compared is None:
             # loopy realizes a sum in a branch of an If under the If's
             # condition, evaluated on the partial sum at every term, so
             # ``acc < 0 ? -acc : acc`` added a term only where the sum so far
@@ -903,13 +908,40 @@ class ExpressionLowerer(Mapper):
             )
         else:
             value = prim.If(
-                prim.Comparison(lowered, "<", 0), prim.Product((-1, lowered)), lowered
+                prim.Comparison(compared, "<", 0),
+                prim.Product((-1, lowered)),
+                lowered,
             )
         assert promotion is not None
         for step in promotion.steps(expr):
             if step.result is not None and not self.in_subscript:
                 value = self._convert(value, step.result, narrowing=True)
         return value
+
+    def _sign_operand(self, operand: Any, lowered: Any) -> Any:
+        """The operand ``abs`` compares with zero, lowered as its ``If`` needs.
+
+        loopy reads the condition of an ``If`` into isl in its bounds check
+        (``check_bounds``), as it reads a guard on the loops, and isl's reader
+        raises on a cast there: ``abs(i * i)``, whose product is widened by a
+        cast, failed with ``UnsupportedExpressionError``. An operand that
+        reads no array is lowered for the condition as such a guard is
+        (:meth:`condition`), ``1l * i * i < 0``; any other is ``lowered``.
+        ``None`` where such a guard has no form for it, a narrow scalar's
+        ``s * s`` converted back into ``int8``: ``abs`` is written without a
+        branch then.
+        """
+        if self._on_loops is not None or any(
+            isinstance(node, Access | prim.Subscript) for node in walk(operand)
+        ):
+            return lowered
+        self._on_loops = prim.Comparison(operand, "<", 0)
+        try:
+            return self.rec(operand)
+        except LoweringError:
+            return None
+        finally:
+            self._on_loops = None
 
     def map_comparison(self, expr: Any) -> prim.Expression:
         """A comparison, its sign compared first where C would lose it (#122).

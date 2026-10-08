@@ -2985,9 +2985,11 @@ def _refuse_arithmetic(expr: Any, params: Mapping[str, Any], where: str) -> None
       it: numpy refuses it at every point (``Python integer -1 out of bounds
       for uint64``, NEP 50), and C computes ``u[i] // -1`` (#141) and ``(b[i]
       // c[i]) * 200`` of two truth values, an ``int8`` natively (#122). A
-      sum is refused only where neither the literal nor its negation is held,
-      since pymbolic builds ``u[i] - 1`` as ``u[i] + -1``, and a negation
-      ``-1 * u[i]`` not at all, which numpy computes as ``-u[i]``. A
+      literal after the first operand of a sum is refused only where neither
+      it nor its negation is held, since pymbolic builds ``u[i] - 1`` as
+      ``u[i] + -1``; one first in a sum, ``-1 + u[i]``, is refused as it
+      stands. A negation ``-1 * u[i]`` is not refused at all, which numpy
+      computes as ``-u[i]`` (#151). A
       comparison is not refused: numpy compares such a literal exactly, and
       so does the compiled run (:func:`loopty.promotion._compared`);
     * an integer literal past 64 bits, which the compiled kernel has no
@@ -3153,16 +3155,21 @@ def _refuse_unheld_literal(node: Any, promotion: Any, where: str) -> None:
     accumulated = promotion.types(operands[0])[0]
     steps = promotion.steps(node)
     for position, operand in enumerate(operands[1:], start=1):
-        checks = [(_literal_of(operand), accumulated)]
+        checks = [(_literal_of(operand), accumulated, False)]
         if position == 1:
-            checks.append((_literal_of(operands[0]), promotion.types(operand)[0]))
-        for literal, beside in checks:
+            checks.append(
+                (_literal_of(operands[0]), promotion.types(operand)[0], True)
+            )
+        for literal, beside, first in checks:
             if literal is None or isinstance(literal, np.generic) or _untyped(literal):
                 continue
             unheld = _unheld(int(literal), beside)
             if unheld is None:
                 continue
-            if isinstance(node, prim.Sum) and _unheld(-int(literal), beside) is None:
+            # u - 1 is built as u + -1, with the literal after u; one before it,
+            # -1 + u, was written so, which numpy refuses.
+            subtracted = isinstance(node, prim.Sum) and not first
+            if subtracted and _unheld(-int(literal), beside) is None:
                 continue
             raise TraceError(
                 f"{_shown(node)} at {where} computes the integer {literal} with "

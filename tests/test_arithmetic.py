@@ -2095,6 +2095,46 @@ def test_abs_of_an_integer_is_numpys():
     agrees(absolute, make)
 
 
+@kernel
+def absolute_on_the_loops(
+    m: Int,
+    s: np.int8,
+    x: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Int],  # noqa: F821
+    z: Arr[Fin[n], np.int8],  # noqa: F821
+):
+    """``abs`` of widened arithmetic of loop variables and scalars."""
+    for i in x.dom:
+        y[i] = abs(i * i - m) + abs((i << 3) - m * i)
+        with when(x[i] < abs(i * i - m)):
+            y[i] = 0
+        z[i] = abs(s * s - i)
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_abs_of_arithmetic_on_the_loops_lowers():
+    # loopy reads the condition of abs's If into isl in its bounds check, and
+    # isl's reader raised on the cast that widens i * i: abs(i * i - m)
+    # failed with UnsupportedExpressionError. The condition is lowered as a
+    # guard on the loops is, 1l * i * i, and where that has no form, the
+    # int8 s * s converted back into int8, abs is written without a branch.
+    def make() -> dict:
+        return {
+            "m": 10,
+            "s": np.int8(12),
+            "x": np.array([0.5, 20.0, 3.0, -1.0, 9.0, 30.0]),
+            "y": np.zeros(6, np.int64),
+            "z": np.zeros(6, np.int8),
+        }
+
+    native = make()
+    absolute_on_the_loops(**native)
+    assert list(native["y"]) == [0, 11, 0, 0, 14, 25]
+    assert list(native["z"]) == [112, 113, 114, 115, 116, 117]
+    agrees(absolute_on_the_loops, make)
+    assert "1l * i * i" in emit_code(absolute_on_the_loops)
+
+
 # }}}
 
 
@@ -2366,6 +2406,26 @@ def unsigned_shift(u: Arr[Fin[n], np.uint32], y: Arr[Fin[n], np.uint32]):  # noq
         y[i] = u[i] << -1
 
 
+@kernel
+def literal_first(
+    u: Arr[Fin[n], np.uint16],  # noqa: F821
+    y: Arr[Fin[n], Int],  # noqa: F821
+):
+    """A literal before a numpy integer that does not hold it, in a sum."""
+    for i in u.dom:
+        y[i] = -7 + u[i]
+
+
+@kernel
+def wide_literal_first(
+    k: Arr[Fin[n], np.int32],  # noqa: F821
+    y: Arr[Fin[n], Int],  # noqa: F821
+):
+    """``2**31 + k[i]`` of an ``int32``, which numpy refuses."""
+    for i in k.dom:
+        y[i] = 2**31 + k[i]
+
+
 @pytest.mark.filterwarnings("ignore::RuntimeWarning")
 def test_a_literal_a_numpy_integer_does_not_hold_is_refused():
     # numpy refuses u[i] // -1 of a uint64 at every point, and the compiled
@@ -2380,6 +2440,14 @@ def test_a_literal_a_numpy_integer_does_not_hold_is_refused():
     for kern in (unsigned_times, unsigned_mod, unsigned_xor, unsigned_shift):
         with pytest.raises(TraceError, match="the integer -[123] with a uint"):
             kern.trace()
+    # A literal first in a sum was written so: pymbolic builds u[i] - 7 with
+    # the literal after u[i], and -7 + u[i] as it stands, which numpy refuses.
+    with pytest.raises(OverflowError, match="-7 out of bounds for uint16"):
+        literal_first(u=np.array([5], np.uint16), y=np.zeros(1, np.int64))
+    with pytest.raises(TraceError, match="the integer -7 with a uint16"):
+        literal_first.trace()
+    with pytest.raises(TraceError, match="the integer 2147483648 with a int32"):
+        wide_literal_first.trace()
 
     def make() -> dict:
         return {
