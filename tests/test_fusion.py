@@ -633,6 +633,14 @@ def reversed_scatter(x, y):
     scatter(p, x, y)
 
 
+@program
+def scattered_into(p, x, y):
+    """The array stored through an index array, then read at every cell."""
+    f = Arr.zeros_like(x)
+    scatter(p, x, f)
+    shifted(f, y)
+
+
 def velocity(size: int) -> np.ndarray:
     return np.sin(np.linspace(0.0, 2.0 * np.pi, size, endpoint=False)) + 0.3
 
@@ -786,6 +794,18 @@ def test_a_cell_the_reader_stores_itself_is_a_zero_or_its_own() -> None:
         "first_edge.S1 reads the zeros at f[n - 1] when n >= 2; first_edge.S1 "
         "reads f[0], the zeros there unless first_edge.S0 stored them before "
         "the read, which is not asked"
+    )
+
+
+def test_a_write_isl_cannot_list_may_have_stored_the_zeros_read() -> None:
+    # scatter stores f[p[i]], which isl cannot list, and shifted reads every
+    # cell: each holds a zero or what scatter stored there, both stored, so
+    # the fact is decided, and the reason says the zeros may be gone.
+    (fact,) = definedness(scattered_into)
+    assert IslOracle().establish(fact).status is Status.DECIDED
+    assert fact.provenance["reason"] == (
+        "shifted.S0 reads the zeros at f[a0] for 0 <= a0 <= n - 1, unless "
+        "scatter.S0 stored them, which isl cannot list"
     )
 
 
