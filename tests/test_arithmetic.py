@@ -1732,3 +1732,567 @@ def test_a_guard_on_the_loops_in_single_precision_is_refused():
 
 
 # }}}
+
+
+# {{{ a written int32 array of Fin[m] (#121)
+
+
+@kernel
+def reversed_squares(
+    p: Arr[Fin[n], Fin[n]],  # noqa: F821
+    q: Arr[Fin[n], Int],  # noqa: F821
+):
+    """A permutation written into ``p``, and the squares of its entries."""
+    for i in p.dom:
+        p[i] = p.dom.size - 1 - i
+    for i in p.dom:
+        q[i] = p[i] * p[i]
+
+
+def test_a_written_int32_index_array_is_computed_with_in_64_bits():
+    # The native run read p[i] of a written int32 array as an np.int32, and
+    # p[i] * p[i] wrapped round at 46341, where the compiled run computes in
+    # 64 bits. Its elements are read as int64 now; the array is written as
+    # the caller gave it.
+    from loopty.interpret import interpret
+
+    rows = 46_342
+
+    def make() -> dict:
+        return {"p": np.zeros(rows, np.int32), "q": np.zeros(rows, np.int64)}
+
+    native = make()
+    reversed_squares(**native)
+    assert native["p"].dtype == np.int32 and native["p"][0] == rows - 1
+    assert native["q"][0] == (rows - 1) ** 2 == 2_147_488_281
+    agrees(reversed_squares, make)
+    interpreted = make()
+    interpret(reversed_squares.term, interpreted)
+    assert interpreted["q"][0] == (rows - 1) ** 2
+
+
+# }}}
+
+
+# {{{ a narrow integer, and an unsigned one beside a signed one (#122)
+
+
+@kernel
+def narrow(
+    a: Arr[Fin[n], np.int8],  # noqa: F821
+    u: Arr[Fin[n], np.uint16],  # noqa: F821
+    b: Arr[Fin[n], np.int8],  # noqa: F821
+    c: Arr[Fin[n], Int],  # noqa: F821
+    d: Arr[Fin[n], Real],  # noqa: F821
+    e: Arr[Fin[n], Int],  # noqa: F821
+):
+    """Arithmetic numpy computes in ``int8`` and ``uint16``, and C in ``int``."""
+    for i in a.dom:
+        b[i] = a[i] * a[i] // 2
+        c[i] = (a[i] + a[i]) * 1 + (a[i] << 3) + (a[i] // -1) + a[i] ** 3
+        d[i] = (u[i] * u[i] > 3) * 1.0 + (u[i] + u[i]) * 0.5
+        e[i] = (u[i] << i) + (a[i] * i)
+
+
+@kernel
+def mixed_signs(
+    u: Arr[Fin[n], np.uint32],  # noqa: F821
+    k: Arr[Fin[n], np.int32],  # noqa: F821
+    col: Arr[Fin[n], Fin[n]],  # noqa: F821
+    y: Arr[Fin[n], Int],  # noqa: F821
+    z: Arr[Fin[n], Int],  # noqa: F821
+    b: Arr[Fin[n], Bool],  # noqa: F821
+    c: Arr[Fin[n], Bool],  # noqa: F821
+    d: Arr[Fin[n], Bool],  # noqa: F821
+):
+    """A ``uint32`` beside signed integers, which numpy computes in ``int64``."""
+    for i in u.dom:
+        y[i] = (u[i] + k[i]) + (u[i] ^ k[i]) + (u[i] - col[i])
+        z[i] = (u[i] - 1) + (u[i] << 3) + (u[i] + i) // 3
+        b[i] = u[i] < k[i]
+        c[i] = u[i] == -1
+        d[i] = u[i] > col[i] - 5
+
+
+@kernel
+def wide_signs(
+    u: Arr[Fin[n], np.uint64],  # noqa: F821
+    k: Arr[Fin[n], Int],  # noqa: F821
+    b: Arr[Fin[n], Bool],  # noqa: F821
+    c: Arr[Fin[n], Bool],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A ``uint64`` compared with an ``int64``, which numpy compares exactly."""
+    for i in u.dom:
+        b[i] = (u[i] > k[i]) | (u[i] <= -2)
+        c[i] = (k[i] >= u[i]) & (u[i] != k[i])
+        y[i] = u[i] + k[i]
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_a_narrow_integer_is_computed_in_its_own_type():
+    # numpy computes int8 * int8 in int8, which wraps 100 * 100 to 16, and C
+    # in int: b was [8, 4] natively and [-120, 4] compiled. The result of an
+    # operation numpy computes in a narrow type is converted back into it.
+    def make() -> dict:
+        return {
+            "a": np.array([100, 3, -128, 127, -1], np.int8),
+            "u": np.array([65535, 2, 300, 0, 40000], np.uint16),
+            "b": np.zeros(5, np.int8),
+            "c": np.zeros(5, np.int64),
+            "d": np.zeros(5),
+            "e": np.zeros(5, np.int64),
+        }
+
+    native = make()
+    narrow(**native)
+    assert list(native["b"][:2]) == [8, 4]
+    assert native["c"][2] == np.int8(-128) * 2 + 0 + (-128) + np.int8(-128) ** 3
+    assert "(int8_t) (a[i] * a[i])" in emit_code(narrow)
+    agrees(narrow, make)
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_an_unsigned_integer_beside_a_signed_one_is_numpys():
+    # C computes a uint32 beside an int32 in uint32, where numpy computes in
+    # int64: u[i] + k[i] at 0 + -1 was 4294967295 compiled, and u[i] < k[i]
+    # at 0 < -1 true. A comparison with a negative value is decided by its
+    # sign first, which numpy's exact comparison does too.
+    def make() -> dict:
+        return {
+            "u": np.array([0, 5, 2**32 - 1, 7], np.uint32),
+            "k": np.array([-1, -7, 3, 2**31 - 1], np.int32),
+            "col": np.array([1, 0, 3, 2], np.int64),
+            "y": np.zeros(4, np.int64),
+            "z": np.zeros(4, np.int64),
+            "b": np.zeros(4, bool),
+            "c": np.zeros(4, bool),
+            "d": np.zeros(4, bool),
+        }
+
+    native = make()
+    mixed_signs(**native)
+    assert native["y"][0] == -1 + (0 ^ -1) + -1
+    # (u - 1) + (u << 3) + (u + i) // 3 at u = 2**32 - 1, i = 2, in uint32.
+    assert native["z"][2] == (2**32 - 2 + 2**32 - 8 + 0) % 2**32
+    assert list(native["b"]) == [False, False, False, True]
+    assert list(native["c"]) == [False] * 4
+    assert list(native["d"]) == [True] * 4
+    code = emit_code(mixed_signs)
+    assert "(int64_t) (u[i]) + (int64_t) (k[i])" in code
+    assert "k[i] >= 0 && u[i] < k[i]" in code
+    agrees(mixed_signs, make)
+
+    # A uint64 and an int64 have no common integer type in C, and numpy
+    # compares them exactly: 2**63 > 2**63 - 1, which doubles say is false.
+    def wide() -> dict:
+        return {
+            "u": np.array([2**63, 0, 2**64 - 1, 5], np.uint64),
+            "k": np.array([2**63 - 1, -1, -(2**63), 5], np.int64),
+            "b": np.zeros(4, bool),
+            "c": np.zeros(4, bool),
+            "y": np.zeros(4),
+        }
+
+    native = wide()
+    wide_signs(**native)
+    assert list(native["b"]) == [True, True, True, False]
+    assert list(native["c"]) == [False, False, False, False]
+    agrees(wide_signs, wide)
+
+
+@kernel
+def literal_beside_integers(
+    k: Arr[Fin[n], Int],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+):
+    """Integer arithmetic with literals, stored into reals."""
+    for i in k.dom:
+        y[i] = k[i] + 3
+        z[i] = (k[i] ^ 3) + -1 * k[i]
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_an_integer_literal_in_integer_arithmetic_is_an_integer():
+    # loopy wrote a literal in the type of the place its operation stands
+    # in, a double for a store into a real: k[i] + 3 was k[i] + 3.0, which
+    # never wraps round at 2**63 - 1 where numpy's int64 sum does, and
+    # k[i] ^ 3 was k[i] ^ 3.0, which C refuses.
+    def make() -> dict:
+        return {
+            "k": np.array([2**63 - 1, 2**53 + 1, -5]),
+            "y": np.zeros(3),
+            "z": np.zeros(3),
+        }
+
+    code = emit_code(literal_beside_integers)
+    assert "(k[i] + 3)" in code and "(k[i] ^ 3)" in code
+    native = make()
+    literal_beside_integers(**native)
+    assert native["y"][0] == float(np.int64(-(2**63) + 2))
+    agrees(literal_beside_integers, make)
+
+
+# }}}
+
+
+# {{{ abs of an integer (#123)
+
+
+@kernel
+def absolute(
+    k: Arr[Fin[n], Int],  # noqa: F821
+    a: Arr[Fin[n], np.int8],  # noqa: F821
+    col: Arr[Fin[n], Fin[n]],  # noqa: F821
+    u: Arr[Fin[n], np.uint32],  # noqa: F821
+    b: Arr[Fin[n], Bool],  # noqa: F821
+    y: Arr[Fin[n], Int],  # noqa: F821
+    z: Arr[Fin[n], Int],  # noqa: F821
+    x: Arr[Fin[n], Real],  # noqa: F821
+):
+    """``abs`` of integers of every kind, of a loop variable, and of a sum."""
+    for i in k.dom:
+        y[i] = abs(k[i]) + abs(a[i]) + abs(col[i] - i)
+        z[i] = abs(u[i]) + abs(b[i]) + abs(i - 3) + abs(reduce_sum(k[j] for j in k.dom))
+        x[i] = abs(-0.5 * k[i])
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_abs_of_an_integer_is_numpys():
+    # loopy resolves abs as C's fabs, which it refuses for an integer (abs
+    # does not support type float32). numpy's abs of the smallest int64 or
+    # int8 is that value, which C's -k wraps round to under -fwrapv.
+    def make() -> dict:
+        return {
+            "k": np.array([-3, 4, -(2**63), 0]),
+            "a": np.array([-128, 5, -7, 0], np.int8),
+            "col": np.array([3, 0, 1, 2]),
+            "u": np.array([2**32 - 1, 0, 3, 1], np.uint32),
+            "b": np.array([True, False, True, False]),
+            "y": np.zeros(4, np.int64),
+            "z": np.zeros(4, np.int64),
+            "x": np.zeros(4),
+        }
+
+    native = make()
+    absolute(**native)
+    assert native["y"][2] == -(2**63) + 7 + 1
+    assert native["y"][0] == 3 - 128 + 3
+    assert "(k[i] < 0) ? -1 * k[i] : k[i]" in emit_code(absolute)
+    agrees(absolute, make)
+
+
+# }}}
+
+
+# {{{ a name the generated code gives a meaning (#124) or OpenCL C has (#131)
+
+
+def _cubed_complex(
+    I: Arr[Fin[n], np.complex128],  # noqa: E741, F821, N803
+    w: Arr[Fin[n], np.complex128],  # noqa: F821
+):
+    for i in I.dom:
+        w[i] = I[i] * 2.0
+
+
+def _powered(pow: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821, A002
+    for i in pow.dom:
+        y[i] = pow[i] ** 3
+
+
+def _floored(floor: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    for i in floor.dom:
+        y[i] = floor[i] * 2.0
+
+
+def _copied(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    for i in x.dom:
+        y[i] = x[i]
+
+
+def _with_parameter(name: str):
+    """``_copied`` as a kernel whose first parameter is called ``name``."""
+    code = _copied.__code__
+    names = tuple(name if v == "x" else v for v in code.co_varnames)
+    copy = types.FunctionType(code.replace(co_varnames=names), _copied.__globals__)
+    copy.__annotations__ = {
+        (name if key == "x" else key): value
+        for key, value in _copied.__annotations__.items()
+    }
+    return kernel(copy)
+
+
+def test_a_name_a_header_defines_or_a_called_function_is_refused():
+    # complex.h defines I as a macro, which gcc expanded in the declaration
+    # of the parameter I; a parameter pow hid the pow its power calls.
+    from loopty.lower import LoweringError
+
+    with pytest.raises(LoweringError, match=r"parameters I \(a macro or type complex"):
+        emit_code(kernel(_cubed_complex))
+    with pytest.raises(LoweringError, match="a C library function the kernel calls"):
+        emit_code(kernel(_powered))
+    # A function of the name the kernel never calls is no clash: floor here.
+    agrees(kernel(_floored), lambda: {"floor": np.arange(3.0), "y": np.zeros(3)})
+    for name, meaning in (
+        ("NAN", "math.h"),
+        ("INT32_MAX", "stdint.h"),
+        ("M_PI", "OpenCL C"),
+        ("get_local_id", "parallel loop"),
+    ):
+        with pytest.raises(LoweringError, match=meaning):
+            emit_code(_with_parameter(name))
+    agrees(_with_parameter("exp"), lambda: {"exp": np.arange(3.0), "y": np.zeros(3)})
+
+
+def test_a_kernel_named_like_an_opencl_builtin_is_renamed(plain_opencl):
+    # OpenCL C's built-ins are in neither loopy's C list nor C's headers: a
+    # kernel named get_global_id was generated under that name.
+    def reals() -> dict:
+        return {"x": np.array([0.5, -2.0, 3.0]), "y": np.zeros(3)}
+
+    for name in ("get_global_id", "clamp", "convert_int4_sat", "native_sin", "M_PI"):
+        kern = _named(name, _doubled)
+        assert f"void {name}_knl(" in emit_code(kern)
+        assert f" {name}_knl(" in emit_code(kern, target="opencl")
+        agrees(kern, reals)
+    assert "void half_edged(" in emit_code(_named("half_edged", _doubled))
+
+
+# }}}
+
+
+# {{{ a negated truth value (#130)
+
+
+@kernel
+def negated(b: Arr[Fin[n], Bool], y: Arr[Fin[n], Int]):  # noqa: F821
+    """``-b[i]``, which numpy refuses."""
+    for i in b.dom:
+        y[i] = -b[i]
+
+
+@kernel
+def negated_first(b: Arr[Fin[n], Bool], y: Arr[Fin[n], Int]):  # noqa: F821
+    """``-b[i] + 1``, which numpy refuses too."""
+    for i in b.dom:
+        y[i] = -b[i] + 1
+
+
+@kernel
+def negations(
+    b: Arr[Fin[n], Bool],  # noqa: F821
+    y: Arr[Fin[n], Int],  # noqa: F821
+    z: Arr[Fin[n], Int],  # noqa: F821
+    w: Arr[Fin[n], Bool],  # noqa: F821
+):
+    """The named fixes, and a truth value subtracted from a number."""
+    for i in b.dom:
+        y[i] = -(1 * b[i])
+        z[i] = 1 - b[i] + -(i > 1)
+        w[i] = ~b[i]
+
+
+def test_a_negated_truth_value_is_refused_by_the_trace():
+    # numpy refuses -b[i] at every point, and the compiled kernel stored -1.
+    def make() -> dict:
+        return {"b": np.array([True, False, True]), "y": np.zeros(3, np.int64)}
+
+    with pytest.raises(TypeError, match="boolean negative"):
+        negated(**make())
+    for kern in (negated, negated_first):
+        with pytest.raises(TraceError, match="negates a truth value") as refused:
+            kern.trace()
+        assert "'~b[i]' for 'not', or '-(1 * b[i])'" in str(refused.value)
+
+    def fixes() -> dict:
+        return {
+            **make(),
+            "z": np.zeros(3, np.int64),
+            "w": np.zeros(3, bool),
+        }
+
+    native = fixes()
+    negations(**native)
+    assert list(native["y"]) == [-1, 0, -1]
+    assert list(native["z"]) == [0, 1, -1]
+    agrees(negations, fixes)
+
+
+# }}}
+
+
+# {{{ an integer literal past 64 bits (#140), or beside a type that does not
+# hold it (#141)
+
+
+@kernel
+def past_64_bits(
+    x: Arr[Fin[n], Real],  # noqa: F821
+    f: Arr[Fin[n], np.float32],  # noqa: F821
+    u: Arr[Fin[n], np.uint64],  # noqa: F821
+    k: Arr[Fin[n], Int],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], np.uint64],  # noqa: F821
+    b: Arr[Fin[n], Bool],  # noqa: F821
+):
+    """Literals past 64 bits where numpy computes in a type that holds them."""
+    for i in x.dom:
+        y[i] = x[i] * 2**70 + f[i] * -(2**80) + 1.0 * (i + 2.0**64)
+        z[i] = u[i] + 2**63
+        b[i] = (k[i] < 2**70) & (k[i] > -(2**70)) & (k[i] < 2**63)
+
+
+@kernel
+def exact_past_64(y: Arr[Fin[n], Real]):  # noqa: F821
+    """A sum Python computes exactly past 64 bits."""
+    for i in y.dom:
+        y[i] = 1.0 * (i + 2**64)
+
+
+@kernel
+def stored_past_64(y: Arr[Fin[n], Real]):  # noqa: F821
+    """A literal past 64 bits stored as it is."""
+    for i in y.dom:
+        y[i] = 2**70
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_an_integer_literal_past_64_bits():
+    # Lowering failed inside loopy's type inference (integer constant too
+    # large). It is written as numpy computes with it where that is a real
+    # or a uint64, and refused elsewhere, naming the real.
+    def make() -> dict:
+        return {
+            "x": np.array([1.0, -2.5]),
+            "f": np.array([0.5, 2.0], np.float32),
+            "u": np.array([5, 2**63 - 1], np.uint64),
+            "k": np.array([-(2**63), 2**63 - 1]),
+            "y": np.zeros(2),
+            "z": np.zeros(2, np.uint64),
+            "b": np.zeros(2, bool),
+        }
+
+    native = make()
+    past_64_bits(**native)
+    assert native["z"][1] == 2**64 - 1
+    assert list(native["b"]) == [True, True]
+    agrees(past_64_bits, make)
+    with pytest.raises(TraceError, match=r"write it as a real, 2\.0 \*\* 64"):
+        exact_past_64.trace()
+    with pytest.raises(TraceError, match=r"2\.0 \*\* 70"):
+        stored_past_64.trace()
+
+
+@kernel
+def unsigned_negative(
+    u: Arr[Fin[n], np.uint64],  # noqa: F821
+    y: Arr[Fin[n], np.uint64],  # noqa: F821
+):
+    """A ``uint64`` divided by ``-1``, which numpy refuses."""
+    for i in u.dom:
+        y[i] = u[i] // -1
+
+
+@kernel
+def truths_scaled(
+    b: Arr[Fin[n], Bool],  # noqa: F821
+    c: Arr[Fin[n], Bool],  # noqa: F821
+    y: Arr[Fin[n], Int],  # noqa: F821
+):
+    """``//`` of two truth values, an ``int8`` natively, times 200."""
+    for i in b.dom:
+        y[i] = (b[i] // c[i]) * 200
+
+
+@kernel
+def unsigned_fixed(
+    u: Arr[Fin[n], np.uint64],  # noqa: F821
+    v: Arr[Fin[n], np.uint32],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], np.uint64],  # noqa: F821
+):
+    """The named fix, a difference, and a negation, which numpy computes."""
+    for i in u.dom:
+        y[i] = u[i] // np.int64(-1) + v[i] * np.int64(-2)
+        z[i] = (u[i] - 1) + -u[i]
+
+
+@kernel
+def unsigned_times(u: Arr[Fin[n], np.uint64], y: Arr[Fin[n], np.uint64]):  # noqa: F821
+    """A ``uint64`` times ``-2``."""
+    for i in u.dom:
+        y[i] = u[i] * -2
+
+
+@kernel
+def unsigned_mod(u: Arr[Fin[n], np.uint64], y: Arr[Fin[n], np.uint64]):  # noqa: F821
+    """A ``uint64`` modulo ``-3``."""
+    for i in u.dom:
+        y[i] = u[i] % -3
+
+
+@kernel
+def unsigned_xor(u: Arr[Fin[n], np.uint64], y: Arr[Fin[n], np.uint64]):  # noqa: F821
+    """``^`` of a ``uint64`` and ``-1``."""
+    for i in u.dom:
+        y[i] = u[i] ^ -1
+
+
+@kernel
+def unsigned_shift(u: Arr[Fin[n], np.uint32], y: Arr[Fin[n], np.uint32]):  # noqa: F821
+    """A ``uint32`` shifted by ``-1``."""
+    for i in u.dom:
+        y[i] = u[i] << -1
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_a_literal_a_numpy_integer_does_not_hold_is_refused():
+    # numpy refuses u[i] // -1 of a uint64 at every point, and the compiled
+    # run computed it in double; (b // c) * 200 is int8 * 200 natively.
+    with pytest.raises(OverflowError, match="-1 out of bounds for uint64"):
+        unsigned_negative(u=np.array([5], np.uint64), y=np.zeros(1, np.uint64))
+    with pytest.raises(TraceError, match="the integer -1 with a uint64") as refused:
+        unsigned_negative.trace()
+    assert "np.int64(-1)" in str(refused.value)
+    with pytest.raises(TraceError, match="the integer 200 with a int8"):
+        truths_scaled.trace()
+    for kern in (unsigned_times, unsigned_mod, unsigned_xor, unsigned_shift):
+        with pytest.raises(TraceError, match="the integer -[123] with a uint"):
+            kern.trace()
+
+    def make() -> dict:
+        return {
+            "u": np.array([5, 2**64 - 1, 0], np.uint64),
+            "v": np.array([3, 2**32 - 1, 0], np.uint32),
+            "y": np.zeros(3),
+            "z": np.zeros(3, np.uint64),
+        }
+
+    agrees(unsigned_fixed, make)
+
+
+@kernel
+def xor_signs(
+    u: Arr[Fin[n], np.uint64],  # noqa: F821
+    k: Arr[Fin[n], Int],  # noqa: F821
+    y: Arr[Fin[n], np.uint64],  # noqa: F821
+):
+    """``^`` of a ``uint64`` and an ``int64``, which numpy refuses."""
+    for i in u.dom:
+        y[i] = u[i] ^ k[i]
+
+
+def test_a_bitwise_operation_of_a_uint64_and_a_signed_integer_is_refused():
+    # numpy has no ^ of the pair, whose common type is a double, and C
+    # computed it in uint64.
+    with pytest.raises(TypeError, match="bitwise_xor"):
+        xor_signs(
+            u=np.array([1], np.uint64), k=np.array([1]), y=np.zeros(1, np.uint64)
+        )
+    with pytest.raises(TraceError, match="of a uint64 and a signed integer"):
+        xor_signs.trace()
+
+
+# }}}

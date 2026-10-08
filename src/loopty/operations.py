@@ -296,18 +296,18 @@ class NumpyArithmetic:
     """
 
     def map_sum(self, expr: Any, type_context: Any) -> Any:
-        return super().map_sum(expr, self._integer_context(expr, type_context))
+        return super().map_sum(expr, self._literal_context(expr, type_context))
 
     def map_product(self, expr: Any, type_context: Any) -> Any:
-        return super().map_product(expr, self._integer_context(expr, type_context))
+        return super().map_product(expr, self._literal_context(expr, type_context))
 
     def map_bitwise_xor(self, expr: Any, type_context: Any) -> Any:
         return super().map_bitwise_xor(
-            expr, self._integer_context(expr, type_context)
+            expr, self._literal_context(expr, type_context)
         )
 
-    def _integer_context(self, expr: Any, type_context: Any) -> Any:
-        """``"i"`` for a sum, product or ``^`` of integers, else ``type_context``.
+    def _literal_context(self, expr: Any, type_context: Any) -> Any:
+        """The type context a sum, product or ``^`` writes its literals in.
 
         loopy writes a Python number in the type context it is handed, and
         hands an operation's operands the context of the place the operation
@@ -315,9 +315,11 @@ class NumpyArithmetic:
         of an integer ``k`` stored into a real was written ``k[i] + 3.0``,
         which C computes in double, rounding past ``2**53`` and never wrapping
         round where numpy's integer sum does, ``-1 * k[i]`` was ``-1.0 *
-        k[i]``, and ``k[i] ^ 3`` was ``k[i] ^ 3.0``, which C refuses. An
+        k[i]``, ``k[i] ^ 3`` was ``k[i] ^ 3.0``, which C refuses, and ``-1 *
+        x[i]`` of a ``float32`` ``x`` was ``-1.0 * x[i]``, a double. An
         operation whose operands are all integers, literals or not, writes its
-        literals as integers (note 23 in ``docs/loopy-notes.md``).
+        literals as integers, and any other in its own type, as numpy computes
+        a Python number beside it (note 23 in ``docs/loopy-notes.md``).
         """
         children = expr.children
         if all(
@@ -326,7 +328,22 @@ class NumpyArithmetic:
             for child in children
         ):
             return "i"
-        return type_context
+        own = dtype_to_type_context(self.kernel.target, self.infer_type(expr))
+        return own if own is not None else type_context
+
+    def map_constant(self, expr: Any, type_context: Any) -> Any:
+        """A ``uint32`` literal as C's ``unsigned int``, ``3u``.
+
+        loopy gives every integer literal of a type wider than 31 bits an
+        ``l``, so an ``np.uint32(3)`` was ``3ul``, an ``unsigned long``, and
+        ``u[i] + 3ul`` of a ``uint32`` ``u`` was computed in 64 bits, where
+        numpy wraps round at ``2**32`` (#122).
+        """
+        if isinstance(expr, np.uint32):
+            from loopy.symbolic import Literal
+
+            return Literal(f"{int(expr)}u")
+        return super().map_constant(expr, type_context)
 
     def map_type_cast(self, expr: Any, type_context: Any) -> Any:
         """A conversion, written out where loopy would leave it out.

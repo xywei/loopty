@@ -76,7 +76,7 @@ from loopy.target.pyopencl import (
     PyOpenCLPythonASTBuilder,
 )
 from pymbolic.mapper import Mapper
-from pymbolic.mapper.stringifier import PREC_COMPARISON
+from pymbolic.mapper.stringifier import PREC_COMPARISON, PREC_PRODUCT, PREC_SUM
 
 from loopty.contract import array_storage, compiled_storage
 from loopty.domain import STORAGES, Union
@@ -261,7 +261,7 @@ _LOOSER_IN_C = (prim.BitwiseAnd, prim.BitwiseXor, prim.BitwiseOr, prim.Compariso
 
 
 class _CText(CExpressionToCodeMapper):
-    """loopy's printer of C expressions, with C's precedence around a comparison.
+    """loopy's printer of C expressions, with C's precedence and the term's nesting.
 
     loopy prints by pymbolic's precedences, which are Python's: there ``&``,
     ``^`` and ``|`` bind more tightly than a comparison, and every comparison
@@ -270,7 +270,9 @@ class _CText(CExpressionToCodeMapper):
     was printed ``k[i] ^ 1 == 0``, which C reads as ``k[i] ^ (1 == 0)``, and
     ``k[i] < (k[i] ^ 1)`` as ``k[i] < k[i] ^ 1``, ``(k[i] < k[i]) ^ 1``, true
     at every ``k``. An operand of a comparison that is one of these is
-    bracketed (note 20).
+    bracketed (note 20). A sum or a product nested after the first operand of
+    another is bracketed too, so that C adds and multiplies in the order the
+    term does (note 23).
     """
 
     def map_comparison(self, expr: Any, enclosing_prec: int) -> str:
@@ -282,6 +284,49 @@ class _CText(CExpressionToCodeMapper):
         )
         return self.parenthesize_if_needed(
             f"{left} {expr.operator} {right}", enclosing_prec, PREC_COMPARISON
+        )
+
+    def map_sum(self, expr: Any, enclosing_prec: int) -> str:
+        """A sum, with a sum after its first operand in brackets.
+
+        pymbolic prints a sum of sums flat, since addition is associative, and
+        C adds from the left: ``x[i] + (y[i] + z[i])`` was ``x[i] + y[i] +
+        z[i]``, rounded otherwise than numpy rounds it, and ``1.0 + (k[i] +
+        j[i])`` was added in double, where numpy adds the integers first and
+        wraps round. A sum the term nests to the left prints as before.
+        """
+        first, *rest = expr.children
+        parts = [self.rec(first, PREC_SUM)] + [
+            self.rec_with_force_parens_around(
+                child, PREC_SUM, force_parens_around=(prim.Sum,)
+            )
+            for child in rest
+        ]
+        return self.parenthesize_if_needed(" + ".join(parts), enclosing_prec, PREC_SUM)
+
+    def map_product(self, expr: Any, enclosing_prec: int) -> str:
+        """A product, with a product after its first operand in brackets.
+
+        As :meth:`map_sum`: ``1.0 * (k[i] * j[i])`` was ``1.0 * k[i] * j[i]``,
+        which C multiplies in double from the left, where numpy multiplies the
+        integers first. A quotient, a floor division or a remainder is in
+        brackets anywhere, as loopy puts it.
+        """
+        around = (prim.Quotient, prim.FloorDiv, prim.Remainder)
+        first, *rest = expr.children
+        parts = [
+            self.rec_with_force_parens_around(
+                first, PREC_PRODUCT, force_parens_around=around
+            )
+        ] + [
+            self.rec_with_force_parens_around(
+                child, PREC_PRODUCT, force_parens_around=(*around, prim.Product)
+            )
+            for child in rest
+        ]
+        # Spaces keep ``* *z`` from reading as a dereference, as loopy's do.
+        return self.parenthesize_if_needed(
+            " * ".join(parts), enclosing_prec, PREC_PRODUCT
         )
 
 
@@ -698,12 +743,14 @@ class ExpressionLowerer(Mapper):
         integer literal past 64 bits is written in the dtype its step gives
         it, and refused where none does (#140).
         """
+        promotion = self.lowering.promotion
+        # The plan of the whole operation first: a sum plans the negations
+        # it adds, ``a - b``, before they are lowered (Promotion._subtracted).
+        steps = () if promotion is None else promotion.steps(expr)
         lowered = [
             operand if _untyped(operand) else self.rec(operand)
             for operand in operands
         ]
-        promotion = self.lowering.promotion
-        steps = () if promotion is None else promotion.steps(expr)
         if self.in_subscript:
             steps = tuple(_without_widening(step) for step in steps)
         if not any(step.converts for step in steps):
@@ -824,19 +871,40 @@ class ExpressionLowerer(Mapper):
         truth value or an unsigned integer, of which ``abs`` is itself, as
         itself. Of an integer narrower than ``int`` the result is converted
         back into its type, which C's ``-1 * k`` leaves
-        (:meth:`loopty.promotion.Promotion._absolute`). The operand is
-        written three times; a sum in it is computed for each.
+        (:meth:`loopty.promotion.Promotion._absolute`). An operand with a sum
+        in it is written without a branch, which loopy computes a sum in
+        wrongly (note 23): ``(k ^ s) - s``, where ``s = k >> 63`` is ``-1``
+        for a negative ``k`` and ``0`` otherwise. The operand is written three
+        times either way; a sum in it is computed for each.
         """
-        lowered = self.rec(operand)
         promotion = self.lowering.promotion
-        compiled = None if promotion is None else promotion.types(operand)[1]
+        native, compiled = (
+            (None, None) if promotion is None else promotion.types(operand)
+        )
+        lowered = self.rec(operand)
         if compiled is None or compiled.kind not in "biu":
             return prim.Call(prim.Variable("abs"), (lowered,))
-        if compiled.kind in "bu":
-            return lowered
-        value: Any = prim.If(
-            prim.Comparison(lowered, "<", 0), prim.Product((-1, lowered)), lowered
+        truths = bool(native) and all(
+            isinstance(sample, bool | np.bool_) for sample in native
         )
+        if compiled.kind in "bu" or truths:
+            return lowered
+        value: Any
+        if reductions_of(operand):
+            # loopy realizes a sum in a branch of an If under the If's
+            # condition, evaluated on the partial sum at every term, so
+            # ``acc < 0 ? -acc : acc`` added a term only where the sum so far
+            # was negative (note 23). Without a branch: ``(k ^ s) - s`` with
+            # ``s = k >> 63``, which is -1 for a negative k and 0 otherwise.
+            bits = 8 * max(compiled.itemsize, 4) - 1
+            sign = prim.RightShift(lowered, bits)
+            value = prim.Sum(
+                (prim.BitwiseXor((lowered, sign)), prim.Product((-1, sign)))
+            )
+        else:
+            value = prim.If(
+                prim.Comparison(lowered, "<", 0), prim.Product((-1, lowered)), lowered
+            )
         assert promotion is not None
         for step in promotion.steps(expr):
             if step.result is not None and not self.in_subscript:
@@ -924,19 +992,21 @@ def _untyped(expr: Any) -> bool:
     )
 
 
-def _untyped_message(value: int) -> str:
+def _untyped_message(value: int, where: str = "") -> str:
     """Why an integer literal past 64 bits is refused, and what to write."""
     exponent = abs(value).bit_length() - 1
     if abs(value) == 2**exponent:
         spelled = f"{'-' if value < 0 else ''}2.0 ** {exponent}"
     else:
         spelled = repr(float(value))
+    at = f" at {where}" if where else ""
     return (
-        f"the integer {value} is past 64 bits, and the compiled kernel has no "
-        "integer type that holds it: loopy types a literal as int32 or int64. "
-        "It is written in numpy's type where numpy computes the operation it "
-        "stands in in a real or a uint64; write it as a real, "
-        f"{spelled}, which both runs compute with alike"
+        f"the integer {value}{at} is past 64 bits, and the compiled kernel has "
+        "no integer type that holds it: loopy types an integer literal as "
+        "int32 or int64. Such a literal is written in numpy's type where numpy "
+        "computes the operation it stands in in a real or a uint64 that holds "
+        f"it, x[i] * 2**70, and nowhere else; write it as a real, {spelled}, "
+        "which both runs compute with alike"
     )
 
 

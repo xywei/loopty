@@ -3144,7 +3144,7 @@ def _refuse_unheld_literal(node: Any, promotion: Any, where: str) -> None:
         operands = (node.base, node.exponent)
     elif isinstance(node, prim.LeftShift | prim.RightShift):
         operands = (node.shiftee, node.shift)
-    elif isinstance(node, prim.Quotient | prim.FloorDiv | prim.Remainder):
+    elif isinstance(node, prim.FloorDiv | prim.Remainder):
         operands = (node.numerator, node.denominator)
     else:
         return
@@ -3223,7 +3223,7 @@ def _refuse_untyped_literals(expr: Any, promotion: Any, where: str) -> None:
         return steps[position - 1].right is not None
 
     def refuse(value: int) -> None:
-        raise TraceError(f"{_shown(value)} at {where}: {_untyped_message(value)}")
+        raise TraceError(_untyped_message(value, where))
 
     def visit(node: Any) -> None:
         if _untyped(node):

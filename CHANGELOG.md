@@ -1956,6 +1956,87 @@ with a pair of statement instances.
   (`loopty.contract.checked_storage`), and composing refuses a temporary of
   it given a narrower `dtype`.
 
+- An `int32` array of `Fin[m]` that a kernel writes is computed with in 64
+  bits natively too (#121): the native run read an entry back as an
+  `np.int32`, and `p[i] * p[i]` wrapped round at `p[i] = 46341`, where the
+  compiled run computes in 64 bits. Its elements are read as `int64` through
+  the masking view (`loopty.trace.read_elements_as`), and by the
+  interpreter, and the array is written as the caller gave it, so a
+  permutation may still be computed into an `int32` array.
+- An operation numpy computes in a numpy integer type is computed in it
+  compiled too (#122). C computes an integer narrower than `int` as an `int`:
+  `a[i] * a[i] // 2` of an `np.int8` `a` was `8` natively at `a[i] = 100` and
+  `-120` compiled; the result is converted back into the narrow type
+  (`(int8_t) (a[i] * a[i])`), which wraps round as numpy does, and loopty's
+  targets write that conversion where loopy would leave it out. C computes an
+  unsigned integer beside a signed one of as many bits as unsigned: `u[i] +
+  k[i]` of a `uint32` and an `int32` was `4294967295` compiled at `0 + -1`,
+  and `u[i] < k[i]` true; the operands are converted into the type numpy
+  computes in, and a comparison of integers compares a negative operand's
+  sign first where C would compare it unsigned (`k[i] >= 0 && u[i] < k[i]`),
+  as numpy compares exactly, `uint64` against `int64` included. A
+  difference, which pymbolic builds as `a + -1 * b`, is computed in the
+  difference's type, where the term negated `b` in its own: `col[i] - k[i]`
+  of an `int8` `k` at `-128`, and `k[i] - u[i]` of a `uint32` `u`. A `uint32`
+  literal is written `3u`, where loopy wrote `3ul`, and an operation loopy
+  computes by a function in a wider type than numpy (`u[i] << 3`, by loopy's
+  `int64` one) is converted back. `loopty.promotion` types C's operators by
+  C's conversions (`_c_result`) and the functions by loopy's
+  (`_loopy_result`). Note 23 in `docs/loopy-notes.md`.
+- Integer literals in integer arithmetic are written as integers: loopy wrote
+  a literal in the type of the place its operation stands in, so `k[i] + 3`
+  of an `Int` stored into a real was `k[i] + 3.0`, computed in double, which
+  never wraps round at `2**63 - 1` where numpy does, `-1 * k[i]` was
+  `-1.0 * k[i]`, and `k[i] ^ 3` was `k[i] ^ 3.0`, which C refuses.
+- A sum or a product nested after the first operand of another is printed in
+  brackets: pymbolic prints them flat, and C computes from the left, so
+  `1.0 * (k[i] * j[i])` of two integers was multiplied in double, where
+  numpy multiplies the integers first, and `x[i] + (y[i] + z[i])` was
+  rounded otherwise (`lower._CText`).
+- `abs` of an integer lowers, and computes numpy's (#123): loopy resolves
+  `abs` as C's and refused an integer (`abs does not support type float32`).
+  It is written `k < 0 ? -1 * k : k`, which is the smallest `int64` at the
+  smallest `int64` under `-fwrapv`, as numpy's is, and converted back into a
+  type narrower than `int`; of a truth value or an unsigned integer it is the
+  operand. An operand with a sum in it is written without a branch, `(k ^ s)
+  - s` with `s = k >> 63`, since loopy sums a reduction in a branch of an
+  `If` only where the branch's condition holds of the partial sum (note 23).
+  `abs` of a loop variable is a Python int's, natively and to the plan.
+- A parameter, a size or a loop variable named like a macro a header the
+  generated code includes defines, or like a function the kernel calls, is
+  refused, naming what the code means by it (#124): `I` with complex values
+  was `complex.h`'s imaginary unit in the parameter's declaration, and gcc
+  failed; so would `NAN`, `INFINITY` and the `stdint.h` limits, OpenCL C's
+  macros (`M_PI`, `INT_MAX`), the work-item functions OpenCL code calls on a
+  parallel loop, and `pow` in a kernel with a power or `floor` beside a call
+  of `floor`. A function the kernel never calls is a name it may use.
+- `-b[i]` of a truth value is a `TraceError` naming `~b[i]` for `not` and
+  `-(1 * b[i])` for the integer (#130): numpy refuses it at every point, and
+  the compiled run stored `-1`. pymbolic builds it as `-1 * b[i]`, so that is
+  refused too; `1 - b[i]`, which is built as `1 + -1 * b[i]`, is not.
+- A kernel named like an OpenCL C built-in function is renamed in the
+  generated code (#131): `get_global_id`, `clamp`, `select`, `mad`, the
+  `convert_`, `as_`, `vload`, `atomic_`, `work_group_` and `native_` families
+  and the others of its specification, on every target, as loopy's and the C
+  library's names are (`lower.is_library_name`).
+- An integer literal past 64 bits lowers where numpy computes it in a type
+  that holds it (#140): `x[i] * 2**70` failed inside loopy's type inference
+  (`integer constant too large`), and is written as a double now, as numpy
+  converts it; beside a `uint64` one up to `2**64 - 1` is a `uint64`, and a
+  comparison with one is exact, as numpy's is. Elsewhere,
+  `1.0 * (i + 2**64)`, which Python computes exactly, or a store of it, is a
+  `TraceError` naming `2.0 ** 64`.
+- An integer literal beside a numpy integer whose type does not hold it is a
+  `TraceError` naming `np.int64(-1)` (#141): numpy refuses `u[i] // -1` of a
+  `uint64` at every point (NEP 50), and the compiled run computed it in
+  double; so it refuses `(b[i] // c[i]) * 200` of two truth values, which is
+  an `int8` natively (#122). A sum is refused only where the literal's
+  negation is not held either, since `u[i] - 1` is built as `u[i] + -1`, a
+  negation not at all, and a comparison not at all, which numpy and the
+  compiled run decide exactly. `^`, `<<` or `>>` of a `uint64` and a signed
+  integer, which numpy refuses, since only a double holds both, is a
+  `TraceError` too.
+
 ### Changed
 
 - **`Nat` and `Int` are 64 bits wide compiled** (#101). An array of them the

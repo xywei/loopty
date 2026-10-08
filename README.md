@@ -324,11 +324,19 @@ end to end; the edges are sharp.
   `b[i] - c[i]`, which numpy refuses; an integer element or scalar to a
   negative integer power, which numpy refuses and loopy computed as an
   integer (`1 / k[i] ** 2`, a real); `^`, `<<` or `>>` of a real, and `//` or
-  `%` of a complex value, which numpy refuses and C cannot compile; and a
+  `%` of a complex value, which numpy refuses and C cannot compile; a
   loop variable divided by a literal zero or shifted by a negative literal,
   which Python refuses natively, or shifted left by a literal of 64 or more,
   which Python computes exactly and the compiled run to `0`
-  (`i * 2.0 ** 64`).
+  (`i * 2.0 ** 64`); `-b[i]` of a truth value, which numpy refuses (`~b[i]`
+  for `not`, `-(1 * b[i])` for the integer); an integer literal beside a
+  numpy integer whose type does not hold it, `u[i] // -1` of a `uint64` or
+  `(b[i] // c[i]) * 200` of two truth values (an `int8` natively), which
+  numpy refuses (`np.int64(-1)`); `^`, `<<` or `>>` of a `uint64` and a
+  signed integer, which numpy refuses; and an integer literal past 64 bits
+  where numpy does not compute it in a real or a `uint64` that holds it,
+  `1.0 * (i + 2**64)`, which the compiled kernel has no integer type for
+  (`2.0 ** 64`).
 - The faithfulness fact. For each kernel and each program, the traced term is
   run by an interpreter (`loopty.interpret`: statement by statement in source
   order over each statement's isl domain, each loop enumerated when the run
@@ -421,9 +429,22 @@ end to end; the edges are sharp.
   computed in 64 (a subscript stays loopy's 32-bit index arithmetic). `//`,
   `%`, `<<` and `>>` are computed as numpy computes them, by functions
   loopty's targets define (`loopty.operations`): of reals too, by zero (`0`
-  for integers) and past the width of a shift. A kernel named like a
-  function loopy or the C headers know (`floor`, `pow`, `cpow`) is renamed in
-  the generated code. See notes 19 and 20 in `docs/loopy-notes.md`.
+  for integers) and past the width of a shift. An operation numpy computes in
+  a numpy integer type is computed in it compiled too: one narrower than
+  `int` (`np.int8`, `np.uint16`), which C computes as an `int`, is converted
+  back into it, and an unsigned integer beside a signed one is computed in
+  the signed type numpy computes in (`int64` for a `uint32` and an `int32`),
+  where C's would be unsigned; integers compare exactly, as numpy's do, a
+  negative one with an unsigned one included. `abs` of an integer is numpy's,
+  the smallest value of its type included. An integer literal past 64 bits
+  is written as a real where numpy computes in one (`x[i] * 2**70`), or as a
+  `uint64` beside one (`u[i] + 2**63`), and refused elsewhere. A kernel named
+  like a function loopy, the C headers or OpenCL C know (`floor`, `pow`,
+  `cpow`, `get_global_id`, `clamp`) is renamed in the generated code, and a
+  parameter, size or loop variable named like a macro the headers define
+  (`I` with complex values, `NAN`, `INT32_MAX`, `M_PI`) or a function the
+  kernel calls (`pow` with a power) is refused, naming what the code means by
+  it. See notes 19, 20 and 23 in `docs/loopy-notes.md`.
 - Array arguments over polyhedral domains (`loopty.domain`): `Where[...]`,
   binders written as slices and then the comparisons that cut their box,
   joined by `&`; `Sigma[...]`, binders and an unnamed last fiber affine in
@@ -573,12 +594,18 @@ end to end; the edges are sharp.
   and wraps compiled, which the differential fact reports (#139).
   Index arithmetic, a subscript and a loop bound, is loopy's, 32 bits wide,
   and so is a sum of loop variables, sizes and small literals: `x[(i * i) %
-  n]` reads out of bounds compiled at `i = 46341` (#129). A
-  `Fin[m]` array the kernel writes may be an `int32` one natively, and an
-  entry read back from it is computed with in 32 bits there, unless a
-  program's checked point reads it, which takes an `int64` one. An integer to a
+  n]` reads out of bounds compiled at `i = 46341` (#129); so is a subscript
+  over a narrow numpy integer type, which is not converted back into it. A
+  `Fin[m]` array the kernel writes may be an `int32` one natively, whose
+  entries the native run reads as `int64`, as the compiled run computes
+  with them, unless a program's checked point reads it, which takes an
+  `int64` one. An integer to a
   negative power whose exponent is not a literal is left to numpy's refusal
-  natively, and computed as an integer compiled. See notes 19 and 20 in
+  natively, and computed as an integer compiled. pymbolic builds `u[i] - 1`
+  and `u[i] + -1` as one term, read as the difference: of an unsigned `u`
+  numpy refuses the second at every point, and the compiled run computes it
+  as the first; `a - b` and `a + -b` of an `int8` `b` likewise differ
+  natively at `b = -128` alone. See notes 19, 20 and 23 in
   `docs/loopy-notes.md`.
 - A polyhedral domain is an array's whole index set, so it cannot sit beside
   a dense axis (`Arr[Fin[k], Where[...], Real]` is refused; write the axis as

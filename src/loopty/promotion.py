@@ -276,6 +276,15 @@ def _negation(expr: Any) -> bool:
     )
 
 
+def _subtrahend(expr: Any) -> Any:
+    """``x`` of ``-1 * x``, which pymbolic builds ``-x`` and ``a - x`` with."""
+    if isinstance(expr, prim.Product) and len(expr.children) == 2:
+        sign, operand = expr.children
+        if _integer_literal(sign) and sign == -1:
+            return operand
+    return None
+
+
 def _weak_integers(*natives: Native) -> bool:
     """Whether every sample of every native type is a Python int (or bool).
 
@@ -345,6 +354,29 @@ def _loopy_result(left: np.dtype | None, right: np.dtype | None) -> np.dtype | N
     if {left, right} == {np.dtype(np.int32), np.dtype(np.float32)}:
         return np.dtype(np.float32)
     return np.promote_types(left, right)
+
+
+def _loopy_sum(
+    left: np.dtype | None, right: np.dtype | None, literals: tuple[Any, Any]
+) -> np.dtype | None:
+    """The type loopy infers for a sum or a product of two such operands.
+
+    :func:`_loopy_result`, but for an integer literal of magnitude below 1024
+    beside an operand that is no integer, a truth value or a real, which
+    loopy leaves out of the promotion (``map_sum`` in
+    ``loopy.type_inference``): ``-1 + (a[i] < b[i])`` is a truth value to
+    loopy, and a sum of them was accumulated in a ``bool``.
+    """
+    for k, literal in enumerate(literals):
+        other = (left, right)[1 - k]
+        if (
+            literal is not None
+            and abs(int(literal)) < 1024
+            and other is not None
+            and other.kind not in "iu"
+        ):
+            return other
+    return _loopy_result(left, right)
 
 
 #: The integer literals loopy types, as ``int32`` or ``int64``; any other is
@@ -465,6 +497,11 @@ def _plan(
     after = result_of(to_left or lc, to_right or rc)
     if after != target:
         to_left = target
+        if result_of(target, to_right or rc) != target:
+            # An integer beside a float32 that numpy keeps weak, a loop
+            # variable's, which loopy computes beside it in double where it
+            # is 64 bits wide.
+            to_right = target
     return Step(to_left, to_right, native, target)
 
 
@@ -596,7 +633,12 @@ def _strong(
       left to loopy.
     """
     (_, lc), (_, rc) = left, right
-    loopy = compiled if helper else _loopy_result(lc, rc)
+    if helper:
+        loopy = compiled
+    elif kind in ("sum", "growing"):
+        loopy = _loopy_sum(lc, rc, literals)
+    else:
+        loopy = _loopy_result(lc, rc)
     if compiled == target and loopy == target:
         return None
     signed_round = (
@@ -888,9 +930,17 @@ class Promotion:
         literal = _literal_of(operands[0])
         steps: list[Step] = []
         for operand in operands[1:]:
-            right = self.types(operand)
+            if isinstance(expr, prim.Sum) and _subtrahend(operand) is not None:
+                right = self._subtracted(operand, accumulated)
+            else:
+                right = self.types(operand)
             literals = (literal, _literal_of(operand))
             native = _apply(function, accumulated[0], right[0])
+            if native is None and _subtrahend(expr) is not None:
+                # pymbolic builds -u as -1 * u, which numpy refuses of an
+                # unsigned integer, and the negation, which it computes,
+                # taken round in u's type.
+                native = _apply(operator.neg, right[0])
             subtrahend = literals[1]
             if native is None and isinstance(expr, prim.Sum) and subtrahend is not None:
                 # pymbolic builds u - 1 as u + -1, which numpy refuses beside
@@ -903,6 +953,58 @@ class Promotion:
             literal = None
         self._steps[id(expr)] = tuple(steps)
         return accumulated
+
+    def _subtracted(
+        self, node: prim.Product, accumulated: tuple[Native, np.dtype | None]
+    ) -> tuple[Native, np.dtype | None]:
+        """``-1 * x`` that a sum adds to ``accumulated``: a difference.
+
+        pymbolic builds ``a - b`` as ``a + -1 * b``, and numpy computes the
+        difference in the type of the two, where the term negates ``b`` in its
+        own type first. That wraps round where the difference does not: ``-1 *
+        b[i]`` of an ``int32`` ``-2**31`` is itself, and of a ``uint32`` it
+        is taken round modulo ``2**32``, so ``k[i] - u[i]``, ``int64``
+        natively, was computed in ``uint32`` compiled. Where numpy computes
+        the difference in a numpy type, ``b`` is negated in it, converted
+        into it where it is an integer of another type natively (``-1 *
+        (int64_t) (u[i])``), and the sum adds a value of that type. A real is
+        negated exactly in its own type, and the sum's step converts it. A
+        negation of a Python int, a loop variable's, is planned as it stands
+        (:func:`_negation`).
+        """
+        x = _subtrahend(node)
+        x_native, x_compiled = self.types(x)
+        difference = _apply(operator.sub, accumulated[0], x_native)
+        target = _one_dtype(difference)
+        numbers = (
+            x_native is not None
+            and difference is not None
+            and all(isinstance(sample, np.generic) for sample in x_native)
+            and all(isinstance(sample, np.generic) for sample in difference)
+        )
+        if not numbers or target is None or x_compiled is None:
+            return self.types(node)
+        convert = None
+        if (
+            x_compiled.kind in "biu"
+            and x_compiled != target
+            and _one_dtype(x_native) != target
+        ):
+            convert = target
+        computed = _c_result(np.dtype(np.int32), convert or x_compiled)
+        result = None
+        if computed is not None and computed.kind in "iu":
+            loopy = _loopy_sum(np.dtype(np.int32), convert or x_compiled, (-1, None))
+            if loopy != computed:
+                # loopy takes -1 * u of a uint64 for a double, and of a
+                # uint32 for an int64: the product is converted into the
+                # type C computes it in, so that the sum is typed so too.
+                result = computed
+        native = (_sample(target, False),)
+        self._seen.append(node)
+        self._steps[id(node)] = (Step(None, convert, native, computed, result),)
+        self._types[id(node)] = (native, computed)
+        return native, computed
 
     def _comparison(self, expr: prim.Comparison) -> tuple[Native, np.dtype | None]:
         """A comparison is computed in the type of its operands' sum."""
@@ -929,6 +1031,8 @@ class Promotion:
         """
         native, compiled = self.types(operand)
         result = _apply(function, native)
+        if native and all(isinstance(sample, bool | np.bool_) for sample in native):
+            return result, compiled
         if compiled is not None and compiled.kind == "c":
             width = _precision(compiled)
             return result, np.dtype(np.float32 if width <= 4 else np.float64)
@@ -953,7 +1057,9 @@ class Promotion:
         name = function.name if isinstance(function, prim.Variable) else None
         numpy_function = _FUNCTIONS.get(name) if name is not None else None
         if name == "abs" and len(expr.parameters) == 1:
-            return self._absolute(expr, expr.parameters[0], np.abs)
+            # Python's abs, which keeps a Python int one, as the native run
+            # calls it; numpy's would make it a strong int64.
+            return self._absolute(expr, expr.parameters[0], abs)
         operands = [self.types(parameter) for parameter in expr.parameters]
         native = (
             None

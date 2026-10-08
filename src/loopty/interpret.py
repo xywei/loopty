@@ -119,7 +119,9 @@ _FUNCTIONS = {
     "cosh": np.cosh,
     "tanh": np.tanh,
     "fabs": np.fabs,
-    "abs": np.abs,
+    # Python's, as a body calls it: a Python int, a loop variable's, stays
+    # one, and a numpy scalar's is numpy's.
+    "abs": builtins.abs,
     "floor": np.floor,
     "ceil": np.ceil,
     "pow": np.power,
@@ -853,8 +855,15 @@ class _Run:
         if isinstance(node, prim.Variable):
             return self.variable(node.name, env)
         if isinstance(node, prim.Sum):
-            return _fold(operator.add, [self.value(c, env) for c in node.children])
+            return self.sum(node, env)
         if isinstance(node, prim.Product):
+            from loopty.promotion import _subtrahend
+
+            negated = _subtrahend(node)
+            if negated is not None:
+                # pymbolic builds -u as -1 * u, which numpy refuses of an
+                # unsigned u and the native run negates.
+                return -self.value(negated, env)
             return _fold(operator.mul, [self.value(c, env) for c in node.children])
         if isinstance(node, prim.BitwiseXor):
             return _fold(operator.xor, [self.value(c, env) for c in node.children])
@@ -897,6 +906,30 @@ class _Run:
             f"no numpy meaning for {type(node).__name__} in the term: "
             f"{_text(node)}"
         )
+
+    def sum(self, node: prim.Sum, env: Mapping[str, Any]) -> Any:
+        """A sum from the left, a negated term or a negative literal subtracted.
+
+        pymbolic builds ``a - b`` as ``a + -1 * b`` and ``u - 1`` as ``u +
+        -1``, and the native run computes the difference: in the type of the
+        two, where ``-1 * b`` would negate an ``int8`` ``b`` of ``-128`` into
+        itself first, and of a ``uint64`` ``u`` and ``1``, which numpy
+        computes and whose ``u + -1`` it refuses. The compiled run computes
+        the difference too (:meth:`loopty.promotion.Promotion._subtracted`).
+        """
+        from loopty.promotion import _integer_literal, _subtrahend
+
+        children = node.children
+        total = self.value(children[0], env)
+        for child in children[1:]:
+            subtrahend = _subtrahend(child)
+            if subtrahend is not None:
+                total = total - self.value(subtrahend, env)
+            elif _integer_literal(child) and child < 0:
+                total = total - -child
+            else:
+                total = total + self.value(child, env)
+        return total
 
     def variable(self, name: str, env: Mapping[str, Any]) -> Any:
         """A loop or binder variable, a scalar argument, or a size."""
