@@ -599,11 +599,11 @@ end to end; the edges are sharp.
   Index arithmetic, a subscript and a loop bound, is loopy's, 32 bits wide,
   and so is a sum of loop variables, sizes and small literals: `x[(i * i) %
   n]` reads out of bounds compiled at `i = 46341` (#129); so is a subscript
-  over a narrow numpy integer type, which is not converted back into it. A
-  `Fin[m]` array the kernel writes may be an `int32` one natively, whose
-  entries the native run reads as `int64`, as the compiled run computes
-  with them, unless a program's checked point reads it, which takes an
-  `int64` one. An integer to a
+  over a narrow numpy integer type, which is not converted back into it
+  (#157). A `Fin[m]` array the kernel writes may be an `int32` one
+  natively, whose entries the native run reads as `int64`, as the compiled
+  run computes with them, unless a program's checked point reads it, which
+  takes an `int64` one. An integer to a
   negative power whose exponent is not a literal is left to numpy's refusal
   natively, and computed as an integer compiled. pymbolic builds `u[i] - 1`
   and `u[i] + -1` as one term, read as the difference: of an unsigned `u`

@@ -1196,11 +1196,11 @@ condition loopy's bounds check reads into isl as it reads a guard on the
 loops (`check_bounds` and `condition_to_set`), and whose reader raised on
 the cast that widens `i * i` in `abs(i * i - m)`. loopty's printer
 brackets a sum or a product that stands after the first operand of another
-(`lower._CText`). A term nested to the left prints as before. Of the examples' code, only
-`fusion.py`'s substituted kernel changes in what it computes, by a bracket
-around a product it subtracts, which rounds alike; the guards of the tiled,
-blocked and diamond schedules in `stencil_skew.py` and
-`wavefront_acoustic.py` gain brackets in their index arithmetic, which
+(`lower._CText`). A term nested to the left prints as before. Of the
+examples' code, only `fusion.py`'s substituted kernel changes in what it
+computes, by a bracket around a product it subtracts, which rounds alike;
+the guards of the tiled, blocked and diamond schedules in `stencil_skew.py`
+and `wavefront_acoustic.py` gain brackets in their index arithmetic, which
 computes the same 32-bit values.
 
 pymbolic builds `a - b` as `a + -1 * b`, and the term then negates `b` in its
@@ -1211,8 +1211,8 @@ sum plans a negation it adds as the difference it stands for
 interpreter subtracts it (`interpret._Run.sum`).
 
 **What it does not cover.** A subscript's arithmetic is left in the type loopy
-computes it in, neither widened nor converted back (#129). `u[i] - 1` and
-`u[i] + -1` of an unsigned `u` are one term, so the second, which numpy
+computes it in, neither widened nor converted back (#129, #157). `u[i] - 1`
+and `u[i] + -1` of an unsigned `u` are one term, so the second, which numpy
 refuses at every point, is computed as the first (#151); a literal a numpy
 integer's type does not hold is refused elsewhere (#141). An `If`, whose
 branches C converts to one type, is not planned: a body cannot write one,
