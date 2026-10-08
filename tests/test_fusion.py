@@ -26,7 +26,7 @@ from lanky.ledger import Status
 from lanky.prelude import Int, Nat, Real
 
 from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum, when
-from loopty.executor import LoopyExecutor
+from loopty.executor import LoopyExecutor, emit_code
 from loopty.oracle import IslOracle
 from loopty.schedule import IllegalCast
 
@@ -615,6 +615,21 @@ def widened(t, x, y):
     """An index array computed in 32 bits and stored in 64, then read through."""
     q = Arr.zeros_like(t)
     widen(t, q)
+    gather_whole(q, x, y)
+
+
+@kernel
+def reversal(q: Arr[Fin[n], Nat]):  # noqa: F821
+    """The last index first, in whole numbers."""
+    for j in q.dom:
+        q[j] = q.dom.size - 1 - j
+
+
+@program
+def reversed_whole(x, y):
+    """An index computed in 32 bits from the sizes, stored in 64, then read."""
+    q = Arr.zeros_like(x, dtype=np.int64)
+    reversal(q)
     gather_whole(q, x, y)
 
 
@@ -1383,57 +1398,87 @@ def test_a_substituted_value_is_converted_as_storing_it_converted_it() -> None:
         )
 
 
-def test_an_index_array_computed_with_a_conversion_is_left_unwritten() -> None:
+def permuted_inputs(size: int, **arrays: np.ndarray) -> dict:
+    """A permutation ``t`` of ``size`` cells, with ``x`` and ``y`` beside it."""
+    t = np.random.default_rng(size).permutation(size).astype(np.int64)
+    return {
+        "t": t,
+        "x": np.arange(size, dtype=np.float64) + 0.5,
+        "y": np.zeros(size),
+        **arrays,
+    }
+
+
+def substituted_agrees(prog, array: str, inputs: dict) -> str:
+    """The substituted kernel's code, after its run agreed with two others.
+
+    With the native program, by the differential fact, and bit for bit with
+    the compiled program that stores ``array``.
+    """
+    schedule = Schedule(prog).substitute(array)
+    assert [fact.status.value for fact in schedule.facts()][:3] == ["decided"] * 3
+    assert schedule.buildable == (True, "")
+    agrees(prog, schedule, {name: value.copy() for name, value in inputs.items()})
+    stored = LoopyExecutor().run(
+        Schedule(prog), **{name: value.copy() for name, value in inputs.items()}
+    )
+    computed = LoopyExecutor().run(
+        schedule, **{name: value.copy() for name, value in inputs.items()}
+    )
+    for name, value in stored.items():
+        assert np.array_equal(value, computed[name]), name
+    return emit_code(schedule)
+
+
+def test_an_index_array_computed_with_a_conversion_is_substituted() -> None:
     # rotate computes (t[j] + 1) % n in 64 bits, with the 32-bit t[j] cast
     # (#101), and p is stored in the 64 bits of an index array a checked
     # point reads (#128), so the store converts nothing. The cast is in the
-    # value itself, and substituting p into x[p[i]] would carry it into the
-    # subscript, which loopy cannot simplify through: the substitution is
-    # decided and its kernel is not written, with the reason (#145).
-    schedule = Schedule(rotated).substitute("p")
-    assert [fact.status.value for fact in schedule.facts()][:3] == ["decided"] * 3
-    assert schedule.buildable == (
-        False,
-        "the value p is computed from converts an operand, and gather.S0 "
-        "reads p in a subscript, which loopy cannot simplify through that "
-        "conversion; keep it stored",
-    )
+    # value itself, and substituting p into x[p[i]] carries it into the
+    # subscript, which loopy declined to read into isl with an error (#145);
+    # loopy generates the subscript as written now. Leaving the cast out
+    # would compute (t[j] + 1) in 32 bits, which is exact here and is not
+    # for (t[j] * 3) % n, so it stays.
+    for size in (1, 5, 8):
+        code = substituted_agrees(rotated, "p", permuted_inputs(size))
+    assert "y[i] = x[loopty_mod_int64((int64_t) (t[i]) + 1, (int64_t) (n))]" in code
 
 
-def test_an_index_computed_in_other_bits_than_its_store_is_left_unwritten() -> None:
+def test_an_index_widened_by_its_store_is_read_unconverted_in_a_subscript() -> None:
     # A Fin[m] entry is read in 32 bits (#101), and an index array a checked
     # point reads between two calls is stored in 64 (#128), as a Nat array
-    # is: t[j] is converted by p's store, and by q's. Read in a subscript,
-    # the conversion is one loopy cannot simplify through, so each
-    # substitution is decided and its kernel is not written, with the reason
-    # (#145: a widening is exact, and could be left out).
-    for prog, array, reader, computed, stored in (
-        (scattered, "p", "scatter.S0", "int32", "int64"),
-        (widened, "q", "gather_whole.S0", "int32", "int64"),
+    # is: t[j] is widened by p's store, and by q's. A widening keeps the
+    # value, and is the last thing done to it, so a read in a subscript
+    # reads the value inside it (#145); the checked point, which reads it as
+    # a value, keeps the conversion.
+    for prog, array, read in (
+        (scattered, "p", "y[t[i]] = x[i];"),
+        (widened, "q", "y[i] = x[t[i]];"),
     ):
-        schedule = Schedule(prog).substitute(array)
-        assert [fact.status.value for fact in schedule.facts()][:3] == [
-            "decided"
-        ] * 3
-        assert schedule.buildable == (
-            False,
-            f"the value {array} is computed from is {computed}, which storing it "
-            f"as {stored} converts, and {reader} reads {array} in a subscript, "
-            "which loopy cannot simplify through that conversion; keep it stored",
+        for size in (1, 4, 9):
+            code = substituted_agrees(prog, array, permuted_inputs(size))
+        assert read in code
+        assert "(int64_t) (t[" in code
+    # An index computed in 32 bits from the loop variable and a size, and
+    # stored in 64, is affine with the widening left out: loopy reads it
+    # into isl, checks its bounds and writes it as it simplifies it.
+    for size in (1, 6):
+        code = substituted_agrees(
+            reversed_whole, "q", {"x": np.arange(size) + 0.5, "y": np.zeros(size)}
         )
+    assert "y[i] = x[-1 + -1 * i + n];" in code
 
 
-def test_a_conversion_in_a_subscript_leaves_the_kernel_unwritten() -> None:
+def test_a_narrowing_in_a_subscript_is_kept() -> None:
     # p is stored in sixteen bits, which converts the 32-bit value it is
-    # computed from, and is read in the subscript of y: loopy simplifies a
-    # subscript as an affine expression and cannot through a cast, so the
-    # substitution is decided and the kernel is not written, with the reason.
-    schedule = Schedule(narrowed).substitute("p")
-    assert [fact.status.value for fact in schedule.facts()][:3] == ["decided"] * 3
-    ok, reason = schedule.buildable
-    assert not ok
-    assert "storing it as int16 converts" in reason
-    assert "scatter_narrow.S0 reads p in a subscript" in reason
+    # computed from, and is read in the subscript of y: the substituted read
+    # converts it as the store did, and loopy generates the subscript with
+    # the cast (#145), as the kernel that stores p computes it.
+    for size in (1, 3, 7):
+        code = substituted_agrees(
+            narrowed, "p", permuted_inputs(size, w=np.arange(size, dtype=np.int16))
+        )
+    assert "y[(int16_t) (t[i])] = x[i] + w[i];" in code
 
 
 # }}}

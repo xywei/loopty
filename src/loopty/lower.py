@@ -88,6 +88,8 @@ from loopty.flow import (
     statement_accesses,
 )
 from loopty.idx import linearize
+from loopty.isl_reading import install as _install_isl_reading
+from loopty.isl_reading import read_as_affine
 from loopty.operations import (
     CODE_DIGEST,
     OPERATIONS,
@@ -137,6 +139,10 @@ __all__ = [
 ]
 
 _LANG_VERSION = (2018, 2)
+
+# loopy's isl reader declines a conversion and a constant that is not an
+# integer, before any kernel is built (:mod:`loopty.isl_reading`, note 23).
+_install_isl_reading()
 
 #: The C compiler flag that keeps ``a * b + c`` two roundings, set on a kernel
 #: with an ``exact`` output (see :func:`allows_contraction`). GCC and clang both
@@ -502,11 +508,9 @@ class ExpressionLowerer(Mapper):
     another type than numpy does natively has them converted
     (:mod:`loopty.promotion`): ``k[i] / 2`` of an integer ``k`` is
     ``(double) (k[i]) / 2``, ``0.1`` beside a ``float32`` is ``0.1f``, and
-    ``col[i] * col[i]`` of a ``Fin[m]`` array is computed in 64 bits, but in a
-    subscript: an index is index arithmetic, which loopy computes in 32 bits
-    and reads into isl, whose reader raises on a cast, and which loopy
-    simplifies, dropping a product with a 64-bit ``1``, so an integer is not
-    widened inside one, a limit (#129). A guard that reads no array is a
+    ``col[i] * col[i]`` of a ``Fin[m]`` array is computed in 64 bits. So is a
+    subscript, ``x[(i * i) % n]`` (#129), unless loopy reads it as affine
+    (:meth:`_index`). A guard that reads no array is a
     condition on the loops, which loopy reads into isl too (note 20 in
     ``docs/loopy-notes.md``), so nothing in one is cast at all: a literal is
     still written in numpy's dtype, an operand is converted by a product with
@@ -522,6 +526,10 @@ class ExpressionLowerer(Mapper):
         self.lowering = lowering
         #: How many subscripts deep the walk is.
         self._subscripts = 0
+        #: Whether the index being lowered keeps its integers' widening, and
+        #: how many widenings the walk has left out; see :meth:`_index`.
+        self._widened_index = False
+        self._left_out = 0
         #: The guard the walk is in, when it reads no array; see
         #: :meth:`condition`.
         self._on_loops: Any = None
@@ -564,12 +572,46 @@ class ExpressionLowerer(Mapper):
         return self._subscripts > 0
 
     def _indices(self, indices: Sequence[Any]) -> tuple[Any, ...]:
-        """Lower the indices of a subscript, as index arithmetic."""
+        """Lower the indices of a subscript, each by :meth:`_index`."""
+        return tuple(self._index(index) for index in indices)
+
+    def _index(self, index: Any) -> Any:
+        """Lower one index of a subscript, widened as everywhere else or not.
+
+        loopy reads a subscript into isl, and one it reads as affine it
+        simplifies to the affine expression isl gives back, which it computes
+        in its 32-bit index type whatever the subscript was written as. One
+        it does not read so it generates as it is written. So an index is
+        lowered first with no integer widened (a step converting to an
+        integer dtype left out), and where loopy reads that as affine, it is
+        the index: ``x[2 * i]`` stays readable, and its bounds checked, as it
+        always was, and C computes its sums and products modulo ``2**32``
+        under ``-fwrapv`` (:data:`WRAP_FLAG`), which gives the cell a
+        subscript in bounds names. Otherwise it is lowered again with every
+        widening the plan asks for, as anywhere else (#129):
+        ``x[(i * i) % n]`` is ``x[loopty_mod_int64((int64_t) (i) * i, n)]``,
+        which wrapped round at ``i = 46341``. loopy's reader declines the
+        cast (:mod:`loopty.isl_reading`), so the subscript is generated with
+        it. A reduction's domain the first walk recorded is dropped before
+        the second records it again.
+        """
+        outer = self._widened_index
+        domains = getattr(self.lowering, "extra_domains", None)
+        recorded = None if domains is None else len(domains)
+        left_out = self._left_out
         self._subscripts += 1
         try:
-            return tuple(self.rec(index) for index in indices)
+            self._widened_index = False
+            narrow = self.rec(index)
+            if self._left_out == left_out or read_as_affine(narrow):
+                return narrow
+            if domains is not None:
+                del domains[recorded:]
+            self._widened_index = True
+            return self.rec(index)
         finally:
             self._subscripts -= 1
+            self._widened_index = outer
 
     # The dispatcher: two of our node types are not pymbolic nodes at all, so
     # they are recognized before the mapper method lookup.
@@ -685,15 +727,19 @@ class ExpressionLowerer(Mapper):
         was, so a kernel whose arithmetic C and numpy type alike lowers to the
         code it always did. See note 19 in ``docs/loopy-notes.md``.
 
-        Inside a subscript an integer is not widened (see the class): a step
-        converting to an integer dtype is left out there. In a guard on the
-        loops no operand is cast at all (:meth:`_convert`).
+        Inside a subscript loopy reads as affine an integer is not widened: a
+        step converting to an integer dtype is left out there (:meth:`_index`).
+        In a guard on the loops no operand is cast at all (:meth:`_convert`).
         """
         lowered = [self.rec(operand) for operand in operands]
         promotion = self.lowering.promotion
         steps = () if promotion is None else promotion.steps(expr)
-        if self.in_subscript:
-            steps = tuple(_without_widening(step) for step in steps)
+        if self.in_subscript and not self._widened_index:
+            narrow = tuple(_without_widening(step) for step in steps)
+            self._left_out += sum(
+                before is not after for before, after in zip(steps, narrow)
+            )
+            steps = narrow
         if not any(step.converts for step in steps):
             return build(lowered)
         head = [lowered[0]]
