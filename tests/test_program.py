@@ -1366,21 +1366,31 @@ def test_a_temporary_of_naturals_is_an_integer_natively() -> None:
     with pytest.raises(ValueError, match="a signed integer of 32 bits or more"):
         LoopyExecutor().run(counted, **make())
 
-    for dtype in (np.int64, np.int32):
+    @program
+    def counted_given(u, y):
+        c = Arr.zeros_like(u, dtype=np.int64)
+        truncate(u, c)
+        count(c, y)
 
-        @program
-        def counted_given(u, y):
-            c = Arr.zeros_like(u, dtype=dtype)
-            truncate(u, c)
-            count(c, y)
+    native = make()
+    counted_given(**native)
+    assert list(native["y"].numpy()) == [1.0, 2.0, 0.0]
+    fact = LoopyExecutor().differential(counted_given, Schedule(counted_given), make())
+    assert fact.status.value == "tested", fact.provenance
 
-        native = make()
-        counted_given(**native)
-        assert list(native["y"].numpy()) == [1.0, 2.0, 0.0]
-        fact = LoopyExecutor().differential(
-            counted_given, Schedule(counted_given), make()
-        )
-        assert fact.status.value == "tested", fact.provenance
+    # count's contract checks that c holds naturals, and truncate wrote it,
+    # so a checked point reads c between the calls (#119), and the compiled
+    # program stores it in 64 bits for that (#128). A 32-bit c would narrow
+    # u[i] = 3e9 natively, negative, where the compiled check passes it, so
+    # it holds a Nat as the compiled program does no more.
+    @program
+    def counted_in_32_bits(u, y):
+        c = Arr.zeros_like(u, dtype=np.int32)
+        truncate(u, c)
+        count(c, y)
+
+    with pytest.raises(TraceError, match="a checked point of the program reads c"):
+        counted_in_32_bits.trace()
 
     for dtype in (np.float64, np.int16):
 

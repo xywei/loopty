@@ -1768,7 +1768,12 @@ with a pair of statement instances.
   the next call refuses `2**32`; the program ran the call. An integral array
   a checked point reads (`Term.checked_arrays`) is stored in 64 bits, in the
   lowered program (`loopty.contract.array_storage`) and in the types
-  `loopty.promotion` gives its elements.
+  `loopty.promotion` gives its elements. The native run computes in the
+  array it is given, and one of 32 bits narrows what is written into it
+  where the compiled program does not, so the compiled run refuses such an
+  array passed in fewer than 64 bits, or the parameter a temporary of it is
+  made like (`loopty.contract.checked_storage`), and composing refuses a
+  temporary of it given a narrower `dtype`.
 
 ### Changed
 

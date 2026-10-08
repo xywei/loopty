@@ -486,7 +486,8 @@ end to end; the edges are sharp.
   message where the native callee is refused (`examples/travel.py`). An
   integral array such a check reads is stored in 64 bits, as the native run
   holds it, so that a value written outside 32 bits is read as written and
-  not as the store narrowed it. Offsets a scan computes and a later call
+  not as the store narrowed it; the compiled run refuses one passed in fewer
+  bits, which the native run would narrow. Offsets a scan computes and a later call
   declares `Nat` without reading rows through them are checked: that they
   are naturals follows from the scan's recurrence only by induction. The
   counts of a ragged family an earlier call wrote are still refused: its rows

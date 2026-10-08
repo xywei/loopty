@@ -507,12 +507,14 @@ class Term:
 
         A checked point reads, between two calls, the cells an earlier call
         wrote, so that the compiled program stops where the later call's
-        native contract refuses them. The native run holds every integer in
-        64 bits, and the compiled one stores an index in fewer: ``perm[i] =
-        2**32`` was narrowed to ``0`` by the store, and the checked point read
-        a point of ``Fin[n]`` where the native contract refuses ``2**32``
-        (#128). So the lowering stores an integral array a checked point reads
-        in 64 bits (:func:`loopty.contract.array_storage`), and the checked
+        native contract refuses them. The native run holds an integer in 64
+        bits as a rule, and the compiled one stores an index in fewer:
+        ``perm[i] = 2**32`` was narrowed to ``0`` by the store, and the
+        checked point read a point of ``Fin[n]`` where the native contract
+        refuses ``2**32`` (#128). So the lowering stores an integral array a
+        checked point reads in 64 bits (:func:`loopty.contract.array_storage`),
+        and the compiled run refuses one passed in fewer, which the native run
+        would narrow (:func:`loopty.contract.checked_storage`): the checked
         point reads what the native contract reads.
         """
         return frozenset(

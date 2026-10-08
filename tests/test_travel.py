@@ -35,6 +35,7 @@ from loopty.hypotheses import discharge, substitute, theorem_instances
 from loopty.interpret import CheckFailed, interpret
 from loopty.oracle import IslOracle
 from loopty.term import Hypothesis
+from loopty.trace import TraceError
 
 pytest.importorskip("loopy")
 
@@ -1095,6 +1096,70 @@ def test_a_checked_point_reads_a_value_past_32_bits_as_written(prog, arguments) 
     with pytest.raises(ValueError, match="stops before gather") as caught:
         LoopyExecutor().run(prog, **inputs())
     assert "an element of perm is not a point of Fin(n)" in str(caught.value)
+
+
+def test_a_checked_array_passed_narrower_than_64_bits_is_refused_compiled() -> None:
+    # The native run computes in the array it is given: a 32-bit perm narrows
+    # 2**32 + i before gather's contract reads it, and the compiled program,
+    # which stores perm in 64 bits for its check, checks 2**32 + i. The two
+    # runs would check two values, so the compiled run refuses such a perm,
+    # as it refuses an array not stored as its sort is (Codex on #138).
+    inputs = {**_permutation_inputs(), "perm": Arr.zeros(4, dtype=np.int32)}
+    with pytest.raises(ValueError) as caught:
+        LoopyExecutor().run(wrong.narrowed, **inputs)
+    message = str(caught.value)
+    assert message.startswith(
+        "the argument perm is stored as int32, and a checked point of the "
+        "program reads perm between two calls"
+    )
+    assert message.endswith("Pass perm as int64")
+    # Passed in 64 bits, the same program stops at its check.
+    inputs = {**_permutation_inputs(), "perm": Arr.zeros(4, dtype=np.int64)}
+    with pytest.raises(ValueError, match="stops before gather"):
+        LoopyExecutor().run(wrong.narrowed, **inputs)
+
+
+def test_a_checked_array_made_narrower_than_64_bits_is_refused() -> None:
+    # The same through an array the program makes: given int32 there, it is
+    # refused where the program is composed; made like a parameter, the
+    # parameter is refused when the compiled program is run.
+    @program
+    def made_narrow(x, y):
+        perm = Arr.zeros_like(x, dtype=np.int32)
+        wrong.past_32_bits(perm)
+        wrong.gather(perm, x, y)
+
+    with pytest.raises(TraceError) as caught:
+        made_narrow.term  # noqa: B018 - composing it is the test
+    assert "as an array of int32, and a checked point of the program reads" in (
+        str(caught.value)
+    )
+    assert str(caught.value).endswith("Pass Arr.zeros_like dtype=int64")
+
+    @program
+    def made_like(index, x, y):
+        perm = Arr.zeros_like(index)
+        wrong.past_32_bits(perm)
+        wrong.gather(perm, x, y)
+        wrong.gather(index, x, y)
+
+    assert made_like.term.checked_arrays == frozenset({"perm"})
+    assert dict(made_like.term.temporaries_like) == {"perm": "index"}
+    inputs = {
+        "index": Arr.zeros(4, dtype=np.int32),
+        "x": Arr.from_numpy(np.arange(4.0)),
+        "y": Arr.zeros(4),
+    }
+    with pytest.raises(ValueError) as caught:
+        LoopyExecutor().run(made_like, **inputs)
+    message = str(caught.value)
+    assert message.startswith(
+        "the argument index is stored as int32, and the program makes perm with "
+        "Arr.zeros_like from it"
+    )
+    assert message.endswith(
+        "Give that Arr.zeros_like dtype=int64, or pass index as int64"
+    )
 
 
 def test_an_array_no_checked_point_reads_keeps_its_storage() -> None:

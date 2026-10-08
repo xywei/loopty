@@ -154,6 +154,7 @@ from lanky.terms import (
 )
 
 from loopty.contract import (
+    CHECKED_STORAGE,
     holds_natively,
     integral_sort,
     native_storage,
@@ -1839,6 +1840,41 @@ class _Composer:
         if value is not None and value.name in self.types:
             self.inherits.append((name, value.name))
 
+    def stored_wide(self, name: str, made: _Made) -> None:
+        """Refuse a ``dtype`` narrower than 64 bits for an array a check reads.
+
+        The compiled program stores an integral array a checked point reads
+        in 64 bits (:func:`loopty.contract.array_storage`), so that the check
+        reads what the earlier call wrote; a native array of fewer bits
+        narrows it first, and the native run would check another value
+        (#128). A ``dtype`` given to the ``Arr.zeros_like``, or to the array
+        it was made like, is checked here; one left to a parameter is checked
+        when the compiled program is run
+        (:func:`loopty.contract.checked_storage`).
+        """
+        if not integral_sort(self.types[name].dtype):
+            return
+        value: ProgramValue | None = made.value
+        while value is not None and value.like is not None:
+            here = self.made.get(value.name)
+            if here is not None and here.dtype is not None:
+                try:
+                    got = np.dtype(here.dtype)
+                except TypeError:
+                    return
+                if got.kind == "i" and got.itemsize >= CHECKED_STORAGE.itemsize:
+                    return
+                raise TraceError(
+                    f"{self.program} makes {name} at {made.where} as an array of "
+                    f"{got}, and a checked point of the program reads {name} "
+                    "between two calls: the compiled program stores it in 64 "
+                    "bits, so that the check reads what the earlier call wrote, "
+                    "and the native array would narrow what is written into it, "
+                    "so the two runs would check two values. Pass "
+                    f"Arr.zeros_like dtype={CHECKED_STORAGE}"
+                )
+            value = value.like
+
     # }}}
 
     def finish(self) -> Term:
@@ -1865,6 +1901,9 @@ class _Composer:
                 "would compare nothing; write the result into a parameter"
             )
         stmts, requirements, scopes, flags = self.travel()
+        for requirement in requirements:
+            if requirement.flag is not None and requirement.array in self.made:
+                self.stored_wide(requirement.array, self.made[requirement.array])
         resolved = self.resolved
         return Term(
             name=self.program,
