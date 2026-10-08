@@ -16,6 +16,7 @@ a few seconds once the compiler cache is warm.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -450,6 +451,42 @@ def test_skewing_the_coupled_wave_makes_the_tile_legal() -> None:
     assert schedule.history == ("skew(i, by='t')", "tile(t,i,4,8)")
     assert [fact.status.value for fact in schedule.facts()] == ["decided"] * 4
     assert schedule.order == ("t_outer", "i_outer", "t_inner", "i_inner")
+
+
+def test_the_wave_schedules_emit_one_text_whatever_the_hash_seed(tmp_path) -> None:
+    # loopy's assumptions of a kernel it was given none took the sizes from a
+    # frozenset, so the order isl writes them in, in every bound of the
+    # wavefront and diamond schedules, followed the process's hash seed:
+    # seeds 0 and 2 printed -4 + nx + nt and -4 + nt + nx (#125). Each seed
+    # runs in a process of its own with no code cache to serve another's.
+    script = (
+        "from lanky.check import import_path\n"
+        "from loopty.executor import emit_code\n"
+        f"module = import_path({str(_path('wavefront_acoustic'))!r})\n"
+        "for make in (module.wavefront_schedule, module.diamond_schedule,\n"
+        "             module.offset_diamond_schedule):\n"
+        "    print(emit_code(make()))\n"
+    )
+    texts = []
+    for seed in ("0", "2"):
+        cache = tmp_path / f"cache{seed}"
+        environment = {
+            **os.environ,
+            "PYTHONHASHSEED": seed,
+            "XDG_CACHE_HOME": str(cache),
+            "LOOPY_NO_CACHE": "1",
+        }
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            env=environment,
+        )
+        assert result.returncode == 0, result.stderr[-2000:]
+        texts.append(result.stdout)
+    assert "-4 + nt + nx" in texts[0]
+    assert texts[0] == texts[1]
 
 
 def test_the_wave_demo_prints_the_rejections_then_every_agreement() -> None:

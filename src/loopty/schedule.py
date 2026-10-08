@@ -2336,16 +2336,31 @@ class Schedule:
     ``sizes`` is a hint, not a constraint: the checks are made with the size
     parameters free, and the hint is used only to print a witness with concrete
     numbers in it, and as the default example inputs for ``loopty run``.
+
+    A schedule given as ``kernel`` is started from as it stands: the schedule
+    is built again from its kernel, on its target and with its sizes unless
+    others are given, and its steps are replayed, each cast checked again, as
+    :meth:`retarget` replays them; its example inputs come too. So
+    ``Schedule(Schedule(k).split("i", 2))`` is that split of ``k``, and
+    ``Schedule(Schedule(k, target="opencl"))`` an OpenCL schedule (#135),
+    where the steps and the target were dropped and the outer schedule was
+    one of ``k`` alone, which ``loopty run`` compared with ``k`` and found
+    in agreement.
     """
 
     def __init__(
         self,
         kernel: Any,
-        target: str = "c",
+        target: str | None = None,
         sizes: dict[str, int] | None = None,
         *,
         _layouts: dict[str, str] | None = None,
     ) -> None:
+        if isinstance(kernel, Schedule):
+            self._start_from(kernel, target, sizes)
+            return
+        if target is None:
+            target = "c"
         self._source = kernel
         self._term = _term_of(kernel)
         #: What the ids of the schedule's facts name the kernel by; see
@@ -2466,6 +2481,25 @@ class Schedule:
 
     # {{{ plumbing
 
+    def _start_from(
+        self, schedule: Schedule, target: str | None, sizes: dict[str, int] | None
+    ) -> None:
+        """Become ``schedule``, built again, on ``target`` and with ``sizes``.
+
+        From its kernel, which is never a schedule, since a schedule built
+        from one is built from its kernel; see the class.
+        """
+        out = Schedule(
+            schedule._source,
+            target=schedule._target if target is None else target,
+            sizes=dict(schedule._sizes) if sizes is None else sizes,
+        )
+        for method, args, kwargs in schedule._steps:
+            out = getattr(out, method)(*args, **kwargs)
+        if schedule._examples is not None:
+            out = out.example(**schedule._examples)
+        self.__dict__.update(out.__dict__)
+
     def _clone(self) -> Schedule:
         """A shallow copy; every public method builds one rather than mutating."""
         other = object.__new__(Schedule)
@@ -2493,7 +2527,11 @@ class Schedule:
 
     @property
     def source(self) -> Any:
-        """The object the schedule was built from (a kernel, or a term)."""
+        """The object the schedule was built from (a kernel, or a term).
+
+        The kernel of a schedule given as the source, which the schedule is
+        built again from (see the class).
+        """
         return self._source
 
     @property

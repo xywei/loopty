@@ -1927,6 +1927,46 @@ def test_retargeting_carries_the_example_inputs() -> None:
     assert set(schedule.retarget("c-source").examples) == set(arrays)
 
 
+def test_a_schedule_of_a_schedule_starts_from_its_steps_and_target() -> None:
+    # Schedule(source) read a schedule for its term and nothing else, so the
+    # split was dropped without a word, a further split split the original
+    # loop, and loopty run compared the outer schedule, a schedule of the
+    # kernel alone, with the kernel (#135). It is the inner one, built again:
+    # its steps replayed and checked again, its target, sizes and examples.
+    arrays = {"a": np.arange(12.0).reshape(3, 4), "b": np.zeros((4, 3))}
+    inner = (
+        Schedule(ht.transpose_term(), sizes={"n": 4, "m": 4})
+        .split("i", 4, inner="i_in", outer="i_out")
+        .interchange("j", "i_out")
+        .example(**arrays)
+    )
+    outer = Schedule(inner)
+    assert outer is not inner
+    assert outer.key == inner.key
+    assert outer.history == inner.history
+    assert outer.order == inner.order == ("j", "i_in", "i_out")
+    assert outer.sizes == inner.sizes
+    assert set(outer.examples) == set(arrays)
+    assert [(fact.id, fact.status.value) for fact in outer.facts()] == [
+        (fact.id, fact.status.value) for fact in inner.facts()
+    ]
+    assert emit_code(outer) == emit_code(inner)
+    # A step after it acts on the inner schedule's loops.
+    with pytest.raises(ValueError, match="is not an iname"):
+        outer.split("i", 2)
+    assert outer.split("i_in", 2).key == inner.split("i_in", 2).key
+    # Its target is the inner one's, unless another is given, which replays
+    # the steps there as retarget does.
+    other = Schedule(ht.transpose_term(), target="c-source").split("i", 4)
+    assert Schedule(other).target == "c-source"
+    assert Schedule(other).key == other.key
+    assert Schedule(inner, target="c-source").key == inner.retarget("c-source").key
+    # With no steps it is a schedule of the kernel, as #75 and #98 have it.
+    assert Schedule(Schedule(ht.transpose_term())).key == (
+        Schedule(ht.transpose_term()).key
+    )
+
+
 # }}}
 
 

@@ -2679,6 +2679,7 @@ def lower_generic(
         lang_version=_LANG_VERSION,
         name=_kernel_name(term.name, [arg.name for arg in args]),
         preambles=(*preambles, *_power_preambles(term, target)),
+        assumptions=_no_assumptions(merged),
     )
     if target in ("c", None):
         flags = [WRAP_FLAG] if contraction else [WRAP_FLAG, NO_CONTRACTION_FLAG]
@@ -2800,6 +2801,31 @@ def _written_as_product(power: prim.Power) -> bool:
     """Whether loopy writes a power without a call: exponent ``0``, ``1`` or ``2``."""
     exponent = power.exponent
     return isinstance(exponent, int | float | np.number) and exponent in (0, 1, 2)
+
+
+def _no_assumptions(domains: Sequence[isl.Set]) -> isl.BasicSet:
+    """The kernel's first assumptions: none, over its parameters in a fixed order.
+
+    loopy's own, when it is given none, is the universe over the parameters
+    of the domains that are no loop, taken from a ``frozenset``, so their
+    order followed the process's hash seed, and with it the order isl writes
+    the sizes in every bound it generates (``-4 + nt + nx`` or ``-4 + nx +
+    nt``), and the text ``loopty run --emit-code`` prints (#125). Here they
+    come in the order the domains name them first, which is the term's.
+    """
+    loops = {
+        name for domain in domains for name in domain.get_var_names(isl.dim_type.set)
+    }
+    names: list[str] = []
+    for domain in domains:
+        for name in _domain_params(domain):
+            if name not in loops and name not in names:
+                names.append(name)
+    context = domains[0].get_ctx() if domains else isl.DEFAULT_CONTEXT
+    space = isl.Space.params_alloc(context, len(names))
+    for position, name in enumerate(names):
+        space = space.set_dim_name(isl.dim_type.param, position, name)
+    return isl.BasicSet.universe(space)
 
 
 def _scalar_assumptions(term: Term, declared: set[str]) -> isl.BasicSet | None:
