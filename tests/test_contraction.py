@@ -32,6 +32,7 @@ import pytest
 from lanky.prelude import Real
 
 from loopty import Arr, Fin, kernel
+from loopty.isl_reading import declining
 
 lp = pytest.importorskip("loopy")
 
@@ -92,9 +93,10 @@ def compiled(
     )
     arrays = inputs()
     try:
-        _event, (y,) = translation_unit.executor()(
-            a=arrays["a"], b=arrays["b"], c=arrays["c"], y=arrays["y"]
-        )
+        with declining():
+            _event, (y,) = translation_unit.executor()(
+                a=arrays["a"], b=arrays["b"], c=arrays["c"], y=arrays["y"]
+            )
     except Exception as exc:  # pragma: no cover - depends on the local toolchain
         if not may_skip:
             raise
@@ -109,7 +111,8 @@ def test_an_exact_output_pins_contraction_off() -> None:
     assert not lowering.contraction
     entry = lowering.kernel.default_entrypoint
     assert NO_CONTRACTION_FLAG in entry.options.build_options
-    code = lp.generate_code_v2(lowering.kernel).device_code()
+    with declining():
+        code = lp.generate_code_v2(lowering.kernel).device_code()
     assert "#pragma STDC FP_CONTRACT OFF" in code
 
     # A schedule transforms that kernel, and the executor builds what the
@@ -118,7 +121,8 @@ def test_an_exact_output_pins_contraction_off() -> None:
 
     scheduled = Schedule(fused_exact).split("i", 2).kernel
     assert NO_CONTRACTION_FLAG in scheduled.default_entrypoint.options.build_options
-    code = lp.generate_code_v2(scheduled).device_code()
+    with declining():
+        code = lp.generate_code_v2(scheduled).device_code()
     assert "#pragma STDC FP_CONTRACT OFF" in code
 
 
@@ -129,7 +133,9 @@ def test_an_approx_output_leaves_contraction_to_the_compiler() -> None:
     assert lowering.contraction
     entry = lowering.kernel.default_entrypoint
     assert NO_CONTRACTION_FLAG not in (entry.options.build_options or ())
-    assert "FP_CONTRACT" not in lp.generate_code_v2(lowering.kernel).device_code()
+    with declining():
+        code = lp.generate_code_v2(lowering.kernel).device_code()
+    assert "FP_CONTRACT" not in code
 
 
 def test_the_opencl_source_carries_the_opencl_pragma(plain_opencl) -> None:
@@ -139,7 +145,8 @@ def test_the_opencl_source_carries_the_opencl_pragma(plain_opencl) -> None:
     from loopty import lower
 
     lowering = lower.lower_generic(fused_exact.trace(), "opencl")
-    code = lp.generate_code_v2(lowering.kernel).device_code()
+    with declining():
+        code = lp.generate_code_v2(lowering.kernel).device_code()
     assert "#pragma OPENCL FP_CONTRACT OFF" in code
     assert not lowering.kernel.default_entrypoint.options.build_options
 

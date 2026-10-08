@@ -17,6 +17,7 @@ from lanky.prelude import Bool, Nat, Real
 
 from loopty import Arr, Fin, kernel, when
 from loopty import sum as reduce_sum
+from loopty.isl_reading import declining
 
 pytest.importorskip("loopy")
 
@@ -1117,7 +1118,7 @@ def test_the_nested_axis_loopty_refuses_is_one_loopy_cannot_build(plain_opencl):
     lp = plain_opencl
     outer = Schedule(lower_total8, target="opencl").tag(i="l.0")
     assert outer.buildable == (True, "")
-    with warnings.catch_warnings():
+    with warnings.catch_warnings(), declining():
         # Every work item stores the finished sum into ``s[0]``, the same
         # value, and loopy says so the first time it generates the code.
         warnings.simplefilter("ignore", lp.diagnostic.WriteRaceConditionWarning)
@@ -1128,7 +1129,10 @@ def test_the_nested_axis_loopty_refuses_is_one_loopy_cannot_build(plain_opencl):
     ok, reason = inner.buildable
     assert not ok
     assert "nested in the reduction over i" in reason
-    with pytest.raises(Exception, match="does not use all local hw axes"):
+    with (
+        pytest.raises(Exception, match="does not use all local hw axes"),
+        declining(),
+    ):
         lp.generate_code_v2(inner.kernel)
 
 
@@ -1169,7 +1173,7 @@ def generated(lp, schedule) -> str:
     """The device code loopy generates for ``schedule``."""
     import warnings
 
-    with warnings.catch_warnings():
+    with warnings.catch_warnings(), declining():
         # A work item per cell of a sum stores one finished value, and an
         # unrolled loop sends loopy to its older scheduler; both say so.
         warnings.simplefilter("ignore", lp.diagnostic.LoopyWarning)

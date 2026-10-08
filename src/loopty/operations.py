@@ -197,7 +197,7 @@ _TAG = "11_loopty"
 #: The modules whose source decides the code loopty's targets generate: the
 #: definitions and the code generator that calls them, here, the plan of
 #: conversions (:mod:`loopty.promotion`) and the lowering (:mod:`loopty.lower`).
-_SOURCES = ("operations.py", "promotion.py", "lower.py")
+_SOURCES = ("operations.py", "promotion.py", "lower.py", "isl_reading.py")
 
 
 def _digest() -> str:
@@ -218,8 +218,9 @@ def _digest() -> str:
     return digest.hexdigest()[:16]
 
 
-#: A digest of every definition, of the code generator that calls them, and
-#: of the modules that decide what the lowered kernel holds, which loopty's
+#: A digest of every definition, of the code generator that calls them, of
+#: the modules that decide what the lowered kernel holds, and of what loopy's
+#: isl reader declines in it (:mod:`loopty.isl_reading`), which loopty's
 #: targets hash in, so that loopy's persistent cache serves no code another
 #: version of them generated. A cache key cannot tell that by the kernel
 #: alone: pymbolic's persistent hash reads a numpy scalar as the Python number
