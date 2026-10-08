@@ -1991,7 +1991,9 @@ published.
   The publish workflow stops on a tag that is not the package's version in
   `pyproject.toml` and `loopty.__version__`, builds without
   `[tool.uv.sources]`, checks that it built one sdist and one wheel of that
-  version, and runs `twine check` on them before it publishes. The README
+  version, and runs `twine check` on them. It builds in a job that can only
+  read the repository, and uploads from a second job that alone may ask for
+  the token PyPI trusts and runs no checkout or build. The README
   installs from PyPI with `pip`, says what the install pulls in and needs,
   where the project stands, has a Known limits section, and links the
   documentation by full addresses, so that the links work on PyPI as well.

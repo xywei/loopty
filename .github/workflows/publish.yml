@@ -5,18 +5,27 @@ on:
     tags:
       - "v*"
 
+# PyPI Trusted Publishing: no API token is stored in this repository; PyPI
+# trusts this workflow (owner xywei, repository loopty, workflow publish.yml,
+# no environment) to upload.
+#
+# Building and publishing are two jobs. The build runs third-party code (uv,
+# the build backend and what they pull in) with read access only; the publish
+# job, the only one allowed to ask for the OIDC token PyPI trusts, runs no
+# checkout and no build, only the upload of what the build produced.
+permissions:
+  contents: read
+
 jobs:
-  publish:
+  build:
     runs-on: ubuntu-latest
-    # PyPI Trusted Publishing: no API token is stored in this repository.
-    # A pending publisher must be configured on PyPI before this workflow can
-    # publish the first release of a brand-new project name.
     permissions:
-      # Required for PyPI Trusted Publishing (OIDC).
-      id-token: write
       contents: read
     steps:
       - uses: actions/checkout@v5
+        with:
+          # The build runs third-party code, which has no use for a Git token.
+          persist-credentials: false
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -71,6 +80,25 @@ jobs:
                   sys.exit(f"the {name} does not ask for lanky from PyPI as lanky>=...")
           EOF
           uvx twine check --strict dist/*
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: distributions
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      # Required for PyPI Trusted Publishing (OIDC), and given to this job only.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: distributions
+          path: dist/
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
