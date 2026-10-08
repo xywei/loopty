@@ -470,7 +470,15 @@ with a pair of statement instances.
   and the buffer's length is a parameter of its own. `cnt[r] = 0`,
   `cnt[r] // 2`, and a start moved within the room its row leaves are
   decided, and the reads and casts resting on the fact are worth `decided`.
-  A family with no counts array is asked of its offsets alone. Where isl
+  A family with no counts array is asked of its offsets alone. A kernel that
+  writes the offsets and an array of the family, or a row's length inside a
+  loop over the row, is not asked, since what rests on the layout needs more
+  than the order there: the disjoint writes and dependences of a ragged
+  array tell its cells apart as `[r, j]`, one cell of the buffer each only
+  while no row moves (`cnt[r] = 0; off[r + 1] = off[r] + cnt[r]` writes
+  `val[0, 0]` and `val[1, 0]` on one cell), and a loop over a row runs to the
+  length it read when it started, which the in-bounds facts of its entries
+  are stated against (`cnt[r] = 0` inside `for j in val.dom[r]`). Where isl
   cannot show a write keeps the order, the fact stays `assumed` with both
   reasons, and a kernel's native runs may refute it
   (`loopty.faithful.layout_fact`): one that reads a row off its buffer

@@ -568,7 +568,12 @@ end to end; the edges are sharp.
   layout it has written (`off[r + 1] = off[r] + cnt[r] + 1`, which moves the
   last row past the end), or that leaves two rows on one cell
   (`off[r] = s[r]`). The order is more than the rows' staying apart, so a
-  kernel that permutes its rows inside the buffer is left `assumed`. A
+  kernel that permutes its rows inside the buffer is left `assumed`; and it
+  is less than some facts on the layout need, so the induction is not asked
+  of a kernel that moves rows and writes the family's arrays, whose disjoint
+  writes and dependences tell the cells apart as `[r, j]`, one cell each
+  only while no row moves, nor of one that writes a row's length inside a
+  loop over the row, which runs to the length it read when it started. A
   program's layout facts are not tried on runs.
 - `Schedule.affine` and maps whose image has holes. The diamond
   `(t, i) -> (t + i, t - i)` reaches only the points of equal parity, and
