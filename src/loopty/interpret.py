@@ -908,14 +908,17 @@ class _Run:
         )
 
     def sum(self, node: prim.Sum, env: Mapping[str, Any]) -> Any:
-        """A sum from the left, a negated term or a negative literal subtracted.
+        """A sum from the left, a negated term subtracted.
 
-        pymbolic builds ``a - b`` as ``a + -1 * b`` and ``u - 1`` as ``u +
-        -1``, and the native run computes the difference: in the type of the
-        two, where ``-1 * b`` would negate an ``int8`` ``b`` of ``-128`` into
-        itself first, and of a ``uint64`` ``u`` and ``1``, which numpy
-        computes and whose ``u + -1`` it refuses. The compiled run computes
-        the difference too (:meth:`loopty.promotion.Promotion._subtracted`).
+        pymbolic builds ``a - b`` as ``a + -1 * b``, and the native run
+        computes the difference: in the type of the two, where ``-1 * b``
+        would negate an ``int8`` ``b`` of ``-128`` into itself first. It
+        builds ``u - 1`` as ``u + -1`` and ``c - -32768`` as ``c + 32768``
+        too: an integer literal whose sum numpy refuses, beside a ``uint64``
+        ``u`` or an ``int16`` ``c`` whose type does not hold it, is
+        subtracted as its negation, which numpy computes. The compiled run
+        computes the same (:meth:`loopty.promotion.Promotion._subtracted`,
+        ``Promotion._arithmetic``).
         """
         from loopty.promotion import _integer_literal, _subtrahend
 
@@ -925,8 +928,11 @@ class _Run:
             subtrahend = _subtrahend(child)
             if subtrahend is not None:
                 total = total - self.value(subtrahend, env)
-            elif _integer_literal(child) and child < 0:
-                total = total - -child
+            elif _integer_literal(child):
+                try:
+                    total = total + child
+                except OverflowError:
+                    total = total - -child
             else:
                 total = total + self.value(child, env)
         return total

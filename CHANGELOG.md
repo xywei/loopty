@@ -1992,7 +1992,22 @@ with a pair of statement instances.
   a literal in the type of the place its operation stands in, so `k[i] + 3`
   of an `Int` stored into a real was `k[i] + 3.0`, computed in double, which
   never wraps round at `2**63 - 1` where numpy does, `-1 * k[i]` was
-  `-1.0 * k[i]`, and `k[i] ^ 3` was `k[i] ^ 3.0`, which C refuses.
+  `-1.0 * k[i]`, and `k[i] ^ 3` was `k[i] ^ 3.0`, which C refuses. So are
+  those of a comparison of integers, which loopy wrote in the type it infers
+  for their difference, a double for a `uint64` beside a signed integer:
+  `u[i] == 9007199254740993` was `u[i] == 9007199254740992.0`, true at
+  `2**53`. Any other literal is written in the type of the operands that are
+  no Python number, as numpy computes it, and not in loopy's type for the
+  operation, which takes an integer literal of 32 bits or more for an
+  `int64`, and a `float32` beside one for a double: `x[i] * 2**62` of a
+  `float32` `x` was multiplied in double, where numpy's product is
+  infinite at `3e38`.
+- pymbolic builds `c[i] - -32768` as `c[i] + 32768`, which numpy refuses
+  beside an `int16` `c`; the plan computes it as the difference numpy
+  computes, in `int16`, where the compiled run added in `int`, and the
+  interpreter subtracts a literal only where numpy refuses to add it, as
+  `u[i] + -1` of an unsigned `u`: it read `a[i] + -128` of an `int8` `a`
+  as `a[i] - 128`, which numpy refuses.
 - A sum or a product nested after the first operand of another is printed in
   brackets: pymbolic prints them flat, and C computes from the left, so
   `1.0 * (k[i] * j[i])` of two integers was multiplied in double, where

@@ -946,9 +946,10 @@ class Promotion:
             subtrahend = literals[1]
             if native is None and isinstance(expr, prim.Sum) and subtrahend is not None:
                 # pymbolic builds u - 1 as u + -1, which numpy refuses beside
-                # an unsigned integer, and the difference, which it computes.
-                if subtrahend < 0:
-                    native = _apply(operator.sub, accumulated[0], (-subtrahend,))
+                # an unsigned integer, and the difference, which it computes;
+                # and c - -32768 as c + 32768, which numpy refuses beside an
+                # int16, and the difference, which it computes in int16.
+                native = _apply(operator.sub, accumulated[0], (-subtrahend,))
             step = _plan(accumulated, right, native, native, kind, helper, literals)
             steps.append(step)
             accumulated = (step.native, step.compiled)

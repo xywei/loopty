@@ -306,7 +306,29 @@ class NumpyArithmetic:
             expr, self._literal_context(expr, type_context)
         )
 
-    def _literal_context(self, expr: Any, type_context: Any) -> Any:
+    def map_comparison(self, expr: Any, type_context: Any) -> Any:
+        """A comparison, its literals written as :meth:`_literal_context` says.
+
+        loopy writes the operands of a comparison in the type it infers for
+        their difference, which is a double for a ``uint64`` beside a signed
+        integer: ``u[i] == 9007199254740993`` was written ``u[i] ==
+        9007199254740992.0``, true at ``2**53``, where numpy compares exactly
+        and the compiled run compares the integers so too (#122).
+        """
+        context = self._literal_context(
+            expr, type_context, (expr.left, expr.right), expr.left - expr.right
+        )
+        return type(expr)(
+            self.rec(expr.left, context), expr.operator, self.rec(expr.right, context)
+        )
+
+    def _literal_context(
+        self,
+        expr: Any,
+        type_context: Any,
+        children: Any = None,
+        whole: Any = None,
+    ) -> Any:
         """The type context a sum, product or ``^`` writes its literals in.
 
         loopy writes a Python number in the type context it is handed, and
@@ -318,17 +340,51 @@ class NumpyArithmetic:
         k[i]``, ``k[i] ^ 3`` was ``k[i] ^ 3.0``, which C refuses, and ``-1 *
         x[i]`` of a ``float32`` ``x`` was ``-1.0 * x[i]``, a double. An
         operation whose operands are all integers, literals or not, writes its
-        literals as integers, and any other in its own type, as numpy computes
-        a Python number beside it (note 23 in ``docs/loopy-notes.md``).
+        literals as integers, and any other in the type of its operands that
+        are no Python number, beside which numpy takes a Python int into their
+        type, and a Python float into a real one (note 23 in
+        ``docs/loopy-notes.md``). Not in loopy's type
+        for the whole operation, which types an integer literal of 32 bits or
+        more as an ``int64``, and a ``float32`` beside one as a double: ``2**62
+        * x[i]`` of a ``float32`` ``x`` was written with a double
+        ``4.611686018427388e+18``, which C multiplied in double, where numpy's
+        ``float32`` product is infinite at ``x[i] = 3e38``.
         """
-        children = expr.children
+        from loopty.promotion import _loopy_result
+
+        children = expr.children if children is None else children
+        whole = expr if whole is None else whole
         if all(
             isinstance(child, int | np.integer)
             or self.infer_type(child).is_integral()
             for child in children
         ):
             return "i"
-        own = dtype_to_type_context(self.kernel.target, self.infer_type(expr))
+
+        def number(child: Any) -> bool:
+            return isinstance(child, int | float | complex) and not isinstance(
+                child, np.generic
+            )
+
+        numbers = [child for child in children if number(child)]
+        typed = [
+            self.infer_type(child).numpy_dtype
+            for child in children
+            if not number(child)
+        ]
+        dtype = typed[0] if typed else None
+        for other in typed[1:]:
+            dtype = _loopy_result(dtype, other)
+        # A Python float or complex makes the operation a real or a complex
+        # one, as numpy takes it: 2.5 beside a loop variable is a double, and
+        # loopy writes a real in the integer context as its integer part.
+        reals = [value for value in numbers if not isinstance(value, int)]
+        if reals:
+            dtype = np.result_type(*(() if dtype is None else (dtype,)), *reals)
+        own = dtype_to_type_context(
+            self.kernel.target,
+            self.infer_type(whole) if dtype is None else NumpyType(dtype),
+        )
         return own if own is not None else type_context
 
     def map_constant(self, expr: Any, type_context: Any) -> Any:

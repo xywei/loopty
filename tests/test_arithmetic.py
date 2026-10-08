@@ -2513,6 +2513,61 @@ def test_a_literal_just_past_64_bits_is_compared_exactly():
 
 
 @kernel
+def literal_contexts(
+    x: Arr[Fin[n], np.float32],  # noqa: F821
+    u: Arr[Fin[n], np.uint64],  # noqa: F821
+    c: Arr[Fin[n], np.int16],  # noqa: F821
+    a: Arr[Fin[n], np.int8],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    b: Arr[Fin[n], Bool],  # noqa: F821
+    d: Arr[Fin[n], Bool],  # noqa: F821
+    z: Arr[Fin[n], Int],  # noqa: F821
+):
+    """Integer literals beside a ``float32``, a ``uint64`` and narrow integers."""
+    for i in x.dom:
+        y[i] = 1.0 * (x[i] * 2**62) + (i + 2.5)
+        b[i] = u[i] == 9007199254740993
+        d[i] = i < 1.5
+        z[i] = (c[i] - -32768) + (a[i] + -128)
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_a_literal_is_written_in_the_type_numpy_computes_with_it():
+    # 2**62 beside a float32 was written as a double, which loopy types an
+    # int64 literal beside one as, so C multiplied in double where numpy's
+    # float32 product is infinite. u[i] == 9007199254740993 of a uint64 was
+    # written u[i] == 9007199254740992.0, true at 2**53. pymbolic builds
+    # c - -32768 as c + 32768, which numpy refuses beside an int16, and was
+    # computed in int; and the interpreter read a + -128 of an int8 as
+    # a - 128, which numpy refuses.
+    from loopty.interpret import interpret
+
+    def make() -> dict:
+        return {
+            "x": np.array([3e38, -2.0, 0.5], np.float32),
+            "u": np.array([2**53, 2**53 + 1, 3], np.uint64),
+            "c": np.array([-3, 32767, 0], np.int16),
+            "a": np.array([-1, 100, 0], np.int8),
+            "y": np.zeros(3),
+            "b": np.zeros(3, bool),
+            "d": np.zeros(3, bool),
+            "z": np.zeros(3, np.int64),
+        }
+
+    native = make()
+    literal_contexts(**native)
+    assert native["y"][0] == np.inf
+    assert list(native["b"]) == [False, True, False]
+    assert list(native["d"]) == [True, True, False]
+    # int16 sums: 32765 + 127, -1 + -28 and -32768 + -128, wrapped round.
+    assert list(native["z"]) == [-32644, -29, 32640]
+    agrees(literal_contexts, make)
+    interpreted = make()
+    interpret(literal_contexts.term, interpreted)
+    assert list(interpreted["z"]) == list(native["z"])
+
+
+@kernel
 def unsigned_negative(
     u: Arr[Fin[n], np.uint64],  # noqa: F821
     y: Arr[Fin[n], np.uint64],  # noqa: F821

@@ -1181,9 +1181,12 @@ round as numpy's does. loopty's targets write a conversion into a type
 narrower than `int` whatever loopy infers (`NumpyArithmetic.map_type_cast`).
 A comparison of integers, which numpy decides exactly whatever their types,
 compares a negative operand's sign first where C would compare it as an
-unsigned value (`k[i] >= 0 && u[i] < k[i]`, `Step.sign`). A sum, a product or
-an `^` of integers hands its operands the integer context `"i"`
-(`NumpyArithmetic._literal_context`), a `np.uint32` literal is written
+unsigned value (`k[i] >= 0 && u[i] < k[i]`, `Step.sign`). A sum, a product,
+an `^` or a comparison of integers hands its operands the integer context
+`"i"`, and any other one the context of its operands that are no Python
+number, as numpy computes it, and not loopy's type for the whole, which
+takes a `float32` beside an integer literal of 32 bits or more for a double
+(`NumpyArithmetic._literal_context`); a `np.uint32` literal is written
 `3u` and a `np.uint8` or `np.uint16` one as the `int` C promotes it to, `3`
 (`NumpyArithmetic.map_constant`). `abs` of an integer is written without a
 branch, `(k ^ s) - s` with `s = k >> 63` (`>> 31` in C's `int`), and of a
