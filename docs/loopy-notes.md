@@ -1075,7 +1075,12 @@ with `lp.remove_unused_inames`, and calls `assignment_to_subst`
 (`schedule._substituted_kernel`). The fact is what makes dropping the zeros
 sound; loopy's own resolution of the definition is by instruction
 dependencies, which are by array and not by cell, so it would accept the
-removal whatever the reads are.
+removal whatever the reads are. The program's own `definedness` fact counts
+the zeros as stored, since a program may read them as padding at a
+boundary (`typing.definedness_facts`, which lists the cells where it does);
+the substitution's does not, since there are no zeros left to read once the
+array is computed where it is read, and a program that reads its padding is
+refused with the cell.
 
 ## 22. After a fusion, dependencies drawn by array can leave loopy no order
 

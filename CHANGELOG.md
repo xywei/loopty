@@ -460,19 +460,23 @@ with a pair of statement instances.
   program makes with `Arr.zeros_like`, written by one call and read by a
   later one, is an internal edge of the program, and the program has a
   `definedness` fact for each call that reads it after another wrote it:
-  every cell the call reads, a call before it stored, so that the zeros the
-  array was made with reach none of its reads but through a call that adds
-  to a cell. The fact's term is the isl subset question between the two
-  sets of cells, for the isl oracle. A call that reads a cell no call before
-  it stored, and that it does not store itself, reads the zeros there, and
-  the fact is `refuted` by isl with that cell, as a kernel that writes one
-  cell twice has its `disjoint-writes` fact refuted: the program runs as
-  written, but the edge does not carry what is read, and the reason names
-  the fix, a producer that stores those cells too. A read or a write isl
-  cannot list (an index that is not affine, a guard it cannot state), or a
-  read of a cell the reading call stores itself, before the read or after
-  it, leaves the fact `assumed`, with the reason. The composition demo has
-  one row more, `decided`.
+  every cell the call reads is one a call before it stored, or one of the
+  zeros the array was made with, which the zeroing stored when the program
+  made it. The fact's term is the isl subset question between the two
+  sets of cells, for the isl oracle. Where the call reads zeros no call
+  stored, the statement says so (`... or one of the zeros f was made
+  with`) and the reason lists the cells (`shifted.S0 reads the zeros at
+  f[0] and f[n - 1]`), so zero padding at a boundary is read as the
+  program wrote it and `lanky check` passes; where it reads none, the
+  statement is the stricter one, every cell read was stored by a call
+  before it. Only a read of a cell that neither a call nor the zeroing
+  stored is `refuted`, with the cell, which isl never shows for an array
+  `Arr.zeros_like` made. A read isl cannot list (an index that is not
+  affine, a guard it cannot state) that may reach a cell no call stored
+  leaves the fact `assumed`, with the reason; a cell the reading call, or
+  a write isl cannot list, may have stored first is a zero or that value,
+  and the reason says so. The composition demo has one row more,
+  `decided`. A substitution keeps the stricter claim (below).
 - **Fusion as a checked cast** (#13). `Schedule.affine` takes maps per
   statement whose statements run in different loops, each taking its own
   loops to the same new ones, which is a fusion: `{ flux_S0[j] -> [j];
@@ -514,11 +518,15 @@ with a pair of statement instances.
   gets the value converted to the array's element type, as the store
   converted it (a `float32` intermediate rounds it); where that conversion
   would sit in a subscript, which loopy cannot simplify through, the kernel
-  is left unwritten with the reason. It is
+  is left unwritten with the reason, as for an index array computed in 64
+  bits and stored in a `Fin[m]` one's 32 (`(t[j] + 1) % n`), or a `Fin[m]`
+  entry stored in a `Nat` cell (#145). It is
   refused with a `ValueError` for a parameter, an array two statements
   write, or a producer that is not pointwise, and with an `IllegalCast` when
   a read is of a cell the producer does not store, or stores after the read
-  (the `definedness` fact of the step), or when something writes what the
+  (the `definedness` fact of the step, refuted with the cell: computed where
+  it is read, the array has no zeros, so a program that reads its zero
+  padding is not substituted), or when something writes what the
   producer read between its run and a read of what it stored (the
   `monotone` fact). The dependences of the dropped statements go, those of
   the producer's reads are carried over to the reads that replace them, and

@@ -523,7 +523,10 @@ and orders the two loops. The loops are not fused here: `fusion.py` fuses them,
 a cast over this term checked against that dependence, and this run is the
 reference it is compared with. The program also has a `definedness` fact:
 every cell of `f` that `divergence` reads, `flux` stored before it, so the
-zeros `f` was made with reach no read.
+zeros `f` was made with reach no read. A program that does read them, as
+padding at a boundary, has the fact decided too, stated with the zeros, and
+its reason lists the cells:
+`shifted.S0 reads the zeros at f[0] and f[n - 1]`.
 
 ### python examples/composition.py
 

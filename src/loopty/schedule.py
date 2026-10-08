@@ -3791,7 +3791,11 @@ class Schedule:
           before the read, so no read sees the zeros: the ``definedness``
           fact, decided by isl, or refuted with the cell, and the read, that
           shows otherwise, or assumed, and refused all the same, where a read
-          cannot be listed;
+          cannot be listed. That is a stricter claim than the program's own
+          ``definedness`` fact, which counts the zeros the array was made
+          with as stored (:func:`loopty.typing.definedness_facts`): a
+          program may read them as padding, and once the array is computed
+          where it is read there are none;
         * nothing writes what the statement read between its run and a
           read of what it stored, in the order the schedule has now: each
           dependence of the statement's reads is carried over to the reads
@@ -3967,12 +3971,13 @@ class Schedule:
         """The ``definedness`` fact of :meth:`substitute`, decided or refuted.
 
         Two questions about the reads of ``array``: are their cells cells
-        ``producer`` writes (:func:`loopty.flow.definedness`), and does any
-        read come before the write of its cell, a dependence from the read
-        to the producer, which would read the zeros. The first refutation is
-        the fact's. A read isl cannot list (an index that is not affine, a
-        guard it cannot state) leaves the first question open: the step is
-        refused all the same, and the fact is ``assumed``, not refuted.
+        ``producer`` writes (:func:`loopty.flow.definedness`, asked without
+        the zeros, which the substitution takes away), and does any read
+        come before the write of its cell, a dependence from the read to the
+        producer, which would read the zeros. The first refutation is the
+        fact's. A read isl cannot list (an index that is not affine, a guard
+        it cannot state) leaves the first question open: the step is refused
+        all the same, and the fact is ``assumed``, not refuted.
         """
         from loopty.flow import definedness
 

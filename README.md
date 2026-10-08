@@ -264,9 +264,10 @@ end to end; the edges are sharp.
 - Fusion, and the storage of what passes between calls. An array a
   program makes and one call writes and a later call reads is an internal
   edge, and the program has a `definedness` fact for it, decided by isl:
-  every cell the reader reads, a call before it stored, so the zeros the
-  array was made with reach no read but through a call that adds to a cell
-  (or `refuted`, with the cell where they do).
+  every cell the reader reads is one a call before it stored, or one of the
+  zeros the array was made with, which the fact's reason then lists
+  (`shifted.S0 reads the zeros at f[0] and f[n - 1]`), so zero padding at a
+  boundary is read as written and `lanky check` passes.
   `Schedule(program).fuse("flux", "divergence", shift=1)`
   runs the reader's loop inside the writer's, one step behind, and is
   `affine` with the map per statement it builds, `{ flux_S0[j] -> [j];
@@ -276,8 +277,9 @@ end to end; the edges are sharp.
   `.substitute("f")` then stores none of `f`: the one statement that writes
   it becomes a substitution rule (loopy's `assignment_to_subst`) computed
   again at every read, legal when every read is of a cell it stored before
-  the read and nothing writes what it read in between, and every later step
-  is checked against the dependences of the program as it then runs.
+  the read, since no zeros are left to read, and nothing writes what it
+  read in between, and every later step is checked against the
+  dependences of the program as it then runs.
   `examples/fusion.py` is the Burgers flux and divergence of
   `examples/composition.py`, fused, then substituted, each compiled run
   compared with the native one.
@@ -519,7 +521,11 @@ end to end; the edges are sharp.
   unbuildable. Only a pointwise
   producer is substituted (one cell per instance, at its loop variables, no
   sum, no guard isl cannot state), and the array is either stored in full
-  or not at all: contracting it to the cells live at once is not done. The
+  or not at all: contracting it to the cells live at once is not done. A
+  value its store converts, read in a subscript, leaves the kernel
+  unwritten, with the reason: loopy cannot simplify a subscript through the
+  cast, and an index array computed in 64 bits and stored in a `Fin[m]`
+  one's 32 (`(t[j] + 1) % n`) is converted (#145). The
   compiled program is one call, so the contract checks its arguments when it
   starts and not at every call. What a callee's contract checks of the cells
   of an array an earlier call wrote, or the program made (an element sort

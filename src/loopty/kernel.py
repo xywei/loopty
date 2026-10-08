@@ -766,10 +766,9 @@ class Program(_Decorated):
         ``monotone`` casts on them, as one of a kernel does. And before it
         too, a ``definedness`` fact for each array the program makes and
         each call that reads it after another call wrote it
-        (:func:`loopty.typing.definedness_facts`): whether the cells it
-        reads are cells stored before it, so that the zeros the array was
-        made with reach none of its reads, but through a call that added to
-        a cell.
+        (:func:`loopty.typing.definedness_facts`): whether each cell it
+        reads is one a call before it stored or one of the zeros the array
+        was made with, and, where it reads zeros no call stored, which.
         """
         if self._facts is not None:
             return self._facts

@@ -1147,6 +1147,11 @@ class Definedness:
     stores may have been stored before the read or after it. ``detail`` says
     which, in words, or names the cell. ``read`` and ``stored`` are the two
     sets of cells when ``ok`` is ``True``, the question isl answered.
+    ``zeros`` is the set of cells read that no writer stores, when the
+    question was given the statements that zeroed the array, which stored
+    them, and a read reaches one (``None`` otherwise); ``stored`` then
+    includes what the zeroing stored, and ``detail`` lists the cells each
+    reader reads the zeros at.
     """
 
     ok: bool | None
@@ -1156,6 +1161,7 @@ class Definedness:
     detail: str = ""
     read: Any = None
     stored: Any = None
+    zeros: Any = None
 
 
 def definedness(
@@ -1164,14 +1170,15 @@ def definedness(
     writers: Sequence[Stmt],
     readers: Sequence[Stmt],
     own: Sequence[Stmt] = (),
+    zeros: Sequence[Stmt] = (),
 ) -> Definedness:
     """Are the cells of ``array`` that ``readers`` read cells ``writers`` store?
 
     The question a program's intermediate is asked: its consumer reads only
-    cells its producer wrote, and the zeros it was made with reach no read
-    but through a write that adds to a cell (``f[j] += ...``); see
+    cells its producer wrote, or the zeros it was made with; see
     :func:`loopty.typing.definedness_facts`, and
-    :meth:`loopty.schedule.Schedule.substitute`, which asks it too. It is
+    :meth:`loopty.schedule.Schedule.substitute`, which asks it without the
+    zeros, since computing the array where it is read leaves none. It is
     an isl subset question between two sets of cells, the cells every read
     reaches, over the domain the read is made in (a guard's over the loops
     before the guard narrows them, a sum's over the sum's), and the cells
@@ -1187,12 +1194,28 @@ def definedness(
     is left out: wherever it is set, the program stops, and no statement
     after it runs, reader or writer.
 
+    ``zeros`` are the statements that zeroed the array where the program
+    made it (``f = Arr.zeros_like(u)``, see :mod:`loopty.compose`), before
+    any of ``writers`` ran. A cell they store counts as stored, and the
+    answer is ``True`` where a read reaches one that ``writers`` do not
+    store, with the cells in ``zeros`` of the answer and listed in its
+    ``detail`` (``shifted.S0 reads the zeros at f[0] and f[n - 1]``): a
+    program may mean them, as the boundary of a stencil, and the cells say
+    where it reads them. So the read has to be listed exactly, and one
+    that is over-approximated still leaves the answer ``None`` there. A
+    write that cannot be listed may have stored some of those cells, and
+    the detail says so. ``False`` is then a cell no writer stores and the
+    zeros do not either, which for an array ``Arr.zeros_like`` made, whose
+    zeroing stores every cell, isl never shows.
+
     ``own`` are the statements that store into the array in the call the
     readers belong to, which may store a cell before it is read there
     (``f[0] = ...``, then ``... f[0] ...``) or after. Whether they did is
     not asked: they count for nothing towards ``True``, and a cell they
     store, or may store, is no witness of ``False``, which is then a cell
     that nothing stores before the read, so that the read sees the zeros.
+    Given ``zeros``, such a cell holds the zeros or what they stored, and
+    the detail says that it is one or the other.
     """
     from lanky.terms import Comparison, Subscript, Var, render
 
@@ -1201,7 +1224,11 @@ def definedness(
     arrtype = term.array_types[array]
     names = dimension_names(len(arrtype.axes), _names_in(arrtype.axes))
     universe = cell_set(arrtype, names=names)
-    unknown: list[str] = []
+    #: What cannot be listed, in words: every read, and every write.
+    unlisted_reads: dict[str, list[str]] = {}
+    unlisted_writes: list[str] = []
+    #: The statements whose stores cannot be listed.
+    blind: list[str] = []
     flags = {
         render(Comparison(Subscript(Var(flag), 0), "==", 0)) for flag, _ in term.checks
     }
@@ -1211,6 +1238,14 @@ def definedness(
         return [
             conjunct for conjunct, _ in stmt.unnarrowed if conjunct not in flags
         ]
+
+    def unlisted(stmt: Stmt, writing: bool, why: str) -> None:
+        if writing:
+            unlisted_writes.append(why)
+            if stmt.id not in blind:
+                blind.append(stmt.id)
+        else:
+            unlisted_reads.setdefault(stmt.id, []).append(why)
 
     def cells(stmt: Stmt, kinds: tuple[str, ...], writing: bool) -> isl.Set | None:
         out: isl.Set | None = None
@@ -1222,17 +1257,21 @@ def definedness(
                     expr_text(index, None, None)
             except NonAffine:
                 shown = ", ".join(str(index) for index in indices)
-                unknown.append(
+                unlisted(
+                    stmt,
+                    writing,
                     f"{stmt.id} {'stores' if writing else 'reads'} {array}[{shown}], "
-                    "whose index is not affine"
+                    "whose index is not affine",
                 )
                 if writing:
                     continue
             guard = unstated(stmt)
             if guard:
-                unknown.append(
+                unlisted(
+                    stmt,
+                    writing,
                     f"{stmt.id} {'stores' if writing else 'reads'} {array} under a "
-                    f"guard isl cannot state ({', '.join(guard)})"
+                    f"guard isl cannot state ({', '.join(guard)})",
                 )
                 if writing:
                     continue
@@ -1241,43 +1280,59 @@ def definedness(
                 reached = reached.set_dim_name(isl.dim_type.set, k, dim)
             reached = _align(reached, universe.get_space())
             reached = reached.intersect(_align(universe, reached.get_space()))
-            out = reached if out is None else _align(out, reached.get_space()).union(
-                _align(reached, out.get_space())
-            )
+            out = reached if out is None else _union(out, reached)
         return out
 
-    stored = universe.subtract(universe)
-    for stmt in writers:
-        found = cells(stmt, ("write", "acc"), writing=True)
-        if found is not None:
-            stored = _align(stored, found.get_space()).union(
-                _align(found, stored.get_space())
-            )
+    def stores(stmts: Sequence[Stmt]) -> isl.Set:
+        out = universe.subtract(universe)
+        for stmt in stmts:
+            found = cells(stmt, ("write", "acc"), writing=True)
+            if found is not None:
+                out = _union(out, found)
+        return out
+
+    stored = stores(writers)
     who = " and ".join(stmt.id for stmt in writers)
     # What the readers' own call stores, which may come before a read: no
     # witness of a cell nothing stored. One of them that cannot be listed
     # leaves every cell outside the stored ones unknown.
-    theirs = universe.subtract(universe)
-    for stmt in own:
-        found = cells(stmt, ("write", "acc"), writing=True)
-        if found is not None:
-            theirs = _align(theirs, found.get_space()).union(
-                _align(found, theirs.get_space())
-            )
+    theirs = stores(own)
+    zeroed = stores(zeros)
+    mine = " or ".join(other.id for other in own)
     read = universe.subtract(universe)
+    seen: list[tuple[Stmt, isl.Set]] = []
     for stmt in readers:
         found = cells(stmt, ("read", "acc"), writing=False)
         if found is None:
             continue
-        read = _align(read, found.get_space()).union(_align(found, read.get_space()))
+        read = _union(read, found)
         outside = found.subtract(_align(stored, found.get_space()))
         if outside.is_empty():
             continue
+        # Given the zeros, a cell outside the stored ones is a zero or what a
+        # write isl cannot list stored, both defined, and only a read listed
+        # wider than it is made leaves the cells it reads them at unknown.
+        unknown = (
+            unlisted_reads.get(stmt.id, [])
+            if zeros
+            else [
+                *(why for whys in unlisted_reads.values() for why in whys),
+                *unlisted_writes,
+            ]
+        )
         if unknown:
             return Definedness(None, detail="; ".join(dict.fromkeys(unknown)))
         unstored = outside.subtract(_align(theirs, outside.get_space()))
-        if unstored.is_empty():
-            mine = " or ".join(other.id for other in own)
+        if zeros:
+            unstored = unstored.subtract(_align(zeroed, unstored.get_space()))
+            if unstored.is_empty():
+                seen.append((stmt, outside))
+                continue
+            if unlisted_writes:
+                return Definedness(
+                    None, detail="; ".join(dict.fromkeys(unlisted_writes))
+                )
+        elif unstored.is_empty():
             return Definedness(
                 None,
                 detail=(
@@ -1286,19 +1341,7 @@ def definedness(
                     "is not asked"
                 ),
             )
-        outside = unstored
-        point = outside.sample_point()
-        witness = tuple(
-            point.get_coordinate_val(isl.dim_type.set, k).to_python()
-            for k in range(outside.dim(isl.dim_type.set))
-        )
-        parameters = tuple(
-            (
-                outside.get_dim_name(isl.dim_type.param, k),
-                point.get_coordinate_val(isl.dim_type.param, k).to_python(),
-            )
-            for k in range(outside.dim(isl.dim_type.param))
-        )
+        witness, parameters = _sampled(unstored)
         at = ", ".join(f"{name}={value}" for name, value in parameters)
         cell = ", ".join(str(value) for value in witness)
         return Definedness(
@@ -1308,13 +1351,43 @@ def definedness(
             reader=stmt.id,
             detail=(
                 f"{stmt.id} reads {array}[{cell}], which {who} does not store"
-                + (
-                    f", nor {' or '.join(other.id for other in own)}"
-                    if own
-                    else ""
-                )
+                + (f", nor {mine}" if own else "")
+                + (f", nor the zeros {array} was made with" if zeros else "")
                 + (f" (at {at})" if at else "")
             ),
+        )
+    if seen:
+        parts: list[str] = []
+        for stmt, outside in seen:
+            certain = outside.subtract(_align(theirs, outside.get_space()))
+            maybe = outside.intersect(_align(theirs, outside.get_space()))
+            if not certain.is_empty():
+                parts.append(
+                    f"{stmt.id} reads the zeros at "
+                    f"{cells_text(certain, array, universe)}"
+                    + (
+                        f", unless {' or '.join(blind)} stored them, which isl "
+                        "cannot list"
+                        if blind
+                        else ""
+                    )
+                )
+            if not maybe.is_empty():
+                first = " or ".join(dict.fromkeys([*blind, *(o.id for o in own)]))
+                parts.append(
+                    f"{stmt.id} reads {cells_text(maybe, array, universe)}, the "
+                    f"zeros there unless {first} stored them before the read, "
+                    "which is not asked"
+                )
+        found_zeros = universe.subtract(universe)
+        for _stmt, outside in seen:
+            found_zeros = _union(found_zeros, outside)
+        return Definedness(
+            True,
+            detail="; ".join(parts),
+            read=read.coalesce(),
+            stored=_union(_align(stored, read.get_space()), zeroed).coalesce(),
+            zeros=found_zeros.coalesce(),
         )
     return Definedness(
         True,
@@ -1322,6 +1395,193 @@ def definedness(
         read=read.coalesce(),
         stored=_align(stored, read.get_space()).coalesce(),
     )
+
+
+def _union(first: isl.Set, second: isl.Set) -> isl.Set:
+    """The union of two sets of cells, over the parameters of both."""
+    return _align(first, second.get_space()).union(_align(second, first.get_space()))
+
+
+def _sampled(cells: isl.Set) -> tuple[tuple[int, ...], tuple[tuple[str, int], ...]]:
+    """One cell of a non-empty set, and the sizes it is one at, sampled once."""
+    point = cells.sample_point()
+    witness = tuple(
+        point.get_coordinate_val(isl.dim_type.set, k).to_python()
+        for k in range(cells.dim(isl.dim_type.set))
+    )
+    parameters = tuple(
+        (
+            cells.get_dim_name(isl.dim_type.param, k),
+            point.get_coordinate_val(isl.dim_type.param, k).to_python(),
+        )
+        for k in range(cells.dim(isl.dim_type.param))
+    )
+    return witness, parameters
+
+
+def cells_text(cells: isl.Set, array: str, within: isl.Set | None = None) -> str:
+    """The cells of ``array`` in ``cells``, in words: ``f[0] and f[n - 1]``.
+
+    Each piece of the set is one cell where the sizes fix its coordinates
+    (``f[n - 1]``), and the cells of a range otherwise, named by the set's
+    dimensions (``f[a0] for 2 <= a0 <= n - 1, 2*a0 >= n``). A condition on
+    the sizes alone is said (``f[0] when n >= 5``), unless ``within``, the
+    cells the array has, leaves the same cells out without it: ``f[n - 1]``
+    is the last cell for every size the array has one. A piece isl writes
+    with a quotient or a remainder is given in isl's own words.
+    """
+    pieces = cells.coalesce().get_basic_sets()
+    rendered = [_piece_text(piece, array) for piece in pieces]
+    if not pieces or any(text is None for text in rendered):
+        return f"the cells {cells} of {array}"
+    shown = [text for text in rendered if text is not None]
+    drop = False
+    if within is not None:
+        loose = cells.subtract(cells)
+        for _cell, _when, piece in shown:
+            loose = _union(loose, isl.Set.from_basic_set(piece))
+        loose = loose.intersect(_align(within, loose.get_space()))
+        drop = bool(loose.is_equal(_align(cells, loose.get_space())))
+    texts = [
+        cell + ("" if drop or not when else f" when {', '.join(when)}")
+        for cell, when, _piece in shown
+    ]
+    if len(texts) == 1:
+        return texts[0]
+    if all(" for " not in text and " when " not in text for text in texts):
+        return ", ".join(texts[:-1]) + f" and {texts[-1]}"
+    return "; ".join(texts)
+
+
+def _piece_text(
+    piece: isl.BasicSet, array: str
+) -> tuple[str, list[str], isl.BasicSet] | None:
+    """One piece of :func:`cells_text`: the cells, the conditions on the sizes
+    alone, and the piece without those, or ``None`` where isl needs a quotient."""
+    if piece.dim(isl.dim_type.div):
+        return None
+    dims = [
+        piece.get_dim_name(isl.dim_type.set, k)
+        for k in range(piece.dim(isl.dim_type.set))
+    ]
+    params = [
+        piece.get_dim_name(isl.dim_type.param, k)
+        for k in range(piece.dim(isl.dim_type.param))
+    ]
+    fixed: dict[int, str] = {}
+    ranges: list[tuple[list[tuple[str, int]], list[tuple[str, int]], int, bool]] = []
+    when: list[str] = []
+    loose = isl.BasicSet.universe(piece.get_space())
+    for constraint in piece.get_constraints():
+        on = [
+            (
+                dims[k],
+                int(constraint.get_coefficient_val(isl.dim_type.set, k).to_python()),
+            )
+            for k in range(len(dims))
+        ]
+        on = [(name, coefficient) for name, coefficient in on if coefficient]
+        by = [
+            (
+                params[k],
+                int(constraint.get_coefficient_val(isl.dim_type.param, k).to_python()),
+            )
+            for k in range(len(params))
+        ]
+        by = [(name, coefficient) for name, coefficient in by if coefficient]
+        constant = int(constraint.get_constant_val().to_python())
+        equality = bool(constraint.is_equality())
+        if not on and not by:
+            if constant < 0 or (equality and constant):
+                return None
+            continue
+        if not on:
+            when.append(_constraint_text(by, [], constant, equality))
+            continue
+        loose = loose.add_constraint(constraint)
+        if equality and len(on) == 1 and abs(on[0][1]) == 1:
+            k = dims.index(on[0][0])
+            if k not in fixed:
+                sign = on[0][1]
+                fixed[k] = _affine_text(
+                    [(name, -sign * value) for name, value in by], -sign * constant
+                )
+                continue
+        ranges.append((on, by, constant, equality))
+    for on, _by, _constant, _equality in ranges:
+        if any(dims.index(name) in fixed for name, _ in on):
+            return None
+    cell = f"{array}[{', '.join(fixed.get(k, dim) for k, dim in enumerate(dims))}]"
+    if ranges:
+        cell += " for " + ", ".join(_ranges_text(ranges))
+    return cell, when, loose
+
+
+def _ranges_text(
+    ranges: Sequence[tuple[list[tuple[str, int]], list[tuple[str, int]], int, bool]],
+) -> list[str]:
+    """The constraints of a piece on its dimensions, a lower and an upper
+    bound of one expression written as one range (``2 <= a0 <= n - 1``)."""
+    bounds: dict[tuple, list[list[str]]] = {}
+    texts: list[str] = []
+    for on, by, constant, equality in ranges:
+        if equality:
+            texts.append(_constraint_text(on, by, constant, True))
+            continue
+        sign = 1 if on[0][1] > 0 else -1
+        key = tuple((name, sign * value) for name, value in on)
+        rest = _affine_text(
+            [(name, -sign * value) for name, value in by], -sign * constant
+        )
+        lower, upper = bounds.setdefault(key, [[], []])
+        # sign * (on + by + constant) >= 0 when sign is 1, and <= 0 otherwise.
+        (lower if sign > 0 else upper).append(rest)
+    for key, (lower, upper) in bounds.items():
+        middle = _affine_text(list(key), 0)
+        if len(lower) == 1 and len(upper) == 1:
+            texts.append(f"{lower[0]} <= {middle} <= {upper[0]}")
+            continue
+        texts.extend(f"{middle} >= {bound}" for bound in lower)
+        texts.extend(f"{middle} <= {bound}" for bound in upper)
+    return texts
+
+
+def _constraint_text(
+    on: Sequence[tuple[str, int]],
+    by: Sequence[tuple[str, int]],
+    constant: int,
+    equality: bool,
+) -> str:
+    """``on + by + constant >= 0`` (or ``= 0``), ``on`` on the left with its
+    first coefficient positive: ``a0 <= n - 1``; with no ``on``, ``by`` is
+    on the left: ``n >= 3``."""
+    left_terms = list(on) if on else list(by)
+    right_terms = list(by) if on else []
+    sign = 1 if left_terms[0][1] > 0 else -1
+    left = _affine_text([(name, sign * value) for name, value in left_terms], 0)
+    right = _affine_text(
+        [(name, -sign * value) for name, value in right_terms], -sign * constant
+    )
+    relation = "=" if equality else (">=" if sign > 0 else "<=")
+    return f"{left} {relation} {right}"
+
+
+def _affine_text(terms: Sequence[tuple[str, int]], constant: int) -> str:
+    """``n - 1``, ``2*a0``, ``0``: an affine expression as loopty prints one."""
+    parts: list[str] = []
+    for name, value in terms:
+        if not value:
+            continue
+        body = name if abs(value) == 1 else f"{abs(value)}*{name}"
+        if not parts:
+            parts.append(body if value > 0 else f"-{body}")
+        else:
+            parts.append(f"+ {body}" if value > 0 else f"- {body}")
+    if not parts:
+        return str(constant)
+    if constant:
+        parts.append(f"+ {constant}" if constant > 0 else f"- {-constant}")
+    return " ".join(parts)
 
 
 # }}}

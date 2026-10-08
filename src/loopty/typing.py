@@ -1464,30 +1464,37 @@ def definedness_facts(
     writes and a later call reads is an internal edge of the program: the
     writer produces it, the reader consumes it, and nobody outside sees it.
     For each call that reads such an array after some call wrote it, one
-    fact asks the question :func:`loopty.flow.definedness` answers: are the
-    cells it reads cells the calls before it stored? Then the zeros the
-    program made the array with reach none of its reads, but through a call
-    that added to a cell (``f[j] += ...``) rather than storing it, and the
-    array is whatever the producers made of it, which is what lets a
-    schedule compute it where it is read instead
-    (:meth:`loopty.schedule.Schedule.substitute`, which takes a producer
-    that stores).
+    fact asks the question :func:`loopty.flow.definedness` answers: is each
+    cell it reads one the calls before it stored, or one of the zeros the
+    program made the array with? The zeroing stores every cell when the
+    program makes the array, so the zeros are stored as much as anything a
+    call stores, and a program may mean them: zero padding at a boundary
+    is read as the program wrote it, natively and compiled.
 
     When isl shows it, the fact is the subset question, for the isl oracle
-    to decide. When isl shows a cell the call reads that no call before it
-    stored and that the call does not store itself, the read sees the zeros
-    there, and the fact is ``refuted`` by isl with that cell, as a kernel
-    that writes one cell twice has its ``disjoint-writes`` fact refuted:
-    the program runs as written, natively and compiled, but the edge does
-    not carry what is read, and the producer that stores those cells, zeros
-    included, is what makes it. When a read or a write is not affine, or is
-    made under a guard isl cannot state, it stays ``assumed``, with the
-    reason: such a read is listed where it may not be made, so a cell it
-    seems to read is no cell it is shown to read. So does a read of a cell
-    the call stores itself, before the read or after it, which is not asked.
-    The flags of the checked points, which the program's own statements set,
-    are no edge, and the guard they put on every later statement is no such
-    guard, since no statement runs where one is set.
+    to decide. Where a call reads zeros no call before it stored, the fact
+    says so in its statement (``... or one of the zeros f was made with``),
+    and its reason lists the cells (``shifted.S0 reads the zeros at f[0] and
+    f[n - 1]``), so the ledger shows where the zeros are read and a reader
+    of it can tell padding that is meant from a producer that stores too
+    little. Where no call does, the statement is the stricter one, every
+    cell read was stored by a call before it, which is what lets a schedule
+    compute the array where it is read instead
+    (:meth:`loopty.schedule.Schedule.substitute`, whose own ``definedness``
+    fact keeps that claim, since the zeros would not be there). It is
+    ``refuted`` by isl only for a cell the call reads that neither a call
+    before it nor the zeroing stored, and that the call does not store
+    itself, which for an array ``Arr.zeros_like`` made isl never shows.
+    When a read is not affine, or is made under a guard isl cannot state,
+    and may reach a cell no call stored, the fact stays ``assumed``, with
+    the reason: such a read is listed where it may not be made, so the
+    cells it is listed at are not cells it is shown to read the zeros at.
+    A cell a write isl cannot list, or the reading call itself, may have
+    stored before the read is a zero or what that write stored, and the
+    reason says it is one or the other. The flags of the checked points,
+    which the program's own statements set, are no edge, and the guard they
+    put on every later statement is no such guard, since no statement runs
+    where one is set.
     """
     flags = dict(term.checks)
     facts: list[Fact] = []
@@ -1540,9 +1547,12 @@ def _definedness_fact(
 
     ``own`` are the call's statements that store into the array, whose
     cells may have been stored before the call reads them (see
-    :func:`loopty.flow.definedness`).
+    :func:`loopty.flow.definedness`). The statement that zeroes the array
+    where the program made it, ``f.zeros``, stores every cell before any
+    call runs.
     """
-    verdict = flow.definedness(term, array, writers, reading, own)
+    zeros = [stmt for stmt in term.stmts if stmt.id == f"{array}.zeros"]
+    verdict = flow.definedness(term, array, writers, reading, own, zeros)
     stored_by = " or ".join(calls)
     provenance: dict[str, Any] = {
         "array": array,
@@ -1556,6 +1566,16 @@ def _definedness_fact(
     )
     if verdict.ok is True:
         dims = term.array_types[array].ndim
+        description = (
+            f"cells of {array} that {scope.call} reads are cells {stored_by} stored"
+        )
+        if verdict.zeros is not None:
+            statement = (
+                f"every cell of {array} that {scope.call} reads is one {stored_by} "
+                f"stored before it or one of the zeros {array} was made with"
+            )
+            description += f" or zeros {array} was made with"
+            provenance["reason"] = verdict.detail
         return Fact(
             id=identifier,
             kind="definedness",
@@ -1563,8 +1583,7 @@ def _definedness_fact(
             term=Subset(
                 verdict.read,
                 verdict.stored,
-                f"cells of {array} that {scope.call} reads are cells {stored_by} "
-                "stored",
+                description,
                 tuple(f"a{k}" for k in range(dims)),
             ),
             status=Status.ASSUMED,
@@ -1579,11 +1598,8 @@ def _definedness_fact(
         provenance["witness_text"] = f"{array}[{cell}]" + (f" at {at}" if at else "")
         provenance["witness_params"] = dict(verdict.parameters)
         provenance["reason"] = (
-            f"{verdict.detail}, so the read sees the zeros {array} was made "
-            f"with. The program runs so, natively and compiled, but {array} "
-            f"does not carry {stored_by}'s values there: have {stored_by} "
-            f"store every cell {scope.call} reads, zeros included where they "
-            "are meant"
+            f"{verdict.detail}, so the read is of a cell nothing stored before "
+            f"it: have {stored_by} store every cell {scope.call} reads"
         )
         return Fact(
             id=identifier,

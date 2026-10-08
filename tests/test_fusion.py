@@ -5,9 +5,9 @@ and lowers to one kernel whose loops follow one another. Three things are
 built on that here:
 
 * a ``definedness`` fact for each array the program makes and each call that
-  reads it after another call wrote it, decided by isl: the cells it reads
-  are cells stored before it, so the zeros the array was made with reach
-  none of its reads;
+  reads it after another call wrote it, decided by isl: each cell it reads
+  is one a call before it stored or one of the zeros the array was made
+  with, and the fact says where it reads the zeros;
 * :meth:`Schedule.fuse`, a map per statement that runs the consumer's loops
   in the producer's, checked as every cast is, and refused with the pair of
   instances that it would run backwards;
@@ -577,6 +577,62 @@ def narrowed(t, w, x, y):
     scatter_narrow(p, w, x, y)
 
 
+@kernel
+def rotate(t: Arr[Fin[n], Fin[n]], p: Arr[Fin[n], Fin[n]]):  # noqa: F821
+    """Each index of ``t``, one further round."""
+    for j in p.dom:
+        p[j] = (t[j] + 1) % p.dom.size
+
+
+@program
+def rotated(t, x, y):
+    """An index array computed in 64 bits and stored in 32, then read through."""
+    p = Arr.zeros_like(t)
+    rotate(t, p)
+    gather(p, x, y)
+
+
+@kernel
+def widen(t: Arr[Fin[n], Fin[n]], q: Arr[Fin[n], Nat]):  # noqa: F821
+    """A copy of an index array, in whole numbers."""
+    for j in q.dom:
+        q[j] = t[j]
+
+
+@kernel
+def gather_whole(
+    q: Arr[Fin[n], Nat],  # noqa: F821
+    x: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """Each cell of ``x`` that ``q`` names."""
+    for i in y.dom:
+        y[i] = x[q[i]]
+
+
+@program
+def widened(t, x, y):
+    """An index array computed in 32 bits and stored in 64, then read through."""
+    q = Arr.zeros_like(t)
+    widen(t, q)
+    gather_whole(q, x, y)
+
+
+@kernel
+def reverse_into(p: Arr[Fin[n], Fin[n]]):  # noqa: F821
+    """The indices in reverse."""
+    for j in p.dom:
+        p[j] = p.dom.size - 1 - j
+
+
+@program
+def reversed_scatter(x, y):
+    """An index array computed in the 32 bits it is stored in."""
+    p = Arr.zeros_like(x, dtype=np.int32)
+    reverse_into(p)
+    scatter(p, x, y)
+
+
 def velocity(size: int) -> np.ndarray:
     return np.sin(np.linspace(0.0, 2.0 * np.pi, size, endpoint=False)) + 0.3
 
@@ -617,57 +673,127 @@ def test_the_consumer_reads_only_cells_the_producer_stored() -> None:
     assert fact.id.endswith(":f:divergence")
 
 
-def test_a_consumer_that_reads_the_zeros_is_refuted_with_the_cell() -> None:
+def test_a_consumer_that_reads_the_zeros_is_decided_with_the_cells() -> None:
     # shifted reads every cell, and interior_flux stores the inside ones: the
-    # boundary cells hold the zeros f was made with when they are read. The
-    # program runs so, but the edge does not carry them, and the fact is
-    # refuted with a boundary cell, as a kernel that writes a cell twice has
-    # its disjoint-writes fact refuted.
+    # boundary cells hold the zeros f was made with when they are read, which
+    # the zeroing stored when the program made f. Zero padding at a boundary
+    # is meant, so the fact is decided, and says where the zeros are read.
     (fact,) = definedness(padded)
-    assert fact.status is Status.REFUTED
-    assert fact.decided_by == "isl"
     assert fact.statement == (
-        "every cell of f that shifted reads, interior_flux stored before it"
+        "every cell of f that shifted reads is one interior_flux stored before "
+        "it or one of the zeros f was made with"
     )
-    (cell,) = fact.provenance["witness"]
-    size = fact.provenance["witness_params"]["n"]
-    assert cell in (0, size - 1)
-    assert fact.provenance["witness_text"] == f"f[{cell}] at n={size}"
-    reason = fact.provenance["reason"]
-    assert reason.startswith(f"shifted.S0 reads f[{cell}], which interior_flux.S0 ")
-    assert "sees the zeros f was made with" in reason
-    assert "have interior_flux store every cell shifted reads" in reason
-    # Both of the halves an edge can go wrong at are refuted.
-    (back_half,) = definedness(between)[1:]
-    assert back_half.provenance["array"] == "h"
-    assert back_half.status is Status.REFUTED
+    reason = "shifted.S0 reads the zeros at f[0] and f[n - 1]"
+    assert fact.provenance["reason"] == reason
+    decided = IslOracle().establish(fact)
+    assert decided.status is Status.DECIDED
+    assert decided.decided_by == "isl"
+    assert decided.provenance["reason"] == reason
+    # front stores the front half of h and back reads the back half, all
+    # zeros; f, which flux stores in full, is read by front with no zero.
+    front_half, back_half = definedness(between)
+    assert front_half.statement == (
+        "every cell of f that front reads, flux stored before it"
+    )
+    assert "reason" not in front_half.provenance
+    assert back_half.provenance["reason"] == (
+        "back.S0 reads the zeros at h[a0] for a0 <= n - 1, 2*a0 >= n"
+    )
+    # halved_flux stores the first half of f, and divergence reads the rest.
+    (top,) = definedness(halved)
+    assert top.provenance["reason"] == (
+        "divergence.S0 reads the zeros at f[a0] for 2 <= a0 <= n - 1, 2*a0 >= n"
+    )
+    for fact in (front_half, back_half, top):
+        assert IslOracle().establish(fact).status is Status.DECIDED
 
 
-def test_a_cell_the_reader_stores_itself_is_no_witness() -> None:
+PADDED = """
+from __future__ import annotations
+
+from lanky.prelude import Real
+
+from loopty import Arr, Fin, kernel, program, when
+
+
+@kernel
+def interior_flux(u: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):
+    for j in u.dom:
+        with when((j > 0) & (j + 1 < u.dom.size)):
+            f[j] = 0.5 * u[j] * u[j]
+
+
+@kernel
+def shifted(f: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
+    for i in y.dom:
+        y[i] = f[i] + 1.0
+
+
+@program
+def padded(u, y):
+    f = Arr.zeros_like(u)
+    interior_flux(u, f)
+    shifted(f, y)
+"""
+
+
+def test_lanky_check_passes_a_program_that_reads_its_zero_padding(
+    tmp_path, capsys
+) -> None:
+    from lanky.cli import main as lanky_main
+
+    path = tmp_path / "padding.py"
+    path.write_text(PADDED, encoding="utf-8")
+    assert lanky_main(["check", str(path)]) == 0
+    rows = capsys.readouterr().out.splitlines()
+    (row,) = [line for line in rows if "every cell of f that shifted reads" in line]
+    assert row.split()[:2] == ["decided", "isl"]
+    assert not [line for line in rows if line.startswith("REFUTED")]
+
+
+def test_the_cells_a_reason_lists_are_written_out() -> None:
+    from loopty.flow import cells_text
+
+    within = isl.Set("[n] -> { [a0] : 0 <= a0 < n }")
+    # f[n - 1] is f[0] at n = 1, so the condition n >= 2 says nothing more.
+    ends = isl.Set("[n] -> { [a0] : n >= 1 and (a0 = 0 or a0 = n - 1) }")
+    assert cells_text(ends, "f", within) == "f[0] and f[n - 1]"
+    late = isl.Set("[n] -> { [a0] : a0 = 0 and n >= 5 }")
+    assert cells_text(late, "f", within) == "f[0] when n >= 5"
+    row = isl.Set("[m, n] -> { [a0, a1] : a0 = n - 1 and 0 <= a1 < m }")
+    assert cells_text(row, "g") == "g[n - 1, a1] for 0 <= a1 <= m - 1"
+    # A piece isl writes with a remainder is given in isl's words.
+    even = isl.Set("[n] -> { [a0] : 0 <= a0 < n and a0 mod 2 = 0 }")
+    assert cells_text(even, "f", within).startswith("the cells [n] -> {")
+
+
+def test_a_cell_the_reader_stores_itself_is_a_zero_or_its_own() -> None:
     # bounded stores f's first and last cells and then reads every cell:
     # interior_flux stored the others, and whether bounded stored its own
-    # before it read them is not asked, so the fact stays assumed. Storing
-    # only the first, the last cell is read unstored by anyone: refuted there.
+    # before it read them is not asked. Either way the read is of a zero or
+    # of what bounded stored, and the reason says it is one or the other.
     (fact,) = definedness(edged)
-    assert fact.status is Status.ASSUMED
-    assert fact.term is None
+    assert IslOracle().establish(fact).status is Status.DECIDED
     assert fact.provenance["reason"] == (
-        "bounded.S2 reads cells of f that interior_flux.S0 does not store and "
-        "that bounded.S0 or bounded.S1 stores, before the read or after it, "
-        "which is not asked"
+        "bounded.S2 reads f[0] and f[n - 1], the zeros there unless bounded.S0 "
+        "or bounded.S1 stored them before the read, which is not asked"
     )
+    # Storing only the first, the last cell is a zero nobody stored, at
+    # every size it is not the first.
     (fact,) = definedness(half_edged)
-    assert fact.status is Status.REFUTED
-    (cell,) = fact.provenance["witness"]
-    assert cell == fact.provenance["witness_params"]["n"] - 1
-    assert "nor first_edge.S0" in fact.provenance["reason"]
+    assert IslOracle().establish(fact).status is Status.DECIDED
+    assert fact.provenance["reason"] == (
+        "first_edge.S1 reads the zeros at f[n - 1] when n >= 2; first_edge.S1 "
+        "reads f[0], the zeros there unless first_edge.S0 stored them before "
+        "the read, which is not asked"
+    )
 
 
 def test_a_read_under_a_guard_isl_cannot_state_is_not_shown_to_see_zeros() -> None:
     # masked reads f[i] only where m[i] > 0.5, which mark sets inside, where
     # interior_flux stores f: no zero reaches a write. Its read is listed
-    # over every i, so a cell outside is only one it may read, and the fact
-    # stays assumed, where it was once decided as reading f[0]. Its guard's
+    # over every i, so a cell outside is only one it may read, not one it is
+    # shown to read the zeros at, and the fact stays assumed. Its guard's
     # read of m is listed over every i as well, under that same guard.
     facts = {fact.provenance["array"]: fact for fact in definedness(marked)}
     for array in ("f", "m"):
@@ -1054,14 +1180,27 @@ def test_a_substitution_drops_the_dependences_through_the_array() -> None:
 
 
 def test_a_read_of_a_cell_the_producer_does_not_store_is_refused() -> None:
+    # The program reads the zeros at f's boundary, which its definedness fact
+    # decides; computed where it is read, f would have no zeros to read, so
+    # the substitution's own fact keeps the stricter claim and is refuted.
     with pytest.raises(IllegalCast) as caught:
         Schedule(padded).substitute("f")
     fact = caught.value.fact
     assert (fact.kind, fact.status) == ("definedness", Status.REFUTED)
+    assert fact.statement == (
+        "every cell of f that padded reads, interior_flux.S0 has stored by the "
+        "time it is read"
+    )
     message = str(caught.value)
     assert message.startswith("substitute('f') illegal: shifted.S0 reads f[")
     assert "which interior_flux.S0 does not store" in message
     assert "would see the zeros" in message
+    assert len(fact.provenance["witness"]) == 1
+    (program_fact,) = definedness(padded)
+    assert IslOracle().establish(program_fact).status is Status.DECIDED
+    # The same for h, whose back half back reads and front leaves zero.
+    with pytest.raises(IllegalCast, match="back.S0 reads h\\["):
+        Schedule(between).substitute("h")
 
 
 def test_a_read_isl_cannot_list_refuses_the_substitution_undecided() -> None:
@@ -1256,6 +1395,38 @@ def test_an_index_array_is_substituted_into_the_subscripts_it_is_read_in() -> No
                 "x": Arr.from_numpy(np.arange(size) + 0.5),
                 "y": Arr.zeros(size),
             },
+        )
+
+
+def test_an_index_computed_in_other_bits_than_its_store_is_left_unwritten() -> None:
+    # Nat and Int are stored in 64 bits and Fin[m] in 32 (#101), and a sum
+    # with a Fin[m] entry is computed in 64: (t[j] + 1) % n is converted by
+    # its Fin[n] store, and a Fin[n] entry by a Nat one. Read in a subscript,
+    # the conversion is one loopy cannot simplify through, so each
+    # substitution is decided and its kernel is not written, with the reason.
+    for prog, array, reader, computed, stored in (
+        (rotated, "p", "gather.S0", "int64", "int32"),
+        (widened, "q", "gather_whole.S0", "int32", "int64"),
+    ):
+        schedule = Schedule(prog).substitute(array)
+        assert [fact.status.value for fact in schedule.facts()][:3] == [
+            "decided"
+        ] * 3
+        assert schedule.buildable == (
+            False,
+            f"the value {array} is computed from is {computed}, which storing it "
+            f"as {stored} converts, and {reader} reads {array} in a subscript, "
+            "which loopy cannot simplify through that conversion; keep it stored",
+        )
+    # Computed from the loop variable and the size, in the 32 bits of its
+    # store, the index needs no conversion, and is substituted.
+    schedule = Schedule(reversed_scatter).substitute("p")
+    assert schedule.buildable == (True, "")
+    for size in (1, 4, 7):
+        agrees(
+            reversed_scatter,
+            schedule,
+            {"x": Arr.from_numpy(np.arange(size) + 0.5), "y": Arr.zeros(size)},
         )
 
 
