@@ -2751,8 +2751,9 @@ def _numpy_valued(expr: Any, params: Mapping[str, Any]) -> bool:
 
     An array's element is one, and so is a scalar of a sort with a native
     storage, which :func:`loopty.contract.native_scalar` makes a numpy scalar
-    however the caller passed it (#102); and so is arithmetic, a comparison
-    or a connective with an operand that is one. A loop variable, a size and
+    however the caller passed it (#102); and so is arithmetic, ``^``, ``<<``
+    and ``>>`` included, a comparison or a connective with an operand that is
+    one. A loop variable, a size and
     a Python literal are Python numbers. Anything else (a sum, which Python's
     ``sum`` makes ``0`` over no terms, a call, a quantifier) is not asked,
     and counts as possibly a Python number.
@@ -2775,12 +2776,17 @@ def _numpy_valued(expr: Any, params: Mapping[str, Any]) -> bool:
             and not isinstance(sort, ArrType)
             and native_storage(sort) is not None
         )
-    if isinstance(expr, prim.Sum | prim.Product | prim.LogicalAnd | prim.LogicalOr):
+    if isinstance(
+        expr,
+        prim.Sum | prim.Product | prim.BitwiseXor | prim.LogicalAnd | prim.LogicalOr,
+    ):
         operands: tuple[Any, ...] = tuple(expr.children)
     elif isinstance(expr, prim.Quotient | prim.FloorDiv | prim.Remainder):
         operands = (expr.numerator, expr.denominator)
     elif isinstance(expr, prim.Power):
         operands = (expr.base, expr.exponent)
+    elif isinstance(expr, prim.LeftShift | prim.RightShift):
+        operands = (expr.shiftee, expr.shift)
     elif isinstance(expr, prim.Comparison):
         operands = (expr.left, expr.right)
     elif isinstance(expr, prim.LogicalNot):

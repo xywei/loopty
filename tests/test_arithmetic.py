@@ -1443,29 +1443,34 @@ def bits_compared(
     y: Arr[Fin[n], Real],  # noqa: F821
     z: Arr[Fin[n], Real],  # noqa: F821
     w: Arr[Fin[n], Real],  # noqa: F821
+    v: Arr[Fin[n], Real],  # noqa: F821
 ):
-    """``^``, ``<<`` and ``>>`` compared, in a guard and as a number."""
+    """``^``, ``<<`` and ``>>`` compared, in a guard, as a number and under ``~``."""
     for i in k.dom:
         with when((k[i] ^ 1) == 0):
             y[i] = 1.0
         z[i] = ((k[i] << 1) != 4) * 1.0 + ((k[i] >> 1) > 1) * 2.0
         with when((i << 2) > 5):
             w[i] = 1.0
+        v[i] = 1.0 * ~((k[i] ^ 1) == 0) + 1.0 * ~((k[i] >> 1) > 1)
 
 
 def test_a_comparison_of_an_xor_or_a_shift_is_traced():
     # lanky left ^, << and >> as pymbolic's nodes, whose == compared them
     # structurally: when((k[i] ^ 1) == 0) was traced as when(False), and
     # (k[i] << 1) != 4 as True, which the trace-faithful fact found tested on
-    # its draws; and whose > raised a TypeError.
+    # its draws; and whose > raised a TypeError. ~ of such a comparison of an
+    # element is a numpy bool's, logical, and is not refused as a Python
+    # bool's.
     def make() -> dict:
-        return {"k": np.array([0, 1, 2, 3, 4, 5]), **{x: np.zeros(6) for x in "yzw"}}
+        return {"k": np.array([0, 1, 2, 3, 4, 5]), **{x: np.zeros(6) for x in "yzwv"}}
 
     native = make()
     bits_compared(**native)
     assert list(native["y"]) == [0.0, 1.0, 0.0, 0.0, 0.0, 0.0]
     assert list(native["z"]) == [1.0, 1.0, 0.0, 1.0, 3.0, 3.0]
     assert list(native["w"]) == [0.0, 0.0, 1.0, 1.0, 1.0, 1.0]
+    assert list(native["v"]) == [2.0, 1.0, 2.0, 2.0, 1.0, 1.0]
     (statement, *_) = bits_compared.term.stmts
     assert isinstance(statement.guard, prim.Comparison)
     agrees(bits_compared, make)
