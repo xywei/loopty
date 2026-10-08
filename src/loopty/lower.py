@@ -912,10 +912,25 @@ class ExpressionLowerer(Mapper):
         k[i]``, and ``u[i] != -1`` is ``-1 < 0 || u[i] != -1``: where the
         signed operand is negative the comparison is decided by its sign, as
         numpy decides it, and C compares the two only where it is not.
+
+        An integer literal past 64 bits that a ``uint64`` does not hold either
+        is compared with an integer as a double (``_compared`` in
+        :mod:`loopty.promotion`), and is written as ``2.0 ** 65`` with its
+        sign (:func:`_beyond_integers`): every integer of 64 bits is on the
+        same side of that as of the literal, which numpy compares exactly,
+        where the literal's own double rounds ``2**64`` and ``-2**63 - 1``
+        onto values a ``uint64`` and an ``int64`` reach: ``u[i] < 2**64`` was
+        false at ``2**64 - 1`` (#140).
         """
         promotion = self.lowering.promotion
         steps = () if promotion is None else promotion.steps(expr)
         sign = steps[0].sign if steps else None
+        operands = (expr.left, expr.right)
+        if promotion is not None:
+            operands = tuple(
+                _beyond_integers(operand, promotion.types(other)[1])
+                for operand, other in zip(operands, operands[::-1], strict=True)
+            )
 
         def build(ops: Sequence[Any]) -> prim.Expression:
             compared = prim.Comparison(ops[0], expr.operator, ops[1])
@@ -929,7 +944,7 @@ class ExpressionLowerer(Mapper):
                 return prim.LogicalOr((prim.Comparison(signed, "<", 0), compared))
             return prim.LogicalAnd((prim.Comparison(signed, ">=", 0), compared))
 
-        return self._operation(expr, (expr.left, expr.right), build)
+        return self._operation(expr, operands, build)
 
     def map_logical_and(self, expr: Any) -> prim.Expression:
         return prim.LogicalAnd(tuple(self.rec(c) for c in expr.children))
@@ -982,6 +997,23 @@ def _untyped(expr: Any) -> bool:
         and not isinstance(expr, bool)
         and not -(2**63) <= expr < 2**63
     )
+
+
+def _beyond_integers(operand: Any, other: np.dtype | None) -> Any:
+    """``operand`` as :meth:`ExpressionLowerer.map_comparison` compares it.
+
+    An integer literal that neither an ``int64`` nor a ``uint64`` holds,
+    beside an integer, is ``2.0 ** 65`` with its sign, a double past every
+    integer of 64 bits; any other operand is itself.
+    """
+    if (
+        not _untyped(operand)
+        or other is None
+        or other.kind not in "biu"
+        or 0 <= operand < 2**64
+    ):
+        return operand
+    return np.float64(2.0**65 if operand > 0 else -(2.0**65))
 
 
 def _untyped_message(value: int, where: str = "") -> str:

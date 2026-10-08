@@ -2480,6 +2480,38 @@ def test_an_integer_literal_past_64_bits():
 
 
 @kernel
+def compared_past_64(
+    u: Arr[Fin[n], np.uint64],  # noqa: F821
+    k: Arr[Fin[n], Int],  # noqa: F821
+    b: Arr[Fin[n], Bool],  # noqa: F821
+    c: Arr[Fin[n], Bool],  # noqa: F821
+):
+    """Literals just past the range of a ``uint64`` and of an ``int64``."""
+    for i in u.dom:
+        b[i] = (u[i] < 2**64) & (u[i] != 2**64 + 1)
+        c[i] = (k[i] > -(2**63) - 1) & (k[i] >= -(2**63) - 7)
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_a_literal_just_past_64_bits_is_compared_exactly():
+    # Such a literal was written as its own double, 2**64 or -2**63, onto
+    # which the largest uint64 and the smallest int64 round: u[i] < 2**64 was
+    # false at 2**64 - 1, where numpy compares exactly.
+    def make() -> dict:
+        return {
+            "u": np.array([2**64 - 1, 0, 2**64 - 1024], np.uint64),
+            "k": np.array([-(2**63), 0, 2**63 - 1]),
+            "b": np.zeros(3, bool),
+            "c": np.zeros(3, bool),
+        }
+
+    native = make()
+    compared_past_64(**native)
+    assert list(native["b"]) == list(native["c"]) == [True] * 3
+    agrees(compared_past_64, make)
+
+
+@kernel
 def unsigned_negative(
     u: Arr[Fin[n], np.uint64],  # noqa: F821
     y: Arr[Fin[n], np.uint64],  # noqa: F821

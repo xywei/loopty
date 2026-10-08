@@ -2048,7 +2048,10 @@ with a pair of statement instances.
   that holds it (#140): `x[i] * 2**70` failed inside loopy's type inference
   (`integer constant too large`), and is written as a double now, as numpy
   converts it; beside a `uint64` one up to `2**64 - 1` is a `uint64`, and a
-  comparison with one is exact, as numpy's is. Elsewhere,
+  comparison with one is exact, as numpy's is: one past that, or below
+  `-2**63`, is compared with an integer as `2.0 ** 65` with its sign, where
+  its own double rounded onto values a `uint64` or an `int64` reach
+  (`u[i] < 2**64` was false at `2**64 - 1`). Elsewhere,
   `1.0 * (i + 2**64)`, which Python computes exactly, or a store of it, is a
   `TraceError` naming `2.0 ** 64`.
 - An integer literal beside a numpy integer whose type does not hold it is a

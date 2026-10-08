@@ -683,8 +683,10 @@ def _compared(
     zero first (:attr:`Step.sign`), and C compares the two only where it is
     not, which it does exactly. An integer literal loopy cannot type is
     written as a ``uint64`` where one holds it and the other operand is an
-    integer, and as a double elsewhere, beyond which every integer of 64 bits
-    compares alike.
+    integer, and as a double elsewhere; beside an integer, the lowering writes
+    that double as ``2.0 ** 65`` with the literal's sign, past which every
+    integer of 64 bits compares as with the literal
+    (:func:`loopty.lower._beyond_integers`).
 
     A comparison with a real or a complex operand is computed in numpy's
     ``common`` type, as :func:`_plan` converts any operation.
