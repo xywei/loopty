@@ -749,6 +749,40 @@ def test_integer_arithmetic_is_64_bits_wide_compiled_too():
 
 
 @kernel
+def past_the_top(
+    x: Arr[Fin[n], Int],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Int],  # noqa: F821
+):
+    """Arithmetic that leaves 64 bits, which numpy wraps round."""
+    for i in x.dom:
+        y[i] = (x[i] + 1 > x[i]) * 1.0
+        z[i] = x[i] * 3 // 7
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_a_signed_overflow_wraps_round_as_numpy_wraps_it():
+    # numpy wraps 2**63 - 1 + 1 round to the smallest int64, so x + 1 > x is
+    # false there. C leaves the overflow undefined, and GCC at -O3 folded the
+    # comparison to true; the C target builds every kernel with -fwrapv.
+    from loopty.lower import WRAP_FLAG, lower_generic
+
+    def make() -> dict:
+        return {
+            "x": np.array([2**63 - 1, 5, -(2**63)]),
+            "y": np.zeros(3),
+            "z": np.zeros(3, np.int64),
+        }
+
+    native = make()
+    past_the_top(**native)
+    assert list(native["y"]) == [0.0, 1.0, 1.0]
+    entry = lower_generic(past_the_top.trace(), "c").kernel.default_entrypoint
+    assert WRAP_FLAG in entry.options.build_options
+    agrees(past_the_top, make)
+
+
+@kernel
 def guarded_squares(
     x: Arr[Fin[n], Real],  # noqa: F821
     k: Fin[m],  # noqa: F821
@@ -1434,6 +1468,24 @@ def test_a_kernel_named_like_a_library_function_is_renamed():
     assert _kernel_name("flooring", []) == "flooring"
 
 
+@kernel
+def shadowed(loopty_mod_int64: Arr[Fin[n], Int], y: Arr[Fin[n], Int]):  # noqa: F821
+    """A parameter named like the helper its remainder calls."""
+    for i in y.dom:
+        y[i] = loopty_mod_int64[i] % 3
+
+
+def test_a_name_of_a_helper_is_refused_in_a_kernel():
+    # The parameter shadowed the helper in the kernel's body, and the call of
+    # it failed to compile. A parameter is not renamed, since a caller passes
+    # it by name, so it is refused, as a C keyword is.
+    from loopty.lower import LoweringError
+
+    with pytest.raises(LoweringError, match="parameters loopty_mod_int64") as refused:
+        emit_code(shadowed)
+    assert "helper function loopy or loopty defines" in str(refused.value)
+
+
 # }}}
 
 
@@ -1528,6 +1580,32 @@ def test_a_guard_on_scalars_is_computed_as_numpy_computes_it():
     assert list(native["y"]) == [0.0, 0.0, 0.0]
     assert "s * 1.0 * a > 0.300000008" in emit_code(on_the_scalars)
     agrees(on_the_scalars, make)
+
+
+@kernel
+def single_on_the_loops(
+    x: Arr[Fin[n], Real],  # noqa: F821
+    a: np.float32,
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A guard on the loops that numpy computes in single precision."""
+    for i in x.dom:
+        with when(a + (i + 1) ** -1 > 0.5):
+            y[i] = x[i]
+
+
+def test_a_guard_on_the_loops_in_single_precision_is_refused():
+    # numpy rounds the double (i + 1) ** -1 to single precision beside the
+    # float32 a, which C does only by a cast, and loopy's isl reader raises
+    # on a cast there; without it the guard was computed in double compiled.
+    from loopty.lower import LoweringError
+
+    native = {"x": np.ones(3), "a": np.float32(0.1), "y": np.zeros(3)}
+    single_on_the_loops(**native)
+    assert list(native["y"]) == [1.0, 1.0, 0.0]
+    with pytest.raises(LoweringError, match="reads no array") as refused:
+        emit_code(single_on_the_loops)
+    assert "Declare the float32 scalars the guard names Real" in str(refused.value)
 
 
 # }}}

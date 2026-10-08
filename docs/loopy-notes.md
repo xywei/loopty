@@ -268,7 +268,8 @@ reduction by them.
 guesses a codepy toolchain from Python's build configuration and then replaces
 its compiler and flags with its own defaults: `gcc -std=c99 -O3 -fPIC`, plus the
 kernel's `options.build_options`, appended in that order. So the compiler is
-whatever `gcc` is on the path: GCC on Linux, clang on macOS.
+whatever `gcc` is on the path: GCC on Linux, clang on macOS. loopty puts
+`-fwrapv` into every kernel's build options on the C target (note 20).
 
 **Whether `a * b + c` becomes one fused multiply-add.** GCC's default is
 `-ffp-contract=fast` in the GNU dialects and `off` in a standard one such as
@@ -1015,13 +1016,24 @@ bits is multiplied by `1.0` or by a 64-bit `1` (`s * 1.0 * a`, `1l * i *
 i`), which C computes from the left in that type as it would the cast and
 isl's reader takes as the number it is or declines, loopy computes a
 quotient of integers in double inside a comparison of its own accord, and a
-floating power of a loop variable calls `pow`. A loop variable divided by a
-literal zero is refused by the trace, since Python refuses it natively where
-the compiled run would compute numpy's `0`.
+floating power of a loop variable calls `pow`. An operand numpy rounds to
+single precision in such a guard, `(i + 1) ** -1` beside a `float32` scalar,
+has no product that does it, and the guard is refused (`LoweringError`). A
+loop variable divided by a literal zero is refused by the trace, since Python
+refuses it natively where the compiled run would compute numpy's `0`. A
+parameter, size or loop variable named like a helper loopy or loopty defines
+is refused, as a keyword is: it shadowed the helper the kernel calls.
+
+Signed overflow is undefined in C as well, where numpy wraps round: GCC at
+`-O3` folds `x[i] + 1 > x[i]` of an `Int` to true, and numpy wraps `2**63 -
+1` round to the smallest `int64` and finds it false. Every kernel the C
+target builds gets `-fwrapv` in its build options (`lower.WRAP_FLAG`), which
+GCC and clang take, so the compiled run wraps round as numpy does.
 
 **What it does not cover.** loopty's targets are needed for numpy's
 arithmetic: a kernel lowered by `lower.lower` for another loopy target gets
-loopy's. The OpenCL definitions are generated and not run from a development
+loopy's. The source `loopty run --emit-code` prints wraps round only when it
+is compiled with `-fwrapv` too, and OpenCL C has no build option for it. The OpenCL definitions are generated and not run from a development
 machine. A function given to loopy as a callable inside a guard is still
 dropped by loopy's type inference.
 

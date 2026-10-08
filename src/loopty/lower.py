@@ -113,6 +113,7 @@ __all__ = [
     "POWER_INCLUDES",
     "RESERVED_PREFIX",
     "RESERVED_WORDS",
+    "WRAP_FLAG",
     "ExpressionLowerer",
     "InKernelOpenCLTarget",
     "InProcessCTarget",
@@ -138,6 +139,14 @@ _LANG_VERSION = (2018, 2)
 #: ``-std=c99``, in which GCC does not contract anyway, but clang does, and the
 #: flag says so rather than leaving it to the compiler.
 NO_CONTRACTION_FLAG = "-ffp-contract=off"
+
+#: The C compiler flag that makes signed integer overflow wrap round, as numpy's
+#: integer arithmetic does, set on every kernel the C target builds. C leaves
+#: the overflow undefined, and GCC at ``-O3`` folds ``x[i] + 1 > x[i]`` to true
+#: where numpy wraps ``2**63 - 1`` round to the smallest ``int64`` and finds it
+#: false; ``Nat`` and ``Int`` hold the whole ``int64`` range since #101. GCC and
+#: clang both take it; OpenCL C has no such build option (note 20).
+WRAP_FLAG = "-fwrapv"
 
 #: GCC's own spelling of the flag in the source, behind a guard that keeps it
 #: from any other compiler. The flag pins the build loopty runs; this pins the
@@ -199,16 +208,16 @@ def count_param_name(counts: str, iname: str) -> str:
 def numpy_dtype(sort: Any) -> np.dtype:
     """The numpy dtype a lanky sort or an index type is stored in.
 
-    ``Real`` is double precision, ``Nat`` and ``Int`` are 32-bit (which is what
-    an index into an array is on every target loopy generates for), ``Bool`` is a
-    byte, and an index type such as ``Fin[m]``, which is the element type of a
-    column-index array, is stored as an integer like any other index. A numpy
-    dtype or scalar type is itself, and Python's ``float`` and ``complex`` are
-    double precision, which is how :func:`loopty.contract.native_storage` has
-    them stored natively too. The rule is
-    :func:`loopty.contract.compiled_storage`, which the contract reads too:
-    a value of an integral sort outside the 32-bit range is refused there
-    (:data:`loopty.contract.INTEGRAL_RANGE`).
+    ``Real`` is double precision, ``Nat`` and ``Int`` are 64-bit, as numpy's
+    integers are (#101), ``Bool`` is a byte, and an index type such as
+    ``Fin[m]``, which is the element type of a column-index array, is 32-bit,
+    which is what an index into an array is on every target loopy generates
+    for. A numpy dtype or scalar type is itself, and Python's ``float`` and
+    ``complex`` are double precision, which is how
+    :func:`loopty.contract.native_storage` has them stored natively too. The
+    rule is :func:`loopty.contract.compiled_storage`, which the contract reads
+    too: a value of an integral sort outside the range it is stored in is
+    refused there (:func:`loopty.contract.integral_range`).
     """
     dtype = compiled_storage(sort)
     if dtype is None:
@@ -458,9 +467,9 @@ class ExpressionLowerer(Mapper):
         self.lowering = lowering
         #: How many subscripts deep the walk is.
         self._subscripts = 0
-        #: Whether the walk is in a guard that reads no array; see
+        #: The guard the walk is in, when it reads no array; see
         #: :meth:`condition`.
-        self._on_loops = False
+        self._on_loops: Any = None
 
     def condition(self, guard: Any) -> Any:
         """Lower a statement's guard.
@@ -474,22 +483,25 @@ class ExpressionLowerer(Mapper):
         (``loopy.kernel.instruction.get_insn_domain``). So no operand in one
         is cast. A literal is written in the dtype, and an operand numpy
         computes in double is multiplied by ``1.0``: C computes the product in
-        double exactly as it would the cast, and the reader declines it as it
-        declines any real. ``s * a`` of an ``Int`` ``s`` and a ``float32``
+        double exactly as it would the cast, and the reader reads the ``1.0``
+        as the ``1`` it is. ``s * a`` of an ``Int`` ``s`` and a ``float32``
         ``a`` is computed in double so, as numpy computes it, where C computed
         it in single precision when the cast was left out. An integer is
         widened so too, by a product with a 64-bit ``1``: ``when(i * i <
         m)`` is ``1l * i * i < m``, which wrapped round at ``i = 46341`` when
-        its integers were left in 32 bits as a subscript's are.
+        its integers were left in 32 bits as a subscript's are. An operand
+        numpy rounds to single precision, ``(i + 1) ** -1`` beside a
+        ``float32`` scalar ``a``, has no such product, and the guard is
+        refused (:meth:`_convert`).
         """
         reads = any(isinstance(node, Access | prim.Subscript) for node in walk(guard))
         if reads:
             return self.rec(guard)
-        self._on_loops = True
+        self._on_loops = guard
         try:
             return self.rec(guard)
         finally:
-            self._on_loops = False
+            self._on_loops = None
 
     @property
     def in_subscript(self) -> bool:
@@ -648,16 +660,25 @@ class ExpressionLowerer(Mapper):
         and an integer by a product with ``1`` in its dtype, which C computes
         from the left in that type exactly as it would the cast, and which the
         reader takes as the number it is, or declines with any product of two
-        variables; nothing else converts. The ``1.0`` comes first: loopy
+        variables. A conversion to another type has no such product, and the
+        guard is refused: numpy rounds ``(i + 1) ** -1`` to single precision
+        beside a ``float32`` scalar, and C would keep it in double. The
+        ``1.0`` comes first: loopy
         prints ``s * (1.0 * a)`` as ``s * 1.0 * a``, which C computes in
         double from the left as well, where ``s * a * 1.0`` would multiply ``s
         * a`` in single precision, and ``1l * i * i`` is a product of longs.
         """
-        if not self._on_loops or _is_literal(operand):
+        if self._on_loops is None or _is_literal(operand):
             return _converted(operand, dtype)
         if dtype == np.float64 or dtype.kind in "iu":
             return prim.Product((dtype.type(1), operand))
-        return operand
+        raise LoweringError(
+            f"the guard {self._on_loops} reads no array, so loopy reads it into "
+            f"isl, whose reader raises on a cast, and numpy computes {operand} "
+            f"in it in {dtype}, which C computes in another type without one. "
+            f"Declare the {dtype} scalars the guard names Real, so that both "
+            "runs compute it in double"
+        )
 
     def map_sum(self, expr: Any) -> prim.Expression:
         return self._operation(expr, expr.children, lambda ops: prim.Sum(tuple(ops)))
@@ -1103,7 +1124,11 @@ def _refuse_reserved_names(term: Term) -> None:
 
     A keyword is a word of :data:`RESERVED_WORDS` or a name of the shape C
     reserves, :data:`RESERVED_PREFIX`: ``for _Bool in x.dom`` fails in the
-    compiler exactly as ``for double in x.dom`` does.
+    compiler exactly as ``for double in x.dom`` does. So is the name of a
+    helper loopy or loopty defines in the generated code
+    (``loopty_mod_int64``, ``loopy_pow_int64_int32``): a parameter of that
+    name shadows the helper in the kernel's body, and a call of it fails to
+    compile.
     """
     roles: dict[str, list[str]] = {
         "parameters": [name for name, _ in term.params],
@@ -1118,15 +1143,23 @@ def _refuse_reserved_names(term: Term) -> None:
             roles["reduction variables"].extend(reduction.inames)
     found = []
     for role, names in roles.items():
-        refused = sorted({name for name in names if is_reserved(_sanitize(name))})
+        refused = sorted(
+            {
+                name
+                for name in names
+                if is_reserved(_sanitize(name))
+                or _HELPER_FUNCTION.match(_sanitize(name))
+            }
+        )
         if refused:
             found.append(f"{role} {', '.join(refused)}")
     if found:
         raise LoweringError(
             f"{term.name} has names the generated code cannot use: "
             f"{'; '.join(found)}. These are reserved words in C or OpenCL C, "
-            "or start with an underscore and a capital letter or with two "
-            "underscores, which C reserves; rename them in the kernel (a "
+            "start with an underscore and a capital letter or with two "
+            "underscores, which C reserves, or name a helper function loopy or "
+            "loopty defines in the generated code; rename them in the kernel (a "
             "parameter in its signature, a size in its annotations, a loop or "
             "reduction variable where it is bound), or in the program that "
             "makes a program-local array."
@@ -2533,8 +2566,9 @@ def lower_generic(
         name=_kernel_name(term.name, [arg.name for arg in args]),
         preambles=(*preambles, *_power_preambles(term, target)),
     )
-    if not contraction and target in ("c", None):
-        kernel = lp.set_options(kernel, build_options=[NO_CONTRACTION_FLAG])
+    if target in ("c", None):
+        flags = [WRAP_FLAG] if contraction else [WRAP_FLAG, NO_CONTRACTION_FLAG]
+        kernel = lp.set_options(kernel, build_options=flags)
     assumptions = _scalar_assumptions(term, {arg.name for arg in args})
     if assumptions is not None:
         # Not ``if assumptions:``: truthiness on an isl set is ``__len__``,

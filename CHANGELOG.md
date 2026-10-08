@@ -1621,8 +1621,10 @@ with a pair of statement instances.
   literals that total less than `2**30`, which is index arithmetic. An
   `np.uint64` beside a Python int or a loop variable is computed in `uint64`,
   as numpy computes it, where loopy typed it in double, lost the low bits of
-  `u[i] % 3` and failed to lower `u[i] << 3`. The sum of a `Bool` array, a
-  count natively, was
+  `u[i] % 3` and failed to lower `u[i] << 3`. The C target builds every
+  kernel with `-fwrapv` (`lower.WRAP_FLAG`), so a signed overflow wraps round
+  as numpy's does, where GCC folded `x[i] + 1 > x[i]` to true at `2**63 - 1`.
+  The sum of a `Bool` array, a count natively, was
   accumulated in a byte compiled and wrapped round at 128; its body is cast.
   The native run reads an integral array stored in fewer bits through an
   `int64` copy, an `int32` one of `Fin[m]` included. Note 19.
@@ -1677,7 +1679,14 @@ with a pair of statement instances.
   there. Such a guard is lowered with no cast in it: an operand numpy
   computes in double or in 64 bits is multiplied by `1.0` or by a 64-bit `1`
   instead, so `when(s * a > t)` of a `float32` `a` is double precision, and
-  `when(i * i < m)` does not wrap round at `i = 46341`.
+  `when(i * i < m)` does not wrap round at `i = 46341`. An operand numpy
+  rounds to single precision there, `(i + 1) ** -1` beside a `float32`
+  scalar, has no such product, and the guard is refused, naming `Real` for
+  the scalar.
+- A helper's name, `loopty_mod_int64` or `loopy_pow_int64_int32`, is refused
+  for a parameter, a size or a loop variable, as a C keyword is: a parameter
+  of that name shadowed the helper the kernel calls, and the C did not
+  compile.
 - A name only the bound of a `Fin` sort mentions is a size, and not
   negative, as an axis extent is (`flow.size_names`). `nnz` in
   `off: Arr[Fin[n + 1], Fin[nnz + 1]]` is the length of the buffer the
