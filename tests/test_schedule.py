@@ -21,6 +21,7 @@ from lanky.prelude import Nat, Real
 import hand_terms as ht
 from loopty import Arr, Fin, reduce_sum, when
 from loopty.executor import emit_code
+from loopty.isl_reading import declining
 from loopty.lower import reductions_of
 from loopty.schedule import IllegalCast, Schedule, parallel_tag
 
@@ -1200,7 +1201,11 @@ def _loopy_warnings(schedule: Schedule) -> list[str]:
 
     import loopy as lp
 
-    with warnings.catch_warnings(record=True) as caught, lp.CacheMode(False):
+    with (
+        warnings.catch_warnings(record=True) as caught,
+        lp.CacheMode(False),
+        declining(),
+    ):
         warnings.simplefilter("always")
         lp.generate_code_v2(schedule.kernel)
     return [str(warning.message) for warning in caught]

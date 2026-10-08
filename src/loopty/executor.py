@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from loopty.contract import check_arguments, checked_storage, inherited_storage
+from loopty.isl_reading import declining
 from loopty.term import Term
 from loopty.tolerance import (
     TOLERANCE,
@@ -351,6 +352,7 @@ class LoopyExecutor:
         """Running is evidence, not proof: an execution is a test."""
         return "test"
 
+    @declining()
     def run(self, obj: Any, /, *args: Any, **kwargs: Any) -> dict[str, np.ndarray]:
         """Lower ``obj``, compile it for its target, and run it.
 
@@ -370,6 +372,11 @@ class LoopyExecutor:
         of these are properties of the call rather than of the term, and each
         is what a typing rule, or the native run's meaning, assumed; see
         :mod:`loopty.contract`.
+
+        loopy preprocesses the kernel, checks its bounds, generates its code,
+        compiles it and runs it inside :func:`loopty.isl_reading.declining`,
+        with the readings it was lowered with; :meth:`differential` runs the
+        kernel through here.
         """
         term, kernel, lowering, target_name = _resolve(obj, self.target)
         names = [name for name, _ in term.params]
@@ -811,8 +818,12 @@ def _agreement_fact(
     )
 
 
+@declining()
 def emit_code(obj: Any, target: str | None = None) -> str:
-    """The code loopy generates for a kernel or a schedule, as a string."""
+    """The code loopy generates for a kernel or a schedule, as a string.
+
+    Generated inside :func:`loopty.isl_reading.declining`, as a run's is.
+    """
     import loopy as lp
 
     _term, kernel, _lowering, _target = _resolve(obj, target)

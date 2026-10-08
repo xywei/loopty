@@ -234,6 +234,7 @@ from pymbolic.mapper.substitutor import substitute
 from loopty import idx
 from loopty import oracle as isl_oracle
 from loopty.flow import bounds_dimension
+from loopty.isl_reading import declining_methods
 from loopty.lower import (
     Lowering,
     _plain,
@@ -2325,6 +2326,7 @@ def _transformed(kernel: Any, transform: Any, *args: Any, **kwargs: Any) -> Any:
     return None if kernel is None else transform(kernel, *args, **kwargs)
 
 
+@declining_methods
 class Schedule:
     """A kernel plus the transformations applied to it, each one checked.
 
@@ -2346,6 +2348,13 @@ class Schedule:
     where the steps and the target were dropped and the outer schedule was
     one of ``k`` alone, which ``loopty run`` compared with ``k`` and found
     in agreement.
+
+    Building a schedule and every public method of one run inside
+    :func:`loopty.isl_reading.declining`
+    (:func:`~loopty.isl_reading.declining_methods`): a step transforms the
+    kernel with loopy and reads some of its expressions with loopy's isl
+    reader, so :attr:`kernel` and :attr:`buildable` are made with loopty's
+    readings, as the kernel is lowered, checked and generated.
     """
 
     def __init__(

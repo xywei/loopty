@@ -10,21 +10,40 @@ its bounds check of a guarded access wrong (#137). :mod:`loopty.isl_reading`
 makes it decline all three, and the lowering widens a subscript loopy does
 not read as affine with no division as it widens any other integer
 arithmetic.
+
+It does so only inside ``isl_reading.declining()``, where loopty builds,
+transforms, checks, generates and runs its kernels: another user of loopy in
+the process reads with loopy's own readings, and loopy checks and generates
+its kernels as it does without loopty.
 """
 
 from __future__ import annotations
 
+import subprocess
+import sys
+import textwrap
+import threading
+
 import islpy as isl
+import loopy as lp
+import loopy.kernel.instruction as instruction
 import numpy as np
 import pymbolic.primitives as prim
 import pytest
 from lanky.prelude import Int, Real
 from loopy.diagnostic import ExpressionToAffineConversionError, LoopyIndexError
-from loopy.symbolic import TypeCast, guarded_aff_from_expr
+from loopy.symbolic import PwAffEvaluationMapper, TypeCast, guarded_aff_from_expr
+from pymbolic.mapper import UnsupportedExpressionError
 
-from loopty import Arr, Fin, Schedule, kernel, when
+from loopty import Arr, Fin, Schedule, isl_reading, kernel, when
 from loopty.executor import LoopyExecutor, emit_code
-from loopty.isl_reading import affine_form, read_as_affine
+from loopty.isl_reading import (
+    ReadingsInactive,
+    active,
+    affine_form,
+    declining,
+    read_as_affine,
+)
 
 
 def agrees(kern, make) -> None:
@@ -60,7 +79,7 @@ def test_the_reader_declines_a_conversion_and_a_constant_not_an_integer() -> Non
         complex(1, 0) * i,
         np.float64(np.inf) + i,
     ):
-        with pytest.raises(ExpressionToAffineConversionError):
+        with declining(), pytest.raises(ExpressionToAffineConversionError):
             guarded_aff_from_expr(space, declined)
         assert not read_as_affine(declined)
     # An integer and a 64-bit integer literal are read as the integers they
@@ -69,11 +88,252 @@ def test_the_reader_declines_a_conversion_and_a_constant_not_an_integer() -> Non
         (2 * i, 2),
         (np.int64(100_000) * i, 100_000),
     ):
-        aff = guarded_aff_from_expr(space, read)
+        with declining():
+            aff = guarded_aff_from_expr(space, read)
         assert aff.get_coefficient_val(isl.dim_type.in_, 0).to_python() == coefficient
         assert read_as_affine(read)
     assert not read_as_affine(i * i)
     assert not read_as_affine(prim.Subscript(prim.Variable("col"), (i,)))
+
+
+# }}}
+
+
+# {{{ where the readings apply
+
+
+def loopys_own() -> None:
+    """loopy's own readings are in place: none of loopty's is installed."""
+    assert vars(PwAffEvaluationMapper)["map_constant"].__module__ == "loopy.symbolic"
+    assert "map_type_cast" not in vars(PwAffEvaluationMapper)
+    assert instruction.get_insn_domain.__module__ == "loopy.kernel.instruction"
+    assert not active()
+    assert isl_reading._OPEN == 0
+
+
+def loopys_own_reading_of(space: isl.Space, i: prim.Variable) -> None:
+    """The reader reads as loopy does: 0.5 as 0, and a cast it cannot read."""
+    zero = guarded_aff_from_expr(space, i * 0.5)
+    assert zero.is_cst() and zero.get_constant_val().to_python() == 0
+    with pytest.raises(UnsupportedExpressionError):
+        guarded_aff_from_expr(space, TypeCast(np.dtype(np.int64), i))
+
+
+def test_running_a_kernel_leaves_loopys_own_readings_in_place() -> None:
+    # Importing loopty and loopty.lower installed the readings in loopy for
+    # the whole process, so every other loopy user in it (sumpy, pytential,
+    # Volumential) had its kernels read with them, and loopy's bounds check
+    # could refuse a kernel of theirs it accepted without loopty.
+    import loopty.lower  # noqa: F401
+
+    loopys_own()
+    agrees(
+        index_square,
+        lambda: {"x": np.arange(9, dtype=np.float64), "y": np.zeros(9)},
+    )
+    emit_code(Schedule(index_square).split("i", 2))
+    loopys_own()
+    space = isl.Space.create_from_names(isl.DEFAULT_CONTEXT, set=["i"])
+    loopys_own_reading_of(space, prim.Variable("i"))
+
+
+def test_importing_loopty_and_running_a_kernel_installs_nothing(tmp_path) -> None:
+    # In a fresh process, so that what loopy had is known before loopty is
+    # imported: the same objects are in place after loopty, loopty.lower and
+    # a run of a kernel through the executor, and a kernel of loopy's own
+    # with a guard loopy reads still generates.
+    script = tmp_path / "fresh.py"
+    script.write_text(
+        textwrap.dedent(
+            """
+            from __future__ import annotations
+
+            import loopy.kernel.instruction as instruction
+            import numpy as np
+            from loopy.symbolic import PwAffEvaluationMapper
+
+            def own():
+                return (
+                    vars(PwAffEvaluationMapper).get("map_constant"),
+                    vars(PwAffEvaluationMapper).get("map_type_cast"),
+                    instruction.get_insn_domain,
+                )
+
+            before = own()
+            import loopty
+            import loopty.lower
+            assert own() == before, "importing loopty changed loopy"
+
+            from lanky.prelude import Real
+            from loopty import Arr, Fin, kernel
+            from loopty.executor import LoopyExecutor
+
+            @kernel
+            def index_square(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
+                for i in x.dom:
+                    y[i] = x[(i * i) % x.dom.size]
+
+            x = np.arange(9, dtype=np.float64)
+            out = LoopyExecutor().run(index_square, x=x, y=np.zeros(9))
+            assert list(out["y"]) == [float((i * i) % 9) for i in range(9)]
+            after = own()
+            assert all(a is b for a, b in zip(after, before)), "a run changed loopy"
+            print("loopy's own")
+            """
+        )
+    )
+    result = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True, timeout=600
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "loopy's own"
+
+
+def loopys_kernel(guard: str, value_args: dict) -> object:
+    """A kernel of loopy's own: ``y[i] = x[2 * i]`` under ``guard``, ``x`` of ``n``."""
+    return lp.make_kernel(
+        "{ [i]: 0 <= i < n }",
+        [
+            lp.Assignment(
+                "y[i]",
+                "x[2 * i]",
+                within_inames=frozenset({"i"}),
+                predicates=frozenset({lp.symbolic.parse(guard)}),
+            )
+        ],
+        [
+            lp.GlobalArg("x", np.float64, shape=("n",)),
+            lp.GlobalArg("y", np.float64, shape=("n",)),
+            lp.ValueArg("n", np.int32),
+            *(lp.ValueArg(name, dtype) for name, dtype in value_args.items()),
+        ],
+        target=lp.ExecutableCTarget(),
+        lang_version=(2018, 2),
+    )
+
+
+@pytest.mark.parametrize(
+    ("guard", "value_args"),
+    [
+        # loopy reads 2.0 as 2, and checks x[2 * i] where 2 * i < n.
+        ("i * 2.0 < n", {}),
+        # loopy reads a double scalar as an integer parameter, and checks
+        # x[2 * i] where 2 * i < a <= n.
+        ("2 * i < a and a <= n", {"a": np.float64}),
+    ],
+)
+def test_loopys_own_kernel_is_read_as_loopy_reads_it(guard, value_args) -> None:
+    # loopy's own reading of each guard narrows its bounds check to the
+    # cells x has, and loopy generates the kernel. loopty's readings decline
+    # the guard, under which loopy refuses it (#148): only inside
+    # declining(), before and after which loopy reads it as its own again.
+    with lp.CacheMode(False):
+        code = lp.generate_code_v2(loopys_kernel(guard, value_args)).device_code()
+        assert "y[i] = x[2 * i];" in code
+        with declining(), pytest.raises(LoopyIndexError, match="could not establish"):
+            lp.generate_code_v2(loopys_kernel(guard, value_args))
+        loopys_own()
+        again = lp.generate_code_v2(loopys_kernel(guard, value_args))
+        assert again.device_code() == code
+
+
+def test_the_readings_apply_inside_and_nested_contexts_restore() -> None:
+    i = prim.Variable("i")
+    space = isl.Space.create_from_names(isl.DEFAULT_CONTEXT, set=["i"])
+    loopys_own()
+    with declining():
+        assert active()
+        with pytest.raises(ExpressionToAffineConversionError):
+            guarded_aff_from_expr(space, i * 0.5)
+        with declining():
+            assert isl_reading._OPEN == 2
+            with pytest.raises(ExpressionToAffineConversionError):
+                guarded_aff_from_expr(space, TypeCast(np.dtype(np.int64), i))
+        # The inner one left the readings to the outer.
+        assert active() and isl_reading._OPEN == 1
+        with pytest.raises(ExpressionToAffineConversionError):
+            guarded_aff_from_expr(space, i * 2.0)
+        assert guarded_aff_from_expr(space, 2 * i) is not None
+    loopys_own()
+    loopys_own_reading_of(space, i)
+    # An exception leaves through the context, which restores loopy's own.
+    with pytest.raises(RuntimeError, match="raised inside"), declining():
+        with declining():
+            raise RuntimeError("raised inside")
+    loopys_own()
+
+
+def test_a_thread_outside_reads_with_loopys_own() -> None:
+    # The readings are installed in loopy while any thread is inside one, and
+    # apply in that thread only: another reads with loopy's own meanwhile.
+    i = prim.Variable("i")
+    space = isl.Space.create_from_names(isl.DEFAULT_CONTEXT, set=["i"])
+    inside = threading.Event()
+    read = threading.Event()
+    seen: list = []
+
+    def outside() -> None:
+        inside.wait(timeout=60)
+        try:
+            loopys_own_reading_of(space, i)
+            seen.append(active())
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            seen.append(exc)
+        read.set()
+
+    thread = threading.Thread(target=outside)
+    thread.start()
+    with declining():
+        assert "map_type_cast" in vars(PwAffEvaluationMapper)
+        inside.set()
+        assert read.wait(timeout=60)
+        with pytest.raises(ExpressionToAffineConversionError):
+            guarded_aff_from_expr(space, i * 0.5)
+    thread.join()
+    assert seen == [False]
+    loopys_own()
+
+    # Threads entering and leaving at once leave loopy's own behind.
+    def nested() -> None:
+        for _ in range(50):
+            with declining(), declining():
+                assert active()
+                assert read_as_affine(2 * i) and not read_as_affine(i * 0.5)
+            assert not active()
+
+    threads = [threading.Thread(target=nested) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    loopys_own()
+
+
+def test_loopy_checks_loopty_kernels_only_with_its_readings() -> None:
+    # loopty's targets refuse to have loopy check or generate their kernels
+    # outside declining(): a cast in a subscript is what loopy's own reader
+    # raises on, and code made outside would be served from loopy's cache to
+    # a run inside, without the bounds check that refuses x[i + 4] under
+    # when(i * 0.5 >= 1). Inside, loopy refuses that check.
+    with lp.CacheMode(False):
+        for source in (index_square, half_guard_past):
+            schedule = Schedule(source)
+            with pytest.raises(ReadingsInactive, match="outside"):
+                lp.generate_code_v2(schedule.kernel)
+            with pytest.raises(ReadingsInactive, match="outside"):
+                schedule.kernel.executor()(**inputs()())
+        with declining():
+            assert "loopty_mod_int64" in lp.generate_code_v2(
+                Schedule(index_square).kernel
+            ).device_code()
+            with pytest.raises(LoopyIndexError, match="could not establish"):
+                lp.generate_code_v2(Schedule(half_guard_past).kernel)
+            preprocessed = lp.preprocess_program(Schedule(half_guard_past).kernel)
+        # Preprocessed inside, the kernel passes loopy's own bounds check
+        # outside, which reads the guard as false everywhere, and is refused
+        # before its code is generated.
+        with pytest.raises(ReadingsInactive, match="outside"):
+            lp.generate_code_v2(preprocessed)
 
 
 # }}}

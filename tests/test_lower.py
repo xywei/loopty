@@ -15,6 +15,7 @@ from lanky.prelude import Nat, Real
 
 import hand_terms as ht
 from loopty import Arr, Fin, kernel
+from loopty.isl_reading import declining
 from loopty.lower import (
     InKernelOpenCLTarget,
     InProcessCTarget,
@@ -30,8 +31,9 @@ lp = pytest.importorskip("loopy")
 
 
 def code_for(term) -> str:
-    """The C loopy generates for a term."""
-    return lp.generate_code_v2(lower(term)).device_code()
+    """The C loopy generates for a term, with loopty's readings."""
+    with declining():
+        return lp.generate_code_v2(lower(term)).device_code()
 
 
 def run(term, **arguments):

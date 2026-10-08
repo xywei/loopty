@@ -297,14 +297,16 @@ def test_one_row_per_group_is_the_schedule_that_does_build(plain_opencl) -> None
     # sequential, so nothing asks for a hardware axis inside it. It builds for
     # a device (loopy's plain OpenCL target stands in for one here), and not
     # for C, which has no hardware axes at all (#47).
+    from loopty.isl_reading import declining
+
     module = _module("spmv")
     schedule = module.rows_parallel()
     assert schedule.target == "opencl"
     assert schedule.buildable == (True, "")
     assert [fact.status.value for fact in schedule.facts()] == ["decided"] * 2
-    assert "get_group_id" in plain_opencl.generate_code_v2(
-        schedule.kernel
-    ).device_code()
+    with declining():
+        code = plain_opencl.generate_code_v2(schedule.kernel).device_code()
+    assert "get_group_id" in code
 
     on_c = module.rows_parallel(target="c")
     ok, reason = on_c.buildable

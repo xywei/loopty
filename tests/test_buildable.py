@@ -25,6 +25,7 @@ from lanky.prelude import Nat, Real
 
 from loopty import Arr, Fin, kernel
 from loopty import sum as reduce_sum
+from loopty.isl_reading import declining
 from loopty.schedule import Schedule
 
 pytest.importorskip("loopy")
@@ -173,10 +174,13 @@ def loopy_says(lp, schedule) -> str | None:
     deprecated ``loopy.diagnostic.warn``, which this suite would turn into an
     error; it is loopy's, like the two in note 5 of ``docs/loopy-notes.md``,
     and is silenced here only.
+
+    Inside loopty's readings, as loopty asks loopy for code
+    (:mod:`loopty.isl_reading`).
     """
     import warnings
 
-    with warnings.catch_warnings(), lp.CacheMode(False):
+    with warnings.catch_warnings(), lp.CacheMode(False), declining():
         warnings.simplefilter("ignore", lp.diagnostic.LoopyWarning)
         warnings.filterwarnings(
             "ignore",
@@ -194,7 +198,7 @@ def loopy_says_code(lp, schedule) -> str:
     """The device code loopy generates for the schedule's kernel, caches off."""
     import warnings
 
-    with warnings.catch_warnings(), lp.CacheMode(False):
+    with warnings.catch_warnings(), lp.CacheMode(False), declining():
         warnings.simplefilter("ignore", lp.diagnostic.LoopyWarning)
         return lp.generate_code_v2(schedule.kernel).device_code()
 

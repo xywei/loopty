@@ -88,8 +88,7 @@ from loopty.flow import (
     statement_accesses,
 )
 from loopty.idx import linearize
-from loopty.isl_reading import affine_form
-from loopty.isl_reading import install as _install_isl_reading
+from loopty.isl_reading import affine_form, declining, require_active
 from loopty.operations import (
     CODE_DIGEST,
     OPERATIONS,
@@ -139,10 +138,6 @@ __all__ = [
 ]
 
 _LANG_VERSION = (2018, 2)
-
-# loopy's isl reader declines a conversion and a constant that is not an
-# integer, before any kernel is built (:mod:`loopty.isl_reading`, note 23).
-_install_isl_reading()
 
 #: The C compiler flag that keeps ``a * b + c`` two roundings, set on a kernel
 #: with an ``exact`` output (see :func:`allows_contraction`). GCC and clang both
@@ -309,7 +304,29 @@ class _CCode(CASTBuilder):
         return _CText()
 
 
-class InProcessCTarget(lp.ExecutableCTarget):
+class _ReadDeclining:
+    """A target of loopty's, whose kernels loopy checks only with loopty's readings.
+
+    loopy calls ``preprocess`` while it preprocesses a kernel, before its
+    bounds check, and ``pre_codegen_entrypoint_check`` before it generates
+    code, and both refuse outside :func:`loopty.isl_reading.declining`: a
+    kernel loopty built is written for loopty's readings of its subscripts
+    and guards, and loopy's code cache, whose key does not say which readings
+    made an entry, would serve code made outside to a run inside (see
+    :mod:`loopty.isl_reading`). A kernel served from the cache was made
+    inside, since nothing outside gets that far.
+    """
+
+    def preprocess(self, kernel: Any) -> Any:
+        require_active(repr(kernel.name))
+        return super().preprocess(kernel)
+
+    def pre_codegen_entrypoint_check(self, kernel: Any, callables_table: Any) -> None:
+        require_active(repr(kernel.name))
+        super().pre_codegen_entrypoint_check(kernel, callables_table)
+
+
+class InProcessCTarget(_ReadDeclining, lp.ExecutableCTarget):
     """``lp.ExecutableCTarget``, with every condition in the code that runs.
 
     loopy hoists a condition shared by every instruction of a kernel as far out
@@ -325,7 +342,9 @@ class InProcessCTarget(lp.ExecutableCTarget):
     Its device code writes ``//``, ``%``, ``<<`` and ``>>`` as numpy computes
     them (:class:`_CCode`, note 20), and the definitions are hashed in, with
     the plan and the lowering, so that loopy's cache keeps no code of other
-    ones (:data:`loopty.operations.CODE_DIGEST`).
+    ones (:data:`loopty.operations.CODE_DIGEST`). loopy checks and generates
+    its kernels only inside :func:`loopty.isl_reading.declining`
+    (:class:`_ReadDeclining`).
     """
 
     hash_fields = (*lp.ExecutableCTarget.hash_fields, "arithmetic")
@@ -338,11 +357,12 @@ class InProcessCTarget(lp.ExecutableCTarget):
         return _CCode(self)
 
 
-class SourceCTarget(lp.CTarget):
+class SourceCTarget(_ReadDeclining, lp.CTarget):
     """``lp.CTarget``, whose code is only printed, with numpy's arithmetic.
 
     The source ``loopty run --emit-code`` prints for target ``c-source``: the
-    device code of :class:`InProcessCTarget`, with no host code.
+    device code of :class:`InProcessCTarget`, with no host code, and made, as
+    its is, inside :func:`loopty.isl_reading.declining`.
     """
 
     hash_fields = (*lp.CTarget.hash_fields, "arithmetic")
@@ -377,7 +397,7 @@ class _OpenCLCode(PyOpenCLCASTBuilder):
         return _CText()
 
 
-class InKernelOpenCLTarget(lp.PyOpenCLTarget):
+class InKernelOpenCLTarget(_ReadDeclining, lp.PyOpenCLTarget):
     """``lp.PyOpenCLTarget``, with every condition in the kernel.
 
     The PyOpenCL target's host code is Python that runs, and a condition
@@ -388,7 +408,8 @@ class InKernelOpenCLTarget(lp.PyOpenCLTarget):
     the guard is emitted in the kernel, as it is for ``lp.OpenCLTarget``,
     which generates no host code. Building one imports pyopencl, as
     ``lp.PyOpenCLTarget`` does; defining the class does not. Its kernel
-    writes numpy's arithmetic, as :class:`InProcessCTarget` does.
+    writes numpy's arithmetic, and is checked and generated inside
+    :func:`loopty.isl_reading.declining`, as :class:`InProcessCTarget`'s are.
     """
 
     hash_fields = (*lp.PyOpenCLTarget.hash_fields, "arithmetic")
@@ -2440,6 +2461,7 @@ def _writes_its_row(writer: Stmt, row: int, shifts: Sequence[int]) -> bool:
     return False
 
 
+@declining()
 def lower_generic(
     term: Term, target: str = "c", layouts: Mapping[str, str] | None = None
 ) -> Lowering:
@@ -2452,6 +2474,11 @@ def lower_generic(
 
     ``layouts`` chooses the layout of an array over a polyhedral domain,
     ``{"L": "packed"}``; every such array is boxed otherwise.
+
+    Every kernel loopty makes is built here, inside
+    :func:`loopty.isl_reading.declining`, so that loopy reads its subscripts,
+    when the lowering asks it to and while it builds the kernel, as it reads
+    them when it checks and generates the kernel.
     """
     _refuse_reserved_names(term)
     _refuse_free_name_sorts(term)
