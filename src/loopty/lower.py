@@ -1359,9 +1359,12 @@ _OPENCL_FAMILIES = re.compile(
 
 #: The functions the OpenCL target's code calls on a loop it runs in parallel,
 #: whatever the kernel computes: a variable of such a name would shadow them.
+#: ``barrier`` is what loopy syncs the work items of a sum on a local axis
+#: with: a parameter ``barrier`` failed to build there (``called object type
+#: 'const __global double *' is not a function``).
 _OPENCL_WORK_ITEM = frozenset(
     name for name in _OPENCL_FUNCTIONS if name.startswith("get_") and "_id" in name
-) | frozenset({"get_local_size", "get_global_size", "get_num_groups"})
+) | frozenset({"get_local_size", "get_global_size", "get_num_groups", "barrier"})
 
 #: The helper functions loopy and loopty define in a preamble:
 #: ``loopy_floor_div_pos_b_int32``, ``loopy_pow_int32_int32``,

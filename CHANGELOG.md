@@ -87,7 +87,8 @@ All notable changes to loopty are recorded here. The format follows
   parallel loop, and `pow` in a kernel with a power or `floor` beside a call
   of `floor`. A function the kernel never calls is a name it may use. Built
   on an OpenCL device, `NULL`, `SCHAR_MAX`, the extension macros
-  (`cl_khr_fp64`), `pipe` and the image types failed too, and are refused
+  (`cl_khr_fp64`), `pipe`, the image types, and `barrier` beside a sum on a
+  local axis, which loopy syncs with `barrier()`, failed too, and are refused
   (`ATOMIC_FLAG_INIT`, `MAX_WORK_DIM` and the other macros OpenCL C or PoCL
   define). A size or an integral scalar named like one of isl's keywords
   (`max`, `min`, `floor`, `mod`, read whatever their case) failed inside the

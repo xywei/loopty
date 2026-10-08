@@ -2264,6 +2264,9 @@ def test_a_name_a_header_defines_or_a_called_function_is_refused():
         ("INT32_MAX", "stdint.h"),
         ("M_PI", "OpenCL C"),
         ("get_local_id", "parallel loop"),
+        # loopy syncs the work items of a sum on a local axis with barrier(),
+        # which a parameter barrier hid: the OpenCL build failed.
+        ("barrier", "parallel loop"),
         # Built on an OpenCL device, each of these failed to compile:
         # OpenCL C defines NULL, SCHAR_MAX and a macro per extension.
         ("NULL", "OpenCL C"),
