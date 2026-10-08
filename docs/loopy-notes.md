@@ -1,6 +1,6 @@
 # Notes on loopy and islpy
 
-Twenty-two interactions with loopty's dependencies that cost real debugging
+Twenty-four interactions with loopty's dependencies that cost real debugging
 time, each with the local workaround and the reason it is local. No upstream
 issues were filed: these are notes so that the next person meets the answer
 instead of the symptom.
@@ -908,9 +908,11 @@ shift, has a narrower operand cast to `int64_t`: `col[i] * col[i]` of a
 variables, sizes and literals alone, or a negation of one, is left as it is,
 as index arithmetic loopy computes every loop bound in, unless its literals
 total `2**30` or more (`i + 2**31 - 1`, or `i + 2**29 + ... + 2**29`, which
-lanky builds as nested sums); so is a floor division, a remainder, an `^` and
-a right shift, whose result is inside 32 bits when its operands are; and so
-is everything inside a subscript, which loopy gives no way to widen (#129). In
+lanky builds as nested sums); and so is a floor division, a remainder, an
+`^` and a right shift, whose result is inside 32 bits when its operands are.
+A subscript is widened as everything else is, unless loopy reads it as
+affine, which it computes from the affine form isl gives back, in 32 bits,
+whatever is written (note 23, #129). In
 a guard that reads no array an operand is widened by a product with a 64-bit
 `1` instead of a cast (`1l * i * i`, note 20). loopy types an `np.uint64`
 beside a signed integer as numpy types two arrays, in double, where numpy
@@ -926,9 +928,10 @@ operation is planned as numpy computes it.
 and natively wraps or is refused, as numpy does, but for arithmetic of loop
 variables, sizes and literals alone, which is Python's natively and exact:
 `1.0 * i ** 5` past `i = 6208` is a wider number natively, which the
-differential fact reports (#139). Arithmetic inside a
-subscript is computed in 32 bits: `x[(i * i) % n]` reads out of bounds
-compiled at `i = 46341` (#129). The interpreter's
+differential fact reports (#139). An affine subscript is computed in
+loopy's 32-bit index type, which `-fwrapv` makes right for its sums and
+products and not for a floor division of a value past 32 bits (note 23).
+The interpreter's
 functions (`sqrt`, `exp`, ...) are typed as numpy types them,
 and a call of anything else is not typed, nor is anything around it. On the
 OpenCL target a `float32` kernel that numpy computes partly in double is
@@ -1031,7 +1034,10 @@ isl's reader takes as the number it is or declines, loopy computes a
 quotient of integers in double inside a comparison of its own accord, and a
 floating power of a loop variable calls `pow`. An operand numpy rounds to
 single precision in such a guard, `(i + 1) ** -1` beside a `float32` scalar,
-has no product that does it, and the guard is refused (`LoweringError`). A
+has no product that does it, and the guard is refused (`LoweringError`).
+Since note 23 the reader declines a cast instead of raising, but a guard is
+still written without one, so that loopy reads an affine guard
+(`100000l * i < m`) and narrows its bounds check by it. A
 loop variable divided by a literal zero is refused by the trace, since Python
 refuses it natively where the compiled run would compute numpy's `0`, and
 so is a loop variable shifted left by a literal of 64 or more, which Python
@@ -1111,3 +1117,95 @@ compute a ragged row's length keep their dependencies. The same is done
 after a substitution, which takes the producer's instruction out: a later
 write of what the producer read depended on the producer, and on nothing that
 now reads it, and loopy was free to run it first.
+
+## 23. loopy's isl reader raises on a cast and reads a constant by its integer part
+
+**Symptom.** Three things that fail or pass wrongly where loopy reads an
+expression into isl:
+
+- `y[i] = x[(i * i) % n]` computes `i * i` in 32 bits compiled, since the
+  lowering left a subscript unwidened (note 19), and reads a wrong cell, or
+  none, from `i = 46341`, where numpy computes it in 64. With the cast that
+  widens it anywhere else, loopy fails in its bounds check:
+  `UnsupportedExpressionError: PwAffEvaluationMapper cannot handle
+  expressions of type TypeCast` (#129).
+- `Schedule.substitute` of an index array whose store converts its value, or
+  whose value holds a cast (`(t[j] + 1) % n` of a 32-bit `Fin[n]` entry,
+  computed in 64 bits), into a read `x[p[i]]` fails the same way in code
+  generation (#145).
+- `with when(i * 0.5 >= 1): y[i] = x[i + 4]` compiles, and the compiled run
+  reads past the end of `x` where the native one is refused; `when(i < 1.5)`
+  lets `x[i + n - 1]` through at `i = 1`. And `when(i * 0.5 < 2)` over
+  `x[i + 4]`, in bounds natively, is refused with `could not establish
+  '[n] -> { [i0] : 4 <= i0 <= 3 + n }' is a subset of ...` (#137).
+
+**Cause.** loopy reads a subscript into isl for its bounds check
+(`symbolic.get_access_map`) and to simplify it in code generation
+(`symbolic.simplify_using_aff`), and a guard that names only loop variables,
+sizes and scalars for its bounds check (`symbolic.condition_to_set`). All go
+through `symbolic.PwAffEvaluationMapper`, and an expression it declines with a
+`TypeError` (a call, a true division, a product of two variables) is caught
+by `with_aff_conversion_guard` and treated as not affine: a subscript is then
+generated as written (simplified by `flatten`, which keeps a cast but drops a
+factor equal to `1`), its access range is not checked, and a guard is not
+used to narrow what the bounds check covers. The mapper has no case for
+`TypeCast`, so pymbolic raises `UnsupportedExpressionError`, a `ValueError`
+nothing catches. And its `map_constant` takes `int(expr)`, so `0.5` is read as
+`0`: `i * 0.5 >= 1` as `0 >= 1`, which holds nowhere and makes the bounds
+check of the statement vacuous; `i < 1.5` as `i < 1`. The C loopy generates
+evaluates the guard as written, so only the check is wrong.
+
+**Local fix.** `loopty.isl_reading.install`, run when `loopty.lower` is
+imported, gives the mapper a `map_type_cast` that raises `TypeError`, and
+wraps its `map_constant` to raise `TypeError` for a constant that is not an
+integer; a float whose value is an integer below `2**53` is that integer in
+double, and is read as one. Declining is always the safe direction: an
+expression loopy does not read is generated as written, and a guard it does
+not read narrows nothing, so the bounds check covers more points, not fewer.
+The module's source is hashed into the targets' persistent hash with the
+others (note 20). With it:
+
+- a subscript is lowered with the widening the plan asks for wherever loopy
+  would not read it as affine without it (`isl_reading.read_as_affine`, asked
+  of the index lowered unwidened): `x[loopty_mod_int64((int64_t) (i) * i,
+  (int64_t) (n))]`. One loopy reads as affine stays unwidened (`x[2 * i]`):
+  loopy replaces it by the affine expression isl gives back, in its 32-bit
+  index type, whatever it was written as, and checks its bounds, which a cast
+  would stop. isl reduces the coefficients of a remainder by a constant
+  (`(i * 7919) % 7` is written `2 * i + -7 * ((2 * i) / 7)`), and under
+  `-fwrapv` C computes a sum or a product modulo `2**32`, which gives the
+  right cell for a subscript whose value is in bounds; a division of an
+  intermediate past 32 bits does not (`2 * i` above, from `i = 2**30`,
+  #149);
+- a substituted read keeps the value's conversions, the store's included, and
+  loopy generates the subscript with them (`y[(int16_t) (t[i])]`); a store's
+  widening keeps the value and is the last thing done to it, so a read in a
+  subscript reads the value inside it, through a second substitution rule
+  with the cast left out (`schedule._unconverted_in_subscripts`), and
+  `x[n - 1 - i]` stays affine;
+- a guard with a non-integer literal is not read, and loopy checks an access
+  under it at every point of its loop, as under a product of loop variables or
+  an array's entry. It refuses an access it cannot show in bounds there, one
+  the guard keeps in bounds included, which it refused before too, from the
+  wrong reading (#148).
+
+## 24. loopy's assumptions of a kernel given none follow the hash seed
+
+**Symptom.** `loopty run examples/wavefront_acoustic.py --emit-code` with a
+cold cache prints one of two texts by `PYTHONHASHSEED`: `-4 + nt + nx` or
+`-4 + nx + nt` in a bound, `-2 + nt >= 0 && -3 + nx >= 0` or the reverse in a
+guard (#125). A warm cache serves the first process's text afterwards.
+
+**Cause.** `lp.make_kernel` given no assumptions (its default is `""`) builds
+the universe over `"[%s] -> { : }"` of `kernel.tools.get_outer_params(domains)`,
+which is a `frozenset`, so the order of the assumptions' parameters is the
+order the hash seed iterates the set in. isl orders the parameters of
+everything code generation aligns with the assumptions by them, and writes the
+sizes of a bound in that order.
+
+**Local fix.** `lower_generic` passes `make_kernel` the universe itself, over
+the parameters in the order the domains name them first, which is the
+term's (`lower._no_assumptions`); a later `lp.assume` aligns its parameters
+after them. Every example prints one text under five seeds, each with a cold
+cache.
+

@@ -4,6 +4,76 @@ All notable changes to loopty are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [PEP 440](https://peps.python.org/pep-0440/).
 
+## [Unreleased]
+
+### Fixed
+
+- A subscript loopy does not read as affine is computed in 64 bits compiled,
+  as the rest of the integer arithmetic is (#129). `x[(i * i) % n]` was
+  `x[loopty_mod_int32(i * i, n)]`, which wrapped round at `i = 46341` and
+  read a wrong cell, or none, and `x[(col[i] * 7919) % m]` read a wrong cell
+  at `col[i] = 271183`. The lowering had left every subscript in 32 bits,
+  since loopy reads a subscript into isl and its reader raised on the cast
+  that widens an operand anywhere else. `loopty.isl_reading` makes the reader
+  decline a cast, as it declines a call, and loopy generates such a
+  subscript as written: `x[loopty_mod_int64((int64_t) (i) * i, (int64_t)
+  (n))]`. A subscript loopy reads as affine without the widening is left
+  without it (`x[2 * i]`): loopy replaces it by the affine expression isl
+  gives back, in its 32-bit index type, and checks its bounds, which a cast
+  would stop. A division in such a subscript whose numerator leaves 32 bits
+  is filed as #149 (note 23 of `docs/loopy-notes.md`).
+- loopy no longer reads a non-integer literal in a guard on the loops by its
+  integer part (#137). Its bounds check reads such a guard into isl, and read
+  `0.5` as `0`: `when(i * 0.5 >= 1)` as false everywhere, so the check passed
+  `x[i + 4]` under it without looking, and the compiled run read past the end
+  of `x` where the native one is refused; `when(i < 1.5)` as `i < 1`, which
+  let `x[i + n - 1]` through at `i = 1`. The reader declines a constant that
+  is not an integer (a float that is one, below `2**53`, is still read as
+  it), and loopy then checks the access at every point of its loop, and
+  refuses both. Under such a guard it also refuses an access the guard keeps
+  in bounds, `when(i * 0.5 < 2)` over `x[i + 4]`, as it did before from the
+  wrong reading and does under a product of loop variables (#148).
+- `Schedule.substitute` computes an index array where it is read in a
+  subscript again (#145). Since #101 and #128 such a value holds a
+  conversion, the store's or its own (`(t[j] + 1) % n` of a 32-bit
+  `Fin[n]` entry, computed in 64 bits), and loopy failed on it in code
+  generation, so the substitution was decided and its kernel left unwritten.
+  loopy's isl reader declines the cast now, and a read in a subscript keeps
+  the value's conversions, the store's narrowing included (`y[(int16_t)
+  (t[i])]`). A store's widening keeps the value and is the last thing done
+  to it, so a read in a subscript reads the value inside it (`x[t[i]]`, and
+  `x[n - 1 - i]`, which loopy reads as affine and checks); a read used as a
+  value keeps it. Each substituted kernel agrees bit for bit with the one
+  that stores the array.
+- The emitted code of a schedule no longer depends on the process's hash
+  seed (#125). loopy builds the assumptions of a kernel given none over a
+  `frozenset` of its parameters, and isl wrote the sizes in every bound in
+  that order: `wavefront_acoustic.py --emit-code` printed `-4 + nt + nx` or
+  `-4 + nx + nt` by `PYTHONHASHSEED`, with a cold cache. The lowering gives
+  `lp.make_kernel` the universe over the parameters in the order the domains
+  name them first (note 24 of `docs/loopy-notes.md`).
+- `Schedule(schedule)` starts from the schedule it is given (#135). It read
+  the schedule for its term alone, so `Schedule(Schedule(double).split("i",
+  2))` was a schedule of `double` with no step, a split after it split the
+  original loop, `loopty run` compared it with `double` and found them in
+  agreement, and `Schedule(Schedule(double, target="opencl"))` was a C
+  schedule. It is the schedule built again from its kernel, its steps
+  replayed and each cast checked again, on its target, with its sizes and
+  its example inputs, unless a target or sizes are given (the default
+  target is now `None`, the given schedule's or `"c"`).
+- The in-bounds fact of a read against a row length a write in its loop left
+  behind is `assumed` (#144). A loop over a row reads the row's length once,
+  when it starts, and the facts of the row's entries were decided against
+  that reading: with `cnt[r] = 0` inside `for j in val.dom[r]`, the native
+  run refuses `val[r, 1]`, and its fact was decided, worth assumed only
+  through the kernel's layout fact, which anything that decided the layout
+  another way would have made decided. A read in a statement that shares the
+  innermost loop the length bounds with a write that can reach the cell the
+  length is read from is now stated with the reason and left `assumed`; a
+  sum or an inner loop over the row reads the length again where it starts,
+  and a write of another row's length changes no reading of this row's, so
+  their reads stay decided.
+
 ## [0.1.0.dev0] - 2026-09-18
 
 The first release in which something works. A decorated kernel runs natively on
