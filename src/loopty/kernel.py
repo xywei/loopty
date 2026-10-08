@@ -632,8 +632,10 @@ class Program(_Decorated):
     statements run in call order, so a program can be run compiled
     (``LoopyExecutor().run(solve, ...)``), scheduled (``Schedule(solve)``)
     and compared with its native run, which is what ``loopty run`` does with
-    every program in a file. Fusing the calls is not done: it is a cast over
-    this term, which is the next step of facts that travel.
+    every program in a file. Fusing two calls' loops is a cast over this
+    term (:meth:`~loopty.schedule.Schedule.fuse`), and computing an array
+    the program makes where it is read, instead of storing it, is a step of
+    a schedule too (:meth:`~loopty.schedule.Schedule.substitute`).
 
     The postcondition of every kernel it calls is restated as a fact *in the
     scope of the program*: after the call, the callee's claim holds of what
@@ -766,7 +768,12 @@ class Program(_Decorated):
         the ``layout`` facts of the term (:func:`loopty.typing.layout_facts`),
         when a call rewrites the counts or the offsets a ragged array of the
         term is read through: a ``Schedule`` of the program rests its
-        ``monotone`` casts on them, as one of a kernel does.
+        ``monotone`` casts on them, as one of a kernel does. And before it
+        too, a ``definedness`` fact for each array the program makes and
+        each call that reads it after another call wrote it
+        (:func:`loopty.typing.definedness_facts`): whether each cell it
+        reads is one a call before it stored or one of the zeros the array
+        was made with, and, where it reads zeros no call stored, which.
         """
         if self._facts is not None:
             return self._facts
@@ -832,6 +839,7 @@ class Program(_Decorated):
             out.extend(rules.requirement_facts(term, self.qualname, **key))
             out.extend(rules.scoped_in_bounds_facts(term, self.qualname, **key))
             out.extend(rules.layout_facts(term, self.qualname, **key))
+            out.extend(rules.definedness_facts(term, self.qualname, **key))
             out.append(
                 faithfulness_fact(
                     self, term, owner=self.qualname, where=self.where, **key

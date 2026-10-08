@@ -1,6 +1,6 @@
 # Notes on loopy and islpy
 
-Twenty interactions with loopty's dependencies that cost real debugging
+Twenty-two interactions with loopty's dependencies that cost real debugging
 time, each with the local workaround and the reason it is local. No upstream
 issues were filed: these are notes so that the next person meets the answer
 instead of the symptom.
@@ -1052,3 +1052,62 @@ is compiled with `-fwrapv` too, and OpenCL C has no build option for it. The Ope
 machine. A function given to loopy as a callable inside a guard is still
 dropped by loopy's type inference.
 
+## 21. `assignment_to_subst` wants one writer, and leaves the zeros' loop behind
+
+**What happens.** A program's temporary is zeroed where the program made it
+(the statement `f.zeros`, see `loopty.compose`) and then written by the call
+that produces it, so the instruction that reads it depends on two writers of
+`f`. `lp.assignment_to_subst(kernel, "f")` looks for the one definition among
+a read's dependencies and refuses: "more than one write to 'f' found in
+dependencies of 'divergence_S0'--definition cannot be resolved (writer
+instructions ids: f_zeros, flux_S0)". With the zeroing instruction removed
+first (`lp.remove_instructions`), it substitutes, and drops the producer, the
+temporary and the producer's loop, which it empties
+(`remove_any_newly_unused_inames`); the zeroing instruction's loop was
+emptied before it ran, and stays, and loopy warns of it when the kernel is
+checked: "Found unused inames in kernel: frozenset({'i_0'}) Unused inames
+during linearization will be prohibited".
+
+**Local fix.** `Schedule.substitute` decides first that no read sees the
+zeros (its `definedness` fact: every cell read was stored by the producer
+before the read), then removes the zeroing instructions, removes their loops
+with `lp.remove_unused_inames`, and calls `assignment_to_subst`
+(`schedule._substituted_kernel`). The fact is what makes dropping the zeros
+sound; loopy's own resolution of the definition is by instruction
+dependencies, which are by array and not by cell, so it would accept the
+removal whatever the reads are. The program's own `definedness` fact counts
+the zeros as stored, since a program may read them as padding at a
+boundary (`typing.definedness_facts`, which lists the cells where it does);
+the substitution's does not, since there are no zeros left to read once the
+array is computed where it is read, and a program that reads its padding is
+refused with the cell.
+
+## 22. After a fusion, dependencies drawn by array can leave loopy no order
+
+**What happens.** The lowering draws an instruction's dependencies by array:
+a statement depends on every earlier one that writes an array it reads, at
+whatever cells (`lower_generic`, and note 12 for why they are final). While a
+program's loops run in sequence that is only the program's order. A fusion
+puts two of them in one loop, and a call between them in the term can then be
+ordered both ways: after the fused loop, because it reads what the first
+fused statement writes, and before it, because the second reads an array it
+writes, at cells it never writes. The casts are decided, since no cell passes
+from it to the second, and loopy fails in code generation with
+`CycleError: EnterLoop(iname='x')`. Dropping the dependency is not enough
+alone: loopy then asks that two instructions touching one variable be ordered
+or said to need no order, and raises `VariableAccessNotOrdered` ("No
+dependency relationship found between 'front_S0' which writes the variable
+'h' and 'back_S0' which also accesses the variable 'h'").
+
+**Local fix.** After a fusion, `Schedule._ordered_by_dependences` draws the
+dependencies between statements again from the dependences the casts were
+checked against: one statement's instruction depends on another's where a
+dependence joins an instance of one to an instance of the other, in either
+direction, ordered as the schedule's time map orders the two within a step
+of the loops they share; two that touch one variable and that no dependence
+joins go in each other's `no_sync_with`, with scope `any`, since they touch
+no cell in common and need no order and no barrier. The instructions that
+compute a ragged row's length keep their dependencies. The same is done
+after a substitution, which takes the producer's instruction out: a later
+write of what the producer read depended on the producer, and on nothing that
+now reads it, and loopy was free to run it first.

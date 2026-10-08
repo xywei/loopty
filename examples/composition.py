@@ -18,8 +18,9 @@ Run this file three ways.
     compiled program with the native one.
 
 ``lanky check examples/composition.py``
-    The two kernels' obligations, and the program's ``trace-faithful`` fact;
-    neither kernel states a postcondition for the program to restate.
+    The two kernels' obligations, and the program's: ``f`` is defined where
+    ``divergence`` reads it, and the ``trace-faithful`` fact; neither kernel
+    states a postcondition for the program to restate.
 
 ``loopty run examples/composition.py``
     Each kernel alone, and the program as one kernel, compiled and compared
@@ -42,8 +43,8 @@ of one kernel, and it orders the two loops of the generated code.
 
 *This is the reference for fusion, not fusion.* The generated code runs the two
 loops one after the other, as the program does. Fusing them into one loop is a
-cast over this term, which a checker will have to accept against the
-dependence above, and it is not done here.
+cast over this term, checked against the dependence above; ``fusion.py`` makes
+it, and then stores no flux at all.
 """
 
 from __future__ import annotations

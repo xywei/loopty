@@ -179,7 +179,10 @@ table of row starts. Both compiled runs agree with the native one.
   `(t, i) -> (t + i, t - i)` included, or a map per statement. Each is checked
   for bijectivity on statement instances and for monotonicity on the dependence
   relation. A failure prints two instances and the array cell between them,
-  before any code is generated.
+  before any code is generated. Fusing two kernels a program calls is one of
+  them, a map per statement that runs both in one loop, and so the storage of
+  what passes between them is a question of the schedule and not of the
+  kernels: computed where it is read, or kept.
 - **Reassociation is visible in the type.** Splitting an accumulation and summing
   the pieces is not free on floating point. A trace reads the accumulation's
   class off what it sums, `realize("y", tree=True)` is what lowers it to
@@ -259,6 +262,28 @@ end to end; the edges are sharp.
   decide a callee's in-bounds fact its own term leaves `assumed`, a flat
   `val[off[r] + j]` after the scan, as a fact of the program's.
   `examples/travel.py` shows all three.
+- Fusion, and the storage of what passes between calls. An array a
+  program makes and one call writes and a later call reads is an internal
+  edge, and the program has a `definedness` fact for it, decided by isl:
+  every cell the reader reads is one a call before it stored, or one of the
+  zeros the array was made with, which the fact's reason then lists
+  (`shifted.S0 reads the zeros at f[0] and f[n - 1]`), so zero padding at a
+  boundary is read as written and `lanky check` passes.
+  `Schedule(program).fuse("flux", "divergence", shift=1)`
+  runs the reader's loop inside the writer's, one step behind, and is
+  `affine` with the map per statement it builds, `{ flux_S0[j] -> [j];
+  divergence_S0[i] -> [j] : j = i + 1 }`, checked on the dependences between
+  the calls; without the shift it is refused with the pair of instances,
+  and the message names the shift that is accepted.
+  `.substitute("f")` then stores none of `f`: the one statement that writes
+  it becomes a substitution rule (loopy's `assignment_to_subst`) computed
+  again at every read, legal when every read is of a cell it stored before
+  the read, since no zeros are left to read, and nothing writes what it
+  read in between, and every later step is checked against the
+  dependences of the program as it then runs.
+  `examples/fusion.py` is the Burgers flux and divergence of
+  `examples/composition.py`, fused, then substituted, each compiled run
+  compared with the native one.
 - Tracing a body to a typed term: accesses, statements, reductions, ragged
   fibers, `when` guards, source locations, and a `TraceError` that names the fix
   when a Python `if` is used on a computed value, when a Python name, a
@@ -339,7 +364,8 @@ end to end; the edges are sharp.
 - `IslOracle`: `Empty`, `Subset`, `Bijective`, `Monotone`, each refutation with a
   witness.
 - `Schedule`: `tag`, `split`, `interchange`, `prioritize`, `tile`, `skew`,
-  `affine`, `realize`, each checked as a cast, each emitting its fact;
+  `affine`, `fuse`, `realize`, each checked as a cast, each emitting its fact,
+  and `substitute`, checked as a storage decision;
   `retarget`, which replays every step against another loopy target and
   re-checks it. A tag belongs to a loop, so `split`, `tile` and `affine`
   refuse a loop that carries one, and the loops they make are tagged after
@@ -493,8 +519,18 @@ end to end; the edges are sharp.
   facts reach isl; a hypothesis isl cannot state is dropped, which assumes
   less, never more.
 - A program lowers sequentially: its calls' loops run one after another, as
-  the program runs them. Fusing them is a cast over the program's term that
-  is not written yet, and so is deciding the storage of an intermediate. The
+  the program runs them, until a schedule fuses them. A fusion moves the
+  outer loops of each side, as many as both have, and a nest the lowering
+  wrote as one domain is cut after them; loops a map takes that are not the
+  outer loops of their domain leave the casts decided and the kernel
+  unbuildable. Only a pointwise
+  producer is substituted (one cell per instance, at its loop variables, no
+  sum, no guard isl cannot state), and the array is either stored in full
+  or not at all: contracting it to the cells live at once is not done. A
+  value its store converts, or one computed with a conversion in it
+  (`(t[j] + 1) % n` of a 32-bit `Fin[m]` entry, computed in 64 bits), read
+  in a subscript, leaves the kernel unwritten, with the reason: loopy
+  cannot simplify a subscript through the cast (#145). The
   compiled program is one call, so the contract checks its arguments when it
   starts and not at every call. What a callee's contract checks of the cells
   of an array an earlier call wrote, or the program made (an element sort
@@ -777,7 +813,7 @@ loopty is loop + ty, for types: loops, typed. It follows `loopy`, `sumpy`, and
 
 - [docs/quickstart.md](docs/quickstart.md): the two demos end to end, with the
   output the commands actually print.
-- [examples/README.md](examples/README.md): all seven demos, with every console
+- [examples/README.md](examples/README.md): all nine demos, with every console
   block regenerated by `scripts/refresh_example_outputs.py`.
 - [docs/device-runs.md](docs/device-runs.md) and
   [docs/device-runs/](docs/device-runs/): the demos run on real OpenCL devices,

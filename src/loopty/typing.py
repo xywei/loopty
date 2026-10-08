@@ -1873,6 +1873,194 @@ def requirement_facts(
     return facts
 
 
+def definedness_id(
+    owner: str,
+    array: str,
+    call: str,
+    *,
+    module: str | None = None,
+    line: int | None = None,
+) -> str:
+    """The id of the fact that a call reads only cells of ``array`` stored before it.
+
+    ``definedness:composition.burgers_rhs@76:f:divergence``: the program's
+    definition, the array it made and the label of the call that reads it.
+    """
+    return fact_id(
+        "definedness", owner, module=module, line=line, detail=f"{array}:{call}"
+    )
+
+
+def definedness_facts(
+    term: Term, owner: str, *, module: str | None = None, line: int | None = None
+) -> list[Fact]:
+    """Whether each edge through an array a program makes carries what is read.
+
+    An array the program makes (``f = Arr.zeros_like(u)``) and that one call
+    writes and a later call reads is an internal edge of the program: the
+    writer produces it, the reader consumes it, and nobody outside sees it.
+    For each call that reads such an array after some call wrote it, one
+    fact asks the question :func:`loopty.flow.definedness` answers: is each
+    cell it reads one the calls before it stored, or one of the zeros the
+    program made the array with? The zeroing stores every cell when the
+    program makes the array, so the zeros are stored as much as anything a
+    call stores, and a program may mean them: zero padding at a boundary
+    is read as the program wrote it, natively and compiled.
+
+    When isl shows it, the fact is the subset question, for the isl oracle
+    to decide. Where a call reads zeros no call before it stored, the fact
+    says so in its statement (``... or one of the zeros f was made with``),
+    and its reason lists the cells (``shifted.S0 reads the zeros at f[0] and
+    f[n - 1]``), so the ledger shows where the zeros are read and a reader
+    of it can tell padding that is meant from a producer that stores too
+    little. Where no call does, the statement is the stricter one, every
+    cell read was stored by a call before it, which is what lets a schedule
+    compute the array where it is read instead
+    (:meth:`loopty.schedule.Schedule.substitute`, whose own ``definedness``
+    fact keeps that claim, since the zeros would not be there). It is
+    ``refuted`` by isl only for a cell the call reads that neither a call
+    before it nor the zeroing stored, and that the call does not store
+    itself, which for an array ``Arr.zeros_like`` made isl never shows.
+    When a read is not affine, or is made under a guard isl cannot state,
+    and may reach a cell no call stored, the fact stays ``assumed``, with
+    the reason: such a read is listed where it may not be made, so the
+    cells it is listed at are not cells it is shown to read the zeros at.
+    A cell a write isl cannot list, or the reading call itself, may have
+    stored before the read is a zero or what that write stored, and the
+    reason says it is one or the other. The flags of the checked points,
+    which the program's own statements set, are no edge, and the guard they
+    put on every later statement is no such guard, since no statement runs
+    where one is set.
+    """
+    flags = dict(term.checks)
+    facts: list[Fact] = []
+    for array, _typ in term.temporaries:
+        if array in flags:
+            continue
+        writers: list[Any] = []
+        calls: list[str] = []
+        for scope in term.scopes:
+            stmts = [term.stmt(stmt_id) for stmt_id in scope.statements]
+            reading = [
+                stmt
+                for stmt in stmts
+                if any(
+                    name == array and kind in ("read", "acc")
+                    for name, _indices, kind, _inames, _domain in (
+                        flow.statement_accesses(stmt, term)
+                    )
+                )
+            ]
+            wrote = [stmt for stmt in stmts if stmt.assignee.array == array]
+            if reading and writers:
+                facts.append(
+                    _definedness_fact(
+                        term, owner, array, scope, writers, calls, reading, wrote,
+                        module=module, line=line,
+                    )
+                )
+            if wrote:
+                writers.extend(wrote)
+                if scope.call not in calls:
+                    calls.append(scope.call)
+    return facts
+
+
+def _definedness_fact(
+    term: Term,
+    owner: str,
+    array: str,
+    scope: Any,
+    writers: Sequence[Any],
+    calls: Sequence[str],
+    reading: Sequence[Any],
+    own: Sequence[Any],
+    *,
+    module: str | None,
+    line: int | None,
+) -> Fact:
+    """One fact of :func:`definedness_facts`: one call reading one array.
+
+    ``own`` are the call's statements that store into the array, whose
+    cells may have been stored before the call reads them (see
+    :func:`loopty.flow.definedness`). The statement that zeroes the array
+    where the program made it, ``f.zeros``, stores every cell before any
+    call runs.
+    """
+    zeros = [stmt for stmt in term.stmts if stmt.id == f"{array}.zeros"]
+    verdict = flow.definedness(term, array, writers, reading, own, zeros)
+    stored_by = " or ".join(calls)
+    provenance: dict[str, Any] = {
+        "array": array,
+        "call": scope.call,
+        "writers": list(calls),
+        "detail": verdict.detail,
+    }
+    identifier = definedness_id(owner, array, scope.call, module=module, line=line)
+    statement = (
+        f"every cell of {array} that {scope.call} reads, {stored_by} stored before it"
+    )
+    if verdict.ok is True:
+        dims = term.array_types[array].ndim
+        description = (
+            f"cells of {array} that {scope.call} reads are cells {stored_by} stored"
+        )
+        if verdict.zeros is not None:
+            statement = (
+                f"every cell of {array} that {scope.call} reads is one {stored_by} "
+                f"stored before it or one of the zeros {array} was made with"
+            )
+            description += f" or zeros {array} was made with"
+            provenance["reason"] = verdict.detail
+        return Fact(
+            id=identifier,
+            kind="definedness",
+            statement=statement,
+            term=Subset(
+                verdict.read,
+                verdict.stored,
+                description,
+                tuple(f"a{k}" for k in range(dims)),
+            ),
+            status=Status.ASSUMED,
+            provenance=provenance,
+            where=scope.where,
+            owner=owner,
+        )
+    if verdict.ok is False:
+        cell = ", ".join(str(value) for value in verdict.witness or ())
+        at = ", ".join(f"{name}={value}" for name, value in verdict.parameters)
+        provenance["witness"] = verdict.witness
+        provenance["witness_text"] = f"{array}[{cell}]" + (f" at {at}" if at else "")
+        provenance["witness_params"] = dict(verdict.parameters)
+        provenance["reason"] = (
+            f"{verdict.detail}, so the read is of a cell nothing stored before "
+            f"it: have {stored_by} store every cell {scope.call} reads"
+        )
+        return Fact(
+            id=identifier,
+            kind="definedness",
+            statement=statement,
+            term=None,
+            status=Status.REFUTED,
+            decided_by="isl",
+            provenance=provenance,
+            where=scope.where,
+            owner=owner,
+        )
+    provenance["reason"] = verdict.detail
+    return Fact(
+        id=identifier,
+        kind="definedness",
+        statement=statement,
+        term=None,
+        status=Status.ASSUMED,
+        provenance=provenance,
+        where=scope.where,
+        owner=owner,
+    )
+
+
 def scoped_in_bounds_facts(
     term: Term, owner: str, *, module: str | None = None, line: int | None = None
 ) -> list[Fact]:

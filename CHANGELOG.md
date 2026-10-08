@@ -455,6 +455,92 @@ with a pair of statement instances.
   the compiled program runs, and a flat access in bounds where it follows the
   scan. `examples/README.md`, the README and the quickstart describe it, and
   the spmv transcripts are regenerated.
+- **Definedness of what passes between a program's calls** (#13,
+  `loopty.flow.definedness`, `loopty.typing.definedness_facts`). An array a
+  program makes with `Arr.zeros_like`, written by one call and read by a
+  later one, is an internal edge of the program, and the program has a
+  `definedness` fact for each call that reads it after another wrote it:
+  every cell the call reads is one a call before it stored, or one of the
+  zeros the array was made with, which the zeroing stored when the program
+  made it. The fact's term is the isl subset question between the two
+  sets of cells, for the isl oracle. Where the call reads zeros no call
+  stored, the statement says so (`... or one of the zeros f was made
+  with`) and the reason lists the cells (`shifted.S0 reads the zeros at
+  f[0] and f[n - 1]`), so zero padding at a boundary is read as the
+  program wrote it and `lanky check` passes; where it reads none, the
+  statement is the stricter one, every cell read was stored by a call
+  before it. Only a read of a cell that neither a call nor the zeroing
+  stored is `refuted`, with the cell, which isl never shows for an array
+  `Arr.zeros_like` made. A read isl cannot list (an index that is not
+  affine, a guard it cannot state) that may reach a cell no call stored
+  leaves the fact `assumed`, with the reason; a cell the reading call, or
+  a write isl cannot list, may have stored first is a zero or that value,
+  and the reason says so. The composition demo has one row more,
+  `decided`. A substitution keeps the stricter claim (below).
+- **Fusion as a checked cast** (#13). `Schedule.affine` takes maps per
+  statement whose statements run in different loops, each taking its own
+  loops to the same new ones, which is a fusion: `{ flux_S0[j] -> [j];
+  divergence_S0[i] -> [j] : j = i + 1 }` runs a program's two calls in one
+  loop, checked as every map per statement is, on the dependences between
+  the calls as well as within each. `Schedule.fuse(producer, consumer,
+  shift=0)` builds that map from two statements, or two calls by their
+  labels, and their loops, outermost first, one shift per loop. A fusion
+  that runs a dependence backwards is refused with the pair of instances and
+  the cell, and the message names the least shift the checker accepts, when
+  a number per loop gives one. A label names the call's own statements and
+  not the checked points a program puts before it, so a fusion that would
+  run the call before such a check is refused for the flag the check sets
+  and the call reads; the check fuses with the producer instead, and stays
+  before the reads. The kernel rewrite replaces the two loops'
+  domains by one, the union of the images, each statement predicated on its
+  own and given its own inverse, and nests the domains again; the union of
+  two loops that run to two sizes, `n` and `m`, is bounded by `n + m`, its
+  hull where the sizes are not negative, which they never are. A nest the
+  lowering wrote as one domain, `{ [i, j] }`, is cut after the loops the
+  maps take when they are its outer ones, so the rows of a two-loop
+  producer fuse with a one-loop consumer of each row; other loops that share
+  a domain with a loop no map takes leave the kernel unbuildable, with the
+  reason. After a fusion, and after a substitution, the statements'
+  instruction dependencies are drawn again from the dependences the casts
+  are checked against, in the order the schedule puts the statements, and
+  two that touch one variable and that no dependence joins are marked as
+  needing no order (`no_sync_with`): the lowering draws them by array, in
+  term order, and a call between the fused ones that the second reads only
+  at cells it never writes left loopy no order (a `CycleError`; note 22 of
+  `docs/loopy-notes.md`). Maps per statement that take a loop in common still have to
+  take the same loops, and every statement in a loop some map takes has to
+  be given one that takes all of them.
+- **Storing an intermediate, or not** (#13). `Schedule.substitute(array)`
+  computes an array the program makes where it is read: the one statement
+  that writes it, pointwise, becomes a substitution rule through loopy's
+  `assignment_to_subst`, after the statement that zeroes the array is
+  dropped, and the temporary and the loops left empty go with it. Each read
+  gets the value converted to the array's element type, as the store
+  converted it (a `float32` intermediate rounds it); where that conversion
+  would sit in a subscript, which loopy cannot simplify through, the kernel
+  is left unwritten with the reason, as for an index array computed with a
+  conversion in it (`(t[j] + 1) % n` of a 32-bit `Fin[m]` entry, computed
+  in 64 bits), or a `Fin[m]` entry stored in a 64-bit cell (#145). It is
+  refused with a `ValueError` for a parameter, an array two statements
+  write, or a producer that is not pointwise, and with an `IllegalCast` when
+  a read is of a cell the producer does not store, or stores after the read
+  (the `definedness` fact of the step, refuted with the cell: computed where
+  it is read, the array has no zeros, so a program that reads its zero
+  padding is not substituted), or when something writes what the
+  producer read between its run and a read of what it stored (the
+  `monotone` fact). The dependences of the dropped statements go, those of
+  the producer's reads are carried over to the reads that replace them, and
+  every later step is checked against the result, so a fused loop that
+  carried the array from step to step may take a hardware axis once it is
+  substituted; the kernel's instruction dependencies are drawn again from
+  them, so a later write of what the producer read waits for the reads that
+  compute it again. Contraction to the cells live at once is not done.
+- **A ninth demo**, `examples/fusion.py`: the Burgers flux and divergence of
+  the closed #6, rebuilt on these. The fusion without a shift is refused with
+  its pair, the fusion one step behind is decided and compiled to one loop,
+  and the substituted schedule stores no flux; both runs agree with the
+  native one. `examples/README.md`, the README and the composition demo
+  describe it, and the composition transcripts are regenerated.
 - **A rewritten layout decided by induction over the run, or refuted by a
   native run** (#103). The `layout` fact of a kernel that writes a count, a
   start read from another array, or a start under a guard isl cannot state

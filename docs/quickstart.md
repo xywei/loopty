@@ -261,7 +261,9 @@ natively, both of its outputs at once. `spmv` declares no offsets, so the
 program reads the rows through their own, as `spmv` does alone; the program
 parameter called `off` is `scan`'s output and is not taken for them.
 `examples/composition.py` composes two kernels with an edge between them, and
-an intermediate array the program keeps to itself.
+an intermediate array the program keeps to itself; `examples/fusion.py` fuses
+the two kernels' loops into one, a cast checked on the edge, and then stores
+none of the intermediate, computing it where it is read.
 
 ## The stencil, and a transformation that is refused
 
@@ -486,7 +488,7 @@ transcripts, are in [device-runs.md](device-runs.md) and under
 debugging time, and the local workarounds for them, are in
 [loopy-notes.md](loopy-notes.md).
 
-All seven demos, with every console block regenerated mechanically by
+All nine demos, with every console block regenerated mechanically by
 `scripts/refresh_example_outputs.py`, are in
 [../examples/README.md](../examples/README.md). The blocks in *this* file come
 from the same script, some of them elided where marked with `...`; run the
