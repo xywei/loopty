@@ -4,12 +4,28 @@ All notable changes to loopty are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [PEP 440](https://peps.python.org/pep-0440/).
 
-## [0.1.0.dev0] - 2026-09-18
+## [Unreleased]
 
-The first release in which something works. A decorated kernel runs natively on
-numpy, traces to a typed term, emits its obligations into lanky's ledger, lowers
-through loopy, and runs on the C target. An illegal transformation is rejected
-with a pair of statement instances.
+## [0.1.0] - 2026-10-08
+
+The first release on PyPI, where only the 0.0.1 placeholder that reserved the
+name was before, and the first on a released lanky, 0.1.0. A kernel is a
+Python function over typed arrays, dense, ragged or over a polyhedral domain.
+It runs natively on numpy, traces to a typed term whose obligations
+`lanky check` prints in one ledger, decided by isl or by type where they can
+be, and lowers through loopy onto the C target, where `loopty run` compares
+the compiled run with the native one. A program's facts travel from one call to
+the next, and every schedule step, a fusion of two calls included, is a cast
+checked before it is applied. The README's Known limits section says what a
+user is most likely to meet: a decided in-bounds fact that is false of a
+kernel which shortens a row inside the loop over it (#144), index arithmetic
+in 32 bits compiled (#129), integers past 64 bits (#139), what substitution
+and fusion do not do yet (#145, #132), and the OpenCL target, which CI never
+runs.
+
+The entries below are every change since that placeholder. 0.1.0.dev0, the
+version on `main` from 2026-09-18, when the first kernel ran, was never
+published.
 
 ### Added
 
@@ -1958,6 +1974,27 @@ with a pair of statement instances.
 
 ### Changed
 
+- **Packaged for the first release.** The version is 0.1.0, the classifiers
+  say `Development Status :: 3 - Alpha`, and the project's URLs name the
+  quickstart, this file and the issue tracker. The dependencies are what an
+  install from PyPI has to get: lanky 0.1.0 or later (the floor was
+  0.1.0.dev1, met only by a checkout of lanky), numpy 2 or later, for NEP 50's
+  promotion, which the compiled run follows, loopy 2025.2, the one release
+  loopty is tested with and whose internals it builds on, and islpy from
+  2025.2.5 and below 2026, as before; the `opencl` extra asks for the
+  pyopencl loopy's own target asks for. `[tool.uv.sources]` still resolves
+  lanky from a sibling checkout for development, and a built distribution
+  carries the requirement on PyPI instead. The sdist holds the package, the
+  tests, the examples, the documentation and the script that checks its
+  transcripts, named in `pyproject.toml` rather than every file git does not
+  ignore, and hatchling 1.27 or later builds it, for the license metadata.
+  The publish workflow stops on a tag that is not the package's version in
+  `pyproject.toml` and `loopty.__version__`, builds without
+  `[tool.uv.sources]`, checks that it built one sdist and one wheel of that
+  version, and runs `twine check` on them before it publishes. The README
+  installs from PyPI with `pip`, says what the install pulls in and needs,
+  where the project stands, has a Known limits section, and links the
+  documentation by full addresses, so that the links work on PyPI as well.
 - **`Nat` and `Int` are 64 bits wide compiled** (#101). An array of them the
   kernel writes, or a program's temporary of them, has to be an `int64` one
   natively, where a signed integer of 32 bits or more was accepted: an
