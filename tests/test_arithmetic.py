@@ -10,8 +10,13 @@ literal beside a ``float32`` (#91), an integral value outside 32 bits (#92),
 an integer result outside 32 bits (#101), a scalar weak or strong by the call
 (#102), floating ``%`` and ``//`` (#104), integer ``//`` and ``%`` by zero
 (#105), a sum of truth values (#106), ``^``, ``<<`` and ``>>`` (#107), a kernel
-named like a library function (#108), and an integer to a negative power
-(#109). Each kernel here either agrees with its native run bit for bit, or is
+named like a library function (#108), an integer to a negative power
+(#109), a written ``int32`` array of ``Fin[m]`` (#121), a narrow integer type
+and an unsigned one beside a signed one (#122), ``abs`` of an integer (#123),
+a name the generated code gives a meaning (#124), a negated truth value
+(#130), a kernel named like an OpenCL C built-in (#131), an integer literal
+past 64 bits (#140), and one beside an unsigned integer that does not hold it
+(#141). Each kernel here either agrees with its native run bit for bit, or is
 refused, by the trace or the contract, with the fix named.
 """
 
@@ -1701,7 +1706,7 @@ def test_a_guard_on_scalars_is_computed_as_numpy_computes_it():
     native = make()
     on_the_scalars(**native)
     assert list(native["y"]) == [0.0, 0.0, 0.0]
-    assert "s * 1.0 * a > 0.300000008" in emit_code(on_the_scalars)
+    assert "s * (1.0 * a) > 0.300000008" in emit_code(on_the_scalars)
     agrees(on_the_scalars, make)
 
 
@@ -1848,8 +1853,8 @@ def test_a_narrow_integer_is_computed_in_its_own_type():
     narrow(**native)
     assert list(native["b"][:2]) == [8, 4]
     assert native["c"][2] == np.int8(-128) * 2 + 0 + (-128) + np.int8(-128) ** 3
-    assert "(int8_t) (a[i] * a[i])" in emit_code(narrow)
     agrees(narrow, make)
+    assert "(int8_t) (a[i] * a[i])" in emit_code(narrow)
 
 
 @pytest.mark.filterwarnings("ignore::RuntimeWarning")
@@ -1878,10 +1883,10 @@ def test_an_unsigned_integer_beside_a_signed_one_is_numpys():
     assert list(native["b"]) == [False, False, False, True]
     assert list(native["c"]) == [False] * 4
     assert list(native["d"]) == [True] * 4
+    agrees(mixed_signs, make)
     code = emit_code(mixed_signs)
     assert "(int64_t) (u[i]) + (int64_t) (k[i])" in code
     assert "k[i] >= 0 && u[i] < k[i]" in code
-    agrees(mixed_signs, make)
 
     # A uint64 and an int64 have no common integer type in C, and numpy
     # compares them exactly: 2**63 > 2**63 - 1, which doubles say is false.
@@ -1926,12 +1931,90 @@ def test_an_integer_literal_in_integer_arithmetic_is_an_integer():
             "z": np.zeros(3),
         }
 
-    code = emit_code(literal_beside_integers)
-    assert "(k[i] + 3)" in code and "(k[i] ^ 3)" in code
     native = make()
     literal_beside_integers(**native)
     assert native["y"][0] == float(np.int64(-(2**63) + 2))
     agrees(literal_beside_integers, make)
+    code = emit_code(literal_beside_integers)
+    assert "(k[i] + 3)" in code and "(k[i] ^ 3)" in code
+
+
+@kernel
+def nested_right(
+    k: Arr[Fin[n], Int],  # noqa: F821
+    j: Arr[Fin[n], Int],  # noqa: F821
+    x: Arr[Fin[n], Real],  # noqa: F821
+    v: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A product and a sum nested after the first operand of another."""
+    for i in k.dom:
+        y[i] = 1.0 * (k[i] * j[i])
+        z[i] = x[i] + (v[i] + v[i])
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_a_sum_or_product_nested_to_the_right_is_computed_so():
+    # pymbolic printed 1.0 * (k[i] * j[i]) flat, and C multiplied from the
+    # left in double, 2**70, where numpy multiplies the integers first and
+    # wraps round to 0; x[i] + (v[i] + v[i]) was added from the left, and
+    # 1e16 + 1 + 1 rounds to 1e16 twice, where numpy adds 2.
+    def make() -> dict:
+        return {
+            "k": np.array([2**40, 3]),
+            "j": np.array([2**30, -5]),
+            "x": np.array([1e16, 0.5]),
+            "v": np.array([1.0, 0.25]),
+            "y": np.zeros(2),
+            "z": np.zeros(2),
+        }
+
+    native = make()
+    nested_right(**native)
+    assert list(native["y"]) == [0.0, -15.0]
+    assert native["z"][0] == 1e16 + 2
+    agrees(nested_right, make)
+    code = emit_code(nested_right)
+    assert "1.0 * (k[i] * j[i])" in code and "x[i] + (v[i] + v[i])" in code
+
+
+@kernel
+def differences(
+    c: Arr[Fin[n], Int],  # noqa: F821
+    a: Arr[Fin[n], np.int8],  # noqa: F821
+    k: Arr[Fin[n], np.int32],  # noqa: F821
+    u: Arr[Fin[n], np.uint32],  # noqa: F821
+    y: Arr[Fin[n], Int],  # noqa: F821
+    z: Arr[Fin[n], Int],  # noqa: F821
+):
+    """Differences pymbolic builds as a sum of a negation."""
+    for i in c.dom:
+        y[i] = c[i] - a[i]
+        z[i] = k[i] - u[i]
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_a_difference_is_computed_in_the_type_of_the_two():
+    # pymbolic builds c - a as c + -1 * a, which negates a in its own type
+    # first: -1 * a of an int8 -128 is itself, and of a uint32 it is taken
+    # round modulo 2**32, while numpy subtracts in the type of the two, int64
+    # here. C computed k[i] - u[i] of an int32 k and a uint32 u in uint32.
+    def make() -> dict:
+        return {
+            "c": np.array([5, -(2**63)]),
+            "a": np.array([-128, 127], np.int8),
+            "k": np.array([-1, 2**31 - 1], np.int32),
+            "u": np.array([2**32 - 1, 0], np.uint32),
+            "y": np.zeros(2, np.int64),
+            "z": np.zeros(2, np.int64),
+        }
+
+    native = make()
+    differences(**native)
+    assert native["y"][0] == 133
+    assert native["z"][0] == -1 - (2**32 - 1)
+    agrees(differences, make)
 
 
 # }}}
@@ -2056,6 +2139,13 @@ def test_a_kernel_named_like_an_opencl_builtin_is_renamed(plain_opencl):
         kern = _named(name, _doubled)
         assert f"void {name}_knl(" in emit_code(kern)
         assert f" {name}_knl(" in emit_code(kern, target="opencl")
+        agrees(kern, reals)
+    # A family of built-ins takes in any suffix, and renaming one by a
+    # suffix ran forever: it gets a prefix.
+    for name in ("atomic_add", "work_group_reduce_add", "read_imagef"):
+        kern = _named(name, _doubled)
+        assert f"void knl_{name}(" in emit_code(kern)
+        assert f" knl_{name}(" in emit_code(kern, target="opencl")
         agrees(kern, reals)
     assert "void half_edged(" in emit_code(_named("half_edged", _doubled))
 

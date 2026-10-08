@@ -852,7 +852,7 @@ void burgers_rhs(int32_t const n, double const *__restrict__ u, double *__restri
 {
   for (int32_t j = 0; j <= -1 + n; ++j)
     if (-2 + j >= 0 && -1 + j > 0 && -1 + j + 1 < n)
-      rhs[-1 + j] = (-1.0 * (0.5 * u[j] * u[j] + -1.0 * 0.5 * u[-2 + j] * u[-2 + j])) / 2.0;
+      rhs[-1 + j] = (-1.0 * (0.5 * u[j] * u[j] + -1.0 * (0.5 * u[-2 + j] * u[-2 + j]))) / 2.0;
 }
 
   rhs: difference 0 within 1e-06 (approx) -> tested

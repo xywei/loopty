@@ -783,10 +783,10 @@ class ExpressionLowerer(Mapper):
         beside a ``float32`` scalar, and C would keep it in double. Nor has a
         conversion of a result back into the integer type numpy computes it
         in (``narrowing``, #122), which a product cannot narrow. The ``1.0``
-        comes first: loopy
-        prints ``s * (1.0 * a)`` as ``s * 1.0 * a``, which C computes in
-        double from the left as well, where ``s * a * 1.0`` would multiply ``s
-        * a`` in single precision, and ``1l * i * i`` is a product of longs.
+        comes first, beside the operand it converts: ``s * (1.0 * a)``, which
+        loopty's printer brackets (:class:`_CText`), is computed in double,
+        where ``s * a * 1.0`` would multiply ``s * a`` in single precision,
+        and ``1l * i * i`` is a product of longs.
         """
         if self._on_loops is None or (_is_literal(operand) and not narrowing):
             return _converted(operand, dtype)
@@ -1423,7 +1423,10 @@ def _kernel_name(name: str, taken: Sequence[str]) -> str:
     way (:func:`is_library_name`): a kernel named ``floor`` was looked up by
     loopy as C's ``floor`` and failed with ``KeyError: 'floor'``, and one
     named ``cpow`` over complex arrays clashed in the C compiler with the
-    ``cpow`` that ``complex.h`` declares (#108).
+    ``cpow`` that ``complex.h`` declares (#108). So is a name of OpenCL C's
+    built-ins (#131), but for one of a family of them that takes in any
+    ending (``atomic_add``, ``work_group_reduce_add``), which gets a ``knl_``
+    prefix instead: ``knl_atomic_add``.
     """
     base = _sanitize(name)
     if not base or base[0].isdigit():
@@ -1443,6 +1446,12 @@ def _kernel_name(name: str, taken: Sequence[str]) -> str:
     if not clashes(base):
         return base
     candidate = f"{base}_knl"
+    if clashes(candidate):
+        # A family of OpenCL C's built-ins takes in any ending (``atomic_add``
+        # and ``atomic_add_knl`` are both ``atomic_\w+``), so no suffix leaves
+        # it, and appending one ran forever. Every family and pattern is
+        # matched from a name's start, which a prefix leaves.
+        candidate = f"knl_{base}"
     while clashes(candidate):
         candidate = f"{candidate}_"
     return candidate

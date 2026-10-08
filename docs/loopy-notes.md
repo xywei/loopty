@@ -1025,8 +1025,8 @@ or loopty defines in a preamble, is renamed with the `_knl` suffix, as a C
 keyword is (`lower.is_library_name`). And a guard that reads no array is
 lowered with no cast in it (`ExpressionLowerer.condition`): a literal is
 still written in numpy's dtype, an operand numpy computes in double or in 64
-bits is multiplied by `1.0` or by a 64-bit `1` (`s * 1.0 * a`, `1l * i *
-i`), which C computes from the left in that type as it would the cast and
+bits is multiplied by `1.0` or by a 64-bit `1` (`s * (1.0 * a)`, `1l * i
+* i`), which C computes from the left in that type as it would the cast and
 isl's reader takes as the number it is or declines, loopy computes a
 quotient of integers in double inside a comparison of its own accord, and a
 floating power of a loop variable calls `pow`. An operand numpy rounds to
@@ -1172,14 +1172,18 @@ A comparison of integers, which numpy decides exactly whatever their types,
 compares a negative operand's sign first where C would compare it as an
 unsigned value (`k[i] >= 0 && u[i] < k[i]`, `Step.sign`). A sum, a product or
 an `^` of integers hands its operands the integer context `"i"`
-(`NumpyArithmetic._integer_context`), and a `np.uint32` literal is written
+(`NumpyArithmetic._literal_context`), and a `np.uint32` literal is written
 `3u` (`NumpyArithmetic.map_constant`). `abs` of an integer is written `k < 0 ?
 -1 * k : k`, of a truth value or an unsigned integer as the operand, and of
 an operand with a sum in it without a branch, `(k ^ s) - s` with `s = k >>
 63` (`ExpressionLowerer._absolute`). loopty's printer brackets a sum or a
 product that stands after the first operand of another (`lower._CText`). A
-term nested to the left prints as before, and no example's code changes but
-`fusion.py`'s substituted kernel, which brackets a product it subtracts.
+term nested to the left prints as before. Of the examples' code, only
+`fusion.py`'s substituted kernel changes in what it computes, by a bracket
+around a product it subtracts, which rounds alike; the guards of the tiled,
+blocked and diamond schedules in `stencil_skew.py` and
+`wavefront_acoustic.py` gain brackets in their index arithmetic, which
+computes the same 32-bit values.
 
 pymbolic builds `a - b` as `a + -1 * b`, and the term then negates `b` in its
 own type before adding, where numpy subtracts in the type of the two: `-1 *
