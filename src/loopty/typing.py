@@ -1265,6 +1265,9 @@ def _layout_by_induction(
     for name, typ in types.items():
         if name in written or name in (starts, counts) or any(typ.ragged):
             continue
+        if name not in term.param_names:
+            # A program's temporary: no contract checked its type on entry.
+            continue
         if typ.domain is not None or not integral_sort(typ.dtype):
             continue
         sort = typ.dtype.base if isinstance(typ.dtype, Refined) else typ.dtype

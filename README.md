@@ -488,10 +488,10 @@ end to end; the edges are sharp.
   holds it, so that a value written outside 32 bits is read as written and
   not as the store narrowed it. Offsets a scan computes and a later call
   declares `Nat` without reading rows through them are checked: that they
-  are naturals follows from the scan's recurrence only by induction. The counts of a ragged
-  family an earlier call wrote are still refused: its rows are laid out in a
-  buffer the program is given, which no hypothesis about the program's
-  arrays can speak of. The kernels an array is passed to have to declare the same
+  are naturals follows from the scan's recurrence only by induction. The
+  counts of a ragged family an earlier call wrote are still refused: its rows
+  are laid out in a buffer the program is given, which no hypothesis about
+  the program's arrays can speak of. The kernels an array is passed to have to declare the same
   element sort for it, and every call has to read a ragged family's rows
   through the same offsets; a loop in the body whose trip count is an
   argument (a host loop) is refused, and so are an array made like a ragged

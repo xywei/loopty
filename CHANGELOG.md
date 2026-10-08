@@ -1724,7 +1724,10 @@ with a pair of statement instances.
   (#110): the map of the pairs of instances that touch one cell named the
   size without declaring it, and isl read the text as a syntax error naming
   neither the kernel nor the access. A write of the last offset beside a
-  ragged read failed the same way.
+  ragged read failed the same way. The map declares the sizes, and its
+  dimensions have primed names, which no size can have: isl reads a
+  dimension named like a declared size as the size, and a kernel over
+  `Fin[s]` lost every dependence that map gives.
 - A ragged type nothing builds is refused where it is traced (#112): a fiber
   after two dense axes, a dense axis after the fiber, or counts of two axes.
   `Arr.ragged` builds none of them and lowering indexes none, but tracing and

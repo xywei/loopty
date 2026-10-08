@@ -1051,6 +1051,48 @@ def test_a_write_that_keeps_the_rows_in_order_decides_the_layout(fn, writers) ->
     assert ran.status is Status.ASSUMED and ran.term is not None
 
 
+def start_moved_by_a_bit(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    off: Arr[Fin[n + 1], Nat],  # noqa: F821
+    bit: Arr[Fin[n], Fin[2]],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A start moved on by 0 or 1 where its row leaves a cell of room."""
+    for r in y.dom:
+        with when((r + 1 < y.dom.size) & (off[r] + cnt[r] + 1 <= off[r + 1])):
+            off[r] = off[r] + bit[r]
+        y[r] = reduce_sum(val[r, j] for j in val.dom[r])
+
+
+def test_only_a_parameters_type_is_a_hypothesis_of_the_induction() -> None:
+    # bit's type, Fin(2), which the contract checks on entry, is what keeps
+    # the moved row inside its room. A program's temporary has no contract
+    # on entry, so the same array as one is no hypothesis, and the fact is
+    # left assumed.
+    from lanky.ledger import Status
+
+    from loopty import typing as rules
+    from loopty.oracle import IslOracle
+
+    term, _ledger, (layout,) = layout_of(start_moved_by_a_bit)
+    assert layout.status is Status.DECIDED, layout.provenance
+    typ = dict(term.params)["bit"]
+    made = dataclasses.replace(
+        term,
+        params=tuple((name, sort) for name, sort in term.params if name != "bit"),
+        temporaries=(*term.temporaries, ("bit", typ)),
+    )
+    (fact,) = rules.layout_facts(made, "start_moved_by_a_bit")
+    oracle = IslOracle()
+    if oracle.can_establish(fact):
+        fact = oracle.establish(fact) or fact
+    assert fact.status is Status.ASSUMED, fact.provenance
+    assert "by induction over the run, S0 writes off[r] = off[r] + bit[r]" in (
+        fact.provenance["reason"]
+    )
+
+
 def test_offsets_with_no_counts_are_kept_in_order_by_induction() -> None:
     # A family whose rows are as long as the differences of their offsets
     # (a term written by hand; tracing names counts): starting row 0 at 0
