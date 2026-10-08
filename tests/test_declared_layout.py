@@ -1022,7 +1022,6 @@ def start_within_its_slack(
         (counts_halved, ["S0"]),
         (counts_cleared_where_flagged, ["S0"]),
         (start_within_its_slack, ["S0"]),
-        (shortened_in_its_own_loop, ["S1"]),
     ],
 )
 def test_a_write_that_keeps_the_rows_in_order_decides_the_layout(fn, writers) -> None:
@@ -1157,18 +1156,87 @@ def test_a_two_axis_family_is_refused_before_any_layout_fact() -> None:
         term_of(second_block_moved)
 
 
-def test_a_row_shortened_in_its_own_loop_decides_its_reads() -> None:
-    # A row's length set to zero keeps the rows in order, so the layout is
-    # decided by induction, and the reads that rest on it are worth decided;
-    # they were worth assumed (#103).
+def test_a_row_shortened_in_its_own_loop_leaves_its_reads_assumed() -> None:
+    # A row's length set to zero keeps the rows in order, and the layout was
+    # decided by induction, its reads worth decided. The loop over the row
+    # read its length when it started, and the read of val[r, 1] after the
+    # write is past the row's end: the native run refuses it, and the read's
+    # in-bounds fact, stated against the loop's reading, is false. So the
+    # layout is not asked by induction where a length is written inside a
+    # loop it bounds, and the reads stay worth assumed (#103).
     from lanky.ledger import Status
 
     _term, ledger, (layout,) = layout_of(shortened_in_its_own_loop)
     assert layout.provenance["written"] == ["cnt"]
+    assert layout.status is Status.ASSUMED
+    assert layout.provenance["reason"].endswith(
+        "S1 writes cnt inside a loop over a row, which runs to the length it "
+        "read as nl_cnt_r when it started: the in-bounds facts of the row's "
+        "entries are stated against that reading, which a write that shortens "
+        "the row leaves behind, and which the rows in order do not keep"
+    )
     (read,) = [fact for fact in ledger if fact.id.endswith(":S0:read:val[r, j]")]
     assert read.status is Status.DECIDED
-    assert ledger.support(read).effective is Status.DECIDED
-    assert read.rests_on == (layout.id,)
+    assert ledger.support(read).effective is Status.ASSUMED
+    assert ledger.support(read).under == (layout.id,)
+    counts = [2, 1, 3]
+    arguments = {
+        "cnt": Arr.from_numpy(np.array(counts, dtype=np.int64)),
+        "val": Arr.ragged(counts, values=np.arange(1.0, 7.0)),
+        "y": Arr.zeros(3),
+    }
+    with pytest.raises(IndexError, match="column 1 out of range for row 0 of length 0"):
+        Kernel(shortened_in_its_own_loop)(**arguments)
+
+
+def emptied_then_moved_onto(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    off: Arr[Fin[n + 1], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+):
+    """Each row written, emptied, and the next row moved onto its start."""
+    for r in cnt.dom:
+        for j in val.dom[r]:
+            val[r, j] = val[r, j] + 1.0
+        cnt[r] = 0
+        with when(r + 1 < cnt.dom.size):
+            off[r + 1] = off[r] + cnt[r]
+
+
+def test_rows_moved_onto_cells_written_before_leave_the_layout_assumed() -> None:
+    # Every write keeps the rows in order, and the layout was decided by
+    # induction, and with it the disjoint writes of S0, which tell the cells
+    # of val apart as [r, j]. Each row is moved onto the start of the one
+    # before it once that one is emptied, so S0 writes val[0, 0], val[1, 0]
+    # and val[2, 0] on one cell. A layout whose rows move is not asked by
+    # induction in a kernel that writes the family's arrays (#103).
+    from lanky.ledger import Status
+
+    _term, ledger, (layout,) = layout_of(emptied_then_moved_onto)
+    assert layout.status is Status.ASSUMED
+    assert layout.term is None
+    assert layout.provenance["reason"].endswith(
+        "S2 writes off, which can move a row of val, and S0 writes val, whose "
+        "disjoint writes and dependences tell its cells apart as [r, j]: one "
+        "cell of the buffer each only while every row keeps its start, which "
+        "the rows in order do not say"
+    )
+    (disjoint,) = [
+        fact
+        for fact in ledger
+        if fact.kind == "disjoint-writes" and fact.provenance["array"] == "val"
+    ]
+    assert disjoint.status is Status.DECIDED
+    assert ledger.support(disjoint).effective is Status.ASSUMED
+    counts = [2, 2, 2]
+    arguments = {
+        "cnt": Arr.from_numpy(np.array(counts, dtype=np.int64)),
+        "off": Arr.from_numpy(np.array([0, 2, 4, 6], dtype=np.int64)),
+        "val": Arr.ragged(counts, values=np.zeros(6)),
+    }
+    Kernel(emptied_then_moved_onto)(**arguments)
+    # Three instances of S0 wrote cell 0, and three cell 1.
+    assert arguments["val"].numpy().tolist() == [3.0, 3.0, 0.0, 0.0, 0.0, 0.0]
 
 
 @pytest.mark.parametrize("fn", [row_sums_then_next_offset, row_sums_then_next_count])

@@ -92,7 +92,11 @@ contract checks on entry, are hypotheses about the cells a write reads, and
 isl decides whether the write keeps them (#103). A write that keeps every row
 inside the buffer and apart in that order is decided; one isl cannot show
 does is left ``assumed``, and a native run that moves a row past the end or
-onto another refutes it (:func:`loopty.faithful.layout_fact`).
+onto another refutes it (:func:`loopty.faithful.layout_fact`). A kernel
+whose rows move while it writes the family's arrays is left ``assumed`` too,
+since the cells ``[r, j]`` this module compares are one cell of the buffer
+each only while no row moves, and so is one that writes a row's length
+inside a loop the length bounds.
 
 *Distinct parameters are distinct storage.* :func:`dependences` compares
 footprints array by array and reports nothing between two differently named

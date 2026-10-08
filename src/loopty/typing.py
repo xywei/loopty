@@ -53,6 +53,11 @@ the call starts, kept by every write wherever they held before it. A write
 isl cannot show keeps them leaves the fact ``assumed`` with the reason, and
 the kernel's native runs may refute it (:func:`loopty.faithful.layout_fact`):
 one that reads a row off its buffer, or leaves two rows on one cell. The
+order is not asked where what rests on the layout needs more than it: in a
+kernel that writes the offsets and an array of the family, whose cells
+``[r, j]`` are one cell of the buffer each only while no row moves, and in
+one that writes a row's length inside a loop the length bounds, whose
+entries' in-bounds facts are against the length the loop read. The
 in-bounds and disjoint-writes facts of the family's ragged arrays rest on it,
 as does a fact decided by type through an index read from one of them
 (``x[col[r, j]]``), and the ``monotone`` casts of a schedule of the kernel
@@ -801,9 +806,11 @@ def layout_facts(
     by induction over the run (:func:`_layout_by_induction`, #103): the rows
     in order hold when the call starts, and the fact is decided when isl
     shows that every write keeps them so where they held before it. Where it
-    cannot, the fact stays ``assumed``, with both reasons, and the facts that
-    rest on it say so in the ledger; a kernel's native runs may still refute
-    it (:func:`loopty.faithful.layout_fact`).
+    cannot, or where the facts resting on the layout need more than the
+    order (rows that move under writes of the family's arrays, a length
+    written inside a loop it bounds), the fact stays ``assumed``, with both
+    reasons, and the facts that rest on it say so in the ledger; a kernel's
+    native runs may still refute it (:func:`loopty.faithful.layout_fact`).
     """
     facts: list[Fact] = []
     for counts, family in _rewritten_layouts(term).items():
@@ -1109,6 +1116,89 @@ _INDUCTION_RULE = (
 )
 
 
+def _beyond_the_order(
+    term: Term, lengths: str, offsets: str | None, family: Mapping[str, Any]
+) -> str | None:
+    """Why the rows in order would not carry what rests on the layout, if so.
+
+    The order keeps every row inside the buffer and apart from the others at
+    every point of the run, which is what the layout fact states and what an
+    access needs to be inside the buffer. Two kinds of fact rest on the
+    layout for more than that:
+
+    * The disjoint writes and the dependences of a ragged array tell its
+      cells apart as ``[r, j]``, which is one cell of the buffer each only
+      while every row keeps its start. A kernel that writes the offsets and
+      an array of the family can write ``val[r + 1, 0]`` on the cell it
+      wrote as ``val[r, 0]``: row ``r`` emptied, ``cnt[r] = 0``, and row
+      ``r + 1`` moved onto its start, ``off[r + 1] = off[r] + cnt[r]``, with
+      the rows in order all the while, and the disjoint writes of the
+      statement were decided.
+    * A loop over a row reads the row's length once, when it starts, natively
+      and compiled, and the in-bounds facts of the row's entries are stated
+      against that reading. A write of the length inside such a loop can
+      shorten the row under it, and the loop then reads entries past the
+      row's end, which the native run refuses (``cnt[r] = 0`` inside ``for j
+      in val.dom[r]``), with the rows in order all the while.
+
+    So the layout is not asked by induction for such a kernel, and its fact
+    stays ``assumed``. ``lengths`` is the array the rows' lengths are read
+    from: the counts, or the offsets of a family with none. Returns the
+    reason, or ``None``.
+    """
+    from loopty.trace import accesses_in
+
+    def verb(ids: Sequence[str]) -> str:
+        return "writes" if len(ids) == 1 else "write"
+
+    statements = family["statements"]
+    arrays = list(family["arrays"])
+    if offsets is not None:
+        movers = [stmt.id for stmt in statements if stmt.assignee.array == offsets]
+        stored = [
+            name
+            for name in arrays
+            if any(stmt.assignee.array == name for stmt in term.stmts)
+        ]
+        if movers and stored:
+            writers = [stmt.id for stmt in term.stmts if stmt.assignee.array in stored]
+            return (
+                f"{_listed(movers)} {verb(movers)} {offsets}, which can move a row "
+                f"of {_listed(arrays)}, and {_listed(writers)} {verb(writers)} "
+                f"{_listed(stored)}, whose disjoint writes and dependences tell "
+                "its cells apart as [r, j]: one cell of the buffer each only "
+                "while every row keeps its start, which the rows in order do not "
+                "say"
+            )
+    reads = {
+        name: {access.array for access in accesses_in(expr)}
+        for name, expr in term.reflected
+    }
+    for stmt in statements:
+        if stmt.assignee.array != lengths:
+            continue
+        # The loops around the write, before a guard narrowed them.
+        nest = stmt.domain if stmt.loop_domain is None else stmt.loop_domain
+        bounds = [
+            name
+            for index, name in enumerate(nest.get_var_names(isl.dim_type.param))
+            if lengths in reads.get(name, ())
+            and any(
+                flow.bounds_dimension(nest, position, index)
+                for position in range(nest.dim(isl.dim_type.set))
+            )
+        ]
+        if bounds:
+            return (
+                f"{stmt.id} writes {lengths} inside a loop over a row, which runs "
+                f"to the length it read as {_listed(bounds)} when it started: the "
+                "in-bounds facts of the row's entries are stated against that "
+                "reading, which a write that shortens the row leaves behind, and "
+                "which the rows in order do not keep"
+            )
+    return None
+
+
 def _layout_by_induction(
     term: Term, counts: str, family: Mapping[str, Any]
 ) -> tuple[Empty, str, list[str]] | str:
@@ -1133,6 +1223,15 @@ def _layout_by_induction(
 
     A family with no counts array has rows as long as the differences of
     its offsets, and the order is their monotonicity, inside the buffer.
+
+    The facts that rest on the layout take two more things for granted than
+    the order gives, and a kernel that can break them is not asked
+    (:func:`_beyond_the_order`): the cells of a ragged array the kernel
+    writes are told apart as ``[r, j]``, which stays one cell of the buffer
+    each only while no row moves; and a loop over a row runs to the length
+    it read when it started, which the in-bounds facts of the row's entries
+    are stated against, and which a row shortened inside the loop leaves
+    behind.
 
     Returns the question, an :class:`Empty` of the instances whose write
     breaks the order where it held, empty when every write keeps it; the
@@ -1186,6 +1285,9 @@ def _layout_by_induction(
         )
     sizes = flow.size_names(term)
     written = {stmt.assignee.array for stmt in term.stmts}
+    beyond = _beyond_the_order(term, counts if by_counts else offsets, offsets, family)
+    if beyond is not None:
+        return beyond
     taken = {
         *term.param_names,
         *sizes,
