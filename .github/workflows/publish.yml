@@ -12,15 +12,65 @@ jobs:
     # A pending publisher must be configured on PyPI before this workflow can
     # publish the first release of a brand-new project name.
     permissions:
+      # Required for PyPI Trusted Publishing (OIDC).
       id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@v5
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
 
+      # A tag publishes the version the package says it is, so the two have to
+      # be the same: v0.1.0 for version 0.1.0 in pyproject.toml and in
+      # loopty.__version__. A tag that is not stops here, before anything is
+      # built, and nothing reaches PyPI.
+      - name: Check that the tag is the package's version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          project=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          module=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' src/loopty/__init__.py)
+          echo "tag ${GITHUB_REF_NAME}, pyproject.toml ${project}, loopty.__version__ ${module}"
+          if [[ "${tag}" != "${project}" || "${tag}" != "${module}" ]]; then
+            echo "the tag ${GITHUB_REF_NAME} is not the package's version: pyproject.toml has ${project}, loopty.__version__ ${module}" >&2
+            exit 1
+          fi
+
+      # --no-sources: [tool.uv.sources] points lanky at a sibling checkout for
+      # development, and what is published must not depend on it. The
+      # distributions name the requirement on PyPI, lanky>=..., either way.
       - name: Build sdist and wheel
-        run: uv build
+        run: uv build --no-sources
+
+      # What was built is what the tag names, one sdist and one wheel; both ask
+      # for lanky from PyPI, not from a path; and their metadata renders on PyPI.
+      - name: Check the distributions
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          ls dist
+          test -f "dist/loopty-${tag}.tar.gz"
+          test -f "dist/loopty-${tag}-py3-none-any.whl"
+          test "$(ls dist | wc -l)" -eq 2
+          python3 - "${tag}" <<'EOF'
+          import sys
+          import tarfile
+          import zipfile
+
+          tag = sys.argv[1]
+          with zipfile.ZipFile(f"dist/loopty-{tag}-py3-none-any.whl") as wheel:
+              wheel_metadata = wheel.read(f"loopty-{tag}.dist-info/METADATA")
+          with tarfile.open(f"dist/loopty-{tag}.tar.gz") as sdist:
+              sdist_metadata = sdist.extractfile(f"loopty-{tag}/PKG-INFO").read()
+          for name, metadata in (("wheel", wheel_metadata), ("sdist", sdist_metadata)):
+              lines = metadata.decode().splitlines()
+              lanky = [line for line in lines if line.startswith("Requires-Dist: lanky")]
+              print(name, *lanky)
+              if len(lanky) != 1 or "@" in lanky[0] or ">=" not in lanky[0]:
+                  sys.exit(f"the {name} does not ask for lanky from PyPI as lanky>=...")
+          EOF
+          uvx twine check --strict dist/*
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
