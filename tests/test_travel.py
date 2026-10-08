@@ -435,7 +435,7 @@ def test_an_undecided_requirement_is_checked_where_the_native_call_refuses() -> 
     assert "nothing that held at the call says" in requirement.reason
     ((flag, message),) = term.checks
     code = emit_code(travel.permuted_up)
-    assert f"{flag}[0] = 1" in code and f"if ({flag}[0] == 0)" in code
+    assert f"{flag}[0] = (int64_t) (1)" in code and f"if ({flag}[0] == 0)" in code
 
     # The ledger keeps it assumed, and says why.
     (fact,) = facts_of("permuted_up", "requirement")
@@ -1159,6 +1159,54 @@ def test_a_checked_array_made_narrower_than_64_bits_is_refused() -> None:
     )
     assert message.endswith(
         "Give that Arr.zeros_like dtype=int64, or pass index as int64"
+    )
+
+
+def test_a_checked_array_is_64_bits_whatever_its_sort_holds_natively(
+    monkeypatch,
+) -> None:
+    # Since #101 the compiled program stores Nat and Int in 64 bits anyway,
+    # and Fin[m] in 32 but where a checked point reads it (#128).
+    from loopty import contract
+    from loopty.contract import array_storage, checked_storage, compiled_storage
+
+    term = wrong.clamped.term
+    assert term.checked_arrays == frozenset({"src"})
+    types = term.array_types
+    assert array_storage(term, "src", types["src"].dtype) == np.int64
+    assert compiled_storage(types["src"].dtype) == np.int64
+    assert array_storage(term, "perm", types["perm"].dtype) == np.int32
+    narrowed = wrong.narrowed.term
+    fin = narrowed.array_types["perm"].dtype
+    assert compiled_storage(fin) == np.int32
+    assert array_storage(narrowed, "perm", fin) == np.int64
+
+    # The checked point reads src as the compiled program stores it, so a
+    # narrower src is refused by the check's own rule, not by the storage
+    # rule of its sort, which is int64 for Nat today: under the rule before
+    # #101, which took any signed integer of 32 bits or more for a Nat, the
+    # compiled run refuses it all the same.
+    for dtype in (np.int32, np.uint32, np.uint64):
+        with pytest.raises(ValueError, match="Pass src as int64"):
+            checked_storage(term, {"src": Arr.zeros(4, dtype=dtype)})
+    checked_storage(term, {"src": Arr.zeros(4, dtype=np.int64)})
+
+    def any_wide_signed(sort, dtype) -> bool:
+        got = np.dtype(dtype)
+        if contract.integral_sort(sort):
+            return got.kind == "i" and got.itemsize >= 4
+        return got == contract.native_storage(sort)
+
+    monkeypatch.setattr(contract, "holds_natively", any_wide_signed)
+    inputs = {
+        **_permutation_inputs(),
+        "src": Arr.zeros(4, dtype=np.int32),
+    }
+    with pytest.raises(ValueError) as caught:
+        LoopyExecutor().run(wrong.clamped, **inputs)
+    assert str(caught.value).startswith(
+        "the argument src is stored as int32, and a checked point of the "
+        "program reads src between two calls"
     )
 
 

@@ -450,7 +450,7 @@ class LoopyExecutor:
         A plain ``ndarray`` needs this as much as an ``Arr`` does. It reaches
         loopy through :func:`_as_numpy`, which hands over the caller's own array
         only when it is already contiguous and of the lowered dtype; a strided
-        view (``z[:, 0]``) or an ``int64`` output for a ``Nat`` parameter,
+        view (``z[:, 0]``) or an ``int64`` output for a ``Fin[m]`` parameter,
         which is lowered as ``int32``, is copied on the way in, and the results
         used to stay in that copy. Such an output is written back here, cast to
         the caller's dtype. An output whose dtype does not hold its element
@@ -621,8 +621,8 @@ def _compare(
     allowance. That last clause is what an infinity both runs computed needs:
     ``inf - inf`` is NaN, and a NaN is within no allowance. The two arrays are
     compared in the type both promote to, so an ``int32`` output that loopy
-    wrote agrees with the ``int64`` array the native run filled, as it always
-    did.
+    wrote, of a ``Fin[m]`` sort, agrees with the ``int64`` array the native
+    run filled, as it always did.
 
     The two numbers returned describe the finite cell that came closest to
     failing, ties going to the one with the smaller allowance, so a run that

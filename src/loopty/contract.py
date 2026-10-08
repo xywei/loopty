@@ -36,9 +36,11 @@ enforces it on the way in, so the ledger's ``decided by type`` row is backed by
 a check rather than by a hope. Being a point is two questions and not one: a
 range test is a pair of comparisons, and ``nan`` fails both of them, so
 integrality (:func:`_not_an_integer`) is asked first and separately. Being a
-point of an integral sort is also being inside :data:`INTEGRAL_RANGE`, the
-32-bit integers the compiled run stores one in, since the native run holds it
-in 64 bits and would compute with a value the compiled run narrows.
+point of an integral sort is also being inside the range of the integers the
+compiled run stores one in (:func:`integral_range`): the 64-bit integers for
+``Nat`` and ``Int`` (:data:`INTEGRAL_RANGE`), and the 32-bit ones for
+``Fin[m]`` (:data:`INDEX_RANGE`), since the native run holds every integral
+value in 64 bits and would compute with a value the compiled run narrows.
 
 *An array over a domain is over that domain.* ``L: Arr[Where[i: Fin[n], j:
 Fin[n], j < i], Real]`` has its in-bounds obligations decided over the exact
@@ -93,6 +95,8 @@ from loopty.term import ArrType
 
 __all__ = [
     "CHECKED_STORAGE",
+    "INDEX_RANGE",
+    "INDEX_STORAGE",
     "INT64_RANGE",
     "INTEGRAL_RANGE",
     "INTEGRAL_STORAGE",
@@ -108,6 +112,7 @@ __all__ = [
     "element_types",
     "holds_natively",
     "inherited_storage",
+    "integral_range",
     "integral_sort",
     "native_copy",
     "native_scalar",
@@ -442,32 +447,66 @@ def sizes_not_negative(
             )
 
 
-#: The dtype the lowering stores an integral sort in, ``Fin[m]``, ``Nat`` and
-#: ``Int`` alike: an index into an array is 32 bits wide on every target loopy
-#: generates for. See :func:`compiled_storage`.
-INTEGRAL_STORAGE = np.dtype(np.int32)
+#: The dtype the lowering stores ``Nat`` and ``Int`` in, and Python's ``int``:
+#: 64 bits, the integers numpy computes in by default, so that an integer
+#: result the native run computes is the one the compiled run computes, up to
+#: the limit numpy has too (#101). See :func:`compiled_storage`.
+INTEGRAL_STORAGE = np.dtype(np.int64)
 
-#: The half-open range of the values an integral sort holds compiled, those of
-#: :data:`INTEGRAL_STORAGE`. The native run holds such a value in 64 bits
-#: (:func:`native_storage`), so one outside this range would run natively as
-#: it is and be narrowed by the compiled run's conversion: ``2**32 + 5`` is
-#: ``5`` compiled. The contract refuses it (:func:`element_types`,
+#: The dtype the lowering stores an index type ``Fin[m]`` in: 32 bits, which is
+#: what an index into an array is on every target loopy generates for. ``m``
+#: bounds the values, so an array of indices stays compact; arithmetic on one
+#: is computed in :data:`INTEGRAL_STORAGE` (:mod:`loopty.promotion`).
+INDEX_STORAGE = np.dtype(np.int32)
+
+#: The half-open range of the values ``Nat`` and ``Int`` hold compiled, those
+#: of :data:`INTEGRAL_STORAGE`. The native run holds such a value in 64 bits
+#: as well (:func:`native_storage`), and a value outside, ``2**63`` of a
+#: ``uint64`` array, would be read natively through an ``int64`` copy as a
+#: negative number. The contract refuses it (:func:`element_types`,
 #: :func:`scalar_parameters`).
 INTEGRAL_RANGE = (
     int(np.iinfo(INTEGRAL_STORAGE).min),
     int(np.iinfo(INTEGRAL_STORAGE).max) + 1,
 )
 
+#: The half-open range of the values ``Fin[m]`` holds compiled, those of
+#: :data:`INDEX_STORAGE`. The native run holds such a value in 64 bits, so one
+#: outside would run natively as it is and be narrowed by the compiled run's
+#: conversion: ``2**32 + 5`` is ``5`` compiled. ``m`` bounds a point of the
+#: sort first, so this is reached only for an ``m`` past it.
+INDEX_RANGE = (
+    int(np.iinfo(INDEX_STORAGE).min),
+    int(np.iinfo(INDEX_STORAGE).max) + 1,
+)
+
+
+def _index_sort(sort: Any) -> bool:
+    """Whether ``sort`` is an index type ``Fin[m]``, a refinement's base included."""
+    from lanky.prelude import FinType
+
+    return isinstance(_base_sort(sort), FinType)
+
+
+def integral_range(sort: Any) -> tuple[int, int]:
+    """The half-open range of the values an integral sort holds compiled.
+
+    :data:`INDEX_RANGE` for ``Fin[m]``, which is stored in 32 bits, and
+    :data:`INTEGRAL_RANGE` for ``Nat`` and ``Int``, which are stored in 64.
+    """
+    return INDEX_RANGE if _index_sort(sort) else INTEGRAL_RANGE
+
 
 def compiled_storage(sort: Any) -> np.dtype | None:
     """The dtype the compiled run stores ``sort`` in, or ``None`` for no sort.
 
-    ``Real`` is double precision, ``Nat``, ``Int`` and an index type such as
-    ``Fin[m]`` are :data:`INTEGRAL_STORAGE`, ``Bool`` is a byte (OpenCL takes
-    no ``bool`` argument), and a numpy dtype or scalar type is itself.
-    Python's ``float`` and ``complex`` are double precision and its ``int``
-    is integral. :func:`loopty.lower.numpy_dtype` is this, refusing a sort
-    with none; it lives here because the contract and
+    ``Real`` is double precision, ``Nat`` and ``Int`` are
+    :data:`INTEGRAL_STORAGE`, 64 bits, an index type such as ``Fin[m]`` is
+    :data:`INDEX_STORAGE`, 32 bits, ``Bool`` is a byte (OpenCL takes no
+    ``bool`` argument), and a numpy dtype or scalar type is itself. Python's
+    ``float`` and ``complex`` are double precision and its ``int`` is
+    integral, as ``Int`` is. :func:`loopty.lower.numpy_dtype` is this,
+    refusing a sort with none; it lives here because the contract and
     :mod:`loopty.promotion` ask it without importing loopy.
     """
     if isinstance(sort, np.dtype):
@@ -493,7 +532,7 @@ def compiled_storage(sort: Any) -> np.dtype | None:
     if name == "Bool":
         return np.dtype(np.int8)
     if hasattr(sort, "bound") or hasattr(sort, "size"):  # an index type Fin[m]
-        return INTEGRAL_STORAGE
+        return INDEX_STORAGE
     return None
 
 
@@ -501,7 +540,9 @@ def compiled_storage(sort: Any) -> np.dtype | None:
 #: in compiled, whatever its sort: 64 bits, as the native run holds it
 #: (:func:`checked_storage` refuses a native array of fewer), so that the
 #: checked point reads the value written and not one the store narrowed
-#: (:attr:`loopty.term.Term.checked_arrays`, #128).
+#: (:attr:`loopty.term.Term.checked_arrays`, #128). ``Nat`` and ``Int`` are
+#: stored so anyway (:data:`INTEGRAL_STORAGE`); an index type ``Fin[m]``,
+#: :data:`INDEX_STORAGE` elsewhere, is widened.
 CHECKED_STORAGE = np.dtype(np.int64)
 
 
@@ -510,9 +551,10 @@ def array_storage(term: Any, name: str, sort: Any) -> np.dtype | None:
 
     :func:`compiled_storage` of its element sort, except for an array of an
     integral sort that a checked point of the term reads, which is
-    :data:`CHECKED_STORAGE` (:attr:`loopty.term.Term.checked_arrays`). The
-    lowering declares the array so, and :mod:`loopty.promotion` types its
-    elements so.
+    :data:`CHECKED_STORAGE` (:attr:`loopty.term.Term.checked_arrays`): the
+    same as :func:`compiled_storage` for ``Nat`` and ``Int``, and wider for
+    ``Fin[m]``. The lowering declares the array so, and
+    :mod:`loopty.promotion` types its elements so.
     """
     if integral_sort(sort) and name in getattr(term, "checked_arrays", ()):
         return CHECKED_STORAGE
@@ -525,14 +567,18 @@ def checked_storage(term: Any, supplied: Mapping[str, Any]) -> None:
     The compiled program stores such an array in 64 bits
     (:func:`array_storage`), so that the checked point reads what an earlier
     call wrote and not what a narrower store left of it (#128). The native
-    run computes in the array it is given, which may be any signed integer of
-    32 bits or more (:func:`holds_natively`), and a 32-bit one narrows what
-    is written into it where the compiled program does not: ``2**31`` into a
-    ``Nat`` array is negative natively, which the later call's contract
-    refuses, and stays ``2**31`` compiled, which the check passes. So the
+    run computes in the array it is given, which for ``Fin[m]`` may be any
+    signed integer of 32 bits or more (:func:`holds_natively`), and a 32-bit
+    one narrows what is written into it where the compiled program does not:
+    ``2**32 + i`` into a ``Fin[n]`` array is not what the later call's
+    contract reads natively, and the check reads it as written. So the
     array, or the parameter a program's temporary of it is made like
     (:attr:`loopty.term.Term.temporaries_like`), has to be passed in 64 bits.
-    A temporary given a ``dtype`` is checked where the program is composed.
+    This is asked of every integral sort, whatever :func:`holds_natively`
+    accepts for it (``int64`` alone for ``Nat`` and ``Int`` since #101): that
+    rule is the sort's, and this one the check's, which reads the array as
+    :data:`CHECKED_STORAGE` holds it. A temporary given a ``dtype`` is
+    checked where the program is composed.
     """
     checked = getattr(term, "checked_arrays", frozenset())
     if not checked:
@@ -588,11 +634,12 @@ def native_storage(sort: Any) -> np.dtype | None:
       which holds a truth value as a bool does; natively ``~``, ``&`` and
       ``|`` are logical only on a bool (bitwise on an integer, refused on a
       float), and ``when`` refuses an integer that is not one;
-    * an integral sort, ``Fin[m]``, ``Nat``, ``Int`` or ``int``, is ``int64``,
-      and any signed integer of 32 bits or more holds it
-      (:func:`holds_natively`): the compiled one is 32 bits wide, and a
-      native argument of such a sort is 64 bits wide as a rule. Its values
-      are inside the narrower range (:data:`INTEGRAL_RANGE`).
+    * an integral sort, ``Fin[m]``, ``Nat``, ``Int`` or ``int``, is ``int64``.
+      The compiled one is 64 bits wide for ``Nat`` and ``Int``, and only
+      ``int64`` holds what is written into it (:func:`holds_natively`). It
+      is 32 bits wide for ``Fin[m]``, whose values ``m`` bounds, and any
+      signed integer of 32 bits or more holds those
+      (:func:`integral_range`).
 
     Anything else is ``None``, and is not asked.
     """
@@ -615,9 +662,12 @@ def native_storage(sort: Any) -> np.dtype | None:
 def holds_natively(sort: Any, dtype: Any) -> bool:
     """Whether a native array of ``dtype`` holds ``sort`` as the compiled one does.
 
-    The dtype :func:`native_storage` says, or for an integral sort any signed
-    integer of 32 bits or more. A narrower one wraps round where the compiled
-    32-bit one does not. A sort with no storage is not asked.
+    The dtype :func:`native_storage` says, or for an index type ``Fin[m]`` any
+    signed integer of 32 bits or more, which holds every point of it as the
+    compiled 32-bit one does. ``Nat`` and ``Int`` are compiled in 64 bits, so
+    an ``int32`` array of them wraps round where the compiled one does not:
+    ``c[i] * c[i]`` written into it at ``c[i] = 2**20`` (#101). A sort with
+    no storage is not asked.
     """
     want = native_storage(sort)
     if want is None:
@@ -626,16 +676,14 @@ def holds_natively(sort: Any, dtype: Any) -> bool:
         got = np.dtype(dtype)
     except TypeError:
         return False
-    base = _base_sort(sort)
-    if base is int or integral_sort(base):
+    if _index_sort(sort):
         return got.kind == "i" and got.itemsize >= 4
     return got == want
 
 
 def storage_wanted(sort: Any) -> str:
     """How :func:`holds_natively` says the native storage of ``sort``, in words."""
-    base = _base_sort(sort)
-    if base is int or integral_sort(base):
+    if _index_sort(sort):
         return "a signed integer of 32 bits or more"
     return str(native_storage(sort))
 
@@ -736,17 +784,19 @@ def written_storage(
 def read_storage(sort: Any, dtype: Any) -> np.dtype | None:
     """The dtype the native run reads an array of ``sort`` stored as ``dtype`` in.
 
-    ``None`` when the array holds ``sort`` natively as it is
-    (:func:`holds_natively`), and :func:`native_storage` otherwise: an integer
-    array of ``Real`` elements is read as ``float64``, a float one of
-    ``Fin[m]`` as ``int64``, one of ``0`` and ``1`` for ``Bool`` as ``bool``.
-    That is what the compiled run reads as well, since it converts the array
-    into its own dtype on the way in, but for an integral sort, which is 32
-    bits wide there (see :func:`holds_natively`). The native run used to
-    compute in the dtype it was given, so an integer ``x`` of a ``Real``
-    parameter overflowed at ``x[i] * x[i]`` where the compiled run squares a
-    double, and a ``bool`` one added ``True + True`` to ``True``. A dtype that
-    is not a number's is ``None`` too: nothing converts it.
+    ``None`` when the array is stored in :func:`native_storage`'s dtype
+    already, and that dtype otherwise: an integer array of ``Real`` elements
+    is read as ``float64``, a float one of ``Fin[m]`` as ``int64``, one of
+    ``0`` and ``1`` for ``Bool`` as ``bool``. That is what the compiled run
+    reads as well, since it converts the array into its own dtype on the way
+    in, and computes integer arithmetic in 64 bits (:mod:`loopty.promotion`),
+    an index type's included. The native run used to compute in the dtype it
+    was given, so an integer ``x`` of a ``Real`` parameter overflowed at
+    ``x[i] * x[i]`` where the compiled run squares a double, a ``bool`` one
+    added ``True + True`` to ``True``, and an ``int32`` one of ``Fin[m]``
+    wrapped round at ``col[i] * col[i]``, which the compiled run computes in
+    64 bits. A dtype that is not a number's is ``None`` too: nothing converts
+    it.
 
     Only an array the term does not write is read through a copy; one it
     writes is refused instead (:func:`written_storage`).
@@ -758,7 +808,7 @@ def read_storage(sort: Any, dtype: Any) -> np.dtype | None:
         got = np.dtype(dtype)
     except TypeError:
         return None
-    if got.kind not in "biufc" or holds_natively(sort, got):
+    if got.kind not in "biufc" or got == want:
         return None
     return want
 
@@ -794,29 +844,39 @@ def native_scalar(sort: Any, value: Any) -> Any:
     refuses and a bool array stores as ``True``, where the compiled run
     computes ``!flag``.
 
-    A value that holds its sort already (:func:`holds_natively`) is returned
-    as it is, and so is a Python ``int`` of an integral sort, which no
-    conversion makes more exact, and anything that is not a number.
-    :func:`scalar_parameters` has required the value to be one of the sort: a
-    whole number for an integral one, ``0`` or ``1`` for ``Bool``, and no
-    imaginary part for a sort that is not complex, which is dropped here.
+    Every number is converted, a Python one included, into a numpy scalar of
+    exactly that dtype, so a scalar has one native meaning however the caller
+    passes it (#102). A Python number is weak under numpy's promotion rules
+    (NEP 50) and takes the dtype of what stands beside it, and a numpy scalar
+    is strong: ``x[i] * a`` of a ``float32`` ``x`` was single precision
+    natively for ``a=0.7`` and double for ``a=np.float64(0.7)``, and ``x[i] *
+    s`` of an integral ``s`` was single for ``s=2`` and double for
+    ``s=np.int64(2)``, while the compiled run computes one of the two. As a
+    numpy scalar it is strong, and :mod:`loopty.promotion` makes the compiled
+    run compute what numpy computes with it. Anything that is not a number is
+    returned as it is. :func:`scalar_parameters` has required the value to be
+    one of the sort: a whole number inside :func:`integral_range` for an
+    integral one, ``0`` or ``1`` for ``Bool``, and no imaginary part for a
+    sort that is not complex, which is dropped here.
     """
     want = native_storage(sort)
     if want is None:
         return value
-    try:
-        got = np.asarray(value).dtype
-    except (TypeError, ValueError, OverflowError):
-        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        # A Python int past uint64 has no dtype of numpy's, which makes an
+        # object array of it, and is a number of a real sort all the same.
+        got = np.dtype(np.int64)
+    else:
+        try:
+            got = np.asarray(value).dtype
+        except (TypeError, ValueError, OverflowError):
+            return value
     if np.ndim(value) or got.kind not in "biufc":
         return value
-    base = _base_sort(sort)
-    if (base is int or integral_sort(base)) and isinstance(value, int):
+    if isinstance(value, np.generic) and value.dtype == want:
         return value
     if want.kind == "b":
-        return value if isinstance(value, np.bool_) else np.bool_(np.real(value))
-    if holds_natively(sort, got):
-        return value
+        return np.bool_(np.real(value))
     if got.kind == "c" and want.kind != "c":
         value = np.real(value)
     return want.type(value)
@@ -1052,11 +1112,12 @@ def element_types(
     (:func:`truth_sort`), because the compiled run converts it into a byte as
     it is, and the native run reads it as a truth value.
 
-    An entry of an integral sort is also inside :data:`INTEGRAL_RANGE`, the
-    32-bit integers the compiled run stores it in. The native run holds it in
-    64 bits, so ``2**32 + 5`` of a ``Nat`` used to run natively as it is and be
-    ``5`` compiled, and a ``uint64`` entry from ``2**63`` on was read natively
-    through an ``int64`` copy as a negative number.
+    An entry of an integral sort is also inside :func:`integral_range`, the
+    range of the integers the compiled run stores it in: 64 bits for ``Nat``
+    and ``Int``, 32 for ``Fin[m]``. The native run holds it in 64 bits, so a
+    ``uint64`` entry from ``2**63`` on was read natively through an ``int64``
+    copy as a negative number, and ``2**32 + 5`` of a ``Fin[m]`` would run
+    natively as it is and be ``5`` compiled.
     """
     sizes = resolve_sizes(types, supplied) if sizes is None else sizes
     extents = axis_extents(types, supplied) if extents is None else extents
@@ -1149,7 +1210,7 @@ def element_types(
                     "element type has to hold of the data that is passed in"
                 )
         if integral_sort(typ.dtype):
-            low, high = INTEGRAL_RANGE
+            low, high = integral_range(typ.dtype)
             offenders = np.flatnonzero((flat < low) | (flat >= high))
             if offenders.size:
                 position = int(offenders[0])
@@ -1164,20 +1225,43 @@ def element_types(
 
 
 def _integral_range_message(where: str, value: Any, sort: Any, held: str) -> str:
-    """The refusal of a value of an integral sort outside :data:`INTEGRAL_RANGE`.
+    """The refusal of a value of an integral sort outside :func:`integral_range`.
 
     ``held`` names what is declared of the sort: an argument, or the elements
-    of an array.
+    of an array. The fix named besides a value inside the range is a numpy
+    integer sort that holds the value, which both runs store as it is, when
+    there is one.
     """
-    low, high = INTEGRAL_RANGE
+    low, high = integral_range(sort)
+    bits = 8 * (INDEX_STORAGE if _index_sort(sort) else INTEGRAL_STORAGE).itemsize
+    if bits < 64:
+        why = (
+            f"the {bits}-bit integers the compiled run stores a value of {sort} "
+            "in. The native run holds it in 64 bits, so it would run natively as "
+            "it is and be narrowed by the compiled run's conversion"
+        )
+    else:
+        why = (
+            f"the {bits}-bit integers both runs compute with a value of {sort} "
+            "in, which do not hold it: a uint64 array is read through an int64 "
+            "copy, where such a value is a negative number"
+        )
+    number = int(value)
+    if INTEGRAL_RANGE[0] <= number < INTEGRAL_RANGE[1] and bits < 64:
+        numpy_sort = "np.int64"
+    elif 0 <= number < 2**64:
+        numpy_sort = "np.uint64"
+    else:
+        numpy_sort = None
+    fix = "Pass a value inside that range"
+    if numpy_sort is not None:
+        fix += (
+            f", or declare {held} as a numpy integer such as {numpy_sort}, which "
+            "both runs store as it is"
+        )
     return (
         f"{where} is {value}, which is outside {low} <= v < {high}, the range of "
-        f"the 32-bit integers the compiled run stores a value of {sort} in. The "
-        "native run holds it in 64 bits, so it would run natively as it is and "
-        "be narrowed by the compiled run's conversion, and the two runs would "
-        "compute different things. Pass a value inside that range, or declare "
-        f"{held} as a numpy integer such as np.int64, which both runs store as "
-        "it is"
+        f"{why}, and the two runs would compute different things. {fix}"
     )
 
 
@@ -1245,9 +1329,10 @@ def scalar_parameters(
     compiled run passes it to a C integer argument, which a float cannot be
     converted to, and the native run indexes with it, which numpy refuses.
     Converting it would be the caller's choice to make, so the message says
-    ``int(...)``. It is inside :data:`INTEGRAL_RANGE` too, which is what the
-    compiled run's C integer argument holds; the native run computes with it
-    as it is, so a value outside would be narrowed by one run only.
+    ``int(...)``. It is inside :func:`integral_range` too, which is what the
+    compiled run's C integer argument holds, 64 bits for ``Nat`` and ``Int``
+    and 32 for ``Fin[m]``: a value outside would be narrowed by one run, or
+    by both differently.
 
     A scalar of any other sort is asked what :func:`element_types` asks an
     entry, because both runs convert it into its sort's dtype
@@ -1306,7 +1391,7 @@ def scalar_parameters(
                     "check in the generated code, so the parameter's type has to "
                     "hold of the value that is passed in"
                 )
-        low, high = INTEGRAL_RANGE
+        low, high = integral_range(sort)
         if not low <= int(value) < high:
             raise ValueError(
                 _integral_range_message(f"the argument {name}", value, sort, name)

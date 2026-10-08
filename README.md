@@ -293,7 +293,17 @@ end to end; the edges are sharp.
   `k[i] != 0`, and `k % 2` for `k & 1`. And `~(i > 0)` used as a number
   (`x[i] * ~(i > 0)`, in a sum's body or an index) is a `TraceError` naming
   `i <= 0`, since natively it is the `-2` or `-1` the native run refuses only
-  where a truth value is asked for.
+  where a truth value is asked for. More operations are refused, naming what
+  to write: `b[i] + c[i]` of two truth values, which is `or` natively and `2`
+  compiled (`b[i] | c[i]` for `or`, `1 * b[i] + c[i]` for a count), and
+  `b[i] - c[i]`, which numpy refuses; an integer element or scalar to a
+  negative integer power, which numpy refuses and loopy computed as an
+  integer (`1 / k[i] ** 2`, a real); `^`, `<<` or `>>` of a real, and `//` or
+  `%` of a complex value, which numpy refuses and C cannot compile; and a
+  loop variable divided by a literal zero or shifted by a negative literal,
+  which Python refuses natively, or shifted left by a literal of 64 or more,
+  which Python computes exactly and the compiled run to `0`
+  (`i * 2.0 ** 64`).
 - The faithfulness fact. For each kernel and each program, the traced term is
   run by an interpreter (`loopty.interpret`: statement by statement in source
   order over each statement's isl domain, each loop enumerated when the run
@@ -379,8 +389,15 @@ end to end; the edges are sharp.
   conversions would pick another: a quotient of integers is a double, a Python
   float beside a `float32` is single precision (`0.1f`), a `float32` beside an
   integer array is a double, and a floating power calls `pow`, as numpy does.
-  Any power compiles on the C target, of a complex base too. See note 19 in
-  `docs/loopy-notes.md`.
+  Any power compiles on the C target, of a complex base too. Integer
+  arithmetic is 64 bits wide in both runs: `Nat` and `Int` are stored in 64
+  bits, and a product of a `Fin[m]` array's entries or of loop variables is
+  computed in 64 (a subscript stays loopy's 32-bit index arithmetic). `//`,
+  `%`, `<<` and `>>` are computed as numpy computes them, by functions
+  loopty's targets define (`loopty.operations`): of reals too, by zero (`0`
+  for integers) and past the width of a shift. A kernel named like a
+  function loopy or the C headers know (`floor`, `pow`, `cpow`) is renamed in
+  the generated code. See notes 19 and 20 in `docs/loopy-notes.md`.
 - Array arguments over polyhedral domains (`loopty.domain`): `Where[...]`,
   binders written as slices and then the comparisons that cut their box,
   joined by `&`; `Sigma[...]`, binders and an unnamed last fiber affine in
@@ -402,12 +419,13 @@ end to end; the edges are sharp.
   to have the declared domain's points at the sizes of the call, and a value
   of a refined sort such as `Fin[m]` has to be one — an array element and a
   scalar argument alike, and being one means being a finite whole number in
-  range, not merely passing two comparisons. A value of `Nat`, `Int` or
-  `Fin[m]` is also inside the 32 bits the compiled run stores it in, since
-  `2**32 + 5` ran natively as it was and was `5` compiled. An array the kernel
-  writes has to be stored as its element sort is natively (`float64` for
-  `Real`, `bool` for `Bool`, a signed integer of 32 bits or more for `Nat`,
-  `Int` and `Fin[m]`, a numpy sort as itself), since an integer `x` for a
+  range, not merely passing two comparisons. A value of `Nat` or `Int` is
+  also inside the 64 bits both runs store it in, and one of `Fin[m]` inside
+  the 32 the compiled run stores it in, since `2**32 + 5` would run natively
+  as it was and be `5` compiled. An array the kernel writes has to be stored
+  as its element sort is natively (`float64` for `Real`, `bool` for `Bool`,
+  `int64` for `Nat` and `Int`, a signed integer of 32 bits or more for
+  `Fin[m]`, a numpy sort as itself), since an integer `x` for a
   `Real` parameter truncates every write the compiled run keeps; an array it
   only reads is read by the native run in that dtype, as the compiled run
   converts it, so an integer `x` no longer overflows natively where the
@@ -415,8 +433,9 @@ end to end; the edges are sharp.
   entry of a sort that is not complex has no imaginary part, and an entry of
   `Bool` stored as a number is `0` or `1`. A scalar is asked the same, and is
   converted into the dtype of its sort in both runs, since it is passed by
-  value: `np.int64(2**32)` for a `Real` is a double natively too, and a `Bool`
-  a numpy bool, on which `~` is `not`. These are the assumptions the typing
+  value: `np.int64(2**32)` for a `Real` is a double natively too, a `Bool` a
+  numpy bool, on which `~` is `not`, and a Python number a numpy scalar, so
+  `a=0.7` and `a=np.float64(0.7)` compute alike beside a `float32`. These are the assumptions the typing
   rules and the two runs make about a *call* rather than about the term, and a
   violation is a `ValueError` naming the argument. Distinct parameters being disjoint storage
   is the load-bearing one: dependences are computed per array name, so a kernel
@@ -485,9 +504,9 @@ end to end; the edges are sharp.
   program between the two calls, which then stops with the requirement's
   message where the native callee is refused (`examples/travel.py`). An
   integral array such a check reads is stored in 64 bits, as the native run
-  holds it, so that a value written outside 32 bits is read as written and
-  not as the store narrowed it; the compiled run refuses one passed in fewer
-  bits, which the native run would narrow. Offsets a scan computes and a later call
+  holds it, a `Fin[m]` one included, so that a value written outside 32 bits
+  is read as written and not as the store narrowed it; the compiled run
+  refuses one passed in fewer bits, which the native run would narrow. Offsets a scan computes and a later call
   declares `Nat` without reading rows through them are checked: that they
   are naturals follows from the scan's recurrence only by induction. The
   counts of a ragged family an earlier call wrote are still refused: its rows
@@ -500,8 +519,9 @@ end to end; the edges are sharp.
   temporary made like a parameter, `Arr.zeros_like(u)`, has `u`'s dtype
   natively, so the compiled program refuses a `u` whose dtype does not hold
   what the compiled temporary holds: `float64` for `Real`, the dtype itself
-  for a numpy one such as `np.complex128`, `bool` for `Bool`, and a signed
-  integer of 32 bits or more for `Nat`, `Int` and `Fin[m]`. On the C target a
+  for a numpy one such as `np.complex128`, `bool` for `Bool`, `int64` for
+  `Nat` and `Int`, and a signed integer of 32 bits or more for `Fin[m]`
+  (`int64` for an array a checked point reads). On the C target a
   temporary is a variable-length array on the stack of the call, which bounds
   its size (note 16 in `docs/loopy-notes.md`); on OpenCL it is a global
   temporary, which is generated but, like every device path, not run from a
@@ -510,13 +530,20 @@ end to end; the edges are sharp.
   one axis, is built and lowered; tracing refuses any other ragged type, a
   fiber after two dense axes, a dense axis after the fiber, or counts of two
   axes, before any fact is stated about it.
-- Integers are 64 bits wide natively and 32 bits compiled. The contract keeps
-  every integral argument inside 32 bits, but a result that leaves them
-  (`c[i] * c[i]` at `c[i] = 2**20`) is a wider number natively and wraps
-  compiled. A scalar of `Real` or of an integral sort is a Python number
-  natively when the caller passes one, and so takes a `float32`'s precision
-  beside one where a numpy scalar would not; an operation whose type depends
-  on that is left as C types it. See note 19 in `docs/loopy-notes.md`.
+- Integers are 64 bits wide in both runs, and a result outside 64 bits wraps
+  round compiled where numpy wraps or refuses, which is numpy's limit too.
+  Arithmetic of loop variables, sizes and literals alone is Python's natively,
+  which is exact: `1.0 * i ** 5` past `i = 6208` is a wider number natively
+  and wraps compiled, which the differential fact reports (#139).
+  Index arithmetic, a subscript and a loop bound, is loopy's, 32 bits wide,
+  and so is a sum of loop variables, sizes and small literals: `x[(i * i) %
+  n]` reads out of bounds compiled at `i = 46341` (#129). A
+  `Fin[m]` array the kernel writes may be an `int32` one natively, and an
+  entry read back from it is computed with in 32 bits there, unless a
+  program's checked point reads it, which takes an `int64` one. An integer to a
+  negative power whose exponent is not a literal is left to numpy's refusal
+  natively, and computed as an integer compiled. See notes 19 and 20 in
+  `docs/loopy-notes.md`.
 - A polyhedral domain is an array's whole index set, so it cannot sit beside
   a dense axis (`Arr[Fin[k], Where[...], Real]` is refused; write the axis as
   a binder of the domain). The pieces of a union have the same number of axes,
