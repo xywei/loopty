@@ -446,6 +446,59 @@ def truncated(u, y):
     twice_whole(f, y)
 
 
+@kernel
+def copy_index(t: Arr[Fin[n], Fin[n]], p: Arr[Fin[n], Fin[n]]):  # noqa: F821
+    """A copy of an index array."""
+    for j in p.dom:
+        p[j] = t[j]
+
+
+@kernel
+def scatter(
+    p: Arr[Fin[n], Fin[n]],  # noqa: F821
+    x: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """``y[p[i]] = x[i]``."""
+    for i in x.dom:
+        y[p[i]] = x[i]
+
+
+@program
+def scattered(t, x, y):
+    """An index array the program computes, then writes through."""
+    p = Arr.zeros_like(t)
+    copy_index(t, p)
+    scatter(p, x, y)
+
+
+@kernel
+def narrow_index(t: Arr[Fin[n], Fin[n]], p: Arr[Fin[n], np.int16]):  # noqa: F821
+    """A copy of an index array, in sixteen bits."""
+    for j in p.dom:
+        p[j] = t[j]
+
+
+@kernel
+def scatter_narrow(
+    p: Arr[Fin[n], np.int16],  # noqa: F821
+    w: Arr[Fin[n], np.int16],  # noqa: F821
+    x: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """``y[p[i]] = x[i] + w[i]``."""
+    for i in x.dom:
+        y[p[i]] = x[i] + w[i]
+
+
+@program
+def narrowed(t, w, x, y):
+    """The index array stored in sixteen bits, which converts it."""
+    p = Arr.zeros_like(w)
+    narrow_index(t, p)
+    scatter_narrow(p, w, x, y)
+
+
 def velocity(size: int) -> np.ndarray:
     return np.sin(np.linspace(0.0, 2.0 * np.pi, size, endpoint=False)) + 0.3
 
@@ -1025,6 +1078,39 @@ def test_a_substituted_value_is_converted_as_storing_it_converted_it() -> None:
                 "y": Arr.from_numpy(np.zeros(size, dtype=np.int64)),
             },
         )
+
+
+def test_an_index_array_is_substituted_into_the_subscripts_it_is_read_in() -> None:
+    # copy_index stores what it computes in the type it computes it in, so
+    # nothing is converted, and the reads in y[p[i]] and in the check of
+    # p's elements become reads of t.
+    schedule = Schedule(scattered).substitute("p")
+    assert schedule.buildable == (True, "")
+    assert "p" not in schedule.kernel.default_entrypoint.temporary_variables
+    for size in (1, 4, 7):
+        t = np.random.default_rng(size).permutation(size).astype(np.int64)
+        agrees(
+            scattered,
+            schedule,
+            {
+                "t": Arr.from_numpy(t),
+                "x": Arr.from_numpy(np.arange(size) + 0.5),
+                "y": Arr.zeros(size),
+            },
+        )
+
+
+def test_a_conversion_in_a_subscript_leaves_the_kernel_unwritten() -> None:
+    # p is stored in sixteen bits, which converts the 32-bit value it is
+    # computed from, and is read in the subscript of y: loopy simplifies a
+    # subscript as an affine expression and cannot through a cast, so the
+    # substitution is decided and the kernel is not written, with the reason.
+    schedule = Schedule(narrowed).substitute("p")
+    assert [fact.status.value for fact in schedule.facts()][:3] == ["decided"] * 3
+    ok, reason = schedule.buildable
+    assert not ok
+    assert "storing it as int16 converts" in reason
+    assert "scatter_narrow.S0 reads p in a subscript" in reason
 
 
 # }}}

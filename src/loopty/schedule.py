@@ -3934,7 +3934,11 @@ class Schedule:
             ids = self._lowering.insn_ids
             removed = [ids[stmt.id] for stmt in writers if stmt.id == zeros]
             kernel, reason = _substituted_kernel(
-                draft.kernel, array, removed, ids[producer.id]
+                draft.kernel,
+                array,
+                removed,
+                ids[producer.id],
+                _computed_in(term, producer, array, readers),
             )
             draft.kernel = kernel
             if reason is not None:
@@ -4913,8 +4917,63 @@ def _not_pointwise(stmt: Stmt, array: str, term: Term) -> str | None:
     return None
 
 
+def _computed_in(
+    term: Term, producer: Stmt, array: str, readers: Sequence[Stmt]
+) -> tuple[Any, str | None]:
+    """The dtype the lowered code computes ``producer``'s value in, and a reader.
+
+    The dtype is :class:`loopty.promotion.Promotion`'s, the one the lowering
+    plans every operation of the value by, or ``None`` where it is not known
+    there; :func:`_substituted_kernel` compares it with the dtype ``array``
+    is stored in. The reader is the first of ``readers`` that reads
+    ``array`` inside a subscript (``y[p[i]]``, or ``x[p[i]]``), or ``None``:
+    loopy simplifies a subscript as an affine expression, which a cast is
+    not.
+    """
+    from loopty.promotion import Promotion
+    from loopty.trace import accesses_in
+
+    _native, computed = Promotion(term).types(producer.expr)
+    for stmt in readers:
+        subscripts = [
+            stmt.assignee.indices,
+            *(
+                access.indices
+                for source in (stmt.expr, stmt.guard)
+                if source is not None
+                for access in accesses_in(source)
+            ),
+        ]
+        if any(
+            access.array == array
+            for indices in subscripts
+            for access in accesses_in(tuple(indices))
+        ):
+            return computed, stmt.id
+    return computed, None
+
+
+def _loopy_dtype(kernel: Any, insn_id: str) -> Any:
+    """The dtype loopy reads the value of instruction ``insn_id`` as, or ``None``."""
+    from loopy.type_inference import TypeReader
+
+    try:
+        typed = lp.infer_unknown_types(kernel, expect_completion=True)
+        entry = typed.default_entrypoint
+        (found,) = TypeReader(entry, typed.callables_table)(
+            entry.id_to_insn[insn_id].expression
+        )
+        return found.numpy_dtype
+    except Exception:  # noqa: BLE001 - any doubt is read as a conversion
+        return None
+
+
 def _substituted_kernel(
-    kernel: Any, array: str, removed: Sequence[str], producer: str
+    kernel: Any,
+    array: str,
+    removed: Sequence[str],
+    producer: str,
+    computed: tuple[Any, str | None] = (None, None),
 ) -> tuple[Any, str | None]:
     """``kernel`` with ``array`` computed where it is read, or why not.
 
@@ -4925,20 +4984,36 @@ def _substituted_kernel(
     temporary and the loops it leaves empty once no read is left; the loops
     the zeros leave empty go too, which loopy would otherwise warn of.
 
-    A store converts the value to the array's element type: ``0.1 * u[j]``
-    stored in a ``float32`` cell is rounded, and a ``Real`` stored in a
-    ``Nat`` cell is truncated. The rule would hand every read the value
-    unconverted, so the producer's value is cast to that type first (loopy's
-    ``TypeCast``), which C converts exactly as it converts a store; a cast to
-    the type the value already has changes nothing. Returns the kernel, or
-    ``None`` and loopy's refusal in words.
+    A store converts the value to the array's element type: ``u[j] * 0.1``
+    of a ``Real`` ``u`` is a double, which a ``float32`` cell rounds, and a
+    ``Real`` stored in a ``Nat`` cell is truncated. The rule would hand
+    every read the value unconverted. So where the dtype the value is
+    computed in (``computed``, from :func:`_computed_in`, or loopy's own
+    reading of the instruction where that is not known) is not the array's,
+    the producer's value is cast to the array's dtype first (loopy's
+    ``TypeCast``), which C converts exactly as it converts a store; a read
+    of the array inside a subscript, which loopy cannot simplify through a
+    cast, leaves the kernel unwritten, with the reason. Returns the kernel,
+    or ``None`` and the reason in words.
     """
     from loopy.symbolic import TypeCast
 
+    value, indexed = computed
     try:
         entry = kernel.default_entrypoint
         dtype = entry.temporary_variables[array].dtype
-        if dtype is not None and dtype is not lp.auto:
+        stored = None if dtype is None or dtype is lp.auto else dtype.numpy_dtype
+        if value is None:
+            value = _loopy_dtype(kernel, producer)
+        if stored is not None and value != stored:
+            if indexed is not None:
+                return None, (
+                    f"the value {array} is computed from is "
+                    f"{value if value is not None else 'of a type not known'}, "
+                    f"which storing it as {stored} converts, and {indexed} reads "
+                    f"{array} in a subscript, which loopy cannot simplify "
+                    "through that conversion; keep it stored"
+                )
             entry = entry.copy(
                 instructions=[
                     insn.copy(expression=TypeCast(dtype, insn.expression))
