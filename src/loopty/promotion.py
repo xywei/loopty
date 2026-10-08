@@ -54,10 +54,36 @@ leaves a subscript's arithmetic in 32 bits, which loopy gives it no way to
 widen, a limit (#129; :class:`loopty.lower.ExpressionLowerer`). A result
 outside 64 bits wraps round compiled and is refused or wraps natively, which
 is numpy's limit too.
+
+The type C computes an operation in is C's, by its integer promotion and its
+usual arithmetic conversions (:func:`_c_result`), and not numpy's, in two
+more places (#122):
+
+* an integer narrower than ``int`` (``np.int8``, ``np.uint16``, a truth
+  value) is computed as an ``int``, where numpy computes ``int8 * int8`` in
+  ``int8``: ``a[i] * a[i] // 2`` at ``a[i] = 100`` was ``8`` natively and
+  ``-120`` compiled. Where numpy computes an operation in such a type, its
+  result is converted back into it (:attr:`Step.result`), which wraps round
+  as numpy's does;
+* an unsigned integer beside a signed one of no more bits is unsigned in C,
+  where numpy computes in a signed type that holds both: ``u[i] + k[i]`` of a
+  ``uint32`` ``u`` and an ``int32`` ``k`` is ``int64`` natively, and was
+  ``4294967295`` compiled at ``0 + -1``. The operands are converted then,
+  and a comparison of integers, which numpy compares exactly whatever their
+  types, is compared on the sign first where C would compare a negative
+  value as an unsigned one (:attr:`Step.sign`).
+
+An operation the lowering writes as a call of a function, ``//``, ``%``,
+``<<``, ``>>`` and ``**``, is computed in the type loopy infers for it
+(:func:`_loopy_result`), and is converted back the same way where that is not
+numpy's. An integer literal past 64 bits has no type loopy can give it, and is
+written in numpy's type where numpy computes in one that holds it, a real or
+a ``uint64``, and refused by the trace elsewhere (#140).
 """
 
 from __future__ import annotations
 
+import dataclasses
 import operator
 import warnings
 from collections.abc import Callable, Mapping
@@ -99,17 +125,31 @@ class Step:
     ``None`` to leave one as it is; a literal is written in that dtype, and
     anything else is cast. ``native`` and ``compiled`` are the types of the
     result, natively and as the lowered operation computes it.
+
+    ``result`` is the dtype to convert the operation's result into, or
+    ``None``: numpy computes it in that integer type, and C in a wider one or
+    one of another sign, ``int`` for ``int8 * int8`` (#122). ``sign`` is, for
+    a comparison of integers that C would compute in an unsigned type, the
+    position (``0`` or ``1``) of the operand that may be negative, which the
+    lowering compares with zero first; ``None`` otherwise.
     """
 
     left: np.dtype | None
     right: np.dtype | None
     native: Native
     compiled: np.dtype | None
+    result: np.dtype | None = None
+    sign: int | None = None
 
     @property
     def converts(self) -> bool:
-        """Whether the step converts either operand."""
-        return self.left is not None or self.right is not None
+        """Whether the step converts an operand or the result, or compares a sign."""
+        return (
+            self.left is not None
+            or self.right is not None
+            or self.result is not None
+            or self.sign is not None
+        )
 
 
 def _kind(value: Any) -> tuple[np.dtype, bool] | None:
@@ -252,11 +292,25 @@ def _weak_integers(*natives: Native) -> bool:
     )
 
 
+def _c_integer(dtype: np.dtype) -> np.dtype:
+    """C's integer promotion: a truth value or an integer narrower than ``int``.
+
+    Either is computed as an ``int``, which holds every value of it.
+    """
+    if dtype.kind in "biu" and dtype.itemsize < 4:
+        return np.dtype(np.int32)
+    return dtype
+
+
 def _c_result(left: np.dtype | None, right: np.dtype | None) -> np.dtype | None:
     """The type C computes an operation of two operands of these types in.
 
     Its usual arithmetic conversions: the widest floating type of the two when
-    either is floating, complex when either is, and an integer otherwise.
+    either is floating, complex when either is, and otherwise an integer
+    after the integer promotion (:func:`_c_integer`): the wider of two of one
+    sign, the unsigned one beside a signed one of no more bits (``uint32``
+    beside ``int32``, where numpy computes ``int64``), and the signed one
+    beside an unsigned one of fewer bits, which it holds.
     """
     if left is None or right is None:
         return None
@@ -266,7 +320,80 @@ def _c_result(left: np.dtype | None, right: np.dtype | None) -> np.dtype | None:
         return np.dtype(np.complex64 if width <= 4 else np.complex128)
     if "f" in kinds:
         return np.dtype(np.float32 if width <= 4 else np.float64)
+    left, right = _c_integer(left), _c_integer(right)
+    if left == right:
+        return left
+    if (left.kind == "u") == (right.kind == "u"):
+        return left if left.itemsize >= right.itemsize else right
+    unsigned, signed = (left, right) if left.kind == "u" else (right, left)
+    return unsigned if unsigned.itemsize >= signed.itemsize else signed
+
+
+def _loopy_result(left: np.dtype | None, right: np.dtype | None) -> np.dtype | None:
+    """The type loopy infers for an operation of two operands of these types.
+
+    loopy promotes as numpy promotes two arrays, but for a ``float32`` beside
+    an ``int32``, which it keeps in single precision (``combine`` in
+    ``loopy.type_inference``). It is the type of the function a ``//``, a
+    ``%``, a ``<<``, a ``>>`` or an integer ``**`` is computed by
+    (:mod:`loopty.operations`, loopy's ``loopy_pow``), and the type loopy
+    takes the result of any operation to be, which is what it casts an operand
+    of such a function by and writes a literal beside it in.
+    """
+    if left is None or right is None:
+        return None
+    if {left, right} == {np.dtype(np.int32), np.dtype(np.float32)}:
+        return np.dtype(np.float32)
     return np.promote_types(left, right)
+
+
+#: The integer literals loopy types, as ``int32`` or ``int64``; any other is
+#: refused by its type inference ("integer constant too large", #140).
+_LOOPY_INTEGERS = (-(2**63), 2**63)
+
+
+def _untyped(literal: Any) -> bool:
+    """Whether ``literal`` is a Python int loopy cannot type, past 64 bits."""
+    return (
+        isinstance(literal, int)
+        and not isinstance(literal, bool)
+        and not _LOOPY_INTEGERS[0] <= literal < _LOOPY_INTEGERS[1]
+    )
+
+
+def _literal_of(expr: Any) -> Any:
+    """``expr`` when it is an integer literal (a truth value is not), else ``None``."""
+    return expr if _integer_literal(expr) else None
+
+
+def _holds(dtype: np.dtype, value: int) -> bool:
+    """Whether the numpy dtype ``dtype`` holds the integer ``value`` exactly."""
+    if dtype.kind in "iu":
+        info = np.iinfo(dtype)
+        return int(info.min) <= value <= int(info.max)
+    if dtype.kind in "fc":
+        return True
+    return False
+
+
+def _strong_integer(native: Native) -> bool:
+    """Whether every sample of a native type is a numpy integer (not a bool)."""
+    return bool(native) and all(
+        isinstance(sample, np.integer) for sample in native
+    )
+
+
+def _maybe_negative(literal: Any, compiled: np.dtype | None) -> bool:
+    """Whether an integer operand may hold a negative value.
+
+    ``literal`` is the operand when it is an integer literal, which says, and
+    ``None`` otherwise; anything else may when its compiled type is signed: an
+    element or a scalar of a signed type, a loop variable, or arithmetic of
+    them.
+    """
+    if literal is not None:
+        return int(literal) < 0
+    return compiled is not None and compiled.kind == "i"
 
 
 def _plan(
@@ -275,6 +402,8 @@ def _plan(
     common: Native,
     native: Native,
     kind: str,
+    helper: bool = False,
+    literals: tuple[Any, Any] = (None, None),
 ) -> Step:
     """Which operands to convert so that C computes in numpy's type ``common``.
 
@@ -283,7 +412,14 @@ def _plan(
     ``"comparison"``, ``"power"``, ``"sum"``, ``"growing"`` (a product or a
     left shift, which can leave the range of its operands) or ``"bounded"``
     (a quotient, a floor division, a remainder, an ``^`` or a right shift,
-    which cannot).
+    which cannot). ``helper`` says that the lowering writes the operation as
+    a call of a function, computed in the type loopy infers for it
+    (:func:`_loopy_result`), and not as C's operator, computed in C's type
+    (:func:`_c_result`). ``literals`` holds each operand that is an integer
+    literal, and ``None`` for one that is not.
+
+    A comparison is planned by :func:`_compared`, and an operation with an
+    integer literal loopy cannot type by :func:`_beyond`.
 
     Where ``common`` is one floating dtype and C would compute in another,
     each floating operand of another precision is converted to it, and if C
@@ -295,28 +431,22 @@ def _plan(
     differs from ``pow`` in the last bit. So both of its operands are
     converted, which makes loopy call ``pow`` (``powf`` in single precision).
 
-    Where ``common`` is one integer dtype wider than the integer C would
-    compute in, which is 64 bits against a ``Fin[m]`` element's 32 or a loop
-    variable's, and the operation can leave the range of its operands, the
-    narrower operands are converted to it, so that the compiled run computes
-    integer arithmetic in 64 bits as numpy does (#101); of a power, the base.
-    A comparison and a ``"bounded"`` operation are not converted, since their
-    result is inside 32 bits when their operands are, and neither is a sum of
-    Python ints alone (loop variables, sizes and literals): that is index
-    arithmetic, which loopy computes in 32 bits as it does every loop bound
-    and subscript, and a sum of a few of them stays inside 32 bits while the
-    sizes do; the caller plans a negation, ``-1 * i``, as a sum too. A
-    product, a power or a left shift of them does not, and is converted, and
-    so is a sum whose literals total ``2**30`` or more, which the caller
-    plans as ``"growing"``: ``i + 2**31 - 1`` left 32 bits at ``i = 1``.
+    Where ``common`` is one integer dtype, :func:`_widened` says what to
+    convert.
     """
     (_, lc), (_, rc) = left, right
-    compiled = _c_result(lc, rc)
+    if kind == "comparison":
+        return _compared(left, right, common, native, literals)
+    result_of = _loopy_result if helper else _c_result
     target = _one_dtype(common)
+    big = tuple(_untyped(literal) for literal in literals)
+    if any(big):
+        return _beyond(left, right, native, target, literals, big, result_of)
+    compiled = result_of(lc, rc)
     if target is None or compiled is None:
         return Step(None, None, native, compiled)
     if target.kind in "iu":
-        return _widened(left, right, native, compiled, target, kind)
+        return _widened(left, right, native, compiled, target, kind, helper, literals)
     if target.kind not in "fc":
         return Step(None, None, native, compiled)
     if kind == "power":
@@ -332,9 +462,43 @@ def _plan(
     precision = _precision(target)
     to_left = target if lc.kind in "fc" and _precision(lc) != precision else None
     to_right = target if rc.kind in "fc" and _precision(rc) != precision else None
-    after = _c_result(to_left or lc, to_right or rc)
+    after = result_of(to_left or lc, to_right or rc)
     if after != target:
         to_left = target
+    return Step(to_left, to_right, native, target)
+
+
+def _beyond(
+    left: tuple[Native, np.dtype | None],
+    right: tuple[Native, np.dtype | None],
+    native: Native,
+    target: np.dtype | None,
+    literals: tuple[Any, Any],
+    big: tuple[bool, ...],
+    result_of: Callable[[Any, Any], np.dtype | None],
+) -> Step:
+    """The plan for an operation with an integer literal loopy cannot type (#140).
+
+    loopy types an integer literal as ``int32`` or ``int64`` and refuses any
+    other ("integer constant too large"). Where numpy computes the operation
+    in a type that holds the literal, a real (``x[i] * 2**70``) or a
+    ``uint64`` (``u[i] + 2**63``), the literal is written in that type, and
+    the other operand is converted too where C would compute in another.
+    Anywhere else (``i + 2**64``, which Python computes exactly) the literal
+    is left, its type unknown, and the trace refuses it, naming a real.
+    """
+    if target is None or not all(
+        _holds(target, int(literal))
+        for literal, beyond in zip(literals, big, strict=True)
+        if beyond
+    ):
+        return Step(None, None, native, None)
+    (_, lc), (_, rc) = left, right
+    to_left = target if big[0] else None
+    to_right = target if big[1] else None
+    if result_of(to_left or lc, to_right or rc) != target:
+        to_left = target if lc != target else to_left
+        to_right = target if rc != target else to_right
     return Step(to_left, to_right, native, target)
 
 
@@ -345,28 +509,50 @@ def _widened(
     compiled: np.dtype,
     target: np.dtype,
     kind: str,
+    helper: bool,
+    literals: tuple[Any, Any],
 ) -> Step:
     """The plan for an operation numpy computes in the integer dtype ``target``.
 
-    See :func:`_plan`: the narrower operands are converted when C computes in
-    fewer bits, but for a comparison, a bounded operation and a sum of Python
-    ints alone. Where the compiled type is no integer at all, every operand
-    of another type is converted, whatever the operation: loopy types an
-    ``np.uint64`` beside a signed integer as numpy types two arrays, in
-    double, where numpy keeps a Python int or a loop variable beside it weak,
-    and computes ``u[i] % 3`` in ``uint64``.
+    Where the compiled type is no integer at all, every operand of another
+    type is converted, whatever the operation: loopy types an ``np.uint64``
+    beside a signed integer as numpy types two arrays, in double, where numpy
+    keeps a Python int or a loop variable beside it weak, and computes ``u[i]
+    % 3`` in ``uint64``.
+
+    Where numpy computes in a numpy integer type (:func:`_strong`), the
+    compiled run computes in it too, by :func:`_strong`.
+
+    Otherwise, where ``target`` is wider than the integer C would compute in,
+    which is 64 bits against a ``Fin[m]`` element's 32 or a loop variable's,
+    and the operation can leave the range of its operands, the narrower
+    operands are converted to it, so that the compiled run computes integer
+    arithmetic in 64 bits as numpy does (#101); of a power, the base. A
+    ``"bounded"`` operation is not converted, since its result is inside 32
+    bits when its operands are, and neither is a sum of Python ints alone
+    (loop variables, sizes and literals): that is index arithmetic, which
+    loopy computes in 32 bits as it does every loop bound and subscript, and
+    a sum of a few of them stays inside 32 bits while the sizes do; the
+    caller plans a negation, ``-1 * i``, as a sum too. A product, a power or a
+    left shift of them does not, and is converted, and so is a sum whose
+    literals total ``2**30`` or more, which the caller plans as
+    ``"growing"``: ``i + 2**31 - 1`` left 32 bits at ``i = 1``.
     """
     (left_native, lc), (right_native, rc) = left, right
     if compiled.kind not in "biu":
         to_left = target if lc != target else None
         to_right = target if rc != target else None
         return Step(to_left, to_right, native, target)
-    narrower = compiled.kind in "biu" and compiled.itemsize < target.itemsize
-    if not narrower or kind in ("comparison", "bounded"):
+    assert lc is not None and rc is not None
+    if _strong_integer(native):
+        step = _strong(left, right, native, compiled, target, kind, helper, literals)
+        if step is not None:
+            return step
+    narrower = compiled.itemsize < target.itemsize
+    if not narrower or kind == "bounded":
         return Step(None, None, native, compiled)
     if kind == "sum" and _weak_integers(left_native, right_native):
         return Step(None, None, native, compiled)
-    assert lc is not None and rc is not None
     to_left = target if lc != target else None
     if kind == "power":
         return Step(to_left, None, native, target)
@@ -374,6 +560,124 @@ def _widened(
     if _c_result(to_left or lc, rc) != target:
         to_right = target
     return Step(to_left, to_right, native, target)
+
+
+def _strong(
+    left: tuple[Native, np.dtype],
+    right: tuple[Native, np.dtype],
+    native: Native,
+    compiled: np.dtype,
+    target: np.dtype,
+    kind: str,
+    helper: bool,
+    literals: tuple[Any, Any],
+) -> Step | None:
+    """The plan for an operation numpy computes in the numpy integer ``target``.
+
+    ``None`` where :func:`_widened`'s rules for a wider ``target`` apply: the
+    compiled run computes in an integer of ``target``'s sign and no more bits
+    than it, as C computes it and loopy types it. Otherwise numpy's type is
+    had one of two ways (#122):
+
+    * an operand that C would take round, a signed one beside an unsigned
+      one of as many bits (``uint32 + int32``, which numpy computes in
+      ``int64``), and an operation loopy types otherwise than C computes it
+      (``u[i] + i`` of a ``uint32`` ``u``, ``int64`` to loopy) or computes in
+      a wider type (``u[i] << 3``, by loopy's ``int64`` function), have the
+      operands converted into ``target``, which holds them, ``target`` being
+      at least 32 bits wide;
+    * where that does not do, the result is converted into ``target``
+      (:attr:`Step.result`), which wraps round as numpy's arithmetic in it
+      does. C computes an integer narrower than ``int`` as an ``int``, so
+      ``a[i] * a[i]`` of an ``np.int8`` ``a`` is ``(int8_t) (a[i] * a[i])``,
+      and a negative literal beside an unsigned integer has no conversion
+      into it, so ``u[i] - 1``, which pymbolic builds as ``u[i] + -1``, is
+      ``(uint32_t) (u[i] + -1)``. A power is converted so too, its exponent
+      left to loopy.
+    """
+    (_, lc), (_, rc) = left, right
+    loopy = compiled if helper else _loopy_result(lc, rc)
+    if compiled == target and loopy == target:
+        return None
+    signed_round = (
+        not helper
+        and compiled.kind == "u"
+        and any(
+            dtype.kind == "i" and _strong_integer(operand)
+            for operand, dtype in (left, right)
+        )
+    )
+    if compiled.kind == target.kind and compiled.itemsize <= target.itemsize:
+        if loopy == compiled and not signed_round:
+            return None
+    narrow = target.itemsize < 4
+    if narrow or kind == "power":
+        return Step(None, None, native, target, result=target)
+    convertible = all(
+        literal is None or _holds(target, int(literal)) for literal in literals
+    )
+    if not convertible:
+        return Step(None, None, native, target, result=target)
+    to_left = target if lc != target else None
+    to_right = target if rc != target else None
+    return Step(to_left, to_right, native, target)
+
+
+def _compared(
+    left: tuple[Native, np.dtype | None],
+    right: tuple[Native, np.dtype | None],
+    common: Native,
+    native: Native,
+    literals: tuple[Any, Any],
+) -> Step:
+    """The plan for a comparison, which numpy computes exactly on integers.
+
+    numpy compares two integers of any types by their values, and an integer
+    with a Python int outside its type's range too (``u[i] > -1`` of a
+    ``uint64`` is true, NEP 50). C compares two integers exactly but where its
+    usual arithmetic conversions take a negative value round into an unsigned
+    type: ``u[i] < k[i]`` of a ``uint32`` ``u`` and an ``int32`` ``k``, and
+    ``u[i] == -1``. There the operand that may be negative is compared with
+    zero first (:attr:`Step.sign`), and C compares the two only where it is
+    not, which it does exactly. An integer literal loopy cannot type is
+    written as a ``uint64`` where one holds it and the other operand is an
+    integer, and as a double elsewhere, beyond which every integer of 64 bits
+    compares alike.
+
+    A comparison with a real or a complex operand is computed in numpy's
+    ``common`` type, as :func:`_plan` converts any operation.
+    """
+    (_, lc), (_, rc) = left, right
+    big = [_untyped(literal) for literal in literals]
+    types = [lc, rc]
+    to: list[np.dtype | None] = [None, None]
+    integral = [dtype is not None and dtype.kind in "biu" for dtype in types]
+    for k in range(2):
+        if not big[k]:
+            continue
+        other = types[1 - k]
+        wide = np.dtype(np.uint64)
+        value = int(literals[k])
+        if other is not None and other.kind in "biu" and _holds(wide, value):
+            to[k] = wide
+        else:
+            to[k] = np.dtype(np.float64)
+        types[k] = to[k]
+        integral[k] = to[k].kind in "biu"
+    if all(integral) and types[0] is not None and types[1] is not None:
+        compiled = _c_result(types[0], types[1])
+        sign = None
+        if compiled is not None and compiled.kind == "u":
+            for k in range(2):
+                literal = literals[k] if not big[k] else None
+                if types[k].kind == "i" and _maybe_negative(literal, types[k]):
+                    sign = k
+                    break
+        return Step(to[0], to[1], native, np.dtype(np.bool_), sign=sign)
+    if any(big):
+        return Step(to[0], to[1], native, np.dtype(np.bool_))
+    step = _plan(left, right, common, native, "bounded")
+    return dataclasses.replace(step, compiled=np.dtype(np.bool_))
 
 
 class Promotion:
@@ -445,12 +749,18 @@ class Promotion:
 
     @staticmethod
     def _literal(value: Any) -> tuple[Native, np.dtype | None]:
-        """A literal is its own sample; compiled, loopy types it by its value."""
+        """A literal is its own sample; compiled, loopy types it by its value.
+
+        An integer as ``int32`` or ``int64``, and one past 64 bits not at all
+        (#140): its compiled type is unknown until a step writes it in one.
+        """
         if isinstance(value, np.generic):
             return (value,), value.dtype
         if isinstance(value, bool):
             return (value,), np.dtype(np.bool_)
         if isinstance(value, int):
+            if _untyped(value):
+                return (value,), None
             fits = -(2**31) <= value < 2**31
             return (value,), np.dtype(np.int32 if fits else np.int64)
         if isinstance(value, float):
@@ -503,8 +813,7 @@ class Promotion:
         if isinstance(expr, LankySum):
             return self._summed(expr, expr.body)
         if isinstance(expr, Abs):
-            native, compiled = self.types(expr.operand)
-            return _apply(abs, native), compiled
+            return self._absolute(expr, expr.operand, abs)
         for kind, function in _ARITHMETIC.items():
             if isinstance(expr, kind):
                 return self._arithmetic(expr, function)
@@ -570,14 +879,28 @@ class Promotion:
             kind = "growing"
         else:
             kind = "bounded"
+        helper = isinstance(
+            expr,
+            prim.FloorDiv | prim.Remainder | prim.LeftShift | prim.RightShift
+            | prim.Power,
+        )
         accumulated = self.types(operands[0])
+        literal = _literal_of(operands[0])
         steps: list[Step] = []
         for operand in operands[1:]:
             right = self.types(operand)
+            literals = (literal, _literal_of(operand))
             native = _apply(function, accumulated[0], right[0])
-            step = _plan(accumulated, right, native, native, kind)
+            subtrahend = literals[1]
+            if native is None and isinstance(expr, prim.Sum) and subtrahend is not None:
+                # pymbolic builds u - 1 as u + -1, which numpy refuses beside
+                # an unsigned integer, and the difference, which it computes.
+                if subtrahend < 0:
+                    native = _apply(operator.sub, accumulated[0], (-subtrahend,))
+            step = _plan(accumulated, right, native, native, kind, helper, literals)
             steps.append(step)
             accumulated = (step.native, step.compiled)
+            literal = None
         self._steps[id(expr)] = tuple(steps)
         return accumulated
 
@@ -586,9 +909,41 @@ class Promotion:
         left, right = self.types(expr.left), self.types(expr.right)
         common = _apply(operator.add, left[0], right[0])
         native = _apply(operator.eq, left[0], right[0])
-        step = _plan(left, right, common, native, "comparison")
+        literals = (_literal_of(expr.left), _literal_of(expr.right))
+        step = _plan(left, right, common, native, "comparison", literals=literals)
         self._steps[id(expr)] = (step,)
         return native, np.dtype(np.bool_)
+
+    def _absolute(
+        self, expr: Any, operand: Any, function: Callable[[Any], Any]
+    ) -> tuple[Native, np.dtype | None]:
+        """``abs`` of ``operand``, by numpy's ``function``; of an integer, #123.
+
+        The lowering writes ``abs`` of an integer as ``k < 0 ? -1 * k : k``
+        in its own type (:meth:`loopty.lower.ExpressionLowerer.map_call`), and
+        ``abs`` of a truth value or an unsigned integer as the operand itself,
+        as numpy computes them. C computes ``-1 * k`` of an integer narrower
+        than ``int`` as an ``int``, where numpy keeps it in its type, in which
+        ``abs`` of the smallest value is that value: the result is converted
+        back into it (:attr:`Step.result`).
+        """
+        native, compiled = self.types(operand)
+        result = _apply(function, native)
+        if compiled is not None and compiled.kind == "c":
+            width = _precision(compiled)
+            return result, np.dtype(np.float32 if width <= 4 else np.float64)
+        if compiled is None or compiled.kind not in "biu":
+            return result, compiled
+        target = _one_dtype(result)
+        if (
+            compiled.kind == "i"
+            and _strong_integer(result)
+            and target is not None
+            and _c_integer(target) != target
+        ):
+            self._steps[id(expr)] = (Step(None, None, result, target, result=target),)
+            return result, target
+        return result, compiled
 
     def _call(self, expr: prim.Call) -> tuple[Native, np.dtype | None]:
         """A library function, by the numpy function the interpreter calls."""
@@ -597,6 +952,8 @@ class Promotion:
         function = expr.function
         name = function.name if isinstance(function, prim.Variable) else None
         numpy_function = _FUNCTIONS.get(name) if name is not None else None
+        if name == "abs" and len(expr.parameters) == 1:
+            return self._absolute(expr, expr.parameters[0], np.abs)
         operands = [self.types(parameter) for parameter in expr.parameters]
         native = (
             None

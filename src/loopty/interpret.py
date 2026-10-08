@@ -237,12 +237,20 @@ class _Run:
         written = {stmt.assignee.array for stmt in term.stmts}
         self.arrays: dict[str, Arr] = {}
         self.scalars: dict[str, Any] = {}
+        #: The dtype each written array's elements are read in where it is
+        #: stored otherwise: an ``int32`` array of ``Fin[m]`` is read as
+        #: ``int64``, as the native run reads it (#121).
+        self.read_as: dict[str, np.dtype] = {}
         for name, typ in term.params:
             if name not in arguments:
                 raise InterpretError(f"no argument was given for {name}")
             value = arguments[name]
             if isinstance(typ, ArrType):
                 self.arrays[name] = _storage(value, typ, name in written)
+                if name in written:
+                    want = read_storage(typ.dtype, self.arrays[name].numpy().dtype)
+                    if want is not None:
+                        self.read_as[name] = want
             else:
                 self.scalars[name] = native_scalar(typ, value)
         for name, (counts, offsets) in declared_layout(
@@ -821,7 +829,11 @@ class _Run:
         if array not in self.arrays:
             raise InterpretError(f"{array} is subscripted and is not an array")
         key = _key([self.index(i, env) for i in indices])
-        return self.arrays[array][key]
+        value = self.arrays[array][key]
+        read_in = self.read_as.get(array)
+        if read_in is not None and isinstance(value, np.generic):
+            return read_in.type(value)
+        return value
 
     def value(self, node: Any, env: Mapping[str, Any]) -> Any:
         """The value of one expression at one point, by numpy's arithmetic."""
