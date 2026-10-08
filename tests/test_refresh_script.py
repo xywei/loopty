@@ -14,6 +14,8 @@ import shlex
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPT = (
     Path(__file__).resolve().parent.parent / "scripts" / "refresh_example_outputs.py"
 )
@@ -149,5 +151,8 @@ def test_the_top_level_readme_ledgers_are_checked_excerpts() -> None:
 
 
 def test_ci_checks_the_transcripts() -> None:
+    if not (SCRIPT.parent.parent / ".github").is_dir():
+        # The sdist ships the tests but not the CI configuration.
+        pytest.skip("no .github/ here: a source distribution, not a checkout")
     workflow = SCRIPT.parent.parent / ".github" / "workflows" / "ci.yml"
     assert "refresh_example_outputs.py --check" in workflow.read_text(encoding="utf-8")
