@@ -303,10 +303,10 @@ end to end; the edges are sharp.
   `Stmt.unnarrowed`, and the facts stated over its domain say so in their
   provenance. loopy's own bounds check reads a guard that names no array
   into isl only when it is affine in integers; under any other, a product of
-  loop variables or a non-integer literal (`when(i * 0.5 < 2)`), it checks
-  an access at every point of the loop, and refuses one it cannot show in
-  bounds there, one the guard keeps in bounds included (#148; note 23 in
-  `docs/loopy-notes.md`). A guard has to be a truth value, and one whose
+  loop variables, a float literal or a `Real` scalar (`when(i * 0.5 < 2)`,
+  `when(i * 2.0 < n)`), it checks an access at every point of the loop, and
+  refuses one it cannot show in bounds there, one the guard keeps in bounds
+  included (#148; note 23 in `docs/loopy-notes.md`). A guard has to be a truth value, and one whose
   value is an integer is a `TraceError`, on a native run and under tracing
   alike. Natively
   that is what `~(i > 0)` is (`~` on a Python bool is bitwise), while the trace
@@ -425,7 +425,7 @@ end to end; the edges are sharp.
   arithmetic is 64 bits wide in both runs: `Nat` and `Int` are stored in 64
   bits, and a product of a `Fin[m]` array's entries or of loop variables is
   computed in 64, a subscript's too unless loopy reads the subscript as
-  affine (note 23). `//`,
+  affine with no division (note 23). `//`,
   `%`, `<<` and `>>` are computed as numpy computes them, by functions
   loopty's targets define (`loopty.operations`): of reals too, by zero (`0`
   for integers) and past the width of a shift. A kernel named like a
@@ -581,13 +581,14 @@ end to end; the edges are sharp.
   Arithmetic of loop variables, sizes and literals alone is Python's natively,
   which is exact: `1.0 * i ** 5` past `i = 6208` is a wider number natively
   and wraps compiled, which the differential fact reports (#139).
-  A loop bound, and a subscript loopy reads as affine, are loopy's index
-  arithmetic, 32 bits wide, and so is a sum of loop variables, sizes and
-  small literals elsewhere; under `-fwrapv` an affine subscript's sums and
-  products give the cell it names, and a division in one does not where
-  its numerator leaves 32 bits: isl writes `x[(i * 7919) % 7]` with `2 * i`,
-  which does from `i = 2**30` (#149). Any other subscript is computed in 64
-  bits, as the rest is: `x[(i * i) % n]` (#129). A
+  A loop bound, and a subscript loopy reads as affine with no division, are
+  loopy's index arithmetic, 32 bits wide, and so is a sum of loop variables,
+  sizes and small literals elsewhere; under `-fwrapv` such a subscript's
+  sums and products give the cell it names. Any other subscript is computed
+  in 64 bits, as the rest is: `x[(i * i) % n]` (#129), and `x[(i * 499999)
+  // 1000000]`, which loopy wrote with a division of the wrapped `499999 *
+  i`. A sum the plan leaves in 32 bits stays so in a division too, `x[(i +
+  n) // 2]` past `2**30` (#149). A
   `Fin[m]` array the kernel writes may be an `int32` one natively, and an
   entry read back from it is computed with in 32 bits there, unless a
   program's checked point reads it, which takes an `int64` one. An integer to a
