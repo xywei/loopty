@@ -1021,13 +1021,14 @@ class Promotion:
     ) -> tuple[Native, np.dtype | None]:
         """``abs`` of ``operand``, by numpy's ``function``; of an integer, #123.
 
-        The lowering writes ``abs`` of an integer as ``k < 0 ? -1 * k : k``
-        in its own type (:meth:`loopty.lower.ExpressionLowerer.map_call`), and
-        ``abs`` of a truth value or an unsigned integer as the operand itself,
-        as numpy computes them. C computes ``-1 * k`` of an integer narrower
-        than ``int`` as an ``int``, where numpy keeps it in its type, in which
-        ``abs`` of the smallest value is that value: the result is converted
-        back into it (:attr:`Step.result`).
+        The lowering writes ``abs`` of an integer as ``(k ^ s) - s`` with ``s
+        = k >> 63`` in its own type
+        (:meth:`loopty.lower.ExpressionLowerer._absolute`), and ``abs`` of a
+        truth value or an unsigned integer as the operand itself, as numpy
+        computes them. C computes that of an integer narrower than ``int`` as
+        an ``int``, where numpy keeps it in its type, in which ``abs`` of the
+        smallest value is that value: the result is converted back into it
+        (:attr:`Step.result`).
         """
         native, compiled = self.types(operand)
         result = _apply(function, native)

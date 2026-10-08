@@ -332,17 +332,24 @@ class NumpyArithmetic:
         return own if own is not None else type_context
 
     def map_constant(self, expr: Any, type_context: Any) -> Any:
-        """A ``uint32`` literal as C's ``unsigned int``, ``3u``.
+        """A ``uint32`` literal as C's ``unsigned int``, ``3u``, a narrower one ``3``.
 
         loopy gives every integer literal of a type wider than 31 bits an
         ``l``, so an ``np.uint32(3)`` was ``3ul``, an ``unsigned long``, and
         ``u[i] + 3ul`` of a ``uint32`` ``u`` was computed in 64 bits, where
-        numpy wraps round at ``2**32`` (#122).
+        numpy wraps round at ``2**32`` (#122). It gives every unsigned one a
+        ``u`` too, so an ``np.uint8(3)`` or an ``np.uint16(3)`` was ``3u``,
+        an ``unsigned int``, where C's integer promotion makes an ``int`` of
+        a value of either type, as :mod:`loopty.promotion` types it: ``a[i]
+        + np.uint16(3)`` of an ``int8`` ``a`` was ``4294967294`` compiled at
+        ``a[i] = -5``, and ``a[i] < np.uint8(3)`` false, where numpy computes
+        ``-2`` and true. Such a literal is written as that ``int``, ``3``.
         """
-        if isinstance(expr, np.uint32):
+        if isinstance(expr, np.uint8 | np.uint16 | np.uint32):
             from loopy.symbolic import Literal
 
-            return Literal(f"{int(expr)}u")
+            suffix = "u" if isinstance(expr, np.uint32) else ""
+            return Literal(f"{int(expr)}{suffix}")
         return super().map_constant(expr, type_context)
 
     def map_type_cast(self, expr: Any, type_context: Any) -> Any:

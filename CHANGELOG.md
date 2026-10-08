@@ -1980,7 +1980,10 @@ with a pair of statement instances.
   `k[i] - u[i]` of an `int32` `k` and a `uint32` `u` was computed in `uint32`
   compiled, and `c[i] - a[i]` of an `int8` `a` at `-128`, which C negated in
   `int`, keeps its value now that a narrow result is converted back. A `uint32`
-  literal is written `3u`, where loopy wrote `3ul`, and an operation loopy
+  literal is written `3u`, where loopy wrote `3ul`, a `uint8` or `uint16` one
+  `3`, where loopy wrote `3u`, which took an `int8` beside it round into an
+  `unsigned int` (`a[i] + np.uint16(3)` was `4294967294` at `a[i] = -5`),
+  and an operation loopy
   computes by a function in a wider type than numpy (`u[i] << 3`, by loopy's
   `int64` one) is converted back. `loopty.promotion` types C's operators by
   C's conversions (`_c_result`) and the functions by loopy's
@@ -1997,17 +2000,17 @@ with a pair of statement instances.
   rounded otherwise (`lower._CText`).
 - `abs` of an integer lowers, and computes numpy's (#123): loopy resolves
   `abs` as C's and refused an integer (`abs does not support type float32`).
-  It is written `k < 0 ? -1 * k : k`, which is the smallest `int64` at the
-  smallest `int64` under `-fwrapv`, as numpy's is, and converted back into a
-  type narrower than `int`; of a truth value or an unsigned integer it is the
-  operand. An operand with a sum in it is written without a branch, `(k ^ s)
-  - s` with `s = k >> 63`, since loopy sums a reduction in a branch of an
-  `If` only where the branch's condition holds of the partial sum (note 23).
-  An operand that reads no array is compared with zero as a guard on the
-  loops is lowered, `1l * i * i < 0`, since loopy's bounds check reads an
-  `If`'s condition into isl, whose reader raised on the cast that widens
-  `i * i` in `abs(i * i - m)`. `abs` of a loop variable is a Python int's,
-  natively and to the plan.
+  It is written without a branch, `(k ^ s) - s` with `s = k >> 63`, which is
+  the smallest `int64` at the smallest `int64` under `-fwrapv`, as numpy's
+  is, and converted back into a type narrower than `int`; of a truth value
+  or an unsigned integer it is the operand. Not as `k < 0 ? -1 * k : k`:
+  GCC reads that as its own `abs`, which it takes to be non-negative whatever
+  `-fwrapv` says, and folded `1 >= abs(c[i])` to false at the smallest
+  `int32`, at `-O0` too; loopy sums a reduction in a branch of an `If` only
+  where the branch's condition holds of the partial sum; and loopy's bounds
+  check reads an `If`'s condition into isl, whose reader raised on the cast
+  that widens `i * i` in `abs(i * i - m)` (note 23). `abs` of a loop
+  variable is a Python int's, natively and to the plan.
 - A parameter, a size or a loop variable named like a macro a header the
   generated code includes defines, or like a function the kernel calls, is
   refused, naming what the code means by it (#124): `I` with complex values
@@ -2015,7 +2018,17 @@ with a pair of statement instances.
   failed; so would `NAN`, `INFINITY` and the `stdint.h` limits, OpenCL C's
   macros (`M_PI`, `INT_MAX`), the work-item functions OpenCL code calls on a
   parallel loop, and `pow` in a kernel with a power or `floor` beside a call
-  of `floor`. A function the kernel never calls is a name it may use.
+  of `floor`. A function the kernel never calls is a name it may use. Built
+  on an OpenCL device, `NULL`, `SCHAR_MAX`, the extension macros
+  (`cl_khr_fp64`), `pipe` and the image types failed too, and are refused
+  (`ATOMIC_FLAG_INIT`, `MAX_WORK_DIM` and the other macros OpenCL C or PoCL
+  define). A size or an integral scalar named like one of isl's keywords
+  (`max`, `min`, `floor`, `mod`, read whatever their case) failed inside the
+  trace with `isl_set_read_from_str failed: syntax error`, and is refused
+  naming them; a loop variable of such a name is renamed in the term
+  (`max_0`). A size that names something the module or Python already
+  defines (`Fin[abs]`, lanky's `abs`) was that object, and lowering failed
+  on it as a foreign object; it is a `TraceError` asking for another name.
 - `-b[i]` of a truth value is a `TraceError` naming `~b[i]` for `not` and
   `-(1 * b[i])` for the integer (#130): numpy refuses it at every point, and
   the compiled run stored `-1`. pymbolic builds it as `-1 * b[i]`, so that is
@@ -2027,7 +2040,10 @@ with a pair of statement instances.
   library's names are (`lower.is_library_name`). A name of a family, which
   takes in any ending (`atomic_add`), gets a `knl_` prefix instead of the
   suffix. Run on an OpenCL device, a kernel named `select`, `mad`, `sign`,
-  `as_float` or `M_PI` failed to build or to be found in the program.
+  `as_float` or `M_PI` failed to build or to be found in the program, and so
+  did one named like a macro OpenCL C defines (`NULL`, `ATOMIC_VAR_INIT`) or
+  a type it declares (`size_t`, `event_t`, `memory_order`), which are renamed
+  too.
 - An integer literal past 64 bits lowers where numpy computes it in a type
   that holds it (#140): `x[i] * 2**70` failed inside loopy's type inference
   (`integer constant too large`), and is written as a double now, as numpy

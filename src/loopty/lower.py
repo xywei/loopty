@@ -865,19 +865,20 @@ class ExpressionLowerer(Mapper):
         it refuses for an integer (``abs does not support type float32``,
         #123). numpy's ``abs`` of an integer is ``-k`` where ``k`` is negative
         and ``k`` elsewhere, the smallest value of its type included, which
-        it returns as it is, as ``-k`` wraps round to it. So an integer is
-        written ``k < 0 ? -1 * k : k``, which C computes so with ``-fwrapv``
-        (where C's ``labs`` of the smallest ``int64`` is undefined), and a
-        truth value or an unsigned integer, of which ``abs`` is itself, as
-        itself. Of an integer narrower than ``int`` the result is converted
-        back into its type, which C's ``-1 * k`` leaves
-        (:meth:`loopty.promotion.Promotion._absolute`). An operand with a sum
-        in it is written without a branch, which loopy computes a sum in
-        wrongly (note 23): ``(k ^ s) - s``, where ``s = k >> 63`` is ``-1``
-        for a negative ``k`` and ``0`` otherwise; so is one whose comparison
-        with zero has no form loopy's bounds check reads
-        (:meth:`_sign_operand`). The operand is written three times either
-        way; a sum in it is computed for each.
+        it returns as it is, as ``-k`` wraps round to it. A truth value or an
+        unsigned integer, of which ``abs`` is itself, is written as itself.
+        An integer is written without a branch, ``(k ^ s) - s``, where ``s =
+        k >> 63`` (``>> 31`` in C's ``int``) is ``-1`` for a negative ``k``
+        and ``0`` otherwise, which C computes so with ``-fwrapv``. Not as ``k
+        < 0 ? -1 * k : k``: GCC reads that as its ``abs``, which it takes to
+        be non-negative even under ``-fwrapv``, and folded ``1 >= abs(k)`` to
+        false at the smallest ``int32``, where numpy's is true, at ``-O0``
+        too; and loopy realizes a sum in a branch of an ``If`` under the
+        ``If``'s condition, so ``acc < 0 ? -acc : acc`` added a term only
+        where the sum so far was negative (note 23). Of an integer narrower
+        than ``int`` the result is converted back into its type, which C's
+        ``int`` leaves (:meth:`loopty.promotion.Promotion._absolute`). The
+        operand is written three times; a sum in it is computed for each.
         """
         promotion = self.lowering.promotion
         native, compiled = (
@@ -891,57 +892,16 @@ class ExpressionLowerer(Mapper):
         )
         if compiled.kind in "bu" or truths:
             return lowered
-        value: Any
-        compared = None if reductions_of(operand) else self._sign_operand(
-            operand, lowered
+        bits = 8 * max(compiled.itemsize, 4) - 1
+        sign = prim.RightShift(lowered, bits)
+        value: Any = prim.Sum(
+            (prim.BitwiseXor((lowered, sign)), prim.Product((-1, sign)))
         )
-        if compared is None:
-            # loopy realizes a sum in a branch of an If under the If's
-            # condition, evaluated on the partial sum at every term, so
-            # ``acc < 0 ? -acc : acc`` added a term only where the sum so far
-            # was negative (note 23). Without a branch: ``(k ^ s) - s`` with
-            # ``s = k >> 63``, which is -1 for a negative k and 0 otherwise.
-            bits = 8 * max(compiled.itemsize, 4) - 1
-            sign = prim.RightShift(lowered, bits)
-            value = prim.Sum(
-                (prim.BitwiseXor((lowered, sign)), prim.Product((-1, sign)))
-            )
-        else:
-            value = prim.If(
-                prim.Comparison(compared, "<", 0),
-                prim.Product((-1, lowered)),
-                lowered,
-            )
         assert promotion is not None
         for step in promotion.steps(expr):
             if step.result is not None and not self.in_subscript:
                 value = self._convert(value, step.result, narrowing=True)
         return value
-
-    def _sign_operand(self, operand: Any, lowered: Any) -> Any:
-        """The operand ``abs`` compares with zero, lowered as its ``If`` needs.
-
-        loopy reads the condition of an ``If`` into isl in its bounds check
-        (``check_bounds``), as it reads a guard on the loops, and isl's reader
-        raises on a cast there: ``abs(i * i)``, whose product is widened by a
-        cast, failed with ``UnsupportedExpressionError``. An operand that
-        reads no array is lowered for the condition as such a guard is
-        (:meth:`condition`), ``1l * i * i < 0``; any other is ``lowered``.
-        ``None`` where such a guard has no form for it, a narrow scalar's
-        ``s * s`` converted back into ``int8``: ``abs`` is written without a
-        branch then.
-        """
-        if self._on_loops is not None or any(
-            isinstance(node, Access | prim.Subscript) for node in walk(operand)
-        ):
-            return lowered
-        self._on_loops = prim.Comparison(operand, "<", 0)
-        try:
-            return self.rec(operand)
-        except LoweringError:
-            return None
-        finally:
-            self._on_loops = None
 
     def map_comparison(self, expr: Any) -> prim.Expression:
         """A comparison, its sign compared first where C would lose it (#122).
@@ -1169,8 +1129,10 @@ def _render(reference: Any) -> str:
 
 
 #: Words the generated code cannot use as an identifier. C's keywords (C23),
-#: plus the type names OpenCL C adds, because the same term is lowered for both
-#: targets and a name that compiles on one has to compile on the other.
+#: plus the type names and keywords OpenCL C adds (its vector types, ``pipe``
+#: and the image types, which clang reads as keywords there, #124), because the
+#: same term is lowered for both targets and a name that compiles on one has to
+#: compile on the other.
 RESERVED_WORDS = frozenset(
     """
     alignas alignof auto bool break case char const constexpr continue default
@@ -1184,7 +1146,10 @@ RESERVED_WORDS = frozenset(
     uint4 uint8 uint16 long2 long3 long4 long8 long16 ulong2 ulong3 ulong4
     ulong8 ulong16 float2 float3 float4 float8 float16 double2 double3 double4
     double8 double16 kernel global local constant private read_only write_only
-    read_write
+    read_write half2 half3 half4 half8 half16 pipe image1d_t image1d_array_t
+    image1d_buffer_t image2d_t image2d_array_t image2d_depth_t
+    image2d_array_depth_t image2d_msaa_t image2d_array_msaa_t
+    image2d_msaa_depth_t image2d_array_msaa_depth_t image3d_t
     """.split()
 )
 
@@ -1262,23 +1227,43 @@ _OBJECT_MACROS = {
     },
 }
 
-#: What OpenCL C predefines as a macro: its limits, its constants and the
-#: arguments of its fences and image functions. The same term is lowered for
-#: both targets, so a name of one of these is refused as a C header's is.
+#: What OpenCL C predefines as a macro: ``NULL``, its limits, its constants,
+#: the arguments of its fences and image functions, the status of an event,
+#: the initializers of its atomics, and a macro for each extension the device
+#: has (``cl_khr_fp64``); and what PoCL, which loopy's OpenCL code is run on in
+#: tests, defines beside them (``MAX_WORK_DIM``, ``IMG_RO_AQ``). The same term
+#: is lowered for both targets, so a name of one of these is refused as a C
+#: header's is.
 _OPENCL_MACROS = re.compile(
-    r"(MAXFLOAT|CHAR_BIT|U?(CHAR|SHRT|INT|LONG)_MAX|(S?CHAR|SHRT|INT|LONG)_MIN"
-    r"|FP_FAST_FMA_HALF)$"
+    r"(NULL|MAXFLOAT|CHAR_BIT|[US]?CHAR_MAX|U?(SHRT|INT|LONG)_MAX"
+    r"|(S?CHAR|SHRT|INT|LONG)_MIN|FP_FAST_FMA_HALF|ATOMIC_FLAG_INIT"
+    r"|MAX_WORK_DIM|IMG_(RO|WO|RW)_AQ)$"
     r"|(FLT|DBL|HALF)_(DIG|MANT_DIG|MAX_10_EXP|MAX_EXP|MIN_10_EXP|MIN_EXP"
     r"|RADIX|MAX|MIN|EPSILON)$"
     r"|M_(E|LOG2E|LOG10E|LN2|LN10|PI|PI_2|PI_4|1_PI|2_PI|2_SQRTPI|SQRT2"
     r"|SQRT1_2)(_F|_H)?$"
-    r"|CLK_\w+$|CL_VERSION_\d+_\d+$"
+    r"|CLK_\w+$|CL_VERSION_\d+_\d+$|CL_(COMPLETE|RUNNING|SUBMITTED|QUEUED)$"
+    r"|cl_(khr|ext|intel|amd|nv|arm|img|qcom|apple|APPLE|clang|pocl)_\w+$|POCL_\w+$"
 )
 
-#: OpenCL C's built-in functions (its specification's section 6.13 and 6.15):
-#: a kernel of one of these names shares it with the built-in on the OpenCL
-#: target (#131). Those C also has are in :data:`_C_LIBRARY_FUNCTIONS`, and
-#: the families of many names in :data:`_OPENCL_FAMILIES`.
+#: The types OpenCL C declares, and the constants of its enumerations: a
+#: kernel of one of these names redeclares it at file scope on the OpenCL
+#: target (``redefinition of 'size_t' as different kind of symbol``, #131). A
+#: variable may take one of these names, which hides the type in its block.
+_OPENCL_TYPES = re.compile(
+    r"(size_t|ptrdiff_t|intptr_t|uintptr_t|event_t|sampler_t|queue_t"
+    r"|clk_event_t|reserve_id_t|ndrange_t|kernel_enqueue_flags_t"
+    r"|clk_profiling_info|cl_mem_fence_flags)$"
+    r"|memory_(order|scope)(_\w+)?$"
+)
+
+#: OpenCL C's built-in functions (its specification's section 6.13 and 6.15),
+#: and the macros it defines that take arguments, which expand only before a
+#: ``(``, as a kernel's declaration has (``ATOMIC_VAR_INIT``, and PoCL's
+#: ``kernel_exec``): a kernel of one of these names shares it with the
+#: built-in on the OpenCL target (#131). Those C also has are in
+#: :data:`_C_LIBRARY_FUNCTIONS`, and the families of many names in
+#: :data:`_OPENCL_FAMILIES`.
 _OPENCL_FUNCTIONS = frozenset(
     """
     get_work_dim get_global_size get_global_id get_local_size
@@ -1308,7 +1293,7 @@ _OPENCL_FUNCTIONS = frozenset(
     get_default_queue ndrange_1D ndrange_2D ndrange_3D
     get_kernel_work_group_size get_kernel_preferred_work_group_size_multiple
     get_kernel_sub_group_count_for_ndrange
-    get_kernel_max_sub_group_size_for_ndrange
+    get_kernel_max_sub_group_size_for_ndrange ATOMIC_VAR_INIT kernel_exec
     """.split()
 )
 
@@ -1372,9 +1357,10 @@ def is_library_name(name: str) -> bool:
     forms, or define as a macro or a type, or a helper loopy or loopty
     defines in a preamble. A kernel of such a name failed inside loopy
     (``KeyError: 'floor'``) or in the C compiler (``conflicting types for
-    'cpow'``), #108. So does a built-in function or a macro of OpenCL C, on
-    the OpenCL target (``get_global_id``, ``clamp``, ``convert_int``, #131),
-    whatever target the kernel is lowered for, as a keyword of either is.
+    'cpow'``), #108. So does a built-in function, a macro or a type of OpenCL
+    C, on the OpenCL target (``get_global_id``, ``clamp``, ``convert_int``,
+    ``NULL``, ``size_t``, #131), whatever target the kernel is lowered for, as
+    a keyword of either is.
     """
     if name in _known_functions() or name in _C_LIBRARY_FUNCTIONS:
         return True
@@ -1385,6 +1371,7 @@ def is_library_name(name: str) -> bool:
         or _HELPER_FUNCTION.match(name)
         or _OPENCL_FAMILIES.match(name)
         or _OPENCL_MACROS.match(name)
+        or _OPENCL_TYPES.match(name)
     )
 
 

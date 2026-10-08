@@ -440,12 +440,15 @@ end to end; the edges are sharp.
   trace yet (`abs(k[i]) > 2`, xywei/lanky#94). An integer literal past 64 bits
   is written as a real where numpy computes in one (`x[i] * 2**70`), or as a
   `uint64` beside one (`u[i] + 2**63`), and refused elsewhere. A kernel named
-  like a function loopy, the C headers or OpenCL C know (`floor`, `pow`,
-  `cpow`, `get_global_id`, `clamp`) is renamed in the generated code, and a
-  parameter, size or loop variable named like a macro the headers define
-  (`I` with complex values, `NAN`, `INT32_MAX`, `M_PI`) or a function the
-  kernel calls (`pow` with a power) is refused, naming what the code means by
-  it. See notes 19, 20 and 23 in `docs/loopy-notes.md`.
+  like a function, a macro or a type loopy, the C headers or OpenCL C know
+  (`floor`, `pow`, `cpow`, `get_global_id`, `clamp`, `NULL`, `size_t`) is
+  renamed in the generated code, and a parameter, size or loop variable
+  named like a macro the headers define (`I` with complex values, `NAN`,
+  `INT32_MAX`, `M_PI`, `NULL`) or a function the kernel calls (`pow` with a
+  power) is refused, naming what the code means by it. So is a size or an
+  integral scalar named like a keyword of isl's (`max`, `floor`, `mod`), and
+  a loop variable of such a name is renamed. See notes 19, 20 and 23 in
+  `docs/loopy-notes.md`.
 - Array arguments over polyhedral domains (`loopty.domain`): `Where[...]`,
   binders written as slices and then the comparisons that cut their box,
   joined by `&`; `Sigma[...]`, binders and an unnamed last fiber affine in
@@ -606,7 +609,8 @@ end to end; the edges are sharp.
   and `u[i] + -1` as one term, read as the difference: of an unsigned `u`
   numpy refuses the second at every point, and the compiled run computes it
   as the first; `a - b` and `a + -b` of an `int8` `b` likewise differ
-  natively at `b = -128` alone (#151). A loop variable's arithmetic beside
+  natively at `b = -128` alone, and of an `Int` `a` and an unsigned `b` at
+  every `b` but zero (#151). A loop variable's arithmetic beside
   a numpy integer whose type does not hold its value at some point,
   `u[i] + (i - 3)` of a `uint32` `u`, is refused natively there and
   computed compiled (#153), and `abs` of a real in a guard fails inside

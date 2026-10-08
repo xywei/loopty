@@ -109,7 +109,13 @@ from lanky.terms import (
 
 from loopty.arr import Arr, ArrSpec
 from loopty.domain import Polyhedron, Union, index_domain
-from loopty.flow import NonAffine, domain_set, expr_text, free_names
+from loopty.flow import (
+    NonAffine,
+    domain_set,
+    expr_text,
+    free_names,
+    is_isl_keyword,
+)
 from loopty.idx import Reflections
 from loopty.term import Access, ArrType, Reduction, Stmt, Term
 
@@ -480,12 +486,19 @@ class Tracer:
         reflected parameters, and the sizes and parameters the signature
         declares. A ``for k in x.dom`` over ``x: Arr[Fin[k], Real]`` would
         otherwise make one isl dimension of the size and the iname, and the
-        loop's domain ``0 <= k < k`` would be empty.
+        loop's domain ``0 <= k < k`` would be empty. It avoids isl's keywords
+        too (:func:`loopty.flow.is_isl_keyword`): a loop variable ``max`` is
+        ``max_0``, since isl's reader took ``max`` as its keyword in the
+        loop's domain and failed with a syntax error.
         """
         stem = hint or f"i{len(self._inames)}"
         name = stem
         suffix = 0
-        while name in self._inames or self.reflections.taken(name):
+        while (
+            name in self._inames
+            or self.reflections.taken(name)
+            or is_isl_keyword(name)
+        ):
             name = f"{stem}_{suffix}"
             suffix += 1
         self._inames.add(name)
@@ -4116,6 +4129,21 @@ class when:  # noqa: N801 - a context manager written like a statement
 # {{{ building the term
 
 
+def _isl_keyword_message(kernel: str, names: Sequence[str]) -> str:
+    """Why sizes or integral scalars named like isl's keywords are refused."""
+    listed = ", ".join(names)
+    return (
+        f"{kernel} names sizes or integral scalars as isl's keywords: {listed}. "
+        "loopty states every loop's domain, and every guard on the loops, to "
+        "isl as text, whose reader takes exists, and, or, implies, not, infty, "
+        "infinity, nan, min, max, rat, true, false, ceild, floord, mod, ceil "
+        "and floor as its own whatever their case, and fails on such a name "
+        "with a syntax error. Rename them in the kernel (a size in its "
+        "annotations, a scalar in its signature); a loop variable of such a "
+        "name is renamed in the term"
+    )
+
+
 def _axis_size(axis: Any) -> Any:
     """The size term of one written axis (``Fin[n]``, an int, or a term)."""
     if isinstance(axis, FinType):
@@ -4160,6 +4188,16 @@ def array_type(
             raise TraceError(f"the type{at}, {spec!r}: {exc}") from exc
         return ArrType(axes=(), dtype=spec.dtype, ragged=(), domain=domain)
     axes = tuple(_axis_size(axis) for axis in spec.axes)
+    for size in axes:
+        if not isinstance(size, int | np.integer | prim.ExpressionNode):
+            at = f" of {name}" if name else ""
+            raise TraceError(
+                f"the type{at}, {spec!r}, has the size {size!r}, which is "
+                "neither a name nor a number: the annotation reads a name that "
+                "the kernel's module or Python already gives a meaning (abs, "
+                "any, all, or a function, a class or a module the file "
+                "defines or imports) as that meaning. Rename the size"
+            )
     ragged = []
     for position, size in enumerate(axes):
         named = isinstance(size, prim.Variable) and size.name in parameters
@@ -4280,6 +4318,9 @@ def trace(kernel: Any, arg_types: Any) -> Term:
             params.append((parameter, annotation))
             arguments.append(Var(parameter))
     tracer.integers |= _integer_names(params)
+    keywords = sorted(n for n in tracer.integers if is_isl_keyword(n))
+    if keywords:
+        raise TraceError(_isl_keyword_message(name, keywords))
 
     _TRACERS.append(tracer)
     watching = _CallWatch.start()

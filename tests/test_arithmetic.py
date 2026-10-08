@@ -1936,6 +1936,40 @@ def test_a_uint32_literal_is_computed_with_in_32_bits():
 
 
 @kernel
+def narrow_unsigned_literals(
+    a: Arr[Fin[n], np.int8],  # noqa: F821
+    y: Arr[Fin[n], Int],  # noqa: F821
+    b: Arr[Fin[n], Bool],  # noqa: F821
+):
+    """``np.uint16`` and ``np.uint8`` literals beside an ``int8``."""
+    for i in a.dom:
+        y[i] = a[i] + np.uint16(3)
+        b[i] = a[i] < np.uint8(3)
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_a_narrow_unsigned_literal_is_an_int():
+    # loopy wrote np.uint16(3) and np.uint8(3) as 3u, an unsigned int, which
+    # took a[i] round into it: a[i] + 3u was 4294967294 at a[i] = -5, and
+    # a[i] < 3u false. C's integer promotion makes an int of either type.
+    import re
+
+    def make() -> dict:
+        return {
+            "a": np.array([-5, 0, 3, -128, 127], np.int8),
+            "y": np.zeros(5, np.int64),
+            "b": np.zeros(5, bool),
+        }
+
+    native = make()
+    narrow_unsigned_literals(**native)
+    assert list(native["y"]) == [-2, 3, 6, -125, 130]
+    assert list(native["b"]) == [True, True, False, True, False]
+    agrees(narrow_unsigned_literals, make)
+    assert not re.search(r"\b3u\b", emit_code(narrow_unsigned_literals))
+
+
+@kernel
 def literal_beside_integers(
     k: Arr[Fin[n], Int],  # noqa: F821
     y: Arr[Fin[n], Real],  # noqa: F821
@@ -2091,8 +2125,46 @@ def test_abs_of_an_integer_is_numpys():
     absolute(**native)
     assert native["y"][2] == -(2**63) + 7 + 1
     assert native["y"][0] == 3 - 128 + 3
-    assert "(k[i] < 0) ? -1 * k[i] : k[i]" in emit_code(absolute)
+    assert "k[i] ^ loopty_rshift_int64(k[i], (int64_t) (63))" in emit_code(absolute)
     agrees(absolute, make)
+
+
+@kernel
+def absolute_compared(
+    k: Arr[Fin[n], Int],  # noqa: F821
+    c: Arr[Fin[n], np.int32],  # noqa: F821
+    b: Arr[Fin[n], Bool],  # noqa: F821
+    d: Arr[Fin[n], Bool],  # noqa: F821
+    y: Arr[Fin[n], Int],  # noqa: F821
+):
+    """``abs`` of the smallest value compared with one, and divided."""
+    for i in k.dom:
+        b[i] = (k[i] ** 0) >= abs(k[i])
+        d[i] = (c[i] ** 0) >= abs(c[i])
+        y[i] = abs(k[i]) % 3 + abs(c[i]) // 2
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_abs_of_the_smallest_value_is_compared_as_numpys():
+    # abs was written k < 0 ? -1 * k : k, which GCC reads as its own abs and
+    # takes to be non-negative, -fwrapv or not: it folded 1 >= abs(c[i]) to
+    # false at the smallest int32 and int64, even at -O0, where numpy's abs
+    # is that value and 1 is greater.
+    def make() -> dict:
+        return {
+            "k": np.array([-(2**63), -3, 4, 0]),
+            "c": np.array([-(2**31), 5, -7, 2**31 - 1], np.int32),
+            "b": np.zeros(4, bool),
+            "d": np.zeros(4, bool),
+            "y": np.zeros(4, np.int64),
+        }
+
+    native = make()
+    absolute_compared(**native)
+    assert list(native["b"]) == [True, False, False, True]
+    assert list(native["d"]) == [True, False, False, False]
+    assert native["y"][0] == (-(2**63)) % 3 + (-(2**31)) // 2
+    agrees(absolute_compared, make)
 
 
 @kernel
@@ -2113,11 +2185,10 @@ def absolute_on_the_loops(
 
 @pytest.mark.filterwarnings("ignore::RuntimeWarning")
 def test_abs_of_arithmetic_on_the_loops_lowers():
-    # loopy reads the condition of abs's If into isl in its bounds check, and
-    # isl's reader raised on the cast that widens i * i: abs(i * i - m)
-    # failed with UnsupportedExpressionError. The condition is lowered as a
-    # guard on the loops is, 1l * i * i, and where that has no form, the
-    # int8 s * s converted back into int8, abs is written without a branch.
+    # loopy reads the condition of an If into isl in its bounds check, and
+    # isl's reader raised on the cast that widens i * i: abs(i * i - m),
+    # written with a branch, failed with UnsupportedExpressionError. abs is
+    # written without one, of the int8 s * s converted back into int8 too.
     def make() -> dict:
         return {
             "m": 10,
@@ -2132,7 +2203,8 @@ def test_abs_of_arithmetic_on_the_loops_lowers():
     assert list(native["y"]) == [0, 11, 0, 0, 14, 25]
     assert list(native["z"]) == [112, 113, 114, 115, 116, 117]
     agrees(absolute_on_the_loops, make)
-    assert "1l * i * i" in emit_code(absolute_on_the_loops)
+    code = emit_code(absolute_on_the_loops)
+    assert "?" not in code[code.index("void absolute_on_the_loops(") :]
 
 
 # }}}
@@ -2192,6 +2264,13 @@ def test_a_name_a_header_defines_or_a_called_function_is_refused():
         ("INT32_MAX", "stdint.h"),
         ("M_PI", "OpenCL C"),
         ("get_local_id", "parallel loop"),
+        # Built on an OpenCL device, each of these failed to compile:
+        # OpenCL C defines NULL, SCHAR_MAX and a macro per extension.
+        ("NULL", "OpenCL C"),
+        ("SCHAR_MAX", "OpenCL C"),
+        ("cl_khr_fp64", "OpenCL C"),
+        ("pipe", "reserved words"),
+        ("image2d_t", "reserved words"),
     ):
         with pytest.raises(LoweringError, match=meaning):
             emit_code(_with_parameter(name))
@@ -2204,19 +2283,75 @@ def test_a_kernel_named_like_an_opencl_builtin_is_renamed(plain_opencl):
     def reals() -> dict:
         return {"x": np.array([0.5, -2.0, 3.0]), "y": np.zeros(3)}
 
-    for name in ("get_global_id", "clamp", "convert_int4_sat", "native_sin", "M_PI"):
+    for name in (
+        "get_global_id",
+        "clamp",
+        "convert_int4_sat",
+        "native_sin",
+        "M_PI",
+        # On an OpenCL device these failed to build: a macro, OpenCL C's
+        # types, and a macro that takes arguments.
+        "NULL",
+        "size_t",
+        "event_t",
+        "ATOMIC_VAR_INIT",
+    ):
         kern = _named(name, _doubled)
         assert f"void {name}_knl(" in emit_code(kern)
         assert f" {name}_knl(" in emit_code(kern, target="opencl")
         agrees(kern, reals)
     # A family of built-ins takes in any suffix, and renaming one by a
     # suffix ran forever: it gets a prefix.
-    for name in ("atomic_add", "work_group_reduce_add", "read_imagef"):
+    for name in (
+        "atomic_add",
+        "work_group_reduce_add",
+        "read_imagef",
+        "memory_order_relaxed",
+        "cl_khr_fp64",
+    ):
         kern = _named(name, _doubled)
         assert f"void knl_{name}(" in emit_code(kern)
         assert f" knl_{name}(" in emit_code(kern, target="opencl")
         agrees(kern, reals)
     assert "void half_edged(" in emit_code(_named("half_edged", _doubled))
+
+
+def _isl_size(x: Arr[Fin[max], Real], y: Arr[Fin[max], Real]):  # noqa: F821
+    for i in x.dom:
+        y[i] = x[i]
+
+
+def _isl_scalar(x: Arr[Fin[n], Real], floor: Int, y: Arr[Fin[n], Real]):  # noqa: F821
+    for i in x.dom:
+        with when(i < floor):
+            y[i] = x[i]
+
+
+def _isl_loop(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    for max in x.dom:  # noqa: A001
+        y[max] = x[max] * 2.0
+
+
+def _object_size(x: Arr[Fin[abs], Real], y: Arr[Fin[abs], Real]):  # noqa: F821
+    for i in x.dom:
+        y[i] = x[i]
+
+
+def test_a_name_isl_reads_as_a_keyword():
+    # isl's reader takes max, floor and its other keywords as its own
+    # whatever their case: a size or a loop variable max failed inside the
+    # trace with "isl_set_read_from_str failed: syntax error".
+    with pytest.raises(TraceError, match="isl's keywords: max"):
+        kernel(_isl_size).trace()
+    with pytest.raises(TraceError, match="isl's keywords: floor"):
+        kernel(_isl_scalar).trace()
+    # A loop variable is renamed in the term.
+    looped = kernel(_isl_loop)
+    assert looped.term.stmts[0].assignee.indices[0].name == "max_0"
+    agrees(looped, lambda: {"x": np.array([0.5, -2.0, 3.0]), "y": np.zeros(3)})
+    # A size abs is lanky's abs, which lowering failed on as a foreign object.
+    with pytest.raises(TraceError, match="neither a name nor a number"):
+        kernel(_object_size).trace()
 
 
 # }}}
