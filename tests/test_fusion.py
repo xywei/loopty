@@ -1064,6 +1064,19 @@ def test_a_read_of_a_cell_the_producer_does_not_store_is_refused() -> None:
     assert "would see the zeros" in message
 
 
+def test_a_read_isl_cannot_list_refuses_the_substitution_undecided() -> None:
+    # gather reads f[idx[i]], and interior_flux stores the inside of f: which
+    # cells idx names is not known, so the substitution is refused, and its
+    # definedness fact is assumed with the reason, not refuted.
+    with pytest.raises(IllegalCast) as caught:
+        Schedule(gathered_inside).substitute("f")
+    fact = caught.value.fact
+    assert (fact.kind, fact.status) == ("definedness", Status.ASSUMED)
+    assert fact.decided_by is None
+    assert "whose index is not affine" in fact.provenance["reason"]
+    assert str(caught.value) == fact.provenance["reason"]
+
+
 def test_a_read_before_the_producer_stores_the_cell_is_refused() -> None:
     with pytest.raises(IllegalCast) as caught:
         Schedule(early, sizes={"n": 4}).substitute("f")

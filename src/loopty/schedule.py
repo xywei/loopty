@@ -277,7 +277,9 @@ class IllegalCast(TypeError):
     instances, and which way round the new order would run them. ``fact`` is the
     ``REFUTED`` ledger entry, carried on the exception because the schedule that
     would have held it was never built; its ``reason`` is this message, and its
-    ``witness`` this witness when isl gave one.
+    ``witness`` this witness when isl gave one. A substitution refused on a
+    question isl could not answer carries it ``ASSUMED`` instead (see
+    :meth:`Schedule.substitute`).
     """
 
     def __init__(self, message: str, witness: Any = None, fact: Any = None) -> None:
@@ -3788,7 +3790,8 @@ class Schedule:
         * every cell of the array any statement reads, that statement wrote
           before the read, so no read sees the zeros: the ``definedness``
           fact, decided by isl, or refuted with the cell, and the read, that
-          shows otherwise;
+          shows otherwise, or assumed, and refused all the same, where a read
+          cannot be listed;
         * nothing writes what the statement read between its run and a
           read of what it stored, in the order the schedule has now: each
           dependence of the statement's reads is carried over to the reads
@@ -3873,7 +3876,7 @@ class Schedule:
             )
 
         fact = self._definedness_fact(producer, readers, array, text, recipe)
-        if fact.status.value == "refuted":
+        if fact.status.value != "decided":
             raise IllegalCast(
                 fact.provenance["reason"],
                 witness=fact.provenance.get("witness"),
@@ -3967,7 +3970,9 @@ class Schedule:
         ``producer`` writes (:func:`loopty.flow.definedness`), and does any
         read come before the write of its cell, a dependence from the read
         to the producer, which would read the zeros. The first refutation is
-        the fact's.
+        the fact's. A read isl cannot list (an index that is not affine, a
+        guard it cannot state) leaves the first question open: the step is
+        refused all the same, and the fact is ``assumed``, not refuted.
         """
         from loopty.flow import definedness
 
@@ -4014,7 +4019,13 @@ class Schedule:
         return self._fact(
             "definedness",
             statement,
-            status="refuted" if message else "decided",
+            status=(
+                "decided"
+                if not message
+                else "assumed"
+                if verdict.ok is None
+                else "refuted"
+            ),
             witness=witness,
             detail=detail,
             step=recipe,
@@ -4730,6 +4741,10 @@ class Schedule:
         ``oracle`` is who answered: ``isl`` for the two questions about meaning,
         ``loopy-target`` for the one about what the backend can generate.
 
+        ``status`` is ``"decided"``, ``"refuted"``, or ``"assumed"`` for a
+        question the oracle could not answer, which a step that refuses all
+        the same records (see :meth:`_definedness_fact`), with no oracle.
+
         ``detail`` is the answer in the oracle's own words, and every fact
         keeps it. A refuted fact also carries ``reason``, the explanation a
         reader is owed: for a refused cast, the message of the
@@ -4761,7 +4776,7 @@ class Schedule:
         }
         if witness:
             provenance["witness"] = witness
-        if status == "refuted":
+        if status in ("refuted", "assumed"):
             provenance["reason"] = reason or detail
         suffix = f":{about}" if about else ""
         return Fact(
@@ -4769,8 +4784,14 @@ class Schedule:
             kind=kind,
             statement=statement,
             term=None,
-            status=Status.REFUTED if status == "refuted" else Status.DECIDED,
-            decided_by=oracle,
+            status=(
+                Status.REFUTED
+                if status == "refuted"
+                else Status.ASSUMED
+                if status == "assumed"
+                else Status.DECIDED
+            ),
+            decided_by=None if status == "assumed" else oracle,
             provenance=provenance,
             where=self._term.stmts[0].where if self._term.stmts else "",
             owner=self._term.name,
