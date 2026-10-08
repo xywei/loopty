@@ -5007,6 +5007,32 @@ def _loopy_dtype(kernel: Any, insn_id: str) -> Any:
         return None
 
 
+def _a_cast_in(expr: Any) -> Any:
+    """The first conversion (loopy's ``TypeCast``) in ``expr``, or ``None``.
+
+    The lowering writes one where C's arithmetic would type an operation
+    otherwise than numpy (:mod:`loopty.promotion`): ``(t[j] + 1) % n`` of a
+    32-bit ``Fin[n]`` entry is computed in 64 bits, with ``t[j]`` cast. A
+    walk that fails is read as finding one, as any doubt is read as a
+    conversion here.
+    """
+    from loopy.symbolic import TypeCast, WalkMapper
+
+    found: list[Any] = []
+
+    class _Casts(WalkMapper):
+        def visit(self, expr: Any, *args: Any, **kwargs: Any) -> bool:
+            if isinstance(expr, TypeCast):
+                found.append(expr)
+            return True
+
+    try:
+        _Casts()(expr)
+    except Exception:  # noqa: BLE001 - any doubt is read as a conversion
+        return expr
+    return found[0] if found else None
+
+
 def _substituted_kernel(
     kernel: Any,
     array: str,
@@ -5032,7 +5058,9 @@ def _substituted_kernel(
     the producer's value is cast to the array's dtype first (loopy's
     ``TypeCast``), which C converts exactly as it converts a store; a read
     of the array inside a subscript, which loopy cannot simplify through a
-    cast, leaves the kernel unwritten, with the reason. Returns the kernel,
+    cast, leaves the kernel unwritten, with the reason. So does a cast
+    already in the producer's value (:func:`_a_cast_in`), which the
+    substitution would carry into the subscript too. Returns the kernel,
     or ``None`` and the reason in words.
     """
     from loopy.symbolic import TypeCast
@@ -5044,6 +5072,14 @@ def _substituted_kernel(
         stored = None if dtype is None or dtype is lp.auto else dtype.numpy_dtype
         if value is None:
             value = _loopy_dtype(kernel, producer)
+        if indexed is not None and _a_cast_in(
+            entry.id_to_insn[producer].expression
+        ) is not None:
+            return None, (
+                f"the value {array} is computed from converts an operand, "
+                f"and {indexed} reads {array} in a subscript, which loopy "
+                "cannot simplify through that conversion; keep it stored"
+            )
         if stored is not None and value != stored:
             if indexed is not None:
                 return None, (

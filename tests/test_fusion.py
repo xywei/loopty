@@ -618,21 +618,6 @@ def widened(t, x, y):
     gather_whole(q, x, y)
 
 
-@kernel
-def reverse_into(p: Arr[Fin[n], Fin[n]]):  # noqa: F821
-    """The indices in reverse."""
-    for j in p.dom:
-        p[j] = p.dom.size - 1 - j
-
-
-@program
-def reversed_scatter(x, y):
-    """An index array computed in the 32 bits it is stored in."""
-    p = Arr.zeros_like(x, dtype=np.int32)
-    reverse_into(p)
-    scatter(p, x, y)
-
-
 @program
 def scattered_into(p, x, y):
     """The array stored through an index array, then read at every cell."""
@@ -1398,34 +1383,32 @@ def test_a_substituted_value_is_converted_as_storing_it_converted_it() -> None:
         )
 
 
-def test_an_index_array_is_substituted_into_the_subscripts_it_is_read_in() -> None:
-    # copy_index stores what it computes in the type it computes it in, so
-    # nothing is converted, and the reads in y[p[i]] and in the check of
-    # p's elements become reads of t.
-    schedule = Schedule(scattered).substitute("p")
-    assert schedule.buildable == (True, "")
-    assert "p" not in schedule.kernel.default_entrypoint.temporary_variables
-    for size in (1, 4, 7):
-        t = np.random.default_rng(size).permutation(size).astype(np.int64)
-        agrees(
-            scattered,
-            schedule,
-            {
-                "t": Arr.from_numpy(t),
-                "x": Arr.from_numpy(np.arange(size) + 0.5),
-                "y": Arr.zeros(size),
-            },
-        )
+def test_an_index_array_computed_with_a_conversion_is_left_unwritten() -> None:
+    # rotate computes (t[j] + 1) % n in 64 bits, with the 32-bit t[j] cast
+    # (#101), and p is stored in the 64 bits of an index array a checked
+    # point reads (#128), so the store converts nothing. The cast is in the
+    # value itself, and substituting p into x[p[i]] would carry it into the
+    # subscript, which loopy cannot simplify through: the substitution is
+    # decided and its kernel is not written, with the reason (#145).
+    schedule = Schedule(rotated).substitute("p")
+    assert [fact.status.value for fact in schedule.facts()][:3] == ["decided"] * 3
+    assert schedule.buildable == (
+        False,
+        "the value p is computed from converts an operand, and gather.S0 "
+        "reads p in a subscript, which loopy cannot simplify through that "
+        "conversion; keep it stored",
+    )
 
 
 def test_an_index_computed_in_other_bits_than_its_store_is_left_unwritten() -> None:
-    # Nat and Int are stored in 64 bits and Fin[m] in 32 (#101), and a sum
-    # with a Fin[m] entry is computed in 64: (t[j] + 1) % n is converted by
-    # its Fin[n] store, and a Fin[n] entry by a Nat one. Read in a subscript,
+    # A Fin[m] entry is read in 32 bits (#101), and an index array a checked
+    # point reads between two calls is stored in 64 (#128), as a Nat array
+    # is: t[j] is converted by p's store, and by q's. Read in a subscript,
     # the conversion is one loopy cannot simplify through, so each
-    # substitution is decided and its kernel is not written, with the reason.
+    # substitution is decided and its kernel is not written, with the reason
+    # (#145: a widening is exact, and could be left out).
     for prog, array, reader, computed, stored in (
-        (rotated, "p", "gather.S0", "int64", "int32"),
+        (scattered, "p", "scatter.S0", "int32", "int64"),
         (widened, "q", "gather_whole.S0", "int32", "int64"),
     ):
         schedule = Schedule(prog).substitute(array)
@@ -1437,16 +1420,6 @@ def test_an_index_computed_in_other_bits_than_its_store_is_left_unwritten() -> N
             f"the value {array} is computed from is {computed}, which storing it "
             f"as {stored} converts, and {reader} reads {array} in a subscript, "
             "which loopy cannot simplify through that conversion; keep it stored",
-        )
-    # Computed from the loop variable and the size, in the 32 bits of its
-    # store, the index needs no conversion, and is substituted.
-    schedule = Schedule(reversed_scatter).substitute("p")
-    assert schedule.buildable == (True, "")
-    for size in (1, 4, 7):
-        agrees(
-            reversed_scatter,
-            schedule,
-            {"x": Arr.from_numpy(np.arange(size) + 0.5), "y": Arr.zeros(size)},
         )
 
 

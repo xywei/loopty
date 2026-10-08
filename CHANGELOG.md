@@ -518,9 +518,9 @@ with a pair of statement instances.
   gets the value converted to the array's element type, as the store
   converted it (a `float32` intermediate rounds it); where that conversion
   would sit in a subscript, which loopy cannot simplify through, the kernel
-  is left unwritten with the reason, as for an index array computed in 64
-  bits and stored in a `Fin[m]` one's 32 (`(t[j] + 1) % n`), or a `Fin[m]`
-  entry stored in a `Nat` cell (#145). It is
+  is left unwritten with the reason, as for an index array computed with a
+  conversion in it (`(t[j] + 1) % n` of a 32-bit `Fin[m]` entry, computed
+  in 64 bits), or a `Fin[m]` entry stored in a 64-bit cell (#145). It is
   refused with a `ValueError` for a parameter, an array two statements
   write, or a producer that is not pointwise, and with an `IllegalCast` when
   a read is of a cell the producer does not store, or stores after the read
