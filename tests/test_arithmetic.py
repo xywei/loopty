@@ -894,6 +894,14 @@ def test_a_scalar_has_one_native_meaning_however_it_is_passed():
     for a in (0.7, 0.2, np.float64(0.7)):
         agrees(complement_scalar, lambda a=a: masked(a))
 
+    # A Python int past uint64 has no numpy dtype, and was passed on weak, so
+    # x * a was single precision natively for a Real a = 2**64 + 2**40.
+    for a in (2**64 + 2**40, 2**70 + 1):
+        results = make(a, 3)
+        scale_by(**results)
+        assert results["y"][0] == np.float32(np.float64(x[0]) * a * 0.1)
+        agrees(scale_by, lambda a=a: make(a, 3))
+
 
 # }}}
 
@@ -1082,6 +1090,13 @@ def real_index_by_zero(y: Arr[Fin[n], Real]):  # noqa: F821
 
 
 @kernel
+def complex_index_by_zero(y: Arr[Fin[n], np.complex128]):  # noqa: F821
+    """A loop variable divided by a complex zero, which Python refuses."""
+    for i in y.dom:
+        y[i] = i / 0j
+
+
+@kernel
 def guard_by_zero(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     """A loop variable divided by zero in a guard."""
     for i in x.dom:
@@ -1107,6 +1122,7 @@ def test_a_python_number_by_a_literal_zero_is_refused_by_the_trace():
     for kern, symbol in (
         (index_by_zero, "//"),
         (real_index_by_zero, "%"),
+        (complex_index_by_zero, "/"),
         (guard_by_zero, "/"),
     ):
         with pytest.raises(TraceError, match="divides by zero") as refused:

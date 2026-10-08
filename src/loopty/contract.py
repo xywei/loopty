@@ -778,10 +778,15 @@ def native_scalar(sort: Any, value: Any) -> Any:
     want = native_storage(sort)
     if want is None:
         return value
-    try:
-        got = np.asarray(value).dtype
-    except (TypeError, ValueError, OverflowError):
-        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        # A Python int past uint64 has no dtype of numpy's, which makes an
+        # object array of it, and is a number of a real sort all the same.
+        got = np.dtype(np.int64)
+    else:
+        try:
+            got = np.asarray(value).dtype
+        except (TypeError, ValueError, OverflowError):
+            return value
     if np.ndim(value) or got.kind not in "biufc":
         return value
     if isinstance(value, np.generic) and value.dtype == want:

@@ -2953,8 +2953,9 @@ def _refuse_arithmetic(expr: Any, params: Mapping[str, Any], where: str) -> None
     * ``//`` or ``%`` with a complex operand, which numpy refuses and C has
       no operation for;
     * ``/``, ``//`` or ``%`` of a Python number, a loop variable's, by a
-      literal zero, which Python refuses and C computes as numpy divides a
-      numpy number by zero, to ``0``, ``inf`` or ``nan`` (#105). A divisor
+      literal zero, ``0``, ``0.0`` or ``0j``, which Python refuses and C
+      computes as numpy divides a numpy number by zero, to ``0``, ``inf`` or
+      ``nan`` (#105). A divisor
       that is zero only at run time is left to the native refusal, as an
       exponent whose sign the trace does not know is.
     """
@@ -3108,7 +3109,9 @@ def _refuse_division_by_zero(node: Any, promotion: Any, where: str) -> None:
     which the compiled run computes too (:mod:`loopty.operations`).
     """
     divisor = node.denominator
-    if not isinstance(divisor, int | float) or isinstance(divisor, np.generic):
+    if not isinstance(divisor, int | float | complex):
+        return
+    if isinstance(divisor, np.generic):
         return
     if divisor != 0:
         return
