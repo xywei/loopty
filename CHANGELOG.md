@@ -6,6 +6,19 @@ All notable changes to loopty are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- loopy refuses to preprocess or generate code for a kernel on one of
+  loopty's targets outside `loopty.isl_reading.declining()`, with
+  `isl_reading.ReadingsInactive`. Such a kernel is written for loopty's
+  readings of its subscripts and guards (#129, #137), and loopy's code
+  cache, whose key does not say which readings made an entry, would serve
+  code generated with loopy's own to a run of loopty's, past the bounds
+  check that refuses it. `LoopyExecutor` and `emit_code` enter the context;
+  a caller who hands `schedule.kernel` to `lp.generate_code_v2` or to its
+  `executor()` itself does it inside `with declining():`. Code loopy finds in
+  its cache was generated inside, and is served as before.
+
 ### Fixed
 
 - A subscript loopy does not read as affine is computed in 64 bits compiled,
@@ -27,7 +40,15 @@ All notable changes to loopty are recorded here. The format follows
   and `x[(i * 499999) // 1000000]` was `x[(499999 * i) / 1000000]`, which
   named a negative cell from `i = 4295` over a few thousand cells. A sum of
   loop variables and sizes, which the plan leaves in 32 bits, stays so in a
-  division too, past `2**30` (#149; note 23 of `docs/loopy-notes.md`).
+  division too, past `2**30` (#149; note 23 of `docs/loopy-notes.md`). The
+  reader declines so only while loopty builds, transforms, checks, generates
+  or runs one of its kernels, inside `isl_reading.declining()` and in that
+  thread alone: nothing is installed in loopy when loopty is imported, and
+  the last context to exit puts loopy's own readings back, so another user
+  of loopy in the process (sumpy, pytential) has its kernels read, checked
+  and generated as without loopty. loopty enters it in
+  `lower.lower_generic`, in building a `Schedule` and in each of its public
+  methods, in `LoopyExecutor.run` and in `emit_code`.
 - loopy no longer reads a non-integer literal in a guard on the loops by its
   integer part (#137). Its bounds check reads such a guard into isl, and read
   `0.5` as `0`: `when(i * 0.5 >= 1)` as false everywhere, so the check passed

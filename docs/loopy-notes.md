@@ -1167,9 +1167,9 @@ value argument the instruction reads as a parameter, an integer whatever its
 dtype: for an integer `a`, `a - 1 < i < a` holds nowhere. The C loopy
 generates evaluates the guard as written, so only the check is wrong.
 
-**Local fix.** `loopty.isl_reading.install`, run when `loopty.lower` is
-imported, gives the mapper a `map_type_cast` that raises `TypeError`, wraps
-its `map_constant` to raise `TypeError` for a constant whose type is not an
+**Local fix.** `loopty.isl_reading.declining()`, a context manager, gives
+the mapper a `map_type_cast` that raises `TypeError`, wraps its
+`map_constant` to raise `TypeError` for a constant whose type is not an
 integer's, a float that is an integer included, and replaces
 `get_insn_domain` (which the bounds check imports where it runs) by one that
 adds a value argument as a parameter only where its dtype is an integer's,
@@ -1178,8 +1178,47 @@ have, which `condition_to_set` declines as it declines a guard that reads an
 array. Declining is always the safe direction: an expression loopy does not
 read is generated as written, and a guard it does not read narrows nothing,
 so the bounds check covers more points, not fewer. The module's source is
-hashed into the targets' persistent hash with the others (note 20). With
-it:
+hashed into the targets' persistent hash with the others (note 20).
+
+The readings apply inside the context and only in the thread that entered
+it. Nothing is installed when loopty is imported: the first context in the
+process installs the three in loopy, under a lock, and the last one to exit
+puts loopy's own back, an exception included; contexts nest, and while the
+readings are installed a thread outside every context reads with loopy's
+own. So another user of loopy in the process, sumpy, pytential or a
+Volumential kernel, has its kernels read, checked and generated as without
+loopty, before, after and while loopty works: loopy's own reading of
+`when(i * 2.0 < n)` lets its bounds check pass `x[2 * i]`, which loopty's
+refuses (#148). loopty enters the context at these chokepoints, and every
+path of its into loopy goes through one:
+
+- `lower.lower_generic`, which builds every kernel loopty makes
+  (`lp.make_kernel`, `lp.assume`, `lp.prioritize_loops`) and asks
+  `isl_reading.affine_form` of each subscript, for `lower.lower`, for a
+  schedule and for the executor given a kernel or a term;
+- `schedule.Schedule`: building one and every public method
+  (`isl_reading.declining_methods`), each step and `retarget` among them,
+  which transform the kernel with loopy and read some of its expressions
+  with loopy's reader (`aff_from_expr` in `schedule._counted`, for one), so
+  `Schedule.kernel` and `Schedule.buildable` are made inside;
+- `executor.LoopyExecutor.run`, in which loopy preprocesses the kernel, runs
+  its bounds check, generates and compiles its code and runs it, and through
+  which `LoopyExecutor.differential` and `loopty run` run it; and
+  `executor.emit_code`, which `LoopyExecutor.emit_code` and `loopty run
+  --emit-code` call;
+- `isl_reading.affine_form` and `read_as_affine`, which enter it themselves.
+
+The native and trace-faithful runs (`interpret`, `faithful`) call no loopy.
+A kernel loopty built is written for the readings (its subscripts may hold a
+cast, which loopy's own reader raises on), and loopy's code cache, whose key
+does not say which readings made an entry, would serve code made outside to
+a run inside, past the bounds check that refuses it. So loopty's three
+targets refuse, with `isl_reading.ReadingsInactive`, to be preprocessed
+(`TargetBase.preprocess`) or to have code generated
+(`pre_codegen_entrypoint_check`) outside the context. A caller who hands
+loopty's kernel to loopy itself, `lp.generate_code_v2(schedule.kernel)` or
+`schedule.kernel.executor()`, does it inside `with declining():`, as the
+tests and `wavefront_acoustic.py --bench` do. With the readings:
 
 - a subscript is lowered with the widening the plan asks for wherever loopy
   would not read it as affine without it, or isl's affine form has a
