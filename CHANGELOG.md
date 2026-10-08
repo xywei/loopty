@@ -2018,7 +2018,10 @@ with a pair of statement instances.
   generated code (#131): `get_global_id`, `clamp`, `select`, `mad`, the
   `convert_`, `as_`, `vload`, `atomic_`, `work_group_` and `native_` families
   and the others of its specification, on every target, as loopy's and the C
-  library's names are (`lower.is_library_name`).
+  library's names are (`lower.is_library_name`). A name of a family, which
+  takes in any ending (`atomic_add`), gets a `knl_` prefix instead of the
+  suffix. Run on an OpenCL device, a kernel named `select`, `mad`, `sign`,
+  `as_float` or `M_PI` failed to build or to be found in the program.
 - An integer literal past 64 bits lowers where numpy computes it in a type
   that holds it (#140): `x[i] * 2**70` failed inside loopy's type inference
   (`integer constant too large`), and is written as a double now, as numpy

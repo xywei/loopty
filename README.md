@@ -436,7 +436,8 @@ end to end; the edges are sharp.
   the signed type numpy computes in (`int64` for a `uint32` and an `int32`),
   where C's would be unsigned; integers compare exactly, as numpy's do, a
   negative one with an unsigned one included. `abs` of an integer is numpy's,
-  the smallest value of its type included. An integer literal past 64 bits
+  the smallest value of its type included; a comparison of one does not
+  trace yet (`abs(k[i]) > 2`, xywei/lanky#94). An integer literal past 64 bits
   is written as a real where numpy computes in one (`x[i] * 2**70`), or as a
   `uint64` beside one (`u[i] + 2**63`), and refused elsewhere. A kernel named
   like a function loopy, the C headers or OpenCL C know (`floor`, `pow`,
@@ -605,7 +606,7 @@ end to end; the edges are sharp.
   and `u[i] + -1` as one term, read as the difference: of an unsigned `u`
   numpy refuses the second at every point, and the compiled run computes it
   as the first; `a - b` and `a + -b` of an `int8` `b` likewise differ
-  natively at `b = -128` alone. See notes 19, 20 and 23 in
+  natively at `b = -128` alone (#151). See notes 19, 20 and 23 in
   `docs/loopy-notes.md`.
 - A polyhedral domain is an array's whole index set, so it cannot sit beside
   a dense axis (`Arr[Fin[k], Where[...], Real]` is refused; write the axis as

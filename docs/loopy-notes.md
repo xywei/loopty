@@ -1195,7 +1195,10 @@ interpreter subtracts it (`interpret._Run.sum`).
 **What it does not cover.** A subscript's arithmetic is left in the type loopy
 computes it in, neither widened nor converted back (#129). `u[i] - 1` and
 `u[i] + -1` of an unsigned `u` are one term, so the second, which numpy
-refuses at every point, is computed as the first; a literal a numpy integer's
-type does not hold is refused elsewhere (#141). An `If` whose branches C
-converts to an unsigned type is not planned.
+refuses at every point, is computed as the first (#151); a literal a numpy
+integer's type does not hold is refused elsewhere (#141). An `If`, whose
+branches C converts to one type, is not planned: a body cannot write one,
+and the one `abs` lowers to has branches of one type. A comparison of `abs`
+of an element does not trace (`abs(k[i]) > 2`, xywei/lanky#94): lanky's
+terms leave `abs` to pymbolic, whose call has no order.
 
