@@ -224,7 +224,7 @@ and `off[r] + j` as the index. `--emit-code` prints it:
 ```console
 $ uv run loopty run examples/spmv.py --emit-code
 ...
-void spmv(int32_t const n, int32_t const *__restrict__ cnt, int32_t const *__restrict__ col, double const *__restrict__ val, double const *__restrict__ x, double *__restrict__ y, int32_t const *__restrict__ off_cnt)
+void spmv(int32_t const n, int64_t const *__restrict__ cnt, int32_t const *__restrict__ col, double const *__restrict__ val, double const *__restrict__ x, double *__restrict__ y, int32_t const *__restrict__ off_cnt)
 {
   double acc_j_out_j_in;
   int32_t nl_cnt_r;
@@ -232,7 +232,7 @@ void spmv(int32_t const n, int32_t const *__restrict__ cnt, int32_t const *__res
   for (int32_t r = 0; r <= -1 + n; ++r)
   {
     acc_j_out_j_in = (double) (0.0);
-    nl_cnt_r = cnt[r];
+    nl_cnt_r = (int32_t) (cnt[r]);
     for (int32_t j_in = 0; j_in <= ((-1 + nl_cnt_r == 0) ? 0 : 1); ++j_in)
       if (-1 + -1 * j_in + nl_cnt_r >= 0)
         for (int32_t j_out = 0; j_out <= -1 + -1 * j_in + (1 + nl_cnt_r + j_in) / 2; ++j_out)
@@ -244,7 +244,9 @@ void spmv(int32_t const n, int32_t const *__restrict__ cnt, int32_t const *__res
 
 `nl_cnt_r` is the row's count, read once per row; `off_cnt` is the offsets
 argument lowering added; `j_in` and `j_out` are the two halves of the split. The
-kernel never mentioned any of them.
+kernel never mentioned any of them. `cnt` is an array of `Nat`, which is 64 bits
+wide as numpy's integers are, and `col` one of `Fin[m]`, which its bound keeps
+to 32.
 
 `scan` agrees exactly, because its output is `Nat` and integer arithmetic is
 exact. `spmv` agrees to `5.55e-17`, comfortably inside the reassociation

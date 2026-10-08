@@ -434,7 +434,7 @@ def test_an_undecided_requirement_is_checked_where_the_native_call_refuses() -> 
     assert "nothing that held at the call says" in requirement.reason
     ((flag, message),) = term.checks
     code = emit_code(travel.permuted_up)
-    assert f"{flag}[0] = 1" in code and f"if ({flag}[0] == 0)" in code
+    assert f"{flag}[0] = (int64_t) (1)" in code and f"if ({flag}[0] == 0)" in code
 
     # The ledger keeps it assumed, and says why.
     (fact,) = facts_of("permuted_up", "requirement")

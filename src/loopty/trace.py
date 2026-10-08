@@ -2437,6 +2437,7 @@ class SymArr:
         sorts = {**tracer.params, **tracer.array_types}
         _refuse_bitwise(indices, sorts, where)
         _refuse_bitwise(expr, sorts, where, truth=_holds_truth(self.type.dtype))
+        _refuse_arithmetic((indices, expr), sorts, where)
         assignee = Access(self.name, indices)
         kind = "accumulate" if _reads_assignee(expr, assignee) else "assign"
         tracer.record(assignee, expr, kind, where, source=value)
@@ -2748,13 +2749,14 @@ def _connectives(expr: Any) -> Iterator[Any]:
 def _numpy_valued(expr: Any, params: Mapping[str, Any]) -> bool:
     """Whether the native run computes ``expr`` as a numpy scalar, whatever the call.
 
-    An array's element is one, and so is a scalar of a truth sort, which
-    :func:`loopty.contract.native_scalar` makes a numpy bool; and so is
-    arithmetic, a comparison or a connective with an operand that is one. A
-    loop variable, a size and a Python literal are Python numbers, and a
-    scalar of another sort is one when the caller passes one. Anything else
-    (a sum, which Python's ``sum`` makes ``0`` over no terms, a call, a
-    quantifier) is not asked, and counts as possibly a Python number.
+    An array's element is one, and so is a scalar of a sort with a native
+    storage, which :func:`loopty.contract.native_scalar` makes a numpy scalar
+    however the caller passed it (#102); and so is arithmetic, ``^``, ``<<``
+    and ``>>`` included, a comparison or a connective with an operand that is
+    one. A loop variable, a size and
+    a Python literal are Python numbers. Anything else (a sum, which Python's
+    ``sum`` makes ``0`` over no terms, a call, a quantifier) is not asked,
+    and counts as possibly a Python number.
     """
     from loopty.contract import native_storage
 
@@ -2772,14 +2774,19 @@ def _numpy_valued(expr: Any, params: Mapping[str, Any]) -> bool:
         return (
             sort is not None
             and not isinstance(sort, ArrType)
-            and native_storage(sort) == np.dtype(np.bool_)
+            and native_storage(sort) is not None
         )
-    if isinstance(expr, prim.Sum | prim.Product | prim.LogicalAnd | prim.LogicalOr):
+    if isinstance(
+        expr,
+        prim.Sum | prim.Product | prim.BitwiseXor | prim.LogicalAnd | prim.LogicalOr,
+    ):
         operands: tuple[Any, ...] = tuple(expr.children)
     elif isinstance(expr, prim.Quotient | prim.FloorDiv | prim.Remainder):
         operands = (expr.numerator, expr.denominator)
     elif isinstance(expr, prim.Power):
         operands = (expr.base, expr.exponent)
+    elif isinstance(expr, prim.LeftShift | prim.RightShift):
+        operands = (expr.shiftee, expr.shift)
     elif isinstance(expr, prim.Comparison):
         operands = (expr.left, expr.right)
     elif isinstance(expr, prim.LogicalNot):
@@ -2885,6 +2892,298 @@ def _refuse_bitwise(
             "kernel computes 0 or 1, so the two runs would compute different "
             f"things with it. Write the complement as a comparison ({complement}, "
             "and '(i <= 0) | (i >= n)' for '~((i > 0) & (i < n))')"
+        )
+
+
+def _nodes(expr: Any) -> Iterator[Any]:
+    """Every node of an expression, outermost first, into sums and subscripts."""
+    if isinstance(expr, prim.ExpressionNode | Reduction | Access):
+        yield expr
+    if isinstance(expr, Reduction):
+        yield from _nodes(expr.body)
+    elif isinstance(expr, Access):
+        yield from _nodes(expr.indices)
+    elif isinstance(expr, prim.ExpressionNode):
+        for arg in init_args(expr):
+            yield from _nodes(arg)
+    elif isinstance(expr, tuple | list):
+        for item in expr:
+            yield from _nodes(item)
+
+
+#: The bitwise operations, as written. A node is pymbolic's, or lanky's
+#: subclass of it, which lanky builds so that a comparison of one is a
+#: proposition.
+_BITWISE = {prim.BitwiseXor: "^", prim.LeftShift: "<<", prim.RightShift: ">>"}
+
+
+def _bitwise_symbol(node: Any) -> str:
+    """How a bitwise node of :data:`_BITWISE`, or a subclass of one, is written."""
+    return next(symbol for kind, symbol in _BITWISE.items() if isinstance(node, kind))
+
+
+#: The width the compiled run shifts a Python int in: a loop variable, a size
+#: or a literal is computed in 64 bits there (:mod:`loopty.promotion`).
+_SHIFT_WIDTH = 64
+
+
+def _all_kinds(native: Any, kinds: str) -> bool:
+    """Whether every sample of a native type is a numpy or Python value of ``kinds``."""
+    if not native:
+        return False
+    return all(np.asarray(sample).dtype.kind in kinds for sample in native)
+
+
+def _numpy_integer(native: Any) -> bool:
+    """Whether some sample of a native type is a numpy integer or bool."""
+    return bool(native) and any(
+        isinstance(sample, np.integer | np.bool_) for sample in native
+    )
+
+
+def _refuse_arithmetic(expr: Any, params: Mapping[str, Any], where: str) -> None:
+    """Refuse arithmetic the two runs compute differently, naming what to write.
+
+    The native type of each operation is numpy's, found by doing it on a
+    sample of each operand's type (:class:`loopty.promotion.Promotion`).
+    These operations are refused, wherever they are (a stored value, a guard,
+    a sum's body, a subscript):
+
+    * a sum numpy computes in ``bool``, ``b[i] + c[i]`` of two truth values:
+      numpy's ``+`` of two bools is ``or``, and C adds the bytes, so
+      ``True + True`` is ``True`` natively and ``2`` compiled (#106);
+    * a difference of two truth values, ``b[i] - c[i]``, which numpy refuses
+      at every point and C computes (#106). pymbolic builds ``b - c`` as
+      ``b + -1 * c``, so that sum is refused too, though numpy computes it;
+      ``1 * b[i] - c[i]`` is not. A negated truth value alone is not
+      refused: it is ``-1 * b[i]`` in the term, which numpy computes, whether
+      it was written so or as ``-b[i]``, which numpy refuses natively
+      (``The numpy boolean negative ... is not supported``) and the compiled
+      run computes as ``-1 * b[i]``; the trace cannot tell the two apart;
+    * a numpy integer to a negative integer power, ``k[i] ** -1``: numpy
+      refuses it at every point, and loopy's integer power inverts the base
+      into an integer, ``0`` for every base but ``1`` and ``-1`` (#109). A
+      Python int to one, a loop variable's, is a float in both runs;
+    * ``^``, ``<<`` or ``>>`` with a real or complex operand, which numpy
+      refuses and C has no operation for (#107), and a shift of a Python
+      int, a loop variable's, by a negative literal, which Python refuses and
+      C computes as numpy shifts a numpy integer, or to the left by a literal
+      of 64 or more, which Python computes exactly and C in 64 bits, to ``0``;
+    * ``//`` or ``%`` with a complex operand, which numpy refuses and C has
+      no operation for;
+    * ``/``, ``//`` or ``%`` of a Python number, a loop variable's, by a
+      literal zero, ``0``, ``0.0`` or ``0j``, which Python refuses and C
+      computes as numpy divides a numpy number by zero, to ``0``, ``inf`` or
+      ``nan`` (#105). A divisor
+      that is zero only at run time is left to the native refusal, as an
+      exponent whose sign the trace does not know is.
+    """
+    from loopty.promotion import Promotion
+
+    promotion = Promotion.of_sorts(params)
+    for node in _nodes(expr):
+        if isinstance(node, prim.Sum):
+            _refuse_truth_sum(node, promotion, where)
+        elif isinstance(node, prim.Power):
+            _refuse_negative_power(node, promotion, where)
+        elif isinstance(node, tuple(_BITWISE)):
+            _refuse_bitwise_of_reals(node, promotion, where)
+            _refuse_python_shift(node, promotion, where)
+        elif isinstance(node, prim.FloorDiv | prim.Remainder):
+            _refuse_complex_division(node, promotion, where)
+            _refuse_division_by_zero(node, promotion, where)
+        elif isinstance(node, prim.Quotient):
+            _refuse_division_by_zero(node, promotion, where)
+
+
+def _negated(expr: Any) -> Any:
+    """``t`` of ``-1 * t``, which pymbolic builds ``-t`` as; ``None`` otherwise."""
+    if isinstance(expr, prim.Product) and len(expr.children) == 2:
+        sign, operand = expr.children
+        if isinstance(sign, int) and not isinstance(sign, bool) and sign == -1:
+            return operand
+    return None
+
+
+def _refuse_truth_sum(node: prim.Sum, promotion: Any, where: str) -> None:
+    """Refuse a sum numpy computes as ``or``, or a difference numpy refuses.
+
+    See :func:`_refuse_arithmetic`. Two Python bools, comparisons of loop
+    variables, add and subtract as the integers they are in both runs.
+    """
+    accumulated = promotion.types(node.children[0])[0]
+    for position, step in enumerate(promotion.steps(node)):
+        left, right = node.children[position], node.children[position + 1]
+        subtracted = _negated(right)
+        if subtracted is not None:
+            other = promotion.types(subtracted)[0]
+            if (
+                _all_kinds(accumulated, "b")
+                and _all_kinds(other, "b")
+                and (_numpy_integer(accumulated) or _numpy_integer(other))
+            ):
+                a, b = _shown(left), _shown(subtracted)
+                raise TraceError(
+                    f"{_shown(node)} at {where} subtracts truth values: natively "
+                    f"{a} and {b} are bools, and numpy refuses '-' of two bools "
+                    "('numpy boolean subtract, the `-` operator, is not "
+                    "supported'), while the compiled kernel subtracts them as the "
+                    "integers 0 and 1, so the compiled run would compute a value "
+                    f"where the native one has none. Write '{a} ^ {b}' for "
+                    f"'xor', or '1 * {a} - {b}' for a difference"
+                )
+        accumulated = step.native
+        if not _all_kinds(step.native, "b"):
+            continue
+        a, b = _shown(left), _shown(right)
+        raise TraceError(
+            f"{_shown(node)} at {where} adds truth values: natively {a} and {b} "
+            "are bools, and numpy's '+' of two bools is 'or', so True + True is "
+            "True, while the compiled kernel adds them as the integers 0 and 1 "
+            "and makes 2, so the two runs would compute different things. Write "
+            f"'{a} | {b}' for 'or', or '1 * {a} + {b}' for a count"
+        )
+
+
+def _refuse_negative_power(node: prim.Power, promotion: Any, where: str) -> None:
+    """Refuse an integer to a negative power; see :func:`_refuse_arithmetic`."""
+    exponent = node.exponent
+    if not isinstance(exponent, int | np.integer) or isinstance(exponent, bool):
+        return
+    if exponent >= 0 or not _numpy_integer(promotion.types(node.base)[0]):
+        return
+    base = _shown(node.base)
+    if not isinstance(node.base, prim.Variable | prim.Subscript | Access):
+        base = f"({base})"
+    power = base if exponent == -1 else f"{base} ** {-exponent}"
+    raise TraceError(
+        f"{_shown(node)} at {where} raises an integer to a negative power. "
+        "Natively numpy refuses it at every point ('Integers to negative "
+        "integer powers are not allowed'), and compiled loopy's integer power "
+        "inverts the base into an integer, which is 0 for every base but 1 and "
+        f"-1, so the compiled run would compute a value where the native one "
+        f"has none. Write '1 / {power}', a real, which both runs compute alike"
+    )
+
+
+def _refuse_bitwise_of_reals(node: Any, promotion: Any, where: str) -> None:
+    """Refuse ``^``, ``<<`` or ``>>`` of a real; see :func:`_refuse_arithmetic`."""
+    if isinstance(node, prim.BitwiseXor):
+        operands: tuple[Any, ...] = tuple(node.children)
+    else:
+        operands = (node.shiftee, node.shift)
+    symbol = _bitwise_symbol(node)
+    for operand in operands:
+        native, compiled = promotion.types(operand)
+        real = _all_kinds(native, "fc") if native else None
+        if real is None:
+            real = compiled is not None and compiled.kind in "fc"
+        if not real:
+            continue
+        raise TraceError(
+            f"{_shown(node)} at {where} is '{symbol}' of {_shown(operand)}, which "
+            f"is not an integer. '^', '<<' and '>>' are defined on integers and "
+            "truth values only: numpy refuses them on a real natively, and C "
+            "has no such operation on one. Compute them on integers, an "
+            "array of Nat, Int or Fin[m], or write the arithmetic a shift "
+            "stands for (k * 4 for k << 2, k // 2 for k >> 1)"
+        )
+
+
+def _refuse_python_shift(node: Any, promotion: Any, where: str) -> None:
+    """Refuse a shift of a Python int that Python computes and C cannot.
+
+    See :func:`_refuse_arithmetic`: a shift by a negative literal, and a left
+    shift by a literal of 64 or more. numpy shifts a numpy integer by a
+    negative amount as by a huge one, to ``0`` or ``-1``, and past its width
+    to ``0``, which the compiled run computes too (:mod:`loopty.operations`);
+    Python refuses the first and shifts a Python int exactly.
+    """
+    if isinstance(node, prim.BitwiseXor):
+        return
+    shift = node.shift
+    if not isinstance(shift, int) or isinstance(shift, bool):
+        return
+    past = isinstance(node, prim.LeftShift) and shift >= _SHIFT_WIDTH
+    if shift >= 0 and not past:
+        return
+    native = promotion.types(node.shiftee)[0]
+    if not native or _numpy_integer(native):
+        return
+    symbol = _bitwise_symbol(node)
+    opposite = ">>" if symbol == "<<" else "<<"
+    shiftee = _shown(node.shiftee)
+    if not isinstance(node.shiftee, prim.Variable):
+        shiftee = f"({shiftee})"
+    if past:
+        raise TraceError(
+            f"{_shown(node)} at {where} shifts past 64 bits. Natively "
+            f"{_shown(node.shiftee)} is a Python int, which Python shifts "
+            f"exactly, to {shiftee} * 2**{shift}, while the compiled kernel "
+            "computes it in 64 bits, where every bit is shifted out, to 0 as "
+            "numpy shifts an integer past its width, so the two runs would "
+            f"compute different things. Write '{shiftee} * 2.0 ** {shift}' for "
+            "the real it stands for"
+        )
+    raise TraceError(
+        f"{_shown(node)} at {where} shifts by a negative amount. Natively "
+        f"{_shown(node.shiftee)} is a Python int, and Python refuses a negative "
+        "shift count ('negative shift count'), while the compiled kernel "
+        "shifts it as numpy shifts an integer by a negative amount, to 0 or -1, "
+        "so the compiled run would compute a value where the native one has "
+        f"none. Write '{shiftee} {opposite} {-shift}' to shift the other way"
+    )
+
+
+def _refuse_division_by_zero(node: Any, promotion: Any, where: str) -> None:
+    """Refuse a Python number divided by a literal zero.
+
+    See :func:`_refuse_arithmetic`. numpy divides a numpy number by zero, to
+    ``0`` for integers and to ``inf`` or ``nan`` for reals, with a warning,
+    which the compiled run computes too (:mod:`loopty.operations`).
+    """
+    divisor = node.denominator
+    if not isinstance(divisor, int | float | complex):
+        return
+    if isinstance(divisor, np.generic):
+        return
+    if divisor != 0:
+        return
+    native = promotion.types(node.numerator)[0]
+    if not native or any(isinstance(sample, np.generic) for sample in native):
+        return
+    if isinstance(node, prim.FloorDiv):
+        symbol = "//"
+    elif isinstance(node, prim.Remainder):
+        symbol = "%"
+    else:
+        symbol = "/"
+    raise TraceError(
+        f"{_shown(node)} at {where} divides by zero. Natively "
+        f"{_shown(node.numerator)} is a Python number, and Python refuses "
+        f"'{symbol}' by zero (ZeroDivisionError), while the compiled kernel "
+        "computes what numpy computes for a numpy number divided by zero, 0, "
+        "inf or nan, so the compiled run would compute a value where the "
+        "native one has none. Divide by a value that is not zero"
+    )
+
+
+def _refuse_complex_division(node: Any, promotion: Any, where: str) -> None:
+    """Refuse ``//`` or ``%`` of a complex value; see :func:`_refuse_arithmetic`."""
+    symbol = "//" if isinstance(node, prim.FloorDiv) else "%"
+    for operand in (node.numerator, node.denominator):
+        native, compiled = promotion.types(operand)
+        if native:
+            complex_ = any(np.asarray(sample).dtype.kind == "c" for sample in native)
+        else:
+            complex_ = compiled is not None and compiled.kind == "c"
+        if not complex_:
+            continue
+        raise TraceError(
+            f"{_shown(node)} at {where} is '{symbol}' of {_shown(operand)}, which "
+            "is complex. numpy refuses '//' and '%' of a complex number natively, "
+            "and C has no such operation on one. Compute them on the real and "
+            "imaginary parts, which are reals"
         )
 
 
@@ -3534,12 +3833,10 @@ class when:  # noqa: N801 - a context manager written like a statement
             )
         if self.tracer is not None:
             tracer = self.tracer
-            _refuse_bitwise(
-                self.condition,
-                {**tracer.params, **tracer.array_types},
-                _location(sys._getframe(1)),
-                truth=True,
-            )
+            sorts = {**tracer.params, **tracer.array_types}
+            where = _location(sys._getframe(1))
+            _refuse_bitwise(self.condition, sorts, where, truth=True)
+            _refuse_arithmetic(self.condition, sorts, where)
             tracer.push_guard(self.condition)
         else:
             _MASKS.append(bool(self.condition))

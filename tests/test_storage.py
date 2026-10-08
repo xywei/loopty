@@ -277,14 +277,15 @@ def test_an_array_of_naturals_written_as_floats_is_refused():
     with pytest.raises(ValueError, match="c is stored as float64") as refused:
         truncate(**make())
     message = str(refused.value)
-    assert "a signed integer of 32 bits or more" in message
+    assert "has to store as int64" in message
     assert "Pass c as int64" in message
     with pytest.raises(ValueError, match="Pass c as int64"):
         LoopyExecutor().run(truncate, **make())
-    for dtype in (np.int64, np.int32):
-        agrees(
-            truncate, lambda d=dtype: {"u": np.array([1.5, 2.0]), "c": np.zeros(2, d)}
-        )
+    agrees(truncate, lambda: {"u": np.array([1.5, 2.0]), "c": np.zeros(2, np.int64)})
+    # A Nat is 64 bits wide compiled (#101), and an int32 c wraps round where
+    # the compiled one does not, so it is refused too.
+    with pytest.raises(ValueError, match="c is stored as int32"):
+        truncate(u=np.array([1.5, 2.0]), c=np.zeros(2, np.int32))
 
 
 def test_an_array_of_truth_values_written_as_bytes_is_refused():
