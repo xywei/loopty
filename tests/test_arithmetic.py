@@ -1369,6 +1369,108 @@ def test_a_shift_python_refuses_and_a_complex_remainder_are_refused():
         complex_remainder.trace()
 
 
+@kernel
+def shifted_past(y: Arr[Fin[n], Real], z: Arr[Fin[n], Real]):  # noqa: F821
+    """A loop variable shifted left past 64 bits, which Python shifts exactly."""
+    for i in y.dom:
+        y[i] = 1.0 * (i << 64)
+        z[i] = 1.0 * (i >> 64)
+
+
+@kernel
+def scaled_past(y: Arr[Fin[n], Real]):  # noqa: F821
+    """The named fix: the real a shift past 64 bits stands for."""
+    for i in y.dom:
+        y[i] = i * 2.0**64
+
+
+def test_a_python_int_shifted_past_64_bits_is_refused():
+    # Python shifts a loop variable exactly, to 2**64 at i = 1, and the
+    # compiled kernel computes it in 64 bits, to 0 as numpy shifts every bit
+    # out. A right shift is 0 or -1 in both.
+    native = {"y": np.zeros(3), "z": np.zeros(3)}
+    shifted_past(**native)
+    assert list(native["y"]) == [0.0, 2.0**64, 2.0**65]
+    with pytest.raises(TraceError, match="shifts past 64 bits") as refused:
+        shifted_past.trace()
+    assert "Write 'i * 2.0 ** 64' for the real it stands for" in str(refused.value)
+    agrees(scaled_past, lambda: {"y": np.zeros(3)})
+
+
+@kernel
+def compared_bits(
+    k: Arr[Fin[n], Int],  # noqa: F821
+    x: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+    w: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A comparison of an ``^`` and of a comparison, which C binds otherwise."""
+    for i in k.dom:
+        y[i] = (k[i] < (k[i] ^ 1)) * 1.0
+        z[i] = (x[i] < (k[i] == 1)) * 1.0
+        with when(i < (i ^ 1)):
+            w[i] = 1.0
+
+
+def test_a_comparison_of_an_xor_is_printed_with_cs_precedence():
+    # loopy printed by Python's precedence, where ^ binds more tightly than a
+    # comparison: k[i] < (k[i] ^ 1) was k[i] < k[i] ^ 1, which C reads as
+    # (k[i] < k[i]) ^ 1, true at every k, and x[i] < (k[i] == 1) was
+    # x[i] < k[i] == 1, (x[i] < k[i]) == 1.
+    def make() -> dict:
+        return {
+            "k": np.array([0, 1, 2, 3, 2, 5]),
+            "x": np.array([0.5, 0.5, 1.5, 0.5, -1.0, 0.5]),
+            **{name: np.zeros(6) for name in "yzw"},
+        }
+
+    native = make()
+    compared_bits(**native)
+    assert list(native["y"]) == [1.0, 0.0, 1.0, 0.0, 1.0, 0.0]
+    assert list(native["z"]) == [0.0, 1.0, 0.0, 0.0, 1.0, 0.0]
+    assert list(native["w"]) == [1.0, 0.0, 1.0, 0.0, 1.0, 0.0]
+    code = emit_code(compared_bits)
+    assert "(k[i] < (k[i] ^ 1)) * 1.0" in code
+    assert "(x[i] < (k[i] == 1)) * 1.0" in code
+    assert "if (i < (i ^ 1))" in code
+    agrees(compared_bits, make)
+
+
+@kernel
+def bits_compared(
+    k: Arr[Fin[n], Int],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+    w: Arr[Fin[n], Real],  # noqa: F821
+):
+    """``^``, ``<<`` and ``>>`` compared, in a guard and as a number."""
+    for i in k.dom:
+        with when((k[i] ^ 1) == 0):
+            y[i] = 1.0
+        z[i] = ((k[i] << 1) != 4) * 1.0 + ((k[i] >> 1) > 1) * 2.0
+        with when((i << 2) > 5):
+            w[i] = 1.0
+
+
+def test_a_comparison_of_an_xor_or_a_shift_is_traced():
+    # lanky left ^, << and >> as pymbolic's nodes, whose == compared them
+    # structurally: when((k[i] ^ 1) == 0) was traced as when(False), and
+    # (k[i] << 1) != 4 as True, which the trace-faithful fact found tested on
+    # its draws; and whose > raised a TypeError.
+    def make() -> dict:
+        return {"k": np.array([0, 1, 2, 3, 4, 5]), **{x: np.zeros(6) for x in "yzw"}}
+
+    native = make()
+    bits_compared(**native)
+    assert list(native["y"]) == [0.0, 1.0, 0.0, 0.0, 0.0, 0.0]
+    assert list(native["z"]) == [1.0, 1.0, 0.0, 1.0, 3.0, 3.0]
+    assert list(native["w"]) == [0.0, 0.0, 1.0, 1.0, 1.0, 1.0]
+    (statement, *_) = bits_compared.term.stmts
+    assert isinstance(statement.guard, prim.Comparison)
+    agrees(bits_compared, make)
+
+
 # }}}
 
 

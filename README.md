@@ -300,7 +300,9 @@ end to end; the edges are sharp.
   integer (`1 / k[i] ** 2`, a real); `^`, `<<` or `>>` of a real, and `//` or
   `%` of a complex value, which numpy refuses and C cannot compile; and a
   loop variable divided by a literal zero or shifted by a negative literal,
-  which Python refuses natively.
+  which Python refuses natively, or shifted left by a literal of 64 or more,
+  which Python computes exactly and the compiled run to `0`
+  (`i * 2.0 ** 64`).
 - The faithfulness fact. For each kernel and each program, the traced term is
   run by an interpreter (`loopty.interpret`: statement by statement in source
   order over each statement's isl domain, each loop enumerated when the run
@@ -517,6 +519,9 @@ end to end; the edges are sharp.
   raises.
 - Integers are 64 bits wide in both runs, and a result outside 64 bits wraps
   round compiled where numpy wraps or refuses, which is numpy's limit too.
+  Arithmetic of loop variables, sizes and literals alone is Python's natively,
+  which is exact: `1.0 * i ** 5` past `i = 6208` is a wider number natively
+  and wraps compiled, which the differential fact reports (#139).
   Index arithmetic, a subscript and a loop bound, is loopy's, 32 bits wide,
   and so is a sum of loop variables, sizes and small literals: `x[(i * i) %
   n]` reads out of bounds compiled at `i = 46341` (#129). A

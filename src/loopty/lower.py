@@ -66,13 +66,17 @@ import pymbolic.primitives as prim
 from loopy.symbolic import Reduction as LoopyReduction
 from loopy.symbolic import TypeCast, set_to_cond_expr
 from loopy.target.c import CASTBuilder, CFamilyASTBuilder
-from loopy.target.c.codegen.expression import ExpressionToCExpressionMapper
+from loopy.target.c.codegen.expression import (
+    CExpressionToCodeMapper,
+    ExpressionToCExpressionMapper,
+)
 from loopy.target.pyopencl import (
     ExpressionToPyOpenCLCExpressionMapper,
     PyOpenCLCASTBuilder,
     PyOpenCLPythonASTBuilder,
 )
 from pymbolic.mapper import Mapper
+from pymbolic.mapper.stringifier import PREC_COMPARISON
 
 from loopty.contract import compiled_storage
 from loopty.domain import STORAGES, Union
@@ -237,11 +241,42 @@ class _CExpressions(NumpyArithmetic, ExpressionToCExpressionMapper):
     """loopy's C expressions, with ``//``, ``%``, ``<<`` and ``>>`` numpy's."""
 
 
+#: The operations C binds more loosely than a comparison, or than ``<`` where
+#: the comparison is ``==``, and Python more tightly or as tightly.
+_LOOSER_IN_C = (prim.BitwiseAnd, prim.BitwiseXor, prim.BitwiseOr, prim.Comparison)
+
+
+class _CText(CExpressionToCodeMapper):
+    """loopy's printer of C expressions, with C's precedence around a comparison.
+
+    loopy prints by pymbolic's precedences, which are Python's: there ``&``,
+    ``^`` and ``|`` bind more tightly than a comparison, and every comparison
+    as tightly as any other. C binds a comparison more tightly than ``&``,
+    ``^`` and ``|``, and ``<`` more tightly than ``==``. So ``(k[i] ^ 1) == 0``
+    was printed ``k[i] ^ 1 == 0``, which C reads as ``k[i] ^ (1 == 0)``, and
+    ``k[i] < (k[i] ^ 1)`` as ``k[i] < k[i] ^ 1``, ``(k[i] < k[i]) ^ 1``, true
+    at every ``k``. An operand of a comparison that is one of these is
+    bracketed (note 20).
+    """
+
+    def map_comparison(self, expr: Any, enclosing_prec: int) -> str:
+        left, right = (
+            self.rec_with_force_parens_around(
+                operand, PREC_COMPARISON, force_parens_around=_LOOSER_IN_C
+            )
+            for operand in (expr.left, expr.right)
+        )
+        return self.parenthesize_if_needed(
+            f"{left} {expr.operator} {right}", enclosing_prec, PREC_COMPARISON
+        )
+
+
 class _CCode(CASTBuilder):
     """The device code of loopty's C targets: loopy's, with numpy's arithmetic.
 
     ``//``, ``%``, ``<<`` and ``>>`` are calls of functions defined as numpy
-    defines them (:mod:`loopty.operations`), whose definitions are preambles.
+    defines them (:mod:`loopty.operations`), whose definitions are preambles,
+    and expressions are printed with C's precedence (:class:`_CText`).
     """
 
     def preamble_generators(self) -> Any:
@@ -249,6 +284,9 @@ class _CCode(CASTBuilder):
 
     def get_expression_to_c_expression_mapper(self, codegen_state: Any) -> Any:
         return _CExpressions(codegen_state)
+
+    def get_c_expression_to_code_mapper(self) -> Any:
+        return _CText()
 
 
 class InProcessCTarget(lp.ExecutableCTarget):
@@ -314,6 +352,9 @@ class _OpenCLCode(PyOpenCLCASTBuilder):
 
     def get_expression_to_c_expression_mapper(self, codegen_state: Any) -> Any:
         return _OpenCLExpressions(codegen_state)
+
+    def get_c_expression_to_code_mapper(self) -> Any:
+        return _CText()
 
 
 class InKernelOpenCLTarget(lp.PyOpenCLTarget):

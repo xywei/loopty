@@ -923,7 +923,10 @@ numpy scalar of its sort natively however the caller passed it
 operation is planned as numpy computes it.
 
 **What it does not cover.** A result outside 64 bits wraps round compiled,
-and natively wraps or is refused, as numpy does. Arithmetic inside a
+and natively wraps or is refused, as numpy does, but for arithmetic of loop
+variables, sizes and literals alone, which is Python's natively and exact:
+`1.0 * i ** 5` past `i = 6208` is a wider number natively, which the
+differential fact reports (#139). Arithmetic inside a
 subscript is computed in 32 bits: `x[(i * i) % n]` reads out of bounds
 compiled at `i = 46341` (#129). The interpreter's
 functions (`sqrt`, `exp`, ...) are typed as numpy types them,
@@ -948,6 +951,7 @@ another way than a type:
   (#104);
 - `y[i] = k[i] ^ 3`, `k[i] << 2` and `k[i] >> 1` fail with an empty
   `NotImplementedError` (#107), and `k << 64` is undefined in C, natively `0`;
+  and `k[i] < (k[i] ^ 1)` is true at every `k` compiled;
 - a kernel named `floor` fails with `KeyError: 'floor'` inside loopy, and one
   named `cpow` over complex arrays with a power in gcc, `conflicting types
   for 'cpow'` (#108);
@@ -965,7 +969,14 @@ asks about zero. `ExpressionToCExpressionMapper._map_integer_div_operator`
 raises for a floating operand. A shift past the width, or by a negative
 amount, is undefined in C, and so is a left shift of a negative value; numpy
 gives `0` past the width, or `-1` for a negative value shifted right.
-`ExpressionLowerer` had no case for `^`, `<<` and `>>`. loopy resolves a call
+`ExpressionLowerer` had no case for `^`, `<<` and `>>`. loopy prints C by
+pymbolic's precedences, which are Python's (`CExpressionToCodeMapper`):
+there `&`, `^` and `|` bind more tightly than a comparison, and every
+comparison as tightly as another, where C binds a comparison more tightly
+than `&`, `^` and `|`, and `<` more tightly than `==`. So
+`k[i] < (k[i] ^ 1)` is printed `k[i] < k[i] ^ 1`, which C reads as
+`(k[i] < k[i]) ^ 1`, and `x[i] < (k[i] == 1)` as `(x[i] < k[i]) == 1`.
+loopy resolves a call
 by its name among its own functions, the target's and the translation
 unit's, the kernel itself included, and the target's win
 (`translation_unit.resolve_callables`): a kernel named `floor` is looked up as
@@ -1004,7 +1015,9 @@ scalar as the Python number it equals (`PersistentHashWalkMapper.map_constant`),
 so a kernel with the literal `3` and one with `np.uint64(3)`, which loopy
 types and prints otherwise (`3ul`), share an entry, and a cache warmed by
 the earlier plan served its code. `^` is C's, which
-agrees with numpy's on integers and truth values. A kernel named like a
+agrees with numpy's on integers and truth values, and loopty's targets print
+an operand of a comparison that is a bitwise operation or a comparison in
+brackets (`lower._CText`). A kernel named like a
 function loopy resolves on a C or OpenCL target, like one the headers the
 generated code includes declare (`math.h`, `complex.h`, with their `f` and
 `l` forms) or define as a macro or type (`stdint.h`), or like a helper loopy
@@ -1020,7 +1033,9 @@ floating power of a loop variable calls `pow`. An operand numpy rounds to
 single precision in such a guard, `(i + 1) ** -1` beside a `float32` scalar,
 has no product that does it, and the guard is refused (`LoweringError`). A
 loop variable divided by a literal zero is refused by the trace, since Python
-refuses it natively where the compiled run would compute numpy's `0`. A
+refuses it natively where the compiled run would compute numpy's `0`, and
+so is a loop variable shifted left by a literal of 64 or more, which Python
+shifts exactly where the compiled run shifts every bit out. A
 parameter, size or loop variable named like a helper loopy or loopty defines
 is refused, as a keyword is: it shadowed the helper the kernel calls.
 

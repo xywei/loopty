@@ -1653,7 +1653,20 @@ with a pair of statement instances.
   `np.uint64(3)`, serves no code another version of them generated. A loop
   variable divided by a literal zero, or shifted by a negative literal, is a
   `TraceError`, since Python refuses it natively, and so is `//` or `%` of a
-  complex value, which numpy refuses. Note 20 in `docs/loopy-notes.md`.
+  complex value, which numpy refuses, and a loop variable shifted left by a
+  literal of 64 or more, which Python shifts exactly and the compiled run to
+  `0` (`i * 2.0 ** 64` is named). Note 20 in `docs/loopy-notes.md`.
+- A comparison of an `^`, or of another comparison, is printed with C's
+  precedence: loopy printed by Python's, in which `^` binds more tightly than
+  a comparison and C's does not, so `k[i] < (k[i] ^ 1)` was
+  `k[i] < k[i] ^ 1`, true at every `k` compiled, and `x[i] < (k[i] == 1)`
+  was `(x[i] < k[i]) == 1` (`lower._CText`).
+- A comparison of an `^`, a `<<` or a `>>` is traced as one, now that lanky
+  builds its own terms for the three (`lanky.terms.BitwiseXor`, `LeftShift`
+  and `RightShift`), whose comparisons are propositions: `when((k[i] ^ 1) ==
+  0)` was traced as `when(False)` and `(k[i] << 1) != 4` as `True`, since
+  pymbolic's `==` of its own nodes compares them as expressions, and
+  `(i << 2) > 5` raised a `TypeError`.
 - A sum of truth values is a `TraceError` naming the fix (#106): numpy's `+`
   of two bools is `or`, so `(b[i] + b[i]) * 1.0` was `1.0` natively and
   `2.0` compiled, with the `trace-faithful` fact `tested`. The fix named is

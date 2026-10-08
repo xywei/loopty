@@ -2905,8 +2905,20 @@ def _nodes(expr: Any) -> Iterator[Any]:
             yield from _nodes(item)
 
 
-#: The bitwise operations pymbolic builds and lanky leaves alone, as written.
+#: The bitwise operations, as written. A node is pymbolic's, or lanky's
+#: subclass of it, which lanky builds so that a comparison of one is a
+#: proposition.
 _BITWISE = {prim.BitwiseXor: "^", prim.LeftShift: "<<", prim.RightShift: ">>"}
+
+
+def _bitwise_symbol(node: Any) -> str:
+    """How a bitwise node of :data:`_BITWISE`, or a subclass of one, is written."""
+    return next(symbol for kind, symbol in _BITWISE.items() if isinstance(node, kind))
+
+
+#: The width the compiled run shifts a Python int in: a loop variable, a size
+#: or a literal is computed in 64 bits there (:mod:`loopty.promotion`).
+_SHIFT_WIDTH = 64
 
 
 def _all_kinds(native: Any, kinds: str) -> bool:
@@ -2949,7 +2961,8 @@ def _refuse_arithmetic(expr: Any, params: Mapping[str, Any], where: str) -> None
     * ``^``, ``<<`` or ``>>`` with a real or complex operand, which numpy
       refuses and C has no operation for (#107), and a shift of a Python
       int, a loop variable's, by a negative literal, which Python refuses and
-      C computes as numpy shifts a numpy integer;
+      C computes as numpy shifts a numpy integer, or to the left by a literal
+      of 64 or more, which Python computes exactly and C in 64 bits, to ``0``;
     * ``//`` or ``%`` with a complex operand, which numpy refuses and C has
       no operation for;
     * ``/``, ``//`` or ``%`` of a Python number, a loop variable's, by a
@@ -2969,7 +2982,7 @@ def _refuse_arithmetic(expr: Any, params: Mapping[str, Any], where: str) -> None
             _refuse_negative_power(node, promotion, where)
         elif isinstance(node, tuple(_BITWISE)):
             _refuse_bitwise_of_reals(node, promotion, where)
-            _refuse_negative_shift(node, promotion, where)
+            _refuse_python_shift(node, promotion, where)
         elif isinstance(node, prim.FloorDiv | prim.Remainder):
             _refuse_complex_division(node, promotion, where)
             _refuse_division_by_zero(node, promotion, where)
@@ -3053,7 +3066,7 @@ def _refuse_bitwise_of_reals(node: Any, promotion: Any, where: str) -> None:
         operands: tuple[Any, ...] = tuple(node.children)
     else:
         operands = (node.shiftee, node.shift)
-    symbol = _BITWISE[type(node)]
+    symbol = _bitwise_symbol(node)
     for operand in operands:
         native, compiled = promotion.types(operand)
         real = _all_kinds(native, "fc") if native else None
@@ -3071,26 +3084,41 @@ def _refuse_bitwise_of_reals(node: Any, promotion: Any, where: str) -> None:
         )
 
 
-def _refuse_negative_shift(node: Any, promotion: Any, where: str) -> None:
-    """Refuse a shift of a Python int by a negative literal.
+def _refuse_python_shift(node: Any, promotion: Any, where: str) -> None:
+    """Refuse a shift of a Python int that Python computes and C cannot.
 
-    See :func:`_refuse_arithmetic`. numpy shifts a numpy integer by a
-    negative amount as by a huge one, to ``0`` or ``-1``, which the compiled
-    run computes too (:mod:`loopty.operations`).
+    See :func:`_refuse_arithmetic`: a shift by a negative literal, and a left
+    shift by a literal of 64 or more. numpy shifts a numpy integer by a
+    negative amount as by a huge one, to ``0`` or ``-1``, and past its width
+    to ``0``, which the compiled run computes too (:mod:`loopty.operations`);
+    Python refuses the first and shifts a Python int exactly.
     """
     if isinstance(node, prim.BitwiseXor):
         return
     shift = node.shift
-    if not isinstance(shift, int) or isinstance(shift, bool) or shift >= 0:
+    if not isinstance(shift, int) or isinstance(shift, bool):
+        return
+    past = isinstance(node, prim.LeftShift) and shift >= _SHIFT_WIDTH
+    if shift >= 0 and not past:
         return
     native = promotion.types(node.shiftee)[0]
     if not native or _numpy_integer(native):
         return
-    symbol = _BITWISE[type(node)]
+    symbol = _bitwise_symbol(node)
     opposite = ">>" if symbol == "<<" else "<<"
     shiftee = _shown(node.shiftee)
     if not isinstance(node.shiftee, prim.Variable):
         shiftee = f"({shiftee})"
+    if past:
+        raise TraceError(
+            f"{_shown(node)} at {where} shifts past 64 bits. Natively "
+            f"{_shown(node.shiftee)} is a Python int, which Python shifts "
+            f"exactly, to {shiftee} * 2**{shift}, while the compiled kernel "
+            "computes it in 64 bits, where every bit is shifted out, to 0 as "
+            "numpy shifts an integer past its width, so the two runs would "
+            f"compute different things. Write '{shiftee} * 2.0 ** {shift}' for "
+            "the real it stands for"
+        )
     raise TraceError(
         f"{_shown(node)} at {where} shifts by a negative amount. Natively "
         f"{_shown(node.shiftee)} is a Python int, and Python refuses a negative "
