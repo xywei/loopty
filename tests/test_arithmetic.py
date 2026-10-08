@@ -1907,6 +1907,35 @@ def test_an_unsigned_integer_beside_a_signed_one_is_numpys():
 
 
 @kernel
+def unsigned_literal(
+    u: Arr[Fin[n], np.uint32],  # noqa: F821
+    y: Arr[Fin[n], Int],  # noqa: F821
+):
+    """A ``uint32`` literal, which numpy computes with in 32 bits."""
+    for i in u.dom:
+        y[i] = (u[i] * np.uint32(5)) * 1
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_a_uint32_literal_is_computed_with_in_32_bits():
+    # loopy wrote an np.uint32 literal 5ul, an unsigned long, so u[i] * 5ul
+    # was computed in 64 bits, where numpy wraps round at 2**32.
+    import re
+
+    def make() -> dict:
+        return {
+            "u": np.array([2**32 - 1, 2**31, 3], np.uint32),
+            "y": np.zeros(3, np.int64),
+        }
+
+    native = make()
+    unsigned_literal(**native)
+    assert list(native["y"]) == [(5 * (2**32 - 1)) % 2**32, 2**31, 15]
+    agrees(unsigned_literal, make)
+    assert re.search(r"\b5u\b", emit_code(unsigned_literal))
+
+
+@kernel
 def literal_beside_integers(
     k: Arr[Fin[n], Int],  # noqa: F821
     y: Arr[Fin[n], Real],  # noqa: F821
