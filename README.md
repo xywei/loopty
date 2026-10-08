@@ -811,8 +811,9 @@ loopty runs on Python 3.12 and 3.13: the islpy it is held to has no wheels for
 
 A compiled run, `loopty run` or `LoopyExecutor`, also needs a C compiler,
 whatever `gcc` is on the `PATH`: GCC on Linux, and on macOS the `gcc` of
-Apple's command-line tools, which is clang. A native run, `python FILE`,
-needs none.
+Apple's command-line tools, which is clang. `lanky check` needs none, and
+neither does calling a kernel natively; the demos under `python` compile a
+schedule as well, so they do.
 
 Device execution is an extra, which installs pyopencl, for
 `loopty run FILE --target opencl` and `LoopyExecutor(target="opencl")`. The
