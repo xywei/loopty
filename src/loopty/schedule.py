@@ -5047,10 +5047,14 @@ def _unconverted_in_subscripts(kernel: Any, rules: Mapping[str, Any]) -> Any:
     (loopy's ``TypeCast`` to a wider integer) to the name of a rule with the
     same arguments and the body inside the cast. An invocation of the first
     inside a subscript becomes one of the second; a read used as a value
-    keeps the conversion.
+    keeps the conversion. The walk is loopy's uncached mapper: its cached
+    one keys a result by the expression alone, so a read used as a value
+    after the same read in a subscript, ``x[q[i]] + q[i] * q[i]``, was given
+    the subscript's rule, and ``q[i] * q[i]`` of a 32-bit ``t[i]`` stored in
+    64 bits was computed in 32.
     """
     from loopy.kernel.data import SubstitutionRule
-    from loopy.symbolic import IdentityMapper
+    from loopy.symbolic import UncachedIdentityMapper
 
     entry = kernel.default_entrypoint
     substitutions = dict(entry.substitutions)
@@ -5060,7 +5064,7 @@ def _unconverted_in_subscripts(kernel: Any, rules: Mapping[str, Any]) -> Any:
             name=index_name, arguments=rule.arguments, expression=rule.expression.child
         )
 
-    class _InSubscripts(IdentityMapper):
+    class _InSubscripts(UncachedIdentityMapper):
         def __init__(self) -> None:
             super().__init__()
             self.depth = 0

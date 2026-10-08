@@ -619,6 +619,27 @@ def widened(t, x, y):
 
 
 @kernel
+def gather_and_cube(
+    q: Arr[Fin[n], Nat],  # noqa: F821
+    x: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Nat],  # noqa: F821
+):
+    """Each cell of ``x`` that ``q`` names, and the cube of each entry."""
+    for i in y.dom:
+        y[i] = x[q[i]]
+        z[i] = q[i] * q[i] * q[i]
+
+
+@program
+def widened_twice(t, x, y, z):
+    """An index read in a subscript and as a value, after its store widened it."""
+    q = Arr.zeros_like(t, dtype=np.int64)
+    widen(t, q)
+    gather_and_cube(q, x, y, z)
+
+
+@kernel
 def reversal(q: Arr[Fin[n], Nat]):  # noqa: F821
     """The last index first, in whole numbers."""
     for j in q.dom:
@@ -1467,6 +1488,24 @@ def test_an_index_widened_by_its_store_is_read_unconverted_in_a_subscript() -> N
             reversed_whole, "q", {"x": np.arange(size) + 0.5, "y": np.zeros(size)}
         )
     assert "y[i] = x[-1 + -1 * i + n];" in code
+
+
+def test_a_widened_index_read_as_a_value_keeps_its_widening() -> None:
+    # The reads in subscripts were rewritten by loopy's cached mapper, which
+    # keys a result by the expression alone, so the read of q in z's
+    # product, the same expression as the one in x's subscript, was given the
+    # subscript's rule too: t[i] * t[i] * t[i] in 32 bits, where the program
+    # that stores q, and numpy, compute it in 64. From t[i] = 1291 the cube
+    # leaves 32 bits, and the substituted run disagreed with both, with every
+    # fact decided.
+    for size in (1, 3000):
+        code = substituted_agrees(
+            widened_twice,
+            "q",
+            permuted_inputs(size, z=np.zeros(size, dtype=np.int64)),
+        )
+    assert "y[i] = x[t[i]];" in code
+    assert "z[i] = (int64_t) (t[i]) * (int64_t) (t[i]) * (int64_t) (t[i]);" in code
 
 
 def test_a_narrowing_in_a_subscript_is_kept() -> None:
