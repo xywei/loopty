@@ -399,11 +399,20 @@ def _literal_of(expr: Any) -> Any:
 
 
 def _holds(dtype: np.dtype, value: int) -> bool:
-    """Whether the numpy dtype ``dtype`` holds the integer ``value`` exactly."""
+    """Whether the numpy dtype ``dtype`` holds the integer ``value``.
+
+    An integer type exactly; a real or a complex one wherever a double does,
+    which numpy rounds the integer into (``int too large to convert to
+    float`` past that).
+    """
     if dtype.kind in "iu":
         info = np.iinfo(dtype)
         return int(info.min) <= value <= int(info.max)
     if dtype.kind in "fc":
+        try:
+            float(value)
+        except OverflowError:
+            return False
         return True
     return False
 
@@ -683,10 +692,15 @@ def _compared(
     zero first (:attr:`Step.sign`), and C compares the two only where it is
     not, which it does exactly. An integer literal loopy cannot type is
     written as a ``uint64`` where one holds it and the other operand is an
-    integer, and as a double elsewhere; beside an integer, the lowering writes
-    that double as ``2.0 ** 65`` with the literal's sign, past which every
-    integer of 64 bits compares as with the literal
-    (:func:`loopty.lower._beyond_integers`).
+    integer, in the real or complex type numpy computes it in beside a real
+    or a complex operand (``f[i] < 2**70 + 2**46`` of a ``float32`` ``f``
+    compares with the ``float32`` ``2**70``, as numpy does, where the double
+    ``2**70 + 2**46`` was false at ``2**70``), and as a double elsewhere;
+    beside an integer, the lowering writes that double as ``2.0 ** 65`` with
+    the literal's sign, past which every integer of 64 bits compares as with
+    the literal (:func:`loopty.lower._beyond_integers`). One past the largest
+    double beside anything but an integer is given no type, and the trace
+    refuses it.
 
     A comparison with a real or a complex operand is computed in numpy's
     ``common`` type, as :func:`_plan` converts any operation.
@@ -696,16 +710,24 @@ def _compared(
     types = [lc, rc]
     to: list[np.dtype | None] = [None, None]
     integral = [dtype is not None and dtype.kind in "biu" for dtype in types]
+    numpys = _one_dtype(common)
     for k in range(2):
         if not big[k]:
             continue
         other = types[1 - k]
         wide = np.dtype(np.uint64)
         value = int(literals[k])
-        if other is not None and other.kind in "biu" and _holds(wide, value):
-            to[k] = wide
-        else:
+        if other is not None and other.kind in "biu":
+            # A double beside an integer is 2.0 ** 65 with the literal's sign.
+            to[k] = wide if _holds(wide, value) else np.dtype(np.float64)
+        elif numpys is not None and numpys.kind in "fc":
+            to[k] = numpys
+        elif _holds(np.dtype(np.float64), value):
             to[k] = np.dtype(np.float64)
+        else:
+            # Past the largest double, which numpy refuses to convert it to:
+            # left without a type, for the trace to refuse.
+            continue
         types[k] = to[k]
         integral[k] = to[k].kind in "biu"
     if all(integral) and types[0] is not None and types[1] is not None:

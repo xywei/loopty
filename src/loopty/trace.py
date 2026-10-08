@@ -1892,6 +1892,12 @@ _UNEQUAL = "compares with '!=', which is not a convex set of points"
 #: Why a guard that is already false is not a constraint.
 _FALSE = "is the constant False, which is not stated to isl"
 
+#: Why a conjunct with an integer past 64 bits is not a constraint (#140).
+_PAST_64_BITS = (
+    "compares with an integer outside 64 bits, which isl would hand loopy for "
+    "a loop bound and loopy has no integer type for"
+)
+
 
 def constraints_of(
     condition: Any, tracer: Tracer | None = None, bound: Collection[str] = ()
@@ -1959,6 +1965,11 @@ def _conjuncts(
     operator = condition.operator
     if operator == "!=":
         return [(condition, None, _UNEQUAL)]
+    if _past_64_bits((condition.left, condition.right)):
+        # isl states i < 2**70 exactly, but generates code from it whose
+        # bound loopy fails to type ("integer constant too large"). The
+        # predicate compares it as numpy does (loopty.promotion._compared).
+        return [(condition, None, _PAST_64_BITS)]
     if tracer is not None:
         known = tracer.integers.union(bound)
         others = sorted((free_names(left) | free_names(right)) - known)
@@ -1968,6 +1979,17 @@ def _conjuncts(
     if operator == "==":
         operator = "="
     return [(condition, f"{left} {operator} {right}", "")]
+
+
+def _past_64_bits(expr: Any) -> bool:
+    """Whether ``expr`` holds an integer literal loopy cannot type, past ``int64``."""
+    if isinstance(expr, int) and not isinstance(expr, bool):
+        return not -(2**63) <= expr < 2**63
+    if isinstance(expr, prim.ExpressionNode):
+        return any(_past_64_bits(arg) for arg in init_args(expr))
+    if isinstance(expr, tuple | list):
+        return any(_past_64_bits(item) for item in expr)
+    return False
 
 
 def _not_integers_text(names: Sequence[str], tracer: Tracer) -> str:

@@ -1018,19 +1018,28 @@ def _beyond_integers(operand: Any, other: np.dtype | None) -> Any:
 
 def _untyped_message(value: int, where: str = "") -> str:
     """Why an integer literal past 64 bits is refused, and what to write."""
-    exponent = abs(value).bit_length() - 1
-    if abs(value) == 2**exponent:
-        spelled = f"{'-' if value < 0 else ''}2.0 ** {exponent}"
-    else:
-        spelled = repr(float(value))
     at = f" at {where}" if where else ""
+    exponent = abs(value).bit_length() - 1
+    try:
+        real = float(value)
+    except OverflowError:
+        # Past the largest double: numpy refuses it beside a real too.
+        fix = (
+            "no real holds it either (numpy raises 'int too large to convert "
+            "to float'), so compute without it"
+        )
+    else:
+        if abs(value) == 2**exponent:
+            spelled = f"{'-' if value < 0 else ''}2.0 ** {exponent}"
+        else:
+            spelled = repr(real)
+        fix = f"write it as a real, {spelled}, which both runs compute with alike"
     return (
         f"the integer {value}{at} is past 64 bits, and the compiled kernel has "
         "no integer type that holds it: loopy types an integer literal as "
         "int32 or int64. Such a literal is written in numpy's type where numpy "
         "computes the operation it stands in in a real or a uint64 that holds "
-        f"it, x[i] * 2**70, and nowhere else; write it as a real, {spelled}, "
-        "which both runs compute with alike"
+        f"it, x[i] * 2**70, and nowhere else; {fix}"
     )
 
 

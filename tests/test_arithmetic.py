@@ -2513,6 +2513,87 @@ def test_a_literal_just_past_64_bits_is_compared_exactly():
 
 
 @kernel
+def compared_past_64_in_reals(
+    f: Arr[Fin[n], np.float32],  # noqa: F821
+    z: Arr[Fin[n], np.complex64],  # noqa: F821
+    k: Arr[Fin[n], Int],  # noqa: F821
+    b: Arr[Fin[n], Bool],  # noqa: F821
+    c: Arr[Fin[n], Bool],  # noqa: F821
+    d: Arr[Fin[n], Bool],  # noqa: F821
+):
+    """A literal past 64 bits beside single precision, and past a double."""
+    for i in f.dom:
+        b[i] = (f[i] < 2**70 + 2**46) | (f[i] < -(2**130))
+        c[i] = z[i] == 2**70 + 2**46
+        d[i] = k[i] < 3**700
+
+
+@kernel
+def compared_past_a_double(x: Arr[Fin[n], Real], b: Arr[Fin[n], Bool]):  # noqa: F821
+    """A literal no double holds, beside a real."""
+    for i in x.dom:
+        b[i] = x[i] < 3**700
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_a_literal_past_64_bits_is_compared_in_numpys_real():
+    # numpy takes the literal into the real or complex type beside it, so
+    # f[i] < 2**70 + 2**46 of a float32 compares with the float32 2**70. It
+    # was written as a double, and differed at f[i] = 2**70. One no double
+    # holds is refused beside a real, which numpy cannot convert it to, and
+    # compared exactly with an integer, as numpy does.
+    def make() -> dict:
+        return {
+            "f": np.array([2.0**70, 1.5, -np.inf], np.float32),
+            "z": np.array([2.0**70, 1, 2.0**70 + 1j], np.complex64),
+            "k": np.array([-(2**63), 0, 2**63 - 1]),
+            "b": np.zeros(3, bool),
+            "c": np.zeros(3, bool),
+            "d": np.zeros(3, bool),
+        }
+
+    native = make()
+    compared_past_64_in_reals(**native)
+    assert list(native["b"]) == [False, True, True]
+    assert list(native["c"]) == [True, False, False]
+    assert list(native["d"]) == [True] * 3
+    agrees(compared_past_64_in_reals, make)
+    with pytest.raises(OverflowError, match="too large to convert to float"):
+        compared_past_a_double(x=np.ones(2), b=np.zeros(2, bool))
+    with pytest.raises(TraceError, match="no real holds it either"):
+        compared_past_a_double.trace()
+
+
+@kernel
+def guarded_past_64(m: Int, y: Arr[Fin[n], Int], z: Arr[Fin[n], Int]):  # noqa: F821
+    """Guards on the loops and on a scalar that compare past 64 bits."""
+    for i in y.dom:
+        with when((i < 2**70) & (i > -(2**70))):
+            y[i] = 1
+        with when((m < 2**63 + 5) & (m > -(2**63) - 5)):
+            z[i] = 2
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_a_guard_on_the_loops_past_64_bits_is_left_to_the_predicate():
+    # isl states i < 2**70 exactly, and generated a loop bound from it that
+    # loopy failed to type (integer constant too large). Such a conjunct does
+    # not narrow the domain, and the predicate compares it as numpy does.
+    from loopty.trace import constraints_of
+
+    def make(m: int) -> dict:
+        return {"m": m, "y": np.zeros(3, np.int64), "z": np.zeros(3, np.int64)}
+
+    for m in (-(2**63), 3, 2**63 - 1):
+        agrees(guarded_past_64, lambda m=m: make(m))
+    native = make(-1)
+    guarded_past_64(**native)
+    assert list(native["y"]) == [1] * 3 and list(native["z"]) == [2] * 3
+    guard = guarded_past_64.term.stmts[0].guard
+    assert constraints_of(guard) == ()
+
+
+@kernel
 def literal_contexts(
     x: Arr[Fin[n], np.float32],  # noqa: F821
     u: Arr[Fin[n], np.uint64],  # noqa: F821
