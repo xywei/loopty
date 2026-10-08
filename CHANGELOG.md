@@ -1976,8 +1976,10 @@ with a pair of statement instances.
   sign first where C would compare it unsigned (`k[i] >= 0 && u[i] < k[i]`),
   as numpy compares exactly, `uint64` against `int64` included. A
   difference, which pymbolic builds as `a + -1 * b`, is computed in the
-  difference's type, where the term negated `b` in its own: `col[i] - k[i]`
-  of an `int8` `k` at `-128`, and `k[i] - u[i]` of a `uint32` `u`. A `uint32`
+  difference's type, where the term negates `b` in its own type first:
+  `k[i] - u[i]` of an `int32` `k` and a `uint32` `u` was computed in `uint32`
+  compiled, and `c[i] - a[i]` of an `int8` `a` at `-128`, which C negated in
+  `int`, keeps its value now that a narrow result is converted back. A `uint32`
   literal is written `3u`, where loopy wrote `3ul`, and an operation loopy
   computes by a function in a wider type than numpy (`u[i] << 3`, by loopy's
   `int64` one) is converted back. `loopty.promotion` types C's operators by
@@ -2041,9 +2043,9 @@ with a pair of statement instances.
   refused only where its negation is not held either, since `u[i] - 1` is
   built as `u[i] + -1`; one first, `-7 + u[i]` or `2**31 + k[i]` of an
   `int32` `k`, as it stands. A negation is not refused, nor a comparison,
-  which numpy and the compiled run decide exactly. `^`, `<<` or `>>` of a `uint64` and a signed
-  integer, which numpy refuses, since only a double holds both, is a
-  `TraceError` too.
+  which numpy and the compiled run decide exactly. `^`, `<<` or `>>` of a
+  `uint64` and a signed integer, which numpy refuses, since only a double
+  holds both, is a `TraceError` too.
 
 ### Changed
 
