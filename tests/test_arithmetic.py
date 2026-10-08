@@ -1717,18 +1717,21 @@ def single_on_the_loops(
             y[i] = x[i]
 
 
-def test_a_guard_on_the_loops_in_single_precision_is_refused():
+def test_a_guard_on_the_loops_in_single_precision_is_cast():
     # numpy rounds the double (i + 1) ** -1 to single precision beside the
-    # float32 a, which C does only by a cast, and loopy's isl reader raises
-    # on a cast there; without it the guard was computed in double compiled.
-    from loopty.lower import LoweringError
-
+    # float32 a, which C does only by a cast. Without it the guard was
+    # computed in double compiled, and with it loopy's isl reader raised, so
+    # the guard was refused. The reader declines a cast now, as it declines
+    # any guard computed in floating point (note 23), and the cast is written.
     native = {"x": np.ones(3), "a": np.float32(0.1), "y": np.zeros(3)}
     single_on_the_loops(**native)
     assert list(native["y"]) == [1.0, 1.0, 0.0]
-    with pytest.raises(LoweringError, match="reads no array") as refused:
-        emit_code(single_on_the_loops)
-    assert "Declare the float32 scalars the guard names Real" in str(refused.value)
+    assert "if (a + (float) (pow(" in emit_code(single_on_the_loops)
+    for a in (0.1, 0.25, 1 / 3):
+        agrees(
+            single_on_the_loops,
+            lambda a=a: {"x": np.ones(5), "a": np.float32(a), "y": np.zeros(5)},
+        )
 
 
 # }}}
