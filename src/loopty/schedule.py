@@ -3452,7 +3452,8 @@ class Schedule:
 
         ``producer`` and ``consumer`` name statements: a statement by its id
         (``S0``, ``flux.S0``), or a call of a program by its label (``flux``,
-        ``step@2``), which names every statement of the call. The producer's
+        ``step@2``), which names every statement of the call and not the
+        checked points before it (see :meth:`_fused_side`). The producer's
         come first in the term. The step is :meth:`affine` with a map per
         statement that this method builds, and it is checked as that is. The
         producer's loops keep their names and their values; the consumer's
@@ -3556,13 +3557,21 @@ class Schedule:
     def _fused_side(self, name: str, text: str) -> list[str]:
         """The statements one side of :meth:`fuse` names, in term order.
 
-        Those a substitution took out run no more, and are left out; a side
-        that names only such statements is refused.
+        A call's label names the call's own statements, its scope's (see
+        :class:`loopty.term.Scope`), and not the checked points the program
+        put before it (``gather.check.perm``): those check what an earlier
+        call left for this one, and a fusion that would run the call before
+        them is refused for the flag they set, which the call reads. Those a
+        substitution took out run no more, and are left out; a side that
+        names only such statements is refused.
         """
         ids = self._layout.stmt_ids
+        calls = {scope.call: scope.statements for scope in self._term.scopes}
         named = (
             [name]
             if name in ids
+            else [stmt_id for stmt_id in calls[name] if stmt_id in ids]
+            if name in calls
             else [stmt_id for stmt_id in ids if stmt_id.startswith(f"{name}.")]
             or [stmt_id for stmt_id in ids if _sanitize(stmt_id) == name]
         )
@@ -3762,7 +3771,9 @@ class Schedule:
         is rewritten with loopy's own ``assignment_to_subst``, which turns the
         statement into a substitution rule and drops it and the temporary,
         once the statement that zeroes the array where the program made it
-        is dropped too.
+        is dropped too. Each read gets the value converted to the array's
+        element type, as storing it converted it (a ``float32`` array rounds
+        what it stores; see :func:`_substituted_kernel`).
 
         That is a storage decision and not a reordering, and it is legal when
         three things hold, each asked before anything is rewritten:
@@ -3868,15 +3879,6 @@ class Schedule:
             )
         gone = {stmt.id for stmt in writers}
         staged = self._clone()
-        staged._deps, staged._within = self._carried_over(
-            producer, gone, readers, array
-        )
-        staged._deps_total = _union(dep.relation for dep in staged._deps)
-        staged._flow_note = (
-            f"those of {term.name} with {array} computed where it is read: the "
-            f"dependences of {', '.join(sorted(gone))} dropped, and those of "
-            f"{producer.id}'s reads carried over to the reads of {array}"
-        )
         staged._substituted = (*self._substituted, array)
         staged._gone = self._gone | gone
         # The statements taken out have no instances left, and the loops
@@ -3892,6 +3894,32 @@ class Schedule:
             instances = instances.align_params(origin.get_space())
             origin = origin.align_params(instances.get_space()).subtract(instances)
         staged._origin = origin.coalesce()
+        staged._deps, staged._within = self._carried_over(
+            producer, gone, readers, array
+        )
+        # The dependences the schedule was checked against join the
+        # statements that still run as they did, since only the reads of the
+        # array change, and they include what loopy.flow found besides the
+        # ones listed here (see _cross_check); the carried ones go with them.
+        kept = (
+            None
+            if self._deps_total is None
+            else self._deps_total.intersect_domain(staged._origin).intersect_range(
+                staged._origin
+            )
+        )
+        staged._deps_total = _union(
+            relation
+            for relation in (
+                *(dep.relation for dep in staged._deps),
+                *(() if kept is None or kept.is_empty() else (kept,)),
+            )
+        )
+        staged._flow_note = (
+            f"those of {term.name} with {array} computed where it is read: the "
+            f"dependences of {', '.join(sorted(gone))} dropped, and those of "
+            f"{producer.id}'s reads carried over to the reads of {array}"
+        )
         staged._reindex = self._reindex.intersect_domain(staged._origin)
         staged._instances = staged._reindex.range().coalesce()
         live = {
@@ -3905,7 +3933,9 @@ class Schedule:
         if draft.kernel is not None:
             ids = self._lowering.insn_ids
             removed = [ids[stmt.id] for stmt in writers if stmt.id == zeros]
-            kernel, reason = _substituted_kernel(draft.kernel, array, removed)
+            kernel, reason = _substituted_kernel(
+                draft.kernel, array, removed, ids[producer.id]
+            )
             draft.kernel = kernel
             if reason is not None:
                 draft.unbuildable = reason
@@ -4884,21 +4914,41 @@ def _not_pointwise(stmt: Stmt, array: str, term: Term) -> str | None:
 
 
 def _substituted_kernel(
-    kernel: Any, array: str, removed: Sequence[str]
+    kernel: Any, array: str, removed: Sequence[str], producer: str
 ) -> tuple[Any, str | None]:
     """``kernel`` with ``array`` computed where it is read, or why not.
 
     The instructions ``removed`` go first: they zero the array where the
     program made it, and loopy's ``assignment_to_subst`` takes an array
-    whose every read has one writer before it. That writer becomes a
-    substitution rule, and loopy drops it, the temporary and the loops it
-    leaves empty once no read is left; the loops the zeros leave empty go
-    too, which loopy would otherwise warn of. Returns the kernel, or ``None``
-    and loopy's refusal in words.
+    whose every read has one writer before it. That writer, the instruction
+    ``producer``, becomes a substitution rule, and loopy drops it, the
+    temporary and the loops it leaves empty once no read is left; the loops
+    the zeros leave empty go too, which loopy would otherwise warn of.
+
+    A store converts the value to the array's element type: ``0.1 * u[j]``
+    stored in a ``float32`` cell is rounded, and a ``Real`` stored in a
+    ``Nat`` cell is truncated. The rule would hand every read the value
+    unconverted, so the producer's value is cast to that type first (loopy's
+    ``TypeCast``), which C converts exactly as it converts a store; a cast to
+    the type the value already has changes nothing. Returns the kernel, or
+    ``None`` and loopy's refusal in words.
     """
+    from loopy.symbolic import TypeCast
+
     try:
+        entry = kernel.default_entrypoint
+        dtype = entry.temporary_variables[array].dtype
+        if dtype is not None and dtype is not lp.auto:
+            entry = entry.copy(
+                instructions=[
+                    insn.copy(expression=TypeCast(dtype, insn.expression))
+                    if insn.id == producer
+                    else insn
+                    for insn in entry.instructions
+                ]
+            )
+            kernel = kernel.with_kernel(entry)
         if removed:
-            entry = kernel.default_entrypoint
             loops = {
                 name
                 for insn in entry.instructions

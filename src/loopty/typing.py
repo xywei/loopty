@@ -1474,9 +1474,12 @@ def definedness_facts(
     to decide. When isl shows a cell it reads that no call before it stored,
     the program reads the zeros there, which is no error: the fact says so,
     ``decided`` by isl, with the cell. When a read or a write is not affine,
-    or a write is under a guard isl cannot state, it stays ``assumed``, with
-    the reason. The flags of the checked points, which the program's own
-    statements set, are no edge.
+    or is made under a guard isl cannot state, it stays ``assumed``, with the
+    reason: such a read is listed where it may not be made, so a cell it
+    seems to read is no cell it is shown to read. The flags of the checked
+    points, which the program's own statements set, are no edge, and the
+    guard they put on every later statement is no such guard, since no
+    statement runs where one is set.
     """
     flags = dict(term.checks)
     facts: list[Fact] = []

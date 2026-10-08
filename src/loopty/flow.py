@@ -1139,11 +1139,12 @@ class Definedness:
     stored, and ``False`` when it shows one that is not: ``witness`` is that
     cell, ``parameters`` the sizes it is one at, and ``reader`` the
     statement that reads it. ``None`` means it cannot tell: a read whose
-    index is not affine reaches cells nobody can list, and a write whose
-    index is not affine, or under a guard isl cannot state, stores cells
-    nobody can list either, so none of them counts as stored. ``detail``
-    says which, in words, or names the cell. ``read`` and ``stored`` are the
-    two sets of cells when ``ok`` is ``True``, the question isl answered.
+    index is not affine reaches cells nobody can list, a read under a guard
+    isl cannot state is listed where the guard may not hold, and a write
+    whose index is not affine, or under such a guard, stores cells nobody
+    can list either, so none of them counts as stored. ``detail`` says
+    which, in words, or names the cell. ``read`` and ``stored`` are the two
+    sets of cells when ``ok`` is ``True``, the question isl answered.
     """
 
     ok: bool | None
@@ -1169,16 +1170,33 @@ def definedness(
     before the guard narrows them, a sum's over the sum's), and the cells
     every write stores; a read is taken to reach only cells the array has,
     which the in-bounds facts are about. A read is over-approximated when
-    its index is not affine, which can only make the answer ``None``; a
-    write that cannot be listed counts for nothing, which can only make it
-    ``None`` too, so ``True`` and ``False`` are both exact.
+    its index is not affine, or when it is made under a guard isl cannot
+    state (its domain is then the loops the guard does not narrow, and the
+    guard's own reads are listed wherever the guards around it may be
+    false), which can only make the answer ``None``; a write that cannot be
+    listed counts for nothing, which can only make it ``None`` too, so
+    ``True`` and ``False`` are both exact. The flag of a checked point a
+    program puts before a call (``term.checks``) is the one such guard that
+    is left out: wherever it is set, the program stops, and no statement
+    after it runs, reader or writer.
     """
+    from lanky.terms import Comparison, Subscript, Var, render
+
     from loopty.domain import dimension_names
 
     arrtype = term.array_types[array]
     names = dimension_names(len(arrtype.axes), _names_in(arrtype.axes))
     universe = cell_set(arrtype, names=names)
     unknown: list[str] = []
+    flags = {
+        render(Comparison(Subscript(Var(flag), 0), "==", 0)) for flag, _ in term.checks
+    }
+
+    def unstated(stmt: Stmt) -> list[str]:
+        """The conjuncts of the statement's guard isl cannot state, but flags."""
+        return [
+            conjunct for conjunct, _ in stmt.unnarrowed if conjunct not in flags
+        ]
 
     def cells(stmt: Stmt, kinds: tuple[str, ...], writing: bool) -> isl.Set | None:
         out: isl.Set | None = None
@@ -1196,13 +1214,14 @@ def definedness(
                 )
                 if writing:
                     continue
-            if writing and stmt.unnarrowed:
-                conjuncts = ", ".join(conjunct for conjunct, _ in stmt.unnarrowed)
+            guard = unstated(stmt)
+            if guard:
                 unknown.append(
-                    f"{stmt.id} stores {array} under a guard isl cannot state "
-                    f"({conjuncts})"
+                    f"{stmt.id} {'stores' if writing else 'reads'} {array} under a "
+                    f"guard isl cannot state ({', '.join(guard)})"
                 )
-                continue
+                if writing:
+                    continue
             reached = access_relation(inames, domain, indices).range()
             for k, dim in enumerate(names):
                 reached = reached.set_dim_name(isl.dim_type.set, k, dim)

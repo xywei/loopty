@@ -23,7 +23,7 @@ import islpy as isl
 import numpy as np
 import pytest
 from lanky.ledger import Status
-from lanky.prelude import Real
+from lanky.prelude import Nat, Real
 
 from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum, when
 from loopty.executor import LoopyExecutor
@@ -330,6 +330,122 @@ def rows(a, z, g):
     row_sum(s, z)
 
 
+@kernel
+def mark(u: Arr[Fin[n], Real], m: Arr[Fin[n], Real]):  # noqa: F821
+    """One at the interior points."""
+    for j in u.dom:
+        with when((j > 0) & (j + 1 < u.dom.size)):
+            m[j] = 1.0
+
+
+@kernel
+def masked(
+    f: Arr[Fin[n], Real],  # noqa: F821
+    m: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """``f`` where ``m`` is set, a guard isl cannot state."""
+    for i in y.dom:
+        with when(m[i] > 0.5):
+            y[i] = f[i]
+
+
+@program
+def marked(u, y):
+    """masked reads f only where mark set m, which is where f is stored."""
+    f = Arr.zeros_like(u)
+    m = Arr.zeros_like(u)
+    interior_flux(u, f)
+    mark(u, m)
+    masked(f, m, y)
+
+
+@kernel
+def reverse_quiet(idx: Arr[Fin[n], Fin[n]]):  # noqa: F821
+    """Reverse the cells, and say nothing about it."""
+    for i in idx.dom:
+        idx[i] = idx.dom.size - 1 - i
+
+
+@kernel
+def number_up(idx: Arr[Fin[n], Fin[n]]):  # noqa: F821
+    """Off by one at the end: ``idx[n - 1]`` is ``n``, and nothing said."""
+    for i in idx.dom:
+        idx[i] = i + 1
+
+
+@program
+def reversed_gather(idx, x, y):
+    """Nothing says what reverse_quiet writes, so gather's is checked."""
+    reverse_quiet(idx)
+    gather(idx, x, y)
+
+
+@program
+def wrong_gather(idx, x, y):
+    """The same with an index past the end, which the check stops."""
+    number_up(idx)
+    gather(idx, x, y)
+
+
+@program
+def checked_flux(idx, x, y, rhs):
+    """A checked point, then an edge through an array the program makes."""
+    reverse_quiet(idx)
+    gather(idx, x, y)
+    f = Arr.zeros_like(y)
+    flux(y, f)
+    divergence(f, rhs)
+
+
+@kernel
+def tenth(u: Arr[Fin[n], Real], f: Arr[Fin[n], np.float32]):  # noqa: F821
+    """A tenth of each cell, stored in single precision."""
+    for j in u.dom:
+        f[j] = u[j] * 0.1
+
+
+@kernel
+def tenfold(
+    f: Arr[Fin[n], np.float32],  # noqa: F821
+    t: Arr[Fin[n], np.float32],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """Ten times each cell, plus ``t``."""
+    for i in y.dom:
+        y[i] = f[i] * 10.0 + t[i]
+
+
+@program
+def single(u, t, y):
+    """An intermediate in single precision, so each store rounds."""
+    f = Arr.zeros_like(t)
+    tenth(u, f)
+    tenfold(f, t, y)
+
+
+@kernel
+def halfway(u: Arr[Fin[n], Real], f: Arr[Fin[n], Nat]):  # noqa: F821
+    """Half of each cell, stored in a whole number, which truncates it."""
+    for j in u.dom:
+        f[j] = u[j] * 0.5
+
+
+@kernel
+def twice_whole(f: Arr[Fin[n], Nat], y: Arr[Fin[n], Nat]):  # noqa: F821
+    """Twice each cell."""
+    for i in y.dom:
+        y[i] = f[i] * 2
+
+
+@program
+def truncated(u, y):
+    """An intermediate of whole numbers, which the store truncates."""
+    f = Arr.zeros_like(y)
+    halfway(u, f)
+    twice_whole(f, y)
+
+
 def velocity(size: int) -> np.ndarray:
     return np.sin(np.linspace(0.0, 2.0 * np.pi, size, endpoint=False)) + 0.3
 
@@ -383,6 +499,37 @@ def test_a_consumer_that_reads_the_zeros_is_told_so_and_not_refuted() -> None:
     size = fact.provenance["witness_params"]["n"]
     assert cell[0] in (0, size - 1)
     assert "zeros" in fact.provenance["reads"]
+
+
+def test_a_read_under_a_guard_isl_cannot_state_is_not_shown_to_see_zeros() -> None:
+    # masked reads f[i] only where m[i] > 0.5, which mark sets inside, where
+    # interior_flux stores f: no zero reaches a write. Its read is listed
+    # over every i, so a cell outside is only one it may read, and the fact
+    # stays assumed, where it was once decided as reading f[0]. Its guard's
+    # read of m is listed over every i as well, under that same guard.
+    facts = {fact.provenance["array"]: fact for fact in definedness(marked)}
+    for array in ("f", "m"):
+        fact = facts[array]
+        assert fact.status is Status.ASSUMED, fact.statement
+        assert fact.term is None
+        reason = fact.provenance["reason"]
+        assert f"masked.S0 reads {array} under a guard isl cannot state (m[" in reason
+    y = Arr.zeros(6)
+    marked(Arr.from_numpy(velocity(6)), y)
+    assert y.numpy()[0] == 0.0 and y.numpy()[-1] == 0.0
+
+
+def test_the_guard_of_a_checked_point_leaves_an_edge_decided() -> None:
+    # gather's requirement on idx is checked between the calls, and every
+    # statement after the check runs only where its flag is clear: flux's
+    # store and divergence's reads are guarded by it, and still decided,
+    # since nothing runs where it is set.
+    term = checked_flux.term
+    assert term.checks
+    assert term.stmt("flux.S0").unnarrowed
+    (fact,) = definedness(checked_flux)
+    assert fact.term is not None, fact.provenance
+    assert IslOracle().establish(fact).status is Status.DECIDED
 
 
 def test_a_read_through_an_index_array_is_decided_when_every_cell_is_stored() -> None:
@@ -558,6 +705,56 @@ def test_a_call_between_the_fused_runs_after_their_loop() -> None:
     for size in (1, 2, 5, 8):
         inputs = {"u": Arr.from_numpy(velocity(size)), "rhs": Arr.zeros(size)}
         agrees(between, fused, inputs)
+
+
+def gather_inputs(size: int) -> dict:
+    return {
+        "idx": Arr.zeros(size, dtype=np.int64),
+        "x": Arr.from_numpy(np.arange(10.0, 10.0 + size)),
+        "y": Arr.zeros(size),
+    }
+
+
+def test_a_fusion_past_a_checked_point_is_refused_for_its_flag() -> None:
+    # gather's requirement on idx is checked between the two calls, and
+    # gather runs only where the check's flag is clear. Fused, gather would
+    # read the flag before the check over the cells after it is done: the
+    # refusal names the check, its flag and the read. The label names the
+    # call's own statement, not the check before it.
+    term = reversed_gather.term
+    ((flag, _message),) = term.checks
+    (check,) = [stmt.id for stmt in term.stmts if stmt.assignee.array == flag]
+    for shift in (0, 1, 3):
+        with pytest.raises(IllegalCast) as caught:
+            Schedule(reversed_gather, sizes={"n": 5}).fuse(
+                "reverse_quiet", "gather", shift=shift
+            )
+        assert caught.value.fact.kind == "monotone"
+        (source, _), (sink, _), _sizes = caught.value.witness
+        assert (source, sink) == (check, "gather.S0")
+        assert f"writes {flag}[0] read by gather.S0[" in str(caught.value)
+
+
+def test_a_checked_point_fused_with_the_producer_stays_before_the_reads() -> None:
+    # The check fused into the producer's loop checks each cell as it is
+    # written, and gather still runs after the loop, where the flag is set
+    # or not: the compiled program agrees, and stops where the native call
+    # is refused.
+    term = reversed_gather.term
+    ((flag, _message),) = term.checks
+    (check,) = [stmt.id for stmt in term.stmts if stmt.assignee.array == flag]
+    fused = Schedule(reversed_gather).fuse("reverse_quiet", check)
+    assert statements(fused) == [("bijective", "decided"), ("monotone", "decided")]
+    for size in (1, 2, 5):
+        agrees(reversed_gather, fused, gather_inputs(size))
+    term = wrong_gather.term
+    ((flag, _message),) = term.checks
+    (check,) = [stmt.id for stmt in term.stmts if stmt.assignee.array == flag]
+    fused = Schedule(wrong_gather).fuse("number_up", check)
+    with pytest.raises(ValueError, match="is 4"):
+        wrong_gather(**gather_inputs(4))
+    with pytest.raises(ValueError, match="stops before gather"):
+        LoopyExecutor().run(fused, **gather_inputs(4))
 
 
 @pytest.mark.parametrize(
@@ -794,6 +991,40 @@ def test_an_array_is_substituted_once() -> None:
     schedule = Schedule(burgers).substitute("f")
     with pytest.raises(ValueError, match="substituted already"):
         schedule.substitute("f")
+
+
+def test_a_substituted_value_is_converted_as_storing_it_converted_it() -> None:
+    # tenth stores a tenth of u in single precision, which rounds it. The
+    # value computed where it is read has to be rounded the same way, or
+    # the substituted program computes something the stored one does not:
+    # bit for bit the same as the kernel that stores f.
+    rng = np.random.default_rng(3)
+    u = rng.normal(size=9) * 1e3 + 1.0 / 3.0
+    stored = LoopyExecutor().run(
+        Schedule(single),
+        u=Arr.from_numpy(u.copy()),
+        t=Arr.from_numpy(np.zeros(9, dtype=np.float32)),
+        y=Arr.zeros(9),
+    )["y"]
+    computed = LoopyExecutor().run(
+        Schedule(single).substitute("f"),
+        u=Arr.from_numpy(u.copy()),
+        t=Arr.from_numpy(np.zeros(9, dtype=np.float32)),
+        y=Arr.zeros(9),
+    )["y"]
+    assert np.array_equal(stored, computed)
+    assert not np.array_equal(computed, u * 0.1 * 10.0)
+    # A Real stored in a Nat cell is truncated, and the result is exact.
+    schedule = Schedule(truncated).substitute("f")
+    for size in (1, 4, 7):
+        agrees(
+            truncated,
+            schedule,
+            {
+                "u": Arr.from_numpy(np.arange(size) * 1.5 + 3.0),
+                "y": Arr.from_numpy(np.zeros(size, dtype=np.int64)),
+            },
+        )
 
 
 # }}}
