@@ -541,6 +541,59 @@ with a pair of statement instances.
   and the substituted schedule stores no flux; both runs agree with the
   native one. `examples/README.md`, the README and the composition demo
   describe it, and the composition transcripts are regenerated.
+- **A rewritten layout decided by induction over the run, or refuted by a
+  native run** (#103). The `layout` fact of a kernel that writes a count, a
+  start read from another array, or a start under a guard isl cannot state
+  was left `assumed`, and every fact resting on it worth an assumption. The
+  rows in order (each starting no earlier than the row before it ends, every
+  row inside the buffer, no count negative) hold when the call starts, where
+  the contract checks the offsets against the counts and the buffer, and isl
+  now asks of every statement that writes the offsets or the counts whether
+  the write keeps them so wherever they held before it
+  (`loopty.typing.layout_facts`, through `loopty.hypotheses.discharge`): the
+  cells the claim reads are parameters, the order before the write is the
+  hypothesis about them, the statement's guard is the claim's antecedent,
+  and the buffer's length is a parameter of its own. `cnt[r] = 0`,
+  `cnt[r] // 2`, and a start moved within the room its row leaves are
+  decided, and the reads and casts resting on the fact are worth `decided`.
+  A family with no counts array is asked of its offsets alone. A kernel that
+  writes the offsets and an array of the family, or a row's length inside a
+  loop over the row, is not asked, since what rests on the layout needs more
+  than the order there: the disjoint writes and dependences of a ragged
+  array tell its cells apart as `[r, j]`, one cell of the buffer each only
+  while no row moves (`cnt[r] = 0; off[r + 1] = off[r] + cnt[r]` writes
+  `val[0, 0]` and `val[1, 0]` on one cell), and a loop over a row runs to the
+  length it read when it started, which the in-bounds facts of its entries
+  are stated against (`cnt[r] = 0` inside `for j in val.dom[r]`). Where isl
+  cannot show a write keeps the order, the fact stays `assumed` with both
+  reasons, and a kernel's native runs may refute it
+  (`loopty.faithful.layout_fact`): one that reads a row off its buffer
+  through the layout it has written, `off[r + 1] = off[r] + cnt[r] + 1`
+  moving the last row past the end, or one that leaves two rows on one
+  cell, `off[r] = s[r]`. Such a read is a `loopty.arr.LayoutError`, an
+  `IndexError` that names the array read, and the runs the body raised in
+  are kept for it (`loopty.faithful.Raised`). `loopty run` lists the
+  kernel's own run-tried fact under a cast that rests on it. A program's
+  layout facts are not tried on runs.
+- **A `nat` requirement** (#119). A kernel's contract checks that the cells
+  of a `Nat` argument are not negative, and in a program nothing checked
+  that of an array an earlier call wrote: the compiled program ran a call
+  the native one refuses, and #118 withheld the callee's postcondition after
+  it. It is now a requirement of the program like a `Fin` element sort,
+  decided under the hypotheses that held at the call or checked between the
+  calls, so the compiled program stops where the native callee is refused,
+  and the postcondition is a hypothesis after the call again. Offsets with a
+  layout requirement owe none, since the layout makes each a sum of counts
+  that are naturals at the call. Offsets a scan computes and a later call
+  declares `Nat` without reading rows through them gain a checked point:
+  that they are naturals follows from the scan's recurrence only by
+  induction.
+- **`refused_claims` in `loopty run --json`** (#99). Each claim of an id that
+  another kernel claimed first, which `loopty run` decided or ran all the
+  same, is kept on the fact in the table with its status and its
+  counterexample, witness or reason, beside lanky's `duplicate_claims`,
+  which keeps its statement alone; a consumer of the JSON can tell that the
+  other claim was refuted, and why.
 
 ### Fixed
 
@@ -1854,6 +1907,54 @@ with a pair of statement instances.
   false that the compiled program then skipped a check on, and read `x[-4]`.
   The requirement after it is checked, and its reason says why the
   postcondition was not used.
+- A schedule of an access indexed by a size, `x[x.dom.size - 1]`, is built
+  (#110): the map of the pairs of instances that touch one cell named the
+  size without declaring it, and isl read the text as a syntax error naming
+  neither the kernel nor the access. A write of the last offset beside a
+  ragged read failed the same way. The map declares the sizes, and its
+  dimensions have primed names, which no size can have: isl reads a
+  dimension named like a declared size as the size, and a kernel over
+  `Fin[s]` lost every dependence that map gives.
+- A ragged type nothing builds is refused where it is traced (#112): a fiber
+  after two dense axes, a dense axis after the fiber, or counts of two axes.
+  `Arr.ragged` builds none of them and lowering indexes none, but tracing and
+  the typing rules accepted them, and the ledger stated facts about a row's
+  start read through the inner index alone.
+- `loopty run` compares a schedule of a schedule with its kernel (#98):
+  `Schedule(Schedule(double)).split("i", 2)` was only executed, since its
+  source is a schedule and not callable, and recorded no agreement, and
+  `double` ran through the identity schedule as if nothing scheduled it. The
+  nested run's agreement is kept under `#2` as a second run of one schedule.
+- A written bound is read where each loop and sum starts whatever a guard or
+  a clause makes of the domain (#111). isl states `for j / for k over one
+  row` with `when(k == j)` as `k = j, 0 <= j < nl_cnt_r`, with no bound of
+  `k` left, so the interpreter gave the loop over `k` no reading of its own,
+  ran it past its row's new length, and refuted the faithful trace by an
+  `IndexError` where `when(k <= j)` was tested. The readings are told apart
+  over the statement's `loop_domain`, and over a sum's new `loop_domain`
+  (`loopty.term.Reduction`), its domain before the statement's guard and its
+  clause narrowed it, and each reading is read where its own loop starts.
+  Lowering computes a row length once per row and refuses a rewrite that a
+  loop inside the row would read stale, but counted only the first loop the
+  length bounds: `cnt[r] = 1` between the loop over `j` and the loop over
+  `k` inside it was lowered, and the compiled run disagreed with the native
+  one. The innermost loop counts now, over the nest before a guard narrowed
+  it, and `loopty.flow` states a sum's bound reads over its `loop_domain`, so
+  a tag across a read the clause hid is refused.
+- A checked point reads a value written outside 32 bits as written (#128).
+  The compiled program stored `Fin` cells in 32 bits, so `perm[i] = 2**32`
+  was `0` after the store, a point of `Fin(n)`, where the native contract of
+  the next call refuses `2**32`; the program ran the call. An integral array
+  a checked point reads (`Term.checked_arrays`) is stored in 64 bits, in the
+  lowered program (`loopty.contract.array_storage`) and in the types
+  `loopty.promotion` gives its elements: a `Fin[m]` one is widened, and one
+  of `Nat` or `Int` is stored so already (#101). The native run computes in the
+  array it is given, and one of 32 bits narrows what is written into it
+  where the compiled program does not, so the compiled run refuses such an
+  array passed in fewer than 64 bits, `Fin[m]`'s `int32` included, or the
+  parameter a temporary of it is made like
+  (`loopty.contract.checked_storage`), and composing refuses a temporary of
+  it given a narrower `dtype`.
 
 ### Changed
 

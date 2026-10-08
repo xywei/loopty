@@ -67,7 +67,7 @@ from typing import Any
 import numpy as np
 import pymbolic.primitives as prim
 
-from loopty.contract import compiled_storage, native_storage
+from loopty.contract import array_storage, compiled_storage, native_storage
 from loopty.term import Access, ArrType, Reduction, Term
 
 __all__ = ["Promotion", "Step"]
@@ -392,6 +392,9 @@ class Promotion:
 
     def __init__(self, term: Term) -> None:
         self.arrays: dict[str, ArrType] = term.array_types
+        #: The term, whose checked points widen what they read compiled
+        #: (:func:`loopty.contract.array_storage`); ``None`` before there is one.
+        self.term: Term | None = term
         self.scalars: dict[str, Any] = {
             name: sort for name, sort in term.params if not isinstance(sort, ArrType)
         }
@@ -409,6 +412,9 @@ class Promotion:
         it of an expression it is about to record (:mod:`loopty.trace`).
         """
         promotion = cls.__new__(cls)
+        # A term being traced has no checked points yet: those come of
+        # composing calls, so each array is stored as its sort is.
+        promotion.term = None
         promotion.arrays = {
             name: typ for name, typ in sorts.items() if isinstance(typ, ArrType)
         }
@@ -458,7 +464,7 @@ class Promotion:
             return None, None
         stored = native_storage(typ.dtype)
         native = None if stored is None else (_sample(stored, False),)
-        return native, compiled_storage(typ.dtype)
+        return native, array_storage(self.term, name, typ.dtype)
 
     def _variable(self, name: str) -> tuple[Native, np.dtype | None]:
         """A scalar argument by its sort; a loop variable or a size is an int.

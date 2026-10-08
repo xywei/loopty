@@ -61,9 +61,10 @@ reads its rows through, which the calls have to agree on.
 The compiled program is one call, so its contract checks the program's
 arguments once, when it starts, where natively every kernel's contract checks
 its own when it is called. What a kernel's contract checks of the cells of an
-array (that a ``Fin[m]`` element is a point of ``Fin[m]``, that the offsets a
-ragged family is read through are the ones its counts give) is what its
-in-bounds facts rest on. A kernel's requirements on its inputs are its
+array (that a ``Fin[m]`` element is a point of ``Fin[m]``, that a ``Nat``
+element is not negative, that the offsets a ragged family is read through are
+the ones its counts give) is what its in-bounds facts, and the runs its
+postcondition is tested on, rest on. A kernel's requirements on its inputs are its
 argument types, so where an earlier call wrote such an array, or the program
 made it, the requirement is an obligation of the program
 (:class:`~loopty.term.Requirement`), and facts travel to discharge it.
@@ -92,10 +93,11 @@ requirement whose fact rests on something not at least ``tested`` (a
 postcondition its kernel's runs refute, a cited theorem the property tester
 does not pass, an axiom) keeps its checked point, and stays ``decided`` in
 the ledger, worth what it rests on (#115). And a postcondition is tested on
-the runs its kernel's contract lets in, so it is a hypothesis only after a
-call at which that contract held: where an earlier call wrote an array of the
-callee's of a ``Nat`` element sort, which the native contract checks and no
-requirement does, the postcondition is not offered (:meth:`_Composer.unchecked`).
+the runs its kernel's contract lets in, so it is a hypothesis after a call at
+which that contract held, which every requirement of the call, decided or
+checked, makes so: the ``Nat`` element sort of an array an earlier call wrote
+is one of them (#119), so that the compiled program stops where the native
+callee is refused for a negative cell, and does not run it.
 
 The hypotheses that held where each call ran are kept with the term too
 (:class:`~loopty.term.Scope`), so that a callee's fact its own term leaves
@@ -154,6 +156,7 @@ from lanky.terms import (
 )
 
 from loopty.contract import (
+    CHECKED_STORAGE,
     holds_natively,
     integral_sort,
     native_storage,
@@ -216,6 +219,11 @@ def rename_expr(expr: Any, names: Mapping[str, str], exprs: Mapping[str, Any]) -
             domain=rename_set(expr.domain, names, exprs),
             body=rename_expr(expr.body, names, exprs),
             exactness=expr.exactness,
+            loop_domain=(
+                None
+                if expr.loop_domain is None
+                else rename_set(expr.loop_domain, names, exprs)
+            ),
         )
     if isinstance(expr, prim.Variable):
         if expr.name in exprs:
@@ -643,9 +651,10 @@ class _Want:
     """A requirement of one call on an array an earlier call wrote.
 
     ``kind`` is ``"element"`` (the callee declares the array's elements of a
-    ``Fin[m]`` sort) or ``"layout"`` (the callee reads the rows of ``owner``,
-    counted by ``counts``, through the array as offsets). ``writer`` is the
-    call, or the ``Arr.zeros_like``, that wrote it last.
+    ``Fin[m]`` sort), ``"nat"`` (of the ``Nat`` sort) or ``"layout"`` (the
+    callee reads the rows of ``owner``, counted by ``counts``, through the
+    array as offsets). ``writer`` is the call, or the ``Arr.zeros_like``,
+    that wrote it last.
     """
 
     kind: str
@@ -976,6 +985,30 @@ def _reflected_spelling(expr: Any) -> str | None:
     if not isinstance(index, prim.Variable):
         return None
     return f"nl_{expr.aggregate.name}_{index.name}"
+
+
+def _laid_out(term: Term, typ: ArrType, read_through: Any) -> bool:
+    """Whether a layout requirement makes every cell of ``typ`` a natural.
+
+    ``read_through`` is ``(owner, counts)`` when the callee reads the rows
+    of ``owner``, counted by ``counts``, through the array, and ``None``
+    otherwise. The layout says ``off[0] == 0`` and ``off[q + 1] == off[q] +
+    cnt[q]`` for every row ``q``, which covers every cell of offsets of one
+    axis, one longer than the rows, and makes each a sum of counts; those
+    are naturals where their sort is ``Nat`` or ``Fin``.
+    """
+    if read_through is None or len(typ.axes) != 1:
+        return False
+    owner, counts = read_through
+    rows = term.array_types[owner].axes[0]
+    if not _same(typ.axes[0], _plus(rows, 1)):
+        return False
+    counts_type = term.array_types.get(counts)
+    if not isinstance(counts_type, ArrType):
+        return False
+    sort = counts_type.dtype
+    sort = sort.base if isinstance(sort, Refined) else sort
+    return isinstance(sort, FinType) or getattr(sort, "name", None) == "Nat"
 
 
 class _Composer:
@@ -1401,9 +1434,11 @@ class _Composer:
         and two of the checks are about what the cells hold, which the
         kernel's facts rest on. The cells of an array of a ``Fin[m]`` element
         sort are points of ``Fin[m]``, so an access indexed by one is in bounds
-        by type, with no test in the generated code. And the offsets a ragged
-        family is read through are the ones its counts give, so an access
-        inside a row is inside the buffer. The compiled program is one call,
+        by type, with no test in the generated code. The cells of one of the
+        ``Nat`` sort are not negative, which the kernel's postcondition was
+        tested on runs of. And the offsets a ragged family is read through
+        are the ones its counts give, so an access inside a row is inside the
+        buffer. The compiled program is one call,
         whose contract checks the program's arguments once, when it starts,
         so an array that an earlier call wrote, or that the program made,
         owes the check here: ``perm[i] = i + 1`` in one kernel is an address
@@ -1411,6 +1446,14 @@ class _Composer:
         native run is refused by the second kernel's contract. Each such
         array is a requirement, decided or checked once the program is
         composed (:meth:`travel`).
+
+        Offsets of the ``Nat`` sort with a layout requirement owe no ``nat``
+        one: the layout says that they start at 0 and grow by the counts,
+        which are naturals where the call is made (the program's contract
+        checks them on entry, and a count an earlier call wrote is refused
+        below), so every cell the layout covers is a natural, by induction
+        over the rows, which isl cannot do; it covers every cell when the
+        offsets have one more than the rows (#119).
 
         An array that is the row lengths of a ragged array the call reads is
         refused instead, when an earlier call wrote it: the rows are laid out
@@ -1460,6 +1503,10 @@ class _Composer:
                 )
             if isinstance(element, FinType):
                 wants.append(_Want("element", param, name, writer))
+            elif getattr(element, "name", None) == "Nat" and not _laid_out(
+                term, typ, offsets_of.get(param)
+            ):
+                wants.append(_Want("nat", param, name, writer))
             if param in offsets_of:
                 owner, family = offsets_of[param]
                 if name not in self.read_through and name not in self.deferred:
@@ -1795,6 +1842,41 @@ class _Composer:
         if value is not None and value.name in self.types:
             self.inherits.append((name, value.name))
 
+    def stored_wide(self, name: str, made: _Made) -> None:
+        """Refuse a ``dtype`` narrower than 64 bits for an array a check reads.
+
+        The compiled program stores an integral array a checked point reads
+        in 64 bits (:func:`loopty.contract.array_storage`), so that the check
+        reads what the earlier call wrote; a native array of fewer bits
+        narrows it first, and the native run would check another value
+        (#128). A ``dtype`` given to the ``Arr.zeros_like``, or to the array
+        it was made like, is checked here; one left to a parameter is checked
+        when the compiled program is run
+        (:func:`loopty.contract.checked_storage`).
+        """
+        if not integral_sort(self.types[name].dtype):
+            return
+        value: ProgramValue | None = made.value
+        while value is not None and value.like is not None:
+            here = self.made.get(value.name)
+            if here is not None and here.dtype is not None:
+                try:
+                    got = np.dtype(here.dtype)
+                except TypeError:
+                    return
+                if got.kind == "i" and got.itemsize >= CHECKED_STORAGE.itemsize:
+                    return
+                raise TraceError(
+                    f"{self.program} makes {name} at {made.where} as an array of "
+                    f"{got}, and a checked point of the program reads {name} "
+                    "between two calls: the compiled program stores it in 64 "
+                    "bits, so that the check reads what the earlier call wrote, "
+                    "and the native array would narrow what is written into it, "
+                    "so the two runs would check two values. Pass "
+                    f"Arr.zeros_like dtype={CHECKED_STORAGE}"
+                )
+            value = value.like
+
     # }}}
 
     def finish(self) -> Term:
@@ -1821,6 +1903,9 @@ class _Composer:
                 "would compare nothing; write the result into a parameter"
             )
         stmts, requirements, scopes, flags = self.travel()
+        for requirement in requirements:
+            if requirement.flag is not None and requirement.array in self.made:
+                self.stored_wide(requirement.array, self.made[requirement.array])
         resolved = self.resolved
         return Term(
             name=self.program,
@@ -1867,12 +1952,6 @@ class _Composer:
         """
         valid: list[Hypothesis] = []
         written: set[str] = set()
-        #: The arrays a call has written so far, which ``written`` holds
-        #: with the ones only an ``Arr.zeros_like`` has.
-        called: set[str] = set()
-        #: The postconditions held back by :meth:`unchecked`, each with the
-        #: arrays it names, for the reason of a requirement on one of them.
-        withheld: list[tuple[frozenset[str], str]] = []
         flags: list[str] = []
         flag_types: list[tuple[str, ArrType]] = []
         shift = 0
@@ -1893,10 +1972,7 @@ class _Composer:
             offered, notes = self.offered(valid, written)
             types_here: list[Hypothesis] = []
             for want in slot.wants:
-                held_back = [note for names, note in withheld if want.array in names]
-                requirement, checks = self.requirement(
-                    slot, want, offered, [*held_back, *notes]
-                )
+                requirement, checks = self.requirement(slot, want, offered, notes)
                 requirements.append(requirement)
                 for check in checks:
                     order = (slot.start + shift, *(0,) * len(check.inames))
@@ -1951,13 +2027,8 @@ class _Composer:
                     ),
                 )
             )
-            unchecked = self.unchecked(slot, called)
             written |= slot.written
-            called |= slot.written
             valid = [h for h in valid if not (h.mentions & slot.written)]
-            withheld = [
-                (names, note) for names, note in withheld if not (names & slot.written)
-            ]
             if slot.post is not None:
                 identifier = self.restatement_id(slot.kernel)
                 self.postconditions[identifier] = slot.kernel
@@ -1967,68 +2038,21 @@ class _Composer:
                 faithful = self.faithful_id(slot.kernel)
                 self.faithfuls[faithful] = slot.kernel
                 claim = self.resolve_claim(slot.post)
-                if unchecked:
-                    # The postcondition was tested on runs its contract let
-                    # in, and here a cell the contract checks natively is
-                    # checked by nothing: it says nothing of this call.
-                    withheld.append(
-                        (
-                            frozenset(self.arrays_in(claim)),
-                            f"the postcondition of {slot.kernel.__name__} after "
-                            f"{slot.label} at {slot.where} is no hypothesis, since "
-                            + "; ".join(unchecked),
-                        )
+                # The postcondition was tested on the runs its contract let
+                # in. Here the contract held at the call: what nothing wrote
+                # before it, the program's contract checked on entry, and
+                # what an earlier call wrote is a requirement of the call,
+                # decided or checked (#119).
+                valid.append(
+                    Hypothesis(
+                        claim=claim,
+                        source=f"the postcondition of {slot.kernel.__name__}, "
+                        f"after {slot.label} at {slot.where}",
+                        rests_on=(identifier, faithful),
+                        mentions=frozenset(self.arrays_in(claim)),
                     )
-                else:
-                    valid.append(
-                        Hypothesis(
-                            claim=claim,
-                            source=f"the postcondition of {slot.kernel.__name__}, "
-                            f"after {slot.label} at {slot.where}",
-                            rests_on=(identifier, faithful),
-                            mentions=frozenset(self.arrays_in(claim)),
-                        )
-                    )
-        return stmts, requirements, scopes, flag_types
-
-    def unchecked(self, slot: _Done, called: set[str]) -> list[str]:
-        """What the call's contract checks natively that nothing checks here.
-
-        A postcondition is tested on the runs the kernel's contract lets in,
-        so it holds after a call only where the contract held at it. In a
-        program it does for an array nothing wrote before the call, which the
-        program's contract checks on entry, and for one whose ``Fin`` element
-        sort or layout is a requirement of the call, decided or checked
-        (:meth:`requirement`). A ``Nat`` element sort is neither: an earlier
-        call can leave a negative cell in such an array, which the native
-        call refuses and the compiled program passes on. Zeros are naturals,
-        so an array only an ``Arr.zeros_like`` wrote is not counted.
-        """
-        out = []
-        for param, typ in slot.types.items():
-            if not isinstance(typ, ArrType):
-                continue
-            array = slot.arrays.get(param)
-            if array is None or array not in called:
-                continue
-            sort = typ.dtype.base if isinstance(typ.dtype, Refined) else typ.dtype
-            if getattr(sort, "name", None) == "Nat":
-                out.append(
-                    f"its contract checks that the elements of {param} are "
-                    f"naturals, and {self.last_writer_before(array, slot)} wrote "
-                    f"{array} before the call, which no requirement checks"
                 )
-        return out
-
-    def last_writer_before(self, array: str, slot: _Done) -> str:
-        """What wrote ``array`` last before the call ``slot``, in words."""
-        writer = None
-        for other in self.slots:
-            if other is slot:
-                break
-            if isinstance(other, _Done) and array in other.written:
-                writer = f"{other.kernel.__name__} at {other.where}"
-        return writer or "an earlier call"
+        return stmts, requirements, scopes, flag_types
 
     def weakly_supported(self, used: Sequence[Hypothesis]) -> list[str]:
         """Why the facts ``used`` rest on are not all at least ``tested``.
@@ -2328,7 +2352,8 @@ class _Composer:
         """One requirement, decided under ``offered``, or its check statements.
 
         An element requirement is about every cell of the array: it is a
-        point of the sort the callee declares, ``0 <= perm[i] < n``. A layout
+        point of the sort the callee declares, ``0 <= perm[i] < n``. So is a
+        ``nat`` one, ``src[i] >= 0``. A layout
         requirement is what the contract compares the offsets with, the
         offsets the counts give the rows: ``off[0] == 0``, and ``off[q] ==
         off[q - 1] + cnt[q - 1]`` for ``1 <= q <= n``. Its check is two
@@ -2339,9 +2364,7 @@ class _Composer:
         typ = self.program_type(array)
         where = slot.where
         checks: list[tuple[str, tuple[str, ...], isl.Set, Any]] = []
-        if want.kind == "element":
-            sort = _rename_type(slot.types[want.param].dtype, {}, self.resolved)
-            bound = _fin_bound(sort)
+        if want.kind in ("element", "nat"):
             dims = tuple(self.fresh("i") for _ in typ.axes)
             bounds = [
                 Subscript(Var(axis.name), Var(dims[k - 1])) if ragged else axis
@@ -2353,24 +2376,32 @@ class _Composer:
             domain = domain_set(dims, bounds, reflections=table)
             index = tuple(Var(d) for d in dims)
             cell = Subscript(Var(array), index[0] if len(index) == 1 else index)
-            goal = LogicalAnd(
-                (Comparison(0, "<=", cell), Comparison(cell, "<", bound))
-            )
-            breaks = LogicalOr(
-                (Comparison(cell, "<", 0), Comparison(cell, ">=", bound))
-            )
+            if want.kind == "element":
+                sort = _rename_type(slot.types[want.param].dtype, {}, self.resolved)
+                bound = _fin_bound(sort)
+
+                def holds(cell: Any, bound: Any = bound) -> Any:
+                    return LogicalAnd(
+                        (Comparison(0, "<=", cell), Comparison(cell, "<", bound))
+                    )
+
+                breaks = LogicalOr(
+                    (Comparison(cell, "<", 0), Comparison(cell, ">=", bound))
+                )
+                what = f"the elements of {array} are points of {sort}"
+                failure = f"an element of {array} is not a point of {sort}"
+            else:
+
+                def holds(cell: Any) -> Any:
+                    return Comparison(cell, ">=", 0)
+
+                breaks = Comparison(cell, "<", 0)
+                what = f"the elements of {array} are naturals"
+                failure = f"an element of {array} is not a natural"
+            goal = holds(cell)
             checks.append((f"{slot.label}.check.{want.param}", dims, domain, breaks))
-            what = f"the elements of {array} are points of {sort}"
-            found = self.cells_hypothesis(
-                array,
-                lambda cell: LogicalAnd(
-                    (Comparison(0, "<=", cell), Comparison(cell, "<", bound))
-                ),
-                "",
-                set(),
-            )
+            found = self.cells_hypothesis(array, holds, "", set())
             claimed = found.claim if found is not None else goal
-            failure = f"an element of {array} is not a point of {sort}"
             used = set(domain.get_var_names(isl.dim_type.param))
             reflected = {name: expr for name, expr in table.items() if name in used}
         else:
@@ -2551,7 +2582,7 @@ class _Composer:
                     unnarrowed=((render(breaks), _NOT_AFFINE),),
                 )
             )
-        if want.kind == "element":
+        if want.kind in ("element", "nat"):
             self.adopt(table)
         return (
             Requirement(**common, reason=reason, flag=flag, message=message),

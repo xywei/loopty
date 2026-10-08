@@ -51,7 +51,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from loopty.contract import check_arguments, inherited_storage
+from loopty.contract import check_arguments, checked_storage, inherited_storage
 from loopty.term import Term
 from loopty.tolerance import (
     TOLERANCE,
@@ -364,8 +364,9 @@ class LoopyExecutor:
         The arguments are checked against the term before anything is compiled
         or run: distinct array parameters may not share storage, a ragged
         argument has to agree with its counts family and with any offsets given
-        alongside it, an element of a refined sort has to be one, and an array
-        the kernel writes has to be stored as its element sort is natively. All
+        alongside it, an element of a refined sort has to be one, an array
+        the kernel writes has to be stored as its element sort is natively,
+        and an integral array a program's checked point reads in 64 bits. All
         of these are properties of the call rather than of the term, and each
         is what a typing rule, or the native run's meaning, assumed; see
         :mod:`loopty.contract`.
@@ -380,6 +381,7 @@ class LoopyExecutor:
             written=lowering.results,
         )
         inherited_storage(term.array_types, term.temporaries_like, supplied)
+        checked_storage(term, supplied)
         layouts = _declared_layouts(term, lowering, supplied)
         call = _call_arguments(term, lowering, args, kwargs, layouts)
         call, empty = _pad_empty_arrays(call, lowering)
@@ -548,6 +550,7 @@ class LoopyExecutor:
             written=lowering.results,
         )
         inherited_storage(term.array_types, term.temporaries_like, args)
+        checked_storage(term, args)
         native = dict(reference or {})
         if native:
             missing = [name for name in lowering.results if name not in native]

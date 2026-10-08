@@ -94,13 +94,16 @@ from loopty.idx import is_affine
 from loopty.term import ArrType
 
 __all__ = [
+    "CHECKED_STORAGE",
     "INDEX_RANGE",
     "INDEX_STORAGE",
     "INT64_RANGE",
     "INTEGRAL_RANGE",
     "INTEGRAL_STORAGE",
+    "array_storage",
     "axis_extents",
     "check_arguments",
+    "checked_storage",
     "compiled_storage",
     "counts_family",
     "disjoint_arguments",
@@ -531,6 +534,87 @@ def compiled_storage(sort: Any) -> np.dtype | None:
     if hasattr(sort, "bound") or hasattr(sort, "size"):  # an index type Fin[m]
         return INDEX_STORAGE
     return None
+
+
+#: The dtype an integral array that a program's checked point reads is stored
+#: in compiled, whatever its sort: 64 bits, as the native run holds it
+#: (:func:`checked_storage` refuses a native array of fewer), so that the
+#: checked point reads the value written and not one the store narrowed
+#: (:attr:`loopty.term.Term.checked_arrays`, #128). ``Nat`` and ``Int`` are
+#: stored so anyway (:data:`INTEGRAL_STORAGE`); an index type ``Fin[m]``,
+#: :data:`INDEX_STORAGE` elsewhere, is widened.
+CHECKED_STORAGE = np.dtype(np.int64)
+
+
+def array_storage(term: Any, name: str, sort: Any) -> np.dtype | None:
+    """The dtype the compiled run stores the array ``name`` of ``term`` in.
+
+    :func:`compiled_storage` of its element sort, except for an array of an
+    integral sort that a checked point of the term reads, which is
+    :data:`CHECKED_STORAGE` (:attr:`loopty.term.Term.checked_arrays`): the
+    same as :func:`compiled_storage` for ``Nat`` and ``Int``, and wider for
+    ``Fin[m]``. The lowering declares the array so, and
+    :mod:`loopty.promotion` types its elements so.
+    """
+    if integral_sort(sort) and name in getattr(term, "checked_arrays", ()):
+        return CHECKED_STORAGE
+    return compiled_storage(sort)
+
+
+def checked_storage(term: Any, supplied: Mapping[str, Any]) -> None:
+    """Refuse an integral array a checked point reads, passed narrower than 64 bits.
+
+    The compiled program stores such an array in 64 bits
+    (:func:`array_storage`), so that the checked point reads what an earlier
+    call wrote and not what a narrower store left of it (#128). The native
+    run computes in the array it is given, which for ``Fin[m]`` may be any
+    signed integer of 32 bits or more (:func:`holds_natively`), and a 32-bit
+    one narrows what is written into it where the compiled program does not:
+    ``2**32 + i`` into a ``Fin[n]`` array is not what the later call's
+    contract reads natively, and the check reads it as written. So the
+    array, or the parameter a program's temporary of it is made like
+    (:attr:`loopty.term.Term.temporaries_like`), has to be passed in 64 bits.
+    This is asked of every integral sort, whatever :func:`holds_natively`
+    accepts for it (``int64`` alone for ``Nat`` and ``Int`` since #101): that
+    rule is the sort's, and this one the check's, which reads the array as
+    :data:`CHECKED_STORAGE` holds it. A temporary given a ``dtype`` is
+    checked where the program is composed.
+    """
+    checked = getattr(term, "checked_arrays", frozenset())
+    if not checked:
+        return
+    types = term.array_types
+    made_like = dict(term.temporaries_like)
+    for name in sorted(checked):
+        if not integral_sort(getattr(types.get(name), "dtype", None)):
+            continue
+        source = made_like.get(name, name)
+        buffer = _buffer(supplied.get(source))
+        if buffer is None:
+            continue
+        got = buffer.dtype
+        if got.kind == "i" and got.itemsize >= CHECKED_STORAGE.itemsize:
+            continue
+        if source == name:
+            what = f"the argument {name} is stored as {got}"
+            fix = f"Pass {name} as {CHECKED_STORAGE}"
+        else:
+            what = (
+                f"the argument {source} is stored as {got}, and the program "
+                f"makes {name} with Arr.zeros_like from it, which natively is "
+                f"an array of {got} too"
+            )
+            fix = (
+                f"Give that Arr.zeros_like dtype={CHECKED_STORAGE}, or pass "
+                f"{source} as {CHECKED_STORAGE}"
+            )
+        raise ValueError(
+            f"{what}, and a checked point of the program reads {name} between "
+            "two calls: the compiled program stores it in 64 bits, so that the "
+            "check reads what the earlier call wrote, and the native run would "
+            "narrow what is written into it, so the two runs would check two "
+            f"values. {fix}"
+        )
 
 
 def native_storage(sort: Any) -> np.dtype | None:

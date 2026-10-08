@@ -629,7 +629,9 @@ rows through, and the layout requirement is `scan`'s postcondition verbatim;
 the program cites `scan_monotone` with `uses=`, and the fact does not rest on
 it, because the requirement does not need it. In `checked`, `number_quiet`
 writes the same permutation and says nothing, so the compiled program checks
-`perm` between the calls. In `flat`, `weigh` reads a flat buffer,
+`perm` between the calls, and stores it in 64 bits, as the native run does,
+so that the check reads what was written and not what a 32-bit store would
+have narrowed it to. In `flat`, `weigh` reads a flat buffer,
 `val[off[r] + j]`, after a scan: alone its in-bounds fact is `assumed`, and in
 the program it is decided under the scan's postcondition and the element type
 of `off`, which the program checks, since nothing says the scan's offsets stay
@@ -685,10 +687,10 @@ number's postcondition, forall i in Fin(n). perm[i] == n - 1 - i: tested
 #include <stdint.h>
 #include <stdbool.h>
 
-void checked(int32_t const n, int32_t *__restrict__ perm, double const *__restrict__ x, double *__restrict__ y, int64_t *__restrict__ gather_perm_ok)
+void checked(int32_t const n, int64_t *__restrict__ perm, double const *__restrict__ x, double *__restrict__ y, int64_t *__restrict__ gather_perm_ok)
 {
   for (int32_t i = 0; i <= -1 + n; ++i)
-    perm[i] = n + -1 + -1 * i;
+    perm[i] = (int64_t) (n + -1 + -1 * i);
   for (int32_t i_1 = 0; i_1 <= -1 + n; ++i_1)
     if ((perm[i_1] < 0 || perm[i_1] >= n))
       gather_perm_ok[0] = (int64_t) (1);

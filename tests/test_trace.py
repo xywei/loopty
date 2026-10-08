@@ -2364,3 +2364,75 @@ def test_a_module_named_like_the_standard_library_is_the_authors(
 
 
 # }}}
+
+
+# {{{ a ragged type nothing builds (#112)
+
+
+def two_axis_reads(
+    cnt: Arr[Fin[n], Fin[m], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[m], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+):
+    """The kernel of #112: a fiber after two dense axes, counted by two."""
+    for r in cnt.dom:
+        for s in cnt.dom[r]:
+            for j in val.dom[r, s]:
+                y[r, s] = y[r, s] + val[r, s, j]
+
+
+def dense_after_the_fiber(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    for r in y.dom:
+        for j in val.dom[r]:
+            for k in val.dom[r, j]:
+                y[r] = y[r] + val[r, j, k]
+
+
+def rows_counted_by_two_axes(
+    cnt: Arr[Fin[n], Fin[m], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    for r in y.dom:
+        for j in val.dom[r]:
+            y[r] = y[r] + val[r, j]
+
+
+@pytest.mark.parametrize(
+    ("fn", "message"),
+    [
+        (two_axis_reads, "is ragged in axis 2 of 3: only a two-axis ragged array"),
+        (dense_after_the_fiber, "is ragged in axis 1 of 3: only a two-axis ragged"),
+        (rows_counted_by_two_axes, "has the rows counted by cnt, which has 2 axes"),
+    ],
+)
+def test_a_ragged_type_no_array_is_built_as_is_refused_where_it_is_traced(
+    fn, message
+) -> None:
+    # Arr.ragged builds a row axis and a fiber from counts of one axis, and
+    # lowering indexes only that; tracing and the typing rules accepted the
+    # others, and the ledger stated facts about a layout nothing builds, a
+    # row's start read through the inner index alone (#112).
+    with pytest.raises(TraceError, match=message) as caught:
+        term_of(fn)
+    assert str(caught.value).startswith("the type of ")
+
+
+def test_a_ragged_type_no_array_is_built_as_is_refused_by_a_native_call() -> None:
+    # The native call reads the same types, and refuses the annotation alike,
+    # before its contract would look for the counts' one axis.
+    from loopty.kernel import Kernel
+
+    with pytest.raises(TraceError, match="is ragged in axis 2 of 3"):
+        Kernel(two_axis_reads)(
+            cnt=Arr.from_numpy(np.ones((2, 2), dtype=np.int64)),
+            val=Arr.zeros(4),
+            y=Arr.zeros((2, 2)),
+        )
+
+
+# }}}
