@@ -2179,4 +2179,44 @@ def test_a_write_of_the_last_offset_beside_a_ragged_read_is_scheduled() -> None:
     assert casts == {"bijective": "decided", "monotone": "decided"}
 
 
+def chain_over_s(x: Arr[Fin[s], Real]):  # noqa: F821
+    """Each cell adds the one before it, over a size named like a dimension."""
+    for i in x.dom:
+        x[i] = x[i] + x[i - 1]
+
+
+def into_the_last_of_x0(x: Arr[Fin[x0], Real], y: Arr[Fin[x0], Real]):  # noqa: F821
+    """Every iteration adds into the last cell of ``y``, of a size named x0."""
+    for i in x.dom:
+        y[y.dom.size - 1] = y[y.dom.size - 1] + x[i]
+
+
+@pytest.mark.parametrize(
+    ("fn", "size", "cell"),
+    [(chain_over_s, "s", "x[2]"), (into_the_last_of_x0, "x0", "y[3]")],
+)
+def test_a_size_named_like_a_dimension_keeps_its_dependences(fn, size, cell) -> None:
+    # The map of the pairs that touch one cell declares the sizes, and isl
+    # reads a dimension named like one as that parameter: the statement's
+    # index ``s = 0`` became a constraint on the size, and every dependence of
+    # a kernel over Fin[s] was empty. The tag was refused only by flow's
+    # dependences, with no pair of instances to name. The dimensions are
+    # primed now, which no size can be (#110).
+    from lanky.terms import evaluate_annotations
+
+    from loopty.trace import trace
+
+    term = trace(fn, evaluate_annotations(fn))
+    schedule = Schedule(term, sizes={size: 4})
+    with pytest.raises(IllegalCast) as caught:
+        schedule.tag(i="g.0")
+    message = str(caught.value)
+    assert message.startswith("tag(i='g.0') illegal: instance S0[i=")
+    assert cell in message
+    assert message.endswith(f"scheduled earlier (at {size}=4, as hinted)")
+    (source_id, _source), (sink_id, _sink), params = caught.value.witness
+    assert source_id == sink_id == "S0"
+    assert params == {size: 4}
+
+
 # }}}
