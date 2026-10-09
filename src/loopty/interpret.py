@@ -119,7 +119,9 @@ _FUNCTIONS = {
     "cosh": np.cosh,
     "tanh": np.tanh,
     "fabs": np.fabs,
-    "abs": np.abs,
+    # Python's, as a body calls it: a Python int, a loop variable's, stays
+    # one, and a numpy scalar's is numpy's.
+    "abs": builtins.abs,
     "floor": np.floor,
     "ceil": np.ceil,
     "pow": np.power,
@@ -237,12 +239,20 @@ class _Run:
         written = {stmt.assignee.array for stmt in term.stmts}
         self.arrays: dict[str, Arr] = {}
         self.scalars: dict[str, Any] = {}
+        #: The dtype each written array's elements are read in where it is
+        #: stored otherwise: an ``int32`` array of ``Fin[m]`` is read as
+        #: ``int64``, as the native run reads it (#121).
+        self.read_as: dict[str, np.dtype] = {}
         for name, typ in term.params:
             if name not in arguments:
                 raise InterpretError(f"no argument was given for {name}")
             value = arguments[name]
             if isinstance(typ, ArrType):
                 self.arrays[name] = _storage(value, typ, name in written)
+                if name in written:
+                    want = read_storage(typ.dtype, self.arrays[name].numpy().dtype)
+                    if want is not None:
+                        self.read_as[name] = want
             else:
                 self.scalars[name] = native_scalar(typ, value)
         for name, (counts, offsets) in declared_layout(
@@ -821,7 +831,11 @@ class _Run:
         if array not in self.arrays:
             raise InterpretError(f"{array} is subscripted and is not an array")
         key = _key([self.index(i, env) for i in indices])
-        return self.arrays[array][key]
+        value = self.arrays[array][key]
+        read_in = self.read_as.get(array)
+        if read_in is not None and isinstance(value, np.generic):
+            return read_in.type(value)
+        return value
 
     def value(self, node: Any, env: Mapping[str, Any]) -> Any:
         """The value of one expression at one point, by numpy's arithmetic."""
@@ -841,8 +855,15 @@ class _Run:
         if isinstance(node, prim.Variable):
             return self.variable(node.name, env)
         if isinstance(node, prim.Sum):
-            return _fold(operator.add, [self.value(c, env) for c in node.children])
+            return self.sum(node, env)
         if isinstance(node, prim.Product):
+            from loopty.promotion import _subtrahend
+
+            negated = _subtrahend(node)
+            if negated is not None:
+                # pymbolic builds -u as -1 * u, which numpy refuses of an
+                # unsigned u and the native run negates.
+                return -self.value(negated, env)
             return _fold(operator.mul, [self.value(c, env) for c in node.children])
         if isinstance(node, prim.BitwiseXor):
             return _fold(operator.xor, [self.value(c, env) for c in node.children])
@@ -885,6 +906,36 @@ class _Run:
             f"no numpy meaning for {type(node).__name__} in the term: "
             f"{_text(node)}"
         )
+
+    def sum(self, node: prim.Sum, env: Mapping[str, Any]) -> Any:
+        """A sum from the left, a negated term subtracted.
+
+        pymbolic builds ``a - b`` as ``a + -1 * b``, and the native run
+        computes the difference: in the type of the two, where ``-1 * b``
+        would negate an ``int8`` ``b`` of ``-128`` into itself first. It
+        builds ``u - 1`` as ``u + -1`` and ``c - -32768`` as ``c + 32768``
+        too: an integer literal whose sum numpy refuses, beside a ``uint64``
+        ``u`` or an ``int16`` ``c`` whose type does not hold it, is
+        subtracted as its negation, which numpy computes. The compiled run
+        computes the same (:meth:`loopty.promotion.Promotion._subtracted`,
+        ``Promotion._arithmetic``).
+        """
+        from loopty.promotion import _integer_literal, _subtrahend
+
+        children = node.children
+        total = self.value(children[0], env)
+        for child in children[1:]:
+            subtrahend = _subtrahend(child)
+            if subtrahend is not None:
+                total = total - self.value(subtrahend, env)
+            elif _integer_literal(child):
+                try:
+                    total = total + child
+                except OverflowError:
+                    total = total - -child
+            else:
+                total = total + self.value(child, env)
+        return total
 
     def variable(self, name: str, env: Mapping[str, Any]) -> Any:
         """A loop or binder variable, a scalar argument, or a size."""

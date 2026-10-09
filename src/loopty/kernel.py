@@ -62,7 +62,14 @@ from loopty.term import (
     free_name_sorts,
     free_name_sorts_message,
 )
-from loopty.trace import TraceError, array_type, mask_writes, trace, when
+from loopty.trace import (
+    TraceError,
+    array_type,
+    mask_writes,
+    read_elements_as,
+    trace,
+    when,
+)
 
 __all__ = [
     "Kernel",
@@ -340,6 +347,12 @@ class Kernel(_Decorated):
         through a copy, since its writes have to land in the caller's array,
         and is refused unless it is stored as its sort is. See
         :meth:`_storage_copies` for which arrays are copied and why only those.
+        The one written array that may be stored otherwise is an ``int32``
+        array of ``Fin[m]``, which the compiled run stores in 32 bits too: its
+        elements are read as ``int64``, which the compiled run computes
+        integer arithmetic in, through the masking view and not through a
+        copy (#121). ``p[i] * p[i]`` wrapped round at ``p[i] = 46341``
+        natively before, where the compiled run computes it in 64 bits.
         A scalar is passed by value and is converted whatever the body does
         (:func:`loopty.contract.native_scalar`): ``np.int64(2**32)`` for a
         ``Real`` is a double, and Python's ``True`` for a ``Bool`` a numpy
@@ -369,7 +382,7 @@ class Kernel(_Decorated):
             bound,
             {name: offsets for name, (_, offsets) in layout.items() if offsets},
         )
-        stored = self._storage_copies(bound)
+        stored, widened = self._storage_copies(bound)
         declared = self._over_declared_domains(bound, stored)
         copies = {**stored, **declared, **self._scalar_copies(bound)}
         code = self.fn.__code__
@@ -396,6 +409,11 @@ class Kernel(_Decorated):
                 keywords[name] = view
             else:
                 positional[names.index(name)] = view
+        for name, dtype in widened.items():
+            if name in keywords:
+                read_elements_as(keywords[name], dtype)
+            elif name in names[: len(positional)]:
+                read_elements_as(positional[names.index(name)], dtype)
         try:
             return self.fn(*positional, **keywords)
         finally:
@@ -438,8 +456,14 @@ class Kernel(_Decorated):
             )
         return out
 
-    def _storage_copies(self, bound: dict[str, Any]) -> dict[str, Any]:
+    def _storage_copies(
+        self, bound: dict[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, np.dtype]]:
         """Copies of the arrays the body only reads, in the dtype of their sort.
+
+        Returned with the dtype each written array that is not copied has its
+        elements read in, which is ``int64`` for an ``int32`` array of
+        ``Fin[m]`` (see below).
 
         An array is a candidate when its dtype does not hold its declared
         element sort as the compiled run holds it
@@ -465,6 +489,15 @@ class Kernel(_Decorated):
         the term, and only when there is a candidate at all: a call whose
         arrays are all stored as their sorts are never traces. A body that
         cannot be traced still runs natively, with its arguments as given.
+
+        A written candidate that holds its sort as the compiled run does is
+        accepted: an ``int32`` array of ``Fin[m]``, whose values ``m`` bounds,
+        which the compiled run stores in 32 bits as well. The compiled run
+        computes integer arithmetic on its elements in 64 bits, as on every
+        integer's (:mod:`loopty.promotion`), so the native run reads each of
+        them as an ``int64``, through the masking view
+        (:func:`loopty.trace.read_elements_as`), and writes into the array as
+        it is (#121).
         """
         candidates: dict[str, tuple[Any, np.dtype]] = {}
         for name, typ in self.arg_types.items():
@@ -478,17 +511,23 @@ class Kernel(_Decorated):
             if want is not None:
                 candidates[name] = (value, want)
         if not candidates:
-            return {}
+            return {}, {}
         try:
             written = {stmt.assignee.array for stmt in self.term.stmts}
         except Exception:  # noqa: BLE001 - reported by facts(), not by a native run
-            return {}
+            return {}, {}
         written_storage(self.arg_types, bound, written & candidates.keys())
-        return {
+        copies = {
             name: native_copy(value, want)
             for name, (value, want) in candidates.items()
             if name not in written
         }
+        widened = {
+            name: want
+            for name, (_value, want) in candidates.items()
+            if name in written
+        }
+        return copies, widened
 
     def _scalar_copies(self, bound: dict[str, Any]) -> dict[str, Any]:
         """The scalar arguments in the dtype of their sort, where they are not.

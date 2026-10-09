@@ -28,9 +28,8 @@ decided each one, lowers through loopy, and runs on the C target with its
 result compared against the Python body at the tolerance its types state. Each
 schedule step is checked as a cast and refused with a witness pair when it
 would reorder a dependence, and asked separately whether the target can build
-it at all. What is not here: a dependent sum deeper than two axes, the use of a
-postcondition as a hypothesis, and any execution on a device from a development
-machine.
+it at all. What is not here: a dependent sum deeper than two axes, and any
+execution on a device from a development machine.
 
 ``import loopty`` imports nothing but this module. Each name below comes from its
 own module the first time it is used, so the import costs no loopy and no islpy,
@@ -45,7 +44,7 @@ import sys
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
-__version__ = "0.1.0.dev0"
+__version__ = "0.1.0"
 
 #: The module each top-level name is defined in, imported on first use.
 _EXPORTS = {

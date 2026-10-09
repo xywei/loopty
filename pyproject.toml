@@ -1,10 +1,12 @@
 [build-system]
-requires = ["hatchling"]
+# license-files and the SPDX license expression are PEP 639, which hatchling
+# supports from 1.27.
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
 name = "loopty"
-version = "0.1.0.dev0"
+version = "0.1.0"
 description = "loopy, with types. A typed polyhedral layer over loopy."
 readme = "README.md"
 license = "MIT"
@@ -20,11 +22,12 @@ keywords = [
     "lanky",
 ]
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering",
@@ -32,25 +35,44 @@ classifiers = [
     "Topic :: Software Development :: Compilers",
     "Typing :: Typed",
 ]
+# The floors and ceilings are what a release installed from PyPI has to get,
+# and docs/loopy-notes.md has the long form of each.
 dependencies = [
-    "numpy",
+    # loopty computes each operation in the type numpy computes it in natively,
+    # and that is NEP 50's promotion, numpy's own from 2.0.
+    "numpy>=2",
     # islpy 2026 removed a method loopy 2025.2 still calls (Aff.is_equal in
     # simplify_pw_aff), so code generation for a tiled loop nest fails against
-    # it. Drop the ceiling once a loopy release supports islpy 2026.
-    "islpy<2026",
-    "loopy",
-    "pymbolic",
-    "lanky>=0.1.0.dev1",
+    # it (note 4). 2025.2.5 is loopy 2025.2's own floor. Drop the ceiling once a
+    # loopy release supports islpy 2026. islpy 2025 has no wheels for Python
+    # 3.14, which is why the classifiers and CI stop at 3.13.
+    "islpy>=2025.2.5,<2026",
+    # loopty builds on loopy's internals, not only its interface: its C and
+    # OpenCL targets, their code builders and their expression mappers subclass
+    # loopy's, and the target-capability check lists the limits of loopy 2025.2
+    # and no others. So a release is held to the loopy it is tested with, and a
+    # new loopy is a new release of loopty.
+    "loopy>=2025.2,<2025.3",
+    "pymbolic>=2025.1",
+    # A plugin of lanky's, through the entry points below. In a checkout,
+    # [tool.uv.sources] resolves it from ../lanky instead; a built
+    # distribution names this requirement and nothing about the path.
+    "lanky>=0.1.0",
 ]
 
 [project.optional-dependencies]
-# Device execution. Never installed on a laptop: the OpenCL target runs on the
-# remote hosts only.
-opencl = ["pyopencl"]
+# Device execution, `--target opencl`. pyopencl is imported only when an
+# OpenCL kernel is built or run, and the floor is that of loopy's own pyopencl
+# target, which loopty's is built on. CI never runs a device; the runs on real
+# devices are in docs/device-runs.md.
+opencl = ["pyopencl>=2022.3"]
 
 [project.urls]
 Homepage = "https://github.com/xywei/loopty"
 Repository = "https://github.com/xywei/loopty"
+Documentation = "https://github.com/xywei/loopty/blob/main/docs/quickstart.md"
+Changelog = "https://github.com/xywei/loopty/blob/main/CHANGELOG.md"
+Issues = "https://github.com/xywei/loopty/issues"
 
 [project.scripts]
 loopty = "loopty.cli:main"
@@ -69,9 +91,27 @@ loopty = "loopty.plugin:LoopyExecutor"
 [project.entry-points."lanky.verbs"]
 run = "loopty.plugin:RunVerb"
 
+# The sdist is the source a downstream packager builds and tests from: the
+# package, its tests, the examples, the documentation whose transcripts the
+# tests and the refresh script compare with a real run, and that script.
+# Named rather than left to the default, which takes every file git does not
+# ignore, so that a stray file in a checkout never ships. (pyproject.toml, the
+# README and the license file go in regardless.)
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tests",
+    "/examples",
+    "/docs",
+    "/scripts",
+    "/CHANGELOG.md",
+]
+
 [dependency-groups]
 dev = ["pytest", "ruff"]
 
+# Development only: uv resolves lanky from a sibling checkout, which is what CI
+# lays out too. A built sdist or wheel carries the requirement above instead.
 [tool.uv.sources]
 lanky = { path = "../lanky", editable = true }
 

@@ -4,12 +4,34 @@ All notable changes to loopty are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [PEP 440](https://peps.python.org/pep-0440/).
 
-## [0.1.0.dev0] - 2026-09-18
+## [Unreleased]
 
-The first release in which something works. A decorated kernel runs natively on
-numpy, traces to a typed term, emits its obligations into lanky's ledger, lowers
-through loopy, and runs on the C target. An illegal transformation is rejected
-with a pair of statement instances.
+### Changed
+
+- CI also tests loopty as `pip install loopty` gets it: a second job installs
+  it without `[tool.uv.sources]`, so with lanky from PyPI, and runs the suite
+  and the worked example's `lanky check` and `loopty run` (#147).
+
+## [0.1.0] - 2026-10-09
+
+The first release on PyPI, where only the 0.0.1 placeholder that reserved the
+name was before, and the first on a released lanky, 0.1.0. A kernel is a
+Python function over typed arrays, dense, ragged or over a polyhedral domain.
+It runs natively on numpy, traces to a typed term whose obligations
+`lanky check` prints in one ledger, decided by isl or by type where they can
+be, and lowers through loopy onto the C target, where `loopty run` compares
+the compiled run with the native one. A program's facts travel from one call to
+the next, and every schedule step, a fusion of two calls included, is a cast
+checked before it is applied. The README's Known limits section says what a
+user is most likely to meet: index arithmetic that stays 32 bits wide in a
+loop bound, an affine subscript and a few sums (#149, #157), integers past 64
+bits (#139), a guard loopy's bounds check cannot read (#148), what
+substitution and fusion do not do yet (#132, #133), and the OpenCL target,
+which CI never runs.
+
+The entries below are every change since that placeholder. 0.1.0.dev0, the
+version on `main` from 2026-09-18, when the first kernel ran, was never
+published.
 
 ### Added
 
@@ -596,6 +618,226 @@ with a pair of statement instances.
   other claim was refuted, and why.
 
 ### Fixed
+
+- A subscript loopy does not read as affine is computed in 64 bits compiled,
+  as the rest of the integer arithmetic is (#129). `x[(i * i) % n]` was
+  `x[loopty_mod_int32(i * i, n)]`, which wrapped round at `i = 46341` and
+  read a wrong cell, or none, and `x[(col[i] * 7919) % m]` read a wrong cell
+  at `col[i] = 271183`. The lowering had left every subscript in 32 bits,
+  since loopy reads a subscript into isl and its reader raised on the cast
+  that widens an operand anywhere else. `loopty.isl_reading` makes the reader
+  decline a cast, as it declines a call, and loopy generates such a
+  subscript as written: `x[loopty_mod_int64((int64_t) (i) * i, (int64_t)
+  (n))]`. So is a sum of a 32-bit entry and a loop variable, as `travel.py`
+  reads its flat buffer, `val[(int64_t) (off[r]) + j]`. A subscript loopy
+  reads as affine without the widening, and isl writes with no division, is
+  left without it (`x[2 * i]`): loopy replaces it by the affine expression
+  isl gives back, in its 32-bit index type, which `-fwrapv` makes right for
+  sums and products, and checks its bounds, which a cast would stop. One
+  with a division is widened: isl keeps a multiple below half the divisor,
+  and `x[(i * 499999) // 1000000]` was `x[(499999 * i) / 1000000]`, which
+  named a negative cell from `i = 4295` over a few thousand cells. A sum of
+  loop variables and sizes, which the plan leaves in 32 bits, stays so in a
+  division too, past `2**30` (#149; note 23 of `docs/loopy-notes.md`). The
+  reader declines so only while loopty builds, transforms, checks, generates
+  or runs one of its kernels, inside `isl_reading.declining()` and in that
+  thread alone: nothing is installed in loopy when loopty is imported, and
+  the last context to exit puts loopy's own readings back, so another user
+  of loopy in the process (sumpy, pytential) has its kernels read, checked
+  and generated as without loopty. loopty enters it in
+  `lower.lower_generic`, in building a `Schedule` and in each of its public
+  methods, in `LoopyExecutor.run` and in `emit_code`.
+- loopy no longer reads a non-integer literal in a guard on the loops by its
+  integer part (#137). Its bounds check reads such a guard into isl, and read
+  `0.5` as `0`: `when(i * 0.5 >= 1)` as false everywhere, so the check passed
+  `x[i + 4]` under it without looking, and the compiled run read past the end
+  of `x` where the native one is refused; `when(i < 1.5)` as `i < 1`, which
+  let `x[i + n - 1]` through at `i = 1`. A float that is an integer was read
+  as the integer, though the guard is computed in floating point, which
+  rounds: `when(i * 2.0**52 + 1.0 <= i * 2.0**52)` read as false everywhere,
+  and holds from `i = 2`. And a `Real` scalar was an integer parameter of
+  the domain the guards are read over: `when((i < a) & (i > a - 1))` holds
+  for no integer `a`, and at `i = 1` for `a = 1.5`. The reader declines a
+  constant whose type is not an integer's, and a value argument whose dtype
+  is not an integer's is no parameter, so loopy reads no guard computed in
+  floating point, checks the access at every point of its loop, and refuses
+  each. Under such a guard it also refuses an access the guard keeps in
+  bounds, `when(i * 0.5 < 2)` over `x[i + 4]` and `when(i * 2.0 < n)` over
+  `x[2 * i]`, as it does under a product of loop variables (#148). A guard on
+  the loops that numpy computes in single precision, `(i + 1) ** -1` beside a
+  `float32` scalar, is written with the cast instead of refused.
+- `Schedule.substitute` computes an index array where it is read in a
+  subscript again (#145). Since #101 and #128 such a value holds a
+  conversion, the store's or its own (`(t[j] + 1) % n` of a 32-bit
+  `Fin[n]` entry, computed in 64 bits), and loopy failed on it in code
+  generation, so the substitution was decided and its kernel left unwritten.
+  loopy's isl reader declines the cast now, and a read in a subscript keeps
+  the value's conversions, the store's narrowing included (`y[(int16_t)
+  (t[i])]`). A store's widening keeps the value and is the last thing done
+  to it, so a read in a subscript reads the value inside it (`x[t[i]]`, and
+  `x[n - 1 - i]`, which loopy reads as affine and checks); a read used as a
+  value keeps it, `q[i] * q[i]` too after `x[q[i]]`. Each substituted kernel
+  agrees bit for bit with the one that stores the array.
+- The emitted code of a schedule no longer depends on the process's hash
+  seed (#125). loopy builds the assumptions of a kernel given none over a
+  `frozenset` of its parameters, and isl wrote the sizes in every bound in
+  that order: `wavefront_acoustic.py --emit-code` printed `-4 + nt + nx` or
+  `-4 + nx + nt` by `PYTHONHASHSEED`, with a cold cache. The lowering gives
+  `lp.make_kernel` the universe over the parameters in the order the domains
+  name them first (note 24 of `docs/loopy-notes.md`).
+- `Schedule(schedule)` starts from the schedule it is given (#135). It read
+  the schedule for its term alone, so `Schedule(Schedule(double).split("i",
+  2))` was a schedule of `double` with no step, a split after it split the
+  original loop, `loopty run` compared it with `double` and found them in
+  agreement, and `Schedule(Schedule(double, target="opencl"))` was a C
+  schedule. It is the schedule built again from its kernel, its steps
+  replayed and each cast checked again, on its target, with its sizes and
+  its example inputs, unless a target or sizes are given (the default
+  target is now `None`, the given schedule's or `"c"`).
+- The in-bounds fact of a read against a row length a write in its loop left
+  behind is `assumed` (#144). A loop over a row reads the row's length once,
+  when it starts, and the facts of the row's entries were decided against
+  that reading: with `cnt[r] = 0` inside `for j in val.dom[r]`, the native
+  run refuses `val[r, 1]`, and its fact was decided, worth assumed only
+  through the kernel's layout fact, which anything that decided the layout
+  another way would have made decided. A read in a statement that shares the
+  innermost loop the length bounds with a write that can reach the cell the
+  length is read from is now stated with the reason and left `assumed`; a
+  sum or an inner loop over the row reads the length again where it starts,
+  and a write of another row's length changes no reading of this row's, so
+  their reads stay decided.
+- An `int32` array of `Fin[m]` that a kernel writes is computed with in 64
+  bits natively too (#121): the native run read an entry back as an
+  `np.int32`, and `p[i] * p[i]` wrapped round at `p[i] = 46341`, where the
+  compiled run computes in 64 bits. Its elements are read as `int64` through
+  the masking view (`loopty.trace.read_elements_as`), and by the
+  interpreter, and the array is written as the caller gave it, so a
+  permutation may still be computed into an `int32` array.
+- An operation numpy computes in a numpy integer type is computed in it
+  compiled too (#122). C computes an integer narrower than `int` as an `int`:
+  `a[i] * a[i] // 2` of an `np.int8` `a` was `8` natively at `a[i] = 100` and
+  `-120` compiled; the result is converted back into the narrow type
+  (`(int8_t) (a[i] * a[i])`), which wraps round as numpy does, and loopty's
+  targets write that conversion where loopy would leave it out. C computes an
+  unsigned integer beside a signed one of as many bits as unsigned: `u[i] +
+  k[i]` of a `uint32` and an `int32` was `4294967295` compiled at `0 + -1`,
+  and `u[i] < k[i]` true; the operands are converted into the type numpy
+  computes in, and a comparison of integers compares a negative operand's
+  sign first where C would compare it unsigned (`k[i] >= 0 && u[i] < k[i]`),
+  as numpy compares exactly, `uint64` against `int64` included. A
+  difference, which pymbolic builds as `a + -1 * b`, is computed in the
+  difference's type, where the term negates `b` in its own type first:
+  `k[i] - u[i]` of an `int32` `k` and a `uint32` `u` was computed in `uint32`
+  compiled, and `c[i] - a[i]` of an `int8` `a` at `-128`, which C negated in
+  `int`, keeps its value now that a narrow result is converted back. A `uint32`
+  literal is written `3u`, where loopy wrote `3ul`, a `uint8` or `uint16` one
+  `3`, where loopy wrote `3u`, which took an `int8` beside it round into an
+  `unsigned int` (`a[i] + np.uint16(3)` was `4294967294` at `a[i] = -5`),
+  and an operation loopy
+  computes by a function in a wider type than numpy (`u[i] << 3`, by loopy's
+  `int64` one) is converted back. `loopty.promotion` types C's operators by
+  C's conversions (`_c_result`) and the functions by loopy's
+  (`_loopy_result`). Note 23 in `docs/loopy-notes.md`.
+- Integer literals in integer arithmetic are written as integers: loopy wrote
+  a literal in the type of the place its operation stands in, so `k[i] + 3`
+  of an `Int` stored into a real was `k[i] + 3.0`, computed in double, which
+  never wraps round at `2**63 - 1` where numpy does, `-1 * k[i]` was
+  `-1.0 * k[i]`, and `k[i] ^ 3` was `k[i] ^ 3.0`, which C refuses. So are
+  those of a comparison of integers, which loopy wrote in the type it infers
+  for their difference, a double for a `uint64` beside a signed integer:
+  `u[i] == 9007199254740993` was `u[i] == 9007199254740992.0`, true at
+  `2**53`. Any other literal is written in the type of the operands that are
+  no Python number, as numpy computes it, and not in loopy's type for the
+  operation, which takes an integer literal of 32 bits or more for an
+  `int64`, and a `float32` beside one for a double: `x[i] * 2**62` of a
+  `float32` `x` was multiplied in double, where numpy's product is
+  infinite at `3e38`.
+- pymbolic builds `c[i] - -32768` as `c[i] + 32768`, which numpy refuses
+  beside an `int16` `c`; the plan computes it as the difference numpy
+  computes, in `int16`, where the compiled run added in `int`, and the
+  interpreter subtracts a literal only where numpy refuses to add it, as
+  `u[i] + -1` of an unsigned `u`: it read `a[i] + -128` of an `int8` `a`
+  as `a[i] - 128`, which numpy refuses.
+- A sum or a product nested after the first operand of another is printed in
+  brackets: pymbolic prints them flat, and C computes from the left, so
+  `1.0 * (k[i] * j[i])` of two integers was multiplied in double, where
+  numpy multiplies the integers first, and `x[i] + (y[i] + z[i])` was
+  rounded otherwise (`lower._CText`).
+- `abs` of an integer lowers, and computes numpy's (#123): loopy resolves
+  `abs` as C's and refused an integer (`abs does not support type float32`).
+  It is written without a branch, `(k ^ s) - s` with `s = k >> 63`, which is
+  the smallest `int64` at the smallest `int64` under `-fwrapv`, as numpy's
+  is, and converted back into a type narrower than `int`; of a truth value
+  or an unsigned integer it is the operand. Not as `k < 0 ? -1 * k : k`:
+  GCC reads that as its own `abs`, which it takes to be non-negative whatever
+  `-fwrapv` says, and folded `1 >= abs(c[i])` to false at the smallest
+  `int32`, at `-O0` too; loopy sums a reduction in a branch of an `If` only
+  where the branch's condition holds of the partial sum; and loopy's bounds
+  check reads an `If`'s condition into isl, whose reader raised on the cast
+  that widens `i * i` in `abs(i * i - m)` (note 25). `abs` of a loop
+  variable is a Python int's, natively and to the plan.
+- A parameter, a size or a loop variable named like a macro a header the
+  generated code includes defines, or like a function the kernel calls, is
+  refused, naming what the code means by it (#124): `I` with complex values
+  was `complex.h`'s imaginary unit in the parameter's declaration, and gcc
+  failed; so would `NAN`, `INFINITY` and the `stdint.h` limits, OpenCL C's
+  macros (`M_PI`, `INT_MAX`), the work-item functions OpenCL code calls on a
+  parallel loop, and `pow` in a kernel with a power or `floor` beside a call
+  of `floor`. A function the kernel never calls is a name it may use. Built
+  on an OpenCL device, `NULL`, `SCHAR_MAX`, the extension macros
+  (`cl_khr_fp64`), `pipe`, the image types, and `barrier` beside a sum on a
+  local axis, which loopy syncs with `barrier()`, failed too, and are refused
+  (`ATOMIC_FLAG_INIT`, `MAX_WORK_DIM` and the other macros OpenCL C or PoCL
+  define). A size, an integral scalar or a reduction binder named like one
+  of isl's keywords (`max`, `min`, `floor`, `mod`, read whatever their case)
+  failed inside the trace with `isl_set_read_from_str failed: syntax error`,
+  and is refused naming them; a loop variable of such a name is renamed in
+  the term (`max_0`). A size that names something the module or Python already
+  defines (`Fin[abs]`, lanky's `abs`) was that object, and lowering failed
+  on it as a foreign object; it is a `TraceError` asking for another name.
+- `-b[i]` of a truth value is a `TraceError` naming `~b[i]` for `not` and
+  `-(1 * b[i])` for the integer (#130): numpy refuses it at every point, and
+  the compiled run stored `-1`. pymbolic builds it as `-1 * b[i]`, so that is
+  refused too; `1 - b[i]`, which is built as `1 + -1 * b[i]`, is not.
+- A kernel named like an OpenCL C built-in function is renamed in the
+  generated code (#131): `get_global_id`, `clamp`, `select`, `mad`, the
+  `convert_`, `as_`, `vload`, `atomic_`, `work_group_` and `native_` families
+  and the others of its specification, on every target, as loopy's and the C
+  library's names are (`lower.is_library_name`). A name of a family, which
+  takes in any ending (`atomic_add`), gets a `knl_` prefix instead of the
+  suffix. Run on an OpenCL device, a kernel named `select`, `mad`, `sign`,
+  `as_float` or `M_PI` failed to build or to be found in the program, and so
+  did one named like a macro OpenCL C defines (`NULL`, `ATOMIC_VAR_INIT`) or
+  a type it declares (`size_t`, `event_t`, `memory_order`), which are renamed
+  too, as is `main`, which OpenCL C refuses as a kernel's name.
+- An integer literal past 64 bits lowers where numpy computes it in a type
+  that holds it (#140): `x[i] * 2**70` failed inside loopy's type inference
+  (`integer constant too large`), and is written as a double now, as numpy
+  converts it; beside a `uint64` one up to `2**64 - 1` is a `uint64`, and a
+  comparison with one is exact, as numpy's is: one past that, or below
+  `-2**63`, is compared with an integer as `2.0 ** 65` with its sign, where
+  its own double rounded onto values a `uint64` or an `int64` reach
+  (`u[i] < 2**64` was false at `2**64 - 1`). Beside a real or a complex
+  value it is written in that value's type, into which numpy takes it:
+  `f[i] < 2**70 + 2**46` of a `float32` `f` compared with a double, and was
+  false at `2**70`, where numpy compares with the `float32` `2**70`. A guard
+  on the loops or the scalars that compares with one, `when(i < 2**70)`, is
+  not stated to isl, which wrote it into a loop bound loopy failed to type,
+  and the guard's predicate compares it. Elsewhere, `1.0 * (i + 2**64)`,
+  which Python computes exactly, or a store of it, is a `TraceError` naming
+  `2.0 ** 64`, and one no double holds (`x[i] * 3**700`), which numpy
+  refuses to convert, a `TraceError` saying so.
+- An integer literal beside a numpy integer whose type does not hold it is a
+  `TraceError` naming `np.int64(-1)` (#141): numpy refuses `u[i] // -1` of a
+  `uint64` at every point (NEP 50), and the compiled run computed it in
+  double; so it refuses `(b[i] // c[i]) * 200` of two truth values, which is
+  an `int8` natively (#122). A literal after the first operand of a sum is
+  refused only where its negation is not held either, since `u[i] - 1` is
+  built as `u[i] + -1`; one first, `-7 + u[i]` or `2**31 + k[i]` of an
+  `int32` `k`, as it stands. A negation is not refused, nor a comparison,
+  which numpy and the compiled run decide exactly. `^`, `<<` or `>>` of a
+  `uint64` and a signed integer, which numpy refuses, since only a double
+  holds both, is a `TraceError` too.
 
 - The cells of a dense array are stated over dimensions none of whose names
   is a size: over `x: Arr[Fin[a0], Real]` they were `0 <= a0 < a0`, which has
@@ -1958,6 +2200,40 @@ with a pair of statement instances.
 
 ### Changed
 
+- loopy refuses to preprocess or generate code for a kernel on one of
+  loopty's targets outside `loopty.isl_reading.declining()`, with
+  `isl_reading.ReadingsInactive`. Such a kernel is written for loopty's
+  readings of its subscripts and guards (#129, #137), and loopy's code
+  cache, whose key does not say which readings made an entry, would serve
+  code generated with loopy's own to a run of loopty's, past the bounds
+  check that refuses it. `LoopyExecutor` and `emit_code` enter the context;
+  a caller who hands `schedule.kernel` to `lp.generate_code_v2` or to its
+  `executor()` itself does it inside `with declining():`. Code loopy finds in
+  its cache was generated inside, and is served as before.
+
+- **Packaged for the first release.** The version is 0.1.0, the classifiers
+  say `Development Status :: 3 - Alpha`, and the project's URLs name the
+  quickstart, this file and the issue tracker. The dependencies are what an
+  install from PyPI has to get: lanky 0.1.0 or later (the floor was
+  0.1.0.dev1, met only by a checkout of lanky), numpy 2 or later, for NEP 50's
+  promotion, which the compiled run follows, loopy 2025.2, the one release
+  loopty is tested with and whose internals it builds on, and islpy from
+  2025.2.5 and below 2026, as before; the `opencl` extra asks for the
+  pyopencl loopy's own target asks for. `[tool.uv.sources]` still resolves
+  lanky from a sibling checkout for development, and a built distribution
+  carries the requirement on PyPI instead. The sdist holds the package, the
+  tests, the examples, the documentation and the script that checks its
+  transcripts, named in `pyproject.toml` rather than every file git does not
+  ignore, and hatchling 1.27 or later builds it, for the license metadata.
+  The publish workflow stops on a tag that is not the package's version in
+  `pyproject.toml` and `loopty.__version__`, builds without
+  `[tool.uv.sources]`, checks that it built one sdist and one wheel of that
+  version, and runs `twine check` on them. It builds in a job that can only
+  read the repository, and uploads from a second job that alone may ask for
+  the token PyPI trusts and runs no checkout or build. The README
+  installs from PyPI with `pip`, says what the install pulls in and needs,
+  where the project stands, has a Known limits section, and links the
+  documentation by full addresses, so that the links work on PyPI as well.
 - **`Nat` and `Int` are 64 bits wide compiled** (#101). An array of them the
   kernel writes, or a program's temporary of them, has to be an `int64` one
   natively, where a signed integer of 32 bits or more was accepted: an

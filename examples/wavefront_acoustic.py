@@ -250,8 +250,13 @@ def benchmark(nt: int = 128, nx: int = 8192, repeats: int = 5) -> int:
     checks the arguments against the term, and at a size like this one that can
     cost as much as the kernel does, which would make the ratio a measurement of
     the overhead. So each schedule's executor is built once and warmed up, and
-    fresh arrays are made outside the timed region.
+    fresh arrays are made outside the timed region. loopy is called directly
+    here, so inside ``declining()``, where loopty's own runs call it: the
+    kernel is written for how loopty has loopy read its subscripts and guards
+    (:mod:`loopty.isl_reading`).
     """
+    from loopty.isl_reading import declining
+
     sizes = {"nt": nt, "nx": nx}
     variants = {
         "plain": Schedule(acoustic, target="c", sizes=sizes),
@@ -270,14 +275,15 @@ def benchmark(nt: int = 128, nx: int = 8192, repeats: int = 5) -> int:
 
     best = {}
     for label, schedule in variants.items():
-        call = schedule.kernel.executor()
-        call(**arguments())  # compile, or load from loopy's cache
         samples = []
-        for _ in range(repeats):
-            data = arguments()
-            start = perf_counter()
-            call(**data)
-            samples.append(perf_counter() - start)
+        with declining():
+            call = schedule.kernel.executor()
+            call(**arguments())  # compile, or load from loopy's cache
+            for _ in range(repeats):
+                data = arguments()
+                start = perf_counter()
+                call(**data)
+                samples.append(perf_counter() - start)
         best[label] = min(samples)
 
     print(f"problem: {nt} time levels by {nx} points, best of {repeats}")

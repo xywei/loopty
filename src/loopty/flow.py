@@ -133,6 +133,7 @@ __all__ = [
     "LayoutRead",
     "assume_sizes",
     "bounds_dimension",
+    "ISL_KEYWORDS",
     "NonAffine",
     "cell_set",
     "counts_families",
@@ -143,6 +144,7 @@ __all__ = [
     "footprints",
     "instance_domain",
     "instance_space_depth",
+    "is_isl_keyword",
     "layout_reads",
     "loops_outside",
     "pad_map",
@@ -218,6 +220,22 @@ _ISL_WORDS = frozenset(
         "min", "max", "mod", "implies", "false", "true",
     }
 )
+
+#: The words isl's reader takes as its own whatever their case
+#: (``check_keywords`` in isl's ``isl_stream.c``): a dimension or a parameter
+#: of one of these names is read as the keyword, and the text fails with a
+#: syntax error (``call to isl_set_read_from_str failed``).
+ISL_KEYWORDS = frozenset(
+    """
+    exists and or implies not infty infinity nan min max rat true false ceild
+    floord mod ceil floor
+    """.split()
+)
+
+
+def is_isl_keyword(name: str) -> bool:
+    """Whether isl's reader takes ``name`` as a keyword (:data:`ISL_KEYWORDS`)."""
+    return name.lower() in ISL_KEYWORDS
 
 
 def free_names(text: str) -> set[str]:

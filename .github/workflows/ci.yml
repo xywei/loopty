@@ -91,3 +91,39 @@ jobs:
       - name: Check the transcripts in the documentation
         working-directory: loopty
         run: uv run python scripts/refresh_example_outputs.py --check
+
+  # What `pip install loopty` gets: lanky from PyPI, as `lanky>=...` in the
+  # metadata asks, and not the sibling checkout the job above uses (#147).
+  # When lanky's main moves past an interface the released pair uses, the two
+  # jobs disagree, which is the signal to raise loopty's floor on lanky. The
+  # transcripts are not checked here: their commands are `uv run` in a
+  # checkout with the sibling.
+  released-lanky:
+    name: test against the released lanky
+    runs-on: ubuntu-latest
+    env:
+      LANKY_LEAN_DISABLE: "1"
+    steps:
+      - name: Check out loopty
+        uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Install loopty, with lanky from PyPI
+        run: |
+          set -euo pipefail
+          uv venv --python 3.13
+          uv pip install --no-sources -e . pytest
+          .venv/bin/python -c "import importlib.metadata as m; print('lanky', m.version('lanky'), 'from PyPI')"
+
+      - name: Pytest
+        run: .venv/bin/python -m pytest -q
+
+      - name: Check the worked example
+        run: .venv/bin/lanky check examples/spmv.py
+
+      - name: Run the worked example
+        run: .venv/bin/loopty run examples/spmv.py

@@ -219,8 +219,17 @@ table of row starts. Both compiled runs agree with the native one.
 
 ## Status
 
-This is `0.1.0.dev0`, a development release. The spmv and stencil stories work
-end to end; the edges are sharp.
+This is 0.1.0, the first release. The core works: kernels and programs run
+natively, trace, state their facts, lower and run compiled on the C target,
+and every schedule step is checked; the edges are sharp. Below is what works,
+what works in part and what does not work yet, and after it, under Known
+limits, the open issues you are most likely to meet, one of them a fact the
+ledger calls `decided` that is false: read that before you rely on a ledger.
+CI runs the suite on every change, on Python 3.12 and 3.13 and against lanky's
+`main`, and reruns every command whose output this README, the quickstart and
+the examples' README show, holding them to what it prints. It runs no OpenCL
+device. Until 1.0 an interface can change in a minor release; the CHANGELOG
+says when one does.
 
 **Works.**
 
@@ -301,8 +310,14 @@ end to end; the edges are sharp.
   A guard that reads an array, compares with `!=`, or compares with a `Real`
   scalar is evaluated at run time only, the statement lists it in
   `Stmt.unnarrowed`, and the facts stated over its domain say so in their
-  provenance. A guard has to be a truth value, and one whose value is an
-  integer is a `TraceError`, on a native run and under tracing alike. Natively
+  provenance. loopy's own bounds check reads a guard that names no array
+  into isl only when it is affine in integers; under any other, a product of
+  loop variables, a float literal or a `Real` scalar (`when(i * 0.5 < 2)`,
+  `when(i * 2.0 < n)`), it checks an access at every point of the loop, and
+  refuses one it cannot show in bounds there, one the guard keeps in bounds
+  included (#148; note 23 in `docs/loopy-notes.md`). A guard has to be a truth value, and one whose
+  value is an integer is a `TraceError`, on a native run and under tracing
+  alike. Natively
   that is what `~(i > 0)` is (`~` on a Python bool is bitwise), while the trace
   records `not (i > 0)`, so such a kernel traces and its `trace-faithful` fact
   is refuted by the native refusal, which names the fix. What is stored into
@@ -324,11 +339,19 @@ end to end; the edges are sharp.
   `b[i] - c[i]`, which numpy refuses; an integer element or scalar to a
   negative integer power, which numpy refuses and loopy computed as an
   integer (`1 / k[i] ** 2`, a real); `^`, `<<` or `>>` of a real, and `//` or
-  `%` of a complex value, which numpy refuses and C cannot compile; and a
+  `%` of a complex value, which numpy refuses and C cannot compile; a
   loop variable divided by a literal zero or shifted by a negative literal,
   which Python refuses natively, or shifted left by a literal of 64 or more,
   which Python computes exactly and the compiled run to `0`
-  (`i * 2.0 ** 64`).
+  (`i * 2.0 ** 64`); `-b[i]` of a truth value, which numpy refuses (`~b[i]`
+  for `not`, `-(1 * b[i])` for the integer); an integer literal beside a
+  numpy integer whose type does not hold it, `u[i] // -1` of a `uint64` or
+  `(b[i] // c[i]) * 200` of two truth values (an `int8` natively), which
+  numpy refuses (`np.int64(-1)`); `^`, `<<` or `>>` of a `uint64` and a
+  signed integer, which numpy refuses; and an integer literal past 64 bits
+  where numpy does not compute it in a real or a `uint64` that holds it,
+  `1.0 * (i + 2**64)`, which the compiled kernel has no integer type for
+  (`2.0 ** 64`).
 - The faithfulness fact. For each kernel and each program, the traced term is
   run by an interpreter (`loopty.interpret`: statement by statement in source
   order over each statement's isl domain, each loop enumerated when the run
@@ -418,12 +441,30 @@ end to end; the edges are sharp.
   Any power compiles on the C target, of a complex base too. Integer
   arithmetic is 64 bits wide in both runs: `Nat` and `Int` are stored in 64
   bits, and a product of a `Fin[m]` array's entries or of loop variables is
-  computed in 64 (a subscript stays loopy's 32-bit index arithmetic). `//`,
+  computed in 64, a subscript's too unless loopy reads the subscript as
+  affine with no division (note 23). `//`,
   `%`, `<<` and `>>` are computed as numpy computes them, by functions
   loopty's targets define (`loopty.operations`): of reals too, by zero (`0`
-  for integers) and past the width of a shift. A kernel named like a
-  function loopy or the C headers know (`floor`, `pow`, `cpow`) is renamed in
-  the generated code. See notes 19 and 20 in `docs/loopy-notes.md`.
+  for integers) and past the width of a shift. An operation numpy computes in
+  a numpy integer type is computed in it compiled too: one narrower than
+  `int` (`np.int8`, `np.uint16`), which C computes as an `int`, is converted
+  back into it, and an unsigned integer beside a signed one is computed in
+  the signed type numpy computes in (`int64` for a `uint32` and an `int32`),
+  where C's would be unsigned; integers compare exactly, as numpy's do, a
+  negative one with an unsigned one included. `abs` of an integer is numpy's,
+  the smallest value of its type included; a comparison of one does not
+  trace yet (`abs(k[i]) > 2`, xywei/lanky#94). An integer literal past 64 bits
+  is written as a real where numpy computes in one (`x[i] * 2**70`), or as a
+  `uint64` beside one (`u[i] + 2**63`), and refused elsewhere. A kernel named
+  like a function, a macro or a type loopy, the C headers or OpenCL C know
+  (`floor`, `pow`, `cpow`, `get_global_id`, `clamp`, `NULL`, `size_t`) is
+  renamed in the generated code, and a parameter, size or loop variable
+  named like a macro the headers define (`I` with complex values, `NAN`,
+  `INT32_MAX`, `M_PI`, `NULL`) or a function the kernel calls (`pow` with a
+  power) is refused, naming what the code means by it. So is a size, an
+  integral scalar or a reduction binder named like a keyword of isl's (`max`,
+  `floor`, `mod`), and a loop variable of such a name is renamed. See notes
+  19, 20 and 23 in `docs/loopy-notes.md`.
 - Array arguments over polyhedral domains (`loopty.domain`): `Where[...]`,
   binders written as slices and then the comparisons that cut their box,
   joined by `&`; `Sigma[...]`, binders and an unnamed last fiber affine in
@@ -479,9 +520,10 @@ end to end; the edges are sharp.
   makes (a factory) do: a `DUPLICATE` block names the kernel and its ids, as
   `lanky check` names them, and the `--json` ledger keeps each claim not in
   the table under `refused_claims`, with its status and what explains it. A
-  schedule of a schedule, `Schedule(Schedule(k))`, is a schedule of `k`: its
-  run is compared with `k`'s body, and `k` is not run again through the
-  identity.
+  schedule of a schedule, `Schedule(Schedule(k).split("i", 2))`, is that
+  schedule built again from `k`: its steps replayed and checked again, on
+  its target and with its sizes unless others are given. Its run is compared
+  with `k`'s body, and `k` is not run again through the identity.
 
 **Partial.**
 
@@ -526,11 +568,13 @@ end to end; the edges are sharp.
   unbuildable. Only a pointwise
   producer is substituted (one cell per instance, at its loop variables, no
   sum, no guard isl cannot state), and the array is either stored in full
-  or not at all: contracting it to the cells live at once is not done. A
-  value its store converts, or one computed with a conversion in it
-  (`(t[j] + 1) % n` of a 32-bit `Fin[m]` entry, computed in 64 bits), read
-  in a subscript, leaves the kernel unwritten, with the reason: loopy
-  cannot simplify a subscript through the cast (#145). The
+  or not at all: contracting it to the cells live at once is not done.
+  Every read gets the value as the store converted it, a read in a
+  subscript included (`y[(int16_t) (t[i])]`), and a conversion inside the
+  value stays (`(t[j] + 1) % n` of a 32-bit `Fin[m]` entry, computed in 64
+  bits); a store's widening keeps the value, and a read in a subscript reads
+  the value inside it (`x[t[i]]`, and `x[n - 1 - i]`, which loopy then reads
+  as affine and checks). The
   compiled program is one call, so the contract checks its arguments when it
   starts and not at every call. What a callee's contract checks of the cells
   of an array an earlier call wrote, or the program made (an element sort
@@ -571,15 +615,29 @@ end to end; the edges are sharp.
   Arithmetic of loop variables, sizes and literals alone is Python's natively,
   which is exact: `1.0 * i ** 5` past `i = 6208` is a wider number natively
   and wraps compiled, which the differential fact reports (#139).
-  Index arithmetic, a subscript and a loop bound, is loopy's, 32 bits wide,
-  and so is a sum of loop variables, sizes and small literals: `x[(i * i) %
-  n]` reads out of bounds compiled at `i = 46341` (#129). A
-  `Fin[m]` array the kernel writes may be an `int32` one natively, and an
-  entry read back from it is computed with in 32 bits there, unless a
-  program's checked point reads it, which takes an `int64` one. An integer to a
+  A loop bound, and a subscript loopy reads as affine with no division, are
+  loopy's index arithmetic, 32 bits wide, and so is a sum of loop variables,
+  sizes and small literals elsewhere; under `-fwrapv` such a subscript's
+  sums and products give the cell it names. Any other subscript is computed
+  in 64 bits, as the rest is: `x[(i * i) % n]` (#129), and `x[(i * 499999)
+  // 1000000]`, which loopy wrote with a division of the wrapped `499999 *
+  i`. A sum the plan leaves in 32 bits stays so in a division too, `x[(i +
+  n) // 2]` past `2**30` (#149). A subscript over a narrow numpy integer
+  type is not converted back into it (#157). A `Fin[m]` array the kernel
+  writes may be an `int32` one natively, whose entries the native run reads
+  as `int64`, as the compiled run computes with them, unless a program's
+  checked point reads it, which takes an `int64` one. An integer to a
   negative power whose exponent is not a literal is left to numpy's refusal
-  natively, and computed as an integer compiled. See notes 19 and 20 in
-  `docs/loopy-notes.md`.
+  natively, and computed as an integer compiled. pymbolic builds `u[i] - 1`
+  and `u[i] + -1` as one term, read as the difference: of an unsigned `u`
+  numpy refuses the second at every point, and the compiled run computes it
+  as the first; `a - b` and `a + -b` of an `int8` `b` likewise differ
+  natively at `b = -128` alone, and of an `Int` `a` and an unsigned `b` at
+  every `b` but zero (#151). A loop variable's arithmetic beside
+  a numpy integer whose type does not hold its value at some point,
+  `u[i] + (i - 3)` of a `uint32` `u`, is refused natively there and
+  computed compiled (#153), and `abs` of a real in a guard fails inside
+  loopy (#154). See notes 19, 20 and 23 in `docs/loopy-notes.md`.
 - A polyhedral domain is an array's whole index set, so it cannot sit beside
   a dense axis (`Arr[Fin[k], Where[...], Real]` is refused; write the axis as
   a binder of the domain). The pieces of a union have the same number of axes,
@@ -638,7 +696,12 @@ end to end; the edges are sharp.
   writes and dependences tell the cells apart as `[r, j]`, one cell each
   only while no row moves, nor of one that writes a row's length inside a
   loop over the row, which runs to the length it read when it started. A
-  program's layout facts are not tried on runs.
+  read of the row inside such a loop is checked natively against the length
+  the write left, which isl cannot read, so its in-bounds fact is
+  `assumed` itself, with the reason (`cnt[r] = 0` inside `for j in
+  val.dom[r]` makes the native run refuse `val[r, 1]`); a sum or an inner
+  loop over the row reads the length again where it starts, and its reads
+  stay decided. A program's layout facts are not tried on runs.
 - `Schedule.affine` and maps whose image has holes. The diamond
   `(t, i) -> (t + i, t - i)` reaches only the points of equal parity, and
   loopy's own `map_domain` refuses it, so loopty rewrites the kernel over the
@@ -714,39 +777,105 @@ end to end; the edges are sharp.
 - The OpenCL target is never executed on a development machine: nothing here
   imports pyopencl, and the test suite asserts it. Device runs happen on real
   hardware elsewhere and are reported under
-  [docs/device-runs/](docs/device-runs/).
+  [docs/device-runs/](https://github.com/xywei/loopty/tree/main/docs/device-runs).
 - CUDA, and targets beyond C and OpenCL.
 - The two-level FMM point-to-point shape, which is a dependent sum of dependent
   sums and needs more than the two ragged axes lowering handles.
-- Anything on PyPI above the 0.0.1 placeholder.
+
+## Known limits
+
+The open issues a user is most likely to meet. Each says what the ledger and
+the runs make of it, since that is what decides whether it can go unnoticed.
+
+- **Some index arithmetic is 32 bits wide compiled**
+  ([#149](https://github.com/xywei/loopty/issues/149), [#157](https://github.com/xywei/loopty/issues/157)). A loop bound, and a subscript loopy
+  reads as affine with no division, are loopy's index arithmetic, 32 bits
+  wide. Every other subscript is computed in 64 bits, as natively. A sum of
+  loop variables and sizes inside a dividing subscript stays in 32 bits, so
+  `x[(i + n) // 2]` wraps round past `2**30` (#149). A subscript over a
+  narrow numpy integer type, such as `int8` or `uint16`, is computed in C's
+  `int` compiled, and wraps round natively (#157).
+- **A guard loopy's bounds check cannot read**
+  ([#148](https://github.com/xywei/loopty/issues/148)). An access that only a floating-point guard keeps in
+  bounds, `x[2 * i]` under `when(i * 2.0 < n)`, is refused by loopy's bounds
+  check, with a message that names no fix. Write the guard over integers.
+- **Integers past 64 bits** ([#139](https://github.com/xywei/loopty/issues/139), [#159](https://github.com/xywei/loopty/issues/159)). Arithmetic of
+  loop variables, sizes and literals alone is exact natively and 64 bits wide
+  compiled: `1.0 * i ** 5` wraps round compiled past `i = 6208`, and the
+  differential fact is refuted. A `uint64` value past `2**63` stored into an
+  `Int` array is refused natively and wraps round compiled.
+- **What passes between calls is stored in full or not at all**
+  ([#132](https://github.com/xywei/loopty/issues/132), [#133](https://github.com/xywei/loopty/issues/133)). `Schedule.substitute` computes an
+  intermediate again at every read; keeping only the cells live at once, a
+  window of three cells of `f` after the Burgers fusion, is not done. Nor is
+  a substitution through two intermediates, one computed from the other.
+- **A program's intermediates live on the C stack**
+  ([#62](https://github.com/xywei/loopty/issues/62)). An array a program makes
+  with `Arr.zeros_like` is a variable-length array on the stack of the compiled
+  call, so one larger than the stack crashes the compiled run, and nothing
+  checks the size first.
+- **The OpenCL target is not run in CI.** `--target opencl`, with the `opencl`
+  extra, generates OpenCL and runs it through pyopencl, and nothing in CI or in
+  the test suite runs a device. The demos were run on two device classes by
+  hand, and
+  [docs/device-runs.md](https://github.com/xywei/loopty/blob/main/docs/device-runs.md)
+  has the commands and the transcripts. A comparison of complex values does
+  not build on it ([#158](https://github.com/xywei/loopty/issues/158)).
+- **A theorem's or a postcondition's statement is lanky's reading of it.**
+  loopty traces a kernel's body itself, and the `trace-faithful` fact checks
+  that trace. A theorem, and the claim after a kernel's `->`, are annotations
+  lanky evaluates, and lanky's
+  [Known limits](https://github.com/xywei/lanky#known-limits) apply to them:
+  an operation that answers from a term object rather than through its
+  overloads can make the statement say something other than what was
+  written. Read the ledger's `STATEMENT` column.
+
+The Partial and Not yet lists under Status have the rest, and the
+[open issues](https://github.com/xywei/loopty/issues) have every one.
 
 ## Install
-
-```sh
-uv add loopty
-```
 
 ```sh
 pip install loopty
 ```
 
-loopty pulls [lanky](https://github.com/xywei/lanky), numpy, islpy, loopy and
-pymbolic. Device execution is an extra, and it is never installed on a laptop:
+loopty runs on Python 3.12 and 3.13: the islpy it is held to has no wheels for
+3.14. CI, and every run this README reports, is on Linux. In a uv project,
+`uv add loopty`, and the same for the extra below. The install pulls in:
+
+- [lanky](https://github.com/xywei/lanky) 0.1.0 or later, the proof host:
+  `lanky check` prints the ledger, and loopty plugs into it;
+- [loopy](https://github.com/inducer/loopy) 2025.2, which generates the code.
+  loopty builds on loopy's internals, so a release of loopty is held to the
+  loopy release it is tested with;
+- [islpy](https://github.com/inducer/islpy) from 2025.2.5 and below 2026,
+  since islpy 2026 removed a method loopy 2025.2 calls (note 4 in
+  [docs/loopy-notes.md](https://github.com/xywei/loopty/blob/main/docs/loopy-notes.md));
+- numpy 2 or later, whose promotion rules (NEP 50) the compiled run follows,
+  and pymbolic.
+
+A compiled run, `loopty run` or `LoopyExecutor`, also needs a C compiler,
+whatever `gcc` is on the `PATH`: GCC on Linux, and on macOS the `gcc` of
+Apple's command-line tools, which is clang. `lanky check` needs none, and
+neither does calling a kernel natively; the demos under `python` compile a
+schedule as well, so they do.
+
+Device execution is an extra, which installs pyopencl, for
+`loopty run FILE --target opencl` and `LoopyExecutor(target="opencl")`. The
+device and its OpenCL driver are yours to provide, and CI never runs this
+path:
 
 ```sh
-uv add "loopty[opencl]"
+pip install "loopty[opencl]"
 ```
 
 lanky's Lean oracle is an extra of *lanky*, so a ledger that says `proved lean`
-needs `uv add "lanky[lean]"` in the same environment. Without it the same
-theorem reads `tested property-test`, and every other row is unchanged.
+needs `pip install "lanky[lean]"` and a Lean toolchain in the same environment
+(lanky's README has the details). Without it the same theorem reads
+`tested property-test`, and every other row is unchanged.
 
-loopty needs lanky 0.1.0.dev1 or later, and follows lanky's `main` between
-`devN` bumps. lanky's version moves to the next `0.1.0.devN` whenever an
-interface loopty uses changes, and loopty's floor (`lanky>=0.1.0.dev1` in
-`pyproject.toml`) is raised with it; in between, loopty is developed and
-tested against lanky's `main`, and a lanky that satisfies the floor may still
-lack something loopty's `main` uses.
+The examples and the documentation are in the repository and not in the
+package; clone it to follow them.
 
 For work on loopty itself, lanky is resolved from a sibling checkout:
 
@@ -811,16 +940,17 @@ loopty is loop + ty, for types: loops, typed. It follows `loopy`, `sumpy`, and
 
 ## Documentation
 
-- [docs/quickstart.md](docs/quickstart.md): the two demos end to end, with the
-  output the commands actually print.
-- [examples/README.md](examples/README.md): all nine demos, with every console
-  block regenerated by `scripts/refresh_example_outputs.py`.
-- [docs/device-runs.md](docs/device-runs.md) and
-  [docs/device-runs/](docs/device-runs/): the demos run on real OpenCL devices,
-  with the commands and the transcripts.
-- [docs/loopy-notes.md](docs/loopy-notes.md): the loopy and islpy interactions
-  that cost debugging time, each with its local workaround and why it is local.
-- [CHANGELOG.md](CHANGELOG.md).
+- [docs/quickstart.md](https://github.com/xywei/loopty/blob/main/docs/quickstart.md): the two demos end to end,
+  with the output the commands actually print.
+- [examples/README.md](https://github.com/xywei/loopty/blob/main/examples/README.md): all nine demos, with every
+  console block regenerated by `scripts/refresh_example_outputs.py`.
+- [docs/device-runs.md](https://github.com/xywei/loopty/blob/main/docs/device-runs.md) and
+  [docs/device-runs/](https://github.com/xywei/loopty/tree/main/docs/device-runs): the demos run on real OpenCL
+  devices, with the commands and the transcripts.
+- [docs/loopy-notes.md](https://github.com/xywei/loopty/blob/main/docs/loopy-notes.md): the loopy and islpy
+  interactions that cost debugging time, each with its local workaround and
+  why it is local.
+- [CHANGELOG.md](https://github.com/xywei/loopty/blob/main/CHANGELOG.md).
 - [lanky](https://github.com/xywei/lanky): the proof host loopty plugs into, and
   where the ledger, the statuses and the oracle protocol are defined.
 
@@ -833,4 +963,4 @@ should assume AI involvement throughout.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](https://github.com/xywei/loopty/blob/main/LICENSE).
