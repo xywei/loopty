@@ -6,6 +6,12 @@ All notable changes to loopty are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- CI also tests loopty as `pip install loopty` gets it: a second job installs
+  it without `[tool.uv.sources]`, so with lanky from PyPI, and runs the suite
+  and the worked example's `lanky check` and `loopty run` (#147).
+
 ## [0.1.0] - 2026-10-09
 
 The first release on PyPI, where only the 0.0.1 placeholder that reserved the
