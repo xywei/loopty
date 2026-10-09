@@ -50,10 +50,12 @@ a product of them is not, since ``i * i`` leaves 32 bits at ``i = 46341``,
 and nor is a sum whose literals total ``2**30`` or more (``i + 2**31 - 1``).
 The lowering widens an integer in a guard that reads no array as everywhere
 else, with no cast (``when(i * i < m)`` wrapped round at ``i = 46341``), and
-leaves a subscript's arithmetic in 32 bits, which loopy gives it no way to
-widen, a limit (#129; :class:`loopty.lower.ExpressionLowerer`). A result
-outside 64 bits wraps round compiled and is refused or wraps natively, which
-is numpy's limit too.
+in a subscript as everywhere else (``x[(i * i) % n]``, #129), unless loopy
+reads the subscript as affine with no division, which it then computes in
+its 32-bit index type whatever is written, and which wraps round to the cell
+it names (:meth:`loopty.lower.ExpressionLowerer._index`). A result outside
+64 bits wraps round compiled and is refused or wraps natively, which is
+numpy's limit too.
 
 The type C computes an operation in is C's, by its integer promotion and its
 usual arithmetic conversions (:func:`_c_result`), and not numpy's, in two

@@ -197,7 +197,7 @@ _TAG = "11_loopty"
 #: The modules whose source decides the code loopty's targets generate: the
 #: definitions and the code generator that calls them, here, the plan of
 #: conversions (:mod:`loopty.promotion`) and the lowering (:mod:`loopty.lower`).
-_SOURCES = ("operations.py", "promotion.py", "lower.py")
+_SOURCES = ("operations.py", "promotion.py", "lower.py", "isl_reading.py")
 
 
 def _digest() -> str:
@@ -218,8 +218,9 @@ def _digest() -> str:
     return digest.hexdigest()[:16]
 
 
-#: A digest of every definition, of the code generator that calls them, and
-#: of the modules that decide what the lowered kernel holds, which loopty's
+#: A digest of every definition, of the code generator that calls them, of
+#: the modules that decide what the lowered kernel holds, and of what loopy's
+#: isl reader declines in it (:mod:`loopty.isl_reading`), which loopty's
 #: targets hash in, so that loopy's persistent cache serves no code another
 #: version of them generated. A cache key cannot tell that by the kernel
 #: alone: pymbolic's persistent hash reads a numpy scalar as the Python number
@@ -342,7 +343,7 @@ class NumpyArithmetic:
         operation whose operands are all integers, literals or not, writes its
         literals as integers, and any other in the type of its operands that
         are no Python number, beside which numpy takes a Python int into their
-        type, and a Python float into a real one (note 23 in
+        type, and a Python float into a real one (note 25 in
         ``docs/loopy-notes.md``). Not in loopy's type
         for the whole operation, which types an integer literal of 32 bits or
         more as an ``int64``, and a ``float32`` beside one as a double: ``2**62

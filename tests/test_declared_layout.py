@@ -1176,9 +1176,8 @@ def test_a_row_shortened_in_its_own_loop_leaves_its_reads_assumed() -> None:
         "the row leaves behind, and which the rows in order do not keep"
     )
     (read,) = [fact for fact in ledger if fact.id.endswith(":S0:read:val[r, j]")]
-    assert read.status is Status.DECIDED
+    assert read.status is Status.ASSUMED
     assert ledger.support(read).effective is Status.ASSUMED
-    assert ledger.support(read).under == (layout.id,)
     counts = [2, 1, 3]
     arguments = {
         "cnt": Arr.from_numpy(np.array(counts, dtype=np.int64)),
@@ -1187,6 +1186,78 @@ def test_a_row_shortened_in_its_own_loop_leaves_its_reads_assumed() -> None:
     }
     with pytest.raises(IndexError, match="column 1 out of range for row 0 of length 0"):
         Kernel(shortened_in_its_own_loop)(**arguments)
+
+
+def first_entry_after_emptied(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The row's first entry, once per entry, the row emptied after the first."""
+    for r in y.dom:
+        for j in val.dom[r]:
+            cnt[r] = 0
+            y[r] = y[r] + val[r, 0]
+
+
+def next_row_emptied_in_a_loop_of_the_row(
+    cnt: Arr[Fin[n], Nat],  # noqa: F821
+    val: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """Row ``r`` read entry by entry, and the length of row ``r + 1`` cleared."""
+    for r in y.dom:
+        for j in val.dom[r]:
+            y[r] = y[r] + val[r, j]
+            with when(r + 1 < y.dom.size):
+                cnt[r + 1] = 0
+
+
+def test_a_read_against_a_length_its_loop_rewrites_is_assumed() -> None:
+    # The loop over j reads the length of row r once, when it starts, as
+    # nl_cnt_r, and the in-bounds fact of val[r, j] is stated against that
+    # reading. cnt[r] = 0 inside the loop leaves it behind: the native run
+    # refuses val[r, 1], and the fact was decided, worth assumed only
+    # through the layout fact, which anything that decides the layout
+    # another way would have made decided (#144). The length at the read is
+    # no parameter isl can read, so the fact itself is assumed.
+    from lanky.ledger import Status
+
+    for fn, access, writer in (
+        (shortened_in_its_own_loop, "S0:read:val[r, j]", "S1"),
+        (count_grown_inside_its_own_fiber, "S0:read:val[r, j]", "S1"),
+        (first_entry_after_emptied, "S1:read:val[r, 0]", "S0"),
+    ):
+        _term, ledger, _layouts = layout_of(fn)
+        (read,) = [fact for fact in ledger if fact.id.endswith(f":{access}")]
+        assert read.status is Status.ASSUMED, fn.__name__
+        assert read.term is None
+        assert read.provenance["reason"] == (
+            f"{writer} writes cnt inside the loop over j, which read the length "
+            f"of the row as nl_cnt_r when it started: from the write on, "
+            f"{access.split(':')[0]} reads the row against the length the write "
+            "left, which isl cannot read, and not against that reading"
+        )
+    counts = [2, 1, 3]
+    arguments = {
+        "cnt": Arr.from_numpy(np.array(counts, dtype=np.int64)),
+        "val": Arr.ragged(counts, values=np.arange(1.0, 7.0)),
+        "y": Arr.zeros(3),
+    }
+    with pytest.raises(IndexError, match="column 0 out of range for row 0 of length 0"):
+        Kernel(first_entry_after_emptied)(**arguments)
+    # A sum or an inner loop over the row reads the length again where it
+    # starts, after the write, and a write of another row's length changes
+    # no reading of this row's: those reads stay decided.
+    for fn, access in (
+        (row_sum_in_its_own_fiber_recounted, "S0:read:val[r, k]"),
+        (pairs_in_a_row_recounted, "S0:read:val[r, k]"),
+        (next_entry_recounted, "S1:read:val[r, k]"),
+        (next_row_emptied_in_a_loop_of_the_row, "S0:read:val[r, j]"),
+    ):
+        _term, ledger, _layouts = layout_of(fn)
+        (read,) = [fact for fact in ledger if fact.id.endswith(f":{access}")]
+        assert read.status is Status.DECIDED, fn.__name__
 
 
 def emptied_then_moved_onto(

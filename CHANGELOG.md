@@ -6,8 +6,108 @@ All notable changes to loopty are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- loopy refuses to preprocess or generate code for a kernel on one of
+  loopty's targets outside `loopty.isl_reading.declining()`, with
+  `isl_reading.ReadingsInactive`. Such a kernel is written for loopty's
+  readings of its subscripts and guards (#129, #137), and loopy's code
+  cache, whose key does not say which readings made an entry, would serve
+  code generated with loopy's own to a run of loopty's, past the bounds
+  check that refuses it. `LoopyExecutor` and `emit_code` enter the context;
+  a caller who hands `schedule.kernel` to `lp.generate_code_v2` or to its
+  `executor()` itself does it inside `with declining():`. Code loopy finds in
+  its cache was generated inside, and is served as before.
+
 ### Fixed
 
+- A subscript loopy does not read as affine is computed in 64 bits compiled,
+  as the rest of the integer arithmetic is (#129). `x[(i * i) % n]` was
+  `x[loopty_mod_int32(i * i, n)]`, which wrapped round at `i = 46341` and
+  read a wrong cell, or none, and `x[(col[i] * 7919) % m]` read a wrong cell
+  at `col[i] = 271183`. The lowering had left every subscript in 32 bits,
+  since loopy reads a subscript into isl and its reader raised on the cast
+  that widens an operand anywhere else. `loopty.isl_reading` makes the reader
+  decline a cast, as it declines a call, and loopy generates such a
+  subscript as written: `x[loopty_mod_int64((int64_t) (i) * i, (int64_t)
+  (n))]`. So is a sum of a 32-bit entry and a loop variable, as `travel.py`
+  reads its flat buffer, `val[(int64_t) (off[r]) + j]`. A subscript loopy
+  reads as affine without the widening, and isl writes with no division, is
+  left without it (`x[2 * i]`): loopy replaces it by the affine expression
+  isl gives back, in its 32-bit index type, which `-fwrapv` makes right for
+  sums and products, and checks its bounds, which a cast would stop. One
+  with a division is widened: isl keeps a multiple below half the divisor,
+  and `x[(i * 499999) // 1000000]` was `x[(499999 * i) / 1000000]`, which
+  named a negative cell from `i = 4295` over a few thousand cells. A sum of
+  loop variables and sizes, which the plan leaves in 32 bits, stays so in a
+  division too, past `2**30` (#149; note 23 of `docs/loopy-notes.md`). The
+  reader declines so only while loopty builds, transforms, checks, generates
+  or runs one of its kernels, inside `isl_reading.declining()` and in that
+  thread alone: nothing is installed in loopy when loopty is imported, and
+  the last context to exit puts loopy's own readings back, so another user
+  of loopy in the process (sumpy, pytential) has its kernels read, checked
+  and generated as without loopty. loopty enters it in
+  `lower.lower_generic`, in building a `Schedule` and in each of its public
+  methods, in `LoopyExecutor.run` and in `emit_code`.
+- loopy no longer reads a non-integer literal in a guard on the loops by its
+  integer part (#137). Its bounds check reads such a guard into isl, and read
+  `0.5` as `0`: `when(i * 0.5 >= 1)` as false everywhere, so the check passed
+  `x[i + 4]` under it without looking, and the compiled run read past the end
+  of `x` where the native one is refused; `when(i < 1.5)` as `i < 1`, which
+  let `x[i + n - 1]` through at `i = 1`. A float that is an integer was read
+  as the integer, though the guard is computed in floating point, which
+  rounds: `when(i * 2.0**52 + 1.0 <= i * 2.0**52)` read as false everywhere,
+  and holds from `i = 2`. And a `Real` scalar was an integer parameter of
+  the domain the guards are read over: `when((i < a) & (i > a - 1))` holds
+  for no integer `a`, and at `i = 1` for `a = 1.5`. The reader declines a
+  constant whose type is not an integer's, and a value argument whose dtype
+  is not an integer's is no parameter, so loopy reads no guard computed in
+  floating point, checks the access at every point of its loop, and refuses
+  each. Under such a guard it also refuses an access the guard keeps in
+  bounds, `when(i * 0.5 < 2)` over `x[i + 4]` and `when(i * 2.0 < n)` over
+  `x[2 * i]`, as it does under a product of loop variables (#148). A guard on
+  the loops that numpy computes in single precision, `(i + 1) ** -1` beside a
+  `float32` scalar, is written with the cast instead of refused.
+- `Schedule.substitute` computes an index array where it is read in a
+  subscript again (#145). Since #101 and #128 such a value holds a
+  conversion, the store's or its own (`(t[j] + 1) % n` of a 32-bit
+  `Fin[n]` entry, computed in 64 bits), and loopy failed on it in code
+  generation, so the substitution was decided and its kernel left unwritten.
+  loopy's isl reader declines the cast now, and a read in a subscript keeps
+  the value's conversions, the store's narrowing included (`y[(int16_t)
+  (t[i])]`). A store's widening keeps the value and is the last thing done
+  to it, so a read in a subscript reads the value inside it (`x[t[i]]`, and
+  `x[n - 1 - i]`, which loopy reads as affine and checks); a read used as a
+  value keeps it, `q[i] * q[i]` too after `x[q[i]]`. Each substituted kernel
+  agrees bit for bit with the one that stores the array.
+- The emitted code of a schedule no longer depends on the process's hash
+  seed (#125). loopy builds the assumptions of a kernel given none over a
+  `frozenset` of its parameters, and isl wrote the sizes in every bound in
+  that order: `wavefront_acoustic.py --emit-code` printed `-4 + nt + nx` or
+  `-4 + nx + nt` by `PYTHONHASHSEED`, with a cold cache. The lowering gives
+  `lp.make_kernel` the universe over the parameters in the order the domains
+  name them first (note 24 of `docs/loopy-notes.md`).
+- `Schedule(schedule)` starts from the schedule it is given (#135). It read
+  the schedule for its term alone, so `Schedule(Schedule(double).split("i",
+  2))` was a schedule of `double` with no step, a split after it split the
+  original loop, `loopty run` compared it with `double` and found them in
+  agreement, and `Schedule(Schedule(double, target="opencl"))` was a C
+  schedule. It is the schedule built again from its kernel, its steps
+  replayed and each cast checked again, on its target, with its sizes and
+  its example inputs, unless a target or sizes are given (the default
+  target is now `None`, the given schedule's or `"c"`).
+- The in-bounds fact of a read against a row length a write in its loop left
+  behind is `assumed` (#144). A loop over a row reads the row's length once,
+  when it starts, and the facts of the row's entries were decided against
+  that reading: with `cnt[r] = 0` inside `for j in val.dom[r]`, the native
+  run refuses `val[r, 1]`, and its fact was decided, worth assumed only
+  through the kernel's layout fact, which anything that decided the layout
+  another way would have made decided. A read in a statement that shares the
+  innermost loop the length bounds with a write that can reach the cell the
+  length is read from is now stated with the reason and left `assumed`; a
+  sum or an inner loop over the row reads the length again where it starts,
+  and a write of another row's length changes no reading of this row's, so
+  their reads stay decided.
 - An `int32` array of `Fin[m]` that a kernel writes is computed with in 64
   bits natively too (#121): the native run read an entry back as an
   `np.int32`, and `p[i] * p[i]` wrapped round at `p[i] = 46341`, where the
@@ -76,7 +176,7 @@ All notable changes to loopty are recorded here. The format follows
   `int32`, at `-O0` too; loopy sums a reduction in a branch of an `If` only
   where the branch's condition holds of the partial sum; and loopy's bounds
   check reads an `If`'s condition into isl, whose reader raised on the cast
-  that widens `i * i` in `abs(i * i - m)` (note 23). `abs` of a loop
+  that widens `i * i` in `abs(i * i - m)` (note 25). `abs` of a loop
   variable is a Python int's, natively and to the plan.
 - A parameter, a size or a loop variable named like a macro a header the
   generated code includes defines, or like a function the kernel calls, is
@@ -140,6 +240,7 @@ All notable changes to loopty are recorded here. The format follows
   which numpy and the compiled run decide exactly. `^`, `<<` or `>>` of a
   `uint64` and a signed integer, which numpy refuses, since only a double
   holds both, is a `TraceError` too.
+
 
 ## [0.1.0.dev0] - 2026-09-18
 
