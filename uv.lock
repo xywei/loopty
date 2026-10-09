@@ -87,7 +87,7 @@ wheels = [
 
 [[package]]
 name = "lanky"
-version = "0.1.0.dev1"
+version = "0.1.0"
 source = { editable = "../lanky" }
 dependencies = [
     { name = "numpy" },
@@ -99,8 +99,9 @@ requires-dist = [
     { name = "lean-interact", marker = "extra == 'lean'", specifier = ">=0.11.5" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pymbolic", specifier = ">=2025.1" },
+    { name = "sympy", marker = "extra == 'cas'", specifier = ">=1.12" },
 ]
-provides-extras = ["lean"]
+provides-extras = ["lean", "cas"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -110,7 +111,7 @@ dev = [
 
 [[package]]
 name = "loopty"
-version = "0.1.0.dev0"
+version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "islpy" },
@@ -133,12 +134,12 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "islpy", specifier = "<2026" },
+    { name = "islpy", specifier = ">=2025.2.5,<2026" },
     { name = "lanky", editable = "../lanky" },
-    { name = "loopy" },
-    { name = "numpy" },
-    { name = "pymbolic" },
-    { name = "pyopencl", marker = "extra == 'opencl'" },
+    { name = "loopy", specifier = ">=2025.2,<2025.3" },
+    { name = "numpy", specifier = ">=2" },
+    { name = "pymbolic", specifier = ">=2025.1" },
+    { name = "pyopencl", marker = "extra == 'opencl'", specifier = ">=2022.3" },
 ]
 provides-extras = ["opencl"]
 
