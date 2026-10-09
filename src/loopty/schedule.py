@@ -234,6 +234,7 @@ from pymbolic.mapper.substitutor import substitute
 from loopty import idx
 from loopty import oracle as isl_oracle
 from loopty.flow import bounds_dimension
+from loopty.isl_reading import declining_methods
 from loopty.lower import (
     Lowering,
     _plain,
@@ -2325,6 +2326,7 @@ def _transformed(kernel: Any, transform: Any, *args: Any, **kwargs: Any) -> Any:
     return None if kernel is None else transform(kernel, *args, **kwargs)
 
 
+@declining_methods
 class Schedule:
     """A kernel plus the transformations applied to it, each one checked.
 
@@ -2336,16 +2338,38 @@ class Schedule:
     ``sizes`` is a hint, not a constraint: the checks are made with the size
     parameters free, and the hint is used only to print a witness with concrete
     numbers in it, and as the default example inputs for ``loopty run``.
+
+    A schedule given as ``kernel`` is started from as it stands: the schedule
+    is built again from its kernel, on its target and with its sizes unless
+    others are given, and its steps are replayed, each cast checked again, as
+    :meth:`retarget` replays them; its example inputs come too. So
+    ``Schedule(Schedule(k).split("i", 2))`` is that split of ``k``, and
+    ``Schedule(Schedule(k, target="opencl"))`` an OpenCL schedule (#135),
+    where the steps and the target were dropped and the outer schedule was
+    one of ``k`` alone, which ``loopty run`` compared with ``k`` and found
+    in agreement.
+
+    Building a schedule and every public method of one run inside
+    :func:`loopty.isl_reading.declining`
+    (:func:`~loopty.isl_reading.declining_methods`): a step transforms the
+    kernel with loopy and reads some of its expressions with loopy's isl
+    reader, so :attr:`kernel` and :attr:`buildable` are made with loopty's
+    readings, as the kernel is lowered, checked and generated.
     """
 
     def __init__(
         self,
         kernel: Any,
-        target: str = "c",
+        target: str | None = None,
         sizes: dict[str, int] | None = None,
         *,
         _layouts: dict[str, str] | None = None,
     ) -> None:
+        if isinstance(kernel, Schedule):
+            self._start_from(kernel, target, sizes)
+            return
+        if target is None:
+            target = "c"
         self._source = kernel
         self._term = _term_of(kernel)
         #: What the ids of the schedule's facts name the kernel by; see
@@ -2466,6 +2490,25 @@ class Schedule:
 
     # {{{ plumbing
 
+    def _start_from(
+        self, schedule: Schedule, target: str | None, sizes: dict[str, int] | None
+    ) -> None:
+        """Become ``schedule``, built again, on ``target`` and with ``sizes``.
+
+        From its kernel, which is never a schedule, since a schedule built
+        from one is built from its kernel; see the class.
+        """
+        out = Schedule(
+            schedule._source,
+            target=schedule._target if target is None else target,
+            sizes=dict(schedule._sizes) if sizes is None else sizes,
+        )
+        for method, args, kwargs in schedule._steps:
+            out = getattr(out, method)(*args, **kwargs)
+        if schedule._examples is not None:
+            out = out.example(**schedule._examples)
+        self.__dict__.update(out.__dict__)
+
     def _clone(self) -> Schedule:
         """A shallow copy; every public method builds one rather than mutating."""
         other = object.__new__(Schedule)
@@ -2493,7 +2536,11 @@ class Schedule:
 
     @property
     def source(self) -> Any:
-        """The object the schedule was built from (a kernel, or a term)."""
+        """The object the schedule was built from (a kernel, or a term).
+
+        The kernel of a schedule given as the source, which the schedule is
+        built again from (see the class).
+        """
         return self._source
 
     @property
@@ -3958,7 +4005,7 @@ class Schedule:
                 array,
                 removed,
                 ids[producer.id],
-                _computed_in(term, producer, array, readers),
+                _computed_in(term, producer),
             )
             draft.kernel = kernel
             if reason is not None:
@@ -4956,40 +5003,18 @@ def _not_pointwise(stmt: Stmt, array: str, term: Term) -> str | None:
     return None
 
 
-def _computed_in(
-    term: Term, producer: Stmt, array: str, readers: Sequence[Stmt]
-) -> tuple[Any, str | None]:
-    """The dtype the lowered code computes ``producer``'s value in, and a reader.
+def _computed_in(term: Term, producer: Stmt) -> Any:
+    """The dtype the lowered code computes ``producer``'s value in, or ``None``.
 
-    The dtype is :class:`loopty.promotion.Promotion`'s, the one the lowering
-    plans every operation of the value by, or ``None`` where it is not known
-    there; :func:`_substituted_kernel` compares it with the dtype ``array``
-    is stored in. The reader is the first of ``readers`` that reads
-    ``array`` inside a subscript (``y[p[i]]``, or ``x[p[i]]``), or ``None``:
-    loopy simplifies a subscript as an affine expression, which a cast is
-    not.
+    :class:`loopty.promotion.Promotion`'s, the one the lowering plans every
+    operation of the value by, or ``None`` where it is not known there;
+    :func:`_substituted_kernel` compares it with the dtype the array is
+    stored in.
     """
     from loopty.promotion import Promotion
-    from loopty.trace import accesses_in
 
     _native, computed = Promotion(term).types(producer.expr)
-    for stmt in readers:
-        subscripts = [
-            stmt.assignee.indices,
-            *(
-                access.indices
-                for source in (stmt.expr, stmt.guard)
-                if source is not None
-                for access in accesses_in(source)
-            ),
-        ]
-        if any(
-            access.array == array
-            for indices in subscripts
-            for access in accesses_in(tuple(indices))
-        ):
-            return computed, stmt.id
-    return computed, None
+    return computed
 
 
 def _loopy_dtype(kernel: Any, insn_id: str) -> Any:
@@ -5007,30 +5032,80 @@ def _loopy_dtype(kernel: Any, insn_id: str) -> Any:
         return None
 
 
-def _a_cast_in(expr: Any) -> Any:
-    """The first conversion (loopy's ``TypeCast``) in ``expr``, or ``None``.
+def _widens(value: Any, stored: Any) -> bool:
+    """Whether storing an integer of dtype ``value`` as ``stored`` keeps it.
 
-    The lowering writes one where C's arithmetic would type an operation
-    otherwise than numpy (:mod:`loopty.promotion`): ``(t[j] + 1) % n`` of a
-    32-bit ``Fin[n]`` entry is computed in 64 bits, with ``t[j]`` cast. A
-    walk that fails is read as finding one, as any doubt is read as a
-    conversion here.
+    A wider integer holds every value of a narrower one, and an unsigned one
+    every value of a narrower unsigned one; ``np.can_cast`` with ``"safe"``
+    says exactly that, and nothing of a float.
     """
-    from loopy.symbolic import TypeCast, WalkMapper
+    import numpy as np
 
-    found: list[Any] = []
+    return (
+        value is not None
+        and value.kind in "iu"
+        and stored.kind in "iu"
+        and np.can_cast(value, stored, casting="safe")
+    )
 
-    class _Casts(WalkMapper):
-        def visit(self, expr: Any, *args: Any, **kwargs: Any) -> bool:
-            if isinstance(expr, TypeCast):
-                found.append(expr)
-            return True
 
-    try:
-        _Casts()(expr)
-    except Exception:  # noqa: BLE001 - any doubt is read as a conversion
-        return expr
-    return found[0] if found else None
+def _unconverted_in_subscripts(kernel: Any, rules: Mapping[str, Any]) -> Any:
+    """``kernel``, each rule of ``rules`` read in a subscript without its cast.
+
+    ``rules`` maps the name of a substitution rule whose body is a widening
+    (loopy's ``TypeCast`` to a wider integer) to the name of a rule with the
+    same arguments and the body inside the cast. An invocation of the first
+    inside a subscript becomes one of the second; a read used as a value
+    keeps the conversion. The walk is loopy's uncached mapper: its cached
+    one keys a result by the expression alone, so a read used as a value
+    after the same read in a subscript, ``x[q[i]] + q[i] * q[i]``, was given
+    the subscript's rule, and ``q[i] * q[i]`` of a 32-bit ``t[i]`` stored in
+    64 bits was computed in 32.
+    """
+    from loopy.kernel.data import SubstitutionRule
+    from loopy.symbolic import UncachedIdentityMapper
+
+    entry = kernel.default_entrypoint
+    substitutions = dict(entry.substitutions)
+    for name, index_name in rules.items():
+        rule = substitutions[name]
+        substitutions[index_name] = SubstitutionRule(
+            name=index_name, arguments=rule.arguments, expression=rule.expression.child
+        )
+
+    class _InSubscripts(UncachedIdentityMapper):
+        def __init__(self) -> None:
+            super().__init__()
+            self.depth = 0
+
+        def map_subscript(self, expr: Any, *args: Any, **kwargs: Any) -> Any:
+            aggregate = self.rec(expr.aggregate, *args, **kwargs)
+            self.depth += 1
+            try:
+                index = self.rec(expr.index, *args, **kwargs)
+            finally:
+                self.depth -= 1
+            return type(expr)(aggregate, index)
+
+        def map_call(self, expr: Any, *args: Any, **kwargs: Any) -> Any:
+            function = expr.function
+            parameters = tuple(self.rec(p, *args, **kwargs) for p in expr.parameters)
+            if (
+                self.depth
+                and isinstance(function, prim.Variable)
+                and function.name in rules
+            ):
+                function = prim.Variable(rules[function.name])
+            return type(expr)(function, parameters)
+
+    mapper = _InSubscripts()
+    entry = entry.copy(
+        substitutions=substitutions,
+        instructions=[
+            insn.with_transformed_expressions(mapper) for insn in entry.instructions
+        ],
+    )
+    return kernel.with_kernel(entry)
 
 
 def _substituted_kernel(
@@ -5038,7 +5113,7 @@ def _substituted_kernel(
     array: str,
     removed: Sequence[str],
     producer: str,
-    computed: tuple[Any, str | None] = (None, None),
+    computed: Any = None,
 ) -> tuple[Any, str | None]:
     """``kernel`` with ``array`` computed where it is read, or why not.
 
@@ -5056,39 +5131,30 @@ def _substituted_kernel(
     computed in (``computed``, from :func:`_computed_in`, or loopy's own
     reading of the instruction where that is not known) is not the array's,
     the producer's value is cast to the array's dtype first (loopy's
-    ``TypeCast``), which C converts exactly as it converts a store; a read
-    of the array inside a subscript, which loopy cannot simplify through a
-    cast, leaves the kernel unwritten, with the reason. So does a cast
-    already in the producer's value (:func:`_a_cast_in`), which the
-    substitution would carry into the subscript too. Returns the kernel,
-    or ``None`` and the reason in words.
+    ``TypeCast``), which C converts exactly as it converts a store. A read
+    in a subscript gets it too, and loopy generates the subscript with the
+    cast, since its isl reader declines one (:mod:`loopty.isl_reading`):
+    ``x[(int16_t) (t[i])]`` of a 32-bit value stored in sixteen bits. But a
+    widening, an integer stored in a wider integer, keeps the value it
+    converts, and is the last thing done to it, so a read in a subscript
+    reads the value inside it (#145): ``x[t[i]]`` of a ``Fin[n]`` entry
+    stored in a ``Nat`` array, and ``x[n - 1 - i]`` of an index computed in
+    32 bits, which loopy reads as affine. A conversion inside the value
+    (``(t[j] + 1) % n`` of a ``Fin[n]`` entry is computed in 64 bits, with
+    ``t[j]`` cast) widens the arithmetic, not the value, and is kept
+    everywhere. Returns the kernel, or ``None`` and the reason in words.
     """
     from loopy.symbolic import TypeCast
 
-    value, indexed = computed
+    value = computed
     try:
         entry = kernel.default_entrypoint
         dtype = entry.temporary_variables[array].dtype
         stored = None if dtype is None or dtype is lp.auto else dtype.numpy_dtype
         if value is None:
             value = _loopy_dtype(kernel, producer)
-        if indexed is not None and _a_cast_in(
-            entry.id_to_insn[producer].expression
-        ) is not None:
-            return None, (
-                f"the value {array} is computed from converts an operand, "
-                f"and {indexed} reads {array} in a subscript, which loopy "
-                "cannot simplify through that conversion; keep it stored"
-            )
-        if stored is not None and value != stored:
-            if indexed is not None:
-                return None, (
-                    f"the value {array} is computed from is "
-                    f"{value if value is not None else 'of a type not known'}, "
-                    f"which storing it as {stored} converts, and {indexed} reads "
-                    f"{array} in a subscript, which loopy cannot simplify "
-                    "through that conversion; keep it stored"
-                )
+        converts = stored is not None and value != stored
+        if converts:
             entry = entry.copy(
                 instructions=[
                     insn.copy(expression=TypeCast(dtype, insn.expression))
@@ -5107,7 +5173,21 @@ def _substituted_kernel(
             }
             kernel = lp.remove_instructions(kernel, set(removed))
             kernel = lp.remove_unused_inames(kernel, loops)
+        before = set(kernel.default_entrypoint.substitutions)
         kernel = lp.assignment_to_subst(kernel, array)
+        if converts and _widens(value, stored):
+            entry = kernel.default_entrypoint
+            taken = set(entry.substitutions) | entry.all_variable_names()
+            rules: dict[str, str] = {}
+            for name in sorted(set(entry.substitutions) - before):
+                if not isinstance(entry.substitutions[name].expression, TypeCast):
+                    continue
+                index_name = f"{name}_index"
+                while index_name in taken:
+                    index_name = f"{index_name}_"
+                taken.add(index_name)
+                rules[name] = index_name
+            kernel = _unconverted_in_subscripts(kernel, rules)
     except Exception as exc:  # noqa: BLE001 - loopy's refusals are of many kinds
         return None, (
             f"loopy could not compute {array} where it is read: "

@@ -310,8 +310,14 @@ says when one does.
   A guard that reads an array, compares with `!=`, or compares with a `Real`
   scalar is evaluated at run time only, the statement lists it in
   `Stmt.unnarrowed`, and the facts stated over its domain say so in their
-  provenance. A guard has to be a truth value, and one whose value is an
-  integer is a `TraceError`, on a native run and under tracing alike. Natively
+  provenance. loopy's own bounds check reads a guard that names no array
+  into isl only when it is affine in integers; under any other, a product of
+  loop variables, a float literal or a `Real` scalar (`when(i * 0.5 < 2)`,
+  `when(i * 2.0 < n)`), it checks an access at every point of the loop, and
+  refuses one it cannot show in bounds there, one the guard keeps in bounds
+  included (#148; note 23 in `docs/loopy-notes.md`). A guard has to be a truth value, and one whose
+  value is an integer is a `TraceError`, on a native run and under tracing
+  alike. Natively
   that is what `~(i > 0)` is (`~` on a Python bool is bitwise), while the trace
   records `not (i > 0)`, so such a kernel traces and its `trace-faithful` fact
   is refuted by the native refusal, which names the fix. What is stored into
@@ -333,11 +339,19 @@ says when one does.
   `b[i] - c[i]`, which numpy refuses; an integer element or scalar to a
   negative integer power, which numpy refuses and loopy computed as an
   integer (`1 / k[i] ** 2`, a real); `^`, `<<` or `>>` of a real, and `//` or
-  `%` of a complex value, which numpy refuses and C cannot compile; and a
+  `%` of a complex value, which numpy refuses and C cannot compile; a
   loop variable divided by a literal zero or shifted by a negative literal,
   which Python refuses natively, or shifted left by a literal of 64 or more,
   which Python computes exactly and the compiled run to `0`
-  (`i * 2.0 ** 64`).
+  (`i * 2.0 ** 64`); `-b[i]` of a truth value, which numpy refuses (`~b[i]`
+  for `not`, `-(1 * b[i])` for the integer); an integer literal beside a
+  numpy integer whose type does not hold it, `u[i] // -1` of a `uint64` or
+  `(b[i] // c[i]) * 200` of two truth values (an `int8` natively), which
+  numpy refuses (`np.int64(-1)`); `^`, `<<` or `>>` of a `uint64` and a
+  signed integer, which numpy refuses; and an integer literal past 64 bits
+  where numpy does not compute it in a real or a `uint64` that holds it,
+  `1.0 * (i + 2**64)`, which the compiled kernel has no integer type for
+  (`2.0 ** 64`).
 - The faithfulness fact. For each kernel and each program, the traced term is
   run by an interpreter (`loopty.interpret`: statement by statement in source
   order over each statement's isl domain, each loop enumerated when the run
@@ -427,12 +441,30 @@ says when one does.
   Any power compiles on the C target, of a complex base too. Integer
   arithmetic is 64 bits wide in both runs: `Nat` and `Int` are stored in 64
   bits, and a product of a `Fin[m]` array's entries or of loop variables is
-  computed in 64 (a subscript stays loopy's 32-bit index arithmetic). `//`,
+  computed in 64, a subscript's too unless loopy reads the subscript as
+  affine with no division (note 23). `//`,
   `%`, `<<` and `>>` are computed as numpy computes them, by functions
   loopty's targets define (`loopty.operations`): of reals too, by zero (`0`
-  for integers) and past the width of a shift. A kernel named like a
-  function loopy or the C headers know (`floor`, `pow`, `cpow`) is renamed in
-  the generated code. See notes 19 and 20 in `docs/loopy-notes.md`.
+  for integers) and past the width of a shift. An operation numpy computes in
+  a numpy integer type is computed in it compiled too: one narrower than
+  `int` (`np.int8`, `np.uint16`), which C computes as an `int`, is converted
+  back into it, and an unsigned integer beside a signed one is computed in
+  the signed type numpy computes in (`int64` for a `uint32` and an `int32`),
+  where C's would be unsigned; integers compare exactly, as numpy's do, a
+  negative one with an unsigned one included. `abs` of an integer is numpy's,
+  the smallest value of its type included; a comparison of one does not
+  trace yet (`abs(k[i]) > 2`, xywei/lanky#94). An integer literal past 64 bits
+  is written as a real where numpy computes in one (`x[i] * 2**70`), or as a
+  `uint64` beside one (`u[i] + 2**63`), and refused elsewhere. A kernel named
+  like a function, a macro or a type loopy, the C headers or OpenCL C know
+  (`floor`, `pow`, `cpow`, `get_global_id`, `clamp`, `NULL`, `size_t`) is
+  renamed in the generated code, and a parameter, size or loop variable
+  named like a macro the headers define (`I` with complex values, `NAN`,
+  `INT32_MAX`, `M_PI`, `NULL`) or a function the kernel calls (`pow` with a
+  power) is refused, naming what the code means by it. So is a size, an
+  integral scalar or a reduction binder named like a keyword of isl's (`max`,
+  `floor`, `mod`), and a loop variable of such a name is renamed. See notes
+  19, 20 and 23 in `docs/loopy-notes.md`.
 - Array arguments over polyhedral domains (`loopty.domain`): `Where[...]`,
   binders written as slices and then the comparisons that cut their box,
   joined by `&`; `Sigma[...]`, binders and an unnamed last fiber affine in
@@ -488,9 +520,10 @@ says when one does.
   makes (a factory) do: a `DUPLICATE` block names the kernel and its ids, as
   `lanky check` names them, and the `--json` ledger keeps each claim not in
   the table under `refused_claims`, with its status and what explains it. A
-  schedule of a schedule, `Schedule(Schedule(k))`, is a schedule of `k`: its
-  run is compared with `k`'s body, and `k` is not run again through the
-  identity.
+  schedule of a schedule, `Schedule(Schedule(k).split("i", 2))`, is that
+  schedule built again from `k`: its steps replayed and checked again, on
+  its target and with its sizes unless others are given. Its run is compared
+  with `k`'s body, and `k` is not run again through the identity.
 
 **Partial.**
 
@@ -535,11 +568,13 @@ says when one does.
   unbuildable. Only a pointwise
   producer is substituted (one cell per instance, at its loop variables, no
   sum, no guard isl cannot state), and the array is either stored in full
-  or not at all: contracting it to the cells live at once is not done. A
-  value its store converts, or one computed with a conversion in it
-  (`(t[j] + 1) % n` of a 32-bit `Fin[m]` entry, computed in 64 bits), read
-  in a subscript, leaves the kernel unwritten, with the reason: loopy
-  cannot simplify a subscript through the cast (#145). The
+  or not at all: contracting it to the cells live at once is not done.
+  Every read gets the value as the store converted it, a read in a
+  subscript included (`y[(int16_t) (t[i])]`), and a conversion inside the
+  value stays (`(t[j] + 1) % n` of a 32-bit `Fin[m]` entry, computed in 64
+  bits); a store's widening keeps the value, and a read in a subscript reads
+  the value inside it (`x[t[i]]`, and `x[n - 1 - i]`, which loopy then reads
+  as affine and checks). The
   compiled program is one call, so the contract checks its arguments when it
   starts and not at every call. What a callee's contract checks of the cells
   of an array an earlier call wrote, or the program made (an element sort
@@ -580,15 +615,29 @@ says when one does.
   Arithmetic of loop variables, sizes and literals alone is Python's natively,
   which is exact: `1.0 * i ** 5` past `i = 6208` is a wider number natively
   and wraps compiled, which the differential fact reports (#139).
-  Index arithmetic, a subscript and a loop bound, is loopy's, 32 bits wide,
-  and so is a sum of loop variables, sizes and small literals: `x[(i * i) %
-  n]` reads out of bounds compiled at `i = 46341` (#129). A
-  `Fin[m]` array the kernel writes may be an `int32` one natively, and an
-  entry read back from it is computed with in 32 bits there, unless a
-  program's checked point reads it, which takes an `int64` one. An integer to a
+  A loop bound, and a subscript loopy reads as affine with no division, are
+  loopy's index arithmetic, 32 bits wide, and so is a sum of loop variables,
+  sizes and small literals elsewhere; under `-fwrapv` such a subscript's
+  sums and products give the cell it names. Any other subscript is computed
+  in 64 bits, as the rest is: `x[(i * i) % n]` (#129), and `x[(i * 499999)
+  // 1000000]`, which loopy wrote with a division of the wrapped `499999 *
+  i`. A sum the plan leaves in 32 bits stays so in a division too, `x[(i +
+  n) // 2]` past `2**30` (#149). A subscript over a narrow numpy integer
+  type is not converted back into it (#157). A `Fin[m]` array the kernel
+  writes may be an `int32` one natively, whose entries the native run reads
+  as `int64`, as the compiled run computes with them, unless a program's
+  checked point reads it, which takes an `int64` one. An integer to a
   negative power whose exponent is not a literal is left to numpy's refusal
-  natively, and computed as an integer compiled. See notes 19 and 20 in
-  `docs/loopy-notes.md`.
+  natively, and computed as an integer compiled. pymbolic builds `u[i] - 1`
+  and `u[i] + -1` as one term, read as the difference: of an unsigned `u`
+  numpy refuses the second at every point, and the compiled run computes it
+  as the first; `a - b` and `a + -b` of an `int8` `b` likewise differ
+  natively at `b = -128` alone, and of an `Int` `a` and an unsigned `b` at
+  every `b` but zero (#151). A loop variable's arithmetic beside
+  a numpy integer whose type does not hold its value at some point,
+  `u[i] + (i - 3)` of a `uint32` `u`, is refused natively there and
+  computed compiled (#153), and `abs` of a real in a guard fails inside
+  loopy (#154). See notes 19, 20 and 23 in `docs/loopy-notes.md`.
 - A polyhedral domain is an array's whole index set, so it cannot sit beside
   a dense axis (`Arr[Fin[k], Where[...], Real]` is refused; write the axis as
   a binder of the domain). The pieces of a union have the same number of axes,
@@ -647,7 +696,12 @@ says when one does.
   writes and dependences tell the cells apart as `[r, j]`, one cell each
   only while no row moves, nor of one that writes a row's length inside a
   loop over the row, which runs to the length it read when it started. A
-  program's layout facts are not tried on runs.
+  read of the row inside such a loop is checked natively against the length
+  the write left, which isl cannot read, so its in-bounds fact is
+  `assumed` itself, with the reason (`cnt[r] = 0` inside `for j in
+  val.dom[r]` makes the native run refuse `val[r, 1]`); a sum or an inner
+  loop over the row reads the length again where it starts, and its reads
+  stay decided. A program's layout facts are not tried on runs.
 - `Schedule.affine` and maps whose image has holes. The diamond
   `(t, i) -> (t + i, t - i)` reaches only the points of equal parity, and
   loopy's own `map_domain` refuses it, so loopty rewrites the kernel over the
@@ -733,38 +787,28 @@ says when one does.
 The open issues a user is most likely to meet. Each says what the ledger and
 the runs make of it, since that is what decides whether it can go unnoticed.
 
-- **A false in-bounds fact that isl decides**
-  ([#144](https://github.com/xywei/loopty/issues/144)). A loop over a ragged
-  row reads the row's length once, when it starts. In a kernel that shortens
-  the row inside that loop (`cnt[r] = 0` in the loop over `val.dom[r]`), the
-  in-bounds fact of `val[r, j]` is decided against the length read at the
-  start, and is false from the second entry on: the native run refuses the
-  read, and the compiled run reads a stale cell inside the buffer. The ledger
-  counts the fact as worth an assumption, since it rests on the kernel's
-  `layout` fact, which is `assumed` there, but its own status reads `decided`.
-  Do not write a row's length inside a loop over the row.
-- **Index arithmetic is 32 bits wide compiled**
-  ([#129](https://github.com/xywei/loopty/issues/129)). A subscript, a loop
-  bound, and a sum of loop variables, sizes and small literals are loopy's
-  index arithmetic, and Python's natively, so `x[(i * i) % n]` reads in bounds
-  natively and out of bounds compiled from `i = 46341` on, where the process
-  can die. The access's in-bounds fact reads `assumed`, so no ledger claims it.
-- **Integers past 64 bits**
-  ([#139](https://github.com/xywei/loopty/issues/139),
-  [#140](https://github.com/xywei/loopty/issues/140)). Arithmetic of loop
-  variables, sizes and literals alone is exact natively and 64 bits wide
+- **Some index arithmetic is 32 bits wide compiled**
+  ([#149](https://github.com/xywei/loopty/issues/149), [#157](https://github.com/xywei/loopty/issues/157)). A loop bound, and a subscript loopy
+  reads as affine with no division, are loopy's index arithmetic, 32 bits
+  wide. Every other subscript is computed in 64 bits, as natively. A sum of
+  loop variables and sizes inside a dividing subscript stays in 32 bits, so
+  `x[(i + n) // 2]` wraps round past `2**30` (#149). A subscript over a
+  narrow numpy integer type, such as `int8` or `uint16`, is computed in C's
+  `int` compiled, and wraps round natively (#157).
+- **A guard loopy's bounds check cannot read**
+  ([#148](https://github.com/xywei/loopty/issues/148)). An access that only a floating-point guard keeps in
+  bounds, `x[2 * i]` under `when(i * 2.0 < n)`, is refused by loopy's bounds
+  check, with a message that names no fix. Write the guard over integers.
+- **Integers past 64 bits** ([#139](https://github.com/xywei/loopty/issues/139), [#159](https://github.com/xywei/loopty/issues/159)). Arithmetic of
+  loop variables, sizes and literals alone is exact natively and 64 bits wide
   compiled: `1.0 * i ** 5` wraps round compiled past `i = 6208`, and the
-  differential fact is refuted. An integer literal past 64 bits,
-  `x[i] * 2**70`, fails inside loopy with a message that names no fix; write
-  `2.0 ** 70`.
+  differential fact is refuted. A `uint64` value past `2**63` stored into an
+  `Int` array is refused natively and wraps round compiled.
 - **What passes between calls is stored in full or not at all**
-  ([#132](https://github.com/xywei/loopty/issues/132)). `Schedule.substitute`
-  computes an intermediate again at every read; keeping only the cells live at
-  once, a window of three cells of `f` after the Burgers fusion, is not done.
-  And a value read in a subscript is not substituted when it is computed in
-  other bits than it is stored in, `p[j] = (t[j] + 1) % n` into a `Fin[n]`
-  array read as `x[p[i]]`: the kernel is left unwritten, with the reason
-  ([#145](https://github.com/xywei/loopty/issues/145)).
+  ([#132](https://github.com/xywei/loopty/issues/132), [#133](https://github.com/xywei/loopty/issues/133)). `Schedule.substitute` computes an
+  intermediate again at every read; keeping only the cells live at once, a
+  window of three cells of `f` after the Burgers fusion, is not done. Nor is
+  a substitution through two intermediates, one computed from the other.
 - **A program's intermediates live on the C stack**
   ([#62](https://github.com/xywei/loopty/issues/62)). An array a program makes
   with `Arr.zeros_like` is a variable-length array on the stack of the compiled
@@ -775,7 +819,8 @@ the runs make of it, since that is what decides whether it can go unnoticed.
   the test suite runs a device. The demos were run on two device classes by
   hand, and
   [docs/device-runs.md](https://github.com/xywei/loopty/blob/main/docs/device-runs.md)
-  has the commands and the transcripts.
+  has the commands and the transcripts. A comparison of complex values does
+  not build on it ([#158](https://github.com/xywei/loopty/issues/158)).
 - **A theorem's or a postcondition's statement is lanky's reading of it.**
   loopty traces a kernel's body itself, and the `trace-faithful` fact checks
   that trace. A theorem, and the claim after a kernel's `->`, are annotations

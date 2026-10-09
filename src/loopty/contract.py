@@ -666,8 +666,10 @@ def holds_natively(sort: Any, dtype: Any) -> bool:
     signed integer of 32 bits or more, which holds every point of it as the
     compiled 32-bit one does. ``Nat`` and ``Int`` are compiled in 64 bits, so
     an ``int32`` array of them wraps round where the compiled one does not:
-    ``c[i] * c[i]`` written into it at ``c[i] = 2**20`` (#101). A sort with
-    no storage is not asked.
+    ``c[i] * c[i]`` written into it at ``c[i] = 2**20`` (#101). An ``int32``
+    array of ``Fin[m]`` the body writes is accepted, and the native run reads
+    its elements as ``int64`` (:func:`read_storage`, #121). A sort with no
+    storage is not asked.
     """
     want = native_storage(sort)
     if want is None:
@@ -799,7 +801,10 @@ def read_storage(sort: Any, dtype: Any) -> np.dtype | None:
     it.
 
     Only an array the term does not write is read through a copy; one it
-    writes is refused instead (:func:`written_storage`).
+    writes is refused instead (:func:`written_storage`), but for one that
+    :func:`holds_natively` accepts, an ``int32`` array of ``Fin[m]``, whose
+    elements the native run reads in this dtype through its masking view
+    (:func:`loopty.trace.read_elements_as`, #121).
     """
     want = native_storage(sort)
     if want is None:

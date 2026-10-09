@@ -29,6 +29,7 @@ from lanky.prelude import Nat, Real
 
 import hand_terms as ht
 from loopty import Arr, Fin, kernel, reduce_sum, when
+from loopty.isl_reading import declining
 from loopty.schedule import IllegalCast, Schedule
 from loopty.term import Access, Stmt, Term
 
@@ -53,7 +54,7 @@ def loopy_says(lp, kernel_: Any, tags: dict[str, str]) -> str:
     a loop it was asked to nest once that loop is on an axis, which is what
     the tag asks for here, and the warning is silenced.
     """
-    with warnings.catch_warnings(), lp.CacheMode(False):
+    with warnings.catch_warnings(), lp.CacheMode(False), declining():
         warnings.simplefilter("ignore", lp.diagnostic.LoopyWarning)
         warnings.filterwarnings(
             "ignore", message="Cannot enforce the constraint", category=UserWarning

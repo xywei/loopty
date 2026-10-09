@@ -109,7 +109,14 @@ from lanky.terms import (
 
 from loopty.arr import Arr, ArrSpec
 from loopty.domain import Polyhedron, Union, index_domain
-from loopty.flow import NonAffine, domain_set, expr_text, free_names
+from loopty.flow import (
+    ISL_KEYWORDS,
+    NonAffine,
+    domain_set,
+    expr_text,
+    free_names,
+    is_isl_keyword,
+)
 from loopty.idx import Reflections
 from loopty.term import Access, ArrType, Reduction, Stmt, Term
 
@@ -480,12 +487,19 @@ class Tracer:
         reflected parameters, and the sizes and parameters the signature
         declares. A ``for k in x.dom`` over ``x: Arr[Fin[k], Real]`` would
         otherwise make one isl dimension of the size and the iname, and the
-        loop's domain ``0 <= k < k`` would be empty.
+        loop's domain ``0 <= k < k`` would be empty. It avoids isl's keywords
+        too (:func:`loopty.flow.is_isl_keyword`): a loop variable ``max`` is
+        ``max_0``, since isl's reader took ``max`` as its keyword in the
+        loop's domain and failed with a syntax error.
         """
         stem = hint or f"i{len(self._inames)}"
         name = stem
         suffix = 0
-        while name in self._inames or self.reflections.taken(name):
+        while (
+            name in self._inames
+            or self.reflections.taken(name)
+            or is_isl_keyword(name)
+        ):
             name = f"{stem}_{suffix}"
             suffix += 1
         self._inames.add(name)
@@ -1879,6 +1893,12 @@ _UNEQUAL = "compares with '!=', which is not a convex set of points"
 #: Why a guard that is already false is not a constraint.
 _FALSE = "is the constant False, which is not stated to isl"
 
+#: Why a conjunct with an integer past 64 bits is not a constraint (#140).
+_PAST_64_BITS = (
+    "compares with an integer outside 64 bits, which isl would hand loopy for "
+    "a loop bound and loopy has no integer type for"
+)
+
 
 def constraints_of(
     condition: Any, tracer: Tracer | None = None, bound: Collection[str] = ()
@@ -1946,6 +1966,11 @@ def _conjuncts(
     operator = condition.operator
     if operator == "!=":
         return [(condition, None, _UNEQUAL)]
+    if _past_64_bits((condition.left, condition.right)):
+        # isl states i < 2**70 exactly, but generates code from it whose
+        # bound loopy fails to type ("integer constant too large"). The
+        # predicate compares it as numpy does (loopty.promotion._compared).
+        return [(condition, None, _PAST_64_BITS)]
     if tracer is not None:
         known = tracer.integers.union(bound)
         others = sorted((free_names(left) | free_names(right)) - known)
@@ -1955,6 +1980,17 @@ def _conjuncts(
     if operator == "==":
         operator = "="
     return [(condition, f"{left} {operator} {right}", "")]
+
+
+def _past_64_bits(expr: Any) -> bool:
+    """Whether ``expr`` holds an integer literal loopy cannot type, past ``int64``."""
+    if isinstance(expr, int) and not isinstance(expr, bool):
+        return not -(2**63) <= expr < 2**63
+    if isinstance(expr, prim.ExpressionNode):
+        return any(_past_64_bits(arg) for arg in init_args(expr))
+    if isinstance(expr, tuple | list):
+        return any(_past_64_bits(item) for item in expr)
+    return False
 
 
 def _not_integers_text(names: Sequence[str], tracer: Tracer) -> str:
@@ -2955,11 +2991,12 @@ def _refuse_arithmetic(expr: Any, params: Mapping[str, Any], where: str) -> None
     * a difference of two truth values, ``b[i] - c[i]``, which numpy refuses
       at every point and C computes (#106). pymbolic builds ``b - c`` as
       ``b + -1 * c``, so that sum is refused too, though numpy computes it;
-      ``1 * b[i] - c[i]`` is not. A negated truth value alone is not
-      refused: it is ``-1 * b[i]`` in the term, which numpy computes, whether
-      it was written so or as ``-b[i]``, which numpy refuses natively
-      (``The numpy boolean negative ... is not supported``) and the compiled
-      run computes as ``-1 * b[i]``; the trace cannot tell the two apart;
+      ``1 * b[i] - c[i]`` is not;
+    * a negated truth value, ``-b[i]``, which numpy refuses at every point
+      (``The numpy boolean negative ... is not supported``) and C computes
+      (#130). pymbolic builds it as ``-1 * b[i]``, so that product is refused
+      too, though numpy computes it, but where it is subtracted, ``1 - b[i]``,
+      which numpy computes as ``1 + -1 * b[i]`` is built;
     * a numpy integer to a negative integer power, ``k[i] ** -1``: numpy
       refuses it at every point, and loopy's integer power inverts the base
       into an integer, ``0`` for every base but ``1`` and ``-1`` (#109). A
@@ -2976,24 +3013,51 @@ def _refuse_arithmetic(expr: Any, params: Mapping[str, Any], where: str) -> None
       computes as numpy divides a numpy number by zero, to ``0``, ``inf`` or
       ``nan`` (#105). A divisor
       that is zero only at run time is left to the native refusal, as an
-      exponent whose sign the trace does not know is.
+      exponent whose sign the trace does not know is;
+    * ``^``, ``<<`` or ``>>`` of a ``uint64`` and a signed integer, which
+      numpy refuses, since only a real holds both, and C computes in
+      ``uint64``;
+    * an integer literal beside a numpy integer whose type does not hold
+      it: numpy refuses it at every point (``Python integer -1 out of bounds
+      for uint64``, NEP 50), and C computes ``u[i] // -1`` (#141) and ``(b[i]
+      // c[i]) * 200`` of two truth values, an ``int8`` natively (#122). A
+      literal after the first operand of a sum is refused only where neither
+      it nor its negation is held, since pymbolic builds ``u[i] - 1`` as
+      ``u[i] + -1``; one first in a sum, ``-1 + u[i]``, is refused as it
+      stands. A negation ``-1 * u[i]`` is not refused at all, which numpy
+      computes as ``-u[i]`` (#151). A
+      comparison is not refused: numpy compares such a literal exactly, and
+      so does the compiled run (:func:`loopty.promotion._compared`);
+    * an integer literal past 64 bits, which the compiled kernel has no
+      integer type for, where the operation it stands in is not computed by
+      numpy in a real or a ``uint64`` that holds it (#140): ``x[i] * 2**70``
+      is written as a double, and ``i + 2**64``, which Python computes
+      exactly, is refused, naming ``2.0 ** 64``.
     """
     from loopty.promotion import Promotion
 
     promotion = Promotion.of_sorts(params)
+    subtracted: set[int] = set()
     for node in _nodes(expr):
         if isinstance(node, prim.Sum):
             _refuse_truth_sum(node, promotion, where)
+            subtracted.update(id(child) for child in node.children[1:])
+        elif isinstance(node, prim.Product):
+            if id(node) not in subtracted:
+                _refuse_truth_negation(node, promotion, where)
         elif isinstance(node, prim.Power):
             _refuse_negative_power(node, promotion, where)
         elif isinstance(node, tuple(_BITWISE)):
             _refuse_bitwise_of_reals(node, promotion, where)
+            _refuse_bitwise_of_mixed_signs(node, promotion, where)
             _refuse_python_shift(node, promotion, where)
         elif isinstance(node, prim.FloorDiv | prim.Remainder):
             _refuse_complex_division(node, promotion, where)
             _refuse_division_by_zero(node, promotion, where)
         elif isinstance(node, prim.Quotient):
             _refuse_division_by_zero(node, promotion, where)
+        _refuse_unheld_literal(node, promotion, where)
+    _refuse_untyped_literals(expr, promotion, where)
 
 
 def _negated(expr: Any) -> Any:
@@ -3043,6 +3107,191 @@ def _refuse_truth_sum(node: prim.Sum, promotion: Any, where: str) -> None:
             "and makes 2, so the two runs would compute different things. Write "
             f"'{a} | {b}' for 'or', or '1 * {a} + {b}' for a count"
         )
+
+
+def _refuse_truth_negation(node: prim.Product, promotion: Any, where: str) -> None:
+    """Refuse ``-b[i]`` of a numpy truth value; see :func:`_refuse_arithmetic`.
+
+    A Python bool, a comparison of loop variables, negates as the integer it
+    is in both runs.
+    """
+    negated = _negated(node)
+    if negated is None:
+        return
+    native = promotion.types(negated)[0]
+    if not (_all_kinds(native, "b") and _numpy_integer(native)):
+        return
+    shown = _shown(negated)
+    raise TraceError(
+        f"{_shown(node)} at {where} negates a truth value: natively {shown} is "
+        "a bool, and numpy refuses '-' of a bool ('The numpy boolean negative, "
+        "the `-` operator, is not supported'), while the compiled kernel "
+        "negates it as the integer 0 or 1, so the compiled run would compute a "
+        f"value where the native one has none. pymbolic builds '-{shown}' as "
+        f"'-1 * {shown}', so that is refused too. Write '~{shown}' for 'not', "
+        f"or '-(1 * {shown})' for the integer"
+    )
+
+
+def _refuse_bitwise_of_mixed_signs(node: Any, promotion: Any, where: str) -> None:
+    """Refuse ``^``, ``<<`` or ``>>`` of a ``uint64`` and a signed integer.
+
+    See :func:`_refuse_arithmetic`. numpy computes such a pair in double,
+    and has no bitwise operation there, while C computes in ``uint64``.
+    """
+    if isinstance(node, prim.BitwiseXor):
+        operands: tuple[Any, ...] = tuple(node.children)
+    else:
+        operands = (node.shiftee, node.shift)
+    samples = [
+        sample
+        for operand in operands
+        for sample in promotion.types(operand)[0] or ()
+        if isinstance(sample, np.integer)
+    ]
+    unsigned = [
+        sample
+        for sample in samples
+        if isinstance(sample, np.unsignedinteger) and sample.dtype.itemsize == 8
+    ]
+    signed = [sample for sample in samples if isinstance(sample, np.signedinteger)]
+    if not unsigned or not signed:
+        return
+    symbol = _bitwise_symbol(node)
+    raise TraceError(
+        f"{_shown(node)} at {where} is '{symbol}' of a uint64 and a signed "
+        f"integer ({signed[0].dtype}). numpy computes such a pair in double, "
+        f"the one type that holds both, and has no bitwise '{symbol}' there, so "
+        "it refuses it at every point, while the compiled kernel computes it "
+        "in uint64. Give both operands one sign: an array of np.uint64, or of "
+        "Int, Nat or np.int64"
+    )
+
+
+def _refuse_unheld_literal(node: Any, promotion: Any, where: str) -> None:
+    """Refuse an integer literal beside a numpy integer that does not hold it.
+
+    See :func:`_refuse_arithmetic`. A literal past 64 bits is left to
+    :func:`_refuse_untyped_literals`, which names a real.
+    """
+    from loopty.promotion import _literal_of, _untyped
+
+    if isinstance(node, prim.Sum | prim.Product | prim.BitwiseXor):
+        operands: tuple[Any, ...] = tuple(node.children)
+    elif isinstance(node, prim.Power):
+        operands = (node.base, node.exponent)
+    elif isinstance(node, prim.LeftShift | prim.RightShift):
+        operands = (node.shiftee, node.shift)
+    elif isinstance(node, prim.FloorDiv | prim.Remainder):
+        operands = (node.numerator, node.denominator)
+    else:
+        return
+    if _negated(node) is not None:
+        return
+    accumulated = promotion.types(operands[0])[0]
+    steps = promotion.steps(node)
+    for position, operand in enumerate(operands[1:], start=1):
+        checks = [(_literal_of(operand), accumulated, False)]
+        if position == 1:
+            checks.append(
+                (_literal_of(operands[0]), promotion.types(operand)[0], True)
+            )
+        for literal, beside, first in checks:
+            if literal is None or isinstance(literal, np.generic) or _untyped(literal):
+                continue
+            unheld = _unheld(int(literal), beside)
+            if unheld is None:
+                continue
+            # u - 1 is built as u + -1, with the literal after u; one before it,
+            # -1 + u, was written so, which numpy refuses.
+            subtracted = isinstance(node, prim.Sum) and not first
+            if subtracted and _unheld(-int(literal), beside) is None:
+                continue
+            raise TraceError(
+                f"{_shown(node)} at {where} computes the integer {literal} with "
+                f"a {unheld} value, whose type does not hold it: numpy refuses "
+                f"it at every point ('Python integer {literal} out of bounds for "
+                f"{unheld}', NEP 50), while the compiled kernel computes it in "
+                "C's type, so the compiled run would compute a value where the "
+                f"native one has none. Write the literal as a numpy integer, "
+                f"np.int64({literal}), with which numpy computes in a type that "
+                "holds both (in double beside a uint64), as the compiled run "
+                "does too"
+            )
+        if position - 1 < len(steps):
+            accumulated = steps[position - 1].native
+
+
+def _unheld(value: int, native: Any) -> np.dtype | None:
+    """The dtype of a numpy integer sample of ``native`` not holding ``value``."""
+    for sample in native or ():
+        if isinstance(sample, np.integer):
+            info = np.iinfo(sample.dtype)
+            if not int(info.min) <= value <= int(info.max):
+                return sample.dtype
+    return None
+
+
+def _refuse_untyped_literals(expr: Any, promotion: Any, where: str) -> None:
+    """Refuse an integer literal past 64 bits that no step writes in a type (#140).
+
+    See :func:`_refuse_arithmetic`. An operand of an operation or comparison
+    is written in the type its step gives it
+    (:func:`loopty.promotion._beyond`, :func:`loopty.promotion._compared`);
+    a literal anywhere else, or one no step converts, has no type the
+    compiled kernel can give it.
+    """
+    from loopty.lower import _untyped_message
+    from loopty.promotion import _untyped
+
+    def operands(node: Any) -> tuple[Any, ...] | None:
+        if isinstance(node, prim.Sum | prim.Product | prim.BitwiseXor):
+            return tuple(node.children)
+        if isinstance(node, prim.Power):
+            return (node.base, node.exponent)
+        if isinstance(node, prim.LeftShift | prim.RightShift):
+            return (node.shiftee, node.shift)
+        if isinstance(node, prim.Quotient | prim.FloorDiv | prim.Remainder):
+            return (node.numerator, node.denominator)
+        if isinstance(node, prim.Comparison):
+            return (node.left, node.right)
+        return None
+
+    def converted(node: Any, position: int) -> bool:
+        steps = promotion.steps(node)
+        if not steps:
+            return False
+        if position == 0:
+            return steps[0].left is not None
+        return steps[position - 1].right is not None
+
+    def refuse(value: int) -> None:
+        raise TraceError(_untyped_message(value, where))
+
+    def visit(node: Any) -> None:
+        if _untyped(node):
+            refuse(node)
+        children = operands(node)
+        if children is not None:
+            for position, child in enumerate(children):
+                if _untyped(child):
+                    if not converted(node, position):
+                        refuse(child)
+                else:
+                    visit(child)
+            return
+        if isinstance(node, Reduction):
+            visit(node.body)
+        elif isinstance(node, Access):
+            visit(tuple(node.indices))
+        elif isinstance(node, prim.ExpressionNode):
+            for arg in init_args(node):
+                visit(arg)
+        elif isinstance(node, tuple | list):
+            for item in node:
+                visit(item)
+
+    visit(expr)
 
 
 def _refuse_negative_power(node: prim.Power, promotion: Any, where: str) -> None:
@@ -3480,6 +3729,15 @@ def lower_reductions(
         for var, domain in expr.binders:
             if isinstance(domain, SymDom):
                 fibers.extend(domain.constraints_for(var))
+            if is_isl_keyword(var.name):
+                at = f" at {where}" if where else ""
+                raise TraceError(
+                    f"the reduction binder {var.name!r}{at} is named like one of "
+                    "isl's keywords, which its reader takes as its own whatever "
+                    f"their case ({', '.join(sorted(ISL_KEYWORDS))}): the "
+                    "reduction's domain is stated to isl as text, and failed "
+                    "with a syntax error. Rename the binder"
+                )
             if var.name in tracer.inames:
                 raise TraceError(
                     f"the reduction binder {var.name!r} shadows the enclosing "
@@ -3742,13 +4000,34 @@ class _MaskedArr(Arr):
         super().__setitem__(key, value)
 
     def __getitem__(self, key: Any) -> Any:
-        """Read, answering zero for an out-of-range read under a false guard."""
+        """Read, answering zero for an out-of-range read under a false guard.
+
+        An element is read in the dtype :func:`read_elements_as` gave the
+        view, if any.
+        """
         try:
-            return super().__getitem__(key)
+            value = super().__getitem__(key)
         except IndexError:
             if _writes_are_masked():
                 return 0
             raise
+        read_in = self.__dict__.get("_read_in")
+        if read_in is not None and isinstance(value, np.generic):
+            return read_in.type(value)
+        return value
+
+
+def read_elements_as(view: Any, dtype: np.dtype) -> None:
+    """Have the masking view ``view`` read each element as a ``dtype`` scalar.
+
+    The native run writes into a written array as the caller gave it, and
+    reads each element in the dtype the compiled run computes with: an
+    ``int32`` array of ``Fin[m]`` is read as ``int64``
+    (:meth:`loopty.kernel.Kernel._storage_copies`, #121). A read of more
+    than one element, a row, is left as it is.
+    """
+    if isinstance(view, _MaskedArr):
+        view._read_in = np.dtype(dtype)
 
 
 class _MaskedArray(np.ndarray):
@@ -3882,6 +4161,21 @@ class when:  # noqa: N801 - a context manager written like a statement
 # {{{ building the term
 
 
+def _isl_keyword_message(kernel: str, names: Sequence[str]) -> str:
+    """Why sizes or integral scalars named like isl's keywords are refused."""
+    listed = ", ".join(names)
+    return (
+        f"{kernel} names sizes or integral scalars as isl's keywords: {listed}. "
+        "loopty states every loop's domain, and every guard on the loops, to "
+        "isl as text, whose reader takes exists, and, or, implies, not, infty, "
+        "infinity, nan, min, max, rat, true, false, ceild, floord, mod, ceil "
+        "and floor as its own whatever their case, and fails on such a name "
+        "with a syntax error. Rename them in the kernel (a size in its "
+        "annotations, a scalar in its signature); a loop variable of such a "
+        "name is renamed in the term"
+    )
+
+
 def _axis_size(axis: Any) -> Any:
     """The size term of one written axis (``Fin[n]``, an int, or a term)."""
     if isinstance(axis, FinType):
@@ -3926,6 +4220,16 @@ def array_type(
             raise TraceError(f"the type{at}, {spec!r}: {exc}") from exc
         return ArrType(axes=(), dtype=spec.dtype, ragged=(), domain=domain)
     axes = tuple(_axis_size(axis) for axis in spec.axes)
+    for size in axes:
+        if not isinstance(size, int | np.integer | prim.ExpressionNode):
+            at = f" of {name}" if name else ""
+            raise TraceError(
+                f"the type{at}, {spec!r}, has the size {size!r}, which is "
+                "neither a name nor a number: the annotation reads a name that "
+                "the kernel's module or Python already gives a meaning (abs, "
+                "any, all, or a function, a class or a module the file "
+                "defines or imports) as that meaning. Rename the size"
+            )
     ragged = []
     for position, size in enumerate(axes):
         named = isinstance(size, prim.Variable) and size.name in parameters
@@ -4046,6 +4350,9 @@ def trace(kernel: Any, arg_types: Any) -> Term:
             params.append((parameter, annotation))
             arguments.append(Var(parameter))
     tracer.integers |= _integer_names(params)
+    keywords = sorted(n for n in tracer.integers if is_isl_keyword(n))
+    if keywords:
+        raise TraceError(_isl_keyword_message(name, keywords))
 
     _TRACERS.append(tracer)
     watching = _CallWatch.start()

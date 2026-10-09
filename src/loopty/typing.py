@@ -315,6 +315,7 @@ def in_bounds_facts(
     # access reaches are two isl sets that get compared, so both have to call
     # ``cnt[r]`` by the parameter the statement domains already use.
     reflections = term.reflections
+    families = _rewritten_layouts(term)
     facts: list[Fact] = []
     for stmt in term.stmts:
         listed: dict[
@@ -344,6 +345,28 @@ def in_bounds_facts(
             role = roles.get((array, kind, text))
             subject = text if role is None else f"{text}, {role},"
             layout = {} if role is None else {"layout": role}
+            behind = None
+            for _indices, inames, domain in places if families else ():
+                behind = _read_behind(term, stmt, array, inames, domain, families)
+                if behind is not None:
+                    break
+            if behind is not None:
+                facts.append(
+                    Fact(
+                        id=identifier,
+                        kind="in-bounds",
+                        statement=(
+                            f"{subject} is in bounds for every instance of {stmt.id}"
+                        ),
+                        term=None,
+                        status=Status.ASSUMED,
+                        provenance={"reason": behind, **layout},
+                        where=stmt.where,
+                        owner=owner,
+                        rests_on=layouts.get(array, ()),
+                    )
+                )
+                continue
             reasons = [
                 _justified_by_type(place[0], arrtype, types) for place in places
             ]
@@ -1197,6 +1220,103 @@ def _beyond_the_order(
                 "which the rows in order do not keep"
             )
     return None
+
+
+def _read_behind(
+    term: Term,
+    stmt: Any,
+    array: str,
+    inames: Sequence[str],
+    domain: isl.Set,
+    families: Mapping[str, Mapping[str, Any]],
+) -> str | None:
+    """Why an access is stated against a row length a write left behind, if it is.
+
+    A loop over a row reads the row's length once, when it starts, natively
+    and compiled, and the term names that reading by one parameter
+    (``nl_cnt_r``), which the in-bounds facts of the row's entries are
+    stated against. A statement inside the loop that writes the cell the
+    length was read from changes the length under the loop: from the next
+    read on, the native run checks an entry against the length the write
+    left, and refuses ``val[r, 1]`` once ``cnt[r] = 0`` emptied the row,
+    while isl, asked against the reading, decided it (#144). The length at
+    the read is no parameter isl can read, so such an access's fact is left
+    ``assumed``, with the reason this returns.
+
+    The reading that counts is the innermost loop of the access's own
+    (``inames`` over ``domain``, the statement's loops and the binders of a
+    sum it is in) that the length bounds. A sum or an inner loop over the
+    row reads the length again where it starts, after any write in the loops
+    around it, so a write is counted only where it shares that loop with
+    the access. And only where isl shows it can reach the cell the length is
+    read from, or cannot say: ``cnt[r + 1] = 0`` inside the loop over row
+    ``r`` changes a length that row ``r + 1``'s loop reads when it starts.
+    """
+    from loopty.trace import accesses_in
+
+    reflected = dict(term.reflected)
+    own = tuple(inames) == tuple(stmt.inames) and stmt.loop_domain is not None
+    nest = stmt.loop_domain if own else domain
+    loops = len(stmt.inames)
+    for family in families.values():
+        if array not in family["arrays"]:
+            continue
+        for index, name in enumerate(nest.get_var_names(isl.dim_type.param)):
+            if name not in reflected:
+                continue
+            read = [
+                access
+                for access in accesses_in(reflected[name])
+                if access.array in family["layout"]
+            ]
+            depths = [
+                depth
+                for depth in range(nest.dim(isl.dim_type.set))
+                if flow.bounds_dimension(nest, depth, index)
+            ]
+            if not read or not depths or depths[-1] >= loops:
+                continue
+            around = tuple(stmt.inames[: depths[-1] + 1])
+            for writer in family["statements"]:
+                if tuple(writer.inames[: len(around)]) != around:
+                    continue
+                if not _may_write_a_read(writer, read):
+                    continue
+                return (
+                    f"{writer.id} writes {writer.assignee.array} inside the loop "
+                    f"over {around[-1]}, which read the length of the row as "
+                    f"{name} when it started: from the write on, {stmt.id} reads "
+                    "the row against the length the write left, which isl cannot "
+                    "read, and not against that reading"
+                )
+    return None
+
+
+def _may_write_a_read(writer: Any, reads: Sequence[Any]) -> bool:
+    """Can ``writer`` write a cell one of ``reads`` reads, at its own instance?
+
+    Each read's indices name the loops around the write (the row's), so
+    both are maps from the writer's instances, and the write reaches the
+    read's cell where the two meet. An index isl cannot state reaches every
+    cell (:func:`loopty.flow.access_relation`), so the answer errs towards
+    a write.
+    """
+    for read in reads:
+        if read.array != writer.assignee.array:
+            continue
+        try:
+            written = flow.access_relation(
+                writer.inames, writer.domain, tuple(writer.assignee.indices)
+            )
+            cell = flow.access_relation(
+                writer.inames, writer.domain, tuple(read.indices)
+            )
+            written, cell = _align_both(written, cell)
+            if not written.intersect(cell).is_empty():
+                return True
+        except Exception:  # noqa: BLE001 - what isl cannot say may be written
+            return True
+    return False
 
 
 def _layout_by_induction(
