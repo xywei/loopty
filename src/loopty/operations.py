@@ -296,6 +296,137 @@ class NumpyArithmetic:
     and a size are far from the ends of the range.
     """
 
+    def map_sum(self, expr: Any, type_context: Any) -> Any:
+        return super().map_sum(expr, self._literal_context(expr, type_context))
+
+    def map_product(self, expr: Any, type_context: Any) -> Any:
+        return super().map_product(expr, self._literal_context(expr, type_context))
+
+    def map_bitwise_xor(self, expr: Any, type_context: Any) -> Any:
+        return super().map_bitwise_xor(
+            expr, self._literal_context(expr, type_context)
+        )
+
+    def map_comparison(self, expr: Any, type_context: Any) -> Any:
+        """A comparison, its literals written as :meth:`_literal_context` says.
+
+        loopy writes the operands of a comparison in the type it infers for
+        their difference, which is a double for a ``uint64`` beside a signed
+        integer: ``u[i] == 9007199254740993`` was written ``u[i] ==
+        9007199254740992.0``, true at ``2**53``, where numpy compares exactly
+        and the compiled run compares the integers so too (#122).
+        """
+        context = self._literal_context(
+            expr, type_context, (expr.left, expr.right), expr.left - expr.right
+        )
+        return type(expr)(
+            self.rec(expr.left, context), expr.operator, self.rec(expr.right, context)
+        )
+
+    def _literal_context(
+        self,
+        expr: Any,
+        type_context: Any,
+        children: Any = None,
+        whole: Any = None,
+    ) -> Any:
+        """The type context a sum, product or ``^`` writes its literals in.
+
+        loopy writes a Python number in the type context it is handed, and
+        hands an operation's operands the context of the place the operation
+        stands in: the assignment's, for its right-hand side. So ``k[i] + 3``
+        of an integer ``k`` stored into a real was written ``k[i] + 3.0``,
+        which C computes in double, rounding past ``2**53`` and never wrapping
+        round where numpy's integer sum does, ``-1 * k[i]`` was ``-1.0 *
+        k[i]``, ``k[i] ^ 3`` was ``k[i] ^ 3.0``, which C refuses, and ``-1 *
+        x[i]`` of a ``float32`` ``x`` was ``-1.0 * x[i]``, a double. An
+        operation whose operands are all integers, literals or not, writes its
+        literals as integers, and any other in the type of its operands that
+        are no Python number, beside which numpy takes a Python int into their
+        type, and a Python float into a real one (note 25 in
+        ``docs/loopy-notes.md``). Not in loopy's type
+        for the whole operation, which types an integer literal of 32 bits or
+        more as an ``int64``, and a ``float32`` beside one as a double: ``2**62
+        * x[i]`` of a ``float32`` ``x`` was written with a double
+        ``4.611686018427388e+18``, which C multiplied in double, where numpy's
+        ``float32`` product is infinite at ``x[i] = 3e38``.
+        """
+        from loopty.promotion import _loopy_result
+
+        children = expr.children if children is None else children
+        whole = expr if whole is None else whole
+        if all(
+            isinstance(child, int | np.integer)
+            or self.infer_type(child).is_integral()
+            for child in children
+        ):
+            return "i"
+
+        def number(child: Any) -> bool:
+            return isinstance(child, int | float | complex) and not isinstance(
+                child, np.generic
+            )
+
+        numbers = [child for child in children if number(child)]
+        typed = [
+            self.infer_type(child).numpy_dtype
+            for child in children
+            if not number(child)
+        ]
+        dtype = typed[0] if typed else None
+        for other in typed[1:]:
+            dtype = _loopy_result(dtype, other)
+        # A Python float or complex makes the operation a real or a complex
+        # one, as numpy takes it: 2.5 beside a loop variable is a double, and
+        # loopy writes a real in the integer context as its integer part.
+        reals = [value for value in numbers if not isinstance(value, int)]
+        if reals:
+            dtype = np.result_type(*(() if dtype is None else (dtype,)), *reals)
+        own = dtype_to_type_context(
+            self.kernel.target,
+            self.infer_type(whole) if dtype is None else NumpyType(dtype),
+        )
+        return own if own is not None else type_context
+
+    def map_constant(self, expr: Any, type_context: Any) -> Any:
+        """A ``uint32`` literal as C's ``unsigned int``, ``3u``, a narrower one ``3``.
+
+        loopy gives every integer literal of a type wider than 31 bits an
+        ``l``, so an ``np.uint32(3)`` was ``3ul``, an ``unsigned long``, and
+        ``u[i] + 3ul`` of a ``uint32`` ``u`` was computed in 64 bits, where
+        numpy wraps round at ``2**32`` (#122). It gives every unsigned one a
+        ``u`` too, so an ``np.uint8(3)`` or an ``np.uint16(3)`` was ``3u``,
+        an ``unsigned int``, where C's integer promotion makes an ``int`` of
+        a value of either type, as :mod:`loopty.promotion` types it: ``a[i]
+        + np.uint16(3)`` of an ``int8`` ``a`` was ``4294967294`` compiled at
+        ``a[i] = -5``, and ``a[i] < np.uint8(3)`` false, where numpy computes
+        ``-2`` and true. Such a literal is written as that ``int``, ``3``.
+        """
+        if isinstance(expr, np.uint8 | np.uint16 | np.uint32):
+            from loopy.symbolic import Literal
+
+            suffix = "u" if isinstance(expr, np.uint32) else ""
+            return Literal(f"{int(expr)}{suffix}")
+        return super().map_constant(expr, type_context)
+
+    def map_type_cast(self, expr: Any, type_context: Any) -> Any:
+        """A conversion, written out where loopy would leave it out.
+
+        loopy writes a cast only where the type it infers for the operand is
+        not the one cast to. It infers ``int8`` for ``a[i] * a[i]`` of an
+        ``int8`` ``a``, which C computes as an ``int`` (its integer
+        promotion), so the conversion back into ``int8`` that numpy's
+        arithmetic in that type stands for (:mod:`loopty.promotion`, #122) was
+        left out. A conversion into an integer narrower than ``int`` is
+        always written.
+        """
+        dtype = expr.type.numpy_dtype
+        if dtype.kind in "iu" and dtype.itemsize < 4:
+            registry = self.codegen_state.ast_builder.target.get_dtype_registry()
+            cast = var(f"({registry.dtype_to_ctype(expr.type)}) ")
+            return cast(self.rec(expr.child, type_context))
+        return super().map_type_cast(expr, type_context)
+
     def map_floor_div(self, expr: Any, type_context: Any) -> Any:
         return self._numpy_operation(
             "loopty_floor_div", expr, type_context, expr.numerator, expr.denominator

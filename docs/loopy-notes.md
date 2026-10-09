@@ -1,6 +1,6 @@
 # Notes on loopy and islpy
 
-Twenty-four interactions with loopty's dependencies that cost real debugging
+Twenty-five interactions with loopty's dependencies that cost real debugging
 time, each with the local workaround and the reason it is local. No upstream
 issues were filed: these are notes so that the next person meets the answer
 instead of the symptom.
@@ -1029,8 +1029,8 @@ or loopty defines in a preamble, is renamed with the `_knl` suffix, as a C
 keyword is (`lower.is_library_name`). And a guard that reads no array is
 lowered with no cast in it (`ExpressionLowerer.condition`): a literal is
 still written in numpy's dtype, an operand numpy computes in double or in 64
-bits is multiplied by `1.0` or by a 64-bit `1` (`s * 1.0 * a`, `1l * i *
-i`), which C computes from the left in that type as it would the cast and
+bits is multiplied by `1.0` or by a 64-bit `1` (`s * (1.0 * a)`, `1l * i
+* i`), which C computes from the left in that type as it would the cast and
 isl's reader takes as the number it is or declines, loopy computes a
 quotient of integers in double inside a comparison of its own accord, and a
 floating power of a loop variable calls `pow`. An operand numpy rounds to
@@ -1273,3 +1273,114 @@ term's (`lower._no_assumptions`); a later `lp.assume` aligns its parameters
 after them. Every example prints one text under five seeds, each with a cold
 cache.
 
+
+## 25. loopy types an integer operation as numpy promotes two arrays, and C computes it otherwise
+
+**Symptom.** Kernels over numpy's integer types whose compiled run computes
+something else than the native one, or does not compile, found by a sweep of
+every pair of numpy integer types under every operator (#122, #123, #141):
+
+- `a[i] * a[i] // 2` of an `np.int8` `a` is `8` natively at `a[i] = 100`, and
+  `-120` compiled;
+- `u[i] + k[i]` of a `uint32` `u` and an `int32` `k` is `-1` natively at
+  `0 + -1`, and `4294967295` compiled, and `u[i] < k[i]` is true there;
+- `k[i] + 3` of an `Int` `k`, stored into a real, does not wrap round at
+  `2**63 - 1` compiled, and `k[i] ^ 3` stored so does not compile;
+- `u[i] + 3` of a `uint32` `u` does not wrap round at `2**32` compiled;
+- `a[i] + np.uint16(3)` of an `int8` `a` is `-2` natively at `a[i] = -5`,
+  and `4294967294` compiled;
+- `abs(k[i])` of an integer fails with `LoopyTypeError: abs does not support
+  type <class 'numpy.float32'>`, and once it lowers, `1 >= abs(c[i])` of an
+  `np.int32` `c` is false compiled at the smallest `int32`, where numpy's
+  `abs` is that value;
+- `1.0 * (k[i] * j[i])` of two integers is computed in double compiled, where
+  numpy multiplies the integers first and wraps round.
+
+**Cause.** Seven, each loopy's, pymbolic's or GCC's way and C's:
+
+1. loopy infers the type of an operation as numpy promotes two arrays
+   (`combine` in `loopy.type_inference`), and writes `+`, `*`, `^` and a
+   comparison as C's operator, which C computes by its integer promotion and
+   its usual arithmetic conversions: an integer narrower than `int` is
+   computed as an `int`, and an unsigned one beside a signed one of as many
+   bits is unsigned. loopy writes a cast only where the type it infers for
+   the operand is not the one cast to (`wrap_in_typecast`), so
+   `(int8_t) (a[i] * a[i])`, whose operand it takes to be an `int8`, was
+   written without one.
+2. loopy writes a Python number in the type context it is handed, and hands
+   the operands of a sum or a product the context of the place the operation
+   stands in: the assignee's, for a right-hand side. A literal beside
+   integers stored into a real was written `3.0`.
+3. loopy writes an integer literal of a numpy type wider than 31 bits with an
+   `l`, a `np.uint32` included (`3ul`, "FIXME: This assumes a 32-bit
+   architecture"), which C reads as an `unsigned long`, and one of an
+   unsigned type with a `u`, a `np.uint8` or `np.uint16` included (`3u`),
+   which C reads as an `unsigned int`, where it promotes a value of either
+   type to an `int`.
+4. loopy resolves `abs` as C's (`CMathCallable`), which takes an integer
+   argument for a `float32` and refuses it.
+5. loopy realizes a reduction inside a branch of an `If` under the `If`'s
+   condition (`realize_reduction`), and evaluates the condition on the
+   partial sum at every term: `acc < 0 ? -acc : acc` summed into the negative
+   branch only the terms after which the sum so far was negative, with
+   `if (acc_j < 0) acc_j_0 = acc_j_0 + k[j]` in the loop.
+6. pymbolic prints a sum of sums and a product of products flat, since both
+   are associative, and C adds and multiplies from the left.
+7. GCC reads `k < 0 ? -1 * k : k` as its own `abs` (`ABS_EXPR`), which it
+   takes to be non-negative whatever `-fwrapv` says, and folds a comparison
+   of it by that, at `-O0` too: `1 >= abs(c)` is false at the smallest
+   `int32` and `int64`. The branchless `(k ^ s) - s` it does not.
+
+**Local fix.** `loopty.promotion` types an operation written as C's operator
+by C's conversions (`_c_result`) and one written as a function, `//`, `%`,
+`<<`, `>>` and `**`, by loopy's (`_loopy_result`), and where numpy computes
+in a numpy integer type the compiled run computes in it: the operands are
+converted into it where C would take a signed one round, or loopy types the
+operation otherwise than C computes it, and where that cannot do, under C's
+promotion of a narrow type or beside a negative literal an unsigned type does
+not hold, the result is converted back into it (`Step.result`), which wraps
+round as numpy's does. loopty's targets write a conversion into a type
+narrower than `int` whatever loopy infers (`NumpyArithmetic.map_type_cast`).
+A comparison of integers, which numpy decides exactly whatever their types,
+compares a negative operand's sign first where C would compare it as an
+unsigned value (`k[i] >= 0 && u[i] < k[i]`, `Step.sign`). A sum, a product,
+an `^` or a comparison of integers hands its operands the integer context
+`"i"`, and any other one the context of its operands that are no Python
+number, as numpy computes it, and not loopy's type for the whole, which
+takes a `float32` beside an integer literal of 32 bits or more for a double
+(`NumpyArithmetic._literal_context`); a `np.uint32` literal is written
+`3u` and a `np.uint8` or `np.uint16` one as the `int` C promotes it to, `3`
+(`NumpyArithmetic.map_constant`). `abs` of an integer is written without a
+branch, `(k ^ s) - s` with `s = k >> 63` (`>> 31` in C's `int`), and of a
+truth value or an unsigned integer as the operand
+(`ExpressionLowerer._absolute`). Without a branch there is no `If`, whose
+condition loopy's bounds check reads into isl as it reads a guard on the
+loops (`check_bounds` and `condition_to_set`), and whose reader raised on
+the cast that widens `i * i` in `abs(i * i - m)`. loopty's printer
+brackets a sum or a product that stands after the first operand of another
+(`lower._CText`). A term nested to the left prints as before. Of the
+examples' code, only `fusion.py`'s substituted kernel changes in what it
+computes, by a bracket around a product it subtracts, which rounds alike;
+the guards of the tiled, blocked and diamond schedules in `stencil_skew.py`
+and `wavefront_acoustic.py` gain brackets in their index arithmetic, which
+computes the same 32-bit values.
+
+pymbolic builds `a - b` as `a + -1 * b`, and the term then negates `b` in its
+own type before adding, where numpy subtracts in the type of the two: `-1 *
+b[i]` of an `int8` `-128` is itself, and of a `uint32` it is taken round. A
+sum plans a negation it adds as the difference it stands for
+(`Promotion._subtracted`), negating `b` in the difference's type, and the
+interpreter subtracts it (`interpret._Run.sum`).
+
+**What it does not cover.** A subscript's arithmetic is left in the type loopy
+computes it in, neither widened nor converted back (#129, #157). `u[i] - 1`
+and `u[i] + -1` of an unsigned `u` are one term, so the second, which numpy
+refuses at every point, is computed as the first (#151); a literal a numpy
+integer's type does not hold is refused elsewhere (#141). An `If`, whose
+branches C converts to one type, is not planned: a body cannot write one,
+and `abs` lowers without one. `c[i] + -u[i]` of an `Int` `c` and an
+unsigned `u` is read as `c[i] - u[i]` too, where numpy adds the negation it
+takes round, `2**8 - u[i]` of a `uint8`, so the two runs differ at every
+`u[i]` but zero (#151). A comparison of `abs` of an element does not trace
+(`abs(k[i]) > 2`, xywei/lanky#94): lanky's terms leave `abs` to pymbolic,
+whose call has no order.
