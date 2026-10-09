@@ -108,7 +108,10 @@ restatement of it in `solve` is `decided` by the call and worth `tested`, as
 the `EFFECTIVE` column shows, since it rests on that fact. Nothing decides the
 recurrence from the term yet, and `lanky` says how it was established rather
 than passing over it. The theorem beside it is `tested` here, and `proved` on a
-machine with the Lean extra installed. The last row of each kernel, `tested` by
+machine with the Lean extra installed, and the row under it is lanky's check of
+its reading: the theorem's annotations, run again as plain Python at drawn
+values, compute what its term does, so the term the oracles are handed is the
+claim written. The last row of each kernel, `tested` by
 `interpreter`, is the one fact about the trace itself: the traced term, run by
 loopty's interpreter, agrees with the body run natively, on this file's
 `example_inputs()` and on three inputs drawn from the declared types. The
@@ -128,6 +131,7 @@ decided  decided    isl            spmv.py:69   scan           the source order 
 tested   tested     native         spmv.py:69   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
 tested   tested     interpreter    spmv.py:69   scan           the traced term computes what the body computes
 tested   tested     property-test  spmv.py:84   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat] | off(0) ==...
+tested   tested     python         spmv.py:84   scan_monotone  the term computes what the annotations compute
 decided  decided    isl            spmv.py:112  spmv           y[r] is in bounds for every instance of S0
 decided  decided    isl            spmv.py:112  spmv           val[r, j] is in bounds for every instance of S0
 decided  decided    type           spmv.py:112  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
@@ -140,7 +144,7 @@ tested   tested     interpreter    spmv.py:102  spmv           the traced term c
 decided  tested     call           spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
 tested   tested     interpreter    spmv.py:115  solve          the traced term computes what the body computes
 
-21 facts: 16 decided, 5 tested
+22 facts: 16 decided, 6 tested
 ```
 
 ### loopty run examples/spmv.py
@@ -727,7 +731,7 @@ decided                                                      tested     isl     
 assumed                                                      assumed    -              travel.py:193  flat           the elements of off are points of Fin(nnz + 1) where weigh is called ...
 decided under requirement:travel.flat@189:weigh:element:off  assumed    isl            travel.py:186  flat           val[off[r_0] + j] is in bounds for every instance of weigh.S0, where ...
 ...
-70 facts: 4 assumed, 51 decided, 15 tested
+71 facts: 4 assumed, 51 decided, 16 tested
 ```
 
 ### loopty run examples/travel.py

@@ -2347,6 +2347,16 @@ published.
   `under`. The `from` entry is gone; `callee`
   stays. The `lanky check` transcripts of `examples/spmv.py` show the new row,
   and this needs the lanky that has `Fact.rests_on`.
+- **A theorem in a kernel file has its reading under it** (lanky #91). lanky
+  now checks each claim's reading of its annotations: the annotations are run
+  again as plain Python at drawn values, the term is evaluated at the same
+  values, and the two have to agree. Each theorem gets a second fact, `tested
+  python ... the term computes what the annotations compute`, on which its
+  pass or proof rests. The `lanky check` transcripts of `examples/spmv.py`
+  and `examples/travel.py`, each of which has a `scan_monotone`, show the new
+  row, and are regenerated with `scripts/refresh_example_outputs.py`;
+  `examples/README.md` says what the row is. A kernel's and a program's facts are loopty's, and
+  have no such row: their trace has its own check, `trace-faithful`.
 
 ### Notes
 
