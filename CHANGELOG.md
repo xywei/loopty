@@ -36,6 +36,12 @@ All notable changes to loopty are recorded here. The format follows
   single precision too. `x ** n` of a real `x` stays numpy's power, the C
   library's `pow` in both runs; at the flagship's Taylor sum `ipow` is an
   order of magnitude faster on the C target (`benchmarks/l2p.py`).
+- The coverage report (`docs/lean-checks.md`) covers the flagship and the
+  upstream test kernels: of 1213 facts isl decides in 29 files, Lean proves
+  1169 in core Lean and confirms the counterexample of the 30 refuted ones;
+  the 14 left decided are claims about reals, and with Mathlib it proves
+  them too, 1183 in all. `examples/l2p.py` has 39: 38 proved with Mathlib,
+  and its refused interchange, whose negation Lean proves.
 - **`benchmarks/l2p.py`**, which times sumpy's own `E2PFromSingleBox`, the
   same algorithm written directly in plain loopy (loopy #970's L2P
   microkernel with the Laplace step put back, and variants that make
