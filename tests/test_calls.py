@@ -40,6 +40,7 @@ from loopty import (
 from loopty.executor import LoopyExecutor, emit_code
 from loopty.faithful import KIND
 from loopty.refusal import RefusedNatively
+from loopty.schedule import IllegalCast
 from loopty.term import Reduction
 
 calls = importlib.import_module("kernels.calls")
@@ -1258,3 +1259,187 @@ def test_an_array_over_a_domain_of_index_elements_is_passed_whole() -> None:
 
     with pytest.raises(TraceError, match="the sort of the elements of its f"):
         other_sort.term
+
+
+# {{{ with updates, a window and a layout (#218, #219)
+
+
+def _mesh_inputs() -> dict:
+    """PyOP2's two triangles, which share the nodes 1 and 3, and their values."""
+    return {
+        "cell": Arr.from_numpy(_cells()),
+        "yl": Arr.from_numpy(np.arange(1.0, 7.0).reshape(2, 3)),
+        "y": Arr.zeros(4),
+    }
+
+
+def test_a_callees_update_is_an_update_of_the_caller() -> None:
+    # y[cell[k]] += yl[k] in the callee is y[cell[c, k]] += yl[c, k] at each
+    # c: it owes the class of its sum, not distinct writes, as written inline
+    (stmt,) = calls.assemble.term.stmts
+    assert (stmt.kind, stmt.exactness) == ("accumulate", "approx")
+    assert stmt.inames == ("c", "k")
+    facts = [_decided(fact) for fact in _facts(calls.assemble)]
+    assert not [fact for fact in facts if fact.kind == "disjoint-writes"]
+    (sums,) = [fact for fact in facts if fact.kind == "exactness"]
+    assert sums.statement == "the accumulation into y[cell[c, k]] over c, k is approx"
+    assert (sums.status, sums.decided_by) == (Status.DECIDED, "type")
+    data = _mesh_inputs()
+    calls.assemble(**data)
+    np.testing.assert_allclose(data["y"].numpy(), [1.0, 8.0, 4.0, 8.0])
+    fact = LoopyExecutor().differential(
+        calls.assemble, Schedule(calls.assemble), _mesh_inputs()
+    )
+    assert fact.status is Status.TESTED
+
+
+def test_a_callees_updates_race_with_a_pair_of_both_loops_until_atomic() -> None:
+    # The pair is read off the schedule's example inputs: the caller's c and
+    # the callee's k, which the call nests inside it.
+    split = Schedule(calls.assemble).example(**_mesh_inputs()).split("c", 32)
+    with pytest.raises(IllegalCast) as caught:
+        split.tag(c_outer="g.0", c_inner="l.0")
+    assert str(caught.value) == (
+        "tag(c_outer='g.0', c_inner='l.0') illegal: S0[c=0, k=2] and S0[c=1, "
+        "k=1] both update y[3] on the schedule's example inputs (nc=2, nv=4), "
+        "where cell[0, 2] = 3 and cell[1, 1] = 3, and the loop c_inner on l.0 "
+        "runs them on two work items, so one can overwrite what the other "
+        "added; make the updates atomic, with atomic('y') before this step"
+    )
+    atomic = (
+        Schedule(calls.assemble)
+        .atomic("y")
+        .split("c", 32)
+        .tag(c_outer="g.0", c_inner="l.0")
+    )
+    assert (
+        "atomic updates of y run at the same time after tag(c_outer='g.0', "
+        "c_inner='l.0'), so their sum is reassociated and compared at 'reassoc'"
+    ) in [fact.statement for fact in atomic.facts()]
+    fact = LoopyExecutor().differential(
+        calls.assemble, calls.assembled_in_no_order, _mesh_inputs()
+    )
+    assert fact.status is Status.TESTED, fact.provenance
+    assert fact.provenance["outputs"]["y"]["exactness"] == "approx"
+
+
+def test_a_callees_updates_compile_atomic_on_opencl(plain_opencl) -> None:
+    schedule = (
+        Schedule(calls.assemble, target="opencl")
+        .atomic("y")
+        .split("c", 32)
+        .tag(c_outer="g.0", c_inner="l.0")
+    )
+    assert schedule.buildable == (True, "")
+    code = emit_code(schedule)
+    assert "__global volatile double *__restrict__ y" in code
+    assert "atom_cmpxchg" in code
+
+
+def test_an_integer_a_callee_is_given_keeps_its_update_exact() -> None:
+    # c given for v: Int is np.int64(c) in the callee, an integer, so the
+    # update stays one, exact, as m[cell[c, k]] += c written inline is
+    @kernel
+    def add_to(m: Arr[Fin[nv], Int], row: Arr[Fin[3], Fin[nv]], v: Int):  # noqa: F821
+        for k in row.dom:
+            m[row[k]] += v
+
+    @kernel
+    def tally(
+        cell: Arr[Fin[nc], Fin[3], Fin[nv]],  # noqa: F821
+        m: Arr[Fin[nv], Int],  # noqa: F821
+    ):
+        for c in cell.dom:
+            add_to(m, cell[c], c)
+
+    (stmt,) = tally.term.stmts
+    assert render(stmt.expr) == "m[cell[c, k]] + np.int64(c)"
+    assert (stmt.kind, stmt.exactness) == ("accumulate", "exact")
+    kinds = {fact.kind for fact in _facts(tally)}
+    assert "exactness" in kinds and "disjoint-writes" not in kinds
+    with pytest.raises(IllegalCast, match="the accumulation into m is exact"):
+        Schedule(tally).atomic("m")
+
+
+def test_a_window_of_an_array_called_kernels_store_and_read() -> None:
+    # The flux and the divergence of each row are calls, inlined: the window
+    # is taken over their statements, and no-clobber is asked of them.
+    window = calls.windowed_rows.windows["f"]
+    assert str(window.placement) == "lambda e, j: j % 3"
+    assert window.producer.id == "row_fluxes.S0"
+    assert window.producer.inames == ("e", "j")
+    (clobber,) = [f for f in calls.windowed_rows.facts() if f.kind == "no-clobber"]
+    assert clobber.status is Status.DECIDED
+    assert clobber.statement == (
+        "no read of f sees its slot overwritten after contract('f', lambda e, j: "
+        "j % 3): f kept in 3 cells, f[e, j] in slot j % 3"
+    )
+    assert calls.rejected_window_of_two_rows().startswith(
+        "contract('f', lambda e, j: j % 2) illegal: instance "
+        "row_divergences.S0[e_0=0, i=1] reads f[0, 0], which row_fluxes.S0[e=0, "
+        "j=0] stored in slot 0, after row_fluxes.S0[e=0, j=2] stored f[0, 2] there"
+    )
+    registers = calls.fused_rows.contract("f", registers=True)
+    for schedule in (calls.windowed_rows, registers):
+        inputs = {
+            "u": Arr.from_numpy(RNG.standard_normal((3, 8))),
+            "rhs": Arr.zeros((3, 8)),
+        }
+        fact = LoopyExecutor().differential(calls.burgers_rows, schedule, inputs)
+        assert fact.status is Status.TESTED, fact.provenance
+    assert "double f_window[3];" in emit_code(calls.windowed_rows)
+
+
+def test_a_callee_reads_through_a_declared_layout() -> None:
+    (stmt,) = calls.unflatten.term.stmts
+    assert render(stmt.expr) == "flat[e, a + 3*b]"
+    reads = [
+        _decided(f)
+        for f in _facts(calls.unflatten, "in-bounds")
+        if "flat" in f.statement
+    ]
+    assert reads and all(f.status is Status.DECIDED for f in reads)
+    flat = np.arange(18.0).reshape(2, 9)
+    inputs = {"flat": Arr.from_numpy(flat), "u": Arr.zeros((2, 3, 3))}
+    calls.unflatten(**inputs)
+    np.testing.assert_array_equal(
+        inputs["u"].numpy(), flat.reshape(2, 3, 3, order="F")
+    )
+    inputs = {"flat": Arr.from_numpy(flat), "u": Arr.zeros((2, 3, 3))}
+    schedule = Schedule(calls.unflatten).split("e", 2)
+    fact = LoopyExecutor().differential(calls.unflatten, schedule, inputs)
+    assert fact.status is Status.TESTED
+
+
+def test_a_layout_changed_after_it_was_declared_is_refused_through_a_call() -> None:
+    from loopty import layout
+    from loopty.layout import LayoutError
+
+    width = [3]
+
+    @layout
+    def stretched(a: Fin[3], b: Fin[3]) -> Fin[16]:
+        return a + width[0] * b
+
+    @kernel
+    def block(flat: Arr[Fin[16], Real], u: Arr[Fin[3], Fin[3], Real]):
+        for a in u.dom:
+            for b in u.dom[a]:
+                u[a, b] = flat[stretched(a, b)]
+
+    @kernel
+    def blocks(
+        flat: Arr[Fin[ne], Fin[16], Real],  # noqa: F821
+        u: Arr[Fin[ne], Fin[3], Fin[3], Real],  # noqa: F821
+    ):
+        for e in u.dom:
+            block(flat[e], u[e])
+
+    width[0] = 4
+    with pytest.raises(
+        LayoutError, match=r"stretched now computes the address a \+ 4\*b"
+    ):
+        blocks.term
+
+
+# }}}

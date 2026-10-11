@@ -934,7 +934,9 @@ release; the CHANGELOG says when one does.
   compile (#220). A domain
   declared outside an annotation, for `Arr.zeros(TRIANGLE, ...)` in a
   program, names its binders and sizes as lanky variables, `i, j, n =
-  Var("i"), Var("j"), Var("n")` (#210).
+  Var("i"), Var("j"), Var("n")` (#210). A program's array over a domain is
+  not kept in a window: `contract` refuses it, naming the fix, keep it whole
+  or `substitute` it (#244).
 - `loopty.math` has eight functions (#184), and numpy's own functions on a
   traced value are refused rather than read as them (#195). A function
   only a guard calls is refused when lowered: loopy resolves a function by

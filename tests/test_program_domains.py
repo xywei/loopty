@@ -24,6 +24,7 @@ from loopty import Arr, Schedule, TraceError, kernel, program
 from loopty.executor import LoopyExecutor
 from loopty.faithful import KIND
 from loopty.oracle import IslOracle
+from loopty.window import WindowError
 
 K = importlib.import_module("kernels.program_domains")
 TRIANGLE, fill, rowsum, diagonal = K.TRIANGLE, K.fill, K.rowsum, K.diagonal
@@ -106,6 +107,26 @@ def test_an_array_of_a_declared_domain_takes_its_sizes_from_the_programs() -> No
     fused = Schedule(declared).fuse("fill", "rowsum", loops=1)
     assert all(f.status is Status.DECIDED for f in fused.facts())
     fact = LoopyExecutor().differential(declared, fused, _inputs())
+    assert fact.status is Status.TESTED
+
+
+def test_a_window_of_an_array_over_a_domain_is_refused_with_the_fix() -> None:
+    # A placement takes a cell's indices to a slot axis by axis, and the cells
+    # of an array over a domain are its points: refused, before a placement
+    # is read, naming the two ways the array may be stored.
+    fused = Schedule(K.declared).fuse("fill", "rowsum", loops=1)
+    message = (
+        "contract('f'): f is over the domain Where[i: Fin(n), j: Fin(n), j < i], "
+        "whose cells a window does not place yet; keep it whole, or compute it "
+        "where it is read, substitute('f')"
+    )
+    with pytest.raises(WindowError) as caught:
+        fused.contract("f")
+    assert str(caught.value) == message
+    with pytest.raises(WindowError, match="whose cells a window does not place"):
+        fused.contract("f", lambda i, j: j)
+    substituted = fused.substitute("f")
+    fact = LoopyExecutor().differential(K.declared, substituted, _inputs())
     assert fact.status is Status.TESTED
 
 

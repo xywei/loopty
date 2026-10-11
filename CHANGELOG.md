@@ -148,7 +148,16 @@ All notable changes to loopty are recorded here. The format follows
   rule called inside a `when` block is refused where it is used after the
   block. `examples/calls.py` has `dot` in a matrix-vector
   and a sparse product, and firedrake's P1 quadrature rule applied per
-  element.
+  element. A callee's update, `y[cell[k]] += yl[k]`, is an update of the
+  caller, of the class of its sum and owing no distinct writes, as written
+  inline: a step that runs two at once is refused with a pair of the
+  caller's loop and the callee's read off the example inputs (`S0[c=0, k=2]
+  and S0[c=1, k=1] both update y[3]`), and `atomic('y')` on the caller
+  lifts it. An integer a callee is given for an `Int`, `np.int64(c)`,
+  keeps such an update exact. A window (`Schedule.contract`) is taken over
+  the statements of the kernels a program's kernels call, and its
+  `no-clobber` fact is about them; a callee reads through a declared
+  layout, which is checked against its facts where it is called.
 - **A program's arrays over a domain** (#74). A program's callee may take
   an array over a `Where`, `Sigma` or union domain: the domain's sizes are
   unified across the calls, binder by binder, and two calls given one array
@@ -169,7 +178,9 @@ All notable changes to loopty are recorded here. The format follows
   points where the program makes it, its edges have definedness facts as a
   dense temporary's do, and a schedule fuses through it; `Schedule.pack`
   stores a program's argument over a domain packed. A declared dense shape
-  is `Arr.zeros((x.dom.size, 3))`.
+  is `Arr.zeros((x.dom.size, 3))`, which `Schedule.contract` may keep in a
+  window; one over a domain is refused there, naming the fix, keep it whole
+  or `substitute` it ([#244](https://github.com/xywei/loopty/issues/244)).
 
 - **Constant tables** (`loopty.table`): quadrature weights, a basis
   tabulated at the quadrature points, a differentiation matrix, declared
