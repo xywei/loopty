@@ -252,7 +252,12 @@ def loopy_same_kernel(tile: str) -> Any:
 
 
 def sumpy_layer_potential(layer: str = "single") -> Any:
-    """sumpy's ``LayerPotential`` as pytential builds it for direct QBX."""
+    """sumpy's ``LayerPotential`` as pytential builds it for direct QBX.
+
+    pytential's ``D`` is an ``IntG`` whose target kernel is the Laplace kernel
+    with the source derivative removed and whose source kernel carries it
+    (``int_g_vec``), and ``get_lpot_applier`` passes both on as they are.
+    """
     from sumpy.expansion.local import LineTaylorLocalExpansion
     from sumpy.kernel import DirectionalSourceDerivative, LaplaceKernel
     from sumpy.qbx import LayerPotential
@@ -265,7 +270,7 @@ def sumpy_layer_potential(layer: str = "single") -> Any:
     )
     return LayerPotential(
         expansion=LineTaylorLocalExpansion(laplace, ORDER),
-        target_kernels=(source,),
+        target_kernels=(laplace,),
         source_kernels=(source,),
         value_dtypes=np.float64,
     )
