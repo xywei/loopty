@@ -384,7 +384,7 @@ interchange) and the claims the test kernels make false on purpose, and Lean
 proved each false at isl's counterexample.
 
 With Mathlib (`LANKY_LEAN_MATHLIB`), the twelve claims about reals,
-postconditions and the theorems applied to them, are proved too: 931 proved,
+postconditions and the theorems applied to them, are proved too: 947 proved,
 none left decided, and the same 22 refuted facts proved false. The slowest
 part about reals is a theorem's application, 0.4 s, and a postcondition's,
 0.4 s, by `linarith`.
