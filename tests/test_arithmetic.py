@@ -28,6 +28,7 @@ import numpy as np
 import pymbolic.primitives as prim
 import pytest
 from lanky.prelude import Bool, Int, Nat, Real
+from lanky.terms import SymbolicMixin
 
 from loopty import Arr, Fin, Schedule, TraceError, kernel, program, reduce_sum, when
 from loopty.contract import (
@@ -2911,6 +2912,48 @@ def test_a_function_only_a_guard_calls_is_refused_with_the_fix_named():
         emit_code(root_in_a_guard)
     # Called in the value too, it is resolved there, and the guard's call with it.
     agrees(root_in_both, make)
+
+
+@pytest.mark.skipif(
+    not hasattr(SymbolicMixin, "__abs__"),
+    reason="before lanky#94, abs() of a term is pymbolic's call, which has no order",
+)
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_abs_of_an_element_is_compared_on_either_side():
+    # abs() of a term was pymbolic's Call of a variable named abs (lanky#94):
+    # with it on the left, a guard when(abs(k[i]) > 2) failed to trace with
+    # "expressions don't have an order", and 127 == abs(c[i]) was pymbolic's
+    # structural equality, False while the body was traced, so the term held
+    # 0 where the body compares. It is lanky's Abs, which the trace lowers.
+
+    @kernel
+    def absolute_first(
+        k: Arr[Fin[n], Int],  # noqa: F821
+        c: Arr[Fin[n], np.uint8],  # noqa: F821
+        y: Arr[Fin[n], Int],  # noqa: F821
+        z: Arr[Fin[n], Int],  # noqa: F821
+    ):
+        """``abs`` on the left of a comparison, in a guard and as a value."""
+        for i in k.dom:
+            with when(abs(k[i]) > 2):
+                y[i] = 1
+            z[i] = (127 == abs(c[i])) * 1 + (abs(k[i]) + 1 > 2) * 2
+            z[i] = z[i] + (abs(k[i]) != 3) * 4
+
+    def make() -> dict:
+        return {
+            "k": np.array([-(2**63), -3, 4, 0, 2]),
+            "c": np.array([127, 0, 255, 127, 1], np.uint8),
+            "y": np.zeros(5, np.int64),
+            "z": np.zeros(5, np.int64),
+        }
+
+    native = make()
+    absolute_first(**native)
+    # numpy's abs of the smallest int64 is that value, which is not above 2
+    assert list(native["y"]) == [0, 1, 1, 0, 0]
+    assert list(native["z"]) == [1 + 4, 2, 2 + 4, 1 + 4, 2 + 4]
+    agrees(absolute_first, make)
 
 
 # }}}
