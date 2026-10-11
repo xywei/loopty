@@ -1005,7 +1005,7 @@ def test_every_refused_cast_is_proved_false_at_isls_pair(lean: Any) -> None:
 def test_lean_confirms_a_layouts_refutation_at_isls_cell(lean: Any) -> None:
     # The DOFArray in C order inside the element, and a layout that folds two
     # cells onto one address: isl refutes each with a point, and Lean proves
-    # the claim false there (gap 7).
+    # the claim false there.
     from loopty import IslOracle, layout
 
     layouts = load(EXAMPLES / "storage_layouts.py")

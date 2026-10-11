@@ -1,4 +1,4 @@
-"""Checked layout maps: a declared storage index, and loopy's dim_tags (gap 7).
+"""Checked layout maps: a declared storage index, and loopy's dim_tags.
 
 A layout is a Python function from a cell's indices to its address, with
 annotations that say which cells and which buffer (:mod:`loopty.layout`).

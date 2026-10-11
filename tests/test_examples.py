@@ -891,7 +891,7 @@ def test_the_fusion_demo_states_the_definedness_of_its_intermediate() -> None:
 # }}}
 
 
-# {{{ storage layouts (gap 7)
+# {{{ storage layouts
 
 
 def test_the_storage_layouts_demo_decides_every_layout_fact() -> None:
