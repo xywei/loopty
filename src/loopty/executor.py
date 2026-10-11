@@ -376,7 +376,9 @@ class LoopyExecutor:
         loopy preprocesses the kernel, checks its bounds, generates its code,
         compiles it and runs it inside :func:`loopty.isl_reading.declining`,
         with the readings it was lowered with; :meth:`differential` runs the
-        kernel through here.
+        kernel through here. Where loopy refuses an access under a guard it
+        does not read, or a function only a guard calls, the error names the
+        statement and the fix (:func:`loopty.refusal.naming_the_fix`).
         """
         term, kernel, lowering, target_name = _resolve(obj, self.target)
         names = [name for name, _ in term.params]
@@ -392,13 +394,17 @@ class LoopyExecutor:
         layouts = _declared_layouts(term, lowering, supplied)
         call = _call_arguments(term, lowering, args, kwargs, layouts)
         call, empty = _pad_empty_arrays(call, lowering)
-        if target_name == "opencl":
-            out = self._run_opencl(kernel, lowering, call)
-        else:
-            # The executor object is where loopy keeps its compiled-code cache;
-            # calling the translation unit directly recompiles, and says so.
-            _event, results = kernel.executor()(**call)
-            out = self._collect(lowering, call, results)
+        from loopty.refusal import naming_the_fix
+
+        with naming_the_fix(lowering):
+            if target_name == "opencl":
+                out = self._run_opencl(kernel, lowering, call)
+            else:
+                # The executor object is where loopy keeps its compiled-code
+                # cache; calling the translation unit directly recompiles, and
+                # says so.
+                _event, results = kernel.executor()(**call)
+                out = self._collect(lowering, call, results)
         for name, original in empty.items():
             # The pad is not a result: an empty output stays empty, so that a
             # caller comparing outputs sees the array it passed in.
@@ -822,9 +828,14 @@ def _agreement_fact(
 def emit_code(obj: Any, target: str | None = None) -> str:
     """The code loopy generates for a kernel or a schedule, as a string.
 
-    Generated inside :func:`loopty.isl_reading.declining`, as a run's is.
+    Generated inside :func:`loopty.isl_reading.declining`, as a run's is, and
+    a refusal of loopy's is named as a run's is
+    (:func:`loopty.refusal.naming_the_fix`).
     """
     import loopy as lp
 
-    _term, kernel, _lowering, _target = _resolve(obj, target)
-    return lp.generate_code_v2(kernel).device_code()
+    from loopty.refusal import naming_the_fix
+
+    _term, kernel, lowering, _target = _resolve(obj, target)
+    with naming_the_fix(lowering):
+        return lp.generate_code_v2(kernel).device_code()

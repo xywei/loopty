@@ -68,6 +68,7 @@ State hidden deeper than that is what the faithfulness fact is for; see
 from __future__ import annotations
 
 import builtins
+import contextlib
 import dis
 import functools
 import importlib.util
@@ -118,7 +119,7 @@ from loopty.flow import (
     is_isl_keyword,
 )
 from loopty.idx import Reflections
-from loopty.term import Access, ArrType, Reduction, Stmt, Term
+from loopty.term import Access, ArrType, Difference, Reduction, Stmt, Term, subtracted
 
 __all__ = [
     "EXACTNESS_ORDER",
@@ -195,6 +196,38 @@ def _shown(value: Any) -> str:
             return f"({text},)" if len(value) == 1 else f"({text})"
         return f"{{{text}}}" if value else "set()"
     return repr(value)
+
+
+def _written(value: Any) -> str:
+    """A sum the way the body wrote it, ``u[i] + -1`` or ``u[i] - -7``.
+
+    lanky prints a sum's negated term and its negative literal behind a minus
+    and anything else behind a plus, so ``u[i] + -1`` reads ``u[i] - 1`` and
+    ``u[i] - -7`` reads ``u[i] + 7``, the other spelling, which numpy computes
+    otherwise (#151). Here only the last term of a
+    :class:`~loopty.term.Difference` is behind a minus. A term inside is
+    printed as :func:`_shown` prints it, and anything but a sum is too.
+    """
+    if not isinstance(value, prim.Sum):
+        return _shown(value)
+    texts: list[str] = []
+    for position, child in enumerate(value.children):
+        if position and subtracted(value, position):
+            subtrahend = _negated(child)
+            if subtrahend is None and isinstance(child, int | float | complex):
+                subtrahend = -child
+            elif subtrahend is None:
+                subtrahend = child
+            text = _shown(subtrahend)
+            if isinstance(subtrahend, prim.Sum):
+                text = f"({text})"
+            texts.append(f" - {text}")
+            continue
+        text = _shown(child)
+        if position and isinstance(child, prim.Sum):
+            text = f"({text})"
+        texts.append(f" + {text}" if position else text)
+    return "".join(texts)
 
 
 def _items_text(shown: Sequence[str], total: int) -> str:
@@ -2989,14 +3022,15 @@ def _refuse_arithmetic(expr: Any, params: Mapping[str, Any], where: str) -> None
       numpy's ``+`` of two bools is ``or``, and C adds the bytes, so
       ``True + True`` is ``True`` natively and ``2`` compiled (#106);
     * a difference of two truth values, ``b[i] - c[i]``, which numpy refuses
-      at every point and C computes (#106). pymbolic builds ``b - c`` as
-      ``b + -1 * c``, so that sum is refused too, though numpy computes it;
-      ``1 * b[i] - c[i]`` is not;
+      at every point and C computes (#106); ``1 * b[i] - c[i]`` is not. The
+      trace builds a ``-`` the body writes as a
+      :class:`~loopty.term.Difference` (#151), and only its last term is
+      read as subtracted;
     * a negated truth value, ``-b[i]``, which numpy refuses at every point
       (``The numpy boolean negative ... is not supported``) and C computes
-      (#130). pymbolic builds it as ``-1 * b[i]``, so that product is refused
-      too, though numpy computes it, but where it is subtracted, ``1 - b[i]``,
-      which numpy computes as ``1 + -1 * b[i]`` is built;
+      (#130), alone or added, ``c[i] + -b[i]``. pymbolic builds it as ``-1 *
+      b[i]``, so that product is refused too, though numpy computes it, but
+      not where it is subtracted, ``1 - b[i]``, which numpy computes;
     * a numpy integer to a negative integer power, ``k[i] ** -1``: numpy
       refuses it at every point, and loopy's integer power inverts the base
       into an integer, ``0`` for every base but ``1`` and ``-1`` (#109). A
@@ -3021,11 +3055,12 @@ def _refuse_arithmetic(expr: Any, params: Mapping[str, Any], where: str) -> None
       it: numpy refuses it at every point (``Python integer -1 out of bounds
       for uint64``, NEP 50), and C computes ``u[i] // -1`` (#141) and ``(b[i]
       // c[i]) * 200`` of two truth values, an ``int8`` natively (#122). A
-      literal after the first operand of a sum is refused only where neither
-      it nor its negation is held, since pymbolic builds ``u[i] - 1`` as
-      ``u[i] + -1``; one first in a sum, ``-1 + u[i]``, is refused as it
-      stands. A negation ``-1 * u[i]`` is not refused at all, which numpy
-      computes as ``-u[i]`` (#151). A
+      literal a difference subtracts is refused where its negation is not
+      held, and one a sum adds where it is not, as the body wrote it (#151):
+      ``u[i] - 1`` is computed and ``u[i] + -1`` refused, and ``k[i] - 2**31``
+      of an ``int32`` ``k`` is refused and ``k[i] + -(2**31)`` computed. A
+      negation ``-1 * u[i]`` is not refused at all, which numpy computes as
+      ``-u[i]``. A
       comparison is not refused: numpy compares such a literal exactly, and
       so does the compiled run (:func:`loopty.promotion._compared`);
     * an integer literal past 64 bits, which the compiled kernel has no
@@ -3037,13 +3072,17 @@ def _refuse_arithmetic(expr: Any, params: Mapping[str, Any], where: str) -> None
     from loopty.promotion import Promotion
 
     promotion = Promotion.of_sorts(params)
-    subtracted: set[int] = set()
+    differences: set[int] = set()
     for node in _nodes(expr):
         if isinstance(node, prim.Sum):
             _refuse_truth_sum(node, promotion, where)
-            subtracted.update(id(child) for child in node.children[1:])
+            differences.update(
+                id(child)
+                for position, child in enumerate(node.children)
+                if subtracted(node, position)
+            )
         elif isinstance(node, prim.Product):
-            if id(node) not in subtracted:
+            if id(node) not in differences:
                 _refuse_truth_negation(node, promotion, where)
         elif isinstance(node, prim.Power):
             _refuse_negative_power(node, promotion, where)
@@ -3073,22 +3112,25 @@ def _refuse_truth_sum(node: prim.Sum, promotion: Any, where: str) -> None:
     """Refuse a sum numpy computes as ``or``, or a difference numpy refuses.
 
     See :func:`_refuse_arithmetic`. Two Python bools, comparisons of loop
-    variables, add and subtract as the integers they are in both runs.
+    variables, add and subtract as the integers they are in both runs. Only
+    the last term of a :class:`~loopty.term.Difference` is subtracted; a
+    negated truth value a sum adds is refused as a negation
+    (:func:`_refuse_truth_negation`).
     """
     accumulated = promotion.types(node.children[0])[0]
     for position, step in enumerate(promotion.steps(node)):
         left, right = node.children[position], node.children[position + 1]
-        subtracted = _negated(right)
-        if subtracted is not None:
-            other = promotion.types(subtracted)[0]
+        subtrahend = _negated(right) if subtracted(node, position + 1) else None
+        if subtrahend is not None:
+            other = promotion.types(subtrahend)[0]
             if (
                 _all_kinds(accumulated, "b")
                 and _all_kinds(other, "b")
                 and (_numpy_integer(accumulated) or _numpy_integer(other))
             ):
-                a, b = _shown(left), _shown(subtracted)
+                a, b = _shown(left), _shown(subtrahend)
                 raise TraceError(
-                    f"{_shown(node)} at {where} subtracts truth values: natively "
+                    f"{_written(node)} at {where} subtracts truth values: natively "
                     f"{a} and {b} are bools, and numpy refuses '-' of two bools "
                     "('numpy boolean subtract, the `-` operator, is not "
                     "supported'), while the compiled kernel subtracts them as the "
@@ -3101,7 +3143,7 @@ def _refuse_truth_sum(node: prim.Sum, promotion: Any, where: str) -> None:
             continue
         a, b = _shown(left), _shown(right)
         raise TraceError(
-            f"{_shown(node)} at {where} adds truth values: natively {a} and {b} "
+            f"{_written(node)} at {where} adds truth values: natively {a} and {b} "
             "are bools, and numpy's '+' of two bools is 'or', so True + True is "
             "True, while the compiled kernel adds them as the integers 0 and 1 "
             "and makes 2, so the two runs would compute different things. Write "
@@ -3199,24 +3241,42 @@ def _refuse_unheld_literal(node: Any, promotion: Any, where: str) -> None:
         for literal, beside, first in checks:
             if literal is None or isinstance(literal, np.generic) or _untyped(literal):
                 continue
-            unheld = _unheld(int(literal), beside)
+            # pymbolic builds u - 1 as u + -1: a difference subtracts the
+            # negation of the literal it holds, and any other sum adds the
+            # literal as the body wrote it (#151).
+            minus = not first and subtracted(node, position)
+            value = -int(literal) if minus else int(literal)
+            unheld = _unheld(value, beside)
             if unheld is None:
                 continue
-            # u - 1 is built as u + -1, with the literal after u; one before it,
-            # -1 + u, was written so, which numpy refuses.
-            subtracted = isinstance(node, prim.Sum) and not first
-            if subtracted and _unheld(-int(literal), beside) is None:
-                continue
+            other = ""
+            if (
+                isinstance(node, prim.Sum)
+                and not first
+                and not minus
+                and value < 0
+                and _unheld(-value, beside) is None
+            ):
+                # u[i] + -1, whose difference numpy computes in u's type.
+                left = _written(node.children[0])
+                if isinstance(node.children[0], prim.Sum):
+                    left = f"({left})"
+                other = (
+                    f", or subtract it, '{left} - {-value}', which numpy "
+                    f"computes in {unheld}"
+                )
+            article = "an" if unheld.name.startswith("int") else "a"
+            double = " (in double beside a uint64)" if unheld == np.uint64 else ""
             raise TraceError(
-                f"{_shown(node)} at {where} computes the integer {literal} with "
-                f"a {unheld} value, whose type does not hold it: numpy refuses "
-                f"it at every point ('Python integer {literal} out of bounds for "
-                f"{unheld}', NEP 50), while the compiled kernel computes it in "
-                "C's type, so the compiled run would compute a value where the "
-                f"native one has none. Write the literal as a numpy integer, "
-                f"np.int64({literal}), with which numpy computes in a type that "
-                "holds both (in double beside a uint64), as the compiled run "
-                "does too"
+                f"{_written(node)} at {where} computes the integer {value} with "
+                f"{article} {unheld} value, whose type does not hold it: numpy "
+                f"refuses it at every point ('Python integer {value} out of "
+                f"bounds for {unheld}', NEP 50), while the compiled kernel "
+                "computes it in C's type, so the compiled run would compute a "
+                "value where the native one has none. Write the literal as a "
+                f"numpy integer, np.int64({value}), with which numpy computes in "
+                f"a type that holds both{double}, as the compiled run does "
+                f"too{other}"
             )
         if position - 1 < len(steps):
             accumulated = steps[position - 1].native
@@ -4295,6 +4355,117 @@ def _free_size_names(axes: Sequence[Any]) -> set[str]:
     return out
 
 
+# {{{ differences as the body writes them
+
+
+#: Guards :data:`_SUBTRACTING_BODIES` and the wrapping of lanky's ``-``.
+_SUBTRACTION_LOCK = threading.Lock()
+
+#: How many bodies are being traced, in every thread. lanky's ``-`` is wrapped
+#: while it is not zero (:func:`_writing_differences`).
+_SUBTRACTING_BODIES = 0
+
+#: What ``SymbolicMixin`` held under each name the wrapping replaces, in its
+#: own namespace, to put back.
+_SUBTRACTION_SAVED: dict[str, Any] = {}
+
+#: lanky's own ``__sub__`` and ``__rsub__``, as the wrapping found them: what
+#: a thread outside every traced body is answered by. Kept once the wrapping
+#: is undone, since a thread may be inside a call of it as it is.
+_SUBTRACTION_OWN: dict[str, Any] = {}
+
+#: How many traced bodies deep the current thread is.
+_SUBTRACTING = threading.local()
+
+#: The operators the wrapping replaces: ``a - b`` and ``a - term`` of a number.
+_SUBTRACTIONS = ("__sub__", "__rsub__")
+
+
+def _difference_operator(name: str) -> Callable[[Any, Any], Any]:
+    """lanky's ``name``, answering a :class:`~loopty.term.Difference` in a body.
+
+    lanky builds ``a - b`` as pymbolic does, ``a + -1 * b``, which is the sum
+    ``a + -b`` builds (#151). Inside a body being traced in this thread the
+    sum is marked as the difference it was written as; anywhere else lanky's
+    own answer is returned as it is.
+
+    A numpy scalar or a truth value subtracted is kept as written, behind a
+    product with ``-1``, where pymbolic negates it: ``-np.uint8(3)`` is
+    ``np.uint8(253)``, which C would add, and ``-True`` is ``-1``, of which
+    numpy's ``b[i] - True`` of a truth value ``b`` is no difference.
+    """
+
+    def operation(self: Any, other: Any) -> Any:
+        inside = getattr(_SUBTRACTING, "depth", 0)
+        if inside and name == "__sub__" and isinstance(other, bool | np.generic):
+            from lanky.terms import Product
+
+            return Difference((self, Product((-1, other))))
+        result = _SUBTRACTION_OWN[name](self, other)
+        if (
+            inside
+            and isinstance(result, prim.Sum)
+            and not isinstance(result, Difference)
+        ):
+            return Difference(tuple(result.children))
+        return result
+
+    operation.__name__ = name
+    operation.__qualname__ = f"_difference_operator.{name}"
+    return operation
+
+
+_DIFFERENCE_OPERATORS = {name: _difference_operator(name) for name in _SUBTRACTIONS}
+
+
+@contextlib.contextmanager
+def _writing_differences() -> Iterator[None]:
+    """Build every ``-`` a body writes as a :class:`~loopty.term.Difference`.
+
+    lanky's terms do not tell ``a - b`` from ``a + -b``, nor ``u - 1`` from
+    ``u + -1``, and numpy computes them otherwise (#151), so :func:`trace`
+    runs the body inside this: ``SymbolicMixin.__sub__`` and ``__rsub__``
+    are wrapped while the first body in the process is traced and put back
+    when the last one is done, an exception included, under a lock, and the
+    wrapping marks a difference only in a thread inside a traced body, as
+    :func:`loopty.isl_reading.declining` installs loopty's readings in loopy.
+    A ``-`` lanky evaluates anywhere else, an annotation or a theorem
+    included, is lanky's own.
+    """
+    global _SUBTRACTING_BODIES
+    from lanky.terms import SymbolicMixin
+
+    with _SUBTRACTION_LOCK:
+        if _SUBTRACTING_BODIES == 0:
+            for name, wrapped in _DIFFERENCE_OPERATORS.items():
+                _SUBTRACTION_SAVED[name] = vars(SymbolicMixin).get(name)
+                own = getattr(SymbolicMixin, name)
+                if own is not wrapped:
+                    _SUBTRACTION_OWN[name] = own
+                setattr(SymbolicMixin, name, wrapped)
+        _SUBTRACTING_BODIES += 1
+    _SUBTRACTING.depth = getattr(_SUBTRACTING, "depth", 0) + 1
+    try:
+        yield
+    finally:
+        _SUBTRACTING.depth -= 1
+        with _SUBTRACTION_LOCK:
+            _SUBTRACTING_BODIES -= 1
+            if _SUBTRACTING_BODIES == 0:
+                for name, wrapped in _DIFFERENCE_OPERATORS.items():
+                    saved = _SUBTRACTION_SAVED.pop(name, None)
+                    if vars(SymbolicMixin).get(name) is not wrapped:
+                        # Something else replaced it meanwhile; leave it so.
+                        continue
+                    if saved is None:
+                        delattr(SymbolicMixin, name)
+                    else:
+                        setattr(SymbolicMixin, name, saved)
+
+
+# }}}
+
+
 def _proposition_of(annotation: Any) -> Any:
     """The postcondition carried by a return annotation, or ``None``.
 
@@ -4357,7 +4528,8 @@ def trace(kernel: Any, arg_types: Any) -> Term:
     _TRACERS.append(tracer)
     watching = _CallWatch.start()
     try:
-        function(*arguments)
+        with _writing_differences():
+            function(*arguments)
     except SymbolicBoolError as exc:
         raise TraceError(
             f"{exc}\nA kernel body may not branch on a value it computes: "

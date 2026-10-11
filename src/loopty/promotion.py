@@ -96,7 +96,7 @@ import numpy as np
 import pymbolic.primitives as prim
 
 from loopty.contract import array_storage, compiled_storage, native_storage
-from loopty.term import Access, ArrType, Reduction, Term
+from loopty.term import Access, ArrType, Reduction, Term, subtracted
 
 __all__ = ["Promotion", "Step"]
 
@@ -955,25 +955,26 @@ class Promotion:
         accumulated = self.types(operands[0])
         literal = _literal_of(operands[0])
         steps: list[Step] = []
-        for operand in operands[1:]:
-            if isinstance(expr, prim.Sum) and _subtrahend(operand) is not None:
+        for position, operand in enumerate(operands[1:], start=1):
+            minus = subtracted(expr, position)
+            if minus and _subtrahend(operand) is not None:
                 right = self._subtracted(operand, accumulated)
             else:
                 right = self.types(operand)
             literals = (literal, _literal_of(operand))
-            native = _apply(function, accumulated[0], right[0])
+            if minus and literals[1] is not None:
+                # pymbolic builds u - 1 as u + -1, and c - -32768 as c +
+                # 32768: the body subtracted the literal's negation, which
+                # numpy computes in u's type and c's (#151), where it refuses
+                # u + -1 and c + 32768 beside a uint64 and an int16.
+                native = _apply(operator.sub, accumulated[0], (-literals[1],))
+            else:
+                native = _apply(function, accumulated[0], right[0])
             if native is None and _subtrahend(expr) is not None:
                 # pymbolic builds -u as -1 * u, which numpy refuses of an
                 # unsigned integer, and the negation, which it computes,
                 # taken round in u's type.
                 native = _apply(operator.neg, right[0])
-            subtrahend = literals[1]
-            if native is None and isinstance(expr, prim.Sum) and subtrahend is not None:
-                # pymbolic builds u - 1 as u + -1, which numpy refuses beside
-                # an unsigned integer, and the difference, which it computes;
-                # and c - -32768 as c + 32768, which numpy refuses beside an
-                # int16, and the difference, which it computes in int16.
-                native = _apply(operator.sub, accumulated[0], (-subtrahend,))
             step = _plan(accumulated, right, native, native, kind, helper, literals)
             steps.append(step)
             accumulated = (step.native, step.compiled)
@@ -984,14 +985,16 @@ class Promotion:
     def _subtracted(
         self, node: prim.Product, accumulated: tuple[Native, np.dtype | None]
     ) -> tuple[Native, np.dtype | None]:
-        """``-1 * x`` that a sum adds to ``accumulated``: a difference.
+        """``-1 * x`` that a :class:`~loopty.term.Difference` subtracts.
 
         pymbolic builds ``a - b`` as ``a + -1 * b``, and numpy computes the
         difference in the type of the two, where the term negates ``b`` in its
         own type first. That wraps round where the difference does not: ``-1 *
         b[i]`` of an ``int32`` ``-2**31`` is itself, and of a ``uint32`` it
         is taken round modulo ``2**32``, so ``k[i] - u[i]``, ``int64``
-        natively, was computed in ``uint32`` compiled. Where numpy computes
+        natively, was computed in ``uint32`` compiled. A negation any other
+        sum adds, ``a + -b``, is numpy's negation of ``b`` in its own type,
+        and is planned as a product is (#151). Where numpy computes
         the difference in a numpy type, ``b`` is negated in it, converted
         into it where it is an integer of another type natively (``-1 *
         (int64_t) (u[i])``), and the sum adds a value of that type. A real is

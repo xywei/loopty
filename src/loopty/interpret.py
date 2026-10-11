@@ -72,7 +72,15 @@ from loopty.contract import (
     resolve_sizes,
 )
 from loopty.flow import bounds_dimension
-from loopty.term import Access, ArrType, Reduction, Stmt, Term, declared_layout
+from loopty.term import (
+    Access,
+    ArrType,
+    Reduction,
+    Stmt,
+    Term,
+    declared_layout,
+    subtracted,
+)
 from loopty.trace import accesses_in, reductions_in
 
 __all__ = ["CheckFailed", "InterpretError", "TooLarge", "interpret"]
@@ -908,33 +916,35 @@ class _Run:
         )
 
     def sum(self, node: prim.Sum, env: Mapping[str, Any]) -> Any:
-        """A sum from the left, a negated term subtracted.
+        """A sum from the left, as the body wrote it.
 
         pymbolic builds ``a - b`` as ``a + -1 * b``, and the native run
         computes the difference: in the type of the two, where ``-1 * b``
         would negate an ``int8`` ``b`` of ``-128`` into itself first. It
         builds ``u - 1`` as ``u + -1`` and ``c - -32768`` as ``c + 32768``
-        too: an integer literal whose sum numpy refuses, beside a ``uint64``
-        ``u`` or an ``int16`` ``c`` whose type does not hold it, is
-        subtracted as its negation, which numpy computes. The compiled run
-        computes the same (:meth:`loopty.promotion.Promotion._subtracted`,
+        too, which numpy refuses beside a ``uint64`` ``u`` and an ``int16``
+        ``c``, where it computes the difference. The trace builds a ``-`` as
+        a :class:`~loopty.term.Difference`, whose last term is subtracted
+        here: ``b`` of ``-1 * b``, and a literal's negation. Any other term is
+        added as written, ``a + -b`` and ``u + -1`` included, which numpy
+        computes otherwise (#151). The compiled run computes the same
+        (:meth:`loopty.promotion.Promotion._subtracted`,
         ``Promotion._arithmetic``).
         """
         from loopty.promotion import _integer_literal, _subtrahend
 
         children = node.children
         total = self.value(children[0], env)
-        for child in children[1:]:
-            subtrahend = _subtrahend(child)
-            if subtrahend is not None:
-                total = total - self.value(subtrahend, env)
-            elif _integer_literal(child):
-                try:
-                    total = total + child
-                except OverflowError:
+        for position, child in enumerate(children[1:], start=1):
+            if subtracted(node, position):
+                subtrahend = _subtrahend(child)
+                if subtrahend is not None:
+                    total = total - self.value(subtrahend, env)
+                    continue
+                if _integer_literal(child):
                     total = total - -child
-            else:
-                total = total + self.value(child, env)
+                    continue
+            total = total + self.value(child, env)
         return total
 
     def variable(self, name: str, env: Mapping[str, Any]) -> Any:

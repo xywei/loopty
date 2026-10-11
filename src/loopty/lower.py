@@ -599,6 +599,8 @@ class ExpressionLowerer(Mapper):
         #: The guard the walk is in, when it reads no array; see
         #: :meth:`condition`.
         self._on_loops: Any = None
+        #: Whether the walk is in a guard at all; see :meth:`_absolute`.
+        self._in_guard = False
 
     def condition(self, guard: Any) -> Any:
         """Lower a statement's guard.
@@ -621,16 +623,21 @@ class ExpressionLowerer(Mapper):
         which rounds where isl's integers do not (note 23 in
         ``docs/loopy-notes.md``). An operand numpy rounds to single
         precision, ``(i + 1) ** -1`` beside a ``float32`` scalar ``a``, is
-        cast (:meth:`_convert`).
+        cast (:meth:`_convert`). ``abs`` of a real is written without a call
+        (:meth:`_absolute`, #154).
         """
         reads = any(isinstance(node, Access | prim.Subscript) for node in walk(guard))
-        if reads:
-            return self.rec(guard)
-        self._on_loops = guard
+        self._in_guard = True
         try:
-            return self.rec(guard)
+            if reads:
+                return self.rec(guard)
+            self._on_loops = guard
+            try:
+                return self.rec(guard)
+            finally:
+                self._on_loops = None
         finally:
-            self._on_loops = None
+            self._in_guard = False
 
     @property
     def in_subscript(self) -> bool:
@@ -950,6 +957,11 @@ class ExpressionLowerer(Mapper):
         than ``int`` the result is converted back into its type, which C's
         ``int`` leaves (:meth:`loopty.promotion.Promotion._absolute`). The
         operand is written three times; a sum in it is computed for each.
+
+        In a guard, ``abs`` of a real is written without a call as well
+        (:func:`_real_absolute`): loopy's type inference visits a statement's
+        value and never its guard, so a function only a guard calls was never
+        resolved, and loopy failed with ``KeyError: 'abs'`` (#154, note 20).
         """
         promotion = self.lowering.promotion
         native, compiled = (
@@ -957,6 +969,8 @@ class ExpressionLowerer(Mapper):
         )
         lowered = self.rec(operand)
         if compiled is None or compiled.kind not in "biu":
+            if self._in_guard and compiled is not None and compiled.kind == "f":
+                return _real_absolute(lowered, compiled)
             return prim.Call(prim.Variable("abs"), (lowered,))
         truths = bool(native) and all(
             isinstance(sample, bool | np.bool_) for sample in native
@@ -1043,6 +1057,25 @@ class ExpressionLowerer(Mapper):
         raise LoweringError(
             f"cannot lower {type(expr).__name__} into a loopy expression: {expr!r}"
         )
+
+
+def _real_absolute(operand: Any, dtype: np.dtype) -> prim.Expression:
+    """``abs`` of a real ``operand`` of ``dtype``, written without a call (#154).
+
+    ``x < 0 ? -1 * x : (x == 0 ? 0 : x)``: the negation of a negative ``x``,
+    and ``x`` itself elsewhere, but for ``-0.0``, which is ``0.0``, as numpy's
+    ``abs`` makes it, and as ``1 / abs(x)`` tells. A NaN is itself, its sign
+    unchanged where numpy's ``abs`` clears it, and nothing a guard computes
+    reads that sign: a comparison of a NaN is false, and arithmetic on one is
+    a NaN. The literals are written in ``dtype``, so a ``float32`` is
+    compared and negated in single precision.
+    """
+    zero = dtype.type(0)
+    return prim.If(
+        prim.Comparison(operand, "<", zero),
+        prim.Product((dtype.type(-1), operand)),
+        prim.If(prim.Comparison(operand, "==", zero), zero, operand),
+    )
 
 
 def _without_widening(step: Any) -> Any:
