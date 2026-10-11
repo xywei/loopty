@@ -182,7 +182,8 @@ table of row starts. Both compiled runs agree with the native one.
   before any code is generated. Fusing two kernels a program calls is one of
   them, a map per statement that runs both in one loop, and so the storage of
   what passes between them is a question of the schedule and not of the
-  kernels: computed where it is read, or kept.
+  kernels: computed where it is read, kept in full, or kept in the cells live
+  at once, with a checked fact that no read sees its slot overwritten.
 - **Reassociation is visible in the type.** Splitting an accumulation and summing
   the pieces is not free on floating point. A trace reads the accumulation's
   class off what it sums, `realize("y", tree=True)` is what lowers it to
@@ -212,6 +213,14 @@ table of row starts. Both compiled runs agree with the native one.
   in-bounds obligations are decided over the set itself, so a cell of the
   bounding box outside it is refused. Where the cells are kept is a layout,
   boxed or packed, chosen by a schedule step, and changes no fact.
+- **A layout is a checked map.** Where an array's cells are stored is a Python
+  function from a cell's indices to its address, and that it stores every
+  cell inside its buffer, no two at one address and a cell at every address
+  is a fact isl decides and Lean proves, as is that two layouts store every
+  cell alike: sumpy's compressed-Taylor storage index, and grudge's
+  `dim_tags` `N3,N0,N1,N2` against modepy's reshape of the DOFArray
+  (`examples/storage_layouts.py`). loopy's shaped arrays (loopy #1053) take a
+  layout's injectivity on trust.
 - **What isl decides, Lean proves.** isl decides a fact in milliseconds and
   gives no proof. Where Lean is installed, every fact isl decides, an access in
   bounds, two writes apart, a definedness, a cast's legality one dependence
@@ -310,9 +319,56 @@ release; the CHANGELOG says when one does.
   the read, since no zeros are left to read, and nothing writes what it
   read in between, and every later step is checked against the
   dependences of the program as it then runs.
+  `.contract("f")` keeps `f` in the cells live at once instead: fused one
+  step behind, the divergence reads `f[j]` and `f[j - 2]` at step `j`, so a
+  window of three cells is found, each flux computed once:
+
+  ```python
+  fused = Schedule(burgers_rhs).fuse("flux", "divergence", shift=1)
+  windowed = fused.contract("f")              # lambda j: j % 3
+  fused.contract("f", lambda j: j % 2)        # refused: a read sees its slot overwritten
+  ```
+
+  A placement is a Python function from a cell's indices to its slot, given
+  or found axis by axis along the order as it stands (one row of the
+  sum-factorized passes' `v`, `lambda e, a, b: b`). The step is legal when
+  every read is of a cell the producer stored before it, the `definedness`
+  fact, and no read sees its slot overwritten between that store and the
+  read, the `no-clobber` fact, decided by isl over the schedule's order and
+  proved by Lean, and refuted with the read, the cell and the instance that
+  overwrote its slot. From then on every pair of accesses to one slot is a
+  dependence of the schedule, so a later step that breaks the window, or
+  puts its slots on two work items, is refused with its pair. It lowers to
+  `double f_window[3]` with modulo addressing, or, with `registers=True`
+  (the default on OpenCL), to a shift register whose every access has a
+  constant index, `f_window[0] = f_window[1]` at each step.
   `examples/fusion.py` is the Burgers flux and divergence of
-  `examples/composition.py`, fused, then substituted, each compiled run
-  compared with the native one.
+  `examples/composition.py`, fused, then substituted, or kept in a window,
+  each compiled run compared with the native one.
+- Declared layouts, checked (`loopty.layout`). A layout is a function from a
+  cell's indices to its address, its cells and its buffer in its
+  annotations, and a layout of pieces is `layout(first, second)`:
+
+  ```python
+  def centre(a: Fin[1], b: Fin[1]) -> Fin[2 * P + 1]:
+      return 0
+
+  def derivatives(
+      cell: Where[a: Fin[2], b: Fin[Q], (a + b >= 1) & (a + b < Q)],
+  ) -> Fin[2 * P + 1]:
+      a, b = cell
+      return 2 * (a + b) - 1 + a
+
+  storage_index = layout(centre, derivatives)        # sumpy's get_storage_index
+  as_dim_tags = dof_array.same_as("N3,N0,N1,N2")     # grudge's output layout
+  ```
+
+  `lanky check` asks three facts of each, every cell at an address of the
+  buffer, no two at one address, a cell at every address (whose witness for
+  Lean is isl's inverse, with `//` and `%`), and `same_as` one more, and a
+  kernel reads through the layout's own function. A wrong nesting,
+  `N3,N2,N1,N0`, is refuted with the cell it moves
+  (`examples/storage_layouts.py`).
 - Tracing a body to a typed term: accesses, statements, reductions, ragged
   fibers, `when` guards, source locations, and a `TraceError` that names the fix
   when a Python `if` is used on a computed value, when a Python name, a
@@ -438,7 +494,7 @@ release; the CHANGELOG says when one does.
   on an `assumption` fact, and a call whose sizes break it is refused.
 - `Schedule`: `tag`, `split`, `interchange`, `prioritize`, `tile`, `skew`,
   `affine`, `fuse`, `realize`, each checked as a cast, each emitting its fact,
-  and `substitute`, checked as a storage decision;
+  and `substitute` and `contract`, checked as storage decisions;
   `retarget`, which replays every step against another loopy target and
   re-checks it. `prioritize` and `interchange` also take the loop of a sum,
   named before loops of its statement, which it then runs outside, as
@@ -662,8 +718,9 @@ release; the CHANGELOG says when one does.
   takes that are not the outer loops of their domain leave the casts
   decided and the kernel unbuildable. Only a pointwise
   producer is substituted (one cell per instance, at its loop variables, no
-  sum, no guard isl cannot state), and the array is either stored in full
-  or not at all: contracting it to the cells live at once is not done.
+  sum, no guard isl cannot state). A window is taken of an array one
+  statement stores, once per cell, and reads none of, which the others read
+  in values, before any of their loops is tagged (#213, #214).
   Every read gets the value as the store converted it, a read in a
   subscript included (`y[(int16_t) (t[i])]`), and a conversion inside the
   value stays (`(t[j] + 1) % n` of a 32-bit `Fin[m]` entry, computed in 64
@@ -973,18 +1030,33 @@ on the inputs it runs.
   after it have written their outputs, where natively the program stopped
   inside that call. After the error, do not trust the arrays, and pass copies
   if you need them as they were.
-- **What passes between calls is stored in full or not at all**
-  ([#132](https://github.com/xywei/loopty/issues/132),
-  [#133](https://github.com/xywei/loopty/issues/133)). `Schedule.substitute`
-  computes an intermediate again at every read; storing only the cells live at
-  once, a window of three cells of `f` after the Burgers fusion, is not done.
-  A substitution through two intermediates, one computed from the other, is
-  refused: substitute one of them.
+- **A window is an edge's, between one writer and its readers**
+  ([#213](https://github.com/xywei/loopty/issues/213),
+  [#214](https://github.com/xywei/loopty/issues/214),
+  [#229](https://github.com/xywei/loopty/issues/229),
+  [#133](https://github.com/xywei/loopty/issues/133)). `Schedule.contract`
+  refuses an array its producer reads (a recurrence) or that two statements
+  store, and a loop tagged with no order before it; a window that drops a
+  loop is shared by its every value, so putting that loop on a hardware axis
+  after it is refused, where one window per work item would do. An array
+  kept in a window, and another computed from it where it is read, are
+  refused together, in either order: `substitute` moves the reads of the
+  window to where the other is read. A substitution through two
+  intermediates, one computed from the other, is refused: substitute one of
+  them.
 - **Some facts are isl's alone** ([docs/lean-checks.md](https://github.com/xywei/loopty/blob/main/docs/lean-checks.md#what-stays-isls)).
-  Where Lean is installed, a rewritten layout's fact, the casts after a
-  substitution, a cast that puts a loop on a hardware axis, and a cast through
-  the part of a tile isl computes stay `decided isl`: loopty states them for
-  isl only, and `lanky check --verbose` or `loopty run --verbose` says so.
+  Where Lean is installed, a cast that puts a loop on a hardware axis and a
+  cast through the part of a tile isl computes stay `decided isl`: loopty
+  states them for isl only, and `lanky check --verbose` or `loopty run
+  --verbose` says so. A cast refused through a substitution's carried read,
+  or a window refused at a read in a sum, is refuted by isl with no
+  counterexample stated for Lean
+  ([#215](https://github.com/xywei/loopty/issues/215)).
+- **A declared layout stands on its own**
+  ([#216](https://github.com/xywei/loopty/issues/216)). Its buffer is one
+  axis, `-> Fin[k]`, and an argument of a kernel does not name the layout it
+  is stored through: a kernel reads through the layout's function, and its
+  facts do not rest on the layout's.
 - **The OpenCL target is not run in CI**
   ([#174](https://github.com/xywei/loopty/issues/174)). `--target opencl`,
   with the `opencl` extra, generates OpenCL and runs it through pyopencl, and
@@ -1116,7 +1188,7 @@ loopty is loop + ty, for types: loops, typed. It follows `loopy`, `sumpy`, and
 
 - [docs/quickstart.md](https://github.com/xywei/loopty/blob/main/docs/quickstart.md): the two demos end to end,
   with the output the commands actually print.
-- [examples/README.md](https://github.com/xywei/loopty/blob/main/examples/README.md): all twelve demos, with every
+- [examples/README.md](https://github.com/xywei/loopty/blob/main/examples/README.md): all thirteen demos, with every
   console block regenerated by `scripts/refresh_example_outputs.py`.
 - [docs/device-runs.md](https://github.com/xywei/loopty/blob/main/docs/device-runs.md) and
   [docs/device-runs/](https://github.com/xywei/loopty/tree/main/docs/device-runs): the demos run on real OpenCL

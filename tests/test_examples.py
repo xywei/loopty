@@ -47,6 +47,7 @@ NAMES = (
     "quadrature",
     "layer_potential",
     "sum_factorization",
+    "storage_layouts",
 )
 
 _RESULTS: dict[tuple[str, str], tuple[Any, list[dict]]] = {}
@@ -157,6 +158,7 @@ KERNELS = {
     "quadrature": {"mass_action"},
     "layer_potential": {"single_layer"},
     "sum_factorization": {"along_r", "along_s", "weak_derivative"},
+    "storage_layouts": {"stored_table", "unflatten"},
     "travel": {
         "number",
         "number_quiet",
@@ -825,7 +827,7 @@ def test_the_composed_program_reads_only_what_its_producer_stored() -> None:
 # {{{ fusion (#13)
 
 
-def test_the_fusion_demo_decides_the_fusion_and_the_substitution() -> None:
+def test_the_fusion_demo_decides_the_fusion_the_substitution_and_the_window() -> None:
     result, facts = _invoke("fusion", "run")
     assert result.returncode == 0, result.stdout + result.stderr
     casts = [
@@ -839,16 +841,18 @@ def test_the_fusion_demo_decides_the_fusion_and_the_substitution() -> None:
         ("definedness", "decided", "isl"),
         ("bijective", "decided", "isl"),
         ("monotone", "decided", "isl"),
+        ("definedness", "decided", "isl"),
+        ("no-clobber", "decided", "isl"),
     ]
     agreements = [
         fact
         for fact in facts
         if fact["owner"] == "burgers_rhs" and fact["kind"] == "agreement"
     ]
-    assert [fact["status"] for fact in agreements] == ["tested", "tested"]
+    assert [fact["status"] for fact in agreements] == ["tested"] * 3
 
 
-def test_the_fusion_demo_prints_the_refusal_and_two_kernels() -> None:
+def test_the_fusion_demo_prints_the_refusals_and_three_kernels() -> None:
     result, _ = _invoke("fusion", "python")
     assert result.returncode == 0, result.stdout + result.stderr
     assert (
@@ -857,16 +861,24 @@ def test_the_fusion_demo_prints_the_refusal_and_two_kernels() -> None:
         "fuse('flux', 'divergence', shift=1) runs every dependence between them "
         "forward"
     ) in result.stdout
-    fused, substituted = result.stdout.split("accepted: ")[1:]
+    assert (
+        "refused: contract('f', lambda j: j % 2) illegal: instance "
+        "divergence.S0[i=14] reads f[13], which flux.S0[j=13] stored in slot 1, "
+        "after flux.S0[j=15] stored f[15] there (at n=16, as hinted)"
+    ) in result.stdout
+    fused, substituted, windowed = result.stdout.split("accepted: ")[1:]
     # Fused, f is stored, and the executor allocates it (#62); substituted,
-    # it is gone.
+    # it is gone; kept in a window, it is three cells on the stack (#132).
     assert "double *__restrict__ f)" in fused
     assert "__restrict__ f" not in substituted
     assert "double f[" not in substituted
     assert "0.5 * u[j] * u[j]" in substituted
+    assert "double f_window[3];" in windowed
+    assert "__restrict__ f" not in windowed
     assert fused.count("for (") == 2
     assert substituted.count("for (") == 1
-    assert result.stdout.count("-> tested") == 2
+    assert windowed.count("for (") == 1
+    assert result.stdout.count("-> tested") == 3
 
 
 def test_the_fusion_demo_states_the_definedness_of_its_intermediate() -> None:
@@ -874,6 +886,41 @@ def test_the_fusion_demo_states_the_definedness_of_its_intermediate() -> None:
     (fact,) = [fact for fact in facts if fact["kind"] == "definedness"]
     assert (fact["status"], fact["decided_by"]) == ("decided", "isl")
     assert fact["owner"] == "burgers_rhs"
+
+
+# }}}
+
+
+# {{{ storage layouts
+
+
+def test_the_storage_layouts_demo_decides_every_layout_fact() -> None:
+    result, facts = _invoke("storage_layouts", "check")
+    assert result.returncode == 0, result.stdout + result.stderr
+    layouts = [
+        (fact["owner"], fact["kind"], fact["status"])
+        for fact in facts
+        if fact["kind"].startswith("layout")
+    ]
+    assert layouts == [
+        ("storage_index", "layout-in-bounds", "decided"),
+        ("storage_index", "layout-one-for-one", "decided"),
+        ("storage_index", "layout-onto", "decided"),
+        ("dof_array", "layout-in-bounds", "decided"),
+        ("dof_array", "layout-one-for-one", "decided"),
+        ("dof_array", "layout-onto", "decided"),
+        ("as_dim_tags", "layout-same", "decided"),
+    ]
+
+
+def test_the_storage_layouts_demo_refutes_the_wrong_nesting() -> None:
+    result, _ = _invoke("storage_layouts", "python")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "(1, 3) -> 8" in result.stdout
+    assert "is modepy's reshape: True" in result.stdout
+    assert (
+        "refuted: dof_array stores every cell where dim_tags N3,N2,N1,N0 does"
+    ) in result.stdout
 
 
 # }}}

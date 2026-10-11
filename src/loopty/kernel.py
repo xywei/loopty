@@ -922,6 +922,10 @@ class KernelTheory:
         """Return the facts claimed by a decorated kernel or program."""
         if isinstance(obj, Kernel | Program):
             return obj.facts()
+        from loopty.layout import Layout, SameLayout
+
+        if isinstance(obj, Layout | SameLayout):
+            return obj.facts()
         return ()
 
 
