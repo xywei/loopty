@@ -28,6 +28,7 @@ from loopty import (
     Arr,
     Fin,
     Schedule,
+    Sigma,
     TraceError,
     Where,
     kernel,
@@ -858,6 +859,77 @@ def test_a_scalar_sizes_the_callees_arrays() -> None:
     assert _faithful(rows).status is Status.TESTED
 
 
+def test_a_rules_value_is_not_used_after_its_guard() -> None:
+    # A with block is no scope: z is the call's value compiled, and 0
+    # natively where i > 0 is false, where the call is not made.
+    @kernel
+    def unit(s: Real) -> Real:
+        return s + 1.0
+
+    @kernel
+    def inside(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(i > 0):
+                z = unit(x[i])
+                with when(x[i] < 10.0):
+                    y[i] = z * 2.0
+
+    @kernel
+    def after(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(i > 0):
+                z = unit(x[i])
+            y[i] = z
+
+    x = np.array([1.0, 2.0, 3.0])
+    native, interpreted, compiled = _three_runs(inside, {"x": x, "y": np.zeros(3)}, "y")
+    np.testing.assert_array_equal(native, [0.0, 6.0, 8.0])
+    np.testing.assert_array_equal(interpreted, native)
+    np.testing.assert_array_equal(compiled, native)
+    native = Arr.zeros(3)
+    after(Arr.from_numpy(x), native)
+    np.testing.assert_array_equal(native.numpy(), [0.0, 3.0, 4.0])
+    with pytest.raises(TraceError, match=r"the value of unit\(x\[i\]\), called "):
+        after.term
+
+
+def test_what_a_rows_indices_read_is_owed_if_the_callee_ignores_it() -> None:
+    # Natively p[i + 1] is read to pick the row when the call is made, and
+    # raises at the last i; the row is in bounds by p's type wherever p[i + 1]
+    # is, and a callee that never reads its row reads nothing of p inlined.
+    @kernel
+    def second(a: Arr[Fin[k], Real], s: Real) -> Real:  # noqa: F821
+        return s
+
+    @kernel
+    def picked(
+        A: Arr[Fin[r], Fin[k], Real],  # noqa: F821
+        p: Arr[Fin[m], Fin[r]],  # noqa: F821
+        y: Arr[Fin[m], Real],  # noqa: F821
+    ):
+        for i in y.dom:
+            y[i] = second(A[p[i + 1]], 1.0)
+
+    (read,) = [f for f in _facts(picked) if "read for the row" in f.statement]
+    assert read.statement.startswith(
+        "p[i + 1], read for the row passed to second as a, is in bounds wherever"
+    )
+    assert _decided(read).status is Status.REFUTED
+
+    @kernel
+    def guarded(
+        A: Arr[Fin[r], Fin[k], Real],  # noqa: F821
+        p: Arr[Fin[m], Fin[r]],  # noqa: F821
+        y: Arr[Fin[m], Real],  # noqa: F821
+    ):
+        for i in y.dom:
+            with when(i + 1 < y.dom.size):
+                y[i] = second(A[p[i + 1]], 1.0)
+
+    (read,) = [f for f in _facts(guarded) if "read for the row" in f.statement]
+    assert _decided(read).status is Status.DECIDED
+
+
 def test_a_rule_under_a_false_guard_is_not_called_natively() -> None:
     @kernel
     def picky(a: Arr[Fin[n], Real], i: Fin[n]) -> Real:  # noqa: F821
@@ -1134,6 +1206,20 @@ def test_an_array_over_a_domain_is_passed_whole() -> None:
 
     with pytest.raises(TraceError, match="nothing says the two have the same points"):
         other_points.term
+
+    # The same points, spelled with a binder bounded by another: f.dom[r].size
+    # is n of the callee's spelling and r of this one, which a callee reading
+    # it would see, so the call is refused at the bound.
+    @kernel
+    def other_spelling(
+        f: Arr[Sigma[a : Fin[m], Fin[a]], Real],  # noqa: F821
+        e: Arr[Fin[m], Real],  # noqa: F821
+    ):
+        for p in e.dom:
+            e[p] = row_sum(f, p)
+
+    with pytest.raises(TraceError, match="the bound of axis 1 of the domain of its f"):
+        other_spelling.term
 
 
 def test_an_array_over_a_domain_of_index_elements_is_passed_whole() -> None:

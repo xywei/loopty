@@ -83,7 +83,7 @@ from typing import Any, NoReturn
 import numpy as np
 import pymbolic.primitives as prim
 from lanky.prelude import FinType, FnType, Refined
-from lanky.terms import Var, current_trace, init_args, render
+from lanky.terms import SymbolicMixin, Var, current_trace, init_args, render
 
 from loopty.compose import _names_in, _plus, _same, _shifted, rename_expr
 from loopty.flow import domain_set
@@ -103,7 +103,7 @@ from loopty.trace import (
     constraints_of,
 )
 
-__all__ = ["inline", "takes_a_function"]
+__all__ = ["Guarded", "inline", "takes_a_function"]
 
 #: How deep calls inside calls are inlined before the nest is refused as one
 #: that would not end (see :meth:`_Inlining.refuse_recursion`).
@@ -234,6 +234,12 @@ class _Inlining:
                 "it; a kernel that returns its value declares the sort after ->"
             )
         post = self.postcondition(term, proxies, values)
+        if term.result is not None and tracer.guards:
+            # Natively a call under a false guard is not made, and its value
+            # there is 0: the value outside the when block is that.
+            spelled = ", ".join(argument.spelled for argument in arguments.values())
+            value = Guarded(tracer.guard(), value, 0)
+            tracer.guarded[id(value)] = (value, f"{self.callee}({spelled})")
         tracer.calls.append(
             Call(
                 callee=self.callee,
@@ -434,6 +440,7 @@ class _Inlining:
         """What the callee's body is given for a scalar or a function parameter."""
         from loopty.contract import integral_sort
 
+        value = unguarded(value, self.tracer, self.where)
         if _function_sort(sort):
             if isinstance(value, prim.ExpressionNode | SymArr | SymDom) or not callable(
                 value
@@ -1097,6 +1104,89 @@ class _Inlining:
         return exact(restated, tracer, truth=True)
 
     # }}}
+
+
+# {{{ a rule's value under a guard
+
+
+class Guarded(SymbolicMixin, prim.If):
+    """The value of a rule called inside ``with when(...)``.
+
+    Natively a kernel called under a false guard is not made, and a rule's
+    value there is ``0`` (:meth:`loopty.kernel.Kernel.__call__`), which
+    nothing inside the block keeps, since a write there is masked. Traced,
+    the call is inlined wherever the guard holds or not, so its value is
+    this: ``condition`` the guards open at the call, ``then`` the call's
+    value and ``else_`` that ``0``. Inside the block the value is the call's
+    (:func:`unguarded`); a ``with`` block is no scope in Python, though, and
+    a use after it would be the call's value compiled and ``0`` natively
+    where the guard is false, so it is refused.
+    """
+
+
+def unguarded(expr: Any, tracer: Any, where: str) -> Any:
+    """``expr`` with each rule value made in an open ``when`` block as the call's.
+
+    A rule's value made in a block that has closed is refused, naming the
+    call and the fix (:class:`Guarded`).
+    """
+    if tracer is None or not tracer.guarded or not _has_guarded(expr):
+        return expr
+    return _unguarded(expr, tracer, where)
+
+
+def _has_guarded(expr: Any) -> bool:
+    """Whether ``expr`` holds a :class:`Guarded` value anywhere."""
+    if isinstance(expr, Guarded):
+        return True
+    if isinstance(expr, tuple | list):
+        return any(_has_guarded(item) for item in expr)
+    if hasattr(expr, "binders") and isinstance(expr, prim.ExpressionNode):
+        return _has_guarded(expr.body) or _has_guarded(getattr(expr, "guard", None))
+    if isinstance(expr, prim.ExpressionNode):
+        return any(_has_guarded(arg) for arg in init_args(expr))
+    return False
+
+
+def _unguarded(node: Any, tracer: Any, where: str) -> Any:
+    """See :func:`unguarded`."""
+    if isinstance(node, Guarded):
+        if not _open(node.condition, tracer.guards):
+            entry = tracer.guarded.get(id(node))
+            call = entry[1] if entry is not None and entry[0] is node else "a rule"
+            raise TraceError(
+                f"the value of {call}, called inside 'with when("
+                f"{_shown(node.condition)}):', is used at {where}, after that "
+                "block: natively a call under a false guard is not made, and "
+                "its value is 0 there, while the compiled kernel computes the "
+                "call wherever its value is used, so the two runs would part. "
+                "Use the value inside the block, or make the call outside it"
+            )
+        return _unguarded(node.then, tracer, where)
+    if not _has_guarded(node):
+        return node
+    if isinstance(node, tuple | list):
+        return type(node)(_unguarded(item, tracer, where) for item in node)
+    if hasattr(node, "binders") and isinstance(node, prim.ExpressionNode):
+        guard = getattr(node, "guard", None)
+        return type(node)(
+            node.binders,
+            _unguarded(node.body, tracer, where),
+            None if guard is None else _unguarded(guard, tracer, where),
+        )
+    return type(node)(*(_unguarded(arg, tracer, where) for arg in init_args(node)))
+
+
+def _open(condition: Any, guards: list[Any]) -> bool:
+    """Whether the guards ``condition`` conjoins are all open, by identity."""
+    if any(condition is guard for guard in guards):
+        return True
+    return isinstance(condition, prim.LogicalAnd) and all(
+        any(part is guard for guard in guards) for part in condition.children
+    )
+
+
+# }}}
 
 
 # {{{ the conversions an index or a comparison does not need

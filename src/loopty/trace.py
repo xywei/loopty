@@ -673,6 +673,10 @@ class Tracer:
         self.reflections = Reflections(params)
         self.loops: list[_Loop] = []
         self.guards: list[Any] = []
+        #: The value of each rule called inside a ``when`` block, by the id of
+        #: the node that stands for it, with the call as the body wrote it
+        #: (:class:`loopty.calls.Guarded`).
+        self.guarded: dict[int, tuple[Any, str]] = {}
         self.stmts: list[Stmt] = []
         self._inames: set[str] = set()
         #: The loop levels that have closed, by iname, so that a statement
@@ -2456,6 +2460,19 @@ def _exact_key(key: Any, tracer: Any) -> Any:
     return exact_key(key, tracer)
 
 
+def _unguarded(expr: Any, tracer: Any, where: str) -> Any:
+    """``expr`` with the value of each rule called in an open ``when`` block.
+
+    One called in a block that has closed is refused; see
+    :func:`loopty.calls.unguarded`.
+    """
+    if tracer is None or not tracer.guarded:
+        return expr
+    from loopty.calls import unguarded
+
+    return unguarded(expr, tracer, where)
+
+
 def _exact_guard(condition: Any, tracer: Any) -> Any:
     """A guard without the conversions of a called kernel's scalars it does not need."""
     from loopty.calls import exact
@@ -2545,7 +2562,9 @@ class SymDom:
         one index, the tuple, and gave the domain of axis 1 whatever the length
         of the tuple.
         """
-        index = _exact_key(index, self.array.tracer)
+        tracer = self.array.tracer
+        where = _location(sys._getframe(1))
+        index = _exact_key(_unguarded(index, tracer, where), tracer)
         if _whole_key(index):
             raise TraceError(
                 f"{_domain_text(self)}[{_key_text(index)}] at "
@@ -2847,7 +2866,7 @@ class SymArr:
         whole array is, with the loop nest to write.
         """
         where = _location(sys._getframe(1))
-        key = _exact_key(key, self.tracer)
+        key = _exact_key(_unguarded(key, self.tracer, where), self.tracer)
         view = self._view_of(key, where)
         if view is not None:
             return view
@@ -2874,12 +2893,13 @@ class SymArr:
     def __setitem__(self, key: Any, value: Any) -> None:
         """Write: record a statement at the caller's file and line."""
         where = _location(sys._getframe(1))
-        key = _exact_key(key, self.tracer)
+        key = _exact_key(_unguarded(key, self.tracer, where), self.tracer)
         self._refuse_whole(key, where, write=True)
         self._store(_index_tuple(key), value, where)
 
     def _store(self, indices: tuple[Any, ...], value: Any, where: str) -> None:
         """Record the statement that writes ``value`` into the cell at ``indices``."""
+        value = _unguarded(value, self.tracer, where)
         key = _key_of(indices)
         if self.type.domain is not None:
             self._check_domain_key(key, where, write=True)
@@ -4905,7 +4925,9 @@ class when:  # noqa: N801 - a context manager written like a statement
             tracer = self.tracer
             sorts = {**tracer.params, **tracer.array_types}
             where = _location(sys._getframe(1))
-            self.condition = _exact_guard(self.condition, tracer)
+            self.condition = _exact_guard(
+                _unguarded(self.condition, tracer, where), tracer
+            )
             _refuse_bitwise(self.condition, sorts, where, truth=True)
             _refuse_arithmetic(self.condition, sorts, where)
             tracer.push_guard(self.condition)

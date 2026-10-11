@@ -2651,6 +2651,9 @@ def call_facts(
 
     * a row passed, ``A[i]``, is in bounds: its indices are a point of the
       leading axes of ``A``, wherever the call is made (kind ``in-bounds``);
+    * every cell read to compute an argument when the call is made, of a
+      scalar's value or of a row's indices (``p[i]`` of ``A[p[i]]``), is in
+      bounds, whether the callee uses the parameter or not;
     * the cells a gather picks, ``u[cell[c]]``, are in bounds, by the type of
       the indices where they are of the sort of ``u``'s axis;
     * a scalar of an integral sort is a point of it, ``j`` of ``Fin(3)``
@@ -2787,20 +2790,55 @@ def _call_facts(
         if argument.kind == "gather" and index.kind == "row":
             text = _access_text(index.array, index.prefix)
             indices.setdefault(text, (index, []))[1].append(argument.param)
+    def read_facts(param: str, expr: Any, what: str) -> None:
+        """Every cell read to compute ``expr`` when the call is made, in bounds.
+
+        Natively an argument is computed when the call is made, every read
+        of it, whether the callee uses the parameter or not; inlined, a read
+        the callee never reaches is not in the term. So each is a fact of
+        the call: of a scalar's value, and of the indices of a row, ``p[i]``
+        of ``A[p[i]]``, whose row is in bounds by ``p``'s type wherever
+        ``p[i]`` is.
+        """
+        for array, indices, summed in _reads_of(expr):
+            read = Argument(param, "row", "", array, indices)
+            if summed:
+                text = _access_text(array, indices)
+                facts.append(
+                    assumed(
+                        fact_id(
+                            "in-bounds",
+                            owner,
+                            detail=f"{call.label}:{param}:{text}",
+                            **key,
+                        ),
+                        "in-bounds",
+                        f"{text}, {what}, is in bounds {at}",
+                        "it is read inside a sum the value computes, whose "
+                        "points the call's facts do not state",
+                    )
+                )
+                continue
+            fact = row_fact(read, what)
+            if fact is not None:
+                facts.append(fact)
+
     for index, params in indices.values():
+        what = f"the indices of the cells passed as {_listed(params)}"
         fact = row_fact(
             Argument(params[0], "row", index.spelled, index.array, index.prefix),
-            f"the indices of the cells passed as {_listed(params)}",
+            what,
         )
         if fact is not None:
             facts.append(fact)
+        read_facts(params[0], index.prefix, f"read for {what}")
     for argument in call.arguments:
         if argument.kind == "row":
-            fact = row_fact(
-                argument, f"the row passed to {call.callee} as {argument.param}"
-            )
+            what = f"the row passed to {call.callee} as {argument.param}"
+            fact = row_fact(argument, what)
             if fact is not None:
                 facts.append(fact)
+            read_facts(argument.param, argument.prefix, f"read for {what}")
             rows.setdefault(argument.array, []).append(argument)
         elif argument.kind == "gather":
             facts.append(_gather_fact(term, call, argument, types, sorts, layouts,
@@ -2810,32 +2848,11 @@ def _call_facts(
                                   owner, at, common, key)
             if fact is not None:
                 facts.append(fact)
-            # Natively the value is computed when the call is made, every read
-            # of it, whether the callee uses the parameter or not; inlined, a
-            # read the callee never reaches is not in the term.
-            what = f"read for the value passed to {call.callee} as {argument.param}"
-            for array, indices, summed in _reads_of(argument.value):
-                read = Argument(argument.param, "row", "", array, indices)
-                if summed:
-                    text = _access_text(array, indices)
-                    facts.append(
-                        assumed(
-                            fact_id(
-                                "in-bounds",
-                                owner,
-                                detail=f"{call.label}:{argument.param}:{text}",
-                                **key,
-                            ),
-                            "in-bounds",
-                            f"{text}, {what}, is in bounds {at}",
-                            "it is read inside a sum the value computes, whose "
-                            "points the call's facts do not state",
-                        )
-                    )
-                    continue
-                fact = row_fact(read, what)
-                if fact is not None:
-                    facts.append(fact)
+            read_facts(
+                argument.param,
+                argument.value,
+                f"read for the value passed to {call.callee} as {argument.param}",
+            )
     for array, sharing in rows.items():
         for first_position, first in enumerate(sharing):
             for second in sharing[first_position + 1 :]:

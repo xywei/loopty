@@ -50,8 +50,9 @@ All notable changes to loopty are recorded here. The format follows
   postcondition, restated of what the call passed and resting on the
   callee's own fact (kind `postcondition-in-scope`). An argument is
   evaluated once, when the call is made, as in Python: every cell read for
-  the value of a scalar argument is owed in bounds at every point of the
-  call, whether the callee uses the parameter or not, and a call whose
+  the value of a scalar argument, or for the indices of a row (`p[i]` of
+  `A[p[i]]`), is owed in bounds at every point of the call, whether the
+  callee uses the parameter or not, and a call whose
   callee writes an array an argument reads (`scale(A[i], A[i, 0])`) is
   refused, naming both. A scalar argument is converted into the sort the
   callee declares, as its contract converts it natively (#232): a double
@@ -71,7 +72,9 @@ All notable changes to loopty are recorded here. The format follows
   writes its value into a one-cell array, `result[0]`, which `loopty run`
   compiles and compares with the native call; one that takes a function is
   compiled where it is called. Natively, a call inside a `when` whose guard
-  is false is not made. `examples/calls.py` has `dot` in a matrix-vector
+  is false is not made, and a rule's value there is `0`, so the value of a
+  rule called inside a `when` block is refused where it is used after the
+  block. `examples/calls.py` has `dot` in a matrix-vector
   and a sparse product, and firedrake's P1 quadrature rule applied per
   element.
 - **A program's arrays over a domain** (#74). A program's callee may take
