@@ -36,8 +36,10 @@ def test_a_function_that_computes_what_the_kernel_does_is_tested() -> None:
     )
     assert fact.owner == "double"
     assert fact.statement == (
-        "the native run of double agrees with numpy_double on its example inputs"
+        "the native run of double agrees with numpy_double in y, on its example "
+        "inputs"
     )
+    assert fact.provenance["uncompared"] == []
     detail = fact.provenance["outputs"]["y"]
     assert detail["agree"] and detail["exactness"] == "approx"
     assert detail["difference"] == 0.0
@@ -74,6 +76,19 @@ def test_a_function_that_cannot_run_here_leaves_it_assumed() -> None:
     assert "FileNotFoundError" in unrecorded.provenance["reason"]
 
 
+def test_the_claim_names_the_outputs_compared_and_no_others() -> None:
+    # the squares are the kernel's too, and the function gives none: the row
+    # does not claim them, and says they were not compared
+    fact = _fact(K.doubles_only)
+    assert fact.status is Status.TESTED
+    assert fact.statement == (
+        "the native run of double_and_square agrees with doubles_only in y, on its "
+        "example inputs"
+    )
+    assert list(fact.provenance["outputs"]) == ["y"]
+    assert fact.provenance["uncompared"] == ["z"]
+
+
 def test_an_output_the_kernel_does_not_write_is_no_agreement() -> None:
     fact = _fact(K.about_its_input)
     assert fact.status is Status.ASSUMED
@@ -96,8 +111,9 @@ def test_the_rows_are_in_the_ledger_under_the_kernel() -> None:
         "not_installed": Status.ASSUMED,
         "not_recorded": Status.ASSUMED,
         "about_its_input": Status.ASSUMED,
+        "doubles_only": Status.TESTED,
     }
-    assert {fact.owner for fact in rows.values()} == {"double"}
+    assert {fact.owner for fact in rows.values()} == {"double", "double_and_square"}
 
 
 def test_a_file_without_example_inputs_leaves_it_assumed(tmp_path) -> None:

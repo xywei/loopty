@@ -22,7 +22,11 @@ in the order of :meth:`loopty.arr.Arr.cells` for an array over a domain.
 ``lanky check`` runs the kernel natively on the same inputs and compares,
 output by output, at the accuracy the kernel's types claim for that output
 (:func:`loopty.tolerance.output_class`), cell by cell as the differential
-test does. The fact reads
+test does. The outputs compared are the ones the function gives, and the
+claim names them (``the native run of l2p agrees with sumpy_l2p in pot, on
+its example inputs``); an array the kernel writes that the function leaves
+out is not claimed, and the provenance lists it (``uncompared``). The fact
+reads
 
 * ``tested`` by ``upstream`` when every output agrees, with the largest
   difference and its allowance in the provenance;
@@ -42,7 +46,7 @@ from __future__ import annotations
 
 import functools
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -101,9 +105,19 @@ class Upstream:
     @property
     def statement(self) -> str:
         """``the native run of l2p agrees with sumpy_l2p on its example inputs``."""
+        return self.compared_statement(())
+
+    def compared_statement(self, outputs: Sequence[str]) -> str:
+        """The claim, naming the outputs compared when they are known.
+
+        ``the native run of l2p agrees with sumpy_l2p in pot, on its example
+        inputs``: only the outputs the function gave are compared, and the
+        claim says which, so that one it left out is not claimed.
+        """
+        compared = f" in {', '.join(outputs)}," if outputs else ""
         return (
             f"the native run of {self.kernel.__name__} agrees with "
-            f"{self.fn.__name__} on its example inputs"
+            f"{self.fn.__name__}{compared} on its example inputs"
         )
 
     def facts(self) -> tuple[Fact, ...]:
@@ -129,11 +143,13 @@ class Upstream:
             "description": self.description,
         }
 
-        def fact(status: Status, **provenance: Any) -> Fact:
+        def fact(
+            status: Status, compared: Sequence[str] = (), **provenance: Any
+        ) -> Fact:
             return Fact(
                 id=identifier,
                 kind=KIND,
-                statement=self.statement,
+                statement=self.compared_statement(compared),
                 term=None,
                 status=status,
                 decided_by=None if status is Status.ASSUMED else KIND,
@@ -249,6 +265,11 @@ class Upstream:
                 detail["native"] = got[k].item()
                 detail[self.fn.__name__] = want[k].item()
             outputs[name] = detail
+        # what the kernel writes that its caller sees, and the function left
+        # out: not compared, which the claim's words and provenance say
+        params = set(term.param_names)
+        uncompared = sorted((written & params) - set(outputs))
+        compared = tuple(outputs)
         failed = [name for name, detail in outputs.items() if not detail["agree"]]
         if failed:
             lines = []
@@ -266,8 +287,14 @@ class Upstream:
                         f"{self.fn.__name__}, beyond the {detail['exactness']} "
                         "allowance"
                     )
-            return fact(Status.REFUTED, outputs=outputs, reason="; ".join(lines))
-        return fact(Status.TESTED, outputs=outputs)
+            return fact(
+                Status.REFUTED,
+                compared,
+                outputs=outputs,
+                uncompared=uncompared,
+                reason="; ".join(lines),
+            )
+        return fact(Status.TESTED, compared, outputs=outputs, uncompared=uncompared)
 
     # }}}
 

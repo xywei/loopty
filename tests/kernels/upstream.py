@@ -20,9 +20,27 @@ def double(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
         y[i] = 2.0 * x[i]
 
 
+@kernel
+def double_and_square(
+    x: Arr[Fin[n], Real], y: Arr[Fin[n], Real], z: Arr[Fin[n], Real]
+):
+    """``y = 2 x`` and ``z = x * x``: two outputs."""
+    for i in y.dom:
+        y[i] = 2.0 * x[i]
+        z[i] = x[i] * x[i]
+
+
 def example_inputs() -> dict:
-    """Five numbers, and a vector to double them into."""
-    return {"x": Arr.from_numpy(np.linspace(0.0, 1.0, 5)), "y": Arr.zeros(5)}
+    """Five numbers, and vectors to double and square them into."""
+    x = np.linspace(0.0, 1.0, 5)
+    return {
+        "double": {"x": Arr.from_numpy(x), "y": Arr.zeros(5)},
+        "double_and_square": {
+            "x": Arr.from_numpy(x.copy()),
+            "y": Arr.zeros(5),
+            "z": Arr.zeros(5),
+        },
+    }
 
 
 @upstream(double)
@@ -65,3 +83,10 @@ def not_recorded(x, y):
 def about_its_input(x, y):
     """What the kernel only reads."""
     return {"x": x.numpy()}
+
+
+@upstream(double_and_square)
+def doubles_only(x, y, z):
+    """Code that computes the doubles and not the squares."""
+    return {"y": 2.0 * x.numpy()}
+

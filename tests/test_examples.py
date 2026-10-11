@@ -1160,8 +1160,9 @@ def test_the_l2p_demo_agrees_with_sumpys_own_kernel() -> None:
         "l2p",
     )
     assert row["statement"] == (
-        "the native run of l2p agrees with sumpy_l2p on its example inputs"
+        "the native run of l2p agrees with sumpy_l2p in pot, on its example inputs"
     )
+    assert row["provenance"]["uncompared"] == []
     detail = row["provenance"]["outputs"]["pot"]
     assert detail["agree"] and detail["exactness"] == "approx"
     # round-off, far inside the class's allowance
