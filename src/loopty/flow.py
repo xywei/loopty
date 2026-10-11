@@ -126,6 +126,7 @@ import pymbolic.primitives as prim
 from lanky.terms import init_args
 
 from loopty.idx import Reflections
+from loopty.names import check_names
 from loopty.term import ArrType, Stmt, Term, count_param_names
 
 __all__ = [
@@ -409,10 +410,14 @@ def domain_set(
         table = Reflections(reserved)
     reflected: dict[str, Any] = {}
     bound_pieces: list[str] = []
-    for name, bound in zip(names, bounds, strict=True):
-        bound_pieces.append(
-            f"0 <= {name} < {expr_text(bound, rename, reflected, table)}"
-        )
+    # A bound may name the loops outside its own, and nothing else of the
+    # nest: any other name in it is a size, a parameter of the set, which a
+    # loop of that name would take for itself (loopty.names).
+    meant: set[str] = set(params)
+    for position, (name, bound) in enumerate(zip(names, bounds, strict=True)):
+        text = expr_text(bound, rename, reflected, table)
+        meant |= free_names(text) - set(names[:position])
+        bound_pieces.append(f"0 <= {name} < {text}")
     pieces = [*constraints, *bound_pieces]
     free: set[str] = set()
     for piece in pieces:
@@ -421,8 +426,10 @@ def domain_set(
     sized: set[str] = set(params) | set(reflected)
     for piece in bound_pieces:
         sized |= free_names(piece)
-    return isl.Set(
-        _assemble(list(names), pieces, parameters, sized - set(names))
+    return check_names(
+        isl.Set(_assemble(list(names), pieces, parameters, sized - set(names))),
+        f"the loops over {', '.join(names)}",
+        meant=meant,
     )
 
 
@@ -576,7 +583,12 @@ def access_relation(
     params = sorted(free - set(names))
     head = f"[{', '.join(params)}] -> " if params else ""
     relation = isl.Map(f"{head}{{ [{source}] -> [{', '.join(texts)}] }}")
-    return relation.intersect_domain(_align(domain, relation.get_space()))
+    # The loops are named, and the cells positional (loopty.names).
+    return check_names(
+        relation.intersect_domain(_align(domain, relation.get_space())),
+        f"the access [{', '.join(texts)}] over {', '.join(names)}",
+        positional=(isl.dim_type.out,),
+    )
 
 
 #: One entry of :func:`statement_accesses`: array, indices, kind, inames, domain.

@@ -796,7 +796,10 @@ def test_the_composed_program_keeps_its_intermediate_to_itself() -> None:
         "divergence.S0",
     ]
     result, _ = _invoke("composition", "python")
-    assert "double f[n];" in result.stdout
+    # The executor allocates it on the heap and passes it after the program's
+    # own arguments, where it was a variable-length array on the stack (#62).
+    assert "double *__restrict__ f)" in result.stdout
+    assert "double f[n];" not in result.stdout
     assert "-> tested" in result.stdout
 
 
@@ -849,8 +852,11 @@ def test_the_fusion_demo_prints_the_refusal_and_two_kernels() -> None:
         "forward"
     ) in result.stdout
     fused, substituted = result.stdout.split("accepted: ")[1:]
-    assert "double f[n];" in fused
-    assert "double f[n];" not in substituted
+    # Fused, f is stored, and the executor allocates it (#62); substituted,
+    # it is gone.
+    assert "double *__restrict__ f)" in fused
+    assert "__restrict__ f" not in substituted
+    assert "double f[" not in substituted
     assert "0.5 * u[j] * u[j]" in substituted
     assert fused.count("for (") == 2
     assert substituted.count("for (") == 1

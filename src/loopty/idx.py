@@ -36,6 +36,8 @@ import pymbolic.primitives as prim
 from lanky.prelude import Fin
 from pymbolic.mapper.dependency import DependencyMapper
 
+from loopty.names import check_names
+
 __all__ = [
     "Fin",
     "Layout",
@@ -336,7 +338,14 @@ def to_set(
     """
     sizes = [axis_size(axis) for axis in shape]
     if names is None:
-        names = tuple(f"i{k}" for k in range(len(sizes)))
+        # Clear of every size and parameter: isl reads a dimension spelled
+        # like a parameter as that parameter (loopty.names), so i0 over
+        # Fin[i0] would be cut by 0 <= i0 < i0 and have no points.
+        avoid = {*size_params(sizes), *params}
+        prefix = "i"
+        while any(f"{prefix}{k}" in avoid for k in range(len(sizes))):
+            prefix = f"{prefix}_"
+        names = tuple(f"{prefix}{k}" for k in range(len(sizes)))
     if len(names) != len(sizes):
         raise ValueError(f"{len(names)} names for {len(sizes)} axes")
 
@@ -357,7 +366,10 @@ def to_set(
     constraints = " and ".join(
         f"0 <= {name} < {bound}" for name, bound in zip(names, bounds, strict=True)
     )
-    return isl.Set(f"{head}{{ [{dims}] : {constraints} }}")
+    return check_names(
+        isl.Set(f"{head}{{ [{dims}] : {constraints} }}"),
+        f"the index tuples of {', '.join(str(size) for size in sizes)}",
+    )
 
 
 def _mul(a: Any, b: Any) -> Any:
@@ -488,7 +500,7 @@ class Layout:
                 "reason on the index tuple instead of the address."
             )
         domain = self.domain(params)
-        names = [f"i{k}" for k in range(len(strides))]
+        names = list(domain.get_var_names(isl.dim_type.set))
         terms = " + ".join(
             f"{stride}*{name}" if stride != 1 else name
             for name, stride in zip(names, strides, strict=True)
@@ -498,7 +510,11 @@ class Layout:
         dims = ", ".join(names)
         flat = terms if terms else "0"
         universe = isl.Map(f"{head}{{ [{dims}] -> [{flat}] }}")
-        return universe.intersect_domain(domain)
+        return check_names(
+            universe.intersect_domain(domain),
+            f"the layout {self}",
+            positional=(isl.dim_type.out,),
+        )
 
 
 @dataclass(frozen=True)

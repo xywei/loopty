@@ -187,6 +187,10 @@ class Reduction:
     exactness: str
     loop_domain: isl.Set | None = None
 
+    def __post_init__(self) -> None:
+        binders = ", ".join(self.inames)
+        _check_domains(self.domain, self.loop_domain, f"the sum over {binders}")
+
 
 @dataclass(frozen=True)
 class Stmt:
@@ -250,6 +254,23 @@ class Stmt:
     order: tuple[int, ...] = ()
     loop_domain: isl.Set | None = None
     unnarrowed: tuple[tuple[str, str], ...] = ()
+
+    def __post_init__(self) -> None:
+        _check_domains(self.domain, self.loop_domain, f"statement {self.id}")
+
+
+def _check_domains(domain: Any, loop_domain: Any, what: str) -> None:
+    """Refuse a domain whose dimensions break :func:`loopty.names.check_names`.
+
+    Every domain a term holds is checked when the statement or the sum
+    holding it is made: its loop variables and binders, and its parameters,
+    each have a name of their own.
+    """
+    from loopty.names import check_names
+
+    check_names(domain, f"the domain of {what}")
+    if loop_domain is not None:
+        check_names(loop_domain, f"the loop domain of {what}")
 
 
 @dataclass(frozen=True)

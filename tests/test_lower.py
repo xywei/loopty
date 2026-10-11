@@ -9,6 +9,10 @@ wrong, which is why every shape here is run and not merely generated.
 
 from __future__ import annotations
 
+import subprocess
+import sys
+import textwrap
+
 import numpy as np
 import pytest
 from lanky.prelude import Nat, Real
@@ -423,6 +427,96 @@ def test_a_ragged_temporary_is_refused() -> None:
     term = _through_temporary(())
     with pytest.raises(LoweringError, match="no offsets"):
         _temporary(term, "t", ragged, "c", {"n", "x"})
+
+
+def test_a_programs_array_is_an_argument_the_executor_allocates_on_c() -> None:
+    # On C a temporary was a variable-length array on the stack of the call,
+    # so the stack bounded how large a program's intermediate could be (#62).
+    # The executor takes it off the stack: an argument it allocates zeroed,
+    # after the program's own, where it has a cell at the call's sizes.
+    from loopty.executor import emit_code
+    from loopty.lower import heap_temporaries
+
+    term = _through_temporary((("t", _vector()),))
+    kernel = lower_generic(term).kernel
+    moved, allocations = heap_temporaries(kernel, term, {"n": 5})
+    entry = moved.default_entrypoint
+    assert [arg.name for arg in entry.args][-1] == "t"
+    assert "t" not in entry.temporary_variables
+    assert allocations == {"t": ((5,), np.dtype(np.float64))}
+    # An empty one stays where it takes no room: loopy's C invoker cannot
+    # pass an empty array (note 3).
+    unmoved, none = heap_temporaries(kernel, term, {"n": 0})
+    assert unmoved is kernel and none == {}
+    code = emit_code(term)
+    assert "double *__restrict__ t)" in code
+    assert "double t[" not in code
+    x = np.arange(5.0)
+    y = np.zeros(5)
+    run(term, x=x, y=y)
+    assert list(y) == list(x)
+
+
+def test_a_program_whose_intermediate_is_larger_than_the_stack_runs(tmp_path):
+    # An intermediate of eight megabytes, run on a thread with four: the
+    # variable-length array overflowed the stack and the process died with
+    # no diagnostic (#62). Run in a process of its own for that reason.
+    script = tmp_path / "large_intermediate.py"
+    script.write_text(
+        textwrap.dedent(
+            """
+            from __future__ import annotations
+
+            import threading
+
+            import numpy as np
+            from lanky.prelude import Real
+
+            from loopty import Arr, Fin, kernel, program, when
+            from loopty.executor import LoopyExecutor
+
+            @kernel
+            def flux(u: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):
+                for j in u.dom:
+                    f[j] = 0.5 * u[j] * u[j]
+
+            @kernel
+            def divergence(f: Arr[Fin[n], Real], rhs: Arr[Fin[n], Real]):
+                for i in rhs.dom:
+                    with when((i > 0) & (i + 1 < rhs.dom.size)):
+                        rhs[i] = -(f[i + 1] - f[i - 1]) / 2
+
+            @program
+            def burgers_rhs(u, rhs):
+                f = Arr.zeros_like(u)
+                flux(u, f)
+                divergence(f, rhs)
+
+            # Not called n: the annotations would read the module's n.
+            cells = 2**20
+            u = np.sin(np.linspace(0.0, 6.0, cells))
+            # Compiled on this thread, run on the small one.
+            LoopyExecutor().run(burgers_rhs, u=u[:8].copy(), rhs=np.zeros(8))
+            rhs = np.zeros(cells)
+            threading.stack_size(4 * 2**20)
+            run = threading.Thread(
+                target=lambda: LoopyExecutor().run(burgers_rhs, u=u, rhs=rhs)
+            )
+            run.start()
+            run.join()
+            f = 0.5 * u * u
+            want = np.zeros(cells)
+            want[1:-1] = -(f[2:] - f[:-2]) / 2
+            assert np.array_equal(rhs, want)
+            print("ran")
+            """
+        )
+    )
+    result = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True, timeout=600
+    )
+    assert result.returncode == 0, (result.returncode, result.stderr)
+    assert result.stdout.strip() == "ran"
 
 
 def test_a_temporary_sized_by_nothing_else_is_refused() -> None:

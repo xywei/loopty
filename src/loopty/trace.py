@@ -3748,6 +3748,20 @@ def lower_reductions(
                     f"the reduction binder {var.name!r} shadows the binder of "
                     "the reduction it is nested in; rename one of them"
                 )
+            # tracer.integers holds every loop variable so far too, and a
+            # binder may reuse the name of a loop that has ended.
+            sized = tracer.integers - tracer._inames
+            if var.name in sized or var.name in tracer.reflections:
+                at = f" at {where}" if where else ""
+                raise TraceError(
+                    f"the reduction binder {var.name!r}{at} is named like a size "
+                    f"or an integer parameter of {tracer.name}, which the "
+                    "reduction's domain is stated to isl with as well, and isl "
+                    "takes the two for one dimension: a sum by j over Fin[j] "
+                    "ranged over 0 <= j < j, no points, and an in-bounds fact "
+                    "about it was decided over that empty domain "
+                    "(loopty.names). Rename the binder"
+                )
             inames.append(var.name)
             bounds.append(_binder_bound(domain))
         inner = (*enclosing, *zip(inames, bounds, strict=True))
