@@ -199,6 +199,15 @@ target's sum, 256 sources at a time, in order. The tests of `loopty.math` that
 need pyopencl, the generated complex functions and a device run of them, pass
 on the same device and are skipped in CI.
 
+The review of the same day reran the driver on the same device, with the same
+numbers, and found two things CI could not: a complex table did not build on
+OpenCL (pyopencl writes its values as calls, which a `__constant` array cannot
+be initialized by), and is now an array of the kernel's own, agreeing to the
+bit; and pyopencl's complex `sqrt` takes the other side of the branch cut for a
+`-0.0` imaginary part, `+2j` for `sqrt(complex(-4, -0.0))` where numpy gives
+`-2j`, which the differential refutes (#196). The OpenCL tests of
+`tests/test_table.py` and `tests/test_math.py` pass there.
+
 ## Reproducing
 
 ```bash
