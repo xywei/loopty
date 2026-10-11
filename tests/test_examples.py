@@ -47,6 +47,7 @@ NAMES = (
     "quadrature",
     "layer_potential",
     "sum_factorization",
+    "calls",
 )
 
 _RESULTS: dict[tuple[str, str], tuple[Any, list[dict]]] = {}
@@ -157,6 +158,7 @@ KERNELS = {
     "quadrature": {"mass_action"},
     "layer_potential": {"single_layer"},
     "sum_factorization": {"along_r", "along_s", "weak_derivative"},
+    "calls": {"dot", "matvec", "csr", "integrate", "element_mass", "mass_matrices"},
     "travel": {
         "number",
         "number_quiet",
@@ -952,6 +954,30 @@ def test_the_travel_demo_prints_the_check_it_compiles() -> None:
     result, _ = _invoke("travel", "python")
     assert "checked when it runs" in result.stdout
     assert "gather_perm_ok[0] = (int64_t) (1)" in result.stdout
+
+
+# }}}
+
+
+# {{{ calls.py
+
+
+def test_the_calls_demo_owes_what_each_call_owes_and_compiles_its_rules() -> None:
+    """A row in bounds, a gather by type, the postcondition after each call."""
+    _result, facts = _invoke("calls", "check")
+    statements = {fact["statement"]: fact for fact in facts}
+    row = next(s for s in statements if s.startswith("A[i], the row passed to dot"))
+    assert statements[row]["status"] == "decided"
+    gathers = [s for s in statements if s.startswith("the cells X[cell[c]] picks")]
+    assert [statements[s]["decided_by"] for s in gathers] == ["type"]
+    restated = [f for f in facts if f["kind"] == "postcondition-in-scope"]
+    assert [(f["owner"], f["decided_by"]) for f in restated] == [
+        ("mass_matrices", "call")
+    ]
+    result, facts = _invoke("calls", "run")
+    assert "integrate: takes the function f" in result.stdout
+    owners = {f["owner"] for f in facts if f["kind"] == "agreement"}
+    assert owners == {"dot", "matvec", "csr", "element_mass", "mass_matrices"}
 
 
 # }}}

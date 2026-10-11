@@ -137,7 +137,7 @@ from loopty.obligations import (
     ordering_obligation,
 )
 from loopty.oracle import Empty, Monotone, Subset
-from loopty.term import ArrType, Term
+from loopty.term import Argument, ArrType, Term
 from loopty.trace import reductions_in
 
 __all__ = [
@@ -2779,6 +2779,21 @@ def _call_facts(
         )
 
     rows: dict[str, list[Any]] = {}
+    # One fact for an index row however many gathers read through it, which
+    # names them all: X[cell[c]] and Y[cell[c]] read cell[c] once each.
+    indices: dict[str, tuple[Any, list[str]]] = {}
+    for argument in call.arguments:
+        index = argument.index
+        if argument.kind == "gather" and index.kind == "row":
+            text = _access_text(index.array, index.prefix)
+            indices.setdefault(text, (index, []))[1].append(argument.param)
+    for index, params in indices.values():
+        fact = row_fact(
+            Argument(params[0], "row", index.spelled, index.array, index.prefix),
+            f"the indices of the cells passed as {_listed(params)}",
+        )
+        if fact is not None:
+            facts.append(fact)
     for argument in call.arguments:
         if argument.kind == "row":
             fact = row_fact(
@@ -2788,13 +2803,6 @@ def _call_facts(
                 facts.append(fact)
             rows.setdefault(argument.array, []).append(argument)
         elif argument.kind == "gather":
-            index = argument.index
-            if index.kind == "row":
-                fact = row_fact(
-                    index, f"the indices of the cells passed as {argument.param}"
-                )
-                if fact is not None:
-                    facts.append(fact)
             facts.append(_gather_fact(term, call, argument, types, sorts, layouts,
                                       owner, at, common, key))
         elif argument.kind == "scalar":

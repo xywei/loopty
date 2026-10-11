@@ -577,3 +577,29 @@ def test_a_rule_under_a_false_guard_is_not_called_natively() -> None:
 
 
 # }}}
+
+
+def test_one_index_row_two_gathers_read_through_is_one_fact() -> None:
+    @kernel
+    def corners(
+        X: Arr[Fin[3], Real],  # noqa: F821
+        Y: Arr[Fin[3], Real],  # noqa: F821
+    ) -> Real:
+        return X[0] * Y[1] - X[1] * Y[0]
+
+    @kernel
+    def twice(
+        cell: Arr[Fin[nc], Fin[3], Fin[nv]],  # noqa: F821
+        X: Arr[Fin[nv], Real],  # noqa: F821
+        Y: Arr[Fin[nv], Real],  # noqa: F821
+        a: Arr[Fin[nc], Real],  # noqa: F821
+    ):
+        for c in a.dom:
+            a[c] = corners(X[cell[c]], Y[cell[c]])
+
+    facts = _facts(twice)
+    assert len({fact.id for fact in facts}) == len(facts)
+    (index,) = [f for f in facts if "the indices of the cells" in f.statement]
+    assert index.statement.startswith(
+        "cell[c], the indices of the cells passed as X and Y, is in bounds"
+    )

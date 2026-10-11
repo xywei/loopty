@@ -1,6 +1,6 @@
 # The loopty demos
 
-Twelve files, each of which runs three ways. Every console block below is a
+Thirteen files, each of which runs three ways. Every console block below is a
 snapshot of real output, not prose about it, and it is produced mechanically:
 
 ```console
@@ -30,6 +30,7 @@ marked with `...` is an excerpt and the lines it keeps are checked verbatim.
 | `quadrature.py` | firedrake's P1 mass kernel cell by cell, its quadrature rule and basis held in constant tables, read-only arrays written into the compiled code, and its gathers through the cell map in bounds by type |
 | `layer_potential.py` | pytential's QBX single layer over complex points with `real` and `log` from `loopty.math`, scheduled as sumpy's CPU tile, the sources' loop outside the targets', and the same order on a loop loopy cannot keep it on |
 | `sum_factorization.py` | grudge's two passes of a sum-factorized operator, fused on the element and the row and no deeper: the deeper fusion refused with its pair, and the fusion of fewer loops it names |
+| `calls.py` | kernels calling kernels inside their loops: a rule with a loop of its own (`dot`, loopy #1044) in a matrix-vector and a sparse product, and firedrake's P1 quadrature rule applied per element through a rule that takes the integrand (#1043), each call inlined with binders of its own and owing the caller what the callee's contract checks |
 
 Run them with `uv run` from the repository root:
 
@@ -1133,6 +1134,168 @@ tested   loopy  sum_factorization.py:74  along_r          the scheduled run of a
 tested   loopy  sum_factorization.py:87  along_s          the scheduled run of along_s agrees with the native run to the accura...
 
 5 facts: 2 decided, 3 tested
+```
+
+## calls.py
+
+A kernel calls a kernel as Python calls a function. `dot` is a rule: its
+return annotation is the sort of its value, `-> Real`, so a call of it is a
+value, `y[i] = dot(A[i], x)`, with `A[i]` the row of `A` as in numpy, and a
+sparse product is `y[r] = dot(val[r], x[col[r]])`, the row of a ragged array
+dotted with the cells of `x` its columns pick. The P1 mass matrix is written
+with the quadrature rule, `integrate(f)`, applied to a `lambda` of the
+quadrature point, and the kernel over the mesh calls the element's kernel per
+cell, `element_mass(X[cell[c]], Y[cell[c]], M[c])`, which writes through the
+row `M[c]`.
+
+Traced, a call is inlined: the callee's body runs again in the caller's
+trace against views of the caller's arrays, so `dot`'s loop is a sum of the
+caller's statement at every `i`, under a name of its own where the caller's
+names would clash, and the compiled kernel is one loop nest. What the
+callee's contract checks of each call natively, the caller owes at every
+point it calls: the row `A[i]` in bounds, the cells `X[cell[c]]` picks in
+bounds by type, and, after each call of `element_mass`, its postcondition
+restated of `M[c]`, decided by the call and resting on the callee's own.
+
+### python examples/calls.py
+
+The kernels against numpy and the closed form, `matvec`'s term with `dot`
+inlined and the loop nest loopy generates for it, a call given a vector of a
+length nothing says is the row's, refused, and a schedule of `matvec`
+compiled and compared with the native run.
+
+```console
+$ uv run python examples/calls.py
+native: matvec agrees with A @ x: True
+native: csr agrees with the dense product: True
+native: each cell's matrix is |detJ| (1 + delta_jk) / 24: True
+
+the term of matvec, with dot inlined at calls.py:99:
+  S0 over i: y[i] = sum over k of A[i, k]*x[k]
+  dot's a is A[i]
+  dot's b is x
+
+the loop nest loopy generates for it:
+  for (int32_t i = 0; i <= -1 + m; ++i)
+  {
+    acc_k = (double) (0.0);
+    for (int32_t k = 0; k <= -1 + n; ++k)
+      acc_k = acc_k + A[n * i + k] * x[k];
+    y[i] = acc_k;
+  }
+
+refused: matvec_by calls dot at calls.py:211: axis 0 of its b is n long there, and z, which it is given, has p; nothing says the two agree
+
+schedule: Schedule(matvec, target='c').split(i, 4)
+  y: difference 0 within 1.01e-06 (approx) -> tested
+```
+
+### lanky check examples/calls.py
+
+```console
+$ uv run lanky check examples/calls.py
+STATUS   EFFECTIVE  BY           WHERE         OWNER          STATEMENT
+-------  ---------  -----------  ------------  -------------  ------------------------------------------------------------------------
+decided  decided    isl          calls.py:92   dot            a[k] is in bounds for every instance of S0
+decided  decided    isl          calls.py:92   dot            b[k] is in bounds for every instance of S0
+decided  decided    isl          calls.py:89   dot            the source order runs every dependence forward in time
+decided  decided    type         calls.py:92   dot            the accumulation into the value dot returns over k is approx
+tested   tested     interpreter  calls.py:89   dot            the traced term computes what the body computes
+decided  decided    isl          calls.py:99   matvec         y[i] is in bounds for every instance of S0
+decided  decided    isl          calls.py:99   matvec         A[i, k] is in bounds for every instance of S0
+decided  decided    isl          calls.py:99   matvec         x[k] is in bounds for every instance of S0
+decided  decided    isl          calls.py:99   matvec         distinct instances of S0 write distinct cells of y
+decided  decided    isl          calls.py:95   matvec         the source order runs every dependence forward in time
+decided  decided    type         calls.py:99   matvec         the accumulation into y[i] over k is approx
+decided  decided    isl          calls.py:99   matvec         A[i], the row passed to dot as a, is in bounds wherever dot is called...
+tested   tested     interpreter  calls.py:95   matvec         the traced term computes what the body computes
+decided  decided    isl          calls.py:112  csr            y[r] is in bounds for every instance of S0
+decided  decided    isl          calls.py:112  csr            val[r, k] is in bounds for every instance of S0
+decided  decided    type         calls.py:112  csr            x[col[r, k]] is in bounds by type (col[r, k] : Fin(m))
+decided  decided    isl          calls.py:112  csr            col[r, k] is in bounds for every instance of S0
+decided  decided    isl          calls.py:112  csr            cnt[r], the length of row r that bounds the loop over k, is in bounds...
+decided  decided    isl          calls.py:112  csr            distinct instances of S0 write distinct cells of y
+decided  decided    isl          calls.py:102  csr            the source order runs every dependence forward in time
+decided  decided    type         calls.py:112  csr            the accumulation into y[r] over k is approx
+decided  decided    isl          calls.py:112  csr            col[r], the indices of the cells passed as b, is in bounds wherever d...
+decided  decided    isl          calls.py:112  csr            val[r], the row passed to dot as a, is in bounds wherever dot is call...
+decided  decided    type         calls.py:112  csr            the cells x[col[r]] picks, passed as b, are in bounds wherever dot is...
+tested   tested     interpreter  calls.py:102  csr            the traced term computes what the body computes
+decided  decided    isl          calls.py:118  integrate      W[q] is in bounds for every instance of S0
+decided  decided    isl          calls.py:115  integrate      the source order runs every dependence forward in time
+decided  decided    type         calls.py:118  integrate      the accumulation into the value integrate returns over q is approx
+tested   tested     interpreter  calls.py:115  integrate      the traced term computes what the body computes
+decided  decided    isl          calls.py:129  element_mass   Me[j, k] is in bounds for every instance of S0
+decided  decided    isl          calls.py:129  element_mass   X[1] is in bounds for every instance of S0
+decided  decided    isl          calls.py:129  element_mass   X[0] is in bounds for every instance of S0
+decided  decided    isl          calls.py:129  element_mass   Y[2] is in bounds for every instance of S0
+decided  decided    isl          calls.py:129  element_mass   Y[0] is in bounds for every instance of S0
+decided  decided    isl          calls.py:129  element_mass   X[2] is in bounds for every instance of S0
+decided  decided    isl          calls.py:129  element_mass   Y[1] is in bounds for every instance of S0
+decided  decided    isl          calls.py:129  element_mass   W[q] is in bounds for every instance of S0
+decided  decided    isl          calls.py:129  element_mass   PHI[q, j] is in bounds for every instance of S0
+decided  decided    isl          calls.py:129  element_mass   PHI[q, k] is in bounds for every instance of S0
+decided  decided    isl          calls.py:129  element_mass   distinct instances of S0 write distinct cells of Me
+decided  decided    isl          calls.py:121  element_mass   the source order runs every dependence forward in time
+decided  decided    type         calls.py:129  element_mass   the accumulation into Me[j, k] over q is approx
+tested   tested     native       calls.py:121  element_mass   Me[0, 0] == Me[0, 0] and Me[0, 1] == Me[1, 0] and Me[0, 2] == Me[2, 0...
+tested   tested     interpreter  calls.py:121  element_mass   the traced term computes what the body computes
+decided  decided    isl          calls.py:129  mass_matrices  M[c, j, k] is in bounds for every instance of S0
+decided  decided    type         calls.py:129  mass_matrices  X[cell[c, 1]] is in bounds by type (cell[c, 1] : Fin(nv))
+decided  decided    isl          calls.py:129  mass_matrices  cell[c, 1] is in bounds for every instance of S0
+decided  decided    type         calls.py:129  mass_matrices  X[cell[c, 0]] is in bounds by type (cell[c, 0] : Fin(nv))
+decided  decided    isl          calls.py:129  mass_matrices  cell[c, 0] is in bounds for every instance of S0
+decided  decided    type         calls.py:129  mass_matrices  Y[cell[c, 2]] is in bounds by type (cell[c, 2] : Fin(nv))
+decided  decided    isl          calls.py:129  mass_matrices  cell[c, 2] is in bounds for every instance of S0
+decided  decided    type         calls.py:129  mass_matrices  Y[cell[c, 0]] is in bounds by type (cell[c, 0] : Fin(nv))
+decided  decided    type         calls.py:129  mass_matrices  X[cell[c, 2]] is in bounds by type (cell[c, 2] : Fin(nv))
+decided  decided    type         calls.py:129  mass_matrices  Y[cell[c, 1]] is in bounds by type (cell[c, 1] : Fin(nv))
+decided  decided    isl          calls.py:129  mass_matrices  W[q] is in bounds for every instance of S0
+decided  decided    isl          calls.py:129  mass_matrices  PHI[q, j] is in bounds for every instance of S0
+decided  decided    isl          calls.py:129  mass_matrices  PHI[q, k] is in bounds for every instance of S0
+decided  decided    isl          calls.py:129  mass_matrices  distinct instances of S0 write distinct cells of M
+decided  decided    isl          calls.py:132  mass_matrices  the source order runs every dependence forward in time
+decided  decided    type         calls.py:129  mass_matrices  the accumulation into M[c, j, k] over q is approx
+decided  decided    isl          calls.py:141  mass_matrices  cell[c], the indices of the cells passed as X and Y, is in bounds whe...
+decided  decided    type         calls.py:141  mass_matrices  the cells X[cell[c]] picks, passed as X, are in bounds wherever eleme...
+decided  decided    type         calls.py:141  mass_matrices  the cells Y[cell[c]] picks, passed as Y, are in bounds wherever eleme...
+decided  decided    isl          calls.py:141  mass_matrices  M[c], the row passed to element_mass as Me, is in bounds wherever ele...
+decided  tested     call         calls.py:141  mass_matrices  after element_mass(...) at calls.py:141, wherever it is called: M[c, ...
+tested   tested     interpreter  calls.py:132  mass_matrices  the traced term computes what the body computes
+
+66 facts: 59 decided, 7 tested
+```
+
+### loopty run examples/calls.py
+
+`integrate` takes a function, so it is compiled where a kernel calls it; a
+rule on its own writes its value into a one-cell array, `result`.
+
+```console
+$ uv run loopty run examples/calls.py
+integrate: takes the function f, so it is compiled where a kernel calls it, inlined
+matvec: Schedule(matvec, target='c').split(i, 4)
+  y: difference 0 within 1.01e-06 (approx) -> tested
+dot: Schedule(dot, target='c')
+  result: difference 0 within 1.26e-06 (approx) -> tested
+csr: Schedule(csr, target='c')
+  y: difference 0 within 1e-06 (approx) -> tested
+element_mass: Schedule(element_mass, target='c')
+  Me: difference 0 within 1.08e-06 (approx) -> tested
+mass_matrices: Schedule(mass_matrices, target='c')
+  M: difference 0 within 1.02e-06 (approx) -> tested
+
+STATUS   BY     WHERE         OWNER          STATEMENT
+-------  -----  ------------  -------------  ------------------------------------------------------------------------
+decided  isl    calls.py:99   matvec         split(i, 4) renames the instances of matvec one for one
+decided  isl    calls.py:99   matvec         the order after split(i, 4) runs every dependence of matvec forward
+tested   loopy  calls.py:99   matvec         the scheduled run of matvec agrees with the native run to the accurac...
+tested   loopy  calls.py:92   dot            the scheduled run of dot agrees with the native run to the accuracy i...
+tested   loopy  calls.py:112  csr            the scheduled run of csr agrees with the native run to the accuracy i...
+tested   loopy  calls.py:129  element_mass   the scheduled run of element_mass agrees with the native run to the a...
+tested   loopy  calls.py:129  mass_matrices  the scheduled run of mass_matrices agrees with the native run to the ...
+
+7 facts: 2 decided, 5 tested
 ```
 
 ## reshape_layouts.py and p2p.py
