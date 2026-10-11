@@ -53,7 +53,12 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from loopty.contract import check_arguments, checked_storage, inherited_storage
+from loopty.contract import (
+    check_arguments,
+    checked_storage,
+    inherited_storage,
+    writeable_outputs,
+)
 from loopty.isl_reading import declining
 from loopty.term import Term
 from loopty.tolerance import (
@@ -442,6 +447,8 @@ class LoopyExecutor:
             _entry_offsets(term, lowering),
             written=lowering.results,
         )
+        # The differential runs on copies; this run writes in place.
+        writeable_outputs(dict(term.params), supplied, lowering.results)
         inherited_storage(term.array_types, term.temporaries_like, supplied)
         checked_storage(term, supplied)
         from loopty.refusal import naming_the_fix, refuse_where_native_does

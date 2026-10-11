@@ -370,3 +370,16 @@ def test_a_bound_read_from_a_table_is_refused_when_traced() -> None:
     )
     assert "test_table.py:" in message
     assert "counts: Arr[Fin[k], Nat]" in message
+
+
+def test_a_compiled_run_writes_no_read_only_array() -> None:
+    # The compiled kernel was handed W.values, a table's own read-only
+    # buffer, wrote into it, and only then failed: the table's numbers
+    # changed under every kernel that holds them. numpy refuses the native
+    # run's write; the compiled run is now refused before it starts.
+    with pytest.raises(ValueError, match="assignment destination is read-only"):
+        times(Arr.from_numpy(np.ones(3)), Arr.from_numpy(STEPS.values))
+    with pytest.raises(ValueError, match="the argument y is read-only"):
+        LoopyExecutor().run(times, t=np.ones(3), y=STEPS.values)
+    assert list(STEPS.values) == [1.0, 2.0, 3.0]
+    assert list(STEPS.numpy()) == [1.0, 2.0, 3.0]

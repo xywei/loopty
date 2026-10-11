@@ -738,6 +738,35 @@ def inherited_storage(
         )
 
 
+def writeable_outputs(
+    types: Mapping[str, Any],
+    supplied: Mapping[str, Any],
+    written: Iterable[str],
+) -> None:
+    """Refuse a read-only array for a parameter the compiled run writes in place.
+
+    numpy refuses the native run's first write into an array whose writeable
+    flag is off ("assignment destination is read-only"); the compiled kernel
+    is handed the buffer and writes into it regardless, and the run then
+    failed after the writes. A constant table's values (``W.values``) are
+    such an array, so a table's numbers changed under the kernels that hold
+    them. ``written`` names the arrays the compiled run writes back.
+    """
+    written = set(written)
+    for name, typ in types.items():
+        if name not in written or not isinstance(typ, ArrType):
+            continue
+        buffer = _buffer(supplied.get(name))
+        if buffer is None or buffer.flags.writeable:
+            continue
+        raise ValueError(
+            f"the argument {name} is read-only (its numpy array is not "
+            f"writeable), and the kernel writes {name}: the native run is "
+            "refused there, and the compiled run would write into it. Pass a "
+            f"writeable array, such as a copy of it, {name}.copy()"
+        )
+
+
 def written_storage(
     types: Mapping[str, Any],
     supplied: Mapping[str, Any],
