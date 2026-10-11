@@ -14,7 +14,9 @@ writing ``y[i]`` carries no dependence and may legally tag ``i`` parallel. Calle
 with ``x is y`` it is a race, and the differential test cannot see it: it copies
 each argument on its own, which destroys the alias and makes the two runs agree.
 :func:`disjoint_arguments` asks numpy whether two arguments share storage and
-refuses the call if they do.
+refuses the call if they do and the kernel writes either. Two parameters it
+only reads may share storage, ``dot(x, x)``: reads do not race, and both runs
+read the same values.
 
 *A ragged argument agrees with its counts family.* ``val: Arr[Fin[n], Fin[cnt],
 Real]`` says row ``r`` of ``val`` has ``cnt[r]`` entries. The generated loop is
@@ -83,7 +85,7 @@ never shorter than a non-negative ``n`` allows (:func:`sizes_not_negative`).
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 import numpy as np
@@ -95,6 +97,7 @@ from loopty.term import ArrType
 
 __all__ = [
     "CHECKED_STORAGE",
+    "CONVERSIONS",
     "INDEX_RANGE",
     "INDEX_STORAGE",
     "INT64_RANGE",
@@ -105,6 +108,8 @@ __all__ = [
     "check_arguments",
     "checked_storage",
     "compiled_storage",
+    "conversion_name",
+    "convert_scalar",
     "counts_family",
     "disjoint_arguments",
     "domain_arguments",
@@ -177,7 +182,10 @@ def counts_family(typ: ArrType) -> str | None:
 # {{{ aliasing
 
 
-def disjoint_arguments(supplied: Mapping[str, Any]) -> None:
+def disjoint_arguments(
+    supplied: Mapping[str, Any],
+    written: Iterable[str] | Callable[[], Iterable[str] | None] | None = None,
+) -> None:
     """Refuse a call in which two distinct array parameters share storage.
 
     ``numpy.shares_memory`` is asked for the exact answer rather than
@@ -185,23 +193,38 @@ def disjoint_arguments(supplied: Mapping[str, Any]) -> None:
     refuses a legal call. The arrays a kernel is run on are the arrays of a
     differential test and of a demo, which are small; a size at which the exact
     decision is expensive is a size at which the run dwarfs it.
+
+    ``written`` names the parameters the term writes, or is a function that
+    names them, asked only once two arguments share storage (a native call
+    learns them by tracing the body); two that it does not name may share
+    storage, as in ``dot(x, x)``, since reads do not race. ``None``, or a
+    function that answers ``None``, refuses every pair.
     """
     buffers = [
         (name, buffer)
         for name, buffer in ((n, _buffer(v)) for n, v in supplied.items())
         if buffer is not None and buffer.size
     ]
+    known: set[str] | None = None
+    asked = False
     for position, (first, left) in enumerate(buffers):
         for second, right in buffers[position + 1 :]:
             if not np.shares_memory(left, right):
                 continue
+            if not asked:
+                asked = True
+                names = written() if callable(written) else written
+                known = None if names is None else set(names)
+            if known is not None and first not in known and second not in known:
+                continue
             raise ValueError(
                 f"the arguments {first} and {second} share storage. loopty "
                 "assumes two distinct array parameters are two distinct "
-                "buffers: dependences are computed per array name, so nothing "
-                "between them is ever reported and a schedule may run them in "
-                "parallel. Pass separate arrays, or write the kernel with one "
-                "parameter for the buffer they share"
+                "buffers where the kernel writes either: dependences are "
+                "computed per array name, so nothing between them is ever "
+                "reported and a schedule may run them in parallel. Pass "
+                "separate arrays, or write the kernel with one parameter for "
+                "the buffer they share"
             )
 
 
@@ -335,6 +358,7 @@ def resolve_sizes(
                 for size_name, extent in value.sizes.items():
                     if size_name in declared:
                         sizes.setdefault(size_name, extent)
+                _sizes_from_binders(typ.domain, value, sizes)
             continue
         for size, extent in _axis_extents_of(value, typ):
             if isinstance(size, prim.Variable):
@@ -363,6 +387,58 @@ def resolve_sizes(
         if solved >= 0:
             sizes[name] = int(solved)
     return sizes
+
+
+def _sizes_from_binders(declared: Any, value: Any, sizes: dict[str, int]) -> None:
+    """Solve a declared domain's sizes from the bounds of an argument's binders.
+
+    An array built over a domain of other names, ``Where[a: Fin[m], ...]`` at
+    ``m = 4``, passed for ``Where[i: Fin[n], ...]``, fixes ``n`` where the
+    bound of a binder of the declared domain is a size alone, or a size and a
+    number, and the argument's bound there names no binder: the extent the
+    argument's bound has at its sizes. Whether the two then have the same
+    points is :func:`domain_arguments`' question.
+    """
+    from lanky.terms import evaluate
+
+    from loopty.domain import Polyhedron
+
+    given = value.domain.domain
+    if not isinstance(declared, Polyhedron) or not isinstance(given, Polyhedron):
+        return
+    if declared.ndim != given.ndim:
+        return
+    for (_name, mine), (_other, theirs) in zip(
+        declared.binders, given.binders, strict=True
+    ):
+        try:
+            mentioned = {
+                getattr(node, "name", None) for node in _variables_of(theirs)
+            }
+            if mentioned & set(given.names):
+                continue
+            extent = int(evaluate(theirs, dict(value.sizes)))
+        except Exception:  # noqa: BLE001 - a bound that cannot be read fixes nothing
+            continue
+        if isinstance(mine, prim.Variable):
+            sizes.setdefault(mine.name, extent)
+        elif isinstance(mine, prim.Sum) and len(mine.children) == 2:
+            name, constant = mine.children
+            if isinstance(constant, prim.Variable):
+                name, constant = constant, name
+            if isinstance(name, prim.Variable) and isinstance(constant, int):
+                sizes.setdefault(name.name, extent - constant)
+
+
+def _variables_of(expr: Any) -> list[Any]:
+    """The variable nodes of an expression."""
+    from lanky.terms import init_args
+
+    if isinstance(expr, prim.Variable):
+        return [expr]
+    if isinstance(expr, prim.ExpressionNode):
+        return [found for arg in init_args(expr) for found in _variables_of(arg)]
+    return []
 
 
 def _axis_extents_of(value: Any, typ: ArrType) -> list[tuple[Any, int]]:
@@ -862,6 +938,45 @@ def native_copy(value: Any, dtype: np.dtype) -> Any:
     return value._replaced(converted) if isinstance(value, Arr) else converted
 
 
+#: The conversions of a scalar into a numpy type, by the name a term's call
+#: gives each, ``np.float32``: what a kernel called inside another kernel's
+#: loop does to a scalar it is given, as :func:`native_scalar` does natively
+#: (:meth:`loopty.calls._Inlining.converted`). The interpreter computes each
+#: with :func:`convert_scalar`, and the lowering writes it as a cast
+#: (:meth:`loopty.lower.ExpressionLowerer._conversion`). ``float16`` is not
+#: here: the compiled kernel has no such type.
+CONVERSIONS: dict[str, np.dtype] = {
+    f"np.{np.dtype(kind).type.__name__}": np.dtype(kind)
+    for kind in (
+        np.bool_, np.int8, np.int16, np.int32, np.int64, np.uint8, np.uint16,
+        np.uint32, np.uint64, np.float32, np.float64, np.complex64, np.complex128,
+    )
+}
+
+
+def conversion_name(dtype: np.dtype) -> str:
+    """The name a term's call of the conversion into ``dtype`` has, ``np.float32``."""
+    return f"np.{dtype.type.__name__}"
+
+
+def convert_scalar(dtype: np.dtype, value: Any) -> Any:
+    """``value`` as a numpy scalar of ``dtype``, as a kernel's contract converts it.
+
+    The number itself when it is one of ``dtype`` already; ``np.bool_`` of its
+    real part for a truth value, and ``dtype`` of its real part for a complex
+    number converted into a type that is not complex, whose imaginary part
+    the contract has required to be zero (:func:`scalar_parameters`). A
+    Python int ``dtype`` does not hold raises, as numpy does.
+    """
+    if isinstance(value, np.generic) and value.dtype == dtype:
+        return value
+    if dtype.kind == "b":
+        return np.bool_(np.real(value))
+    if np.iscomplexobj(value) and dtype.kind != "c":
+        value = np.real(value)
+    return dtype.type(value)
+
+
 def native_scalar(sort: Any, value: Any) -> Any:
     """A scalar argument as the native run computes with it, for ``sort``.
 
@@ -907,13 +1022,7 @@ def native_scalar(sort: Any, value: Any) -> Any:
             return value
     if np.ndim(value) or got.kind not in "biufc":
         return value
-    if isinstance(value, np.generic) and value.dtype == want:
-        return value
-    if want.kind == "b":
-        return np.bool_(np.real(value))
-    if got.kind == "c" and want.kind != "c":
-        value = np.real(value)
-    return want.type(value)
+    return convert_scalar(want, value)
 
 
 def _shown_sort(sort: Any) -> str:
@@ -1601,6 +1710,7 @@ def check_arguments(
     supplied: Mapping[str, Any],
     offsets_args: Mapping[str, str] | None = None,
     written: Iterable[str] | None = None,
+    writes: Callable[[], Iterable[str] | None] | None = None,
 ) -> None:
     """Everything an argument list owes a term, in one call.
 
@@ -1611,15 +1721,18 @@ def check_arguments(
     and their storage is checked too (:func:`written_storage`); a native call
     knows them only once the body is traced, which it does only when some
     array is not stored as its sort is (see
-    :meth:`loopty.kernel.Kernel._storage_copies`). Raises :class:`ValueError`
-    naming the argument at fault.
+    :meth:`loopty.kernel.Kernel._storage_copies`). ``writes`` names them
+    when asked, for a caller that would have to trace the body to know, and
+    is asked only when two arguments share storage, which is legal where the
+    term writes neither (:func:`disjoint_arguments`). Raises
+    :class:`ValueError` naming the argument at fault.
 
     The sizes are resolved once and handed to both element checks, so that an
     array and a scalar declared over the same ``Fin[n]`` are measured against
     the same ``n``.
     """
     no_tables(supplied)
-    disjoint_arguments(supplied)
+    disjoint_arguments(supplied, written if written is not None else writes)
     ragged_arguments(types, supplied, offsets_args)
     sizes_not_negative(types, supplied)
     sizes = resolve_sizes(types, supplied)

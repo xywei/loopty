@@ -196,6 +196,13 @@ def _domains(path: Path) -> Iterator[tuple[str, Any, Any]]:
                 yield f"{found.__name__}.{stmt.id} loops", stmt.loop_domain, term
             for reduction in reductions_in(stmt.expr):
                 yield f"{found.__name__}.{stmt.id} sum", reduction.domain, term
+        for call in term.calls:
+            # the points a call of another kernel is made at, which its
+            # arguments' facts are stated over (loopty.calls)
+            yield f"{found.__name__} call {call.label}", call.domain, term
+            if call.loop_domain is not None:
+                label = f"{found.__name__} call {call.label} loops"
+                yield label, call.loop_domain, term
 
 
 @pytest.mark.parametrize(

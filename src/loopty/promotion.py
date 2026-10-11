@@ -98,7 +98,12 @@ from typing import Any
 import numpy as np
 import pymbolic.primitives as prim
 
-from loopty.contract import array_storage, compiled_storage, native_storage
+from loopty.contract import (
+    CONVERSIONS,
+    array_storage,
+    compiled_storage,
+    native_storage,
+)
 from loopty.term import Access, ArrType, Reduction, Term, subtracted
 
 __all__ = ["Promotion", "Step"]
@@ -1155,6 +1160,13 @@ class Promotion:
             # Python's abs, which keeps a Python int one, as the native run
             # calls it; numpy's would make it a strong int64.
             return self._absolute(expr, expr.parameters[0], abs)
+        if name in CONVERSIONS and len(expr.parameters) == 1:
+            # A scalar a called kernel converts into its sort's storage
+            # (loopty.calls): a numpy scalar of that type, whatever it was, and
+            # the type the lowering casts it to.
+            self.types(expr.parameters[0])
+            dtype = CONVERSIONS[name]
+            return (_sample(dtype, False),), dtype
         operands = [self.types(parameter) for parameter in expr.parameters]
         native = (
             None

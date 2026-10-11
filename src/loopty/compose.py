@@ -314,8 +314,75 @@ def _rename_type(typ: Any, names: Mapping[str, str], exprs: Mapping[str, Any]) -
             axes=tuple(_tidy(rename_expr(axis, names, exprs)) for axis in typ.axes),
             dtype=_rename_sort(typ.dtype, names, exprs),
             ragged=typ.ragged,
+            domain=(
+                None
+                if typ.domain is None
+                else _rename_domain(typ.domain, names, exprs)
+            ),
         )
     return _rename_sort(typ, names, exprs)
+
+
+def _rename_domain(
+    domain: Any, names: Mapping[str, str], exprs: Mapping[str, Any]
+) -> Any:
+    """A polyhedral domain with its sizes in the new names; its binders are kept.
+
+    Only the names the domain does not bind are renamed: a binder ``i`` is
+    the domain's own, whatever a parameter of the callee is called.
+    """
+    from loopty.domain import Polyhedron, Union
+
+    if isinstance(domain, Union):
+        pieces = domain.pieces
+        return Union(tuple(_rename_domain(piece, names, exprs) for piece in pieces))
+    sizes = domain.size_names()
+    own_names = {key: value for key, value in names.items() if key in sizes}
+    own_exprs = {key: value for key, value in exprs.items() if key in sizes}
+    if not own_names and not own_exprs:
+        return domain
+    meant = set(own_names.values())
+    for value in own_exprs.values():
+        meant |= set(_names_in(value))
+    if meant & set(domain.names):
+        raise TraceError(
+            f"the domain {domain} would be read in names one of its binders has "
+            f"({', '.join(sorted(meant & set(domain.names)))}); rename the binder "
+            "in the kernel's annotation"
+        )
+    assert isinstance(domain, Polyhedron)
+    return Polyhedron(
+        binders=tuple(
+            (name, _tidy(rename_expr(bound, own_names, own_exprs)))
+            for name, bound in domain.binders
+        ),
+        constraints=tuple(
+            rename_expr(prop, own_names, own_exprs) for prop in domain.constraints
+        ),
+        spelling=domain.spelling,
+        shown=domain.shown,
+    )
+
+
+def _shape_text(typ: Any) -> str:
+    """``an array over Where[...]``, or ``a dense or ragged array``."""
+    if isinstance(typ, ArrType) and typ.domain is not None:
+        return f"an array over {typ.domain}"
+    return "a dense or ragged array"
+
+
+def _same_domain(first: Any, second: Any) -> bool:
+    """Whether two domains, in one set of sizes, have the same points at every size."""
+    from loopty.domain import dimension_names
+
+    if first.ndim != second.ndim:
+        return False
+    avoid = first.size_names() | second.size_names()
+    names = dimension_names(first.ndim, avoid)
+    left, right = first.isl_set(names), second.isl_set(names)
+    left = left.align_params(right.get_space())
+    right = right.align_params(left.get_space())
+    return bool(left.is_equal(right))
 
 
 def _tidy(expr: Any) -> Any:
@@ -496,16 +563,23 @@ class ProgramValue:
     placeholder is.
     """
 
-    __slots__ = ("_recorder", "like", "name")
+    __slots__ = ("_recorder", "like", "made", "name")
 
     def __init__(
-        self, recorder: _Recorder, name: str, like: ProgramValue | None = None
+        self,
+        recorder: _Recorder,
+        name: str,
+        like: ProgramValue | None = None,
+        made: bool = False,
     ) -> None:
         self._recorder = recorder
         self.name = name
-        #: What ``Arr.zeros_like`` made this like, for an array the body made;
-        #: ``None`` for a parameter.
+        #: What ``Arr.zeros_like`` made this like, for an array the body made
+        #: like another; ``None`` for a parameter and for one ``Arr.zeros``
+        #: made of a declared shape.
         self.like = like
+        #: Whether the body made it, with ``Arr.zeros_like`` or ``Arr.zeros``.
+        self.made = made
 
     def _loopty_zeros_like(self, frame: Any, dtype: Any = None) -> ProgramValue:
         """``Arr.zeros_like(self)``, under tracing: a new array of the program."""
@@ -515,7 +589,7 @@ class ProgramValue:
         program = self._recorder.name
         which = (
             f"the array {self.name} it made"
-            if self.like is not None
+            if self.made
             else f"its parameter {self.name}"
         )
         raise TraceError(
@@ -532,6 +606,10 @@ class ProgramValue:
     def __getattr__(self, attribute: str) -> Any:
         if attribute.startswith("__") and attribute.endswith("__"):
             raise AttributeError(attribute)
+        if attribute == "dom":
+            # Its sizes, and nothing else: x.dom.size is the size of an
+            # array the program makes, Arr.zeros(TRIANGLE, n=x.dom.size).
+            return _ProgramDom(self, ())
         self._refuse(f"asks for .{attribute} of")
 
     def __getitem__(self, key: Any) -> Any:
@@ -580,6 +658,51 @@ class ProgramValue:
         return f"<{self.name} of the program {self._recorder.name}>"
 
 
+#: How a size of a program's array is named while the term is built: the
+#: array and the axis. No identifier starts with it, so it is no size's name.
+_SIZE_OF = "@size"
+
+
+def size_of(name: str, axis: int) -> Var:
+    """The name ``x.dom[...].size`` stands for, in a program's body traced."""
+    return Var(f"{_SIZE_OF}:{name}:{axis}")
+
+
+class _ProgramDom:
+    """``x.dom`` of a program's placeholder: its sizes, for an array the body makes.
+
+    ``x.dom.size`` is the length of ``x``'s first axis and ``x.dom[0].size``
+    of its second, as natively, which the program's term reads off ``x``'s
+    type once a kernel has given it one. Iterating it is a loop of the body's
+    whose trip count is an argument, a host loop, and is refused.
+    """
+
+    __slots__ = ("prefix", "value")
+
+    def __init__(self, value: ProgramValue, prefix: tuple[Any, ...]) -> None:
+        self.value = value
+        self.prefix = prefix
+
+    @property
+    def size(self) -> Any:
+        """The length of the axis, a size of the program."""
+        return size_of(self.value.name, len(self.prefix))
+
+    def __getitem__(self, index: Any) -> _ProgramDom:
+        if not isinstance(index, int | np.integer) or isinstance(index, bool):
+            self.value._refuse("takes a fiber at a value that is no number of")
+        return _ProgramDom(self.value, (*self.prefix, int(index)))
+
+    def __iter__(self) -> Any:
+        self.value._refuse("iterates over the domain of")
+
+    def __len__(self) -> int:
+        self.value._refuse("asks for the length of the domain of")
+
+    def __bool__(self) -> bool:
+        self.value._refuse("branches on the domain of")
+
+
 def _refusing(what: str) -> Any:
     def method(self: ProgramValue, *_args: Any) -> Any:
         self._refuse(what)
@@ -611,11 +734,18 @@ class _Call:
 @dataclass
 class _Made:
     """One ``Arr.zeros_like`` of the body: the array it made, where, and the
-    ``dtype`` it was given, which is the native array's alone."""
+    ``dtype`` it was given, which is the native array's alone.
+
+    ``declared`` is the shape an ``Arr.zeros`` gave it instead, a domain or
+    a tuple of axes, with the sizes it was given (``n=x.dom.size``), in the
+    names :func:`size_of` writes.
+    """
 
     value: ProgramValue
     where: str
     dtype: Any = None
+    declared: Any = None
+    sizes: dict[str, Any] | None = None
 
 
 @dataclass
@@ -697,7 +827,56 @@ class _Recorder:
             )
         self.events.append(_Call(kernel, bound, where))
 
-    def make(self, like: ProgramValue, frame: Any, dtype: Any = None) -> ProgramValue:
+    def declare(
+        self, shape: Any, frame: Any, dtype: Any, storage: str, sizes: dict[str, Any]
+    ) -> ProgramValue:
+        """Record ``Arr.zeros(shape, ...)`` of the body: an array of a declared shape.
+
+        ``shape`` is a domain (``Where[...]``) with a value for each of its
+        sizes, or a tuple of axes; a size is a number, or a size of an array
+        of the program, ``x.dom.size``. It is stored boxed.
+        """
+        from loopty.domain import index_domain
+
+        where = _where(frame)
+        if storage != "box":
+            raise TraceError(
+                f"the program {self.name} makes an array at {where} stored "
+                f"{storage!r}, and an array a program makes is stored boxed: a "
+                "packed one would need its table of row starts, which nothing "
+                "computes for it. Leave storage out"
+            )
+        domain = index_domain(shape)
+        if domain is not None:
+            declared: Any = domain
+            missing = sorted(domain.size_names() - set(sizes))
+            if missing:
+                raise TraceError(
+                    f"the program {self.name} makes an array over {domain} at "
+                    f"{where} and gives no {', '.join(missing)}: give each size, "
+                    f"{missing[0]}=x.dom.size for an array x of that length"
+                )
+        else:
+            parts = shape if isinstance(shape, tuple) else (shape,)
+            declared = tuple(
+                part.bound if isinstance(part, FinType) else part for part in parts
+            )
+            if sizes:
+                raise TraceError(
+                    f"the program {self.name} gives sizes to Arr.zeros at {where}, "
+                    "whose shape is no domain; write them in the shape, "
+                    "Arr.zeros((x.dom.size, 3))"
+                )
+        value = self.make(None, frame, dtype)
+        made = self.events[-1]
+        assert isinstance(made, _Made) and made.value is value
+        made.declared = declared
+        made.sizes = dict(sizes)
+        return value
+
+    def make(
+        self, like: ProgramValue | None, frame: Any, dtype: Any = None
+    ) -> ProgramValue:
         """Record an array the body makes, named after what it is stored to."""
         stem = _stored_name(frame) or "tmp"
         name = stem
@@ -706,7 +885,7 @@ class _Recorder:
             name = f"{stem}_{suffix}"
             suffix += 1
         self.taken.add(name)
-        value = ProgramValue(self, name, like=like)
+        value = ProgramValue(self, name, like=like, made=True)
         self.events.append(_Made(value, _where(frame), dtype))
         return value
 
@@ -792,7 +971,7 @@ def _made_in(value: Any) -> ProgramValue | None:
     a body returns several results in.
     """
     if isinstance(value, ProgramValue):
-        return value if value.like is not None else None
+        return value if value.made else None
     if isinstance(value, dict):
         value = tuple(value.values())
     if isinstance(value, tuple | list):
@@ -1132,12 +1311,11 @@ class _Composer:
         for event in self.recorder.events:
             if isinstance(event, _Made):
                 self.made[event.value.name] = event
+                maker = "Arr.zeros" if event.declared is not None else "Arr.zeros_like"
                 self.writers.setdefault(
-                    event.value.name, f"the Arr.zeros_like at {event.where}"
+                    event.value.name, f"the {maker} at {event.where}"
                 )
-                self.last_writer[event.value.name] = (
-                    f"the Arr.zeros_like at {event.where}"
-                )
+                self.last_writer[event.value.name] = f"the {maker} at {event.where}"
                 self.slots.append((event, self.blocks))
                 self.blocks += 1
             else:
@@ -1152,8 +1330,105 @@ class _Composer:
                 like = like.like
             if like is not None:
                 self.shaped_like(name, like.name, made.where)
+            if made.declared is not None:
+                self.shaped_declared(name, made)
             self.stored_like(name, made)
         return self.finish()
+
+    def shaped_declared(self, name: str, made: _Made) -> None:
+        """Unify an array the program made with ``Arr.zeros`` with its declared shape.
+
+        The shape's sizes are numbers or sizes of the program's arrays
+        (``x.dom.size``), read off their types now that every call has
+        given them one.
+        """
+        mine = self.types[name]
+        sizes = {
+            key: self.size_value(value, made) for key, value in made.sizes.items()
+        }
+        if isinstance(made.declared, tuple):
+            axes = tuple(self.size_value(axis, made) for axis in made.declared)
+            if mine.domain is not None or any(mine.ragged) or len(mine.axes) != len(
+                axes
+            ):
+                raise TraceError(
+                    f"{self.program} makes {name} at {made.where} of "
+                    f"{len(axes)} axes, and {self.origin[name]} wants it "
+                    f"{_shape_text(mine)} of {len(mine.axes)}"
+                )
+            for k, (first, second) in enumerate(zip(mine.axes, axes, strict=True)):
+                first, second = self.resolve(first), self.resolve(second)
+                if _same(first, second) or self.equate(first, second):
+                    continue
+                raise TraceError(
+                    f"{self.program} makes {name} at {made.where} with an axis {k} "
+                    f"of length {_shown(second)}, and {self.origin[name]} wants "
+                    f"it of length {_shown(first)}; nothing says the two agree"
+                )
+            return
+        theirs = ArrType(
+            axes=(),
+            dtype=mine.dtype,
+            ragged=(),
+            domain=_rename_domain(made.declared, {}, sizes),
+        )
+        self.shaped_over(name, mine, theirs, "with Arr.zeros", made.where)
+
+    def size_value(self, value: Any, made: _Made) -> Any:
+        """A size given to ``Arr.zeros``, in the program's sizes.
+
+        A number is itself, and ``x.dom.size`` is the length of ``x``'s axis
+        as its type says.
+        """
+        if isinstance(value, int | np.integer) and not isinstance(value, bool):
+            return int(value)
+        if not isinstance(value, prim.ExpressionNode):
+            raise TraceError(
+                f"{self.program} gives Arr.zeros at {made.where} the size "
+                f"{value!r}, which is neither a number nor a size of its arrays "
+                "(x.dom.size)"
+            )
+        exprs = {}
+        for found in _names_in(value):
+            if not found.startswith(_SIZE_OF + ":"):
+                raise TraceError(
+                    f"{self.program} gives Arr.zeros at {made.where} a size "
+                    f"that names {found}, which is no size of its arrays; write "
+                    "x.dom.size for the length of an array x"
+                )
+            _tag, array, axis = found.split(":")
+            exprs[found] = self.axis_size(array, int(axis), made)
+        return self.resolve(_tidy(rename_expr(value, {}, exprs)))
+
+    def axis_size(self, array: str, axis: int, made: _Made) -> Any:
+        """The length of axis ``axis`` of the program's array ``array``."""
+        typ = self.types.get(array)
+        if not isinstance(typ, ArrType):
+            raise TraceError(
+                f"{self.program} sizes the array it makes at {made.where} by "
+                f"{array}.dom, and {array} is passed to no kernel, which would "
+                "give it a type to read the size off"
+            )
+        typ = _rename_type(typ, {}, self.resolved)
+        if typ.domain is not None:
+            if axis != 0 or not hasattr(typ.domain, "binders"):
+                raise TraceError(
+                    f"{self.program} reads the size of axis {axis} of {array}, an "
+                    f"array over {typ.domain}, at {made.where}; read the first "
+                    "axis of a domain, or the axes of a dense array"
+                )
+            return typ.domain.binders[0][1]
+        if axis >= len(typ.axes) or typ.ragged[axis]:
+            raise TraceError(
+                f"{self.program} reads the size of axis {axis} of {array} at "
+                f"{made.where}, which "
+                + (
+                    "it does not have"
+                    if axis >= len(typ.axes)
+                    else "is ragged: its length is a row's"
+                )
+            )
+        return typ.axes[axis]
 
     # {{{ one call
 
@@ -1177,17 +1452,15 @@ class _Composer:
                 f"{self.program} calls {kernel.__name__} at {call.where}, whose "
                 f"body cannot be traced: {type(exc).__name__}: {exc}"
             ) from exc
-        for param, typ in term.params:
-            if isinstance(typ, ArrType) and typ.domain is not None:
-                self.refuse(
-                    call,
-                    f"its {param} is an array over {typ.domain}, and a "
-                    "program's term composes dense and ragged arrays only: "
-                    "the sizes of a Where, Sigma or union domain are not "
-                    "unified across calls, so the compiled program would not "
-                    "know which cells it has. Compile the kernel on its own; "
-                    "the program still runs natively",
-                )
+        if term.result is not None:
+            self.refuse(
+                call,
+                f"{kernel.__name__} is a rule, which returns its value "
+                f"({term.result} of its term) and writes none of its "
+                "arguments, and a program's term is what its kernels write into "
+                "the arrays it passes them. Call it inside a kernel, where its "
+                f"call is a value: y[i] = {kernel.__name__}(...)",
+            )
         label = self.label(kernel.__name__)
         names: dict[str, str] = {}
         exprs: dict[str, Any] = {}
@@ -1220,7 +1493,7 @@ class _Composer:
                 arrays[param] = value.name
                 names[param] = value.name
             elif mine:
-                if value.like is not None:
+                if value.made:
                     self.refuse(
                         call,
                         f"it is given the array {value.name} for its scalar "
@@ -1475,6 +1748,17 @@ class _Composer:
                     self.read_through.add(name)
                 continue
             element = typ.dtype.base if isinstance(typ.dtype, Refined) else typ.dtype
+            if typ.domain is not None and (
+                isinstance(element, FinType) or getattr(element, "name", None) == "Nat"
+            ):
+                self.refuse(
+                    call,
+                    f"it is given {name}, which {writer} writes, an array over "
+                    f"{typ.domain} whose elements are {element}: what its "
+                    f"contract checks of them, natively, at the call, is not "
+                    "yet checked between the calls of a program. Call "
+                    f"{term.name} on its own, outside the program",
+                )
             if param in counts:
                 owner = counts[param]
                 self.refuse(
@@ -1526,6 +1810,21 @@ class _Composer:
             return
         mine = _rename_type(typ, {}, self.resolved)
         theirs = _rename_type(known, {}, self.resolved)
+        if isinstance(mine, ArrType) and isinstance(theirs, ArrType) and (
+            mine.domain is not None or theirs.domain is not None
+        ):
+            if (
+                mine.domain is None
+                or theirs.domain is None
+                or not _same_domain(mine.domain, theirs.domain)
+            ):
+                self.refuse(
+                    call,
+                    f"its {param} is {_shape_text(mine)}, and {name}, which it "
+                    f"is given there, is {_shape_text(theirs)} as "
+                    f"{self.origin[name]}; nothing says the two have the same "
+                    "points",
+                )
         first = mine.dtype if isinstance(mine, ArrType) else mine
         second = theirs.dtype if isinstance(theirs, ArrType) else theirs
         if str(first) != str(second):
@@ -1580,6 +1879,11 @@ class _Composer:
                     sizes.append(name)
             if not isinstance(typ, ArrType):
                 continue
+            if typ.domain is not None:
+                for name in sorted(typ.domain.size_names()):
+                    if name not in params and name not in sizes:
+                        sizes.append(name)
+                continue
             for axis, ragged in zip(typ.axes, typ.ragged, strict=True):
                 if ragged:
                     continue
@@ -1594,6 +1898,13 @@ class _Composer:
             if not isinstance(typ, ArrType) or arrays[param] not in self.types:
                 continue
             known = self.types[arrays[param]]
+            if typ.domain is not None or known.domain is not None:
+                pending.extend(
+                    self.domain_equations(
+                        call, param, arrays[param], typ, known, marked, exprs
+                    )
+                )
+                continue
             if len(known.axes) != len(typ.axes):
                 self.refuse(
                     call,
@@ -1656,6 +1967,58 @@ class _Composer:
                     _rename_type(typ, names, {**exprs, **out}),
                     call,
                     param,
+                )
+        return out
+
+    def domain_equations(
+        self,
+        call: _Call,
+        param: str,
+        name: str,
+        typ: ArrType,
+        known: ArrType,
+        marked: Mapping[str, str],
+        exprs: Mapping[str, Any],
+    ) -> list[tuple[str, int | None, Any, bool, Any, bool]]:
+        """The equations between two domains' binder bounds, one per axis.
+
+        The callee's binders are read as the ones the program's type has, axis
+        by axis, so that a bound naming an earlier binder (``Fin[i + 1]``) is
+        compared with the program's; whether the two are the same set of
+        points, constraints included, is asked once the sizes are settled
+        (:meth:`settle_type`).
+        """
+        from loopty.domain import Union
+
+        mine, theirs = typ.domain, known.domain
+        if mine is None or theirs is None:
+            self.refuse(
+                call,
+                f"its {param} is {_shape_text(typ)}, and {name}, which it is "
+                f"given there, is {_shape_text(known)} as {self.origin[name]}",
+            )
+        if type(mine) is not type(theirs) or mine.ndim != theirs.ndim or (
+            isinstance(mine, Union) and len(mine.pieces) != len(theirs.pieces)
+        ):
+            self.refuse(
+                call,
+                f"its {param} is over {mine}, and {name}, which it is given "
+                f"there, is over {theirs} as {self.origin[name]}; the two are "
+                "not one domain",
+            )
+        pairs = (
+            list(zip(mine.pieces, theirs.pieces, strict=True))
+            if isinstance(mine, Union)
+            else [(mine, theirs)]
+        )
+        out = []
+        for first, second in pairs:
+            renamed = {**marked, **dict(zip(first.names, second.names, strict=True))}
+            for k, ((_binder, bound), (_other, other)) in enumerate(
+                zip(first.binders, second.binders, strict=True)
+            ):
+                out.append(
+                    (param, k, rename_expr(bound, renamed, exprs), False, other, False)
                 )
         return out
 
@@ -1773,6 +2136,10 @@ class _Composer:
                 f"{self.program} makes {name} like {like} at {where}, and "
                 f"{like} is a scalar, which has no shape to copy"
             )
+        if mine.domain is not None or theirs.domain is not None:
+            self.shaped_over(name, mine, _rename_type(theirs, {}, self.resolved),
+                             f"like {like}", where)
+            return
         if len(mine.axes) != len(theirs.axes) or mine.ragged != theirs.ragged:
             raise TraceError(
                 f"{self.program} makes {name} like {like} at {where}, and "
@@ -1786,6 +2153,43 @@ class _Composer:
                 f"{self.program} makes {name} like {like} at {where}, so its "
                 f"axis {k} is {_shown(second)} long, and {self.origin[name]} "
                 f"wants it {_shown(first)} long; nothing says the two agree"
+            )
+
+    def shaped_over(
+        self, name: str, mine: ArrType, theirs: ArrType, how: str, where: str
+    ) -> None:
+        """Unify an array the program made over a domain with the one it is made as.
+
+        The binders' bounds are equated axis by axis, which may settle a size
+        of the program, and then the two have to be one set of points.
+        """
+        mine = _rename_type(mine, {}, self.resolved)
+        if mine.domain is None or theirs.domain is None or (
+            mine.domain.ndim != theirs.domain.ndim
+        ):
+            raise TraceError(
+                f"{self.program} makes {name} {how} at {where}, "
+                f"{_shape_text(theirs)}, and {self.origin[name]} wants it "
+                f"{_shape_text(mine)}"
+            )
+        from loopty.domain import Union
+
+        if not isinstance(mine.domain, Union) and not isinstance(theirs.domain, Union):
+            for (_a, first), (_b, second) in zip(
+                mine.domain.binders, theirs.domain.binders, strict=True
+            ):
+                renamed = dict(zip(mine.domain.names, theirs.domain.names, strict=True))
+                first = self.resolve(rename_expr(first, renamed, {}))
+                second = self.resolve(second)
+                if not _same(first, second):
+                    self.equate(first, second)
+            mine = _rename_type(mine, {}, self.resolved)
+            theirs = _rename_type(theirs, {}, self.resolved)
+        if not _same_domain(mine.domain, theirs.domain):
+            raise TraceError(
+                f"{self.program} makes {name} {how} at {where}, over "
+                f"{theirs.domain}, and {self.origin[name]} wants it over "
+                f"{mine.domain}; nothing says the two have the same points"
             )
 
     def stored_like(self, name: str, made: _Made) -> None:
@@ -1809,7 +2213,7 @@ class _Composer:
         if want is None:
             return
         value: ProgramValue | None = made.value
-        while value is not None and value.like is not None:
+        while value is not None and value.made:
             here = self.made.get(value.name)
             if here is not None and here.dtype is not None:
                 try:
@@ -1847,7 +2251,7 @@ class _Composer:
         if not integral_sort(self.types[name].dtype):
             return
         value: ProgramValue | None = made.value
-        while value is not None and value.like is not None:
+        while value is not None and value.made:
             here = self.made.get(value.name)
             if here is not None and here.dtype is not None:
                 try:
@@ -1957,7 +2361,9 @@ class _Composer:
                     zeros = self.zeros(name, self.types[name], made, block + shift)
                     stmts.append(self.guarded(zeros, flags))
                     valid = [h for h in valid if name not in h.mentions]
-                    valid.append(self.zeros_hypothesis(name, made))
+                    zeros_held = self.zeros_hypothesis(name, made)
+                    if zeros_held is not None:
+                        valid.append(zeros_held)
                     written.add(name)
                 continue
             offered, notes = self.offered(valid, written)
@@ -2245,16 +2651,19 @@ class _Composer:
                 out.append(Hypothesis(body(Var(name)), source))
         return out
 
-    def zeros_hypothesis(self, name: str, made: _Made) -> Hypothesis:
-        """Every cell of an array the program made is zero, until a call writes it."""
-        found = self.cells_hypothesis(
+    def zeros_hypothesis(self, name: str, made: _Made) -> Hypothesis | None:
+        """Every cell of an array the program made is zero, until a call writes it.
+
+        ``None`` for one over a domain, whose cells no hypothesis isl reads
+        ranges over; the zeros its statement stores are what a definedness
+        fact reads (:func:`loopty.typing.definedness_facts`).
+        """
+        return self.cells_hypothesis(
             name,
             lambda cell: Comparison(cell, "==", 0),
             f"the zeros the Arr.zeros_like at {made.where} starts {name} with",
             set(),
         )
-        assert found is not None  # a temporary is dense, see zeros()
-        return found
 
     def offered(
         self, valid: Sequence[Hypothesis], written: set[str]
@@ -2644,11 +3053,43 @@ class _Composer:
                 "program makes is a temporary of the lowered kernel, which has "
                 "no offsets for its rows; make it a parameter of the program"
             )
+        if typ.domain is not None:
+            return self.domain_zeros(name, typ, made, block)
         inames = tuple(self.fresh("i") for _ in typ.axes)
         return Stmt(
             id=f"{name}.zeros",
             inames=inames,
             domain=domain_set(inames, typ.axes),
+            assignee=Access(name, tuple(Var(iname) for iname in inames)),
+            expr=0,
+            kind="assign",
+            guard=None,
+            where=made.where,
+            order=(block, *(0,) * len(inames)),
+        )
+
+    def domain_zeros(self, name: str, typ: ArrType, made: _Made, block: int) -> Stmt:
+        """The statement that zeroes an array the program made over a domain.
+
+        Over the points of the domain, which is the array's every cell. A
+        union of pieces is refused: a temporary is stored boxed, as one array
+        of the box's shape, which a union's pieces are not.
+        """
+        from loopty.domain import Union
+
+        if isinstance(typ.domain, Union):
+            raise TraceError(
+                f"{self.program} makes {name} at {made.where} over {typ.domain}, "
+                "a union of pieces, and an array a program makes over a domain "
+                "is stored as one box; make it a parameter of the program, or "
+                "make one array for each piece"
+            )
+        inames = tuple(self.fresh("i") for _ in range(typ.domain.ndim))
+        domain = typ.domain.isl_set(inames)
+        return Stmt(
+            id=f"{name}.zeros",
+            inames=inames,
+            domain=domain,
             assignee=Access(name, tuple(Var(iname) for iname in inames)),
             expr=0,
             kind="assign",

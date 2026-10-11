@@ -229,7 +229,18 @@ class Arr:
         as ``Fin[2] + Fin[3]``, with a value for every size it names and the
         layout to store it in: ``Arr.zeros(triangle, n=4, storage="packed")``.
         A kernel's declared domain is ``kernel.arg_types[name].domain``.
+
+        In a program's body it makes an array of the program's own, a
+        temporary of its term, stored boxed, of the shape given: a size is a
+        number, or a size of an array the program is passed,
+        ``Arr.zeros(TRIANGLE, n=x.dom.size)``, which is ``x``'s length
+        natively too (see :mod:`loopty.compose`).
         """
+        from loopty.compose import current_recorder
+
+        recorder = current_recorder()
+        if recorder is not None:
+            return recorder.declare(shape, sys._getframe(1), dtype, storage, sizes)
         domain = index_domain(shape)
         if domain is not None:
             fixed = domain.fixed(sizes)
