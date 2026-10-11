@@ -139,6 +139,9 @@ class _Inlining:
         self.where = _location(frame)
         self.callee = kernel.__name__
         self.caller = tracer.name
+        #: The arrays over a domain passed, as ``(param, callee's domain,
+        #: caller's domain, the array)``, compared once the sizes are settled.
+        self.domains: list[tuple[str, Any, Any, str]] = []
 
     def refuse(self, message: str) -> NoReturn:
         raise TraceError(
@@ -414,13 +417,7 @@ class _Inlining:
             )
         given = value.type
         if typ.domain is not None or given.domain is not None:
-            self.refuse(
-                f"its {param} is {_shape_text(typ)}, and it is given "
-                f"{value.name}, {_shape_text(given)}; an array over a Where, "
-                "Sigma or union domain is not passed to a kernel called inside "
-                "another yet, so call the kernel from a program, or write the "
-                "loops in the caller"
-            )
+            return self.over_a_domain(param, typ, value, pending)
         if len(typ.axes) != len(given.axes):
             self.refuse(
                 f"its {param} has {len(typ.axes)} axes, and {value.name}, which it "
@@ -455,6 +452,63 @@ class _Inlining:
                 f"it declares the elements of its {param} {_sort_text(typ.dtype)}, "
                 f"and the elements of {value.name}, which it is given there, are "
                 f"{_sort_text(given.dtype)}; the two have to be one sort"
+            )
+        return value
+
+    def over_a_domain(
+        self,
+        param: str,
+        typ: ArrType,
+        value: SymArr,
+        pending: list[tuple[str, Any, Any, str]],
+    ) -> SymArr:
+        """An array over a domain, passed whole: its sizes unified, its points one.
+
+        The callee's binders are read as the caller's, axis by axis, so that
+        each bound settles a size of the callee; whether the two domains are
+        one set of points is asked once every size is settled
+        (:meth:`settle_all`).
+        """
+        from loopty.domain import Union
+
+        mine, theirs = typ.domain, value.type.domain
+        if (
+            mine is None
+            or theirs is None
+            or isinstance(value, _RowView | _GatherView)
+            or type(mine) is not type(theirs)
+            or mine.ndim != theirs.ndim
+            or (isinstance(mine, Union) and len(mine.pieces) != len(theirs.pieces))
+        ):
+            self.refuse(
+                f"its {param} is {_shape_text(typ)}, and it is given "
+                f"{value.name}, {_shape_text(value.type)}; an array over a "
+                "domain is passed whole, to a parameter over the same domain"
+            )
+        pairs = (
+            list(zip(mine.pieces, theirs.pieces, strict=True))
+            if isinstance(mine, Union)
+            else [(mine, theirs)]
+        )
+        for first, second in pairs:
+            renamed = dict(zip(first.names, second.names, strict=True))
+            for k, ((_binder, bound), (_other, other)) in enumerate(
+                zip(first.binders, second.binders, strict=True)
+            ):
+                pending.append(
+                    (
+                        f"the bound of axis {k} of the domain of its {param}",
+                        rename_expr(bound, renamed, {}),
+                        other,
+                        value.name,
+                    )
+                )
+        self.domains.append((param, mine, theirs, value.name))
+        if not _same_sort(typ.dtype, value.type.dtype):
+            self.refuse(
+                f"it declares the elements of its {param} {_sort_text(typ.dtype)}, "
+                f"and the elements of {value.name}, which it is given there, are "
+                f"{_sort_text(value.type.dtype)}; the two have to be one sort"
             )
         return value
 
@@ -532,6 +586,15 @@ class _Inlining:
                     f"there; {name} has to fix it"
                 )
             pending[:] = waiting
+        from loopty.compose import _rename_domain, _same_domain
+
+        for param, mine, theirs, name in self.domains:
+            if not _same_domain(_rename_domain(mine, {}, values), theirs):
+                self.refuse(
+                    f"its {param} is over {mine}, and {name}, which it is given "
+                    f"there, is over {theirs}; nothing says the two have the same "
+                    "points"
+                )
 
     def sizes(self) -> set[str]:
         """The callee's own sizes, which a call solves."""

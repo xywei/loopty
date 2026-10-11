@@ -335,6 +335,7 @@ def resolve_sizes(
                 for size_name, extent in value.sizes.items():
                     if size_name in declared:
                         sizes.setdefault(size_name, extent)
+                _sizes_from_binders(typ.domain, value, sizes)
             continue
         for size, extent in _axis_extents_of(value, typ):
             if isinstance(size, prim.Variable):
@@ -363,6 +364,58 @@ def resolve_sizes(
         if solved >= 0:
             sizes[name] = int(solved)
     return sizes
+
+
+def _sizes_from_binders(declared: Any, value: Any, sizes: dict[str, int]) -> None:
+    """Solve a declared domain's sizes from the bounds of an argument's binders.
+
+    An array built over a domain of other names, ``Where[a: Fin[m], ...]`` at
+    ``m = 4``, passed for ``Where[i: Fin[n], ...]``, fixes ``n`` where the
+    bound of a binder of the declared domain is a size alone, or a size and a
+    number, and the argument's bound there names no binder: the extent the
+    argument's bound has at its sizes. Whether the two then have the same
+    points is :func:`domain_arguments`' question.
+    """
+    from lanky.terms import evaluate
+
+    from loopty.domain import Polyhedron
+
+    given = value.domain.domain
+    if not isinstance(declared, Polyhedron) or not isinstance(given, Polyhedron):
+        return
+    if declared.ndim != given.ndim:
+        return
+    for (_name, mine), (_other, theirs) in zip(
+        declared.binders, given.binders, strict=True
+    ):
+        try:
+            mentioned = {
+                getattr(node, "name", None) for node in _variables_of(theirs)
+            }
+            if mentioned & set(given.names):
+                continue
+            extent = int(evaluate(theirs, dict(value.sizes)))
+        except Exception:  # noqa: BLE001 - a bound that cannot be read fixes nothing
+            continue
+        if isinstance(mine, prim.Variable):
+            sizes.setdefault(mine.name, extent)
+        elif isinstance(mine, prim.Sum) and len(mine.children) == 2:
+            name, constant = mine.children
+            if isinstance(constant, prim.Variable):
+                name, constant = constant, name
+            if isinstance(name, prim.Variable) and isinstance(constant, int):
+                sizes.setdefault(name.name, extent - constant)
+
+
+def _variables_of(expr: Any) -> list[Any]:
+    """The variable nodes of an expression."""
+    from lanky.terms import init_args
+
+    if isinstance(expr, prim.Variable):
+        return [expr]
+    if isinstance(expr, prim.ExpressionNode):
+        return [found for arg in init_args(expr) for found in _variables_of(arg)]
+    return []
 
 
 def _axis_extents_of(value: Any, typ: ArrType) -> list[tuple[Any, int]]:

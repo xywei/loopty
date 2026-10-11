@@ -29,6 +29,7 @@ from loopty import (
     Fin,
     Schedule,
     TraceError,
+    Where,
     kernel,
     program,
     reduce_sum,
@@ -603,3 +604,47 @@ def test_one_index_row_two_gathers_read_through_is_one_fact() -> None:
     assert index.statement.startswith(
         "cell[c], the indices of the cells passed as X and Y, is in bounds"
     )
+
+
+def test_an_array_over_a_domain_is_passed_whole() -> None:
+    @kernel
+    def row_sum(
+        f: Arr[Where[i : Fin[n], j : Fin[n], j < i], Real],  # noqa: F821
+        r: Fin[n],  # noqa: F821
+    ) -> Real:
+        return reduce_sum(f[r, q] for q in f.dom[r])
+
+    @kernel
+    def rows(
+        f: Arr[Where[a : Fin[m], b : Fin[m], b < a], Real],  # noqa: F821
+        e: Arr[Fin[m], Real],  # noqa: F821
+    ):
+        for p in e.dom:
+            e[p] = row_sum(f, p)
+
+    (stmt,) = rows.term.stmts
+    assert render(stmt.expr.body) == "f[p, q]"
+    (argument,) = _facts(rows, "argument")
+    assert argument.statement.startswith(
+        "p, passed to row_sum as r, is a point of Fin(m)"
+    )
+    assert _decided(argument).status is Status.DECIDED
+    domain = rows.arg_types["f"].domain
+    f = Arr.from_cells(domain, np.arange(6.0), m=4)
+    e = Arr.zeros(4)
+    rows(f, e)
+    np.testing.assert_allclose(e.numpy(), [0.0, 0.0, 3.0, 12.0])
+    inputs = {"f": Arr.from_cells(domain, np.arange(6.0), m=4), "e": Arr.zeros(4)}
+    fact = LoopyExecutor().differential(rows, Schedule(rows), inputs)
+    assert fact.status is Status.TESTED
+
+    @kernel
+    def other_points(
+        f: Arr[Where[a : Fin[m], b : Fin[m], b <= a], Real],  # noqa: F821
+        e: Arr[Fin[m], Real],  # noqa: F821
+    ):
+        for p in e.dom:
+            e[p] = row_sum(f, p)
+
+    with pytest.raises(TraceError, match="nothing says the two have the same points"):
+        other_points.term
