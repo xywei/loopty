@@ -15,8 +15,8 @@ All notable changes to loopty are recorded here. The format follows
   a product of loop variables, a guard computed in floating point or an
   array's entry, names the statement, where the body wrote it, the guard,
   and a guard over integers that keeps the access in bounds, which loopy
-  reads: `with when(i <= n - 5):` for `x[i + 4]` under `when(i * 0.5 < 2)`
-  (#148). It is `loopty.refusal.GuardNotRead`, a `LoopyIndexError` still,
+  reads, with a size as the body reads it: `with when(i <= y.dom.size - 5):`
+  for `x[i + 4]` under `when(i * 0.5 < 2)` (#148). It is `loopty.refusal.GuardNotRead`, a `LoopyIndexError` still,
   with loopy's message at its end. A guard that calls a function no
   statement's value calls, which loopy never resolves, is refused with a
   `LoweringError` naming the fix, where loopy failed with `KeyError` and the
@@ -45,7 +45,17 @@ All notable changes to loopty are recorded here. The format follows
   `k[i] + -2147483648` of an `int32` `k` was computed in 64 bits, never
   wrapping round as numpy does; `-9223372036854775808` is the negation of a
   constant no signed type holds, which GCC reads in 128 bits with a warning
-  and clang as an `unsigned long`.
+  and clang as an `unsigned long`. That is on the C target, built with
+  `-fwrapv`; OpenCL C has none, and its compilers fold `k[i] + (-2147483647 -
+  1)` into `k[i] | (-2147483647 - 1)`, so there the literal is left as loopy
+  writes it. A real less an integer keeps the sign of zero: `x[i] - 0` and
+  `x[i] - i`, `-0.0` natively at `x[i] = -0.0` and `i = 0`, were `0.0`
+  compiled, since pymbolic builds them as `x[i] + 0` and `x[i] + -1 * i`; the
+  zero is written `-0.0`, and `i` is converted into the real's type before it
+  is negated. A truth value subtracted, `k[i] - True`, which pymbolic takes as
+  no operand, is a `TraceError` naming the integer, `k[i] - 1`. `k[i] - 2**63`
+  and `b[i] - 2**63` of a truth value `b`, which numpy refuses in `int64`, are
+  refused by the trace, naming a real, `2.0 ** 63`.
 - `abs` of a real in a guard lowers (#154): loopy's type inference visits a
   statement's value and never its guard, so `abs`, which only the guard
   called, was never resolved, and loopy failed with `KeyError: 'abs'`. In a
@@ -59,9 +69,12 @@ All notable changes to loopty are recorded here. The format follows
   such a point, isl finds it, and the compiled run is refused before it
   starts (`loopty.refusal.RefusedNatively`, an `OverflowError`), naming the
   point and `(i - 3) * np.int64(1)` as the fix. Arithmetic isl cannot read,
-  or a ragged row's loop, is left to the native refusal (#166). A literal
-  stored into an integer array that does not hold it, `y[i] = 300` of a
-  `uint8` `y`, is a `TraceError`, as #141's literals are.
+  or a ragged row's loop, is left to the native refusal (#166). A sum's body
+  is asked about where the generator's `if` clause holds, which skips it
+  natively: `reduce_sum(a[j] + j for j in a.dom if j < 100)` of an `int8`
+  `a` is computed at any size. A literal stored into an integer array that
+  does not hold it, `y[i] = 300` of a `uint8` `y`, is a `TraceError`, as
+  #141's literals are.
 - A regression test for #152, which #156 fixed: a literal beside a loop
   variable under a double power in a single-precision statement is written as
   an integer, `(double) (i + 16777216)`, where loopy wrote `1.0f` and C

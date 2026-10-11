@@ -317,7 +317,8 @@ says when one does.
   refuses one it cannot show in bounds there, one the guard keeps in bounds
   included. The refusal (`loopty.refusal.GuardNotRead`, a `LoopyIndexError`)
   names the statement, the guard, and a guard over integers that keeps the
-  access in bounds, `when(i <= n - 5)` for `x[i + 4]` (#148; note 23 in
+  access in bounds, as the body writes it, `when(i <= y.dom.size - 5)` for
+  `x[i + 4]` (#148; note 23 in
   `docs/loopy-notes.md`). A guard has to be a truth value, and one whose
   value is an integer is a `TraceError`, on a native run and under tracing
   alike. Natively
@@ -459,7 +460,10 @@ says when one does.
   `a[i]` negated in its own type, which differ for an `int8` `a` at `-128` and
   an unsigned one at every value but zero; `u[i] + -1` of an unsigned `u` and
   `k[i] - 2**31` of an `int32` `k`, which numpy refuses at every point, are
-  refused by the trace (#151). Loop arithmetic beside a numpy integer whose
+  refused by the trace (#151). A real less an integer keeps the sign of zero,
+  `x[i] - 0` and `x[i] - i` at `x[i] = -0.0`, and a truth value subtracted,
+  `k[i] - True`, which pymbolic takes no operand of, is refused naming the
+  integer. Loop arithmetic beside a numpy integer whose
   type does not hold it at some point, `u[i] + (i - 3)` of a `uint32` `u` at
   `i = 0`, is refused by numpy natively there, and the compiled run is refused
   before it starts where the call's sizes reach such a point, naming it
@@ -645,9 +649,10 @@ says when one does.
   negative power whose exponent is not a literal is left to numpy's refusal
   natively, and computed as an integer compiled. Loop arithmetic beside a
   numpy integer that does not hold it is refused compiled where isl reads it
-  and the call's sizes fix its loops (#153); a product of loop variables, or
-  a ragged row's loop, is left to the native refusal and computed compiled
-  (#166). So is a value stored into a signed integer array that does not hold
+  and the call's sizes fix its loops (#153); a product of loop variables, a
+  ragged row's loop, a store under a guard isl does not read, and a sum's
+  body under both a guard and the generator's `if` clause where the guard is
+  false, are left to the native refusal and computed compiled (#166). So is a value stored into a signed integer array that does not hold
   it, a `uint64` past `2**63` into `Int`, an `Int` into an `np.int8` array, or
   a real past `2**63`, or a NaN, into `Int`, whose value only the compiled
   kernel knows (#159). The written `-1 * u[i]` of an unsigned `u`, which numpy
@@ -828,8 +833,10 @@ the runs make of it, since that is what decides whether it can go unnoticed.
   kernel's, known only inside the compiled run, which does not check it. Loop
   arithmetic beside a numpy integer that does not hold it is refused compiled
   where the call's sizes reach such a point, unless isl cannot read it (a
-  product of loop variables) or the call's sizes do not fix its loop (a
-  ragged row's). The differential fact raises the native run's error.
+  product of loop variables), the call's sizes do not fix its loop (a
+  ragged row's), or a guard isl does not read masks the store. The
+  differential fact raises the native run's error. Signed overflow is
+  undefined in OpenCL C, which has no `-fwrapv`, and is not checked there.
 - **What passes between calls is stored in full or not at all**
   ([#132](https://github.com/xywei/loopty/issues/132), [#133](https://github.com/xywei/loopty/issues/133)). `Schedule.substitute` computes an
   intermediate again at every read; keeping only the cells live at once, a

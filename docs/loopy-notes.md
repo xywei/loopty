@@ -932,11 +932,13 @@ differential fact reports (#139). numpy converts a Python int beside a numpy
 integer into the integer's type and refuses one the type does not hold:
 `u[i] + (i - 3)` of a `uint32` `u` at `i = 0`. The compiled run is refused
 too where the call's sizes reach such a point, which isl finds before it
-starts (`refusal.refuse_where_native_does`, #153), and computes it in C's
-type where isl cannot read the arithmetic or the sizes do not fix its loop
-(#166). A value stored into a signed integer array that does not hold it, a
-`uint64` past `2**63` into `Int`, is refused natively and converted compiled
-(#159). An affine subscript with no division is
+starts (`refusal.refuse_where_native_does`, #153), a sum's body where the
+generator's `if` clause holds, which skips the body natively, and computes it
+in C's type where isl cannot read the arithmetic, the sizes do not fix its
+loop, or a guard isl does not read masks the store (#166). A value stored
+into a signed integer array that does not hold it, a `uint64` past `2**63`
+into `Int`, is refused natively and converted compiled (#159). An affine
+subscript with no division is
 computed in loopy's 32-bit index type, which `-fwrapv` makes right for its
 sums and products; what the plan leaves in 32 bits, a sum of loop variables
 and sizes, stays there in a division too (`x[(i + n) // 2]`, past `2**30`,
@@ -1276,7 +1278,8 @@ tests and `wavefront_acoustic.py --bench` do. With the readings:
   executor and `emit_code` raise in its place `refusal.GuardNotRead`, a
   `LoopyIndexError` too, which names the statement, where the body wrote
   it, the guard, and the guard over integers isl finds that keeps every
-  access loopy refused in bounds, `when(i <= n - 5)` (#148). A statement
+  access loopy refused in bounds, with each size as the body reads it from
+  an array's domain, `when(i <= y.dom.size - 5)` (#148). A statement
   whose guard is stated whole is left loopy's message.
 
 ## 24. loopy's assumptions of a kernel given none follow the hash seed
@@ -1411,9 +1414,22 @@ the trace with it. A numpy scalar subtracted is kept as written, as `-1 *
 np.uint8(3)`, since pymbolic's `-` negates it in its own type, to
 `np.uint8(253)`. C has no literal of the smallest `int32`: `-2147483648` is
 the negation of `2147483648`, a `long`, so `k[i] + -2147483648` of an
-`int32` `k` was computed in 64 bits; loopty's targets write it as
+`int32` `k` was computed in 64 bits; loopty's C target writes it as
 `(-2147483647 - 1)`, and the smallest `int64` as `(-9223372036854775807l -
-1)` (`operations.NumpyArithmetic.map_constant`).
+1)` (`operations.NumpyArithmetic.map_constant`). Its OpenCL target does not:
+OpenCL C has no `-fwrapv`, and PoCL's compiler and Intel's fold `k[i] +
+(-2147483647 - 1)` into `k[i] | (-2147483647 - 1)`, which is the sum where it
+cannot overflow, so loopy's literal, a `long`, is left there, with which the
+sum does not overflow. pymbolic builds `x[i] - 0` as `x[i] + 0` and `x[i] - i`
+as `x[i] + -1 * i`, the integer `0` at `i = 0`, and C's `-0.0 + 0` is `0.0`
+where numpy's `-0.0 - 0` is `-0.0`: a real difference writes a subtracted
+integer zero as `-0.0` in its precision (`lower._subtracted_zero`) and
+converts a subtracted Python int into the real's type before negating it,
+`-1.0 * (double) (i)` (`Promotion._subtracted`). A truth value subtracted,
+`k[i] - True`, is kept as written, as `-1 * True`, so that `b[i] - True` of a
+truth value is refused as a difference of two; pymbolic takes no truth value
+as an operand, and loopy failed on it with an `AssertionError`, so the trace
+refuses it, naming the integer.
 
 **What it does not cover.** A subscript's arithmetic is left in the type loopy
 computes it in, neither widened nor converted back (#129, #157). An `If`,
