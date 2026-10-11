@@ -68,6 +68,46 @@ All notable changes to loopty are recorded here. The format follows
   each fusion it checked that is accepted: the least shift at the same
   depth, as before, and the deepest fusion of fewer loops, `fuse('along',
   'along@2', loops=1)`.
+
+### Fixed
+
+- The first run of a kernel with an array of four axes over one size, or a
+  triangle boxed over two, no longer prints loopy's `ParameterFinderWarning:
+  Unable to generate code to automatically find 'm' from 'u': nonlinear
+  expression`, a warning about an equation of the strides loopy's invoker
+  could not solve, while it found the size from the shape (note 28 in
+  `docs/loopy-notes.md`). Five constructs kernels written like sumpy's L2P
+  and grudge's sum-factorized passes need, a
+  `Where` array beside a ragged family, a `Where` of three binders, `**` with
+  a loop variable as the exponent in a sum of two binders and in a sum
+  nested in another, four dense axes and `when(a + b == 0)`, were run three
+  ways and work; `tests/test_demo_shapes.py` keeps them so.
+- A split sum adds its terms in order. `split("s", 256)` of a sum's loop
+  left loopy to choose the order of the two loops it makes, and loopy ran
+  the inner one outside, `for s_inner ... for s_outer`, adding every 256th
+  term first: another sum in floating point, `2**53` where the native run
+  adds `1 + 1 + 2**53` to `2**53 + 2`. Every schedule now gives loopy a sum's
+  loops in order, outermost first, as it gives it each statement's nest.
+
+## [0.2.0] - 2026-10-11
+
+The second release, on lanky 0.2.0, which checks each theorem's reading of
+its annotations and gives it a row of its own in the ledger, and whose `abs`
+of a term compares (lanky#94); loopty requires it, so that the ledgers its
+documentation shows are the ones an install prints. The rest is two waves of
+fixes where the compiled run computed otherwise than numpy, or did not build:
+subscripts, storage and names (#164: an index sum in a dividing subscript is
+64 bits wide, a narrow subscript stays in its type, complex `==` builds on
+OpenCL, a program's arrays are off the C stack, and every isl dimension
+loopty names has a name of its own), and arithmetic and messages (#169: a
+sum is computed as the body wrote it, `abs` of a real lowers in a guard, the
+compiled run is refused before it starts where the native run is refused,
+and loopy's refusal of a guard it cannot read names the fix). CI also tests
+loopty against the released lanky (#160). The README's Known limits section
+lists what is still open.
+
+### Added
+
 - **The names of isl dimensions** (`loopty.names`, #161). Every isl object
   loopty names the dimensions of keeps namedisl's invariants: each
   dimension has a name, no two share one, and none is named like a
@@ -84,6 +124,26 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Changed
 
+- **Requires lanky 0.2.0** (`lanky>=0.2.0`, was `>=0.1.0`). Its ledger has
+  a reading row under each theorem (the next entry), which the `lanky check`
+  transcripts in the README, the quickstart and the examples' README show,
+  and its `abs` of a term is lanky's `Abs`, so a comparison of it traces,
+  `when(abs(k[i]) > 2)` and `127 == abs(c[i])` (lanky#94); the test of that
+  (#165) no longer skips on an older lanky. `[tool.uv.sources]` still
+  resolves lanky from `../lanky` in a checkout, and the built distributions
+  ask for it from PyPI.
+- **A theorem in a kernel file has its reading under it** (lanky #91, #155).
+  lanky now checks each claim's reading of its annotations: the annotations
+  are run again as plain Python at drawn values, the term is evaluated at the
+  same values, and the two have to agree. Each theorem gets a second fact,
+  `tested python ... the term computes what the annotations compute`, on
+  which its pass or proof rests. The `lanky check` transcripts of
+  `examples/spmv.py` and `examples/travel.py`, each of which has a
+  `scan_monotone`, show the new row, and are regenerated with
+  `scripts/refresh_example_outputs.py`; `examples/README.md` says what the
+  row is. A kernel's and a program's facts are loopty's, and have no such
+  row: their trace has its own check, `trace-faithful`. (This entry was
+  filed under 0.1.0 by mistake; it was merged after that release.)
 - CI also tests loopty as `pip install loopty` gets it: a second job installs
   it without `[tool.uv.sources]`, so with lanky from PyPI, and runs the suite
   and the worked example's `lanky check` and `loopty run` (#147).
@@ -112,23 +172,6 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Fixed
 
-- The first run of a kernel with an array of four axes over one size, or a
-  triangle boxed over two, no longer prints loopy's `ParameterFinderWarning:
-  Unable to generate code to automatically find 'm' from 'u': nonlinear
-  expression`, a warning about an equation of the strides loopy's invoker
-  could not solve, while it found the size from the shape (note 28 in
-  `docs/loopy-notes.md`). Five constructs kernels written like sumpy's L2P
-  and grudge's sum-factorized passes need, a
-  `Where` array beside a ragged family, a `Where` of three binders, `**` with
-  a loop variable as the exponent in a sum of two binders and in a sum
-  nested in another, four dense axes and `when(a + b == 0)`, were run three
-  ways and work; `tests/test_demo_shapes.py` keeps them so.
-- A split sum adds its terms in order. `split("s", 256)` of a sum's loop
-  left loopy to choose the order of the two loops it makes, and loopy ran
-  the inner one outside, `for s_inner ... for s_outer`, adding every 256th
-  term first: another sum in floating point, `2**53` where the native run
-  adds `1 + 1 + 2**53` to `2**53 + 2`. Every schedule now gives loopy a sum's
-  loops in order, outermost first, as it gives it each statement's nest.
 - A sum is computed as the body wrote it (#151). pymbolic builds `a - b` as
   `a + -1 * b` and `u - 1` as `u + -1`, the same nodes `a + -b` and `u + -1`
   build, and the trace, the plan and the interpreter read every such sum as
@@ -141,9 +184,9 @@ All notable changes to loopty are recorded here. The format follows
   unsigned `u`, `k[i] - 2**31` and `k[i] + 2**31` of an `int32` `k`, `u[i] -
   -7`, `c[i] + -b[i]` and `b[i] - True` of a truth value `b`, which numpy
   refuses at every point and the compiled run computed as the other
-  spelling, are `TraceError`s naming the fix, and `k[i] + -(2**31)` and `c[i]
-  - -32768` of an `int16` `c` are computed in the type numpy computes them
-  in. A numpy scalar subtracted is kept as written, where pymbolic negates it
+  spelling, are `TraceError`s naming the fix, and `k[i] + -(2**31)` and
+  `c[i] - -32768` of an `int16` `c` are computed in the type numpy computes
+  them in. A numpy scalar subtracted is kept as written, where pymbolic negates it
   in its own type: `k[i] - np.uint8(3)` was `k[i] + 253` compiled. The
   smallest `int32` and `int64` are written as C writes `INT_MIN`,
   `(-2147483647 - 1)`: `-2147483648` is the negation of a `long` in C, and
@@ -2566,16 +2609,6 @@ published.
   `under`. The `from` entry is gone; `callee`
   stays. The `lanky check` transcripts of `examples/spmv.py` show the new row,
   and this needs the lanky that has `Fact.rests_on`.
-- **A theorem in a kernel file has its reading under it** (lanky #91). lanky
-  now checks each claim's reading of its annotations: the annotations are run
-  again as plain Python at drawn values, the term is evaluated at the same
-  values, and the two have to agree. Each theorem gets a second fact, `tested
-  python ... the term computes what the annotations compute`, on which its
-  pass or proof rests. The `lanky check` transcripts of `examples/spmv.py`
-  and `examples/travel.py`, each of which has a `scan_monotone`, show the new
-  row, and are regenerated with `scripts/refresh_example_outputs.py`;
-  `examples/README.md` says what the row is. A kernel's and a program's facts are loopty's, and
-  have no such row: their trace has its own check, `trace-faithful`.
 
 ### Notes
 
