@@ -521,6 +521,7 @@ class Polyhedron:
         return check_names(
             isl.Set(_assembled(names[:count], [(pieces, sizes)], params)),
             f"the points of {self}",
+            meant=sizes,
         )
 
     def prefix_constraints(self, prefix: Sequence[Any], var: Any) -> tuple[Any, ...]:
@@ -671,11 +672,17 @@ class Union:
         names = tuple(names)
         disjuncts: list[tuple[list[str], set[str]]] = []
         params: set[str] = set()
+        sizes: set[str] = set()
         for position, piece in enumerate(self.pieces):
             pieces, mentioned, extents = piece.constraint_texts(names[1:])
             disjuncts.append(([f"{names[0]} = {position}", *pieces], extents))
             params |= mentioned
-        return isl.Set(_assembled(names, disjuncts, params))
+            sizes |= extents
+        return check_names(
+            isl.Set(_assembled(names, disjuncts, params)),
+            f"the points of {self}",
+            meant=sizes,
+        )
 
     def fixed(self, sizes: Mapping[str, int]) -> Fixed:
         """This union at concrete sizes; see :class:`Fixed`."""

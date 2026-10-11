@@ -11,10 +11,9 @@ dimension named like a declared size was read so (#110). Two dimensions of
 one name are two variables isl prints apart (``[i, i']``), and anything that
 finds a dimension by its name then finds the first.
 
-namedisl, the isl in which names matter that loopy's next release builds on
-(``docs/loopy-notes.md``, and the reading of it in the project's notes),
-keeps three invariants, and loopty keeps them too wherever it names
-dimensions:
+namedisl (inducer/namedisl), the isl in which names matter that loopy's main
+branch builds on, keeps three invariants, and loopty keeps them too wherever
+it names dimensions:
 
 * every parameter, set, ``in`` and ``out`` dimension has a name;
 * no two dimensions of an object share one;
@@ -22,11 +21,20 @@ dimensions:
 
 :func:`check_names` checks them, and raises :class:`NamingError`, where such
 an object is made: a statement's and a sum's domain when the term records it
-(:class:`loopty.term.Stmt`, :class:`loopty.term.Reduction`), the cells of an
-index type (:func:`loopty.idx.to_set`), an access relation
+(:class:`loopty.term.Stmt`, :class:`loopty.term.Reduction`), the loops of a
+nest (:func:`loopty.flow.domain_set`), the cells of an index type
+(:func:`loopty.idx.to_set`), an access relation
 (:func:`loopty.flow.access_relation`), and whatever :func:`rename` returns.
 A breach is loopty's own bug, not the kernel's, and the error says what the
 object was and which names clash.
+
+The third invariant has a breach the object cannot show. A name the text
+gives as a tuple variable and also uses in a constraint is read as the
+variable, whatever the parameter list says, so ``{ [j] : 0 <= j < j }``, a
+sum by ``j`` over ``Fin[j]``, is a set over a well-named ``j`` with no
+points, and the size is gone. So a caller that knows which names it meant as
+parameters says so (``meant``), and a dimension named like one is refused
+too.
 
 What is positional by design is left out, named in ``positional``: the cells
 an access reaches are ``x[i + 1]``'s index expressions, which have no names,
@@ -76,16 +84,22 @@ def _kinds(obj: Any) -> tuple[tuple[Any, str], ...]:
 
 
 def check_names(
-    obj: Any, what: str = "", positional: Collection[Any] = ()
+    obj: Any,
+    what: str = "",
+    positional: Collection[Any] = (),
+    meant: Collection[str] = (),
 ) -> Any:
     """``obj``, once every dimension of it has a name of its own; see the module.
 
     A parameter and each set dimension (``in`` and ``out`` of a map) has a
     name, and no two share one, so none is named like a parameter. A
     dimension type in ``positional`` is left out: its dimensions may be
-    unnamed, and their names are no variables. ``what`` says what ``obj`` is,
-    for the message of the :class:`NamingError` raised otherwise. Returns
-    ``obj``, so a constructor can return what it checked.
+    unnamed, and their names are no variables. ``meant`` are the names the
+    caller meant as parameters of ``obj``, which isl's reader takes for a
+    dimension of the same name and drops, and no dimension may have one
+    either. ``what`` says what ``obj`` is, for the message of the
+    :class:`NamingError` raised otherwise. Returns ``obj``, so a constructor
+    can return what it checked.
     """
     kinds = ((isl.dim_type.param, "parameter"), *_kinds(obj))
     seen: list[tuple[str, str]] = []
@@ -101,7 +115,11 @@ def check_names(
                 seen.append((name, shown))
     counts = Counter(name for name, _kind in seen)
     clashes = sorted(name for name, count in counts.items() if count > 1)
-    if not unnamed and not clashes:
+    taken = sorted(
+        {name for name, shown in seen if shown != "parameter" and name in meant}
+        - set(clashes)
+    )
+    if not unnamed and not clashes and not taken:
         return obj
     about = f"{what}, " if what else ""
     problems = []
@@ -115,6 +133,12 @@ def check_names(
         kinds_of = sorted({shown for seen_name, shown in seen if seen_name == name})
         problems.append(
             f"{name} names more than one dimension ({', '.join(kinds_of)})"
+        )
+    for name in taken:
+        problems.append(
+            f"{name} names a dimension and is meant as a parameter too (isl "
+            "reads a name its text gives as a tuple variable as that variable "
+            "wherever it stands, and the parameter is lost)"
         )
     raise NamingError(
         f"{about}{obj}: {'; and '.join(problems)}. Every dimension loopty builds "

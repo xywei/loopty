@@ -410,10 +410,14 @@ def domain_set(
         table = Reflections(reserved)
     reflected: dict[str, Any] = {}
     bound_pieces: list[str] = []
-    for name, bound in zip(names, bounds, strict=True):
-        bound_pieces.append(
-            f"0 <= {name} < {expr_text(bound, rename, reflected, table)}"
-        )
+    # A bound may name the loops outside its own, and nothing else of the
+    # nest: any other name in it is a size, a parameter of the set, which a
+    # loop of that name would take for itself (loopty.names).
+    meant: set[str] = set(params)
+    for position, (name, bound) in enumerate(zip(names, bounds, strict=True)):
+        text = expr_text(bound, rename, reflected, table)
+        meant |= free_names(text) - set(names[:position])
+        bound_pieces.append(f"0 <= {name} < {text}")
     pieces = [*constraints, *bound_pieces]
     free: set[str] = set()
     for piece in pieces:
@@ -425,6 +429,7 @@ def domain_set(
     return check_names(
         isl.Set(_assemble(list(names), pieces, parameters, sized - set(names))),
         f"the loops over {', '.join(names)}",
+        meant=meant,
     )
 
 

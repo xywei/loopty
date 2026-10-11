@@ -19,9 +19,11 @@ import pytest
 
 from loopty import Arr, Fin, kernel, reduce_sum
 from loopty.compose import rename_set
+from loopty.flow import domain_set
 from loopty.idx import Layout, to_set
 from loopty.names import NamingError, check_names, rename
 from loopty.term import Access, Reduction, Stmt
+from loopty.trace import TraceError
 
 V = prim.Variable
 
@@ -73,6 +75,23 @@ def test_a_positional_tuple_is_left_out() -> None:
     with pytest.raises(NamingError, match="out dimension 0 has no name"):
         check_names(access)
     assert check_names(access, positional=(isl.dim_type.out,)) is access
+
+
+def test_a_dimension_isl_took_a_parameter_for_is_refused() -> None:
+    # Given in the text as a tuple variable, j is read as the variable in
+    # 0 <= j < j too: a well-named set with no points, and the size j gone.
+    # Only the caller knows it meant j as a parameter.
+    read = isl.Set("{ [j] : 0 <= j < j }")
+    assert check_names(read) is read
+    with pytest.raises(NamingError, match="j names a dimension and is meant as a"):
+        check_names(read, "a sum over Fin[j]", meant={"j"})
+    with pytest.raises(NamingError, match="the loops over r, i"):
+        domain_set(("r", "i"), (V("i"), V("m")))
+    with pytest.raises(NamingError, match="the loops over j"):
+        domain_set(("j",), (V("j"),))
+    # A bound may name the loops outside it.
+    triangle = domain_set(("i", "j"), (V("n"), V("i")))
+    assert triangle.get_var_names(isl.dim_type.param) == ["n"]
 
 
 def test_a_statement_or_a_sum_is_refused_a_domain_that_breaks_them() -> None:
@@ -176,6 +195,70 @@ def test_a_kernel_with_nested_sums_keeps_every_name_apart() -> None:
     a = np.arange(6.0).reshape(2, 3)
     out = LoopyExecutor().run(nested_totals, a=a, s=np.zeros(2))
     assert list(out["s"]) == [15.0, 15.0]
+
+
+# }}}
+
+
+# {{{ a binder named like a size
+
+
+@kernel
+def summed_by_its_size(
+    x: Arr[Fin[j], np.float64],  # noqa: F821
+    y: Arr[Fin[1], np.float64],  # noqa: F821
+):
+    """A sum by ``j`` over ``Fin[j]``."""
+    y[0] = reduce_sum(x[j] for j in x.dom)
+
+
+@kernel
+def summed_past_its_size(
+    x: Arr[Fin[j], np.float64],  # noqa: F821
+    y: Arr[Fin[1], np.float64],  # noqa: F821
+):
+    """A sum by ``j`` over ``Fin[j]`` that reads past ``x``."""
+    y[0] = reduce_sum(x[j + 5] for j in x.dom)
+
+
+@kernel
+def summed_by_the_rows(
+    a: Arr[Fin[i], Fin[m], np.float64],  # noqa: F821
+    s: Arr[Fin[i], np.float64],  # noqa: F821
+):
+    """A sum by ``i`` inside a loop bounded by the size ``i``."""
+    for r in a.dom:
+        s[r] = reduce_sum(a[r, i] for i in a.dom[r])
+
+
+@kernel
+def summed_after_a_loop(
+    x: Arr[Fin[n], np.float64],  # noqa: F821
+    y: Arr[Fin[n], np.float64],  # noqa: F821
+):
+    """A sum by the name of a loop that has ended."""
+    for i in x.dom:
+        y[i] = 2.0 * x[i]
+    y[0] = reduce_sum(x[i] for i in x.dom)
+
+
+def test_a_sum_by_a_binder_named_like_a_size_is_refused() -> None:
+    # The domain of a sum by j over Fin[j] was { [j] : 0 <= j < j }: no
+    # points, so the compiled sum was 0 where numpy's was not, and the
+    # in-bounds fact of x[j + 5] was decided over the empty domain. A sum by
+    # i inside a loop bounded by the size i took the loop's bound for its
+    # binder, and loopy refused to build it. Each is refused at the trace now,
+    # with the fix named.
+    for kern in (summed_by_its_size, summed_past_its_size, summed_by_the_rows):
+        with pytest.raises(TraceError, match="named like a size") as caught:
+            kern.trace()
+        assert str(caught.value).endswith("Rename the binder")
+    # A binder may take the name of a loop that has ended.
+    from loopty.executor import LoopyExecutor
+
+    x = np.arange(4.0)
+    out = LoopyExecutor().run(summed_after_a_loop, x=x, y=np.zeros(4))
+    assert list(out["y"]) == [6.0, 2.0, 4.0, 6.0]
 
 
 # }}}

@@ -72,6 +72,16 @@ All notable changes to loopty are recorded here. The format follows
   the sizes are called, and isl read the dimension `i0` as the size, `0 <= i0
   < i0`. They are named clear of the sizes now, as a polyhedral domain's
   already were (#161).
+- A sum by a binder named like a size or an integer parameter of the kernel,
+  `reduce_sum(x[j] for j in x.dom)` over `x: Arr[Fin[j], Real]`, is refused
+  at the trace, naming the fix (#161). Its domain was `{ [j] : 0 <= j < j }`,
+  a set with a well-named dimension and no points, which the name check
+  could not see: the compiled sum was `0` where numpy's was not, the
+  in-bounds fact of `x[j + 5]` was decided over the empty domain, and a sum
+  by `i` inside a loop bounded by a size `i` did not build. A loop variable
+  so named was already given a name of its own. `flow.domain_set` and a
+  polyhedral domain's points now also refuse a dimension named like a size
+  their bounds meant as a parameter (`check_names(..., meant=...)`).
 
 ## [0.1.0] - 2026-10-09
 
