@@ -111,6 +111,7 @@ def test_a_postcondition_about_reals_is_decided_with_each_equation_an_atom() -> 
 
 def test_a_statement_without_loops_is_stated_for_lean_as_storing_once() -> None:
     """One instance, so no two that differ: a part, its hypothesis ``False``."""
+    pytest.importorskip("lanky.obligations", reason="this lanky states no obligations")
     (fact,) = facts(kernels.one_cell, KIND)
     assert fact.status is Status.DECIDED
     obligation = fact.term.lean_obligation()

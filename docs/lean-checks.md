@@ -275,9 +275,9 @@ and test kernel to Lean, the casts each file's `rejected*` functions refuse
 included, from an empty proof cache. Its report, with Lean v4.29.1 (a
 file's time is Lean's on all its facts, a part's on one declaration):
 
-Of 523 facts isl decides in 16 files, Lean proved 499; 9 stay decided; 15 refuted facts have their negation proved at isl's counterexample. 260 more facts are not isl's to decide (by type, tested, assumed).
+Of 718 facts isl decides in 21 files (3 of them a theorem a kernel cites, applied to what isl decided), Lean proved 687; 14 stay decided; 17 refuted facts have their negation proved at isl's counterexample. 270 more facts are not isl's to decide (by type, tested, assumed).
 
-Not all of them are equally hard. The 81 `ordering` facts, that the source
+Not all of them are equally hard. The 97 `ordering` facts, that the source
 order runs every dependence forward, hold by the definition of a dependence
 (two instances that touch one cell, which the source runs in that order), and
 Lean's proof of them checks only that the printer states the source order the
@@ -286,52 +286,73 @@ same way twice. The others are claims isl could get wrong.
 | file | isl facts | proved | decided, not proved | refuted, negation proved | Lean time |
 |---|---:|---:|---:|---:|---:|
 | `examples/composition.py` | 10 | 10 | 0 | 0 | 1.6 s |
-| `examples/fusion.py` | 16 | 12 | 3 | 1 | 0.7 s |
-| `examples/p2p.py` | 19 | 19 | 0 | 0 | 2.1 s |
-| `examples/pairs.py` | 14 | 14 | 0 | 0 | 0.8 s |
-| `examples/reshape_layouts.py` | 16 | 16 | 0 | 0 | 1.7 s |
-| `examples/spmv.py` | 18 | 18 | 0 | 0 | 0.9 s |
-| `examples/stencil_skew.py` | 10 | 9 | 0 | 1 | 2.5 s |
-| `examples/travel.py` | 47 | 45 | 2 | 0 | 3.4 s |
-| `examples/wavefront_acoustic.py` | 24 | 21 | 0 | 3 | 9.2 s |
+| `examples/fusion.py` | 16 | 12 | 3 | 1 | 0.6 s |
+| `examples/layer_potential.py` | 15 | 15 | 0 | 0 | 0.9 s |
+| `examples/p2p.py` | 19 | 19 | 0 | 0 | 1.9 s |
+| `examples/pairs.py` | 14 | 14 | 0 | 0 | 0.6 s |
+| `examples/quadrature.py` | 12 | 12 | 0 | 0 | 0.8 s |
+| `examples/reshape_layouts.py` | 16 | 16 | 0 | 0 | 1.1 s |
+| `examples/spmv.py` | 20 | 20 | 0 | 0 | 0.7 s |
+| `examples/stencil_skew.py` | 10 | 9 | 0 | 1 | 1.9 s |
+| `examples/sum_factorization.py` | 14 | 13 | 0 | 1 | 1.3 s |
+| `examples/taylor_reconstruction.py` | 14 | 11 | 2 | 1 | 1.9 s |
+| `examples/travel.py` | 53 | 51 | 2 | 0 | 3.0 s |
+| `examples/wavefront_acoustic.py` | 24 | 21 | 0 | 3 | 9.4 s |
 | `tests/kernels/axpy.py` | 4 | 4 | 0 | 0 | 0.1 s |
-| `tests/kernels/domains.py` | 90 | 89 | 0 | 1 | 5.8 s |
-| `tests/kernels/out_of_bounds.py` | 4 | 3 | 0 | 1 | 0.2 s |
-| `tests/kernels/spmv_min.py` | 14 | 14 | 0 | 0 | 0.0 s |
+| `tests/kernels/dataflow.py` | 98 | 95 | 3 | 0 | 4.8 s |
+| `tests/kernels/domains.py` | 90 | 89 | 0 | 1 | 3.4 s |
+| `tests/kernels/out_of_bounds.py` | 4 | 3 | 0 | 1 | 0.1 s |
+| `tests/kernels/spmv_min.py` | 16 | 16 | 0 | 0 | 0.0 s |
 | `tests/kernels/stencil.py` | 5 | 5 | 0 | 0 | 0.0 s |
-| `tests/kernels/travel.py` | 64 | 61 | 2 | 1 | 2.3 s |
-| `tests/kernels/travel_wrong.py` | 168 | 159 | 2 | 7 | 9.4 s |
+| `tests/kernels/travel.py` | 70 | 67 | 2 | 1 | 1.4 s |
+| `tests/kernels/travel_wrong.py` | 194 | 185 | 2 | 7 | 6.8 s |
 
 By kind:
 
 | kind | isl facts | proved | decided, not proved | refuted, negation proved | parts | median s per part | slowest part |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| bijective | 15 | 14 | 1 | 0 | 58 | 0.130 | 0.52 s |
-| definedness | 19 | 18 | 1 | 0 | 22 | 0.085 | 0.17 s |
-| disjoint-writes | 108 | 108 | 0 | 0 | 108 | 0.022 | 0.14 s |
-| element-sort | 28 | 20 | 0 | 8 | 20 | 0.058 | 0.07 s |
-| in-bounds | 230 | 228 | 0 | 2 | 245 | 0.048 | 1.14 s |
+| bijective | 24 | 23 | 1 | 0 | 85 | 0.104 | 0.58 s |
+| by-theorem | 3 | 1 | 2 | 0 | 1 | 0.126 | 0.13 s |
+| definedness | 29 | 28 | 1 | 0 | 32 | 0.072 | 0.27 s |
+| disjoint-writes | 134 | 134 | 0 | 0 | 134 | 0.012 | 0.09 s |
+| element-sort | 28 | 20 | 0 | 8 | 20 | 0.025 | 0.06 s |
+| in-bounds | 290 | 288 | 0 | 2 | 326 | 0.028 | 1.16 s |
 | layout | 6 | 0 | 6 | 0 | 0 | - | - |
-| monotone | 20 | 14 | 1 | 5 | 115 | 0.183 | 0.58 s |
-| ordering | 81 | 81 | 0 | 0 | 226 | 0.022 | 0.11 s |
-| requirement | 16 | 16 | 0 | 0 | 16 | 0.145 | 0.43 s |
+| monotone | 31 | 23 | 1 | 7 | 153 | 0.147 | 0.76 s |
+| ordering | 97 | 97 | 0 | 0 | 312 | 0.014 | 0.08 s |
+| postcondition | 30 | 27 | 3 | 0 | 42 | 0.007 | 0.14 s |
+| requirement | 16 | 16 | 0 | 0 | 16 | 0.076 | 0.27 s |
+| single-assignment | 30 | 30 | 0 | 0 | 98 | 0.010 | 0.07 s |
 
 Every fact Lean did not prove, and why:
 
 - `examples/fusion.py`, burgers_rhs: every cell of f that burgers_rhs reads, flux.S0 has stored by the time it is read. loopty states this kind of fact for isl only, from sets isl computed, and not yet from its own description of the kernel
 - `examples/fusion.py`, burgers_rhs: substitute('f') renames the instances of burgers_rhs one for one. a substitution before this step changed what the instances read, and the dependences the step is checked against are isl's, not loopty's description
 - `examples/fusion.py`, burgers_rhs: the order after substitute('f') runs every dependence of burgers_rhs forward. a substitution before this step changed what the instances read, and the dependences the step is checked against are isl's, not loopty's description
+- `examples/taylor_reconstruction.py`, reconstruct: (forall a in Fin(p + 1), b in Fin(p + 1) where a < 2 and a + b <= p. R[a, b] == c[a, b]) and (forall a in Fin(p + 1), b in Fin(p + 1) where a + b + 2 <= p. R[a + 2, b] == -R[a, b + 2]). the claim is about real numbers, which core Lean does not have; where Mathlib is (LANKY_LEAN_MATHLIB), Lean checks it
+- `examples/taylor_reconstruction.py`, reconstruct: by on_the_triangle: forall D in Fn[Nat, Fn[Nat, Real]] where (forall a in Nat, b in Nat. D(a + 2)(b) + D(a)(b + 2) == 0) and (forall a in Fin(p + 1), b in Fin(p + 1) where a < 2 and a + b <= p. c[a, b] == D(a)(b)). forall a in Fin(p + 1), b in Fin(p + 1) where a + b <= p. R[a, b] == D(a)(b). the claim is about real numbers, which core Lean does not have; where Mathlib is (LANKY_LEAN_MATHLIB), Lean checks it
 - `examples/travel.py`, through: the rows of val stay inside their buffers and apart while scan.S0 and scan.S1 write off. loopty states this kind of fact for isl only, from sets isl computed, and not yet from its own description of the kernel
 - `examples/travel.py`, flat: the rows of wt stay inside their buffers and apart while scan_flat.S0 and scan_flat.S1 write off. loopty states this kind of fact for isl only, from sets isl computed, and not yet from its own description of the kernel
+- `tests/kernels/dataflow.py`, triangle: (forall a in Fin(p + 1), b in Fin(p + 1) where a < 2 and a + b <= p. R[a, b] == c[a, b]) and (forall a in Fin(p + 1), b in Fin(p + 1) where a + b + 2 <= p. R[a + 2, b] == -R[a, b + 2]). the claim is about real numbers, which core Lean does not have; where Mathlib is (LANKY_LEAN_MATHLIB), Lean checks it
+- `tests/kernels/dataflow.py`, reconstruct: (forall a in Fin(p + 1), b in Fin(p + 1) where a < 2 and a + b <= p. R[a, b] == c[a, b]) and (forall a in Fin(p + 1), b in Fin(p + 1) where a + b + 2 <= p. R[a + 2, b] == -R[a, b + 2]). the claim is about real numbers, which core Lean does not have; where Mathlib is (LANKY_LEAN_MATHLIB), Lean checks it
+- `tests/kernels/dataflow.py`, reconstruct: by on_the_triangle: forall D in Fn[Nat, Fn[Nat, Real]] where (forall a in Nat, b in Nat. D(a + 2)(b) + D(a)(b + 2) == 0) and (forall a in Fin(p + 1), b in Fin(p + 1) where a < 2 and a + b <= p. c[a, b] == D(a)(b)). forall a in Fin(p + 1), b in Fin(p + 1) where a + b <= p. R[a, b] == D(a)(b). the claim is about real numbers, which core Lean does not have; where Mathlib is (LANKY_LEAN_MATHLIB), Lean checks it
 - `tests/kernels/travel.py`, through: the rows of val stay inside their buffers and apart while scan.S0 and scan.S1 write off. loopty states this kind of fact for isl only, from sets isl computed, and not yet from its own description of the kernel
 - `tests/kernels/travel.py`, flat: the rows of wt stay inside their buffers and apart while scan_csr.S0 and scan_csr.S1 write off. loopty states this kind of fact for isl only, from sets isl computed, and not yet from its own description of the kernel
 - `tests/kernels/travel_wrong.py`, two_buffers: the rows of wt stay inside their buffers and apart while scan_flat.S0 and scan_flat.S1 write off. loopty states this kind of fact for isl only, from sets isl computed, and not yet from its own description of the kernel
 - `tests/kernels/travel_wrong.py`, two_buffers: the rows of wt2 stay inside their buffers and apart while scan_flat@2.S0 and scan_flat@2.S1 write off2. loopty states this kind of fact for isl only, from sets isl computed, and not yet from its own description of the kernel
 
+With Mathlib (`LANKY_LEAN_MATHLIB`), the five claims about reals among them,
+the reconstruction's postconditions and the theorem applied to them, are
+proved too (692 proved, 9 decided, the 9 facts loopty states for isl only);
+the slowest part is a postcondition's, 7.5 s, by `linarith`. Every
+`single-assignment` fact and every postcondition over integers is proved in
+core Lean.
+
 ## What stays isl's
 
 Facts loopty states for isl alone, from sets isl computes, which Lean is not
-asked about; each says so with `--verbose`, and the coverage report lists them.
+asked about, and claims core Lean has no words for; each says so with
+`--verbose`, and the coverage report lists them.
 
 - **A layout a kernel rewrites** (`the rows of val stay inside their buffers
   and apart`): an induction over the run, decided by isl over the cells a
@@ -344,6 +365,11 @@ asked about; each says so with `--verbose`, and the coverage report lists them.
   no dependence joins two work items, which is stated for isl only; the cast
   is then left `decided` as a whole; none of the examples has one; issue
   [#188](https://github.com/xywei/loopty/issues/188).
+- **A claim about reals, in core Lean:** a kernel's postcondition over a
+  `Real` array, and a theorem applied to it, are stated with Mathlib's `ℝ`;
+  without Mathlib they stay `decided`, saying why, and with it Lean proves
+  them. Issue [#227](https://github.com/xywei/loopty/issues/227) is what an
+  equation of floats means at a `NaN`.
 - **A part of a tile isl computed:** a statement in one of two tiled loops is
   split by the part of the tile's map over its loop, which isl computes; a
   cast with such a step is left `decided`; none of the examples has one;

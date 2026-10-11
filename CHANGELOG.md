@@ -38,6 +38,19 @@ All notable changes to loopty are recorded here. The format follows
   decides that conjunct instead. A family into `Nat` or a `Fin` sort stands
   for an array the kernel does not write; the cells it writes take a
   theorem over `Int`.
+
+  ```python
+  @kernel(uses=[on_the_triangle])
+  def reconstruct(c: Arr[STORED, Real], R: Arr[TRIANGLE, Real]) -> copies & recurrence:
+      ...
+  ```
+
+  ```console
+  $ lanky check examples/taylor_reconstruction.py
+  ...
+  decided under on_the_triangle  assumed    theorem      taylor_reconstruction.py:116  reconstruct      by on_the_triangle: forall D in Fn[Nat, Fn[Nat, Real]] where (forall ...
+  ...
+  ```
 - **`lanky check` lists a file's schedules** (#191). The casts of every
   schedule a file holds at module level are rows of its ledger, under the
   kernel or program they schedule, decided by isl as each step was taken
@@ -49,7 +62,6 @@ All notable changes to loopty are recorded here. The format follows
 - A matched theorem's family of families applied one index at a time,
   `R(a)(b)`, stands for an array indexed at once, `R[a, b]`, for a program's
   cited theorems too.
-
 - **Constant tables** (`loopty.table`): quadrature weights, a basis
   tabulated at the quadrature points, a differentiation matrix, declared
   next to the kernel as the numpy array they are, `W = table([1 / 6, 1 / 6,
