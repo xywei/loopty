@@ -1186,10 +1186,13 @@ tested   run          layer_potential.py:448  jump_D          D(+) - D(-) = sigm
 40 facts: 1 assumed, 33 decided, 6 tested
 ```
 
-With Lean, the 15 facts isl decided read `proved` by `lean`, the write fact
-sumpy silences among them. With Mathlib too, `line_taylor` reads `proved` by
-`lean`, and is worth `tested`: what the theorem rests on includes the reading
-of its annotations, which lanky checks by running them (the second row).
+With Lean, the 31 facts isl decided read `proved` by `lean`, the write fact
+sumpy silences and the tile's casts among them (`40 facts: 1 assumed, 2
+decided, 31 proved, 6 tested`). With Mathlib too, `line_taylor` reads `proved`
+by `lean`, by induction two orders at a time with the linear combinations
+Python found, and is worth `tested`: what the theorem rests on includes the
+reading of its annotations, which lanky checks by running them (the second
+row).
 
 ### loopty run examples/layer_potential.py
 
