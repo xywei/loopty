@@ -20,26 +20,41 @@ to write: :class:`GuardNotRead`, a ``LoopyIndexError`` still, with loopy's
 message at its end, and a :class:`~loopty.lower.LoweringError` for a call.
 :meth:`loopty.executor.LoopyExecutor.run` and :func:`loopty.executor.emit_code`
 run loopy inside it. Any other refusal is loopy's own, raised as it is.
+
+The compiled run is also refused where the native run is, at a point the
+call's sizes reach: numpy converts a Python int beside a numpy integer into
+the integer's type, and refuses one the type does not hold, so ``u[i] + (i -
+3)`` of a ``uint32`` ``u`` is refused natively at ``i = 0`` and ``a[i] * (i *
+100)`` of an ``int8`` ``a`` from ``i = 2``, where C computes both (#153).
+:func:`refuse_where_native_does` finds such a point with isl before the
+compiled run starts, and raises :class:`RefusedNatively`, an
+``OverflowError`` as numpy's is.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 import islpy as isl
+import numpy as np
 import pymbolic.primitives as prim
 from loopy.diagnostic import LoopyIndexError
 
 from loopty.lower import LoweringError, walk
-from loopty.term import ArrType, Stmt
+from loopty.term import Access, ArrType, Reduction, Stmt, Term, subtracted
 
 if TYPE_CHECKING:
     from loopty.lower import Lowering
 
-__all__ = ["GuardNotRead", "naming_the_fix"]
+__all__ = [
+    "GuardNotRead",
+    "RefusedNatively",
+    "naming_the_fix",
+    "refuse_where_native_does",
+]
 
 #: How loopy's bounds check names the instruction it refuses an access of.
 _INSTRUCTION = re.compile(r"in instruction '([^']+)'")
@@ -258,3 +273,329 @@ def _called_in_a_guard(error: KeyError, lowering: Lowering) -> LoweringError | N
         "statement first, into an array the guard then reads. abs of a real "
         "is written without a call, and needs none of this"
     )
+
+
+# {{{ loop arithmetic beside a numpy integer that does not hold it (#153)
+
+
+class RefusedNatively(OverflowError):
+    """The compiled run refused a call at a point where the native run is refused.
+
+    numpy refuses there, with an ``OverflowError``, a Python int beside a
+    numpy integer whose type does not hold it, and the compiled kernel would
+    compute a value in C's type instead (#153). The message names the point
+    and the fix.
+    """
+
+
+#: The operations numpy converts a Python int beside a numpy integer for, into
+#: the integer's type, refusing one it does not hold. A comparison compares
+#: the two exactly, and ``/`` divides them in double.
+_CONVERTING = (
+    prim.Sum,
+    prim.Product,
+    prim.FloorDiv,
+    prim.Remainder,
+    prim.Power,
+    prim.BitwiseXor,
+    prim.LeftShift,
+    prim.RightShift,
+)
+
+
+def refuse_where_native_does(term: Term, supplied: Mapping[str, Any]) -> None:
+    """Refuse the compiled run of ``term`` on ``supplied`` where the native run is.
+
+    Arithmetic of loop variables and sizes is a Python int natively, and
+    beside a numpy integer numpy converts it into the integer's type and
+    refuses a value the type does not hold (NEP 50). The compiled kernel
+    computes it in C's type, so it computed a value at a point where the
+    native run has none: ``u[i] + (i - 3)`` of a ``uint32`` ``u``, and ``y[i]
+    = i`` of an ``int8`` ``y`` from ``i = 128`` (#153). The value is known
+    only once the sizes are, which the call gives, and isl finds whether the
+    loops reach a point where the type does not hold it:
+
+    * an operation, ``+``, ``*``, ``//``, ``%``, ``**``, ``^``, ``<<`` or
+      ``>>``, of such arithmetic beside a numpy integer narrower than 64 bits
+      or an unsigned one, over the loops around the statement with no guard
+      applied, since a ``when`` masks the write and the body computes at
+      every point of its loops; inside a sum, over the sum's own. A point
+      where one of the integer's reads is out of bounds is left out: under a
+      false guard the native run reads such a cell as the Python int ``0``;
+    * a store of such arithmetic into an array stored so natively, over the
+      points the statement stores at, when its guard narrows its domain
+      whole.
+
+    An integer of 64 bits that is signed is not asked about, since loop
+    arithmetic leaves it only past 64 bits, which is #139's limit; nor is
+    arithmetic isl cannot read, a product of two loop variables say, nor
+    loops whose bounds the call's sizes do not fix, a ragged row's: those are
+    left to the native refusal.
+    """
+    from loopty.contract import resolve_sizes
+    from loopty.promotion import Promotion
+
+    sizes = resolve_sizes(dict(term.params), supplied)
+    promotion = Promotion(term)
+    for stmt in term.stmts:
+        loops = stmt.loop_domain if stmt.loop_domain is not None else stmt.domain
+        parts = (stmt.assignee.indices, stmt.expr, stmt.guard)
+        for part in parts:
+            _operations(part, term, stmt, promotion, loops, sizes)
+        _store(term, stmt, promotion, sizes)
+
+
+def _operations(
+    expr: Any,
+    term: Term,
+    stmt: Stmt,
+    promotion: Any,
+    loops: isl.Set,
+    sizes: Mapping[str, int],
+) -> None:
+    """:func:`refuse_where_native_does` of the operations in ``expr``."""
+    from lanky.terms import init_args
+
+    if expr is None:
+        return
+    if isinstance(expr, Reduction):
+        inner = expr.loop_domain if expr.loop_domain is not None else expr.domain
+        _operations(expr.body, term, stmt, promotion, inner, sizes)
+        return
+    if isinstance(expr, Access):
+        _operations(expr.indices, term, stmt, promotion, loops, sizes)
+        return
+    if isinstance(expr, tuple | list):
+        for item in expr:
+            _operations(item, term, stmt, promotion, loops, sizes)
+        return
+    if not isinstance(expr, prim.ExpressionNode):
+        return
+    if isinstance(expr, _CONVERTING):
+        _operation(expr, term, stmt, promotion, loops, sizes)
+    for arg in init_args(expr):
+        _operations(arg, term, stmt, promotion, loops, sizes)
+
+
+def _operands(node: Any) -> tuple[Any, ...]:
+    """The operands of an operation of :data:`_CONVERTING`, in numpy's order."""
+    if isinstance(node, prim.Sum | prim.Product | prim.BitwiseXor):
+        return tuple(node.children)
+    if isinstance(node, prim.Power):
+        return (node.base, node.exponent)
+    if isinstance(node, prim.LeftShift | prim.RightShift):
+        return (node.shiftee, node.shift)
+    return (node.numerator, node.denominator)
+
+
+def _operation(
+    node: Any,
+    term: Term,
+    stmt: Stmt,
+    promotion: Any,
+    loops: isl.Set,
+    sizes: Mapping[str, int],
+) -> None:
+    """:func:`refuse_where_native_does` of one operation, operand by operand.
+
+    numpy computes a sum or a product of several from the left, so an
+    operand after the first stands beside what the ones before it make, and
+    the first beside the second. A difference subtracts the operand its last
+    term negates (:func:`loopty.term.subtracted`).
+    """
+    from loopty.promotion import _subtrahend
+
+    operands = _operands(node)
+    steps = promotion.steps(node)
+    accumulated = promotion.types(operands[0])[0]
+    for position, operand in enumerate(operands[1:], start=1):
+        native = promotion.types(operand)[0]
+        pairs = [(operand, native, accumulated, operands[:position])]
+        if position == 1:
+            pairs.append((operands[0], accumulated, native, (operand,)))
+        for value, value_native, beside, others in pairs:
+            if value is operand and subtracted(node, position):
+                inner = _subtrahend(value)
+                if inner is not None:
+                    value, value_native = inner, promotion.types(inner)[0]
+            dtype = _narrow_integer(beside)
+            if dtype is None or not _loop_arithmetic(value, value_native):
+                continue
+            leaves = _leaves(value, dtype, loops, sizes, term, others)
+            if leaves is None:
+                continue
+            raise RefusedNatively(_operation_message(node, value, dtype, leaves, stmt))
+        if position - 1 < len(steps):
+            accumulated = steps[position - 1].native
+
+
+def _store(
+    term: Term, stmt: Stmt, promotion: Any, sizes: Mapping[str, int]
+) -> None:
+    """:func:`refuse_where_native_does` of the store a statement makes."""
+    from loopty.contract import native_storage
+
+    if stmt.unnarrowed:
+        # Its domain holds points its guard masks, at which nothing is stored.
+        return
+    typ = dict(term.params).get(stmt.assignee.array)
+    if typ is None:
+        typ = dict(term.temporaries).get(stmt.assignee.array)
+    if not isinstance(typ, ArrType):
+        return
+    stored = native_storage(typ.dtype)
+    if stored is None or stored.kind not in "iu":
+        return
+    dtype = _narrow_integer((stored.type(0),))
+    value = stmt.expr
+    if dtype is None or not _loop_arithmetic(value, promotion.types(value)[0]):
+        return
+    leaves = _leaves(value, dtype, stmt.domain, sizes, term, ())
+    if leaves is None:
+        return
+    raise RefusedNatively(
+        f"the compiled run of {term.name} stops before it starts: the store of "
+        f"{_shown(value)} into {stmt.assignee.array} at {stmt.where} stores a "
+        f"Python int into an array of {dtype}, which does not hold it, "
+        f"{leaves}. numpy refuses it there ('Python integer out of bounds for "
+        f"{dtype}'), so the native run stops there, and the compiled kernel "
+        "would convert it as C does and store a value where the native one "
+        f"has none. Give {stmt.assignee.array} a type that holds it, as an "
+        f"array of Int, or keep the value inside {dtype}"
+    )
+
+
+def _narrow_integer(native: Any) -> np.dtype | None:
+    """The dtype of a native type that is one numpy integer narrower than 64
+    bits, or an unsigned one, of any width: what loop arithmetic can leave."""
+    dtype = None
+    for sample in native or ():
+        if not isinstance(sample, np.integer):
+            return None
+        if dtype is not None and sample.dtype != dtype:
+            return None
+        dtype = sample.dtype
+    if dtype is None or (dtype.itemsize == 8 and dtype.kind == "i"):
+        return None
+    return dtype
+
+
+def _loop_arithmetic(expr: Any, native: Any) -> bool:
+    """Whether ``expr`` is arithmetic of loop variables and sizes.
+
+    A Python int natively, and no literal: the trace refuses a literal a
+    numpy integer does not hold, at every point (#141).
+    """
+    from loopty.promotion import _weak_integers
+
+    if isinstance(expr, bool | int | np.generic):
+        return False
+    return bool(native) and _weak_integers(native)
+
+
+def _leaves(
+    expr: Any,
+    dtype: np.dtype,
+    loops: isl.Set,
+    sizes: Mapping[str, int],
+    term: Term,
+    others: Sequence[Any],
+) -> str | None:
+    """Where the loop arithmetic ``expr`` leaves ``dtype``, at the call's sizes.
+
+    ``loops`` with its parameters fixed to ``sizes``, less the points where a
+    read in ``others`` is out of bounds, and the least point there at which
+    the value of ``expr`` is outside ``dtype``, as ``-3 at i = 0``. ``None``
+    where there is none, and where isl cannot say: ``expr`` is not
+    quasi-affine, or a parameter of the loops or of ``expr`` is no size the
+    call fixes.
+    """
+    from lanky.terms import evaluate
+
+    from loopty import flow
+    from loopty.trace import accesses_in
+
+    info = np.iinfo(dtype)
+    try:
+        text = flow.expr_text(expr, None, None)
+    except (flow.NonAffine, TypeError, ValueError):
+        return None
+    dims = list(loops.get_var_names(isl.dim_type.set))
+    named = flow.free_names(text)
+    params = sorted((named | set(loops.get_var_names(isl.dim_type.param))) - set(dims))
+    if any(name not in sizes for name in params):
+        return None
+    fixed = " and ".join(f"{name} = {sizes[name]}" for name in params) or "true"
+    try:
+        outside = isl.Set(
+            f"[{', '.join(params)}] -> {{ [{', '.join(dims)}] : "
+            f"({text} < {int(info.min)} or {text} > {int(info.max)}) and {fixed} }}"
+        )
+        loops = loops.align_params(outside.get_space().params())
+        outside = outside.align_params(loops.get_space().params()).intersect(loops)
+        types = dict(term.params)
+        for access in accesses_in(tuple(others)):
+            arrtype = types.get(access.array)
+            if not isinstance(arrtype, ArrType):
+                continue
+            relation = flow.access_relation(dims, outside, access.indices)
+            cells = flow.cell_set(arrtype, access.indices, reflections=term.reflections)
+            cells = cells.align_params(relation.get_space().params())
+            relation = relation.align_params(cells.get_space().params())
+            inside = relation.intersect_range(cells).domain()
+            outside, inside = isl.align_two(outside, inside)
+            outside = outside.intersect(inside)
+        if outside.is_empty():
+            return None
+        point = outside.lexmin().sample_point()
+        values = {
+            name: int(point.get_coordinate_val(isl.dim_type.set, k).to_python())
+            for k, name in enumerate(dims)
+        }
+    except (isl.Error, flow.NonAffine, ValueError):
+        return None
+    values.update({name: sizes[name] for name in params})
+    try:
+        value = str(evaluate(expr, values))
+    except Exception:  # noqa: BLE001 - the point says where without it
+        value = "a value outside it"
+    at = ", ".join(f"{name} = {values[name]}" for name in dims)
+    return f"{value} at {at}" if at else value
+
+
+def _operation_message(
+    node: Any, value: Any, dtype: np.dtype, leaves: str, stmt: Stmt
+) -> str:
+    """Why the compiled run refuses loop arithmetic beside ``dtype``, and the fix."""
+    shown = _shown(value)
+    bracketed = shown if isinstance(value, prim.Variable) else f"({shown})"
+    article = "an" if dtype.name.startswith("int") else "a"
+    double = " (in double beside a uint64)" if dtype == np.uint64 else ""
+    return (
+        f"the compiled run stops before it starts: {_written(node)} at "
+        f"{stmt.where} computes the loop arithmetic {shown} with {article} "
+        f"{dtype} value, whose type does not hold it, {leaves}. numpy refuses "
+        f"it there ('Python integer out of bounds for {dtype}', NEP 50), so "
+        "the native run stops there, and the compiled kernel would compute a "
+        "value in C's type where the native one has none. Compute it in int64, "
+        f"'{bracketed} * np.int64(1)', with which numpy computes in a type that "
+        f"holds both{double}, as the compiled run does too, or keep it inside "
+        f"{dtype}"
+    )
+
+
+def _shown(value: Any) -> str:
+    """A term as the trace's messages print it."""
+    from loopty.trace import _shown as shown
+
+    return shown(value)
+
+
+def _written(value: Any) -> str:
+    """A sum as the body wrote it (:func:`loopty.trace._written`)."""
+    from loopty.trace import _written as written
+
+    return written(value)
+
+
+# }}}

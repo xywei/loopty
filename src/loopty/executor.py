@@ -378,7 +378,11 @@ class LoopyExecutor:
         with the readings it was lowered with; :meth:`differential` runs the
         kernel through here. Where loopy refuses an access under a guard it
         does not read, or a function only a guard calls, the error names the
-        statement and the fix (:func:`loopty.refusal.naming_the_fix`).
+        statement and the fix (:func:`loopty.refusal.naming_the_fix`). A call
+        whose sizes reach a point where the native run is refused, loop
+        arithmetic beside a numpy integer whose type does not hold it, is
+        refused before anything is compiled
+        (:func:`loopty.refusal.refuse_where_native_does`, #153).
         """
         term, kernel, lowering, target_name = _resolve(obj, self.target)
         names = [name for name, _ in term.params]
@@ -391,11 +395,12 @@ class LoopyExecutor:
         )
         inherited_storage(term.array_types, term.temporaries_like, supplied)
         checked_storage(term, supplied)
+        from loopty.refusal import naming_the_fix, refuse_where_native_does
+
+        refuse_where_native_does(term, supplied)
         layouts = _declared_layouts(term, lowering, supplied)
         call = _call_arguments(term, lowering, args, kwargs, layouts)
         call, empty = _pad_empty_arrays(call, lowering)
-        from loopty.refusal import naming_the_fix
-
         with naming_the_fix(lowering):
             if target_name == "opencl":
                 out = self._run_opencl(kernel, lowering, call)

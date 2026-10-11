@@ -3136,3 +3136,135 @@ def test_a_bitwise_operation_of_a_uint64_and_a_signed_integer_is_refused():
 
 
 # }}}
+
+
+# {{{ loop arithmetic beside a numpy integer that does not hold it (#153)
+
+
+@kernel
+def runtime_negative(u: Arr[Fin[n], np.uint32], y: Arr[Fin[n], Int]):  # noqa: F821
+    """``i - 3`` beside a ``uint32``, which numpy refuses at ``i = 0``."""
+    for i in u.dom:
+        y[i] = u[i] + (i - 3)
+
+
+@kernel
+def runtime_negative_fixed(
+    u: Arr[Fin[n], np.uint32],  # noqa: F821
+    y: Arr[Fin[n], Int],  # noqa: F821
+):
+    """The fix its refusal names: the loop arithmetic in int64."""
+    for i in u.dom:
+        y[i] = u[i] + (i - 3) * np.int64(1)
+
+
+@kernel
+def runtime_wide(a: Arr[Fin[n], np.int8], y: Arr[Fin[n], Int]):  # noqa: F821
+    """``i * 100`` beside an ``int8``, which numpy refuses from ``i = 2``."""
+    for i in a.dom:
+        y[i] = a[i] * (i * 100)
+
+
+@kernel
+def guarded_negative(u: Arr[Fin[n], np.uint32], y: Arr[Fin[n], Int]):  # noqa: F821
+    """``i - 3`` under a guard that masks the write and not the arithmetic."""
+    for i in u.dom:
+        with when(i >= 3):
+            y[i] = u[i] + (i - 3)
+
+
+@kernel
+def summed_negative(a: Arr[Fin[n], np.uint16], y: Arr[Fin[n], Int]):  # noqa: F821
+    """``j - i`` beside a ``uint16`` in a sum, which numpy refuses at ``j < i``."""
+    for i in a.dom:
+        y[i] = reduce_sum(a[j] * (j - i) for j in a.dom)
+
+
+@kernel
+def stored_index(y: Arr[Fin[n], np.int8]):  # noqa: F821
+    """A loop variable stored into an ``int8``, which numpy refuses from 128."""
+    for i in y.dom:
+        y[i] = i
+
+
+@kernel
+def within_the_type(
+    u: Arr[Fin[n], np.uint32],  # noqa: F821
+    a: Arr[Fin[n], np.int8],  # noqa: F821
+    y: Arr[Fin[n], Int],  # noqa: F821
+):
+    """Loop arithmetic the types hold at every point a loop of 32 bits reaches."""
+    for i in u.dom:
+        y[i] = (u[i] + i) + a[i] * (i % 7)
+
+
+@kernel
+def stored_literal(y: Arr[Fin[n], np.uint8]):  # noqa: F821
+    """``300`` stored into a ``uint8``, which numpy refuses at every point."""
+    for i in y.dom:
+        y[i] = 300
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_loop_arithmetic_a_numpy_integer_does_not_hold_is_refused_compiled_too():
+    # numpy converts a Python int beside a numpy integer into its type, and
+    # refuses one the type does not hold: the native run stops there, and the
+    # compiled run computed u[i] + (i - 3) at i = 0, and a[i] * (i * 100)
+    # wrapped round in int8 from i = 2. The point is known once the sizes
+    # are, and the compiled run is refused there, before it starts.
+    from loopty.refusal import RefusedNatively
+
+    def unsigned(size: int) -> dict:
+        return {"u": np.arange(size, dtype=np.uint32), "y": np.zeros(size, np.int64)}
+
+    with pytest.raises(OverflowError, match="-3 out of bounds for uint32"):
+        runtime_negative(**unsigned(4))
+    with pytest.raises(RefusedNatively, match="-3 at i = 0") as refused:
+        LoopyExecutor().run(runtime_negative, **unsigned(4))
+    assert isinstance(refused.value, OverflowError)
+    message = str(refused.value)
+    assert "u[i] + (i - 3) at test_arithmetic.py:" in message
+    assert "'(i - 3) * np.int64(1)'" in message
+    agrees(runtime_negative_fixed, lambda: unsigned(5))
+    # Under a guard as well: the body computes at every point of its loop.
+    with pytest.raises(OverflowError, match="-3 out of bounds"):
+        guarded_negative(**unsigned(4))
+    with pytest.raises(RefusedNatively, match="-3 at i = 0"):
+        LoopyExecutor().run(guarded_negative, **unsigned(4))
+    # In a sum, over the sum's own loop too.
+    summed = {"a": np.ones(3, np.uint16), "y": np.zeros(3, np.int64)}
+    with pytest.raises(OverflowError, match="-1 out of bounds for uint16"):
+        summed_negative(**dict(summed))
+    with pytest.raises(RefusedNatively, match="-1 at i = 1, j = 0"):
+        LoopyExecutor().run(summed_negative, **summed)
+
+    # Where the sizes do not reach such a point, the two runs agree.
+    def narrow(size: int) -> dict:
+        return {"a": np.full(size, 3, np.int8), "y": np.zeros(size, np.int64)}
+
+    agrees(runtime_wide, lambda: narrow(2))
+    with pytest.raises(OverflowError, match="200 out of bounds for int8"):
+        runtime_wide(**narrow(3))
+    with pytest.raises(RefusedNatively, match="200 at i = 2"):
+        LoopyExecutor().run(runtime_wide, **narrow(3))
+    agrees(stored_index, lambda: {"y": np.zeros(128, np.int8)})
+    with pytest.raises(OverflowError, match="128 out of bounds for int8"):
+        stored_index(y=np.zeros(129, np.int8))
+    with pytest.raises(RefusedNatively, match="128 at i = 128"):
+        LoopyExecutor().run(stored_index, y=np.zeros(129, np.int8))
+    agrees(
+        within_the_type,
+        lambda: {
+            "u": np.full(300, 2**32 - 1, np.uint32),
+            "a": np.full(300, -128, np.int8),
+            "y": np.zeros(300, np.int64),
+        },
+    )
+    # A literal no point holds is refused by the trace, as #141's are.
+    with pytest.raises(OverflowError, match="300 out of bounds for uint8"):
+        stored_literal(y=np.zeros(2, np.uint8))
+    with pytest.raises(TraceError, match="the store of 300 into y"):
+        stored_literal.trace()
+
+
+# }}}

@@ -2507,6 +2507,7 @@ class SymArr:
         _refuse_bitwise(indices, sorts, where)
         _refuse_bitwise(expr, sorts, where, truth=_holds_truth(self.type.dtype))
         _refuse_arithmetic((indices, expr), sorts, where)
+        _refuse_unheld_store(self, expr, where)
         assignee = Access(self.name, indices)
         kind = "accumulate" if _reads_assignee(expr, assignee) else "assign"
         tracer.record(assignee, expr, kind, where, source=value)
@@ -3068,6 +3069,12 @@ def _refuse_arithmetic(expr: Any, params: Mapping[str, Any], where: str) -> None
       numpy in a real or a ``uint64`` that holds it (#140): ``x[i] * 2**70``
       is written as a double, and ``i + 2**64``, which Python computes
       exactly, is refused, naming ``2.0 ** 64``.
+
+    Arithmetic of loop variables and sizes beside a numpy integer that does
+    not hold its value at some point of the loops is refused natively there,
+    and by the compiled run where the call's sizes reach such a point
+    (:func:`loopty.refusal.refuse_where_native_does`, #153): the trace knows
+    no sizes.
     """
     from loopty.promotion import Promotion
 
@@ -3290,6 +3297,38 @@ def _unheld(value: int, native: Any) -> np.dtype | None:
             if not int(info.min) <= value <= int(info.max):
                 return sample.dtype
     return None
+
+
+def _refuse_unheld_store(array: SymArr, value: Any, where: str) -> None:
+    """Refuse a literal stored into an integer array whose type does not hold it.
+
+    numpy converts a Python int stored into an integer array into its dtype,
+    and refuses one it does not hold, at every point, an unsigned array's
+    included: ``y[i] = 300`` of a ``uint8`` ``y``. The compiled kernel
+    converts it as C does, and wraps round. A store of loop arithmetic the
+    array's type does not hold at some point is refused when the compiled
+    run is asked for, where the sizes are known
+    (:func:`loopty.refusal.refuse_where_native_does`, #153).
+    """
+    from loopty.contract import native_storage
+
+    if not isinstance(value, int) or isinstance(value, bool):
+        return
+    stored = native_storage(array.type.dtype)
+    if stored is None or stored.kind not in "iu":
+        return
+    info = np.iinfo(stored)
+    if info.min <= value <= info.max:
+        return
+    raise TraceError(
+        f"the store of {value} into {array.name} at {where} stores a Python int "
+        f"into an array of {stored}, whose type does not hold it: numpy "
+        f"refuses it at every point ('Python integer {value} out of bounds for "
+        f"{stored}'), while the compiled kernel converts it as C does and "
+        "wraps round, so the compiled run would store a value where the native "
+        f"one has none. Give {array.name} a type that holds it, as an array of "
+        f"Int, or store a value inside {stored}"
+    )
 
 
 def _refuse_untyped_literals(expr: Any, promotion: Any, where: str) -> None:
