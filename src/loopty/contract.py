@@ -97,6 +97,7 @@ from loopty.term import ArrType
 
 __all__ = [
     "CHECKED_STORAGE",
+    "CONVERSIONS",
     "INDEX_RANGE",
     "INDEX_STORAGE",
     "INT64_RANGE",
@@ -107,6 +108,8 @@ __all__ = [
     "check_arguments",
     "checked_storage",
     "compiled_storage",
+    "conversion_name",
+    "convert_scalar",
     "counts_family",
     "disjoint_arguments",
     "domain_arguments",
@@ -935,6 +938,45 @@ def native_copy(value: Any, dtype: np.dtype) -> Any:
     return value._replaced(converted) if isinstance(value, Arr) else converted
 
 
+#: The conversions of a scalar into a numpy type, by the name a term's call
+#: gives each, ``np.float32``: what a kernel called inside another kernel's
+#: loop does to a scalar it is given, as :func:`native_scalar` does natively
+#: (:meth:`loopty.calls._Inlining.converted`). The interpreter computes each
+#: with :func:`convert_scalar`, and the lowering writes it as a cast
+#: (:meth:`loopty.lower.ExpressionLowerer._conversion`). ``float16`` is not
+#: here: the compiled kernel has no such type.
+CONVERSIONS: dict[str, np.dtype] = {
+    f"np.{np.dtype(kind).type.__name__}": np.dtype(kind)
+    for kind in (
+        np.bool_, np.int8, np.int16, np.int32, np.int64, np.uint8, np.uint16,
+        np.uint32, np.uint64, np.float32, np.float64, np.complex64, np.complex128,
+    )
+}
+
+
+def conversion_name(dtype: np.dtype) -> str:
+    """The name a term's call of the conversion into ``dtype`` has, ``np.float32``."""
+    return f"np.{dtype.type.__name__}"
+
+
+def convert_scalar(dtype: np.dtype, value: Any) -> Any:
+    """``value`` as a numpy scalar of ``dtype``, as a kernel's contract converts it.
+
+    The number itself when it is one of ``dtype`` already; ``np.bool_`` of its
+    real part for a truth value, and ``dtype`` of its real part for a complex
+    number converted into a type that is not complex, whose imaginary part
+    the contract has required to be zero (:func:`scalar_parameters`). A
+    Python int ``dtype`` does not hold raises, as numpy does.
+    """
+    if isinstance(value, np.generic) and value.dtype == dtype:
+        return value
+    if dtype.kind == "b":
+        return np.bool_(np.real(value))
+    if np.iscomplexobj(value) and dtype.kind != "c":
+        value = np.real(value)
+    return dtype.type(value)
+
+
 def native_scalar(sort: Any, value: Any) -> Any:
     """A scalar argument as the native run computes with it, for ``sort``.
 
@@ -980,13 +1022,7 @@ def native_scalar(sort: Any, value: Any) -> Any:
             return value
     if np.ndim(value) or got.kind not in "biufc":
         return value
-    if isinstance(value, np.generic) and value.dtype == want:
-        return value
-    if want.kind == "b":
-        return np.bool_(np.real(value))
-    if got.kind == "c" and want.kind != "c":
-        value = np.real(value)
-    return want.type(value)
+    return convert_scalar(want, value)
 
 
 def _shown_sort(sort: Any) -> str:

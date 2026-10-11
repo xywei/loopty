@@ -53,6 +53,7 @@ for, or a domain it cannot enumerate at the given sizes, is an
 from __future__ import annotations
 
 import builtins
+import functools
 import operator
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -65,6 +66,8 @@ from lanky.terms import Abs, evaluate, init_args, render
 
 from loopty.arr import Arr
 from loopty.contract import (
+    CONVERSIONS,
+    convert_scalar,
     native_copy,
     native_scalar,
     native_storage,
@@ -141,6 +144,12 @@ _FUNCTIONS = {
     "real": np.real,
     "imag": np.imag,
     "conj": np.conj,
+    # A scalar a called kernel converts into its sort's storage, as its
+    # contract does natively (loopty.calls): np.float32 and the rest.
+    **{
+        name: functools.partial(convert_scalar, dtype)
+        for name, dtype in CONVERSIONS.items()
+    },
 }
 
 _COMPARISONS = {

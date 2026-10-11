@@ -21,7 +21,7 @@ import islpy as isl
 import numpy as np
 import pytest
 from lanky.ledger import Status
-from lanky.prelude import Nat, Real
+from lanky.prelude import Bool, Int, Nat, Real
 from lanky.terms import render
 
 from loopty import (
@@ -38,6 +38,7 @@ from loopty import (
 )
 from loopty.executor import LoopyExecutor, emit_code
 from loopty.faithful import KIND
+from loopty.refusal import RefusedNatively
 from loopty.term import Reduction
 
 calls = importlib.import_module("kernels.calls")
@@ -877,6 +878,192 @@ def test_a_rule_under_a_false_guard_is_not_called_natively() -> None:
 
 
 # }}}
+
+
+# {{{ a scalar converted into the sort the callee declares (#232)
+
+
+def _three_runs(caller, inputs, output):
+    """``output`` after the native, interpreted and compiled runs of ``caller``."""
+    from loopty.interpret import interpret
+
+    runs = []
+    for run in (
+        lambda args: caller(**args),
+        lambda args: interpret(caller.term, args),
+        lambda args: LoopyExecutor().run(caller, **args),
+    ):
+        args = {name: Arr.from_numpy(np.array(value)) for name, value in inputs.items()}
+        run(args)
+        runs.append(args[output].numpy())
+    return runs
+
+
+def test_a_scalar_argument_is_converted_into_the_callees_sort() -> None:
+    # Natively same's contract rounds x[i] to single precision; the inlined
+    # term used to compute with the double.
+    @kernel
+    def same(s: np.float32) -> np.float32:
+        return s
+
+    @kernel
+    def rounded(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = same(x[i])
+
+    x = np.array([0.1, 2.7, 1e-8, 1 / 3])
+    inputs = {"x": x, "y": np.zeros(4)}
+    native, interpreted, compiled = _three_runs(rounded, inputs, "y")
+    np.testing.assert_array_equal(native, x.astype(np.float32))
+    np.testing.assert_array_equal(interpreted, native)
+    np.testing.assert_array_equal(compiled, native)
+    (stmt,) = rounded.term.stmts
+    assert render(stmt.expr) == "np.float32(x[i])"
+
+
+def test_a_loop_variable_given_for_an_integer_is_a_numpy_integer() -> None:
+    # Natively s is np.int64(i), so s * w[0] is a double beside a float32;
+    # the loop variable i, a Python int, made it single precision inlined.
+    # Its index reads as the caller's own, A[i, i], and isl decides it.
+    @kernel
+    def scaled(a: Arr[Fin[k], Real], w: Arr[Fin[1], np.float32], s: Int) -> Real:  # noqa: F821
+        return s * w[0] * a[s]
+
+    @kernel
+    def diagonal(
+        A: Arr[Fin[m], Fin[m], Real],  # noqa: F821
+        w: Arr[Fin[1], np.float32],
+        y: Arr[Fin[m], Real],  # noqa: F821
+    ):
+        for i in y.dom:
+            y[i] = scaled(A[i], w, i)
+
+    A = np.arange(25.0).reshape(5, 5)
+    inputs = {"A": A, "w": np.array([0.1], dtype=np.float32), "y": np.zeros(5)}
+    native, interpreted, compiled = _three_runs(diagonal, inputs, "y")
+    expected = [np.int64(i) * np.float32(0.1) * A[i, i] for i in range(5)]
+    np.testing.assert_array_equal(native, expected)
+    np.testing.assert_array_equal(interpreted, native)
+    np.testing.assert_array_equal(compiled, native)
+    (stmt,) = diagonal.term.stmts
+    assert render(stmt.expr) == "np.int64(i)*w[0]*A[i, i]"
+    (read,) = [
+        f for f in _facts(diagonal, "in-bounds") if f.statement.startswith("A[i, i]")
+    ]
+    assert _decided(read).status is Status.DECIDED
+
+
+def test_a_scalar_the_contract_refuses_is_refused_where_it_is_passed() -> None:
+    @kernel
+    def counted(s: Int) -> Real:
+        return s * 1.0
+
+    @kernel
+    def halved(s: Real) -> Real:
+        return s / 2
+
+    @kernel
+    def flagged(s: Bool) -> Real:
+        return s * 1.0
+
+    @kernel
+    def from_reals(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = counted(x[i])
+
+    @kernel
+    def from_complex(z: Arr[Fin[n], np.complex128], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = halved(z[i])
+
+    @kernel
+    def from_integers(k: Arr[Fin[n], Int], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = flagged(k[i])
+
+    with pytest.raises(TraceError, match="which is not an integer: natively"):
+        from_reals.term
+    with pytest.raises(TraceError, match=r"Pass real\(z\[i\]\)"):
+        from_complex.term
+    with pytest.raises(TraceError, match=r"Pass a truth value, such as k\[i\] != 0"):
+        from_integers.term
+    with pytest.raises(ValueError, match="a float"):
+        from_reals(Arr.from_numpy(np.array([0.5])), Arr.zeros(1))
+
+
+def test_a_python_int_a_narrow_integer_does_not_hold_is_refused_alike() -> None:
+    # Natively numpy refuses np.int8(i + 125) from i = 3; compiled, C wraps it.
+    @kernel
+    def small(s: np.int8) -> Real:
+        return s * 1.0
+
+    @kernel
+    def past(y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = small(i + 125)
+
+    @kernel
+    def short_of(y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(i < 3):
+                y[i] = small(i + 125)
+
+    @kernel
+    def literal(y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = small(300)
+
+    with pytest.raises(OverflowError, match="out of bounds for int8"):
+        past(Arr.zeros(4))
+    with pytest.raises(RefusedNatively, match="from i = 3|at i = 3"):
+        LoopyExecutor().run(past, y=Arr.zeros(4))
+    native, interpreted, compiled = _three_runs(short_of, {"y": np.zeros(4)}, "y")
+    np.testing.assert_array_equal(native, [125.0, 126.0, 127.0, 0.0])
+    np.testing.assert_array_equal(interpreted, native)
+    np.testing.assert_array_equal(compiled, native)
+    with pytest.raises(TraceError, match=r"numpy refuses that \(Python integer 300"):
+        literal.term
+
+
+# }}}
+
+
+def test_a_callee_with_positional_only_parameters_is_called_in_order() -> None:
+    # #233: the body was called by keyword, which Python refuses for a
+    # parameter before the /.
+    @kernel
+    def dot(a: Arr[Fin[n], Real], b: Arr[Fin[n], Real], /) -> Real:  # noqa: F821
+        return reduce_sum(a[k] * b[k] for k in a.dom)
+
+    @kernel
+    def matvec(
+        A: Arr[Fin[m], Fin[n], Real],  # noqa: F821
+        x: Arr[Fin[n], Real],  # noqa: F821
+        y: Arr[Fin[m], Real],  # noqa: F821
+    ):
+        for i in y.dom:
+            y[i] = dot(A[i], x)
+
+    @kernel
+    def by_name(
+        A: Arr[Fin[m], Fin[n], Real],  # noqa: F821
+        x: Arr[Fin[n], Real],  # noqa: F821
+        y: Arr[Fin[m], Real],  # noqa: F821
+    ):
+        for i in y.dom:
+            y[i] = dot(A[i], b=x)
+
+    A, x = RNG.standard_normal((3, 2)), RNG.standard_normal(2)
+    native, interpreted, compiled = _three_runs(
+        matvec, {"A": A, "x": x, "y": np.zeros(3)}, "y"
+    )
+    np.testing.assert_allclose(native, A @ x)
+    np.testing.assert_array_equal(interpreted, native)
+    np.testing.assert_allclose(compiled, native)
+    with pytest.raises(TraceError, match="positional-only"):
+        by_name.term
+    with pytest.raises(TypeError, match="positional-only"):
+        by_name(Arr.from_numpy(A), Arr.from_numpy(x), Arr.zeros(3))
 
 
 def test_one_index_row_two_gathers_read_through_is_one_fact() -> None:

@@ -2444,6 +2444,25 @@ def _key_of(indices: Sequence[Any]) -> Any:
     return indices[0] if len(indices) == 1 else tuple(indices)
 
 
+def _exact_key(key: Any, tracer: Any) -> Any:
+    """``key`` without the conversions of a called kernel's scalars it does not need.
+
+    See :func:`loopty.calls.exact`: ``A[i, np.int64(j)]`` is ``A[i, j]``.
+    """
+    if tracer is None:
+        return key
+    from loopty.calls import exact_key
+
+    return exact_key(key, tracer)
+
+
+def _exact_guard(condition: Any, tracer: Any) -> Any:
+    """A guard without the conversions of a called kernel's scalars it does not need."""
+    from loopty.calls import exact
+
+    return exact(condition, tracer, truth=True)
+
+
 def _subscript(name: str, indices: Sequence[Any]) -> Subscript:
     """Build ``name[i]`` or ``name[i, j]`` as a pymbolic subscript."""
     index = indices[0] if len(indices) == 1 else tuple(indices)
@@ -2526,6 +2545,7 @@ class SymDom:
         one index, the tuple, and gave the domain of axis 1 whatever the length
         of the tuple.
         """
+        index = _exact_key(index, self.array.tracer)
         if _whole_key(index):
             raise TraceError(
                 f"{_domain_text(self)}[{_key_text(index)}] at "
@@ -2827,6 +2847,7 @@ class SymArr:
         whole array is, with the loop nest to write.
         """
         where = _location(sys._getframe(1))
+        key = _exact_key(key, self.tracer)
         view = self._view_of(key, where)
         if view is not None:
             return view
@@ -2853,6 +2874,7 @@ class SymArr:
     def __setitem__(self, key: Any, value: Any) -> None:
         """Write: record a statement at the caller's file and line."""
         where = _location(sys._getframe(1))
+        key = _exact_key(key, self.tracer)
         self._refuse_whole(key, where, write=True)
         self._store(_index_tuple(key), value, where)
 
@@ -4883,6 +4905,7 @@ class when:  # noqa: N801 - a context manager written like a statement
             tracer = self.tracer
             sorts = {**tracer.params, **tracer.array_types}
             where = _location(sys._getframe(1))
+            self.condition = _exact_guard(self.condition, tracer)
             _refuse_bitwise(self.condition, sorts, where, truth=True)
             _refuse_arithmetic(self.condition, sorts, where)
             tracer.push_guard(self.condition)

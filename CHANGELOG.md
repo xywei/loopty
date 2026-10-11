@@ -53,8 +53,19 @@ All notable changes to loopty are recorded here. The format follows
   the value of a scalar argument is owed in bounds at every point of the
   call, whether the callee uses the parameter or not, and a call whose
   callee writes an array an argument reads (`scale(A[i], A[i, 0])`) is
-  refused, naming both. A rule may be applied to a function that applies
-  it again, `integrate(lambda q: integrate(lambda p: ...))`; a kernel that
+  refused, naming both. A scalar argument is converted into the sort the
+  callee declares, as its contract converts it natively (#232): a double
+  given for `s: np.float32` is `np.float32(x[i])` in the caller's term,
+  which the interpreter computes as numpy does and the lowering writes as
+  C's cast, and a loop variable given for `Int` is a numpy `int64` beside a
+  `float32`, while an index or a comparison of it reads as the caller's
+  own, `A[i, i]`. What the contract refuses is refused where it is passed:
+  a real or a truth value for an integral sort, a number for `Bool`, a
+  complex value for a real sort (naming `real(z[i])`), a literal numpy
+  does not convert (`300` for `np.int8`), and, when the compiled run is
+  asked for, loop arithmetic a narrow integer does not hold where the call
+  is made. A callee's positional-only parameters are passed in order
+  (#233). A rule may be applied to a function that applies it again, `integrate(lambda q: integrate(lambda p: ...))`; a kernel that
   calls itself, directly or through the functions it is passed, is
   refused. A rule on its own is the kernel that
   writes its value into a one-cell array, `result[0]`, which `loopty run`

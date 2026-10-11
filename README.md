@@ -246,7 +246,11 @@ table of row starts. Both compiled runs agree with the native one.
   one, `matvec` owes at every point it calls `dot`, as facts isl decides
   and Lean proves, and a callee's postcondition holds after each call,
   restated of what it was passed. An argument is evaluated once, when the
-  call is made, as in Python.
+  call is made, as in Python, and a scalar is converted into the sort the
+  callee declares, as its contract converts it natively: `same(x[i])` of a
+  rule taking `s: np.float32` is `np.float32(x[i])` in `matvec`'s term,
+  and a value the contract refuses (a real for `Int`) is refused where it
+  is passed.
 - **It plugs into a proof host.** loopty registers a theory, an isl oracle, an
   executor and a `run` verb with [lanky](https://github.com/xywei/lanky), so a
   residual obligation an oracle cannot decide is an ordinary theorem a person can
@@ -831,12 +835,13 @@ release; the CHANGELOG says when one does.
   is refused: state it as a theorem about the rule (#206). A call made
   inside a sum over `Fin[...]` of a size, rather than over an array's `.dom`,
   has points the trace does not see, and its facts are `assumed` (#207). A rule that
-  takes a function is compiled where it is called, not on its own. A scalar
-  argument is passed in the caller's type, where the native call converts
-  it to a narrower sort the callee declares (`np.float32`, `np.int8`)
-  (#232); a callee's positional-only parameters are refused by Python where
-  it is called (#233); and a call that reads one cell of a row, `first(A[i])`,
-  leaves `A`'s second size in no loop, which fails to compile (#220). A domain
+  takes a function is compiled where it is called, not on its own. A real
+  given for a numpy integer sort (`np.int8`) is truncated in both runs, and
+  one outside the type converts as C leaves undefined and numpy warns; a
+  `uint64` value given for `Fin[m]`, `Nat` or `Int` is refused, since the
+  contract refuses one past `int64` (#232). A call that reads one cell of a
+  row, `first(A[i])`, leaves `A`'s second size in no loop, which fails to
+  compile (#220). A domain
   declared outside an annotation, for `Arr.zeros(TRIANGLE, ...)` in a
   program, names its binders and sizes as lanky variables, `i, j, n =
   Var("i"), Var("j"), Var("n")` (#210).

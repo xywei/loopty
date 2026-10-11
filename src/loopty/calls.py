@@ -198,12 +198,19 @@ class _Inlining:
                     param, "function", getattr(value, "__name__", repr(value))
                 )
             else:
+                # What the caller passed, which the call's facts are about; the
+                # body is given it converted into the sort (converted).
+                given = bound[param]
+                spelled = _shown(given)
+                if isinstance(given, np.integer):
+                    # A number, which isl reads as a Python int.
+                    given = given.item()
                 unfixed = _unknown(_fin_bound(sort) or 0, values, self.sizes())
                 arguments[param] = Argument(
                     param,
                     "scalar",
-                    _shown(value),
-                    value=value,
+                    spelled,
+                    value=given,
                     sort=self.in_caller(sort, values),
                     unfixed=tuple(sorted(unfixed)),
                 )
@@ -212,7 +219,9 @@ class _Inlining:
         before = len(tracer.stmts)
         tracer.inlining.append((label, key))
         try:
-            value = kernel.fn(**proxies)
+            # In the order of its parameters, as trace calls it: a parameter
+            # may be positional-only (#233).
+            value = kernel.fn(*(proxies[name] for name in self.parameters()))
         finally:
             tracer.inlining.pop()
         statements = tuple(stmt.id for stmt in tracer.stmts[before:])
@@ -245,10 +254,19 @@ class _Inlining:
         )
         return value
 
-    def bind(self, args: tuple, kwargs: dict) -> dict[str, Any]:
-        """The call's arguments by the callee's parameter names."""
+    def parameters(self) -> tuple[str, ...]:
+        """The callee's parameters, in the order of its signature."""
         code = self.kernel.fn.__code__
-        names = code.co_varnames[: code.co_argcount]
+        return code.co_varnames[: code.co_argcount]
+
+    def bind(self, args: tuple, kwargs: dict) -> dict[str, Any]:
+        """The call's arguments by the callee's parameter names.
+
+        A parameter before the ``/`` of the signature is positional-only, and
+        Python refuses it by name natively, so the call is refused so too.
+        """
+        names = self.parameters()
+        positional = names[: self.kernel.fn.__code__.co_posonlyargcount]
         if len(args) > len(names):
             self.refuse(f"it is given {len(args)} arguments; it takes {len(names)}")
         bound = dict(zip(names, args, strict=False))
@@ -257,6 +275,12 @@ class _Inlining:
                 self.refuse(
                     f"the argument {key} is given "
                     + ("twice" if key in bound else "and is no parameter of it")
+                )
+            if key in positional:
+                self.refuse(
+                    f"its parameter {key} is positional-only (before the / of its "
+                    f"signature), and it is given by name, which Python refuses "
+                    f"natively; pass it by position"
                 )
             bound[key] = value
         missing = [name for name in names if name not in bound]
@@ -444,7 +468,181 @@ class _Inlining:
                     "integral sort is passed as one"
                 )
             values[param] = value.item() if isinstance(value, np.generic) else value
-        return value
+        return self.converted(param, sort, value)
+
+    def converted(self, param: str, sort: Any, value: Any) -> Any:
+        """``value`` as the callee's body computes with it: in its sort's storage.
+
+        Natively the callee's contract converts every scalar it is given into
+        the numpy type its sort is stored in (:func:`loopty.contract.native_scalar`):
+        a double given for ``np.float32`` is rounded to single precision, an
+        integer given for ``Real`` is a double, and a loop variable given for
+        ``Int`` is an ``np.int64``, which numpy computes with as a numpy type
+        and not as a Python int beside a ``float32`` (NEP 50). Inlined, the
+        value is put where the callee uses the parameter, so it is put there
+        converted, ``np.float32(x[i])``: a call the interpreter computes as the
+        contract converts (:data:`loopty.contract.CONVERSIONS`) and the
+        lowering writes as C's cast (#232). A value the caller computes in
+        that type already is put there as it is, and where an index or a
+        comparison of integers reads a conversion into ``int64`` it is left out
+        (:func:`exact`), so that ``A[i, j]`` reads as the caller's own access.
+
+        What the contract refuses natively is refused, with the fix: a value
+        that is not an integer, or is a truth value, for an integral sort; a
+        number for ``Bool``, which the contract takes only as ``0`` or ``1``; a
+        complex value for a sort that is not complex, which it takes only with
+        no imaginary part; and a literal it refuses or numpy does not convert,
+        ``300`` for ``np.int8``. The compiled kernel cannot ask those of a value
+        it computes, so a value of the caller's is refused where its type
+        allows one at all. A Python int a narrow integer does not hold where
+        the call is made is refused when the compiled run is asked for, at the
+        call's sizes (:func:`loopty.refusal.refuse_where_native_does`).
+        """
+        from lanky.terms import Call
+
+        from loopty.contract import CONVERSIONS, conversion_name, native_storage
+
+        want = native_storage(sort)
+        if want is None:
+            return value
+        name = conversion_name(want)
+        if name not in CONVERSIONS:
+            self.refuse(
+                f"its scalar parameter {param} is declared {_sort_text(sort)}, which "
+                f"natively is a {want}, and the compiled kernel has no {want}; "
+                f"declare {param} np.float32 or Real"
+            )
+        if not isinstance(value, prim.ExpressionNode):
+            self.literal(param, sort, value, want)
+            # Put there as a call, so that the callee computes with it as
+            # with a numpy scalar of the type: a numpy scalar left of a term
+            # in the callee's body would be made a Python number by numpy.
+            return Call(Var(name), (value,))
+        kinds = self.kinds(value)
+        if kinds is None:
+            return Call(Var(name), (value,))
+        if all(dtype == want and not weak for dtype, weak in kinds):
+            return value
+        self.refuse_unconverted(param, sort, value, want, kinds)
+        return Call(Var(name), (value,))
+
+    def kinds(self, value: Any) -> set[tuple[np.dtype, bool]] | None:
+        """The types the native run may give ``value``, each with whether it is weak.
+
+        ``None`` when one is not known (:mod:`loopty.promotion`).
+        """
+        from loopty.promotion import Promotion, _kind
+
+        tracer = self.tracer
+        promotion = Promotion.of_sorts({**tracer.params, **tracer.array_types})
+        native = promotion.types(value)[0]
+        if not native:
+            return None
+        kinds = {_kind(sample) for sample in native}
+        return None if None in kinds else kinds  # type: ignore[return-value]
+
+    def literal(self, param: str, sort: Any, value: Any, want: np.dtype) -> None:
+        """Refuse a literal the callee's contract refuses natively, or numpy does.
+
+        An integral one outside the integers the sort is stored in, a complex
+        one with an imaginary part for a sort that is not complex, a number
+        other than ``0`` and ``1`` for ``Bool``
+        (:func:`loopty.contract.scalar_parameters`), and one numpy does not
+        convert: ``300`` for ``np.int8``. Whether an integral one is a point
+        of its sort is a fact of the call (:func:`loopty.typing.call_facts`).
+        """
+        import warnings
+
+        from loopty.contract import (
+            _integral_range_message,
+            _scalar_value,
+            integral_range,
+            integral_sort,
+            native_scalar,
+        )
+
+        if integral_sort(sort):
+            low, high = integral_range(sort)
+            if not low <= int(value) < high:
+                self.refuse(
+                    _integral_range_message(
+                        f"its scalar parameter {param}", value, sort, param
+                    )
+                )
+            return
+        try:
+            _scalar_value(param, sort, value)
+        except ValueError as exc:
+            self.refuse(f"natively its contract refuses the call: {exc}")
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                native_scalar(sort, value)
+        except (ArithmeticError, ValueError, TypeError, RuntimeWarning) as exc:
+            self.refuse(
+                f"its scalar parameter {param} is declared {_sort_text(sort)}, and "
+                f"it is given {value!r}, which natively its contract converts into "
+                f"{_a(want.name)}, and numpy refuses that ({exc}). Pass a value "
+                f"{_a(want.name)} holds, or declare {param} a sort that holds "
+                f"{value!r}"
+            )
+
+    def refuse_unconverted(
+        self,
+        param: str,
+        sort: Any,
+        value: Any,
+        want: np.dtype,
+        kinds: set[tuple[np.dtype, bool]],
+    ) -> None:
+        """Refuse a value of the caller's that the callee's contract may refuse.
+
+        See :meth:`converted`. ``kinds`` are the types the native run may give
+        ``value``.
+        """
+        from loopty.contract import integral_sort, truth_sort
+
+        letters = {dtype.kind for dtype, _weak in kinds}
+        shown = _shown(value)
+        given = (
+            f"its scalar parameter {param} is declared {_sort_text(sort)}, and it "
+            f"is given {shown}, {_typed(kinds)}"
+        )
+        cannot = "which the compiled kernel cannot ask of a value it computes"
+        if integral_sort(sort):
+            if letters & set("fc"):
+                self.refuse(
+                    f"{given}, which is not an integer: natively the contract of "
+                    f"{self.callee} refuses it at every call, since a value of an "
+                    f"integral sort is passed as an integer. Pass an integer, or "
+                    f"declare {param} Real"
+                )
+            if "b" in letters:
+                self.refuse(
+                    f"{given}, a truth value, which natively the contract of "
+                    f"{self.callee} refuses for an integral sort at every call. "
+                    f"Pass an integer, or declare {param} Bool"
+                )
+            if any(dtype == np.uint64 for dtype, _weak in kinds):
+                self.refuse(
+                    f"{given}: natively the contract of {self.callee} refuses one "
+                    f"past the int64 a value of {sort} is stored in, {cannot}, "
+                    "and would wrap round. Pass a value of a signed integer sort, "
+                    "such as an element of an array of Int or Nat"
+                )
+        elif truth_sort(sort) and letters != {"b"}:
+            self.refuse(
+                f"{given}: natively the contract of {self.callee} takes a number "
+                f"for {_sort_text(sort)} only when it is 0 or 1, {cannot}. Pass a "
+                f"truth value, such as {shown} != 0"
+            )
+        if "c" in letters and want.kind != "c":
+            self.refuse(
+                f"{given}: natively the contract of {self.callee} takes a complex "
+                "value for it only when its imaginary part is zero, "
+                f"{cannot}. Pass real({shown}) (loopty.math.real), or declare "
+                f"{param} complex"
+            )
 
     def array(
         self,
@@ -891,11 +1089,210 @@ class _Inlining:
         for proxy in arrays.values():
             avoid |= _view_names(proxy)
         try:
-            return _restated(term.post, arrays, mapping, functions, avoid, self.where)
+            restated = _restated(
+                term.post, arrays, mapping, functions, avoid, self.where
+            )
         except _Refused:
             return None
+        return exact(restated, tracer, truth=True)
 
     # }}}
+
+
+# {{{ the conversions an index or a comparison does not need
+
+
+#: The integer arithmetic through which :func:`exact` leaves out a conversion
+#: into int64.
+_INTEGER_ARITHMETIC = (prim.Sum, prim.Product, prim.FloorDiv, prim.Remainder)
+
+_INT64 = np.dtype(np.int64)
+
+
+def _conversion(node: Any, name: str | None = None) -> bool:
+    """Whether ``node`` is a scalar's conversion into its sort, ``np.int64(j)``."""
+    from loopty.contract import CONVERSIONS
+
+    function = getattr(node, "function", None)
+    return (
+        isinstance(node, prim.Call)
+        and isinstance(function, prim.Variable)
+        and function.name in CONVERSIONS
+        and len(node.parameters) == 1
+        and (name is None or function.name == name)
+    )
+
+
+def _has_conversion(expr: Any) -> bool:
+    """Whether ``expr`` holds a conversion anywhere, the indices of its reads too."""
+    if _conversion(expr):
+        return True
+    if isinstance(expr, tuple | list):
+        return any(_has_conversion(item) for item in expr)
+    if hasattr(expr, "binders") and isinstance(expr, prim.ExpressionNode):
+        return _has_conversion(expr.body) or _has_conversion(
+            getattr(expr, "guard", None)
+        )
+    if isinstance(expr, prim.ExpressionNode):
+        return any(_has_conversion(arg) for arg in init_args(expr))
+    return False
+
+
+def exact(expr: Any, tracer: Any, *, truth: bool = False) -> Any:
+    """``expr`` without the conversions an index or a comparison of it does not need.
+
+    A scalar a called kernel is given is converted into its sort's storage
+    (:meth:`_Inlining.converted`), so a loop variable ``j`` given for
+    ``Fin[m]`` is ``np.int64(j)`` in the callee's body. Where an index reads
+    it, or a comparison, and every other value there is an integer numpy
+    computes in 64 bits or a Python int, the two hold the same number, and
+    the conversion is left out: ``A[i, j]`` and ``j < n`` are read by isl as
+    the caller's own index and guard are. So is a truth value's conversion
+    where a guard reads it (``truth``), ``np.bool(i < 2)``. Beside a value of
+    another type, ``x8[k]`` of an ``int8`` array, a Python int is computed in
+    eight bits, and the conversion stays; so it does in a value.
+    """
+    if tracer is None or not _has_conversion(expr):
+        return expr
+    from loopty.promotion import Promotion
+
+    promotion = Promotion.of_sorts({**tracer.params, **tracer.array_types})
+    return _exact(expr, promotion, truth)
+
+
+def exact_key(key: Any, tracer: Any) -> Any:
+    """A subscript key, or a fiber's, with :func:`exact` of each index in it."""
+    if tracer is None or not _has_conversion(key):
+        return key
+    from loopty.promotion import Promotion
+
+    promotion = Promotion.of_sorts({**tracer.params, **tracer.array_types})
+    if isinstance(key, tuple):
+        return tuple(_exact_index(part, promotion) for part in key)
+    return _exact_index(key, promotion)
+
+
+def _exact_index(part: Any, promotion: Any) -> Any:
+    """One index of a subscript, with the conversions it does not need left out."""
+    if not isinstance(part, prim.ExpressionNode):
+        return part
+    return _exact_unit(_exact(part, promotion, False), promotion)
+
+
+def _exact(node: Any, promotion: Any, truth: bool) -> Any:
+    """See :func:`exact`; ``truth`` says whether a guard reads ``node``."""
+    if not _has_conversion(node):
+        return node
+    if isinstance(node, tuple | list):
+        return type(node)(_exact(item, promotion, truth) for item in node)
+    if truth and _conversion(node, "np.bool"):
+        (operand,) = node.parameters
+        kinds = promotion.types(operand)[0]
+        if kinds and all(isinstance(k, bool | np.bool_) for k in kinds):
+            return _exact(operand, promotion, truth)
+        return node
+    if isinstance(node, prim.Subscript):
+        index = node.index if isinstance(node.index, tuple) else (node.index,)
+        parts = tuple(_exact_index(part, promotion) for part in index)
+        return type(node)(node.aggregate, parts[0] if len(parts) == 1 else parts)
+    if isinstance(node, prim.Comparison):
+        compared = type(node)(
+            _exact(node.left, promotion, False),
+            node.operator,
+            _exact(node.right, promotion, False),
+        )
+        return _exact_unit(compared, promotion)
+    if isinstance(node, prim.LogicalAnd | prim.LogicalOr):
+        return type(node)(tuple(_exact(c, promotion, truth) for c in node.children))
+    if isinstance(node, prim.LogicalNot):
+        return type(node)(_exact(node.child, promotion, truth))
+    if hasattr(node, "binders") and isinstance(node, prim.ExpressionNode):
+        guard = getattr(node, "guard", None)
+        return type(node)(
+            node.binders,
+            _exact(node.body, promotion, truth),
+            None if guard is None else _exact(guard, promotion, True),
+        )
+    if isinstance(node, prim.ExpressionNode):
+        return type(node)(*(_exact(arg, promotion, False) for arg in init_args(node)))
+    return node
+
+
+def _exact_unit(node: Any, promotion: Any) -> Any:
+    """``node``, an index or a comparison, without its conversions into int64.
+
+    Only where every value left in it is an integer the native run computes in
+    64 bits, or a Python int: then both hold one number, and the conversion
+    changes nothing an index or a comparison reads.
+    """
+    if not _has_conversion(node):
+        return node
+    stripped = _without_int64(node)
+    leaves = _integer_leaves(stripped)
+    for leaf in leaves:
+        native = promotion.types(leaf)[0]
+        if not native or not all(_int64(sample) for sample in native):
+            return node
+    return stripped
+
+
+def _int64(sample: Any) -> bool:
+    """Whether a native sample is an int64 or a Python int (not a truth value)."""
+    from loopty.promotion import _kind
+
+    if isinstance(sample, bool | np.bool_):
+        return False
+    kind = _kind(sample)
+    return kind is not None and kind[0] == _INT64
+
+
+def _without_int64(node: Any) -> Any:
+    """``node`` with each conversion into int64 its arithmetic reaches left out."""
+    if _conversion(node, "np.int64"):
+        return _without_int64(node.parameters[0])
+    if isinstance(node, prim.Comparison):
+        return type(node)(
+            _without_int64(node.left), node.operator, _without_int64(node.right)
+        )
+    if isinstance(node, _INTEGER_ARITHMETIC):
+        return type(node)(*(_without_int64(arg) for arg in init_args(node)))
+    if isinstance(node, tuple):
+        return tuple(_without_int64(item) for item in node)
+    return node
+
+
+def _integer_leaves(node: Any) -> list[Any]:
+    """The operands of the integer arithmetic of ``node``, which :func:`exact` asks."""
+    if isinstance(node, prim.Comparison):
+        return _integer_leaves(node.left) + _integer_leaves(node.right)
+    if isinstance(node, _INTEGER_ARITHMETIC):
+        out: list[Any] = []
+        for arg in init_args(node):
+            out.extend(_integer_leaves(arg))
+        return out
+    if isinstance(node, tuple):
+        return [leaf for item in node for leaf in _integer_leaves(item)]
+    return [node]
+
+
+def _typed(kinds: set[tuple[np.dtype, bool]]) -> str:
+    """``a float64``, ``a Python int``: the types a native value may have, in words."""
+    python = {"b": "bool", "i": "int", "u": "int", "f": "float", "c": "complex"}
+    names = sorted(
+        {
+            f"Python {python[dtype.kind]}" if weak else dtype.name
+            for dtype, weak in kinds
+        }
+    )
+    return " or ".join(_a(name) for name in names)
+
+
+def _a(name: str) -> str:
+    """``an int8``, ``a uint64``, ``a Python int``: a type's name with its article."""
+    return f"an {name}" if name.startswith(("int", "a", "e", "i", "o")) else f"a {name}"
+
+
+# }}}
 
 
 def _restated(
