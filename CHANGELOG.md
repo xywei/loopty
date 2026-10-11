@@ -8,6 +8,27 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Added
 
+- **Claims settled by running them** (`loopty.tested`): `@tested` on a
+  function that takes nothing and returns whether its claim held, alone or
+  with what it measured, puts the claim in the ledger as a `tested` row,
+  decided by `run`, the docstring's first line its statement; `refuted` with
+  the reason when it returns false, raises, or returns something that is not
+  a verdict. A run is evidence about its inputs, so nothing here reads more
+  than `tested`. `examples/layer_potential.py` measures pytential's Green
+  identity and the two jump relations this way.
+- **S2 of the demonstration** (`examples/layer_potential.py`): pytential's
+  QBX on its own curve. The line-Taylor theorem, for every order, in the same
+  file as the kernels that add its closed form, `coefficient(ratio, k)`;
+  pytential's single and double layer on the five-armed starfish over complex
+  points; sumpy's CPU tile (`sumpy_tile()`), its casts decided, with the
+  write sumpy silences (`write_race(write_lpot*)`) the fact `distinct
+  instances of S0 write distinct cells of out`, proved by Lean where it is
+  installed; and pytential's identity test and the jump relations as tested
+  rows, the errors falling faster than the QBX order less 1.6.
+  `benchmarks/qbx_layer_potential.py` times the kernel against plain loopy
+  and sumpy's own on one OpenCL device, and runs it on the arguments
+  pytential itself hands sumpy.
+
 - **Window contraction** (`Schedule.contract`,
   [#132](https://github.com/xywei/loopty/issues/132)): an array a program
   makes, kept in the cells live at once. Fused one step behind, the Burgers
@@ -303,6 +324,12 @@ All notable changes to loopty are recorded here. The format follows
   left is one trivial part.
 
 ### Fixed
+
+- On OpenCL, a complex number to a natural power below 100 is the products
+  numpy's power by an integer takes (`z * ((z * z) * (z * z))` for 5), never
+  pyopencl's `cdouble_powr`. loopy writes only the powers by 2, 3 and 4 as
+  products, and by 1 or 5, which a written-out series has, `exp(n log z)`:
+  a logarithm and an exponential for each, and not exact for `z**1`.
 
 - A write through a cell read from an array, `y[perm[i]] = x[i]`, no longer
   has its distinct writes refuted by isl with two instances that write no

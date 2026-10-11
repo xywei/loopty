@@ -68,14 +68,10 @@ def main() -> int:
 
     potential = load("layer_potential")
     report(
-        "sumpy's QBX tile, complex log and real",
+        "sumpy's QBX tile, complex points",
         potential.single_layer,
-        Schedule(potential.single_layer, target="opencl")
-        .split("t", 16)
-        .tag(t_outer="g.0", t_inner="l.0")
-        .split("s", 256)
-        .prioritize("s_outer", "t_inner"),
-        potential.circle(),
+        potential.sumpy_tile("opencl"),
+        potential.example_inputs()["single_layer"],
     )
 
     quadrature = load("quadrature")

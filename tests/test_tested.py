@@ -15,12 +15,15 @@ import numpy as np
 import pytest
 from lanky.ledger import Status
 
-from loopty import tested
+import loopty
 from loopty.tested import Tested
+
+# ``loopty.tested`` rather than ``from loopty import tested``: pytest would
+# collect a module-level function whose name starts with ``test``.
 
 
 def test_a_claim_that_holds_is_a_tested_row_with_what_it_measured() -> None:
-    @tested
+    @loopty.tested
     def converges():
         """The error falls at order 4."""
         return True, "errors 1e-4, 6e-6: order 4.01"
@@ -39,7 +42,7 @@ def test_a_claim_that_holds_is_a_tested_row_with_what_it_measured() -> None:
 
 
 def test_a_bare_true_is_a_verdict_with_nothing_measured() -> None:
-    @tested
+    @loopty.tested
     def holds():
         """It holds."""
         return True
@@ -50,7 +53,7 @@ def test_a_bare_true_is_a_verdict_with_nothing_measured() -> None:
 
 
 def test_a_claim_that_fails_is_refuted_with_what_it_measured() -> None:
-    @tested
+    @loopty.tested
     def too_slow():
         """The error falls at order 4."""
         return False, "order 2.10"
@@ -62,7 +65,7 @@ def test_a_claim_that_fails_is_refuted_with_what_it_measured() -> None:
 
 
 def test_a_bare_false_is_refuted_and_says_so() -> None:
-    @tested
+    @loopty.tested
     def fails():
         """It holds."""
         return False
@@ -73,7 +76,7 @@ def test_a_bare_false_is_refuted_and_says_so() -> None:
 
 
 def test_a_claim_that_raises_is_refuted_with_the_error() -> None:
-    @tested
+    @loopty.tested
     def broken():
         """It holds."""
         raise ZeroDivisionError("division by zero")
@@ -110,7 +113,7 @@ def test_a_numpy_truth_value_is_a_verdict() -> None:
 def test_the_claim_runs_once_for_its_row_and_again_when_called() -> None:
     runs = []
 
-    @tested
+    @loopty.tested
     def counted():
         """It holds."""
         runs.append(1)
@@ -128,9 +131,9 @@ def test_a_claim_needs_a_docstring_and_a_function() -> None:
         return True
 
     with pytest.raises(TypeError, match="its first line is the claim"):
-        tested(bare)
+        loopty.tested(bare)
     with pytest.raises(TypeError, match="decorates a function"):
-        tested(3)
+        loopty.tested(3)
 
 
 def test_lanky_check_lists_the_claims_of_a_file(tmp_path: Path) -> None:

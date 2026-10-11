@@ -425,19 +425,19 @@ def _verdict(name: str) -> tuple[bool, str]:
 
 @tested
 def green_identity():
-    """Green's identity S(du/dn) - D(u) = u/2 converges at order 5 - 1.6 or faster."""
+    """S(du/dn) - D(u) = u/2, Green's identity, at order 5 - 1.6 or faster."""
     return _verdict("green")
 
 
 @tested
 def jump_S():
-    """S is continuous across the curve: S(+) - S(-) = 0 at order 5 - 1.6 or faster."""
+    """S(+) - S(-) = 0: S is continuous, at order 5 - 1.6 or faster."""
     return _verdict("jump_S")
 
 
 @tested
 def jump_D():
-    """D jumps by the density: D(+) - D(-) = sigma at order 5 - 1.6 or faster."""
+    """D(+) - D(-) = sigma: D jumps by the density, at order 5 - 1.6 or faster."""
     return _verdict("jump_D")
 
 

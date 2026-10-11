@@ -28,7 +28,7 @@ marked with `...` is an excerpt and the lines it keeps are checked verbatim.
 | `travel.py` | facts that travel between a program's calls: a requirement decided under the postcondition of the call before, one checked by the compiled program between the calls, and a flat access in bounds where it follows the scan |
 | `fusion.py` | the program of `composition.py` with its two loops fused into one, a fusion one step too early refused with its pair, the intermediate computed where it is read instead of stored, and kept in the three cells live at once, a window of two refused with the read that sees its slot overwritten |
 | `quadrature.py` | firedrake's P1 mass kernel cell by cell, its quadrature rule and basis held in constant tables, read-only arrays written into the compiled code, and its gathers through the cell map in bounds by type |
-| `layer_potential.py` | pytential's QBX single layer over complex points with `real` and `log` from `loopty.math`, scheduled as sumpy's CPU tile, the sources' loop outside the targets', and the same order on a loop loopy cannot keep it on |
+| `layer_potential.py` | pytential's QBX on its own curve: the line-Taylor theorem the kernels add the terms of, the single and double layer over complex points, sumpy's CPU tile checked and the write sumpy silences a fact, and pytential's Green identity and jump relations as tested rows |
 | `sum_factorization.py` | grudge's two passes of a sum-factorized operator, fused on the element and the row and no deeper: the deeper fusion refused with its pair, the fusion of fewer loops it names, and what passes between them kept one row at a time |
 | `storage_layouts.py` | where cells are stored, as checked maps: sumpy's compressed-Taylor storage index in two pieces, one for one onto its buffer, and grudge's `dim_tags` `N3,N0,N1,N2` the same layout as modepy's reshape of the DOFArray, a wrong nesting refuted with a cell; two kernels read through them |
 | `assembly.py` | PyOP2's assembly loop around the P1 mass kernel, `y[cell[c, k]] += yl[c, k]`: an update that owes the class of its sum and not distinct writes, PyOP2's GPU split refused with the node its two triangles share, and accepted once the updates are atomic |
@@ -1039,67 +1039,114 @@ tested   loopy  quadrature.py:78  mass_action  the scheduled run of mass_action 
 
 ## layer_potential.py
 
-The QBX single layer pytential evaluates at a target on a curve, through the
-line-Taylor expansion of `log` about a center just off the curve, written over
-complex points with `real` and `log` from `loopty.math`. On the unit circle,
-for the density `cos(theta)`, the answer is `cos(theta) / 2`.
+pytential's QBX on its own curve, the demonstration of three layers in one
+file. pytential evaluates a layer potential at the points of a curve by
+expanding the kernel about a center just off the curve; with no FMM that is
+sumpy's `LayerPotential` with a line-Taylor expansion, the kernel along the
+line from the center through the target. Read the points as complex numbers,
+with `alpha = c - y` and `beta = z - c`, and its terms are
 
-The schedule is sumpy's CPU tile, `LayerPotential.get_optimized_kernel`: the
-targets split by 16, the sources by 256, and the sources' outer loop outside
-the targets' inner loop, `.prioritize("s_outer", "t_inner")`. Each target's
-sum still adds its sources in order. On the C target the 16 targets are an
-`ilp` loop, which gives each an accumulator of its own; the same order on a
-target loop in sequence is one loopy cannot keep, and the schedule's
-`buildable` fact says so with the tag that fixes it.
+```text
+log|alpha| + Re( c(1) + ... + c(5) ),   c(k) = -(-beta / alpha)**k / k
+```
+
+- `line_taylor` is the theorem that these are the Taylor coefficients of
+  `log(alpha + tau * beta)`, for every order: lanky's
+  `examples/line_taylor.py`, here in the same file. With Mathlib, Lean proves
+  it; without, it is `assumed`, since the property tester draws no table over
+  `Nat`. The kernels add `coefficient(ratio, k)`, the same function the
+  theorem's conclusion is written with.
+- `single_layer` and `double_layer` are pytential's `S` and `D` on the
+  five-armed starfish, as sumpy computes them, over complex points.
+  `sumpy_tile()` is sumpy's CPU schedule, `get_optimized_kernel(is_cpu=True)`:
+  16 targets to a work group, the sources 256 at a time, the sources' loop
+  outside the targets'. Its casts are decided, and on the C target it does not
+  build, since C has no hardware axes; `tiled` is the same tile on C, with an
+  `ilp` loop for the work items. sumpy silences loopy's
+  `write_race(write_lpot*)` on this kernel; the fact in its place is
+  `distinct instances of S0 write distinct cells of out`, decided by isl and,
+  with Lean, proved.
+- `green_identity`, `jump_S` and `jump_D` are pytential's own identity test
+  on the starfish and the jump relations, measured with the compiled kernels
+  at 30 to 90 panels: each a `tested` row (`loopty.tested`), the order the
+  errors fall at above the QBX order less 1.6, as pytential's test asks.
+
+`benchmarks/qbx_layer_potential.py` runs the kernels on what pytential itself
+hands sumpy, and times them beside sumpy's own kernel and plain loopy.
 
 ### python examples/layer_potential.py
 
 ```console
 $ uv run python examples/layer_potential.py
-32 targets, 512 sources, order 4
-largest error against cos(theta) / 2: 3.0e-10
+the starfish at 30 panels: 270 targets, 510 sources, QBX order 5
+  single_layer: compiled agrees with native to the approx tolerance: True -> tested
+  double_layer: compiled agrees with native to the approx tolerance: True -> tested
 
-schedule: Schedule(single_layer, target='c').split(t, 16).tag(t_inner='ilp').split(s, 256).prioritize(s_outer, t_inner)
+sumpy's tile: Schedule(single_layer, target='c').split(t, 16).tag(t_outer='g.0', t_inner='l.0').split(s, 256).prioritize(s_outer, t_inner)
   decided  isl  split(t, 16) renames the instances of single_layer one for one
   decided  isl  the order after split(t, 16) runs every dependence of single_layer forward
-  decided  isl  tag(t_inner='ilp') renames the instances of single_layer one for one
-  decided  isl  the order after tag(t_inner='ilp') runs every dependence of single_layer forward
+  decided  isl  tag(t_outer='g.0', t_inner='l.0') renames the instances of single_layer one for one
+  decided  isl  the order after tag(t_outer='g.0', t_inner='l.0') runs every dependence of single_layer forward, within one work item
   decided  isl  split(s, 256) renames the instances of single_layer one for one
-  decided  isl  the order after split(s, 256) runs every dependence of single_layer forward
+  decided  isl  the order after split(s, 256) runs every dependence of single_layer forward, within one work item
   decided  isl  prioritize(s_outer, t_inner) renames the instances of single_layer one for one
-  decided  isl  the order after prioritize(s_outer, t_inner) runs every dependence of single_layer forward
-  out: the compiled run agrees with the native run to the approx tolerance: True -> tested
+  decided  isl  the order after prioritize(s_outer, t_inner) runs every dependence of single_layer forward, within one work item
+  decided  isl  distinct instances of S0 write distinct cells of out
+  on C: Schedule(single_layer, target='c').split(t, 16).tag(t_inner='ilp').split(s, 256).prioritize(s_outer, t_inner)
 
-schedule: Schedule(single_layer, target='c').split(t, 16).split(s, 256).prioritize(s_outer, t_inner)
-  buildable: False
-  reason: the loop s_outer of the sum over s_outer, s_inner in S0 is ordered outside t_inner, which runs in sequence: loopy keeps one accumulator for the sum, so it would run the sum inside every loop of S0 anyway, in another order than the one this schedule's facts were checked for. Tag t_inner 'ilp', tag(t_inner='ilp'), which gives each of its iterations an accumulator of its own, or on a device put it on a hardware axis, tag(t_inner='l.0')
+accuracy at 30, 50, 70, 90 panels:
+  green_identity  errors 1.4e-04, 3.5e-05, 9.1e-06, 2.8e-06: order 3.51 -> tested
+  jump_S          errors 5.4e-04, 9.4e-05, 2.3e-05, 7.2e-06: order 3.91 -> tested
+  jump_D          errors 4.2e-03, 1.0e-03, 2.4e-04, 6.6e-05: order 3.75 -> tested
 ```
 
 ### lanky check examples/layer_potential.py
 
 ```console
 $ uv run lanky check examples/layer_potential.py
-STATUS   BY           WHERE                  OWNER         STATEMENT
--------  -----------  ---------------------  ------------  ------------------------------------------------------
-decided  isl          layer_potential.py:88  single_layer  out[t] is in bounds for every instance of S0
-decided  isl          layer_potential.py:88  single_layer  w[s] is in bounds for every instance of S0
-decided  isl          layer_potential.py:88  single_layer  c[t] is in bounds for every instance of S0
-decided  isl          layer_potential.py:88  single_layer  y[s] is in bounds for every instance of S0
-decided  isl          layer_potential.py:88  single_layer  z[t] is in bounds for every instance of S0
-decided  isl          layer_potential.py:88  single_layer  distinct instances of S0 write distinct cells of out
-decided  isl          layer_potential.py:78  single_layer  the source order runs every dependence forward in time
-decided  type         layer_potential.py:88  single_layer  the accumulation into out[t] over s is approx
-tested   interpreter  layer_potential.py:78  single_layer  the traced term computes what the body computes
+STATUS   BY           WHERE                   OWNER           STATEMENT
+-------  -----------  ----------------------  --------------  ------------------------------------------------------------------------
+assumed  -            layer_potential.py:113  line_taylor     alpha : Complex, beta : Complex, c : Fn[Nat, Complex] | alpha != 0, a...
+tested   python       layer_potential.py:113  line_taylor     the term computes what the annotations compute
+decided  isl          layer_potential.py:182  single_layer    out[t] is in bounds for every instance of S0
+decided  isl          layer_potential.py:182  single_layer    w[s] is in bounds for every instance of S0
+decided  isl          layer_potential.py:182  single_layer    c[t] is in bounds for every instance of S0
+decided  isl          layer_potential.py:182  single_layer    y[s] is in bounds for every instance of S0
+decided  isl          layer_potential.py:182  single_layer    z[t] is in bounds for every instance of S0
+decided  isl          layer_potential.py:182  single_layer    distinct instances of S0 write distinct cells of out
+decided  isl          layer_potential.py:168  single_layer    the source order runs every dependence forward in time
+decided  type         layer_potential.py:182  single_layer    the accumulation into out[t] over s is approx
+tested   interpreter  layer_potential.py:168  single_layer    the traced term computes what the body computes
+decided  isl          layer_potential.py:198  double_layer    out[t] is in bounds for every instance of S0
+decided  isl          layer_potential.py:198  double_layer    w[s] is in bounds for every instance of S0
+decided  isl          layer_potential.py:198  double_layer    n[s] is in bounds for every instance of S0
+decided  isl          layer_potential.py:198  double_layer    c[t] is in bounds for every instance of S0
+decided  isl          layer_potential.py:198  double_layer    y[s] is in bounds for every instance of S0
+decided  isl          layer_potential.py:198  double_layer    z[t] is in bounds for every instance of S0
+decided  isl          layer_potential.py:198  double_layer    distinct instances of S0 write distinct cells of out
+decided  isl          layer_potential.py:187  double_layer    the source order runs every dependence forward in time
+decided  type         layer_potential.py:198  double_layer    the accumulation into out[t] over s is approx
+tested   interpreter  layer_potential.py:187  double_layer    the traced term computes what the body computes
+tested   run          layer_potential.py:426  green_identity  S(du/dn) - D(u) = u/2, Green's identity, at order 5 - 1.6 or faster
+tested   run          layer_potential.py:432  jump_S          S(+) - S(-) = 0: S is continuous, at order 5 - 1.6 or faster
+tested   run          layer_potential.py:438  jump_D          D(+) - D(-) = sigma: D jumps by the density, at order 5 - 1.6 or faster
 
-9 facts: 8 decided, 1 tested
+24 facts: 1 assumed, 17 decided, 6 tested
 ```
+
+With Lean, the 15 facts isl decided read `proved` by `lean`, the write fact
+sumpy silences among them. With Mathlib too, `line_taylor` reads `proved` by
+`lean`, and is worth `tested`: what the theorem rests on includes the reading
+of its annotations, which lanky checks by running them (the second row).
 
 ### loopty run examples/layer_potential.py
 
-`uv run loopty run examples/layer_potential.py` compiles the tile on the C
-target and compares it with the native run, as for every demo. Its transcript
-is not kept here: the difference it prints is one of `log`'s last bits,
-numpy's against the C library's, which can differ from machine to machine.
+`uv run loopty run examples/layer_potential.py` compiles `tiled` and
+`tiled_double` on the C target and compares each with the native run, and
+with Lean proves their casts. Its transcript is not kept here: the difference
+it prints is in the last bits of `log`, numpy's against the C library's,
+which can differ from machine to machine. `--target opencl` runs both on an
+OpenCL device; sumpy's own tags are `sumpy_tile()`, which the benchmark runs.
 
 ## sum_factorization.py
 

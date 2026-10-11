@@ -7,6 +7,8 @@ single layer at QBX order 5 (``examples/layer_potential.py``):
   translation unit loopty lowers it to (``Schedule.kernel``);
 - **loopy**: the same arithmetic transcribed by hand into plain loopy, with
   the same transforms, which is what loopty's lowering is compared against;
+- **loopy-same**: the expression loopty lowers the kernel to, handed to plain
+  loopy, so that only loopty's target and transforms differ;
 - **sumpy**: sumpy's own ``LayerPotential`` with ``LineTaylorLocalExpansion``,
   the kernel pytential runs, from ``get_cached_kernel`` with the arguments
   pytential passes it (needs sumpy, which needs a loopy that reads namedisl
@@ -178,6 +180,52 @@ def loopy_kernel(tile: str) -> Any:
             lp.ValueArg("ns", np.int32),
         ],
         fixed_parameters={"scale": -1 / (2 * np.pi)},
+        target=lp.PyOpenCLTarget(),
+        name="single_layer",
+        lang_version=(2018, 2),
+    )
+    return _tiled(knl, "t", "s", GROUP[tile])
+
+
+def loopy_same_kernel(tile: str) -> Any:
+    """loopty's own expression, handed to plain loopy, under the same tile.
+
+    The instruction loopty lowers the kernel to, with each complex power by
+    a natural number written as the products loopty's OpenCL code writes it
+    in, since plain loopy's ``cdouble_powr`` would time something else. What
+    is left between this and loopty's kernel is loopty's target, its
+    transforms and the order of the source loops they keep.
+    """
+    import loopy as lp
+    from pymbolic.mapper import IdentityMapper
+
+    from loopty import Schedule
+    from loopty.isl_reading import declining
+    from loopty.lower import _natural_power
+
+    class Products(IdentityMapper):
+        def map_power(self, expr: Any) -> Any:
+            exponent = expr.exponent
+            if isinstance(exponent, int) and 0 < exponent < 100:
+                return _natural_power(self.rec(expr.base), exponent)
+            return super().map_power(expr)
+
+    ex = example()
+    with declining():
+        lowered = Schedule(ex.single_layer, target="opencl").kernel
+    (insn,) = lowered.default_entrypoint.instructions
+    knl = lp.make_kernel(
+        "{[t, s]: 0 <= t < nt and 0 <= s < ns}",
+        [lp.Assignment(insn.assignee, Products()(insn.expression), id="S0")],
+        [
+            lp.ValueArg("ns", np.int32),
+            lp.ValueArg("nt", np.int32),
+            lp.GlobalArg("z", np.complex128, shape=("nt",)),
+            lp.GlobalArg("c", np.complex128, shape=("nt",)),
+            lp.GlobalArg("y", np.complex128, shape=("ns",)),
+            lp.GlobalArg("w", np.float64, shape=("ns",)),
+            lp.GlobalArg("out", np.float64, shape=("nt",), is_output=True),
+        ],
         target=lp.PyOpenCLTarget(),
         name="single_layer",
         lang_version=(2018, 2),
@@ -383,7 +431,12 @@ def run_time(options: Any) -> int:
     """``time``: one implementation, one tile, on the saved inputs."""
     queue = _queue()
     data = dict(np.load(options.inputs))
-    build = {"loopty": loopty_kernel, "loopy": loopy_kernel, "sumpy": sumpy_kernel}
+    build = {
+        "loopty": loopty_kernel,
+        "loopy": loopy_kernel,
+        "loopy-same": loopy_same_kernel,
+        "sumpy": sumpy_kernel,
+    }
     knl = build[options.impl](options.tile)
     if options.keep_order:
         knl = keeping_order(knl, options.impl)
@@ -642,7 +695,9 @@ def main(argv: list[str] | None = None) -> int:
     made.add_argument("--sources", type=int, default=10_000)
     made.add_argument("--out", required=True)
     timing = verbs.add_parser("time")
-    timing.add_argument("--impl", choices=("loopty", "loopy", "sumpy"), required=True)
+    timing.add_argument(
+        "--impl", choices=("loopty", "loopy", "loopy-same", "sumpy"), required=True
+    )
     timing.add_argument("--tile", choices=("cpu", "gpu", "sumpy-gpu"), default="cpu")
     timing.add_argument("--inputs", required=True)
     timing.add_argument("--runs", type=int, default=10)
