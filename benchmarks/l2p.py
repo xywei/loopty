@@ -770,7 +770,11 @@ def record(inputs: dict, pot: str, run: str, out: str) -> None:
         raise SystemExit(
             f"{run} records a run of {made.get('implementation')}, not sumpy"
         )
-    recorded = {
+    # the platform and the kind of device; the device's own name stays with the
+    # run's record, which is not kept in the repository
+    device = made["device"]
+    kind = "GPU" if "GPU" in device["device_type"] else "CPU"
+    head = {
         "what": (
             "sumpy's E2PFromSingleBox(LinearPDEConformingVolumeTaylorLocalExpansion("
             "LaplaceKernel(2), order), [LaplaceKernel(2)]).get_optimized_kernel(), run "
@@ -778,16 +782,26 @@ def record(inputs: dict, pot: str, run: str, out: str) -> None:
         ),
         "order": inputs["order"],
         "versions": made["versions"],
-        "device": {
-            key: made["device"][key] for key in ("platform", "device", "device_type")
-        },
+        "device": f"{device['platform']}, a {kind}",
         "largest_difference_to_the_direct_sum": float(
             np.max(np.abs(potential - inputs["direct"]))
         ),
-        "coeffs": inputs["coeffs"].tolist(),
-        "pot": potential.tolist(),
     }
-    Path(out).write_text(json.dumps(recorded, indent=1) + "\n")
+    # one row of numbers per line: the file is data, and a change reads as one
+    lines = json.dumps(head, indent=1)[:-2].splitlines()
+    rows = ",\n".join(f"  {json.dumps(row)}" for row in inputs["coeffs"].tolist())
+    text = "\n".join(
+        [
+            *lines[:-1],
+            lines[-1] + ",",
+            ' "coeffs": [',
+            rows,
+            " ],",
+            f' "pot": {json.dumps(potential.tolist())}',
+            "}",
+        ]
+    )
+    Path(out).write_text(text + "\n")
     print(f"recorded sumpy's potential at {potential.size} targets -> {out}")
 
 
