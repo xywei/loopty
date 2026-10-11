@@ -22,7 +22,7 @@ One file holds the three layers of it:
   function, with the ratio computed as ``-beta * conj(alpha) / |alpha|**2``.
 - **The kernels and their transforms.** ``single_layer`` and ``double_layer``
   are pytential's ``S`` and ``D`` as sumpy computes them, over complex points.
-  ``sumpy_tile`` is sumpy's CPU schedule, as ``get_optimized_kernel`` writes
+  ``sumpy_tile()`` is sumpy's CPU schedule, as ``get_optimized_kernel`` writes
   it, and ``tiled`` the same tile on the C target. sumpy silences loopy's
   ``write_race(write_lpot*)`` warning on this kernel; here the ledger has the
   fact that stands in its place, ``distinct instances of S0 write distinct
@@ -43,13 +43,14 @@ Run this file three ways.
     The ledger. The theorem reads ``proved`` by Lean where Mathlib is
     installed, and ``assumed`` without it, since the property tester draws no
     table over ``Nat``. Each kernel's accesses are in bounds and its writes
-    distinct, decided by isl (proved by Lean where it is installed), its trace
-    faithful to its body, and the three accuracy rows ``tested``.
+    distinct, and each cast of its tile on C keeps every dependence, decided
+    by isl (proved by Lean where it is installed); its trace is faithful to
+    its body, and the three accuracy rows are ``tested``.
 
 ``loopty run examples/layer_potential.py``
-    The tiled kernel compiled on the C target and compared with the native
-    run; sumpy's own tile names the device axes C cannot build, and runs with
-    ``--target opencl``.
+    Both kernels on their tile, compiled on the C target and compared with
+    the native run. ``sumpy_tile()``, with its work items, runs on a device
+    in ``benchmarks/qbx_layer_potential.py``.
 
 What it mirrors, at the commits the demonstration pins
 ------------------------------------------------------
@@ -76,11 +77,18 @@ What it mirrors, at the commits the demonstration pins
 
 What differs: sumpy computes the expansion in real arithmetic, straight-line
 code sympy writes for each order; here it is the same series in complex
-arithmetic, one loop over the order that the compiler writes out. The curve
-here is the parametrization itself at Gauss-Legendre points, where meshmode
-interpolates it by polynomials and pytential refines its panels first. The
-agreement with sumpy's own kernel, on pytential's own geometry, is measured
-by ``benchmarks/qbx_layer_potential.py``.
+arithmetic, one sum over the order that the trace writes out, with the
+ratio's division multiplied out by the conjugate. The curve here is the
+parametrization itself at Gauss-Legendre points, where meshmode interpolates
+it by polynomials and pytential refines its panels first. The agreement with
+sumpy's own kernel, on the arguments pytential hands it, is measured by
+``benchmarks/qbx_layer_potential.py``.
+
+What loopy does with sumpy's tile: ``prioritize_loops([isrc_outer,
+itgt_inner])`` cannot be kept with the targets on a hardware axis, which
+loopy says, and it then nests the inner source loop outside the outer one,
+so that each work item adds its sources 256 apart. The schedule here states
+the order its facts were checked for, and its code keeps it.
 """
 
 from __future__ import annotations
@@ -250,17 +258,23 @@ def starfish(panels: int, source_panels: int | None = None) -> dict:
     }
 
 
-def arguments(curve: dict, side: str, density: np.ndarray) -> dict:
-    """A kernel's arguments: the curve's targets, centers on ``side``, and a density."""
-    nt = curve["z"].size
-    return {
+def arguments(
+    curve: dict, side: str, density: np.ndarray, normals: bool = False
+) -> dict:
+    """A kernel's arguments: the curve's targets, centers on ``side``, a density.
+
+    With ``normals``, the sources' normals too, which ``double_layer`` takes.
+    """
+    args = {
         "z": Arr.from_numpy(curve["z"]),
         "c": Arr.from_numpy(curve[side]),
         "y": Arr.from_numpy(curve["y"]),
-        "n": Arr.from_numpy(curve["ny"]),
         "w": Arr.from_numpy(curve["wy"] * density),
-        "out": Arr.zeros(nt),
+        "out": Arr.zeros(curve["z"].size),
     }
+    if normals:
+        args["n"] = Arr.from_numpy(curve["ny"])
+    return args
 
 
 #: A harmonic function inside the starfish, pytential's: ``log|x - x0|``,
@@ -288,11 +302,9 @@ def example_inputs() -> dict:
     """Four panels, small enough to run natively: 36 targets, 68 sources."""
     curve = starfish(4)
     sigma = density(curve["y"])
-    single_args = arguments(curve, "inside", sigma)
-    del single_args["n"]
     return {
-        "single_layer": single_args,
-        "double_layer": arguments(curve, "inside", sigma),
+        "single_layer": arguments(curve, "inside", sigma),
+        "double_layer": arguments(curve, "inside", sigma, normals=True),
     }
 
 
@@ -362,9 +374,7 @@ def _layer(
     """One layer potential of ``values`` at the sources, compiled and run."""
     from loopty.executor import LoopyExecutor
 
-    args = arguments(curve, side, values)
-    if schedule is tiled:
-        del args["n"]
+    args = arguments(curve, side, values, normals=schedule is tiled_double)
     return LoopyExecutor().run(schedule, **args)["out"]
 
 
@@ -449,17 +459,17 @@ def main() -> int:
     from loopty.executor import LoopyExecutor
     from loopty.oracle import IslOracle
 
-    curve = starfish(30)
+    curve = starfish(4)
     print(
-        f"the starfish at 30 panels: {curve['z'].size} targets, "
-        f"{curve['y'].size} sources, QBX order {ORDER}"
+        f"pytential's starfish, QBX order {ORDER}, at 4 panels: "
+        f"{curve['z'].size} targets, {curve['y'].size} sources"
     )
     ok = True
     for kern, schedule in ((single_layer, tiled), (double_layer, tiled_double)):
         fact = LoopyExecutor().differential(kern, schedule, schedule.examples)
         detail = fact.provenance["outputs"]["out"]
         print(
-            f"  {kern.__name__}: compiled agrees with native to the "
+            f"  {kern.__name__}: compiled on C agrees with native to the "
             f"{detail['exactness']} tolerance: {detail['agree']} -> {fact.status.value}"
         )
         ok = ok and fact.status.value == "tested"

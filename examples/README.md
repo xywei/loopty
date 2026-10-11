@@ -1153,6 +1153,14 @@ decided  isl          layer_potential.py:182  single_layer    distinct instances
 decided  isl          layer_potential.py:168  single_layer    the source order runs every dependence forward in time
 decided  type         layer_potential.py:182  single_layer    the accumulation into out[t] over s is approx
 tested   interpreter  layer_potential.py:168  single_layer    the traced term computes what the body computes
+decided  isl          layer_potential.py:182  single_layer    split(t, 16) renames the instances of single_layer one for one
+decided  isl          layer_potential.py:182  single_layer    the order after split(t, 16) runs every dependence of single_layer fo...
+decided  isl          layer_potential.py:182  single_layer    tag(t_inner='ilp') renames the instances of single_layer one for one
+decided  isl          layer_potential.py:182  single_layer    the order after tag(t_inner='ilp') runs every dependence of single_la...
+decided  isl          layer_potential.py:182  single_layer    split(s, 256) renames the instances of single_layer one for one
+decided  isl          layer_potential.py:182  single_layer    the order after split(s, 256) runs every dependence of single_layer f...
+decided  isl          layer_potential.py:182  single_layer    prioritize(s_outer, t_inner) renames the instances of single_layer on...
+decided  isl          layer_potential.py:182  single_layer    the order after prioritize(s_outer, t_inner) runs every dependence of...
 decided  isl          layer_potential.py:198  double_layer    out[t] is in bounds for every instance of S0
 decided  isl          layer_potential.py:198  double_layer    w[s] is in bounds for every instance of S0
 decided  isl          layer_potential.py:198  double_layer    n[s] is in bounds for every instance of S0
@@ -1163,11 +1171,19 @@ decided  isl          layer_potential.py:198  double_layer    distinct instances
 decided  isl          layer_potential.py:187  double_layer    the source order runs every dependence forward in time
 decided  type         layer_potential.py:198  double_layer    the accumulation into out[t] over s is approx
 tested   interpreter  layer_potential.py:187  double_layer    the traced term computes what the body computes
+decided  isl          layer_potential.py:198  double_layer    split(t, 16) renames the instances of double_layer one for one
+decided  isl          layer_potential.py:198  double_layer    the order after split(t, 16) runs every dependence of double_layer fo...
+decided  isl          layer_potential.py:198  double_layer    tag(t_inner='ilp') renames the instances of double_layer one for one
+decided  isl          layer_potential.py:198  double_layer    the order after tag(t_inner='ilp') runs every dependence of double_la...
+decided  isl          layer_potential.py:198  double_layer    split(s, 256) renames the instances of double_layer one for one
+decided  isl          layer_potential.py:198  double_layer    the order after split(s, 256) runs every dependence of double_layer f...
+decided  isl          layer_potential.py:198  double_layer    prioritize(s_outer, t_inner) renames the instances of double_layer on...
+decided  isl          layer_potential.py:198  double_layer    the order after prioritize(s_outer, t_inner) runs every dependence of...
 tested   run          layer_potential.py:426  green_identity  S(du/dn) - D(u) = u/2, Green's identity, at order 5 - 1.6 or faster
 tested   run          layer_potential.py:432  jump_S          S(+) - S(-) = 0: S is continuous, at order 5 - 1.6 or faster
 tested   run          layer_potential.py:438  jump_D          D(+) - D(-) = sigma: D jumps by the density, at order 5 - 1.6 or faster
 
-24 facts: 1 assumed, 17 decided, 6 tested
+40 facts: 1 assumed, 33 decided, 6 tested
 ```
 
 With Lean, the 15 facts isl decided read `proved` by `lean`, the write fact
