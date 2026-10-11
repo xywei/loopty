@@ -45,6 +45,14 @@ names the pair it would run backwards and the shallower fusion it checked.
 grudge's three-dimensional passes fuse the same way: on the element and the
 row for ``r`` then ``s``, deeper for ``s`` then ``t``.
 
+*What passes between the passes is one row.* Fused on the element and the
+row, ``along_s`` reads only the row of ``v`` that ``along_r`` has just stored,
+so ``contract("v")`` keeps one row, ``lambda e, a, b: b``, in ``double
+v_window[n]``, where the program stored ``ne * n * n`` cells; its
+``no-clobber`` fact says no read sees its row overwritten, and putting the
+elements on a group axis after it is refused, since every element would
+share the row.
+
 *The answer is a Kronecker product.* Flattened row by row, each element's
 result is ``kron(D, M) @ u[e]``, the dense operator grudge's escape hatch
 applies.
@@ -97,6 +105,9 @@ def weak_derivative(D, M, u, w):
 
 #: The element and the row fused, the inner loops one after the other.
 fused = Schedule(weak_derivative).fuse("along_r", "along_s", loops=2)
+
+#: The same, with v kept one row at a time.
+contracted = fused.contract("v")
 
 
 def gll(nodes: int = NODES) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -153,7 +164,7 @@ def example_inputs() -> dict:
 
 
 def main() -> int:
-    """Run natively, then the refused fusion, then the accepted one, compiled."""
+    """Run natively, the refused fusion, the accepted one, and its window."""
     from loopty.executor import LoopyExecutor
 
     data = inputs()
@@ -181,7 +192,17 @@ def main() -> int:
             f"{detail['tolerance']:.3g} ({detail['exactness']}) -> "
             f"{fact.status.value}"
         )
-    return 0 if native and fact.status.value == "tested" else 1
+    print()
+
+    window = contracted.windows["v"]
+    print(f"accepted: {contracted!r}")
+    print(f"  v kept in {window.extents[0]} cells, {window.placement}")
+    for storage in contracted.facts()[-2:]:
+        print(f"  {storage.status.value:8} {storage.decided_by:4} {storage.statement}")
+    kept = LoopyExecutor().differential(weak_derivative, contracted, inputs())
+    print(f"  w: agrees with the native run -> {kept.status.value}")
+    tested = fact.status.value == "tested" and kept.status.value == "tested"
+    return 0 if native and tested else 1
 
 
 if __name__ == "__main__":

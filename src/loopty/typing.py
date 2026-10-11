@@ -1208,6 +1208,8 @@ def _row_starts_question(
             found, piece = _align_both(found, piece)
             found = found.union(piece)
     ids = [stmt.id for _index, stmt, _instances in fixed]
+    from loopty.obligations import Stated, row_starts_obligation
+
     question = Empty(
         flow.assume_sizes(found, sizes),
         description=(
@@ -1217,6 +1219,22 @@ def _row_starts_question(
             "it, and only row 0 starts at 0 whatever they are)"
         ),
         labels=labels,
+        # Lean's statement: every write stores the value its cell holds where
+        # the contract's invariant holds, the induction step (#186)
+        lean=Stated(
+            partial(
+                row_starts_obligation,
+                term,
+                offsets,
+                counts,
+                counts_type.axes[0],
+                tuple(
+                    stmt
+                    for stmt in term.stmts
+                    if any(stmt is writer for writer in family["statements"])
+                ),
+            )
+        ),
     )
     return question, restated, ids
 
@@ -1706,6 +1724,8 @@ def _layout_by_induction(
         return lambda claim: LogicalOr((*conditions, claim))
 
     questions: list[tuple[int, Any, Any]] = []
+    #: Each statement's question as discharge stated it, for Lean.
+    stated: list[tuple[str, Any]] = []
     writers: list[str] = []
     for index, stmt in enumerate(term.stmts):
         if not any(stmt is writer for writer in family["statements"]):
@@ -1784,6 +1804,7 @@ def _layout_by_induction(
                 f"write out of order: {reason}"
             )
         questions.append((index, stmt, outcome.question.obj))
+        stated.append((stmt.id, outcome.question))
     if len(questions) == 1 and questions[0][1].inames:
         ((_index, stmt, found),) = questions
         labels: tuple[str, ...] = tuple(stmt.inames)
@@ -1799,6 +1820,8 @@ def _layout_by_induction(
             else:
                 found, piece = _align_both(found, piece)
                 found = found.union(piece)
+    from loopty.obligations import Stated, merged_obligation
+
     question = Empty(
         flow.assume_sizes(found, {*sizes, buffer.name}),
         description=(
@@ -1806,6 +1829,9 @@ def _layout_by_induction(
             f"rows of {_listed(arrays)} where it held"
         ),
         labels=labels,
+        # Lean's statement: each write keeps the order where it held, as isl
+        # decided it under that order, the induction step (#186)
+        lean=Stated(partial(merged_obligation, tuple(stated))),
     )
     rule = _INDUCTION_RULE.format(
         arrays=_listed(arrays), laid=laid, writers=_listed(writers)

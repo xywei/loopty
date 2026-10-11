@@ -131,9 +131,17 @@ its own, in parallel.
 | distinct writes | statement | two instances that differ write cells that differ |
 | element sort | statement | the value written is a point of the sort |
 | definedness | read | some statement wrote the cell read, before the read: a disjunction of existentials, one per writer; a write under a guard isl cannot state is no writer, since its domain is wider than where it stores |
+| definedness of a substitution or a window | read of the array | the producer, and only it, stored the cell read before the read, in the program's order |
+| no read sees its slot overwritten (a window) | read of the array | three instances, the read, the producer's that stored the cell it reads, and another of the producer's that stored a different cell into the same slot after it: that one does not run before the read, in the order the steps leave; the slot is the placement, `j % 3` |
+| a rewritten layout, by the row starts | statement that writes the offsets | where the offsets start at 0 and step by the counts, as the contract checks on entry, the value written is the value the cell holds: the induction step, its base case the contract's check |
+| a rewritten layout, by induction | statement that writes the layout | the rows in order before the write imply them in order after it, at the cells the write reads |
+| a declared layout | piece, or pair of pieces | every cell's address is in the buffer; two cells at one address are one cell; and every address of the buffer has a cell (an existential) |
+| two layouts the same | pair of pieces | a cell of both is stored at one address by each, and a cell of one is a cell of the other |
 | the source order | pair of accesses | the source runs the pair in the order the dependence says, which is its definition |
 | a cast is bijective | statement the step moves | every instance has an image (an existential), one only, and no two share one |
 | a cast is monotone | dependence class, a pair of accesses (two updates of one cell, `y[cell[c, k]] += v`, are none: either order gives the sum) | two instances that touch one cell, in the source's order, keep it after every step: their time vectors compare as the source's do |
+| a cast after a substitution | class of a read it computes again and a write of what it reads | the instance of the producer that stored the cell read, before or after the write in the source's order, puts the read on that side of the write after every step |
+| a cast after a window | pair of accesses to one slot | two instances that touch one slot, in the order the window was taken in, keep it after every step |
 | what a program's call may assume | requirement, or flat access | the claim at every point of its domain, under the hypotheses isl used (a callee's postcondition, a theorem the program cites, a type the contract checks) |
 | an assumption of a schedule | (a hypothesis of every later cast) | |
 
@@ -160,6 +168,11 @@ stays `decided`.
   (`loopty.hypotheses`) are given as `have` lines, with an equation between
   any cell they read and the claim's that is the same cell written otherwise
   (`off (q - 1 + 1) = off q`).
+- **The inverse of a layout,** isl's `lexmin` of it in pieces, with `//` and
+  `%` by numbers, as the witness that every address of the buffer has a
+  cell: for sumpy's storage index, the centre at address 0, and at an
+  address `d >= 1` the cell `a = d + 1 - 2 * ((d + 1) // 2)`, `b = 3 * ((d +
+  1) // 2) - d - 1`, which is `(d + 1) % 2` and `(d + 1) // 2 - a`.
 - **Case splits,** for what `omega` lacks: it has no dark or grey shadows, and
   a split by the rational bounds isl knows rescues it. None of the examples
   needs one.
@@ -214,75 +227,72 @@ and test kernel to Lean, the casts each file's `rejected*` functions refuse
 included, from an empty proof cache. Its report, with Lean v4.29.1 (a
 file's time is Lean's on all its facts, a part's on one declaration):
 
-Of 581 facts isl decides in 20 files, Lean proved 556; 9 stay decided; 16 refuted facts have their negation proved at isl's counterexample. 289 more facts are not isl's to decide (by type, tested, assumed).
+Of 650 facts isl decides in 21 files, Lean proved 629; 0 stay decided; 21 refuted facts have their negation proved at isl's counterexample. 288 more facts are not isl's to decide (by type, tested, assumed).
 
-Not all of them are equally hard. The 86 `ordering` facts, that the source
+Not all of them are equally hard. The 93 `ordering` facts, that the source
 order runs every dependence forward, hold by the definition of a dependence
 (two instances that touch one cell, which the source runs in that order), and
 Lean's proof of them checks only that the printer states the source order the
-same way twice. The others are claims isl could get wrong.
+same way twice. The others are claims isl could get wrong. The first file's
+time includes starting Lean.
 
 | file | isl facts | proved | decided, not proved | refuted, negation proved | Lean time |
 |---|---:|---:|---:|---:|---:|
 | `examples/assembly.py` | 17 | 17 | 0 | 0 | 2.9 s |
-| `examples/composition.py` | 10 | 10 | 0 | 0 | 0.3 s |
-| `examples/fusion.py` | 16 | 12 | 3 | 1 | 0.3 s |
-| `examples/layer_potential.py` | 15 | 15 | 0 | 0 | 0.9 s |
-| `examples/p2p.py` | 19 | 19 | 0 | 0 | 1.6 s |
-| `examples/pairs.py` | 14 | 14 | 0 | 0 | 0.5 s |
-| `examples/quadrature.py` | 12 | 12 | 0 | 0 | 0.3 s |
-| `examples/reshape_layouts.py` | 16 | 16 | 0 | 0 | 0.9 s |
+| `examples/composition.py` | 10 | 10 | 0 | 0 | 26.1 s |
+| `examples/fusion.py` | 19 | 17 | 0 | 2 | 1.1 s |
+| `examples/layer_potential.py` | 15 | 15 | 0 | 0 | 1.0 s |
+| `examples/p2p.py` | 19 | 19 | 0 | 0 | 1.7 s |
+| `examples/pairs.py` | 14 | 14 | 0 | 0 | 0.6 s |
+| `examples/quadrature.py` | 12 | 12 | 0 | 0 | 0.8 s |
+| `examples/reshape_layouts.py` | 16 | 16 | 0 | 0 | 1.0 s |
 | `examples/spmv.py` | 18 | 18 | 0 | 0 | 0.5 s |
-| `examples/stencil_skew.py` | 10 | 9 | 0 | 1 | 1.6 s |
-| `examples/sum_factorization.py` | 14 | 13 | 0 | 1 | 1.2 s |
-| `examples/travel.py` | 47 | 45 | 2 | 0 | 2.3 s |
-| `examples/wavefront_acoustic.py` | 24 | 21 | 0 | 3 | 7.5 s |
+| `examples/stencil_skew.py` | 10 | 9 | 0 | 1 | 1.8 s |
+| `examples/storage_layouts.py` | 18 | 18 | 0 | 0 | 1.9 s |
+| `examples/sum_factorization.py` | 16 | 15 | 0 | 1 | 1.3 s |
+| `examples/travel.py` | 47 | 47 | 0 | 0 | 2.6 s |
+| `examples/wavefront_acoustic.py` | 24 | 21 | 0 | 3 | 8.8 s |
 | `tests/kernels/axpy.py` | 4 | 4 | 0 | 0 | 0.1 s |
-| `tests/kernels/domains.py` | 90 | 89 | 0 | 1 | 2.5 s |
+| `tests/kernels/domains.py` | 90 | 89 | 0 | 1 | 3.1 s |
 | `tests/kernels/out_of_bounds.py` | 4 | 3 | 0 | 1 | 0.1 s |
 | `tests/kernels/spmv_min.py` | 14 | 14 | 0 | 0 | 0.0 s |
 | `tests/kernels/stencil.py` | 5 | 5 | 0 | 0 | 0.0 s |
-| `tests/kernels/travel.py` | 64 | 61 | 2 | 1 | 1.4 s |
-| `tests/kernels/travel_wrong.py` | 168 | 159 | 2 | 7 | 6.5 s |
+| `tests/kernels/travel.py` | 64 | 63 | 0 | 1 | 1.4 s |
+| `tests/kernels/travel_wrong.py` | 168 | 161 | 0 | 7 | 16.6 s |
+| `tests/kernels/windows.py` | 63 | 59 | 0 | 4 | 5.0 s |
 
 By kind:
 
 | kind | isl facts | proved | decided, not proved | refuted, negation proved | parts | median s per part | slowest part |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| bijective | 23 | 22 | 1 | 0 | 80 | 0.088 | 0.46 s |
-| definedness | 21 | 20 | 1 | 0 | 24 | 0.056 | 0.10 s |
-| disjoint-writes | 113 | 113 | 0 | 0 | 113 | 0.011 | 0.06 s |
-| element-sort | 28 | 20 | 0 | 8 | 20 | 0.027 | 0.05 s |
-| in-bounds | 259 | 257 | 0 | 2 | 300 | 0.026 | 1.21 s |
-| layout | 6 | 0 | 6 | 0 | 0 | - | - |
-| monotone | 29 | 22 | 1 | 6 | 135 | 0.135 | 0.63 s |
-| ordering | 86 | 86 | 0 | 0 | 234 | 0.013 | 0.06 s |
-| requirement | 16 | 16 | 0 | 0 | 16 | 0.084 | 0.29 s |
+| bijective | 28 | 28 | 0 | 0 | 114 | 0.066 | 0.59 s |
+| definedness | 32 | 32 | 0 | 0 | 52 | 0.001 | 0.17 s |
+| disjoint-writes | 122 | 122 | 0 | 0 | 122 | 0.010 | 0.07 s |
+| element-sort | 28 | 20 | 0 | 8 | 20 | 0.022 | 0.03 s |
+| in-bounds | 272 | 270 | 0 | 2 | 309 | 0.025 | 1.08 s |
+| layout | 6 | 6 | 0 | 0 | 12 | 0.079 | 11.41 s |
+| layout-in-bounds | 2 | 2 | 0 | 0 | 3 | 0.091 | 0.13 s |
+| layout-one-for-one | 2 | 2 | 0 | 0 | 4 | 0.135 | 0.27 s |
+| layout-onto | 2 | 2 | 0 | 0 | 2 | 0.219 | 0.24 s |
+| layout-same | 1 | 1 | 0 | 0 | 1 | 0.089 | 0.09 s |
+| monotone | 36 | 28 | 0 | 8 | 230 | 0.084 | 0.69 s |
+| no-clobber | 10 | 7 | 0 | 3 | 15 | 0.148 | 0.28 s |
+| ordering | 93 | 93 | 0 | 0 | 242 | 0.013 | 0.09 s |
+| requirement | 16 | 16 | 0 | 0 | 16 | 0.062 | 0.23 s |
 
-Every fact Lean did not prove, and why:
-
-- `examples/fusion.py`, burgers_rhs: every cell of f that burgers_rhs reads, flux.S0 has stored by the time it is read. loopty states this kind of fact for isl only, from sets isl computed, and not yet from its own description of the kernel
-- `examples/fusion.py`, burgers_rhs: substitute('f') renames the instances of burgers_rhs one for one. a substitution before this step changed what the instances read, and the dependences the step is checked against are isl's, not loopty's description
-- `examples/fusion.py`, burgers_rhs: the order after substitute('f') runs every dependence of burgers_rhs forward. a substitution before this step changed what the instances read, and the dependences the step is checked against are isl's, not loopty's description
-- `examples/travel.py`, through: the rows of val stay inside their buffers and apart while scan.S0 and scan.S1 write off. loopty states this kind of fact for isl only, from sets isl computed, and not yet from its own description of the kernel
-- `examples/travel.py`, flat: the rows of wt stay inside their buffers and apart while scan_flat.S0 and scan_flat.S1 write off. loopty states this kind of fact for isl only, from sets isl computed, and not yet from its own description of the kernel
-- `tests/kernels/travel.py`, through: the rows of val stay inside their buffers and apart while scan.S0 and scan.S1 write off. loopty states this kind of fact for isl only, from sets isl computed, and not yet from its own description of the kernel
-- `tests/kernels/travel.py`, flat: the rows of wt stay inside their buffers and apart while scan_csr.S0 and scan_csr.S1 write off. loopty states this kind of fact for isl only, from sets isl computed, and not yet from its own description of the kernel
-- `tests/kernels/travel_wrong.py`, two_buffers: the rows of wt stay inside their buffers and apart while scan_flat.S0 and scan_flat.S1 write off. loopty states this kind of fact for isl only, from sets isl computed, and not yet from its own description of the kernel
-- `tests/kernels/travel_wrong.py`, two_buffers: the rows of wt2 stay inside their buffers and apart while scan_flat@2.S0 and scan_flat@2.S1 write off2. loopty states this kind of fact for isl only, from sets isl computed, and not yet from its own description of the kernel
+Lean proved every fact isl decides, a window's `no-clobber`, a substitution's
+`definedness` and the casts after it, a rewritten layout's facts and a
+declared layout's among them. The 21 refuted facts are the casts and windows
+the files refuse on purpose (a window of two cells of the Burgers flux, one of
+three for a reader three cells back, a step after the window past the slot it
+reads, the loop run backwards after it) and the claims the test kernels make
+false on purpose, and Lean proved each false at isl's counterexample.
 
 ## What stays isl's
 
 Facts loopty states for isl alone, from sets isl computes, which Lean is not
 asked about; each says so with `--verbose`, and the coverage report lists them.
 
-- **A layout a kernel rewrites** (`the rows of val stay inside their buffers
-  and apart`): an induction over the run, decided by isl over the cells a
-  write reads; issue [#186](https://github.com/xywei/loopty/issues/186).
-- **A substitution's definedness, and the casts after it:** a substitution
-  changes what the instances read, and the dependences its definedness and the
-  later steps are checked against are isl's; issue
-  [#187](https://github.com/xywei/loopty/issues/187).
 - **Work items:** a cast that puts a loop on a hardware axis also claims that
   no dependence joins two work items, which is stated for isl only; the cast
   is then left `decided` as a whole; none of the examples has one; issue
@@ -300,3 +310,8 @@ asked about; each says so with `--verbose`, and the coverage report lists them.
   split by the part of the tile's map over its loop, which isl computes; a
   cast with such a step is left `decided`; none of the examples has one;
   issue [#189](https://github.com/xywei/loopty/issues/189).
+- **Some counterexamples:** a cast refused on a class a substitution carries
+  over, or a window refused at a read in a sum, is refuted by isl with
+  instances that do not give every variable of the part (the producer's
+  instance, a sum's binders), so Lean is not asked; issue
+  [#215](https://github.com/xywei/loopty/issues/215).

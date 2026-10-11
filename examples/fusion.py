@@ -1,4 +1,4 @@
-"""Two kernels fused into one loop, and the array between them never stored.
+"""Two kernels fused into one loop, and the array between them stored less.
 
 The Burgers right-hand side of ``composition.py``, the flux ``f = u**2 / 2``
 and then its centred divergence, run by a program that keeps the flux in an
@@ -9,17 +9,19 @@ array of its own::
     divergence(f, rhs)
 
 ``composition.py`` lowers that program as one kernel with two loops, one after
-the other. Here the loops become one, and then ``f`` is not stored at all:
-two schedule steps, each checked before it is applied.
+the other. Here the loops become one, and then ``f`` is kept in the three
+cells live at once, or not stored at all: schedule steps, each checked before
+it is applied.
 
 Run this file three ways.
 
 ``python examples/fusion.py``
     Runs the program natively and checks it against numpy slices. Then asks
     for the fusion with no shift, which isl refuses with a pair of instances,
-    and prints the fused schedule and the substituted one: their facts, the
-    code loopy generates for each, and the comparison of each compiled run
-    with the native one.
+    and for a window of two cells, refused with a read that sees its slot
+    overwritten, and prints the fused schedule, the substituted one and the
+    windowed one: their facts, the code loopy generates for each, and the
+    comparison of each compiled run with the native one.
 
 ``lanky check examples/fusion.py``
     The kernels' obligations and the program's, among them the definedness
@@ -40,13 +42,21 @@ dependences between the two calls as well as within each. Without the shift,
 ``divergence`` at ``i`` would read ``f[i + 1]`` a step before ``flux`` stores
 it, and the refusal names that pair, and the shift that is accepted.
 
-*An intermediate is stored only if it has to be.* Once the flux is computed
-in the loop that reads it, nothing needs it kept: ``substitute("f")`` computes
-``0.5 * u[j] * u[j]`` at each read instead (loopy's ``assignment_to_subst``),
-and the temporary goes, with the loop that zeroed it. That is legal because
-every cell ``divergence`` reads, ``flux`` stored before the read (the
-``definedness`` fact), and nothing writes ``u`` in between (the ``monotone``
-fact over the program as it now runs).
+*An intermediate is stored only as long as it is live.* Fused one step
+behind, the divergence reads ``f[j]`` and ``f[j - 2]`` at step ``j``, so three
+cells of ``f`` are live at once: ``contract("f")`` finds that window, ``lambda
+j: j % 3``, and keeps ``f`` in ``double f_window[3]``, each flux computed once.
+It is legal because every cell ``divergence`` reads, ``flux`` stored before the
+read (the ``definedness`` fact), and no read sees its slot overwritten (the
+``no-clobber`` fact): between the flux that stores ``f[j - 2]`` and the read of
+it, the fluxes at ``j - 1`` and ``j`` store into the two other slots. A window
+of two cells is refused with the read and the flux that overwrote it.
+
+*Or not at all.* ``substitute("f")`` computes ``0.5 * u[j] * u[j]`` at each read
+instead (loopy's ``assignment_to_subst``), twice per flux, and the temporary
+goes, with the loop that zeroed it. That is legal because of the same
+``definedness`` fact, and because nothing writes ``u`` in between (the
+``monotone`` fact over the program as it now runs).
 
 *Each compiled run is compared with the program's own body.* The native run
 is the reference both schedules are tested against, bit for bit where the
@@ -93,6 +103,9 @@ fused = Schedule(burgers_rhs, sizes={"n": N}).fuse("flux", "divergence", shift=1
 #: The same loop, with the flux computed where it is read and never stored.
 substituted = fused.substitute("f")
 
+#: The same loop, with the flux kept in the three cells live at once.
+windowed = fused.contract("f")
+
 
 def velocity(n: int = N) -> np.ndarray:
     """A smooth periodic velocity with some structure."""
@@ -134,9 +147,14 @@ def main() -> int:
     except IllegalCast as exc:
         print(f"refused: {exc}")
     print()
+    try:
+        fused.contract("f", lambda j: j % 2)
+    except IllegalCast as exc:
+        print(f"refused: {exc}")
+    print()
 
     ok = native
-    for schedule in (fused, substituted):
+    for schedule in (fused, substituted, windowed):
         print(f"accepted: {schedule!r}")
         for fact in schedule.facts():
             print(f"  {fact.status.value:8} {fact.decided_by:4} {fact.statement}")

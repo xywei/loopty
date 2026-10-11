@@ -324,6 +324,10 @@ class _Stated:
     """
 
     lean: Any
+    #: A function of a refuting verdict that says what refutes the question
+    #: in the user's words, or ``None`` for the witness and the description
+    #: (see :func:`_refutation`).
+    explain: Any
 
     def lean_obligation(self) -> Any:
         """How Lean is to check this question's fact (see :mod:`lanky.obligations`)."""
@@ -347,6 +351,7 @@ class Empty(_Stated):
     description: str = ""
     labels: tuple[str, ...] = ()
     lean: Any = field(default=None, compare=False, repr=False)
+    explain: Any = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -362,6 +367,7 @@ class Subset(_Stated):
     description: str = ""
     labels: tuple[str, ...] = ()
     lean: Any = field(default=None, compare=False, repr=False)
+    explain: Any = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -376,6 +382,7 @@ class Bijective(_Stated):
     description: str = ""
     labels: tuple[str, ...] = ()
     lean: Any = field(default=None, compare=False, repr=False)
+    explain: Any = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -391,6 +398,7 @@ class Monotone(_Stated):
     description: str = ""
     labels: tuple[str, ...] = ()
     lean: Any = field(default=None, compare=False, repr=False)
+    explain: Any = field(default=None, compare=False, repr=False)
 
 
 #: The questions :class:`IslOracle` answers.
@@ -450,8 +458,15 @@ def _refutation(question: IslQuestion, verdict: Verdict) -> str:
     other three it states the claim, so the witness is the exception: ``cells
     u[i + 1] reaches are cells u has, except [a0=1]``. The sizes the witness was
     read off at close the sentence. A question with no description, or a
-    verdict with no witness, is explained by the verdict's own ``detail``.
+    verdict with no witness, is explained by the verdict's own ``detail``. A
+    question that says how to put its witness in words (``explain``, as a
+    layout's do: ``fold stores (a=1, b=3) and (a=3, b=2) both at 7``) is
+    explained so.
     """
+    if question.explain is not None:
+        said = question.explain(verdict)
+        if said:
+            return said
     labelled = label_witness(verdict.witness, question.labels)
     if not question.description or not labelled:
         return verdict.detail

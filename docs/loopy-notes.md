@@ -1,6 +1,6 @@
 # Notes on loopy and islpy
 
-Thirty interactions with loopty's dependencies that cost real debugging
+Thirty-one interactions with loopty's dependencies that cost real debugging
 time, each with the local workaround and the reason it is local. No upstream
 issues were filed: these are notes so that the next person meets the answer
 instead of the symptom.
@@ -1568,7 +1568,29 @@ as a cache key.
 or an infinity when it is declared, naming the position; an array holding
 such values is passed instead (#193).
 
-## 30. loopy's atomic updates: none on the C target, four dtypes on OpenCL, and every access atomic
+## 30. loopy writes a window's remainder as a division, and keeps a private array on the stack
+
+**Symptom.** A window kept with modulo addressing (`Schedule.contract`)
+indexes `f_window[j % 3]`, and loopy's C reads `f_window[j + -3 * (j /
+3)]`, and `f_window[1 + j + -3 * ((1 + j) / 3)]` for `f[j - 2]`.
+
+**Cause.** loopy simplifies an index through isl, which has no remainder,
+and writes `j - 3 * floor(j / 3)` back with C's `/`. C's division truncates,
+which is floor division only for a numerator that is not negative; loopy
+knows it is not from the loop's domain (`j >= 0`, and `j >= 2` under the
+guard of the read of `f[j - 2]`, which isl moves to `(j + 1) % 3`). The value
+is the remainder.
+
+**Local fix.** None needed. A window along a loop with every access at a
+fixed distance from it can be a shift register instead (`registers=True`,
+the default on OpenCL), whose every index is a number: `f_window[0] =
+f_window[1]` at each step, and `f_window[2]`, `f_window[0]` for the reads. A
+window whose extents are numbers is a private temporary, on the stack on the
+C target and in registers on a device; one whose extent is a size, a row of
+`n` cells, is a variable-length array on the C target and a global temporary
+on OpenCL, where a private array has to have a constant size.
+
+## 31. loopy's atomic updates: none on the C target, four dtypes on OpenCL, and every access atomic
 
 **Symptom.** A kernel whose update `y[cell[c, k]] = y[cell[c, k]] + yl[c, k]`
 is given `atomicity=(lp.AtomicUpdate("y"),)` raises `NotImplementedError`
