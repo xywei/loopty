@@ -49,9 +49,9 @@ from __future__ import annotations
 
 import numpy as np
 from lanky.prelude import Nat, Real
-from pymbolic.primitives import Call, Variable
 
 from loopty import Arr, Fin, Schedule, kernel, reduce_sum, when
+from loopty.math import sqrt
 
 #: A four by four grid of boxes over the unit square, and this many points in
 #: it. Tiny, and still ragged: the lists run from a handful to a few dozen.
@@ -59,20 +59,16 @@ BOXES, POINTS = 4, 16
 
 
 def coulomb(r2: float) -> float:
-    """``1 / r`` from the squared distance, symbolically or numerically.
+    """``1 / r`` from the squared distance.
 
-    Two modes, because the body runs both ways. On numbers this is numpy; on a
-    term it builds a call to ``sqrt``, which loopy resolves against the target's
-    own library. loopty has no elementary-function surface of its own yet, so a
-    kernel that needs one writes the call, as here.
+    ``loopty.math.sqrt`` is numpy's on numbers, and a call of the target's
+    ``sqrt`` when the body is traced, so the helper is written once for both
+    runs. The masked self pair reaches it with ``r2 == 0`` (see the module
+    docstring): the infinity is discarded by the mask, so numpy's warning
+    would be about a number nobody reads.
     """
-    if isinstance(r2, int | float | np.floating):
-        # The masked self pair reaches this with r2 == 0 (see the module
-        # docstring): the infinity is discarded by the mask, so the warning
-        # would be about a number nobody reads.
-        with np.errstate(divide="ignore"):
-            return 1.0 / np.sqrt(r2)
-    return 1 / Call(Variable("sqrt"), (r2,))
+    with np.errstate(divide="ignore"):
+        return 1.0 / sqrt(r2)
 
 
 @kernel

@@ -136,6 +136,11 @@ _FUNCTIONS = {
     "pow": np.power,
     "fmin": np.fmin,
     "fmax": np.fmax,
+    # loopty.math's complex parts, which numpy gives a number that is not
+    # complex too: itself, 0 and itself.
+    "real": np.real,
+    "imag": np.imag,
+    "conj": np.conj,
 }
 
 _COMPARISONS = {

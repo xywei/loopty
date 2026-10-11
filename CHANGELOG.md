@@ -8,6 +8,20 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Added
 
+- **`loopty.math`**: `sqrt`, `exp`, `log`, `sin`, `cos`, `real`, `imag` and
+  `conj` for kernel bodies (gap 12). Each is numpy's natively and a call the
+  trace records, which the interpreter evaluates with the same numpy function
+  and the lowering writes as the target's library function, `csqrt` and
+  `creal` of a complex number on the C target and pyopencl's `cdouble_sqrt`
+  and `cdouble_real` on OpenCL, in the type numpy computes it in: `sqrt` of
+  an integer is a double (`sqrt((double) (k[i]))`), where loopy refused it on
+  the C target and took it for a `float` on OpenCL, and `real`, `imag` and
+  `conj` of a number that is not complex are the number, `0` and the number,
+  where loopy wrote `creal` of a double. A function numpy computes in half
+  precision, `sqrt` of an `int8`, is a `TraceError` naming `sqrt(1.0 *
+  k[i])`. pytential's line-Taylor single layer over complex points,
+  `real(log(c[t] - y[s]) - ...)`, runs, checks and compiles as any kernel.
+  `examples/p2p.py` calls `loopty.math.sqrt` where it built the call by hand.
 - **A sum's loop ordered outside a loop of its statement**
   (`Schedule.prioritize("s_outer", "t_inner")`, gap 13). sumpy's CPU tile of
   a layer potential splits the targets by 16 onto a group and its work

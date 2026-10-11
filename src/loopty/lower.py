@@ -96,7 +96,7 @@ from loopty.operations import (
     NumpyArithmetic,
     numpy_arithmetic_preambles,
 )
-from loopty.promotion import Promotion
+from loopty.promotion import MATH_FUNCTIONS, Promotion
 from loopty.term import (
     COUNT_PARAM,
     COUNT_PARAM_REFLECTED,
@@ -1071,9 +1071,47 @@ class ExpressionLowerer(Mapper):
             and len(expr.parameters) == 1
         ):
             return self._absolute(expr, expr.parameters[0])
+        if (
+            isinstance(function, prim.Variable)
+            and function.name in MATH_FUNCTIONS
+            and len(expr.parameters) == 1
+        ):
+            return self._math(expr, function.name, expr.parameters[0])
         return prim.Call(
             self.rec(expr.function), tuple(self.rec(p) for p in expr.parameters)
         )
+
+    def _math(self, expr: Any, name: str, operand: Any) -> prim.Expression:
+        """A function of :mod:`loopty.math`, computed in the type numpy computes it in.
+
+        Of a complex operand it is the library's, which loopy writes for its
+        type: ``csqrt``, ``clog``, ``creal``, ``cimag`` and ``conj`` on the C
+        target, ``cdouble_sqrt`` and the rest on OpenCL. Of any other, numpy's
+        type is the operand's own or a floating one, and loopy's is not:
+        ``sqrt`` of an integer is a double natively, and loopy refuses an
+        integer operand on the C target and takes it for a ``float`` on
+        OpenCL, and ``real``, ``imag`` and ``conj`` of a real it writes as
+        ``creal`` of a complex one on the C target. So the operand is
+        converted into numpy's type before the call, ``sqrt((double)
+        k[i])``, and ``real`` and ``conj`` are the operand itself in that
+        type, and ``imag`` a zero of it
+        (:func:`loopty.promotion._math_compiled`).
+        """
+        promotion = self.lowering.promotion
+        lowered = self.rec(operand)
+        if promotion is None:
+            return prim.Call(prim.Variable(name), (lowered,))
+        compiled = promotion.types(operand)[1]
+        target = promotion.types(expr)[1]
+        if compiled is None or compiled.kind == "c" or target is None:
+            return prim.Call(prim.Variable(name), (lowered,))
+        if name == "imag":
+            return target.type(0)
+        if target != compiled:
+            lowered = self._convert(lowered, target)
+        if name in ("real", "conj"):
+            return lowered
+        return prim.Call(prim.Variable(name), (lowered,))
 
     def _absolute(self, expr: Any, operand: Any) -> prim.Expression:
         """``abs(operand)``: C's ``abs`` of a number, and numpy's of an integer.

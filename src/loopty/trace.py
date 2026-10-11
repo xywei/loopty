@@ -3108,8 +3108,48 @@ def _refuse_arithmetic(expr: Any, params: Mapping[str, Any], where: str) -> None
             _refuse_division_by_zero(node, promotion, where)
         elif isinstance(node, prim.Quotient):
             _refuse_division_by_zero(node, promotion, where)
+        elif isinstance(node, prim.Call):
+            _refuse_half_precision(node, promotion, where)
         _refuse_unheld_literal(node, promotion, where)
     _refuse_untyped_literals(expr, promotion, where)
+
+
+def _refuse_half_precision(node: prim.Call, promotion: Any, where: str) -> None:
+    """Refuse a function of :mod:`loopty.math` numpy computes in half precision.
+
+    numpy computes ``sqrt``, ``log`` and the rest of an integer narrower than
+    32 bits in the narrowest floating type that holds it, a ``float16`` for an
+    ``int8`` or a truth value, which neither C nor OpenCL C has; a double is
+    what ``1.0 *`` the operand asks for.
+    """
+    from loopty.promotion import MATH_FUNCTIONS, _one_dtype
+
+    function = node.function
+    if not isinstance(function, prim.Variable) or function.name not in MATH_FUNCTIONS:
+        return
+    if len(node.parameters) != 1:
+        return
+    result = _one_dtype(promotion.types(node)[0])
+    if result is None or result.kind != "f" or result.itemsize > 2:
+        return
+    (operand,) = node.parameters
+    operand_type = _one_dtype(promotion.types(operand)[0])
+    shown = _written(operand)
+    raise TraceError(
+        f"{function.name}({shown}) at {where} is a {result} natively, the type "
+        f"numpy computes it in for {_a(operand_type)}, and the compiled kernel "
+        f"has no {result}; write {function.name}(1.0 * {shown}) for a double"
+    )
+
+
+def _a(dtype: Any) -> str:
+    """``an int8``, ``a truth value``: a dtype as a sentence names one."""
+    if dtype is None:
+        return "its operand"
+    if dtype.kind == "b":
+        return "a truth value"
+    name = str(dtype)
+    return f"an {name}" if name[0] in "aeiou" else f"a {name}"
 
 
 def _negated(expr: Any) -> Any:
