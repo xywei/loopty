@@ -419,7 +419,7 @@ class LoopyExecutor:
             if name in out:
                 out[name] = original
         failed = [
-            message
+            (flag, message)
             for flag, message in lowering.checks.items()
             if np.asarray(out.pop(flag)).reshape(-1)[0]
         ]
@@ -428,15 +428,18 @@ class LoopyExecutor:
             # An output over a domain is its cells, whatever layout it ran in.
             if name in lowering.storage:
                 out[name] = supplied[name].cells()
+        if refused is not None and not any(
+            flag in refused.checks for flag, _message in failed
+        ):
+            # The checked points before the refused call passed, so natively
+            # it ran, and stopped where its arithmetic leaves its type, before
+            # any point after it.
+            raise refused
         if failed:
             # A checked point of a program: the statements after it did not
             # run, and what the ones before it wrote is where the caller
             # looks, as natively, where the call after it is refused.
-            raise ValueError(failed[0])
-        if refused is not None:
-            # Every checked point passed, so the call after them ran, and
-            # natively it stops where its arithmetic leaves its type.
-            raise refused
+            raise ValueError(failed[0][1])
         return out
 
     def _collect(

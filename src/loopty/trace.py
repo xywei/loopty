@@ -3369,11 +3369,16 @@ def _refuse_unheld_store(array: SymArr, value: Any, where: str) -> None:
     converts it as C does, and wraps round. A store of loop arithmetic the
     array's type does not hold at some point is refused when the compiled
     run is asked for, where the sizes are known
-    (:func:`loopty.refusal.refuse_where_native_does`, #153).
+    (:func:`loopty.refusal.refuse_where_native_does`, #153), and so is a
+    literal under a guard: the guard masks the store, so numpy converts
+    nothing where it is false, and ``with when(i < 0): y[i] = 300`` stores
+    nothing in either run.
     """
     from loopty.contract import native_storage
 
     if not isinstance(value, int) or isinstance(value, bool):
+        return
+    if array.tracer.guard() is not None:
         return
     stored = native_storage(array.type.dtype)
     if stored is None or stored.kind not in "iu":

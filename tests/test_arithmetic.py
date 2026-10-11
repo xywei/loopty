@@ -3423,6 +3423,40 @@ def checked_then_offset(u, w, y):
 
 
 @kernel
+def as_reals(d: Arr[Fin[n], Nat], z: Arr[Fin[n], Real]):  # noqa: F821
+    """Every count, as a real: a requirement that d holds naturals."""
+    for i in d.dom:
+        z[i] = 1.0 * d[i]
+
+
+@program
+def offset_then_checked(u, v, w, y, z):
+    """The refused call between two checked points, the second of which fails."""
+    c = Arr.zeros_like(u, dtype=np.int64)
+    truncated(u, c)
+    offset_counts(c, w, y)
+    d = Arr.zeros_like(v, dtype=np.int64)
+    truncated(v, d)
+    as_reals(d, z)
+
+
+@kernel
+def stored_nowhere(y: Arr[Fin[n], np.uint8]):  # noqa: F821
+    """``300`` stored into a ``uint8`` under a guard that holds nowhere."""
+    for i in y.dom:
+        with when(i < 0):
+            y[i] = 300
+
+
+@kernel
+def stored_once(y: Arr[Fin[n], np.uint8]):  # noqa: F821
+    """``300`` stored into a ``uint8`` under a guard that holds at ``i = 0``."""
+    for i in y.dom:
+        with when(i < 1):
+            y[i] = 300
+
+
+@kernel
 def stored_literal(y: Arr[Fin[n], np.uint8]):  # noqa: F821
     """``300`` stored into a ``uint8``, which numpy refuses at every point."""
     for i in y.dom:
@@ -3526,6 +3560,26 @@ def test_loop_arithmetic_a_numpy_integer_does_not_hold_is_refused_compiled_too()
     assert "the program's checked points before the call passed" in str(
         refused.value
     )
+    # A checked point after the refused call is not reached natively: the
+    # refusal is raised, and not that point's error.
+    both = {
+        **checked(1.0),
+        "v": Arr.from_numpy(np.array([-1.0, 2.0, 3.0])),
+        "z": Arr.zeros(3),
+    }
+    with pytest.raises(OverflowError, match="-3 out of bounds for uint32"):
+        offset_then_checked(**dict(both))
+    with pytest.raises(RefusedNatively, match="-3 at"):
+        LoopyExecutor().run(offset_then_checked, **dict(both))
+
+    # A literal stored under a guard is stored only where the guard holds,
+    # and numpy converts nothing elsewhere: refused where the call's sizes
+    # reach a point of the guard, and computed where they reach none.
+    agrees(stored_nowhere, lambda: {"y": np.zeros(3, np.uint8)})
+    with pytest.raises(OverflowError, match="300 out of bounds for uint8"):
+        stored_once(y=np.zeros(3, np.uint8))
+    with pytest.raises(RefusedNatively, match="the store of 300 into y"):
+        LoopyExecutor().run(stored_once, y=np.zeros(3, np.uint8))
 
 
 # }}}

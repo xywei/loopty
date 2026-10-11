@@ -317,8 +317,11 @@ class RefusedNatively(OverflowError):
     numpy refuses there, with an ``OverflowError``, a Python int beside a
     numpy integer whose type does not hold it, and the compiled kernel would
     compute a value in C's type instead (#153). The message names the point
-    and the fix.
+    and the fix. ``checks`` names the flags of a program's checked points the
+    refused statement runs after, empty for one every run reaches.
     """
+
+    checks: frozenset[str] = frozenset()
 
 
 #: The operations numpy converts a Python int beside a numpy integer for, into
@@ -361,7 +364,9 @@ def refuse_where_native_does(
       false guard the native run reads such a cell as the Python int ``0``;
     * a store of such arithmetic into an array stored so natively, over the
       points the statement stores at, when its guard narrows its domain
-      whole.
+      whole; and of a literal the array's type does not hold under such a
+      guard, which the trace leaves here (:func:`loopty.trace.trace`), since
+      the guard may hold nowhere: ``with when(i < 0): y[i] = 300``.
 
     An integer of 64 bits that is signed is not asked about, since loop
     arithmetic leaves it only past 64 bits, which is #139's limit; nor is
@@ -373,9 +378,10 @@ def refuse_where_native_does(
     A program's statement after a checked point runs only where the point
     passed (:meth:`loopty.compose._Builder.guarded`), and natively the call
     after a point that fails is refused before it starts, with the point's
-    error. So its refusal is returned, not raised, for the executor to raise
-    once the run has shown that every checked point passed; a statement
-    every run reaches is refused here.
+    error. So its refusal is returned, not raised, with the flags of the
+    points before it (:attr:`RefusedNatively.checks`), for the executor to
+    raise once the run has shown that those points passed, before anything
+    a later point says; a statement every run reaches is refused here.
     """
     from loopty.contract import resolve_sizes
     from loopty.promotion import Promotion
@@ -391,7 +397,8 @@ def refuse_where_native_does(
                 _operations(part, term, stmt, promotion, loops, sizes)
             _store(term, stmt, promotion, sizes)
         except RefusedNatively as refusal:
-            if not _after_a_check(stmt, flags):
+            before = _checks_before(stmt, flags)
+            if not before:
                 raise
             if deferred is None:
                 deferred = RefusedNatively(
@@ -402,23 +409,25 @@ def refuse_where_native_does(
                         1,
                     )
                 )
+                deferred.checks = before
     return deferred
 
 
-def _after_a_check(stmt: Stmt, flags: set[str]) -> bool:
-    """Whether ``stmt`` runs only where a program's checked point passed."""
+def _checks_before(stmt: Stmt, flags: set[str]) -> frozenset[str]:
+    """The flags of a program's checked points ``stmt`` runs only after."""
     if not flags or stmt.guard is None:
-        return False
+        return frozenset()
+    out: set[str] = set()
     for node in walk(stmt.guard):
         if isinstance(node, Access) and node.array in flags:
-            return True
-        if (
+            out.add(node.array)
+        elif (
             isinstance(node, prim.Subscript)
             and isinstance(node.aggregate, prim.Variable)
             and node.aggregate.name in flags
         ):
-            return True
-    return False
+            out.add(node.aggregate.name)
+    return frozenset(out)
 
 
 def _operations(
@@ -560,7 +569,12 @@ def _store(
         return
     dtype = _narrow_integer((stored.type(0),))
     value = stmt.expr
-    if dtype is None or not _loop_arithmetic(value, promotion.types(value)[0]):
+    # A literal under a guard, which the trace leaves to the call's sizes: the
+    # guard masks the store, and numpy converts only what is stored.
+    literal = isinstance(value, int) and not isinstance(value, bool)
+    if dtype is None or not (
+        literal or _loop_arithmetic(value, promotion.types(value)[0])
+    ):
         return
     leaves = _leaves(value, dtype, stmt.domain, sizes, term, ())
     if leaves is None:
