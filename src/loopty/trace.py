@@ -3186,6 +3186,24 @@ class _GatherView(SymArr):
             return self.index.axis_bound(axis, prefix)
         return self.type.axes[axis]
 
+    def _view_of(self, key: Any, where: str) -> SymArr | None:
+        """A part of the gathered cells: ``u[cell][c]`` is ``u[cell[c]]``.
+
+        A row that fixes leading axes of the indices only is the gather by
+        that row of the indices, as numpy reads it, and as read only. A part
+        that fixes every axis of the indices, ``xy[cell][c, 0]``, is a row of
+        this view, which a called kernel is not given (:mod:`loopty.calls`
+        names the row of the source to pass instead).
+        """
+        parts = _index_tuple(key)
+        if (
+            not _whole_key(key)
+            and 0 < len(parts) < self.index.ndim
+            and not any(isinstance(part, SymArr) for part in parts)
+        ):
+            return _GatherView(self.source, _RowView(self.index, parts, where), where)
+        return super()._view_of(key, where)
+
     def _read(self, indices: tuple[Any, ...], where: str) -> Any:
         depth = self.index.ndim
         picked = self.index._read(tuple(indices[:depth]), where)

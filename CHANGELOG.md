@@ -234,8 +234,10 @@ All notable changes to loopty are recorded here. The format follows
   called kernel takes, natively the row as an `Arr` sharing the buffer and
   the gathered cells as a read-only copy, where both were refused as an
   operation on the whole array. Used as a value, a view is still refused,
-  with the loop nest to write. A table's row, `PHI[q]`, reads natively as a
-  read-only array.
+  with the loop nest to write. A row of the cells a gather picks,
+  `u[cell][c]`, is `u[cell[c]]`, as numpy reads it. A table's row, `PHI[q]`,
+  reads natively as a read-only array, and as zeros out of range under a
+  false guard, as a cell does.
 - In a program's body, `x.dom.size` (and `x.dom[0].size`) is the size of an
   axis of the argument, for the arrays it makes; iterating `x.dom` is still
   refused, as a loop whose trip count is an argument. A kernel's contract

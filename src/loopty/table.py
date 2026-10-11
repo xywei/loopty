@@ -149,14 +149,25 @@ class Table:
         ):
             # A row, PHI[q], which a kernel the body calls takes as an array
             # (loopty.calls): a view of the values, which nothing can write.
+            # Out of range under a false guard it is a row of zeros, as a
+            # cell is zero there; the call it is given to is not made.
             from loopty.arr import Arr
+            from loopty.trace import _writes_are_masked
 
-            if any(part < 0 for part in parts):
-                raise IndexError(
-                    f"index {key!r} of a table is negative: an index is a point "
-                    "of the table's axis, and is never counted from the end"
-                )
-            return Arr(self._values[key])
+            try:
+                if any(part < 0 for part in parts):
+                    raise IndexError(
+                        f"index {key!r} of a table is negative: an index is a "
+                        "point of the table's axis, and is never counted from "
+                        "the end"
+                    )
+                return Arr(self._values[key])
+            except IndexError:
+                if not _writes_are_masked():
+                    raise
+                zeros = np.zeros(self._values.shape[len(parts) :], self._values.dtype)
+                zeros.flags.writeable = False
+                return Arr(zeros)
         if not (
             isinstance(key, tuple)
             and len(key) == self.ndim

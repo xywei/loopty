@@ -707,6 +707,17 @@ class _Inlining:
 
     def array_argument(self, param: str, value: SymArr, written: bool) -> Argument:
         """What the call passed for an array parameter, as the facts read it."""
+        if isinstance(value, _RowView) and isinstance(value.base, _GatherView):
+            gather = value.base
+            depth = gather.index.ndim
+            picked = gather.index._read(tuple(value.prefix[:depth]), self.where)
+            rest = ", ".join(_shown(part) for part in value.prefix[depth:])
+            row = f"{gather.source.name}[{_shown(picked)}{', ' + rest if rest else ''}]"
+            self.refuse(
+                f"its {param} is given {value.name}, a part of the cells "
+                f"{gather.name} picks, which natively is a copy of them; pass "
+                f"{row}, the row of {gather.source.name} the indices pick"
+            )
         if isinstance(value, _RowView):
             return Argument(
                 param,

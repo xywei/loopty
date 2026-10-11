@@ -238,6 +238,56 @@ def test_a_gather_is_read_only() -> None:
         zeroing.term
 
 
+def test_a_row_of_the_cells_a_gather_picks_is_the_gather_by_the_row() -> None:
+    # numpy reads X[cell][c] as X[cell[c]]: so does the trace, and a part that
+    # fixes an axis of the source is refused, naming the row to pass
+    @kernel
+    def weighted_corners(X: Arr[Fin[3], Real]) -> Real:  # noqa: F821
+        return X[0] + 2.0 * X[1] + 3.0 * X[2]
+
+    @kernel
+    def by_rows(
+        cell: Arr[Fin[nc], Fin[3], Fin[nv]],  # noqa: F821
+        X: Arr[Fin[nv], Real],  # noqa: F821
+        a: Arr[Fin[nc], Real],  # noqa: F821
+    ):
+        for c in a.dom:
+            a[c] = weighted_corners(X[cell][c])
+
+    (call,) = by_rows.term.calls
+    (argument,) = call.arguments
+    assert (argument.kind, argument.spelled) == ("gather", "X[cell[c]]")
+    picks = [f for f in _facts(by_rows) if "picks" in f.statement]
+    assert [f.decided_by for f in picks] == ["type"]
+    X = RNG.standard_normal(4)
+    a = Arr.zeros(2)
+    by_rows(Arr.from_numpy(_cells()), Arr.from_numpy(X), a)
+    np.testing.assert_allclose(a.numpy(), X[_cells()] @ [1.0, 2.0, 3.0])
+    inputs = {
+        "cell": Arr.from_numpy(_cells()),
+        "X": Arr.from_numpy(X),
+        "a": Arr.zeros(2),
+    }
+    fact = LoopyExecutor().differential(by_rows, Schedule(by_rows), inputs)
+    assert fact.status is Status.TESTED
+
+    @kernel
+    def apart(P: Arr[Fin[2], Real]) -> Real:  # noqa: F821
+        return P[0] - P[1]
+
+    @kernel
+    def by_corner(
+        cell: Arr[Fin[nc], Fin[3], Fin[nv]],  # noqa: F821
+        xy: Arr[Fin[nv], Fin[2], Real],  # noqa: F821
+        a: Arr[Fin[nc], Real],  # noqa: F821
+    ):
+        for c in a.dom:
+            a[c] = apart(xy[cell][c, 0])
+
+    with pytest.raises(TraceError, match=r"pass xy\[cell\[c, 0\]\], the row of xy"):
+        by_corner.term
+
+
 # }}}
 
 
@@ -730,6 +780,28 @@ def test_a_row_of_a_table_is_passed_as_an_array() -> None:
     inputs = {"x": Arr.from_numpy(x), "y": Arr.zeros(2)}
     fact = LoopyExecutor().differential(by_rows, Schedule(by_rows), inputs)
     assert fact.status is Status.TESTED
+
+
+def test_a_row_of_a_table_under_a_false_guard_is_not_read() -> None:
+    rows = table([[1.0, 2.0], [3.0, 4.0]])
+
+    @kernel
+    def next_rows(x: Arr[Fin[2], Real], y: Arr[Fin[2], Real]):  # noqa: F821
+        for i in y.dom:
+            with when(i + 1 < 2):
+                y[i] = calls.dot(rows[i + 1], x)
+
+    x = np.array([1.0, -1.0])
+    y = Arr.zeros(2)
+    next_rows(Arr.from_numpy(x), y)
+    np.testing.assert_allclose(y.numpy(), [-1.0, 0.0])
+    (row,) = [f for f in _facts(next_rows) if "row passed" in f.statement]
+    assert _decided(row).status is Status.DECIDED
+    inputs = {"x": Arr.from_numpy(x), "y": Arr.zeros(2)}
+    fact = LoopyExecutor().differential(next_rows, Schedule(next_rows), inputs)
+    assert fact.status is Status.TESTED
+    with pytest.raises(IndexError):
+        rows[2]
 
 
 def test_a_scalar_sizes_the_callees_arrays() -> None:
