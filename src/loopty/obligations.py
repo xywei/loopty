@@ -68,6 +68,7 @@ from loopty.description import (
     Unstatable,
     conjunction,
     description_of,
+    disjunction,
 )
 from loopty.hypotheses import substitute
 from loopty.term import Stmt, Term
@@ -75,14 +76,17 @@ from loopty.term import Stmt, Term
 __all__ = [
     "Claim",
     "Stated",
+    "defined_obligation",
     "discharged_obligation",
     "disjoint_writes_obligation",
     "element_sort_obligation",
     "in_bounds_obligation",
+    "mixed_in_bounds_obligation",
     "cast_obligation",
     "lexicographically_before",
     "ordering_obligation",
     "prove",
+    "written_before",
 ]
 
 
@@ -433,6 +437,44 @@ def _reaching(
 # }}}
 
 
+def mixed_in_bounds_obligation(
+    term: Term,
+    place: tuple[tuple[Any, ...], tuple[str, ...], Any],
+    typed: Sequence[tuple[int, Any]],
+    cells: Any,
+    text: str,
+    verdict: Any,
+) -> Any:
+    """An access with mixed subscripts in bounds, every axis of it (#17 of the gaps).
+
+    One part: at every point of the domain, if each index read from an array
+    of a ``Fin`` sort is a point of that sort, which is what the type says
+    and the contract and the element-sort facts keep, the cell is a cell of
+    the array, on every axis. isl decided the affine axes alone; Lean checks
+    the whole access, the typed axes from their sort.
+    """
+    indices, inames, domain = place
+    try:
+        cell_set = _described(cells, f"the cells of {text}")
+        claim = Claim(term)
+        coords = claim.coordinates(inames)
+        described = _described(domain, f"the loops {', '.join(inames)} of {text}")
+        claim.hypotheses.append(described.predicate(coords))
+        at = [_renamed(index, inames, coords) for index in indices]
+        for axis, bound in typed:
+            claim.hypotheses.append(Comparison(0, "<=", at[axis]))
+            claim.hypotheses.append(
+                Comparison(at[axis], "<", _renamed(bound, inames, coords))
+            )
+        goal = cell_set.predicate(at, others=dict(zip(inames, coords, strict=True)))
+        loops = ", ".join(inames)
+        label = f"{text} over the loops {loops}, its typed indices in their sorts"
+        part = _lanky_obligations().Part("in_bounds", label, claim.close(goal))
+    except Unstatable as exc:
+        return _declined(str(exc))
+    return _obligation([part])
+
+
 # {{{ distinct instances write distinct cells
 
 
@@ -654,6 +696,224 @@ def ordering_obligation(term: Term, verdict: Any) -> Any:
 # }}}
 
 
+# {{{ inside one kernel, every read of an array sees an earlier write
+
+
+def _both(first: Any, second: Any) -> tuple[Any, Any]:
+    """Two isl objects with one list of parameters, so that isl combines them."""
+    second = second.align_params(first.get_space())
+    first = first.align_params(second.get_space())
+    return first, second
+
+
+def _time_map(stmt: Stmt, inames: Sequence[str], depth: int) -> Any:
+    """``{ [loops] -> [time] }``: the 2d+1 vector of :func:`loopty.flow.schedule_of`.
+
+    Over ``inames``, which may hold a sum's binders after the statement's
+    loops; they do not move the time, since a sum runs inside one instance.
+    """
+    order = stmt.order or (0,) * (len(stmt.inames) + 1)
+    time: list[str] = []
+    for k in range(depth):
+        time.append(str(order[k]) if k < len(order) else "0")
+        time.append(stmt.inames[k] if k < len(stmt.inames) else "0")
+    time.append(str(order[depth]) if depth < len(order) else "0")
+    return isl.Map(f"{{ [{', '.join(inames)}] -> [{', '.join(time)}] }}")
+
+
+def written_before(
+    term: Term, array: str, writers: Sequence[Stmt], places: Sequence[tuple]
+) -> tuple[Any, list[list[Any]]] | None:
+    """Whether every read of ``array`` sees a cell an earlier instance wrote.
+
+    ``places`` are ``(statement, indices, inames, domain)`` of each read, and
+    ``writers`` the statements that store into the array. For each read,
+    each writer gives the pairs of a reading point and a writing instance of
+    one cell, the write before the read in the source order; the read is
+    defined where some writer gives one. ``None`` when isl shows a read that
+    is not, which a kernel may well mean (it reads what the array held when
+    the call started), or when a read or a write is one isl cannot list.
+    Otherwise the question, the union of the reads no write precedes, an
+    empty set, and the pairs, read by read and writer by writer, for the
+    witness (:func:`defined_obligation`).
+    """
+    depth = flow.instance_space_depth(term)
+    sizes = flow.size_names(term)
+    if not all(_affine(index) for w in writers for index in w.assignee.indices):
+        return None
+    question = None
+    relations: list[list[Any]] = []
+    for k, (stmt, indices, inames, domain) in enumerate(places):
+        if len(inames) < len(stmt.inames) or not all(_affine(i) for i in indices):
+            return None
+        reads = flow.access_relation(inames, domain, indices)
+        reading = _time_map(stmt, inames, depth)
+        per_writer = []
+        covered = None
+        for writer in writers:
+            writes = flow.access_relation(
+                writer.inames, writer.domain, writer.assignee.indices
+            )
+            first, second = _both(reads, writes.reverse())
+            same = first.apply_range(second)
+            later = reading.apply_range(isl.Map.lex_gt(reading.get_space().range()))
+            later = later.apply_range(_time_map(writer, writer.inames, depth).reverse())
+            same, later = _both(same, later)
+            pairs = same.intersect(later)
+            per_writer.append(pairs)
+            found = pairs.domain()
+            if covered is None:
+                covered = found
+            else:
+                covered, found = _both(covered, found)
+                covered = covered.union(found)
+        read_points = reads.domain()
+        if covered is not None:
+            read_points, covered = _both(read_points, covered)
+            missing = read_points.subtract(covered)
+        else:
+            missing = read_points
+        missing = flow.assume_sizes(missing, sizes)
+        if not missing.is_empty():
+            return None
+        relations.append(per_writer)
+        piece = isl.UnionSet.from_set(missing.set_tuple_name(f"read{k}"))
+        question = piece if question is None else question.union(piece)
+    if question is None:
+        return None
+    return question, relations
+
+
+def defined_obligation(
+    term: Term,
+    array: str,
+    writers: Sequence[Stmt],
+    places: Sequence[tuple],
+    relations: Sequence[Sequence[Any]],
+    verdict: Any,
+) -> Any:
+    """Every read of ``array`` sees a cell an earlier instance wrote: a ∀∃, witnessed.
+
+    One part per read: at every point of the read's domain, some writer has
+    an instance in its domain that writes the cell read, earlier in the
+    source order. The goal is a disjunction, one existential per writer, and
+    its witness is isl's ``lexmax`` of the writing instances, in pieces: the
+    region each writer is the witness in, a writer after the ones before it
+    (#4 of the demo's gaps).
+    """
+    lanky = _lanky_obligations()
+    depth = flow.instance_space_depth(term)
+    reflected = dict(term.reflected)
+    parts = []
+    try:
+        for k, ((stmt, indices, inames, domain), per_writer) in enumerate(
+            zip(places, relations, strict=True)
+        ):
+            claim = Claim(term)
+            coords = claim.coordinates(inames)
+            at = dict(zip(inames, coords, strict=True))
+            loops = ", ".join(inames)
+            described = _described(domain, f"the loops {loops} of {stmt.id}")
+            claim.hypotheses.append(described.predicate(coords))
+            read = [_renamed(index, inames, coords) for index in indices]
+            now = _source_time(stmt, depth, coords[: len(stmt.inames)])
+            options = []
+            for writer in writers:
+                ys = claim.fresh_all(writer.inames, "w")
+                values = [ys[name] for name in writer.inames]
+                written = _described(writer.domain, f"the loops of {writer.id}")
+                body = conjunction(
+                    [
+                        written.predicate(values),
+                        _equal(
+                            [
+                                _renamed(i, writer.inames, values)
+                                for i in writer.assignee.indices
+                            ],
+                            read,
+                        ),
+                        lexicographically_before(
+                            _source_time(writer, depth, values), now
+                        ),
+                    ]
+                )
+                if values:
+                    from lanky.terms import Exists
+
+                    binders = tuple((ys[name], Int) for name in writer.inames)
+                    body = Exists(binders, body)
+                options.append(body)
+            goal = disjunction(options) if len(options) > 1 else options[0]
+            pieces = _writer_pieces(
+                per_writer, coords, at, reflected, multiple=len(options) > 1
+            )
+            hints = lanky.Hints(witness=tuple(pieces)) if pieces else lanky.Hints()
+            label = f"{stmt.id} reads {array}[{', '.join(render(i) for i in indices)}]"
+            parts.append(lanky.Part(f"read_{k}", label, claim.close(goal), hints))
+    except Unstatable as exc:
+        return _declined(str(exc))
+    return _obligation(parts)
+
+
+def _writer_pieces(
+    per_writer: Sequence[Any],
+    coords: Sequence[Any],
+    at: Mapping[str, Any],
+    reflected: Mapping[str, Any],
+    multiple: bool,
+) -> list[Any]:
+    """isl's witness of who wrote each cell read: ``lexmax``, writer after writer.
+
+    A hint: a region isl gives that this cannot write as a proposition, or a
+    function it cannot write as terms, leaves the part without one.
+    """
+    lanky = _lanky_obligations()
+    pieces = []
+    taken = None
+    try:
+        for index, pairs in enumerate(per_writer):
+            region = pairs.domain()
+            if taken is not None:
+                region, earlier = _both(region, taken)
+                region = region.subtract(earlier)
+            if region.is_empty():
+                continue
+            params = {
+                name: (
+                    substitute(reflected[name], dict(at))
+                    if name in reflected
+                    else Var(name)
+                )
+                for name in pairs.get_var_names(isl.dim_type.param)
+            }
+            best = isl.PwMultiAff.from_map(pairs.intersect_domain(region).lexmax())
+            found: list[tuple[Any, Any]] = []
+            best.foreach_piece(lambda where, value: found.append((where, value)))
+            for where, value in found:
+                condition = _set_term(where, list(coords), params)
+                values = tuple(
+                    _aff_term(value.get_at(k), list(coords), params)
+                    for k in range(value.dim(isl.dim_type.out))
+                )
+                pieces.append(
+                    lanky.Piece(values, condition, index if multiple else None)
+                )
+            if taken is None:
+                taken = pairs.domain()
+            else:
+                taken, more = _both(taken, pairs.domain())
+                taken = taken.union(more)
+    except (Unstatable, isl.Error, KeyError, ValueError):
+        return []
+    if pieces:
+        last = pieces[-1]
+        pieces[-1] = lanky.Piece(last.values, None, last.disjunct)
+    return pieces
+
+
+# }}}
+
+
 # {{{ a program's facts, under what held where a call is made
 
 
@@ -783,8 +1043,6 @@ def _aff_term(aff: Any, inputs: Sequence[Any], params: Mapping[str, Any]) -> Any
         Unstatable: For a function whose value is not an integer combination
             of its inputs, its parameters and the floors of such.
     """
-    from math import lcm
-
     parts: list[tuple[Any, Any]] = []
     for k, value in enumerate(inputs):
         parts.append((_rational(aff.get_coefficient_val(isl.dim_type.in_, k)), value))
@@ -794,30 +1052,83 @@ def _aff_term(aff: Any, inputs: Sequence[Any], params: Mapping[str, Any]) -> Any
             (_rational(aff.get_coefficient_val(isl.dim_type.param, k)), params[name])
         )
     for k in range(aff.dim(isl.dim_type.div)):
-        argument = aff.get_div(k)
-        coefficients = [
-            _rational(argument.get_coefficient_val(isl.dim_type.in_, j))
-            for j in range(len(inputs))
-        ]
-        coefficients += [
-            _rational(argument.get_coefficient_val(isl.dim_type.param, j))
-            for j in range(len(names))
-        ]
-        constant = _rational(argument.get_constant_val())
-        if any(
-            not argument.get_coefficient_val(isl.dim_type.div, j).is_zero()
-            for j in range(argument.dim(isl.dim_type.div))
-        ):
-            raise Unstatable("a floor of a floor in isl's function")
-        scale = lcm(*(c.denominator for c in (*coefficients, constant)))
-        values = (*inputs, *(params[n] for n in names))
-        numerator = _linear(
-            [(c * scale, v) for c, v in zip(coefficients, values, strict=True)],
-            constant * scale,
-        )
-        floor = prim.FloorDiv(numerator, scale) if scale != 1 else numerator
+        floor = _floor_term(aff.get_div(k), inputs, params)
         parts.append((_rational(aff.get_coefficient_val(isl.dim_type.div, k)), floor))
     return _linear(parts, _rational(aff.get_constant_val()))
+
+
+def _floor_term(argument: Any, inputs: Sequence[Any], params: Mapping[str, Any]) -> Any:
+    """``floor(argument)`` for an isl aff with rational coefficients, as ``e // m``.
+
+    Raises:
+        Unstatable: For an argument that is itself a floor of something.
+    """
+    from math import lcm
+
+    names = argument.get_var_names(isl.dim_type.param)
+    coefficients = [
+        _rational(argument.get_coefficient_val(isl.dim_type.in_, j))
+        for j in range(len(inputs))
+    ]
+    coefficients += [
+        _rational(argument.get_coefficient_val(isl.dim_type.param, j))
+        for j in range(len(names))
+    ]
+    constant = _rational(argument.get_constant_val())
+    if any(
+        not argument.get_coefficient_val(isl.dim_type.div, j).is_zero()
+        for j in range(argument.dim(isl.dim_type.div))
+    ):
+        raise Unstatable("a floor of a floor in isl's function")
+    scale = lcm(*(c.denominator for c in (*coefficients, constant)))
+    values = (*inputs, *(params[n] for n in names))
+    numerator = _linear(
+        [(c * scale, v) for c, v in zip(coefficients, values, strict=True)],
+        constant * scale,
+    )
+    return prim.FloorDiv(numerator, scale) if scale != 1 else numerator
+
+
+def _set_term(obj: Any, inputs: Sequence[Any], params: Mapping[str, Any]) -> Any:
+    """An isl set over ``inputs`` as a lanky proposition: a piece's condition.
+
+    Each basic set a conjunction of its constraints, the existential ones
+    through the floors isl defines them by. A hint, so a set this cannot
+    read raises and the hint is not given.
+
+    Raises:
+        Unstatable: For a constraint on a variable isl gives no floor for.
+    """
+    out = []
+    for basic in obj.get_basic_sets():
+        local = basic.get_local_space()
+        floors = [
+            _floor_term(local.get_div(k), inputs, params)
+            for k in range(basic.dim(isl.dim_type.div))
+        ]
+        names = basic.get_var_names(isl.dim_type.param)
+        parts = []
+        for constraint in basic.get_constraints():
+            terms = [
+                (_rational(constraint.get_coefficient_val(isl.dim_type.set, k)), value)
+                for k, value in enumerate(inputs)
+            ]
+            terms += [
+                (
+                    _rational(constraint.get_coefficient_val(isl.dim_type.param, k)),
+                    params[n],
+                )
+                for k, n in enumerate(names)
+            ]
+            terms += [
+                (_rational(constraint.get_coefficient_val(isl.dim_type.div, k)), floor)
+                for k, floor in enumerate(floors)
+            ]
+            value = _linear(terms, _rational(constraint.get_constant_val()))
+            relation = "==" if constraint.is_equality() else ">="
+            parts.append(Comparison(value, relation, 0))
+        out.append(conjunction(parts))
+    return disjunction(out)
 
 
 def _linear(parts: Sequence[tuple[Any, Any]], constant: Any) -> Any:
