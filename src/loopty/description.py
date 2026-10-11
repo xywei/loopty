@@ -271,6 +271,11 @@ def map_text(text: str) -> dict[str | None, MapText]:
     its value, as isl reads a name written twice. A piece whose output is not
     a list of names, or that this reader cannot split, is refused.
 
+    Several pieces for one statement are one piecewise map, as isl reads them,
+    and keep every piece: their constraints are one disjunction, a piece's
+    conjunction each. Pieces of one statement that name its loops
+    differently are refused, since a step matches loops by name.
+
     Raises:
         Unstatable: For text of another shape.
     """
@@ -280,7 +285,7 @@ def map_text(text: str) -> dict[str | None, MapText]:
         body = body[head.end() :]
     if not (body.startswith("{") and body.endswith("}")):
         raise Unstatable(f"not the text of a map: {text}")
-    out: dict[str | None, MapText] = {}
+    found_pieces: dict[str | None, list[MapText]] = {}
     for piece in body[1:-1].split(";"):
         found = re.match(
             r"^\s*([A-Za-z_][A-Za-z_0-9]*)?\s*\[([^\]]*)\]\s*->\s*\[([^\]]*)\]\s*"
@@ -308,7 +313,23 @@ def map_text(text: str) -> dict[str | None, MapText]:
             for token in _tokens(written):
                 words.append(renamed.get(token, token))
             constraints.append(" ".join(words))
-        out[name] = MapText(ins, outs, tuple(constraints))
+        found_pieces.setdefault(name, []).append(MapText(ins, outs, tuple(constraints)))
+    out: dict[str | None, MapText] = {}
+    for name, pieces in found_pieces.items():
+        first = pieces[0]
+        if len(pieces) == 1:
+            out[name] = first
+            continue
+        if any((p.inputs, p.outputs) != (first.inputs, first.outputs) for p in pieces):
+            raise Unstatable(
+                f"the pieces of the map of {name or 'every statement'} name its loops "
+                "differently"
+            )
+        either = " or ".join(
+            "(" + (" and ".join(f"({c})" for c in p.constraints) or "0 = 0") + ")"
+            for p in pieces
+        )
+        out[name] = MapText(first.inputs, first.outputs, (either,))
     return out
 
 

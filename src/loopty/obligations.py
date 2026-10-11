@@ -1458,24 +1458,33 @@ def _linear(parts: Sequence[tuple[Any, Any]], constant: Any) -> Any:
 
 def _functional_form(
     mapping: Any, inputs: Sequence[Any], params: Mapping[str, Any]
-) -> list[Any] | None:
-    """isl's functional form of a step's map, as one value per output: the witness.
+) -> list[tuple[Any, list[Any]]] | None:
+    """isl's functional form of a step's map, piece by piece: the witness.
 
-    ``None`` when isl gives none in one piece over every input, which leaves
-    the part to ``omega`` alone (and to fail, since its goal is an
-    existential): the witness is a hint and nothing rests on it.
+    Each piece is ``(condition, values)``: where it applies, as a proposition
+    over ``inputs`` (``None`` for the last, which applies wherever the ones
+    before do not), and one value per output. ``None`` when isl gives none,
+    or one this cannot write as terms, which leaves the part to ``omega``
+    alone (and to fail, since its goal is an existential): the witness is a
+    hint and nothing rests on it.
     """
     try:
         function = isl.PwMultiAff.from_map(mapping)
         pieces: list[tuple[Any, Any]] = []
         function.foreach_piece(lambda where, value: pieces.append((where, value)))
-        if len(pieces) != 1 or not pieces[0][0].complement().is_empty():
+        if not pieces:
             return None
-        value = pieces[0][1]
-        return [
-            _aff_term(value.get_at(k), inputs, params)
-            for k in range(value.dim(isl.dim_type.out))
-        ]
+        out = []
+        for k, (where, value) in enumerate(pieces):
+            condition = (
+                None if k == len(pieces) - 1 else _set_term(where, inputs, params)
+            )
+            values = [
+                _aff_term(value.get_at(j), inputs, params)
+                for j in range(value.dim(isl.dim_type.out))
+            ]
+            out.append((condition, values))
+        return out
     except (Unstatable, isl.Error, KeyError, ValueError):
         return None
 
@@ -1781,15 +1790,17 @@ def _bijective_parts(origin: Any, steps: Sequence[Any]) -> list[Any]:
         relation = _relation(step, stmt.id, before, images)
         params = {name: Var(name) for name in mapping.get_var_names(isl.dim_type.param)}
         form = _functional_form(mapping, [before[name] for name in inputs], params)
-        values = None
+        witness = []
         if form is not None:
             names = mapping.get_var_names(isl.dim_type.out)
-            outputs = dict(zip(names, form, strict=True))
-            values = tuple(outputs.get(name, before.get(name)) for name in new)
+            for condition, found in form:
+                outputs = dict(zip(names, found, strict=True))
+                values = tuple(outputs.get(name, before.get(name)) for name in new)
+                witness.append(lanky.Piece(values, condition))
         from lanky.terms import Exists
 
         goal = Exists(tuple((images[name], Int) for name in new), relation)
-        hints = lanky.Hints(witness=(lanky.Piece(values),)) if values else lanky.Hints()
+        hints = lanky.Hints(witness=tuple(witness)) if witness else lanky.Hints()
         parts.append(
             lanky.Part(
                 f"{stmt.id}_total",

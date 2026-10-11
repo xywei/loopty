@@ -343,6 +343,18 @@ def test_an_affine_map_given_as_text_keeps_its_pieces() -> None:
     assert found["S1"].constraints == ("b0 = a0 + a1 and b1 = a0 - a1 + 1",)
     kept = map_text("{ [t, i] -> [t, b] : b = i + t }")[None]
     assert kept.constraints == ("b0 = a0", "b1 = a1 + b0")
+    # Codex: pieces of one statement are one piecewise map, every piece kept
+    piecewise = map_text(
+        "{ [t, i] -> [a, b] : a = t and b = i and i < 4; "
+        "[t, i] -> [a, b] : a = t + 1 and b = i and i >= 4 }"
+    )[None]
+    assert piecewise.constraints == (
+        "((b0 = a0 and b1 = a1 and a1 < 4)) or ((b0 = a0 + 1 and b1 = a1 and a1 >= 4))",
+    )
+    with pytest.raises(Unstatable, match="name its loops differently"):
+        map_text(
+            "{ [t, i] -> [a, b] : a = t and b = i; [t, j] -> [a, b] : a = t and b = j }"
+        )
 
 
 def test_a_cast_is_stated_one_part_per_dependence_class() -> None:
@@ -951,6 +963,18 @@ VARIANTS = {
     "repeated": ("t + 1 < steps.size", "t + 1, i", "t, i", "t, i"),
 }
 
+#: The right half a time step later: a reversal at the seam for the stencil.
+PIECEWISE_SHIFTED = (
+    "{ [t, i] -> [a, b] : a = t and b = i and i < 4; "
+    "[t, i] -> [a, b] : a = t + 1 and b = i and i >= 4 }"
+)
+
+#: The right half moved a hundred places on: the order kept, in two pieces.
+PIECEWISE_SPREAD = (
+    "{ [t, i] -> [a, b] : a = t and b = i and i < 4; "
+    "[t, i] -> [a, b] : a = t and b = i + 100 and i >= 4 }"
+)
+
 #: Schedules, legal for some variants and refused for others.
 SCHEDULES = {
     "tile": lambda s: s.tile("t", "i", 4, 4),
@@ -960,6 +984,9 @@ SCHEDULES = {
     "reverse_i": lambda s: s.affine("{ [t, i] -> [t2, i2] : t2 = t and i2 = -i }"),
     "reverse_t": lambda s: s.affine("{ [t, i] -> [t2, i2] : t2 = -t and i2 = i }"),
     "wavefront": lambda s: s.affine("{ [t, i] -> [a, b] : a = 2 t + i and b = t }"),
+    # piecewise maps, every piece of which Lean has to see (Codex)
+    "piecewise": lambda s: s.affine(PIECEWISE_SHIFTED),
+    "piecewise_legal": lambda s: s.affine(PIECEWISE_SPREAD),
 }
 
 
@@ -1045,6 +1072,20 @@ def test_lean_fails_on_exactly_the_classes_isl_finds_reversed(
             }
             assert failed == wanted, (name, label, sorted(failed), sorted(wanted))
     assert outcomes["legal"] >= 10 and outcomes["refused"] >= 10, outcomes
+
+
+def test_a_piecewise_map_is_proved_piece_by_piece(lean: Any) -> None:
+    # Every piece of the map is in the statement, and isl's functional form
+    # of it, in two pieces, is the witness that the step is total.
+    schedule = Schedule(stencil().jacobi, target="c", sizes={"nt": 8, "nx": 8})
+    bijective, monotone = [
+        f for f in schedule.affine(PIECEWISE_SPREAD).facts()
+        if f.kind in ("bijective", "monotone")
+    ][-2:]
+    total = bijective.term.lean_obligation().parts[0]
+    assert len(total.hints.witness) == 2
+    for fact in (bijective, monotone):
+        assert lean.establish(fact).status is Status.PROVED, fact.statement
 
 
 MUTANT = """
