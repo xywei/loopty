@@ -72,6 +72,7 @@ _EXPORTS = {
     "reduce_sum": "loopty.reduction",
     "table": "loopty.table",
     "trace": "loopty.trace",
+    "upstream": "loopty.upstream",
     "when": "loopty.trace",
 }
 
@@ -108,6 +109,7 @@ __all__ = [
     "reduce_sum",
     "table",
     "trace",
+    "upstream",
     "when",
 ]
 
@@ -164,5 +166,6 @@ if TYPE_CHECKING:
     from loopty.term import Access, ArrType, Reduction, Stmt, Term
     from loopty.trace import TraceError, trace, when
     from loopty.typing import facts_for
+    from loopty.upstream import upstream
 
     sum = reduce_sum
