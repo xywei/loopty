@@ -34,6 +34,20 @@ cnt[q - 1]``. An instance reads cells of its own, which are instantiated at
 in turn, for :data:`ROUNDS` rounds. Any instance of a true universal is true,
 so whichever instances are chosen, the hypotheses stay true.
 
+*An equation of values isl cannot read is an atom, where asked for.* A
+kernel's postcondition is about what it stores, reals as often as integers,
+and ``R[a + 2, b] == -R[a, b + 2]`` is no integer arithmetic. Decided under
+what the kernel's statements store (:mod:`loopty.dataflow`), the claim is an
+instance of one of them, and needs no arithmetic of reals: only that the
+same equation, at the same point, is the same proposition. So with
+``atoms=True`` an equation whose sides isl cannot state is a parameter of
+its own, ``1`` where it holds and ``0`` where it does not, one per equation
+as written, its cells in their canonical spelling and its sides in either
+order. A truth value for every atom is what any values of the reals give
+them, so a set empty for every value of the atoms has no point at those
+values either; two equations written differently are two atoms, even where
+they say the same, which loses a verdict and never makes one.
+
 *What cannot be stated is dropped toward the safe side.* The hypotheses and
 the negated claim are put in negation normal form, and a part isl cannot
 state (a comparison of reals, a product of two unknowns, a quantifier left
@@ -102,6 +116,7 @@ __all__ = [
     "MAX_INSTANCES",
     "ROUNDS",
     "Discharge",
+    "canonical_cells",
     "cells_in",
     "discharge",
     "free_in",
@@ -422,6 +437,78 @@ def _cell(array: str, indices: Sequence[Any]) -> Subscript:
     return Subscript(Var(array), canonical[0] if len(canonical) == 1 else canonical)
 
 
+def _atom_key(prop: prim.Comparison) -> Any:
+    """The key of an equation as an atom: both sides, canonical, in either order.
+
+    ``True`` for an equation whose sides are one term.
+    """
+    left = structural_key(canonical_cells(prop.left))
+    right = structural_key(canonical_cells(prop.right))
+    if left == right:
+        return True
+    return ("equation", frozenset((left, right)))
+
+
+def _atoms_of(prop: Any, cells: _Cells, known: Collection[str]) -> set[Any]:
+    """The keys of the equations in ``prop`` that are atoms (:meth:`_Cells.atom`)."""
+    out: set[Any] = set()
+    if isinstance(prop, prim.LogicalNot):
+        return _atoms_of(prop.child, cells, known)
+    if isinstance(prop, prim.LogicalAnd | prim.LogicalOr):
+        for child in prop.children:
+            out |= _atoms_of(child, cells, known)
+        return out
+    if isinstance(prop, prim.Comparison) and prop.operator in ("==", "!="):
+        left = _text(prop.left, cells, known)
+        if left is None or _text(prop.right, cells, known) is None:
+            out.add(_atom_key(prop))
+    return out
+
+
+def _foreign(
+    instance: Any, wanted: set[Any], cells: _Cells, known: Collection[str]
+) -> bool:
+    """Whether an instance says only what an atom the claim does not have says.
+
+    Atoms are independent of each other, so an instance whose consequent is
+    an equation isl cannot state, and not one of the claim's, constrains
+    nothing the claim is about; it is left out, which only saves work.
+    """
+    consequent = instance
+    if (
+        isinstance(instance, prim.LogicalOr)
+        and len(instance.children) == 2
+        and isinstance(instance.children[0], prim.LogicalNot)
+    ):
+        consequent = instance.children[1]
+    found = _atoms_of(consequent, cells, known)
+    if not found or not isinstance(consequent, prim.Comparison):
+        return False
+    return not (found & wanted)
+
+
+def canonical_cells(expr: Any) -> Any:
+    """``expr`` with every cell it reads in its canonical spelling (:func:`_cell`).
+
+    ``R[(a + 2) - 2, b + 2]``, which putting ``a + 2`` in for a binder
+    writes, is ``R[a, b + 2]``, and an atom about it is the atom about that.
+    """
+    if isinstance(expr, prim.Subscript) and isinstance(expr.aggregate, prim.Variable):
+        index = expr.index if isinstance(expr.index, tuple) else (expr.index,)
+        return _cell(expr.aggregate.name, [canonical_cells(item) for item in index])
+    if isinstance(expr, Forall | Exists):
+        return expr
+    if isinstance(expr, prim.ExpressionNode):
+        args = init_args(expr)
+        new = tuple(canonical_cells(arg) for arg in args)
+        if all(old is changed for old, changed in zip(args, new, strict=True)):
+            return expr
+        return type(expr)(*new)
+    if isinstance(expr, tuple):
+        return tuple(canonical_cells(item) for item in expr)
+    return expr
+
+
 # }}}
 
 
@@ -431,12 +518,23 @@ def _cell(array: str, indices: Sequence[Any]) -> Subscript:
 class _Cells:
     """The isl parameter each cell stands for, keyed by the cell as written."""
 
-    def __init__(self, reserved: Collection[str], integral: Collection[str]) -> None:
+    def __init__(
+        self, reserved: Collection[str], integral: Collection[str], atoms: bool = False
+    ) -> None:
         self.taken = set(reserved)
         self.integral = set(integral)
         self.by_key: dict[Any, str] = {}
         #: Each parameter's cell, in its canonical spelling.
         self.cells: dict[str, Subscript] = {}
+        #: Whether an equation isl cannot state is an atom (see :meth:`atom`).
+        self.atoms = atoms
+        #: Each atom's parameter, by the equation's key, and its equation.
+        self.atom_keys: dict[Any, str] = {}
+        self.equations: dict[str, Any] = {}
+        #: The cells of arrays of no integers a claim reads, with atoms on:
+        #: no parameter of isl's, and still cells a universal hypothesis is
+        #: instantiated at, so that an equation about them can be one.
+        self.others: dict[Any, Subscript] = {}
 
     def adopt(self, name: str, cell: prim.Subscript) -> None:
         canonical = _cell(cell.aggregate.name, _indices(cell))
@@ -448,6 +546,9 @@ class _Cells:
         """The parameter of ``cell``, or ``None`` for an array of no integers."""
         array = cell.aggregate.name
         if array not in self.integral:
+            if self.atoms:
+                canonical = _cell(array, _indices(cell))
+                self.others.setdefault(structural_key(canonical), canonical)
             return None
         canonical = _cell(array, _indices(cell))
         key = structural_key(canonical)
@@ -464,7 +565,30 @@ class _Cells:
         return name
 
     def known(self) -> list[Subscript]:
-        return list(self.cells.values())
+        return [*self.cells.values(), *self.others.values()]
+
+    def atom(self, prop: prim.Comparison) -> str | bool:
+        """The parameter of the equation ``prop``; its truth where its sides agree.
+
+        Keyed by both sides in their canonical spelling (:func:`canonical_cells`)
+        and in either order, so that ``R[(a + 2) - 2, b] == x`` and ``x ==
+        R[a, b]`` are one atom.
+        """
+        key = _atom_key(prop)
+        if key is True:
+            return True
+        found = self.atom_keys.get(key)
+        if found is not None:
+            return found
+        name = "eq"
+        suffix = 0
+        while f"{name}{suffix}" in self.taken:
+            suffix += 1
+        name = f"{name}{suffix}"
+        self.taken.add(name)
+        self.atom_keys[key] = name
+        self.equations[name] = prop
+        return name
 
 
 # }}}
@@ -560,6 +684,13 @@ def _encode(
         operator = _FLIPPED[prop.operator] if negate else prop.operator
         left = _text(prop.left, cells, known)
         right = _text(prop.right, cells, known)
+        if (left is None or right is None) and cells.atoms and operator in ("==", "!="):
+            # an equation of values isl cannot read, read as an atom
+            atom = cells.atom(prop)
+            holds = operator == "=="
+            if isinstance(atom, bool):
+                return "1 = 1" if holds else "1 = 0"
+            return f"({atom} = {1 if holds else 0})"
         if left is None or right is None or operator not in _FLIPPED:
             if dropped is not None:
                 dropped.append(prop)
@@ -855,6 +986,7 @@ def _run(
     negated: bool = True,
     unstated: list[str] | None = None,
     record: list | None = None,
+    atoms: bool = False,
 ) -> tuple[isl.Set, _Cells]:
     """The bad set of ``goal`` over ``domain`` under ``hypotheses``.
 
@@ -884,10 +1016,13 @@ def _run(
             fresh = _fresh(name, reserved)
             reserved.add(fresh)
             apart[name] = Var(fresh)
-        claims.append(substitute(hypothesis.claim, apart))
+        claim = substitute(hypothesis.claim, apart)
+        # and a binder named like a name of the claim, which an instance
+        # taken at that name could not be told apart from (_candidates)
+        claims.append(_bound_apart(claim, set(dims) | _names(goal), reserved))
         if record is not None:
             record.append(("claim", hypothesis, claims[-1]))
-    cells = _Cells(reserved, integral)
+    cells = _Cells(reserved, integral, atoms)
     for name, expr in reflected.items():
         if isinstance(expr, prim.Subscript) and isinstance(
             expr.aggregate, prim.Variable
@@ -915,14 +1050,19 @@ def _run(
     found = assume_sizes(found, set(nonneg) | set(reflected))
     seen: set[Any] = set()
     pending = list(zip(hypotheses, claims, strict=True))
+    # with atoms, the equations of the claim an instance has to be about
+    wanted = _atoms_of(goal, cells, names) if atoms else None
     for _round in range(ROUNDS):
         known_cells = cells.known()
         grew = False
         for hypothesis, claim in pending:
             chosen: list = []
             for instance in _instances(claim, known_cells, chosen):
-                if record is not None and chosen:
-                    record.append(("instance", *chosen.pop()))
+                taken = chosen.pop() if chosen else None
+                if wanted is not None and _foreign(instance, wanted, cells, names):
+                    continue
+                if record is not None and taken is not None:
+                    record.append(("instance", *taken))
                 key = structural_key(instance)
                 if key in seen:
                     continue
@@ -940,6 +1080,41 @@ def _run(
     return found, cells
 
 
+def _bound_apart(claim: Any, avoid: Collection[str], taken: set[str]) -> Any:
+    """``claim`` with each universal conjunct's binders named apart from ``avoid``.
+
+    ``all(off[r + 1] == off[r] + cnt[r] for r ...)`` taken at the claim's
+    own ``r`` would read ``r`` for ``r``, and :func:`_candidates` leaves out a
+    value that names a binder of the universal, since it cannot tell the two
+    apart; named ``r_0``, it is taken there. A renaming changes no meaning.
+    """
+    parts = list(conjuncts(claim))
+    changed = False
+    for position, conjunct in enumerate(parts):
+        if not isinstance(conjunct, Forall) or not any(
+            var.name in avoid for var, _ in conjunct.binders
+        ):
+            continue
+        renames: dict[str, Any] = {}
+        binders = []
+        for var, sort in conjunct.binders:
+            sort = _substitute_sort(sort, renames)
+            if var.name in avoid:
+                fresh = _fresh(var.name, taken | set(avoid))
+                taken.add(fresh)
+                renames[var.name] = Var(fresh)
+                binders.append((Var(fresh), sort))
+            else:
+                binders.append((var, sort))
+        body = substitute(conjunct.body, renames)
+        guard = None if conjunct.guard is None else substitute(conjunct.guard, renames)
+        parts[position] = Forall(tuple(binders), body, guard)
+        changed = True
+    if not changed:
+        return claim
+    return parts[0] if len(parts) == 1 else LogicalAnd(tuple(parts))
+
+
 def discharge(
     domain: isl.Set,
     goal: Any,
@@ -950,6 +1125,8 @@ def discharge(
     nonneg: Collection[str] = (),
     reflected: Mapping[str, Any] | None = None,
     description: str = "",
+    atoms: bool = False,
+    sorts: Mapping[str, Any] | None = None,
 ) -> Discharge:
     """Ask isl whether ``goal`` holds at every point of ``domain`` under ``hypotheses``.
 
@@ -960,7 +1137,11 @@ def discharge(
     ``nonneg`` the parameters that are sizes and so not negative; and
     ``reflected`` the parameters of ``domain`` that already stand for a
     cell, ``nl_cnt_r`` for ``cnt[r]``, so that a hypothesis about ``cnt[r]``
-    is about the bound of the domain too.
+    is about the bound of the domain too. ``atoms`` reads an equation isl
+    cannot state as an atom (see the module docstring), which a kernel's
+    postcondition over reals is decided with, and ``sorts`` names the arrays
+    and scalars of reals among what the claim reads, which Lean states in
+    Mathlib's dialect (:func:`loopty.obligations.discharged_obligation`).
     """
     reflected = dict(reflected or {})
     unstated: list[str] = []
@@ -973,6 +1154,7 @@ def discharge(
         nonneg,
         reflected,
         unstated=unstated,
+        atoms=atoms,
     )
     dims = tuple(domain.get_var_names(isl.dim_type.set))
     if not found.is_empty():
@@ -991,7 +1173,7 @@ def discharge(
     for hypothesis in reversed(list(hypotheses)):
         trial = [kept for kept in used if kept is not hypothesis]
         found_without, _ = _run(
-            domain, goal, trial, integral, known, nonneg, reflected
+            domain, goal, trial, integral, known, nonneg, reflected, atoms=atoms
         )
         if found_without.is_empty():
             used = trial
@@ -1001,11 +1183,13 @@ def discharge(
         # no decision. A domain empty without them is a claim about nothing,
         # and is decided as such.
         held, _ = _run(
-            domain, goal, used, integral, known, nonneg, reflected, negated=False
+            domain, goal, used, integral, known, nonneg, reflected, negated=False,
+            atoms=atoms,
         )
         if held.is_empty():
             alone, _ = _run(
-                domain, goal, (), integral, known, nonneg, reflected, negated=False
+                domain, goal, (), integral, known, nonneg, reflected, negated=False,
+                atoms=atoms,
             )
             if not alone.is_empty():
                 sources = "; ".join(hypothesis.source for hypothesis in used)
@@ -1027,7 +1211,8 @@ def discharge(
                 )
     record: list = []
     final, _ = _run(
-        domain, goal, used, integral, known, nonneg, reflected, record=record
+        domain, goal, used, integral, known, nonneg, reflected, record=record,
+        atoms=atoms,
     )
     from loopty.obligations import Stated, discharged_obligation
 
@@ -1047,6 +1232,7 @@ def discharge(
                 frozenset(integral),
                 frozenset(known),
                 frozenset(nonneg),
+                sorts=tuple(sorted((sorts or {}).items())),
             )
         ),
     )
@@ -1133,26 +1319,25 @@ class _Matcher:
                 return True
             return isinstance(target, prim.Variable) and target.name == name
         if isinstance(pattern, prim.Call):
-            function = pattern.function
-            if not (
-                isinstance(function, prim.Variable) and function.name in self.functions
-            ):
+            spine = _call_spine(pattern)
+            if spine is None or spine[0] not in self.functions:
                 return structurally_equal(pattern, target)
+            function, parameters = spine
             if not (
                 isinstance(target, prim.Subscript)
                 and isinstance(target.aggregate, prim.Variable)
             ):
                 return False
             array = target.aggregate.name
-            if sigma.get(function.name, array) != array:
+            if sigma.get(function, array) != array:
                 return False
-            sigma[function.name] = array
+            sigma[function] = array
             indices = _indices(target)
-            if len(indices) != len(pattern.parameters):
+            if len(indices) != len(parameters):
                 return False
             return all(
                 self.match(p, t, sigma, bound)
-                for p, t in zip(pattern.parameters, indices, strict=True)
+                for p, t in zip(parameters, indices, strict=True)
             )
         if isinstance(pattern, prim.Comparison):
             if not isinstance(target, prim.Comparison):
@@ -1228,6 +1413,22 @@ class _Matcher:
         return str(pattern) == str(target)
 
 
+def _call_spine(expr: Any) -> tuple[str, tuple[Any, ...]] | None:
+    """A family applied an argument at a time: ``R(a)(b)`` is ``R`` at ``(a, b)``.
+
+    A theorem's family of families is applied one index at a time, and the
+    array it stands for is indexed by all of them at once, ``R[a, b]``.
+    ``None`` for a call of anything but a name.
+    """
+    arguments: tuple[Any, ...] = ()
+    while isinstance(expr, prim.Call):
+        arguments = (*expr.parameters, *arguments)
+        expr = expr.function
+    if isinstance(expr, prim.Variable):
+        return expr.name, arguments
+    return None
+
+
 def _base_of(node: Any) -> type:
     """The pymbolic class a lanky node subclasses, to compare kinds of node."""
     for kind in (prim.Sum, prim.Product, prim.LogicalAnd, prim.LogicalOr):
@@ -1256,12 +1457,12 @@ def _apply(expr: Any, sigma: Mapping[str, Any], functions: Collection[str]) -> A
     program size called ``a`` is about that size, and would otherwise say
     ``perm[a] <= a`` of the binder, which no theorem said.
     """
-    if isinstance(expr, prim.Call) and isinstance(expr.function, prim.Variable):
-        if expr.function.name in functions:
-            args = tuple(_apply(arg, sigma, functions) for arg in expr.parameters)
-            return Subscript(
-                Var(sigma[expr.function.name]), args[0] if len(args) == 1 else args
-            )
+    if isinstance(expr, prim.Call):
+        spine = _call_spine(expr)
+        if spine is not None and spine[0] in functions:
+            name, parameters = spine
+            args = tuple(_apply(arg, sigma, functions) for arg in parameters)
+            return Subscript(Var(sigma[name]), args[0] if len(args) == 1 else args)
     if isinstance(expr, prim.Variable):
         if expr.name in sigma and expr.name not in functions:
             return sigma[expr.name]

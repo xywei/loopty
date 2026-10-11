@@ -281,11 +281,14 @@ def test_a_theorems_family_is_checked_against_its_sorts_in_the_programs_names() 
 
 def test_a_kernels_postcondition_is_tested_against_its_native_runs() -> None:
     (post,) = facts_of("number", "postcondition")
-    assert post.status is Status.TESTED
-    assert post.decided_by == "native"
+    # tested on the native runs, and decided from the term (#113)
+    assert post.provenance["native"] == "tested"
     assert post.provenance["compared"] >= 1
-    # Its term is the claim about a call, which no oracle takes for closed.
-    assert str(post.term) == "forall i in Fin(n). perm[i] == n - 1 - i"
+    assert post.status is Status.DECIDED
+    assert post.decided_by == "isl"
+    assert post.provenance["used"] == [
+        f"what S0 stores in perm at {post.where}"
+    ]
 
 
 def test_a_false_postcondition_is_refuted_by_a_native_run() -> None:

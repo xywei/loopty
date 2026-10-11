@@ -257,10 +257,10 @@ def test_realizing_the_spmv_accumulation_records_the_reassociation() -> None:
 def test_the_scan_postcondition_and_its_theorem_are_in_the_ledger() -> None:
     _result, facts = _invoke("spmv", "check")
     post = _statuses(facts, kind="postcondition", owner="scan")
-    # Nobody can decide the recurrence from the term alone; whether it is
-    # assumed, property-tested or proved depends on which oracles are installed,
-    # and all three are honest answers.
-    assert post and set(post) <= {"assumed", "tested", "proved"}, post
+    # Decided from the term (#113): every cell of off is stored once, and read
+    # after its store, so what each statement stores is what the kernel leaves;
+    # proved where Lean is installed.
+    assert post and set(post) <= {"decided", "proved"}, post
 
     theorem = _statuses(facts, owner="scan_monotone")
     assert theorem and set(theorem) <= {"tested", "proved", "certified"}, theorem
@@ -916,7 +916,9 @@ def test_the_travel_demo_decides_its_requirements_or_checks_them() -> None:
         if fact["kind"] == "postcondition"
         and fact["owner"] in ("number", "scan", "scan_flat")
     ]
-    assert [fact["status"] for fact in post] == ["tested", "tested", "tested"]
+    # decided from the term, and tested on the native runs all the same (#113)
+    assert [fact["status"] for fact in post] == ["decided", "decided", "decided"]
+    assert [fact["provenance"]["native"] for fact in post] == ["tested"] * 3
 
 
 def test_the_travel_demo_decides_a_flat_access_where_the_scan_was_called() -> None:
