@@ -485,6 +485,18 @@ def main() -> int:
     sides = {"loopy": cases}
     if not args.baseline_only:
         sides["loopty"] = loopty_kernels(args.target)
+    if len(cells) % 4:
+        # Sun et al.'s split assumes the cells a multiple of four, and these
+        # kernels are run as loopy runs them, with no check of it at the call
+        print(
+            f"{len(cells)} cells (2 n^2 with n odd) are not a multiple of four, "
+            "which Sun et al.'s split assumes: its cases are not timed",
+            flush=True,
+        )
+        sides = {
+            side: {name: k for name, k in kernels.items() if "sun" not in name}
+            for side, kernels in sides.items()
+        }
 
     prepared = {}
     device = "-"

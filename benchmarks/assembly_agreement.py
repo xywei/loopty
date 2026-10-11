@@ -19,8 +19,10 @@ islpy and loopy releases.
     target (the loop as it stands and Sun et al.'s schedule), and prints the
     largest difference from firedrake's vector, relative to its largest
     entry; on the two triangles also the matrix the cells' ``Ae`` add up to
-    against PyOP2's and firedrake's matrices and against the test's
-    ``expected_matrix``.
+    against PyOP2's and firedrake's matrices (relative to their largest
+    entry) and against the test's ``expected_matrix`` (to the test's own
+    ``1e-5``). It exits 1 unless every vector and matrix agrees to
+    ``1e-12`` and ``expected_matrix`` passes the test's check.
 """
 
 from __future__ import annotations
@@ -210,17 +212,28 @@ def compare(path: str) -> int:
             print(f"{label}, {len(cells)} cells, {name}: y within {gap:.1e}")
             if f"{label}:M" in kept:
                 M = assembly.matrix(cells, Ae, len(coords))
-                gap = float(np.abs(M - kept[f"{label}:M"]).max())
+                want_M = kept[f"{label}:M"]
+                gap = float(np.abs(M - want_M).max() / np.abs(want_M).max())
+                worst = max(worst, gap)
                 print(f"  the cells' Ae add up to firedrake's matrix within {gap:.1e}")
         if label == "pyop2":
             # firedrake numbers the nodes its own way; PyOP2's test does not
             data = assembly.inputs_on(assembly.pyop2_mesh())
             assembly.mass_action(**data)
             M = assembly.matrix(CELLS, data["Ae"].numpy(), 4)
-            gap = float(np.abs(M - kept["pyop2_matrix"]).max())
+            want_M = kept["pyop2_matrix"]
+            gap = float(np.abs(M - want_M).max() / np.abs(want_M).max())
+            worst = max(worst, gap)
             print(f"  on PyOP2's numbering, PyOP2's own matrix within {gap:.1e}")
             gap = float(np.abs(M - assembly.EXPECTED).max())
-            print(f"  and the test's expected_matrix within {gap:.1e}, its 6 digits")
+            # the test's own check of its six digits, assert_allclose(..., 1e-5)
+            expected = bool(np.allclose(M, assembly.EXPECTED, 1e-5))
+            print(
+                f"  and the test's expected_matrix within {gap:.1e}, its 6 digits: "
+                f"{expected}"
+            )
+            if not expected:
+                worst = max(worst, 1.0)
     return 0 if worst < 1e-12 else 1
 
 
