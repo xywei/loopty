@@ -1386,6 +1386,8 @@ decided  decided    isl          calls.py:96   matvec         the source order r
 decided  decided    type         calls.py:100  matvec         the accumulation into y[i] over k is approx
 decided  decided    isl          calls.py:100  matvec         A[i], the row passed to dot as a, is in bounds wherever dot is called...
 tested   tested     interpreter  calls.py:96   matvec         the traced term computes what the body computes
+decided  decided    isl          calls.py:100  matvec         split(i, 4) renames the instances of matvec one for one
+decided  decided    isl          calls.py:100  matvec         the order after split(i, 4) runs every dependence of matvec forward
 decided  decided    isl          calls.py:113  csr            y[r] is in bounds for every instance of S0
 decided  decided    isl          calls.py:113  csr            val[r, k] is in bounds for every instance of S0
 decided  decided    type         calls.py:113  csr            x[col[r, k]] is in bounds by type (col[r, k] : Fin(m))
@@ -1440,7 +1442,7 @@ decided  decided    isl          calls.py:142  mass_matrices  M[c], the row pass
 decided  tested     call         calls.py:142  mass_matrices  after each call element_mass(X[cell[c]], Y[cell[c]], M[c]) at calls.p...
 tested   tested     interpreter  calls.py:133  mass_matrices  the traced term computes what the body computes
 
-66 facts: 59 decided, 7 tested
+68 facts: 61 decided, 7 tested
 ```
 
 ### loopty run examples/calls.py
