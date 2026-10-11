@@ -78,7 +78,7 @@ from loopy.target.pyopencl import (
 from pymbolic.mapper import Mapper
 from pymbolic.mapper.stringifier import PREC_COMPARISON, PREC_PRODUCT, PREC_SUM
 
-from loopty.contract import array_storage, compiled_storage
+from loopty.contract import CONVERSIONS, array_storage, compiled_storage
 from loopty.domain import STORAGES, Union
 from loopty.flow import (
     access_relation,
@@ -1077,9 +1077,46 @@ class ExpressionLowerer(Mapper):
             and len(expr.parameters) == 1
         ):
             return self._math(expr, function.name, expr.parameters[0])
+        if (
+            isinstance(function, prim.Variable)
+            and function.name in CONVERSIONS
+            and len(expr.parameters) == 1
+        ):
+            return self._conversion(CONVERSIONS[function.name], expr.parameters[0])
         return prim.Call(
             self.rec(expr.function), tuple(self.rec(p) for p in expr.parameters)
         )
+
+    def _conversion(self, dtype: np.dtype, operand: Any) -> prim.Expression:
+        """A scalar a called kernel converts into its sort's storage, ``np.float32(e)``.
+
+        A kernel called inside another kernel's loop is given its scalars
+        converted, as its contract converts them natively (:mod:`loopty.calls`),
+        and the conversion is C's cast, which rounds a double to single
+        precision and truncates a real to an integer as numpy's does, and
+        wraps an integer round as numpy wraps a numpy one. Nothing is written
+        where the operand is computed in the type already, a comparison for a
+        truth value; a number converted into a truth value is ``e != 0``, which
+        is what ``np.bool_`` makes of it. A widening into ``long`` or
+        ``double`` is had as :meth:`_convert` has one, without a cast in a
+        guard on the loops.
+        """
+        promotion = self.lowering.promotion
+        compiled = None if promotion is None else promotion.types(operand)[1]
+        lowered = self.rec(operand)
+        if dtype.kind == "b" and _is_literal(operand):
+            # pymbolic takes no truth value for a number; C's is 0 or 1.
+            return int(bool(np.real(operand)))
+        if compiled == dtype:
+            return lowered
+        if dtype.kind == "b":
+            if compiled is not None and compiled.kind == "b":
+                return lowered
+            return prim.Comparison(lowered, "!=", 0)
+        widening = dtype == np.float64 or (
+            dtype == np.int64 and compiled is not None and compiled.kind in "bi"
+        )
+        return self._convert(lowered, dtype, narrowing=not widening)
 
     def _math(self, expr: Any, name: str, operand: Any) -> prim.Expression:
         """A function of :mod:`loopty.math`, computed in the type numpy computes it in.
@@ -2560,7 +2597,17 @@ def _storage_plan(
     """
     arrays = {name: typ for name, typ in term.params if isinstance(typ, ArrType)}
     plan = {name: "box" for name, typ in arrays.items() if typ.domain is not None}
+    # A program's own array over a domain is a temporary, stored boxed: its
+    # box is its shape, and nothing would give a packed one its table.
+    made = {name for name, typ in term.temporaries if typ.domain is not None}
+    plan.update((name, "box") for name in made)
     for name, storage in (layouts or {}).items():
+        if name in made:
+            raise LoweringError(
+                f"{name} is an array {term.name} makes for itself over a domain, "
+                "and it is stored boxed: a packed one would need its table of "
+                "row starts, which nothing computes for a temporary"
+            )
         if name not in plan:
             raise LoweringError(
                 f"{name} is not an array over a Where, Sigma or union domain of "
@@ -4080,7 +4127,15 @@ def _temporary(
             "a temporary has no offsets for its rows to be found by, so make "
             "it a parameter of the program instead"
         )
-    shape = tuple(_plain(size) for size in typ.axes)
+    if typ.domain is not None and not box_is_shape(typ.domain):
+        raise LoweringError(
+            f"{name} is an array {term.name} makes for itself over {typ.domain}, "
+            "whose box has an extent that is negative at some size, or which is "
+            "a union of pieces, so it has no box of its shape to be stored in; "
+            "make it a parameter of the program instead"
+        )
+    axes = typ.axes if typ.domain is None else typ.domain.box()
+    shape = tuple(_plain(size) for size in axes)
     missing = sorted(
         {found for size in shape for found in _names_in(size)} - declared
     )

@@ -220,6 +220,22 @@ def _name_of(obj: Any) -> str:
     return getattr(term, "name", repr(obj))
 
 
+def _function_parameter(kernel: Any) -> str | None:
+    """The first parameter of a function sort ``kernel`` takes, or ``None``.
+
+    Asked of a decorated kernel only, through its declared types, which reads
+    the annotations and does not trace the body.
+    """
+    if not hasattr(kernel, "arg_types"):
+        return None
+    from loopty.calls import takes_a_function
+
+    try:
+        return takes_a_function(kernel)
+    except Exception:  # noqa: BLE001 - a kernel whose types cannot be read is run
+        return None
+
+
 def _retargeted(schedules: list, target: str) -> tuple[list, int]:
     """Rebuild every schedule for ``target``, keeping the ones that survive.
 
@@ -574,6 +590,15 @@ class RunVerb:
         unscheduled = 0
         for kernel in kernels:
             if id(kernel) in scheduled:
+                continue
+            function = _function_parameter(kernel)
+            if function is not None:
+                # A rule that takes a rule has nothing to call on its own; it
+                # is compiled where a kernel calls it, with what it is given.
+                print(
+                    f"{_name_of(kernel)}: takes the function {function}, so it is "
+                    "compiled where a kernel calls it, inlined"
+                )
                 continue
             try:
                 schedules.append(Schedule(kernel, target=target or "c"))

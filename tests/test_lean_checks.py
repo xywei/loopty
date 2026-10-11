@@ -196,6 +196,13 @@ def _domains(path: Path) -> Iterator[tuple[str, Any, Any]]:
                 yield f"{found.__name__}.{stmt.id} loops", stmt.loop_domain, term
             for reduction in reductions_in(stmt.expr):
                 yield f"{found.__name__}.{stmt.id} sum", reduction.domain, term
+        for call in term.calls:
+            # the points a call of another kernel is made at, which its
+            # arguments' facts are stated over (loopty.calls)
+            yield f"{found.__name__} call {call.label}", call.domain, term
+            if call.loop_domain is not None:
+                label = f"{found.__name__} call {call.label} loops"
+                yield label, call.loop_domain, term
 
 
 @pytest.mark.parametrize(
@@ -831,6 +838,8 @@ def test_lean_proves_the_windows_and_the_substitution_of_the_test_kernels(
     unproved = []
     for path, words in (
         (KERNELS / "windows.py", ""),
+        # a window over the statements of called kernels, inlined
+        (KERNELS / "calls.py", "sees its slot overwritten"),
         (KERNELS / "travel.py", "stay inside their buffers"),
         (KERNELS / "travel_wrong.py", "stay inside their buffers"),
     ):

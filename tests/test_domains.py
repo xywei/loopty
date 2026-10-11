@@ -709,3 +709,18 @@ def test_packing_a_domain_whose_rows_skip_columns_is_refused_when_lowered() -> N
 
 
 # }}}
+
+
+def test_a_size_of_the_declared_domain_is_read_off_the_arguments_binders() -> None:
+    # The triangle built over names of its own: the call fixes the kernel's
+    # n through the bound of the argument's first binder, as a kernel called
+    # inside another one is given its caller's triangle (loopty.calls).
+    theirs = Where[j : Fin[m], i : Fin[m], i < j]
+    f = Arr.from_cells(theirs, np.arange(6.0), m=4)
+    out = Arr.zeros(1)
+    K.total(f, out)
+    assert out.numpy()[0] == 15.0
+    # and the points are still compared: the band at m = 4 is not a triangle
+    band = Where[j : Fin[m], i : Fin[m], (i - j <= 1) & (j - i <= 1)]
+    with pytest.raises(ValueError, match="is a point of"):
+        K.total(Arr.zeros(band, m=4), Arr.zeros(1))
