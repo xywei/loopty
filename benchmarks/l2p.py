@@ -27,7 +27,10 @@ three can run where their dependencies are:
 ``loopy``
     the plain loopy kernel on the C target or an OpenCL device; ``--variant
     unrolled`` unrolls the two triangle loops (loopy's ``unr``), which loopy
-    does over the triangle's bounding box with a guard.
+    does over the triangle's bounding box with a guard. On C it is built
+    with the flags loopty builds its kernels with, ``-fwrapv`` beside loopy's
+    own (loopty's integers wrap round as numpy's do), so that the two are
+    compared at the same flags; ``--no-wrapv`` builds it with loopy's alone.
 ``loopty``
     the kernels of ``examples/l2p.py``, written out at the order of the
     inputs (the example fixes its order as sumpy fixes a kernel's), lowered
@@ -43,7 +46,8 @@ three can run where their dependencies are:
     the device it came from, as ``examples/l2p_sumpy.json``.
 
 Every run records the device (platform, device, driver), the versions of the
-packages that compiled it, the compiler flags of the C target, the time of
+packages that compiled it, the compiler and the flags the kernel was built
+with on the C target (loopy's and the kernel's own), the time of
 the first call, in fresh code caches when ``--cold``, in two parts:
 ``prepare``, building the kernel (sumpy's symbolic code generation; loopy's
 ``make_kernel``; loopty's trace, its every fact and cast checked, and its
@@ -216,19 +220,34 @@ def opencl_device(queue: Any) -> dict[str, str]:
     }
 
 
-def c_toolchain() -> dict[str, str]:
-    """The compiler and flags loopy's C target compiles with here."""
+def c_toolchain(kernel: Any) -> dict[str, str]:
+    """The compiler, and the flags ``kernel`` is compiled with on the C target here.
+
+    loopy's C target compiles with its toolchain's flags and then the
+    kernel's own build options, which loopty sets on every kernel it lowers
+    (``-fwrapv``, and ``-ffp-contract=off`` for an ``exact`` output); both
+    are recorded, so that two runs are compared at the flags they had.
+    """
     import loopy as lp
 
     target = lp.ExecutableCTarget()
     toolchain = target.compiler.toolchain
+    options = list(kernel.default_entrypoint.options.build_options or [])
     return {
         "cc": " ".join(toolchain.cc) if isinstance(toolchain.cc, list) else str(
             toolchain.cc
         ),
-        "cflags": " ".join(toolchain.cflags),
+        "cflags": " ".join([*toolchain.cflags, *options]),
+        "build_options": " ".join(options),
         "cpu": cpu_model(),
     }
+
+
+def device_kernels(kernel: Any) -> int:
+    """How many device kernels loopy makes of ``kernel``, several at a barrier."""
+    import loopy as lp
+
+    return len(lp.generate_code_v2(kernel).device_programs)
 
 
 def cpu_model() -> str:
@@ -286,12 +305,14 @@ def opencl_queue() -> Any:
     )
 
 
-def time_opencl(call: Any, queue: Any, warmup: int, repeat: int) -> list[float]:
+def time_opencl(
+    call: Any, queue: Any, warmup: int, repeat: int, kernels: int = 1
+) -> list[float]:
     """The device time of ``repeat`` calls of ``call()``, after ``warmup`` calls.
 
     ``call`` returns the event of the kernel it enqueues. Where loopy splits a
-    kernel in several, the event is the last one's, and the wall time of the
-    call to ``queue.finish()`` is taken instead.
+    kernel in several (``kernels`` > 1), the event is the last one's, and the
+    wall time of the call to ``queue.finish()`` is taken instead.
     """
     for _ in range(warmup):
         call()
@@ -303,8 +324,9 @@ def time_opencl(call: Any, queue: Any, warmup: int, repeat: int) -> list[float]:
         queue.finish()
         wall = time.perf_counter() - start
         device = None
-        with contextlib.suppress(Exception):
-            device = (event.profile.end - event.profile.start) * 1e-9
+        if kernels == 1:
+            with contextlib.suppress(Exception):
+                device = (event.profile.end - event.profile.start) * 1e-9
         times.append(wall if device is None else device)
     return times
 
@@ -385,7 +407,8 @@ def run_sumpy(inputs: dict, args: argparse.Namespace) -> tuple[dict, np.ndarray]
     call()
     queue.finish()
     compiled = time.perf_counter() - start
-    times = time_opencl(call, queue, args.warmup, args.repeat)
+    kernels = device_kernels(program)
+    times = time_opencl(call, queue, args.warmup, args.repeat, kernels)
     pot = device_args["result"][0].get()
     record = {
         "implementation": "sumpy",
@@ -398,6 +421,7 @@ def run_sumpy(inputs: dict, args: argparse.Namespace) -> tuple[dict, np.ndarray]
         "compile": compiled,
         "first_call": prepared + compiled,
         "cold": args.cold,
+        "device_kernels": kernels,
         "time": summary(times),
         "times": times,
         "device": opencl_device(queue),
@@ -439,7 +463,9 @@ def _c_headers(preamble_info: Any) -> Any:
     yield ("00_l2p_headers", "#include <stdint.h>\n#include <math.h>")
 
 
-def plain_loopy_kernel(order: int, target: str, variant: str) -> Any:
+def plain_loopy_kernel(
+    order: int, target: str, variant: str, wrap: bool = True
+) -> Any:
     """The L2P written directly in loopy, as a kernel author would write it.
 
     One loop over the boxes; in it, the triangle ``a + b <= p`` of the box's
@@ -447,7 +473,10 @@ def plain_loopy_kernel(order: int, target: str, variant: str) -> Any:
     temporary (``G_xx = -G_yy``: a coefficient with two more ``x``'s is
     minus the one with two more ``y``'s), and then, for each target of the
     box, the Taylor sum over the triangle. On a device the boxes are work
-    groups, as sumpy's own schedule has them (``itgt_box`` on ``g.0``).
+    groups, as sumpy's own schedule has them (``itgt_box`` on ``g.0``). On
+    C, ``wrap`` builds it with ``-fwrapv``, as loopty builds every kernel
+    (``loopty.lower.WRAP_FLAG``), which changes the code GCC makes of the
+    subscripts' arithmetic.
     """
     import loopy as lp
 
@@ -554,6 +583,10 @@ def plain_loopy_kernel(order: int, target: str, variant: str) -> Any:
         knl = lp.tag_inames(knl, tags)
     else:
         knl = lp.register_preamble_generators(knl, [_c_headers])
+        if wrap:
+            from loopty.lower import WRAP_FLAG
+
+            knl = lp.set_options(knl, build_options=[WRAP_FLAG])
     return knl
 
 
@@ -590,7 +623,7 @@ def run_loopy(inputs: dict, args: argparse.Namespace) -> tuple[dict, np.ndarray]
 
     queue = opencl_queue() if args.target == "opencl" else None
     start = time.perf_counter()
-    knl = plain_loopy_kernel(order, args.target, args.variant)
+    knl = plain_loopy_kernel(order, args.target, args.variant, wrap=args.wrap)
     record["prepare"] = time.perf_counter() - start
     if queue is None:
         start = time.perf_counter()
@@ -602,7 +635,7 @@ def run_loopy(inputs: dict, args: argparse.Namespace) -> tuple[dict, np.ndarray]
         call()
         record["compile"] = time.perf_counter() - start
         times = time_c(call, args.warmup, args.repeat)
-        record["toolchain"] = c_toolchain()
+        record["toolchain"] = c_toolchain(knl)
         pot = call_args["result"]
     else:
         import pyopencl.array as cla
@@ -622,7 +655,10 @@ def run_loopy(inputs: dict, args: argparse.Namespace) -> tuple[dict, np.ndarray]
         call()
         queue.finish()
         record["compile"] = time.perf_counter() - start
-        times = time_opencl(call, queue, args.warmup, args.repeat)
+        record["device_kernels"] = device_kernels(knl)
+        times = time_opencl(
+            call, queue, args.warmup, args.repeat, record["device_kernels"]
+        )
         record["device"] = opencl_device(queue)
         pot = device_args["result"].get()
     record["first_call"] = record["prepare"] + record["compile"]
@@ -809,7 +845,7 @@ def run_loopty(inputs: dict, args: argparse.Namespace) -> tuple[dict, np.ndarray
             run()
             record["compile"] = time.perf_counter() - start
             times = time_c(run, args.warmup, args.repeat)
-            record["toolchain"] = c_toolchain()
+            record["toolchain"] = c_toolchain(kernel)
             pot = call["pot"]
         else:
             import pyopencl.array as cla
@@ -829,7 +865,10 @@ def run_loopty(inputs: dict, args: argparse.Namespace) -> tuple[dict, np.ndarray
             run()
             queue.finish()
             record["compile"] = time.perf_counter() - start
-            times = time_opencl(run, queue, args.warmup, args.repeat)
+            record["device_kernels"] = device_kernels(kernel)
+            times = time_opencl(
+                run, queue, args.warmup, args.repeat, record["device_kernels"]
+            )
             record["device"] = opencl_device(queue)
             pot = device_call["pot"].get()
         record["code"] = {
@@ -970,6 +1009,12 @@ def main(argv: list[str] | None = None) -> int:
         run.add_argument("--save", help="write the potential to this .npz")
         run.add_argument("--out", help="append the record to this JSON-lines file")
         run.add_argument("--label", default="", help="a free-form tag for the record")
+        if name == "loopy":
+            run.add_argument(
+                "--no-wrapv", dest="wrap", action="store_false",
+                help="on C, build with loopy's flags alone, without the -fwrapv "
+                "loopty builds every kernel with",
+            )
         if name != "sumpy":
             run.add_argument("--target", choices=("c", "opencl"), default="c")
             run.add_argument(

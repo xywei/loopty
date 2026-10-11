@@ -15,7 +15,10 @@ tree, one set of coefficients and one device:
   in an environment of its own;
 - the same algorithm written directly in plain loopy, as a kernel author
   would (loopy #970's L2P microkernel with the Laplace step put back), with
-  variants that make loopty's choices, so that each cost can be told apart;
+  variants that make loopty's choices, so that each cost can be told apart.
+  On the C target it is built with the flags loopty builds its kernels with,
+  `-fwrapv` beside loopy's own, which changes the code GCC makes; `--no-wrapv`
+  builds it with loopy's flags alone;
 - loopty's schedules of the example, written out at the order asked for,
   lowered by loopty and called as the loopy kernel they are.
 
@@ -28,7 +31,7 @@ $ python benchmarks/l2p.py compare in.npz loopty.npz loopy.npz sumpy.npz
 ```
 
 Each run prints one JSON record: the device (platform, device, driver), the
-versions that compiled it, the C target's compiler flags, the time of the
+versions that compiled it, the flags the C kernel was built with, the time of the
 first call (code generation and compilation, in fresh caches with `--cold`),
 and the median, minimum and maximum of the timed calls after the untimed ones.
 `compare` gives the largest difference between every two potentials and to
