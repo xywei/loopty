@@ -8,6 +8,21 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Added
 
+- **Constant tables** (`loopty.table`, gap 18): quadrature weights, a basis
+  tabulated at the quadrature points, a differentiation matrix, declared
+  next to the kernel as the numpy array they are, `W = table([1 / 6, 1 / 6,
+  1 / 6])`, and read by the body as an array is, `W[q]`, `W.dom`. Natively a
+  table is a read-only copy of its values. Traced, it is recorded in the
+  term (`Term.tables`) under the name the body reads it by, and each read is
+  an access whose in-bounds fact isl decides over the table's shape. Lowered,
+  it is a read-only loopy temporary with the values as its initializer, which
+  loopy writes once with every digit, `static double W[3] = {
+  0.16666666666666666, ... };` on the C target and `__constant` on OpenCL, so
+  both runs read the same numbers; the interpreter reads them too. Complex,
+  single precision and integer tables are read in their own dtype. A table
+  read in a helper of the body is the kernel's, a program holds one table for
+  every call that reads it, and a table named like a parameter or a size of
+  the kernel is a `TraceError`. Writing one is a `TypeError` in both runs.
 - **`loopty.math`**: `sqrt`, `exp`, `log`, `sin`, `cos`, `real`, `imag` and
   `conj` for kernel bodies (gap 12). Each is numpy's natively and a call the
   trace records, which the interpreter evaluates with the same numpy function

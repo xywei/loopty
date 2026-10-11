@@ -1030,6 +1030,9 @@ class _Composer:
         self.blocks = 0
         self.labels: set[str] = set()
         self.calls: dict[str, int] = {}
+        #: The constant tables the callees read, by the program's name for
+        #: each: one name for one table, whichever callees read it.
+        self.tables: dict[str, Any] = {}
 
     # {{{ names
 
@@ -1254,6 +1257,18 @@ class _Composer:
             param: _rename_type(typ, names, exprs) for param, typ in term.params
         }
 
+        for name, values in term.tables:
+            # A table is the callee's own, and the program's under a name of
+            # its own: the same one for the same table read by two calls, and
+            # another for another table its callee happens to name alike.
+            mine = next(
+                (known for known, held in self.tables.items() if held is values),
+                None,
+            )
+            if mine is None:
+                mine = self.fresh(name)
+                self.tables[mine] = values
+            names[name] = mine
         for name in _own_names(term):
             if name not in names and name not in exprs:
                 names[name] = self.fresh(name)
@@ -1890,6 +1905,7 @@ class _Composer:
             requirements=tuple(requirements),
             scopes=tuple(scopes),
             deferred_offsets=tuple(self.deferred),
+            tables=tuple(self.tables.items()),
         )
 
     # {{{ facts that travel

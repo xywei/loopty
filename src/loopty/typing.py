@@ -306,8 +306,14 @@ def in_bounds_facts(
     (:func:`layout_facts`), since it is decided against the row, and so does
     a fact decided by type through an index read from such an array
     (``x[col[r, j]]``), since the element is read from a cell of the row.
+
+    A read of a constant table (:mod:`loopty.table`) is an access like any
+    other, decided over the table's shape.
     """
+    from loopty.table import table_type
+
     types = dict(term.params)
+    types.update((name, table_type(values)) for name, values in term.tables)
     sizes = flow.size_names(term)
     sorts = _element_sort_ids(term, owner, module=module, line=line)
     layouts = layout_fact_ids(term, owner, module=module, line=line)

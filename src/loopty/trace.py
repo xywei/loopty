@@ -510,6 +510,55 @@ class Tracer:
         #: The kernel's own code, which is watched and followed wherever it is
         #: installed; see :class:`_Own`. :func:`trace` sets it.
         self.own: _Own | None = None
+        #: The constant tables the body reads, by the name it reads each by,
+        #: and the proxy each read goes through; see :meth:`table`.
+        self.tables: dict[str, Any] = {}
+        self._table_proxies: dict[str, SymArr] = {}
+
+    # {{{ constant tables
+
+    def table(self, values: Any, frame: Any) -> SymArr:
+        """The proxy a constant table is read through, recorded on first use.
+
+        The table is named as the frame that reads it names it, the body's or
+        a helper's: a global, a closure variable or a local, whichever holds
+        that very object. A table read by none (``tables["W"][q]``) is
+        ``table``, numbered past one already taken. A name that is also a
+        parameter, a size or a scalar of the kernel would make two things
+        one, and is refused.
+        """
+        for name, known in self.tables.items():
+            if known is values:
+                return self._table_proxies[name]
+        from loopty.table import table_type
+
+        name = _table_name(values, frame)
+        if name is None:
+            name = "table"
+            count = 0
+            while name in self.tables:
+                count += 1
+                name = f"table_{count}"
+        elif name in self.tables:
+            raise TraceError(
+                f"{self.name} reads two different tables as {name}; give each "
+                "a name of its own"
+            )
+        if name in self.params or name in self.integers:
+            raise TraceError(
+                f"{self.name} reads a constant table as {name}, which is also "
+                f"the name of a parameter or a size of {self.name}; rename the "
+                "table"
+            )
+        arrtype = table_type(values)
+        self.tables[name] = values
+        self.array_types[name] = arrtype
+        self.reflections.reserve([name])
+        proxy = SymArr(name, arrtype, self)
+        self._table_proxies[name] = proxy
+        return proxy
+
+    # }}}
 
     # {{{ loops
 
@@ -880,6 +929,15 @@ class Tracer:
 
 
 _TRACERS: list[Tracer] = []
+
+
+def _table_name(values: Any, frame: Any) -> str | None:
+    """The name ``frame`` holds ``values`` by: a local, a closure variable, a global."""
+    for scope in (frame.f_locals, frame.f_globals):
+        for name, value in scope.items():
+            if value is values and name.isidentifier():
+                return name
+    return None
 
 
 def current_tracer() -> Tracer | None:
@@ -3135,10 +3193,11 @@ def _refuse_half_precision(node: prim.Call, promotion: Any, where: str) -> None:
     (operand,) = node.parameters
     operand_type = _one_dtype(promotion.types(operand)[0])
     shown = _written(operand)
+    scaled = f"({shown})" if isinstance(operand, prim.Sum) else shown
     raise TraceError(
         f"{function.name}({shown}) at {where} is a {result} natively, the type "
         f"numpy computes it in for {_a(operand_type)}, and the compiled kernel "
-        f"has no {result}; write {function.name}(1.0 * {shown}) for a double"
+        f"has no {result}; write {function.name}(1.0 * {scaled}) for a double"
     )
 
 
@@ -4722,6 +4781,7 @@ def trace(kernel: Any, arg_types: Any) -> Term:
         stmts=tuple(tracer.stmts),
         post=_proposition_of(post_annotation),
         reflected=tracer.reflections.items(),
+        tables=tuple(tracer.tables.items()),
     )
 
 

@@ -281,6 +281,8 @@ class _Run:
         self.sizes = resolve_sizes(dict(term.params), arguments)
         for name, typ in term.temporaries:
             self.arrays[name] = self._temporary(name, typ)
+        for name, values in term.tables:
+            self.arrays[name] = Arr(values.values)
         self.reflected = dict(term.reflected)
         #: The arrays the term writes, which a bound can read.
         self.written = written

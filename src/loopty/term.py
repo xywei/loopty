@@ -525,6 +525,14 @@ class Term:
       program does not compare them with the rows' own offsets when it
       starts, as a native call that does not read through them does not: a
       layout requirement does, where they are first read.
+
+    And one more is any term's:
+
+    * ``tables`` are the constant tables the body reads
+      (:class:`loopty.table.Table`), each under the name the body reads it
+      by, with its values. Nothing writes one; the lowering declares each as
+      a read-only temporary with its values as the initializer, and the
+      interpreter reads them.
     """
 
     name: str
@@ -540,6 +548,7 @@ class Term:
     requirements: tuple[Requirement, ...] = ()
     scopes: tuple[Scope, ...] = ()
     deferred_offsets: tuple[str, ...] = ()
+    tables: tuple[tuple[str, Any], ...] = ()
 
     @property
     def param_names(self) -> tuple[str, ...]:
@@ -587,9 +596,12 @@ class Term:
 
     @property
     def array_types(self) -> dict[str, ArrType]:
-        """The type of every array the term touches: parameters and temporaries."""
+        """The type of every array the term touches: parameters, temporaries, tables."""
+        from loopty.table import table_type
+
         out = {name: typ for name, typ in self.params if isinstance(typ, ArrType)}
         out.update(self.temporaries)
+        out.update((name, table_type(values)) for name, values in self.tables)
         return out
 
     def offsets_of(self, counts: str) -> str | None:
@@ -619,6 +631,7 @@ class Term:
         table = Reflections()
         table.reserve(self.param_names)
         table.reserve(name for name, _ in self.temporaries)
+        table.reserve(name for name, _ in self.tables)
         table.reserve(self.sizes)
         for stmt in self.stmts:
             table.reserve(stmt.inames)

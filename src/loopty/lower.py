@@ -1887,6 +1887,7 @@ def _refuse_reserved_names(term: Term) -> None:
     roles: dict[str, list[str]] = {
         "parameters": [name for name, _ in term.params],
         "program-local arrays": [name for name, _ in term.temporaries],
+        "constant tables": [name for name, _ in term.tables],
         "sizes": list(term.sizes),
         "loop variables": [],
         "reduction variables": [],
@@ -1915,8 +1916,8 @@ def _refuse_reserved_names(term: Term) -> None:
             "underscores, which C reserves, or name a helper function loopy or "
             "loopty defines in the generated code; rename them in the kernel (a "
             "parameter in its signature, a size in its annotations, a loop or "
-            "reduction variable where it is bound), or in the program that "
-            "makes a program-local array."
+            "reduction variable where it is bound, a table where it is "
+            "declared), or in the program that makes a program-local array."
         )
     called = _called_functions(term)
     shadowed = []
@@ -2215,6 +2216,7 @@ class _Builder:
         candidate = f"off_{counts}"
         used = set(self.term.param_names) | set(self.term.sizes)
         used |= {temporary for temporary, _ in self.term.temporaries}
+        used |= {name for name, _ in self.term.tables}
         used |= {symbol for symbol, _ in self.term.reflected}
         for stmt in self.term.stmts:
             used |= set(stmt.inames)
@@ -2413,6 +2415,7 @@ class _Builder:
         """
         taken = set(self.term.sizes) | set(dict(self.term.params))
         taken |= set(dict(self.term.temporaries))
+        taken |= set(dict(self.term.tables))
         taken |= {iname for stmt in self.term.stmts for iname in stmt.inames}
         taken |= {symbol for symbol, _ in self.term.reflected}
         for stmt in self.term.stmts:
@@ -3913,6 +3916,7 @@ def _arguments(
     # kernel and not a size the caller passes; see _Builder.plan_reductions.
     known_inames |= builder.extra_inames
     temporaries = dict(term.temporaries)
+    tables = dict(term.tables)
     sizes = [
         name
         for name in used
@@ -3921,6 +3925,7 @@ def _arguments(
         and name not in provided
         and name not in dict(term.params)
         and name not in temporaries
+        and name not in tables
     ]
     scalars = {name for name, typ in term.params if not isinstance(typ, ArrType)}
 
@@ -4011,8 +4016,31 @@ def _arguments(
             continue
         args.append(_temporary(term, name, typ, builder.target, declared | scalars))
         declared.add(name)
+    for name, values in term.tables:
+        args.append(_table(name, values))
+        declared.add(name)
 
     return args, tuple(array_args), tuple(value_args), tuple(outputs)
+
+
+def _table(name: str, values: Any) -> Any:
+    """The loopy temporary for a constant table (:class:`loopty.table.Table`).
+
+    Read-only, with the table's values as its initializer, and in global
+    memory: loopy writes it once, outside the kernel's function, as a
+    ``static`` array on the C target and a ``__constant`` one on OpenCL, with
+    every digit of each value (its ``repr``), so the compiled run reads the
+    numbers the native one does. A private one would be an array on the stack
+    of every call, initialized at every call.
+    """
+    return lp.TemporaryVariable(
+        name,
+        values.dtype,
+        shape=values.shape,
+        initializer=values.values,
+        read_only=True,
+        address_space=lp.AddressSpace.GLOBAL,
+    )
 
 
 def _temporary(
