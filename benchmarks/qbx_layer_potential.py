@@ -197,18 +197,18 @@ def loopy_same_kernel(tile: str) -> Any:
     transforms and the order of the source loops they keep.
     """
     import loopy as lp
-    from pymbolic.mapper import IdentityMapper
+    from loopy.symbolic import IdentityMapper
 
     from loopty import Schedule
     from loopty.isl_reading import declining
     from loopty.lower import _natural_power
 
     class Products(IdentityMapper):
-        def map_power(self, expr: Any) -> Any:
+        def map_power(self, expr: Any, *args: Any) -> Any:
             exponent = expr.exponent
             if isinstance(exponent, int) and 0 < exponent < 100:
-                return _natural_power(self.rec(expr.base), exponent)
-            return super().map_power(expr)
+                return _natural_power(self.rec(expr.base, *args), exponent)
+            return super().map_power(expr, *args)
 
     ex = example()
     with declining():
