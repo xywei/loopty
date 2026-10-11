@@ -1314,6 +1314,7 @@ class _Composer:
                         else rename_set(stmt.loop_domain, names, exprs)
                     ),
                     unnarrowed=stmt.unnarrowed,
+                    exactness=stmt.exactness,
                 )
             )
         self.blocks += top

@@ -1597,7 +1597,9 @@ def _classes(origin: Any) -> list[tuple[Stmt, Stmt, tuple, tuple]]:
     access of ``a`` and one of ``b`` to the same array, of the same rank, at
     least one a write (:func:`loopty.schedule._accesses`). A class isl finds
     empty is listed too: that it is empty is isl's verdict, and Lean proves
-    it again.
+    it again. Two updates of one array that commute are no class: they
+    need no order (:func:`loopty.schedule._updates`), and what they ask of
+    a schedule instead is stated for isl only.
     """
     schedule = _schedule_module()
     term = origin._term
@@ -1609,6 +1611,8 @@ def _classes(origin: Any) -> list[tuple[Stmt, Stmt, tuple, tuple]]:
                     if first[1] != second[1] or len(first[2]) != len(second[2]):
                         continue
                     if first[0] == "read" and second[0] == "read":
+                        continue
+                    if schedule._updating(a, b, first[1]):
                         continue
                     out.append((a, b, first, second))
     return out

@@ -135,6 +135,7 @@ __all__ = [
     "reduction_exactness",
     "reductions_in",
     "trace",
+    "update_exactness",
     "when",
 ]
 
@@ -1047,6 +1048,7 @@ class Tracer:
         kind: str,
         where: str,
         source: Any = None,
+        exactness: str | None = None,
     ) -> Stmt:
         """Append one statement instance family to the term being built.
 
@@ -1063,6 +1065,10 @@ class Tracer:
         there: ``reduce_sum(... for r in val.dom[r])`` after a loop over ``r``
         reads that loop's ``r`` in its bound, which the lowered domain can no
         longer tell from the binder.
+
+        ``exactness`` is the class of an update, ``y[cell[c, j]] += v``
+        (:func:`update_exactness`), which :attr:`loopty.term.Stmt.exactness`
+        keeps.
         """
         escaped = self._escaped(assignee, expr, source)
         if escaped:
@@ -1085,6 +1091,7 @@ class Tracer:
             order=(*self._path, self._position()),
             loop_domain=self.loop_domain() if self.guards else None,
             unnarrowed=self.unnarrowed(),
+            exactness=exactness if kind == "accumulate" else None,
         )
         self.stmts.append(stmt)
         return stmt
@@ -2753,7 +2760,12 @@ class SymArr:
         _refuse_unheld_store(self, expr, where)
         assignee = Access(self.name, indices)
         kind = "accumulate" if _reads_assignee(expr, assignee) else "assign"
-        tracer.record(assignee, expr, kind, where, source=value)
+        exactness = (
+            update_exactness(expr, assignee, tracer.guard(), tracer)
+            if kind == "accumulate"
+            else None
+        )
+        tracer.record(assignee, expr, kind, where, source=value, exactness=exactness)
 
     def _refuse_many_values(self, key: Any, value: Any, where: str) -> None:
         """Refuse a store of many values into one cell.
@@ -4014,6 +4026,61 @@ def join_exactness(*classes: str) -> str:
         key=EXACTNESS_ORDER.index,
         default="exact",
     )
+
+
+def update_exactness(
+    expr: Any, assignee: Access, guard: Any, tracer: Tracer
+) -> str | None:
+    """The exactness class of an update, ``y[cell[c, j]] += v``, or ``None``.
+
+    An update is a sum one operand of which is the cell the statement
+    writes, read once and added (``y[c] - v`` is one, ``v - y[c]`` is not),
+    and none of whose other operands reads the array, any cell of it, as
+    neither do the statement's guard and the cell's own subscripts. Two
+    instances' updates of one cell then commute: each adds its own value,
+    whatever the other has left in the cell. The class is the weaker of the
+    array's element sort and the value added (:func:`_value_exactness`),
+    as a reduction's is read off what it sums: ``approx`` for ``Real``,
+    ``exact`` for an integer added to an integral array. An integral array
+    updated by a value that is not integral is no update: each partial sum
+    is truncated when it is stored, so the order of the updates changes the
+    result by more than any class allows, and ``None`` is returned, as it is
+    for any other read-modify-write (``y[i] = 2 * y[i]``).
+    """
+    if not isinstance(expr, prim.Sum):
+        return None
+    array = assignee.array
+
+    def is_cell(node: Any) -> bool:
+        if not isinstance(node, prim.Subscript | Access):
+            return False
+        found = accesses_in(node)
+        return bool(found) and (
+            found[0].array == array
+            and structurally_equal(found[0].indices, assignee.indices)
+        )
+
+    def reads_array(node: Any) -> bool:
+        return any(access.array == array for access in accesses_in(node))
+
+    own = [k for k, operand in enumerate(expr.children) if is_cell(operand)]
+    if len(own) != 1 or subtracted(expr, own[0]):
+        return None
+    added = [operand for k, operand in enumerate(expr.children) if k != own[0]]
+    cell = expr.children[own[0]]
+    inside = cell.indices if isinstance(cell, Access) else cell.index
+    if (
+        any(reads_array(operand) for operand in added)
+        or reads_array(inside)
+        or (guard is not None and reads_array(guard))
+    ):
+        return None
+    arrtype = tracer.array_types.get(array)
+    stored = "approx" if arrtype is None else _sort_exactness(arrtype.dtype)
+    value = join_exactness(*(_value_exactness(operand, tracer) for operand in added))
+    if stored == "exact" and value != "exact":
+        return None
+    return join_exactness(stored, value)
 
 
 def reduction_exactness(body: Any, tracer: Tracer) -> str:

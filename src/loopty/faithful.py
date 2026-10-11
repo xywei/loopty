@@ -59,6 +59,7 @@ since the claim is about every state of the run and not only its last.
 
 from __future__ import annotations
 
+import dataclasses
 import warnings
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -70,7 +71,7 @@ from lanky.prelude import FinType, Refined
 from lanky.terms import evaluate, free_variables
 
 from loopty.arr import Arr, LayoutError
-from loopty.interpret import CheckFailed, InterpretError, TooLarge, interpret
+from loopty.interpret import CheckFailed, InterpretError, TooLarge, Touch, interpret
 from loopty.term import ArrType, Term, declared_layout
 from loopty.tolerance import disagreement, output_class
 from loopty.trace import TraceError
@@ -83,6 +84,10 @@ __all__ = [
     "SIZES",
     "Stopped",
     "Raised",
+    "Collision",
+    "Logged",
+    "collision_fact",
+    "collisions",
     "faithfulness_fact",
     "layout_fact",
     "no_term_fact",
@@ -128,6 +133,7 @@ def faithfulness_fact(
     module: str | None = None,
     line: int | None = None,
     observed: list[tuple[str, Any, dict[str, Any]]] | None = None,
+    touched: list[Logged] | None = None,
 ) -> Fact:
     """The ``trace-faithful`` fact of one kernel, established by running it.
 
@@ -144,6 +150,10 @@ def faithfulness_fact(
     input, those after a disagreement too, which settles this fact and not
     the postcondition. A run the body raised in is collected too, with a
     :class:`Raised` in place of the arguments, for :func:`layout_fact`.
+
+    ``touched``, when given, collects the cells the interpreted term touched
+    on every input on which it agreed with the body, as :class:`Logged`
+    entries, for :func:`collision_fact`.
     """
     identifier = fact_id(KIND, owner, module=module, line=line)
     inputs: list[dict[str, Any]] = []
@@ -192,7 +202,10 @@ def faithfulness_fact(
                 ) -> None:
                     observed.append((label, recorded, Raised(error)))
 
-            outcome = _compare(kernel, term, label, arguments, after, failed)
+            log: list[Touch] | None = [] if touched is not None else None
+            outcome = _compare(kernel, term, label, arguments, after, failed, log)
+            if outcome is None and touched is not None and log is not None:
+                touched.append(Logged(label, _sizes_of(term, arguments), log))
             if verdict is not None:
                 continue
             if outcome is None:
@@ -471,6 +484,235 @@ def layout_fact(
             **extra,
         )
     return fact
+
+
+@dataclass(frozen=True)
+class Logged:
+    """The cells an interpreted run touched on one input (:func:`faithfulness_fact`).
+
+    ``label`` names the input, ``sizes`` are its sizes, and ``log`` the
+    cells, in the order the run touched them.
+    """
+
+    label: str
+    sizes: dict[str, int]
+    log: list[Touch]
+
+
+@dataclass(frozen=True)
+class Collision:
+    """Two instances that touched one cell of an array on one input.
+
+    ``first`` and ``second`` are ``(statement id, coordinates)``, the
+    coordinates by loop name, ``first`` the one the run reached first;
+    ``reads`` are the cells the subscript of each read on the way to the
+    cell, with what they held, ``cell[0, 1] = 1``.
+    """
+
+    label: str
+    sizes: dict[str, int]
+    array: str
+    cell: tuple[Any, ...]
+    first: tuple[str, dict[str, int]]
+    second: tuple[str, dict[str, int]]
+    reads: tuple[str, ...] = ()
+
+    @property
+    def instances(self) -> str:
+        """``S1[c=0, j=1] and S1[c=1, j=2]``."""
+        return f"{_instance(*self.first)} and {_instance(*self.second)}"
+
+    @property
+    def at(self) -> str:
+        """The input and its sizes, ``example_inputs() (nc=2, nv=4)``."""
+        if "(" in self.label:
+            return self.label  # a drawn input's label has its sizes
+        sizes = ", ".join(
+            f"{name}={value}" for name, value in sorted(self.sizes.items())
+        )
+        return f"{self.label}" + (f" ({sizes})" if sizes else "")
+
+    @property
+    def cell_text(self) -> str:
+        """``y[1]``."""
+        return f"{self.array}[{', '.join(str(index) for index in self.cell)}]"
+
+    @property
+    def where(self) -> str:
+        """``: cell[0, 1] = 1 and cell[1, 2] = 1``, or nothing."""
+        return f", where {' and '.join(self.reads)}" if self.reads else ""
+
+
+def _instance(stmt_id: str, coords: Mapping[str, int]) -> str:
+    return f"{stmt_id}[{', '.join(f'{k}={v}' for k, v in coords.items())}]"
+
+
+def _sizes_of(term: Term, arguments: Mapping[str, Any]) -> dict[str, int]:
+    """The sizes one input gives the term, or none where they cannot be read."""
+    from loopty.contract import resolve_sizes
+
+    try:
+        sizes = resolve_sizes(dict(term.params), arguments)
+    except Exception:  # noqa: BLE001 - a witness is printed without them
+        return {}
+    return {
+        name: int(value)
+        for name, value in sizes.items()
+        if isinstance(value, int | np.integer)
+    }
+
+
+def collisions(
+    term: Term,
+    logged: Logged,
+    array: str,
+    pairs: Any,
+    limit: int = 10_000,
+) -> Iterator[Collision]:
+    """Pairs of instances that touched one cell of ``array`` on one input.
+
+    ``pairs(first, second)`` says which pairs are wanted, each a
+    :class:`loopty.interpret.Touch`, ``first`` the earlier: the writes of
+    one statement for a disjoint-writes fact, the two ends of a dependence
+    a schedule reverses for a cast. The cells are those the run computed,
+    which isl cannot when a subscript is read from an array, ``y[cell[c,
+    j]]``. At most ``limit`` touches of the array are looked at.
+    """
+    by_stmt = {stmt.id: stmt for stmt in term.stmts}
+    seen: dict[tuple[Any, ...], list[Touch]] = {}
+    count = 0
+    for touch in logged.log:
+        if touch.array != array:
+            continue
+        count += 1
+        if count > limit:
+            return
+        earlier = seen.setdefault(touch.cell, [])
+        for first in earlier:
+            if (first.stmt, first.coords) == (touch.stmt, touch.coords):
+                continue
+            if not pairs(first, touch):
+                continue
+            yield Collision(
+                label=logged.label,
+                sizes=dict(logged.sizes),
+                array=array,
+                cell=touch.cell,
+                first=(first.stmt, _coords(by_stmt, first)),
+                second=(touch.stmt, _coords(by_stmt, touch)),
+                reads=_subscript_reads(by_stmt, logged, (first, touch)),
+            )
+        earlier.append(touch)
+
+
+def _coords(by_stmt: Mapping[str, Any], touch: Touch) -> dict[str, int]:
+    stmt = by_stmt.get(touch.stmt)
+    names = stmt.inames if stmt is not None else ()
+    return dict(zip(names, (int(value) for value in touch.coords), strict=False))
+
+
+def _subscript_reads(
+    by_stmt: Mapping[str, Any], logged: Logged, touches: Sequence[Touch]
+) -> tuple[str, ...]:
+    """What each instance's written cell was read through, ``cell[0, 1] = 1``.
+
+    The reads inside the subscript of the cell the statement writes, at the
+    instance's loop variables, with the value the run read there.
+    """
+    from lanky.terms import evaluate as value_of
+
+    from loopty.trace import accesses_in
+
+    out: list[str] = []
+    for touch in touches:
+        stmt = by_stmt.get(touch.stmt)
+        if stmt is None:
+            continue
+        env = {**logged.sizes, **_coords(by_stmt, touch)}
+        for inner in accesses_in(tuple(stmt.assignee.indices)):
+            try:
+                cell = tuple(int(value_of(index, env)) for index in inner.indices)
+            except Exception:  # noqa: BLE001 - a subscript not read back is left out
+                continue
+            for entry in logged.log:
+                if (
+                    entry.kind == "read"
+                    and (entry.stmt, entry.coords) == (touch.stmt, touch.coords)
+                    and entry.array == inner.array
+                    and entry.cell == cell
+                ):
+                    text = (
+                        f"{inner.array}[{', '.join(str(i) for i in cell)}] = "
+                        f"{_python(entry.value)}"
+                    )
+                    if text not in out:
+                        out.append(text)
+                    break
+    return tuple(out)
+
+
+def collision_fact(term: Term, fact: Fact, touched: Sequence[Logged]) -> Fact:
+    """A disjoint-writes fact isl cannot decide, decided on the kernel's runs.
+
+    ``fact`` is one :func:`loopty.typing.write_disjointness_facts` leaves to
+    the native runs: a write through a subscript read from an array,
+    ``y[perm[i]] = x[i]``, which isl widens to every cell. ``touched`` is what
+    :func:`faithfulness_fact` logged of the term's runs, the example inputs
+    first. Two instances of the statement that wrote one cell on an input
+    refute it, with that input, and the cells their subscripts read: the
+    collision is real, not one of the widened relation. With none on every
+    input that ran it is ``tested``, and ``assumed`` when no input ran.
+    """
+    if fact.status is not Status.ASSUMED or not fact.provenance.get("native"):
+        return fact
+    stmt_id = fact.provenance["statement"]
+    array = fact.provenance["array"]
+
+    def writes_of_one(first: Touch, second: Touch) -> bool:
+        return (
+            first.kind == second.kind == "write"
+            and first.stmt == second.stmt == stmt_id
+        )
+
+    tried: list[str] = []
+    for logged in touched:
+        found = next(collisions(term, logged, array, writes_of_one), None)
+        if found is None:
+            tried.append(logged.label)
+            continue
+        return fact.with_status(
+            Status.REFUTED,
+            decided_by="native",
+            witness=found.instances,
+            counterexample={"input": found.label, **found.sizes},
+            reason=(
+                f"{found.instances} both write {found.cell_text} on {found.at}"
+                f"{found.where}, so the later write overwrites the earlier one"
+            ),
+        )
+    if not tried:
+        return fact.with_status(
+            Status.ASSUMED,
+            reason=(
+                f"{fact.provenance.get('reason', '')}, and no input ran natively"
+            ),
+        )
+    # No ``reason``: on a tested fact lanky reads one as a pass on thin
+    # evidence, and this one is a pass on every input that ran.
+    provenance = {key: v for key, v in fact.provenance.items() if key != "reason"}
+    return dataclasses.replace(
+        fact,
+        status=Status.TESTED,
+        decided_by="native",
+        provenance={
+            **provenance,
+            "inputs": tried,
+            "detail": (
+                f"no two instances of {stmt_id} wrote one cell of {array} on "
+                + ", ".join(tried)
+            ),
+        },
+    )
 
 
 def _broken_layout(
@@ -771,6 +1013,7 @@ def _compare(
     arguments: Mapping[str, Any],
     after: Any = None,
     failed: Any = None,
+    log: list[Touch] | None = None,
 ) -> tuple[str, Any] | None:
     """Run both meanings on one input; ``None`` when they agree.
 
@@ -792,7 +1035,9 @@ def _compare(
 
     ``after``, when given, is called with the native run's arguments once the
     body has run them without an error, as the run left them, and
-    ``failed`` with what the body raised on an input it cannot run.
+    ``failed`` with what the body raised on an input it cannot run. ``log``,
+    when given, collects the cells the interpreted term touches
+    (:func:`loopty.interpret.interpret`).
     """
     native = {name: _copy(value) for name, value in arguments.items()}
     interpreted = {name: _copy(value) for name, value in arguments.items()}
@@ -800,7 +1045,7 @@ def _compare(
         warnings.simplefilter("ignore")
         failure: Exception | None = None
         try:
-            interpret(term, interpreted, limit=MAX_INSTANCES)
+            interpret(term, interpreted, limit=MAX_INSTANCES, log=log)
         except TooLarge as exc:
             return "skipped", f"too large to interpret: {exc}"
         except Exception as exc:  # noqa: BLE001 - judged below, after the body

@@ -631,14 +631,32 @@ class Kernel(_Decorated):
                 ),
             )
             return self._facts
-        from loopty.faithful import faithfulness_fact, layout_fact, postcondition_fact
+        from loopty.faithful import (
+            collision_fact,
+            faithfulness_fact,
+            layout_fact,
+            postcondition_fact,
+        )
 
         key = {"module": self.module, "line": self.line}
-        observed: list[Any] = []
-        faithful = faithfulness_fact(
-            self, term, owner=self.qualname, where=self.where, observed=observed, **key
-        )
         stated = rules.facts_for(term, owner=self.qualname, where=self.where, **key)
+        # A write through a subscript read from an array is decided on the
+        # runs, from the cells the interpreted term wrote (collision_fact).
+        native = any(
+            fact.kind == "disjoint-writes" and fact.provenance.get("native")
+            for fact in stated
+        )
+        observed: list[Any] = []
+        touched: list[Any] | None = [] if native else None
+        faithful = faithfulness_fact(
+            self,
+            term,
+            owner=self.qualname,
+            where=self.where,
+            observed=observed,
+            touched=touched,
+            **key,
+        )
         tested = [
             postcondition_fact(
                 self, term, observed, owner=self.qualname, where=self.where, **key
@@ -646,6 +664,8 @@ class Kernel(_Decorated):
             if fact.kind == "postcondition"
             else layout_fact(term, fact, observed)
             if fact.kind == "layout"
+            else collision_fact(term, fact, touched or ())
+            if fact.kind == "disjoint-writes" and fact.provenance.get("native")
             else fact
             for fact in stated
         ]

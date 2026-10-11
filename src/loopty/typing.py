@@ -135,7 +135,7 @@ from loopty.obligations import (
     ordering_obligation,
 )
 from loopty.oracle import Empty, Monotone, Subset
-from loopty.term import ArrType, Term
+from loopty.term import ArrType, Term, commutes
 from loopty.trace import reductions_in
 
 __all__ = [
@@ -1820,6 +1820,20 @@ def write_disjointness_facts(
     The cells of a ragged array are ``[r, j]``, which are distinct cells of
     its buffer while its layout keeps the rows apart; the fact of a ragged
     array whose layout the term rewrites rests on that layout's fact.
+
+    An update, ``y[cell[c, j]] += v`` (:attr:`loopty.term.Stmt.exactness`),
+    owes none: two of its instances may add to one cell, which is what an
+    accumulation is for, and what it owes instead is the class of the sum
+    (:func:`reduction_facts`). Whether two of them may run at the same time
+    is a schedule's question (:meth:`loopty.schedule.Schedule.atomic`).
+
+    A write through a subscript isl cannot read, ``y[perm[i]] = x[i]``, is
+    widened to every cell of the array (:func:`loopty.flow.access_relation`),
+    over which isl would refute the claim with two instances that write no
+    common cell. Its fact is not isl's: it is left ``assumed`` here, with
+    ``native`` in its provenance, and the kernel's native runs decide it
+    (:func:`loopty.faithful.collision_fact`), refuting it with two instances
+    that write one cell on an input, the example inputs first.
     """
     labels = instance_labels(term)
     sizes = flow.size_names(term)
@@ -1830,6 +1844,46 @@ def write_disjointness_facts(
         if not footprint.touches_memory:
             continue
         stmt = by_statement[footprint.stmt]
+        if footprint.kind == "acc" and stmt.exactness is not None:
+            continue
+        identifier = fact_id(
+            "disjoint-writes",
+            owner,
+            module=module,
+            line=line,
+            detail=f"{stmt.id}:{footprint.array}",
+        )
+        statement = (
+            f"distinct instances of {stmt.id} write distinct cells of "
+            f"{footprint.array}"
+        )
+        if _is_widened(footprint.relation, stmt.assignee.indices):
+            subscript = _access_text(footprint.array, stmt.assignee.indices)
+            facts.append(
+                Fact(
+                    id=identifier,
+                    kind="disjoint-writes",
+                    statement=statement,
+                    term=None,
+                    status=Status.ASSUMED,
+                    provenance={
+                        "statement": stmt.id,
+                        "array": footprint.array,
+                        "kind": footprint.kind,
+                        "native": True,
+                        "reason": (
+                            f"the cell {subscript} is read from an array, which "
+                            "isl cannot follow, so the kernel's native runs "
+                            "decide it"
+                        ),
+                        **_unnarrowed(stmt),
+                    },
+                    where=stmt.where,
+                    owner=owner,
+                    rests_on=layouts.get(footprint.array, ()),
+                )
+            )
+            continue
         relation = footprint.relation
         identity = isl.Map.identity(relation.get_space().domain().map_from_set())
         collisions = flow.assume_sizes(
@@ -1840,18 +1894,9 @@ def write_disjointness_facts(
         )
         facts.append(
             Fact(
-                id=fact_id(
-                    "disjoint-writes",
-                    owner,
-                    module=module,
-                    line=line,
-                    detail=f"{stmt.id}:{footprint.array}",
-                ),
+                id=identifier,
                 kind="disjoint-writes",
-                statement=(
-                    f"distinct instances of {stmt.id} write distinct cells of "
-                    f"{footprint.array}"
-                ),
+                statement=statement,
                 term=Empty(
                     collisions,
                     description=f"pairs of {stmt.id} instances writing the same cell",
@@ -2044,9 +2089,44 @@ def ordering_facts(
 def reduction_facts(
     term: Term, owner: str, *, module: str | None = None, line: int | None = None
 ) -> list[Fact]:
-    """One fact per reduction: the exactness class its accumulation is allowed."""
+    """One fact per reduction: the exactness class its accumulation is allowed.
+
+    And one per update, ``y[cell[c, j]] += v``, whose accumulation runs over
+    the statement's own loops: its instances that add to one cell are the
+    terms of a sum, in the order the source runs them, and the class is
+    the one :func:`loopty.trace.update_exactness` reads off what they add.
+    """
     facts: list[Fact] = []
     for stmt in term.stmts:
+        if stmt.exactness is not None:
+            target = _access_text(stmt.assignee.array, stmt.assignee.indices)
+            over = f" over {', '.join(stmt.inames)}" if stmt.inames else ""
+            facts.append(
+                Fact(
+                    id=fact_id(
+                        "exactness",
+                        owner,
+                        module=module,
+                        line=line,
+                        detail=f"{stmt.id}:update",
+                    ),
+                    kind="exactness",
+                    statement=(
+                        f"the accumulation into {target}{over} is {stmt.exactness}"
+                    ),
+                    term=None,
+                    status=Status.DECIDED,
+                    decided_by="type",
+                    provenance={
+                        "exactness": stmt.exactness,
+                        "op": "update",
+                        "inames": list(stmt.inames),
+                        "commutes": commutes(stmt),
+                    },
+                    where=stmt.where,
+                    owner=owner,
+                )
+            )
         for position, reduction in enumerate(reductions_in(stmt.expr)):
             written = stmt.assignee
             indices = ", ".join(render(i) for i in written.indices)

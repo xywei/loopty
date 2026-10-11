@@ -75,9 +75,12 @@ def output_class(
     """The exactness class the comparison of one array of ``term`` is judged by.
 
     The weakest of three: the class of the element sort, the class of every
-    accumulation that writes the array, and ``reassoc`` if ``name`` is among
-    the ``reassociated`` outputs, which is what a schedule's ``realize(...,
-    tree=True)`` records. Weakest wins because error does not cancel.
+    accumulation that writes the array, a sum or an update
+    (:attr:`loopty.term.Stmt.exactness`), and ``reassoc`` if ``name`` is
+    among the ``reassociated`` outputs, which is what a schedule's
+    ``realize(..., tree=True)``, or a step that reorders or runs at once the
+    updates of an array, records. Weakest wins because error does not
+    cancel.
     """
     classes = ["exact"]
     if name in reassociated:
@@ -92,6 +95,8 @@ def output_class(
             continue
         for reduction in reductions_in(stmt.expr):
             classes.append(reduction.exactness)
+        if stmt.exactness is not None:
+            classes.append(stmt.exactness)
     known = [c for c in classes if c in EXACTNESS_ORDER]
     return max(known, key=EXACTNESS_ORDER.index)
 
