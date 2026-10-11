@@ -1229,9 +1229,10 @@ over all of `Nat`), the kernel's facts `decided` by `isl`, and the
 application `decided` by `theorem`, worth what the theorem is. With Lean and
 Mathlib (`LANKY_LEAN_MATHLIB`), every row but the readings and the trace's is
 `proved`: `16 facts: 14 proved, 2 tested`. That takes Lean about a minute and
-a half the first time; checked again with nothing changed, every answer is
+a half the first time. Checked again with nothing changed, every answer is
 read from the proof cache, no Lean is started, and the check takes about two
-seconds.
+seconds; the first check after a cold one may still ask Lean once, for an
+attempt the cold one ran out of time for (lanky#134).
 
 ```console
 $ uv run lanky check examples/taylor_reconstruction.py
