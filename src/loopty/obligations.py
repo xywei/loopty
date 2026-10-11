@@ -87,6 +87,7 @@ __all__ = [
     "mixed_in_bounds_obligation",
     "cast_obligation",
     "lexicographically_before",
+    "window_obligation",
     "ordering_obligation",
     "prove",
     "shadow_hints",
@@ -1700,17 +1701,15 @@ def cast_obligation(cast: Any) -> Any:
     (an existential, with isl's functional form of the map as the witness),
     one only, and no two instances share one.
 
-    A cast after a substitution is not stated: it changed what the instances
-    read, and the dependences its later steps are checked against are isl's.
+    The classes are those of the term as the steps leave it
+    (:func:`_cast_classes`): a statement a substitution or a window took out
+    is in none; the reads a substitution computes again read what its
+    producer read, at the instance that stored the cell; and a window's
+    accesses, two that touch one slot, keep the order they ran in when it
+    was taken.
     """
     origin = cast.schedule
     steps = tuple(cast.steps)
-    if any(step.substitution for step in steps):
-        return _declined(
-            "a substitution before this step changed what the instances read, and "
-            "the dependences the step is checked against are isl's, not loopty's "
-            "description"
-        )
     try:
         if cast.kind == "bijective":
             parts = _bijective_parts(origin, steps)
@@ -1738,33 +1737,279 @@ def cast_obligation(cast: Any) -> Any:
 def _monotone_parts(origin: Any, steps: Sequence[Any]) -> list[Any]:
     lanky = _lanky_obligations()
     term = origin._term
-    stages_order = steps[-1].order if steps else origin._origin_order
-    tags = steps[-1].tags if steps else {}
-    last = steps[-1].new if steps else origin._origin_layout.coords
     parts = []
     assumed = steps[-1].assumptions if steps else ()
-    for n, (a, b, first, second) in enumerate(_classes(origin)):
+    for found in _cast_classes(origin, steps):
         claim = Claim(term)
         claim.hypotheses.extend(assumed)
+        a, b = found.a, found.b
         chain_a = _chain(claim, origin, a, steps, "a")
         chain_b = _chain(claim, origin, b, steps, "b")
-        claim.hypotheses.append(
-            _same_cell(origin, a, b, first[2], second[2], chain_a[0], chain_b[0])
+        if found.kind == "window":
+            first, second = found.accesses
+            at_a = _footprint_place(
+                claim, a, list(chain_a[0].values()), first.inames, first.domain, "c"
+            )
+            at_b = _footprint_place(
+                claim, b, list(chain_b[0].values()), second.inames, second.domain, "d"
+            )
+            placement = found.window.placement
+            claim.hypotheses.append(
+                _equal(
+                    placement.at(
+                        [_renamed(i, first.inames, at_a) for i in first.indices]
+                    ),
+                    placement.at(
+                        [_renamed(i, second.inames, at_b) for i in second.indices]
+                    ),
+                )
+            )
+            stage = len(found.window.steps)
+            claim.hypotheses.append(
+                lexicographically_before(
+                    _stage_time(origin, steps, stage, a.id, chain_a[stage]),
+                    _stage_time(origin, steps, stage, b.id, chain_b[stage]),
+                )
+            )
+        elif found.kind == "carried":
+            producer, at, stored_first = found.through
+            p = claim.coordinates(producer.inames, "p")
+            domain = _described(producer.domain, f"the loops of {producer.id}")
+            claim.hypotheses.append(domain.predicate(p))
+            at_p = dict(zip(producer.inames, p, strict=True))
+            reader, chain_r = (a, chain_a) if stored_first else (b, chain_b)
+            # the producer's instance stored the cell the reader reads
+            claim.hypotheses.append(
+                _equal(
+                    [
+                        _renamed(i, producer.inames, p)
+                        for i in producer.assignee.indices
+                    ],
+                    [substitute(plain(i), dict(chain_r[0])) for i in at],
+                )
+            )
+            claim.hypotheses.append(
+                _same_cell(
+                    origin,
+                    a,
+                    b,
+                    found.first[2],
+                    found.second[2],
+                    chain_a[0],
+                    chain_b[0],
+                )
+            )
+            source = origin._origin_layout.coords
+            writer, chain_x = (b, chain_b) if stored_first else (a, chain_a)
+            then = _time(source, origin._origin_order, {}, producer.id, at_p)
+            other = _time(source, origin._origin_order, {}, writer.id, chain_x[0])
+            claim.hypotheses.append(
+                lexicographically_before(then, other)
+                if stored_first
+                else lexicographically_before(other, then)
+            )
+            if a.id == b.id:
+                names = list(chain_a[0])
+                claim.hypotheses.append(
+                    LogicalNot(
+                        _equal(
+                            [chain_a[0][name] for name in names],
+                            [chain_b[0][name] for name in names],
+                        )
+                    )
+                )
+        else:
+            claim.hypotheses.append(
+                _same_cell(
+                    origin,
+                    a,
+                    b,
+                    found.first[2],
+                    found.second[2],
+                    chain_a[0],
+                    chain_b[0],
+                )
+            )
+            source = origin._origin_layout.coords
+            claim.hypotheses.append(
+                lexicographically_before(
+                    _time(source, origin._origin_order, {}, a.id, chain_a[0]),
+                    _time(source, origin._origin_order, {}, b.id, chain_b[0]),
+                )
+            )
+        goal = lexicographically_before(
+            _stage_time(origin, steps, len(steps), a.id, chain_a[-1]),
+            _stage_time(origin, steps, len(steps), b.id, chain_b[-1]),
         )
-        source = origin._origin_layout.coords
-        claim.hypotheses.append(
-            lexicographically_before(
-                _time(source, origin._origin_order, {}, a.id, chain_a[0]),
-                _time(source, origin._origin_order, {}, b.id, chain_b[0]),
+        parts.append(lanky.Part(found.name, found.label, claim.close(goal)))
+    return parts
+
+
+def plain(expr: Any) -> Any:
+    """``expr`` with the casts of the trace taken off, as the checker reads it."""
+    return _schedule_module()._plain(expr)
+
+
+def _stage_time(
+    origin: Any, steps: Sequence[Any], stage: int, stmt_id: str, values: Any
+) -> list[Any]:
+    """A statement's time vector after the first ``stage`` steps."""
+    if stage == 0:
+        return _time(
+            origin._origin_layout.coords, origin._origin_order, {}, stmt_id, values
+        )
+    step = steps[stage - 1]
+    return _time(step.new, step.order, step.tags, stmt_id, values)
+
+
+@dataclass(frozen=True)
+class _Class:
+    """One dependence class of a cast, as the steps before it leave the term.
+
+    ``kind`` is ``"source"`` for two accesses of the term, in the source
+    order; ``"window"`` for two accesses of one slot of ``window``, in the
+    order the window was taken in (``accesses`` are the two, as
+    :func:`loopty.window.accesses` lists them); and ``"carried"`` for a read
+    a substitution computes again and a write of what it reads, in the
+    order of the write and the producer's instance that stored the cell
+    (``through``: the producer, the reader's index into the array, and
+    whether the reader is first, the class of a read before the write).
+    """
+
+    name: str
+    label: str
+    a: Stmt
+    b: Stmt
+    first: tuple
+    second: tuple
+    kind: str = "source"
+    window: Any = None
+    accesses: tuple = ()
+    through: Any = None
+
+
+def _cast_classes(origin: Any, steps: Sequence[Any]) -> list[_Class]:
+    """Every dependence class a cast after ``steps`` is checked on.
+
+    As :func:`_classes` lists them for the term, without a statement a step
+    took out (:attr:`loopy.schedule.Step.gone`); with the reads a
+    substitution computes again, two classes per write of what its producer
+    read (the read before it, and after it); and with the pairs of accesses
+    of a window, at least one a write, that touch one slot. isl checks a
+    cast against the same dependences (:meth:`loopty.schedule.Schedule.
+    substitute`, :meth:`loopty.schedule.Schedule.contract`).
+    """
+    from loopty import window as win
+
+    schedule = _schedule_module()
+    term = origin._term
+    gone: set[str] = set()
+    for step in steps:
+        gone |= set(step.gone)
+    out: list[_Class] = []
+    for n, (a, b, first, second) in enumerate(_classes(origin)):
+        if a.id in gone or b.id in gone:
+            continue
+        out.append(
+            _Class(
+                f"dependence_{n}",
+                _class_label(a, b, first, second),
+                a,
+                b,
+                first,
+                second,
             )
         )
-        goal = lexicographically_before(
-            _time(last, stages_order, tags, a.id, chain_a[-1]),
-            _time(last, stages_order, tags, b.id, chain_b[-1]),
-        )
-        label = _class_label(a, b, first, second)
-        parts.append(lanky.Part(f"dependence_{n}", label, claim.close(goal)))
-    return parts
+    count = 0
+    for step in steps:
+        if step.substituted is None:
+            continue
+        array, producer, readers = step.substituted
+        stored = producer.assignee.indices
+        reads = [
+            access
+            for access in schedule._accesses(producer, term)
+            if access[0] == "read"
+        ]
+        writes = [
+            (stmt, access)
+            for stmt in term.stmts
+            if stmt.id not in gone
+            for access in schedule._accesses(stmt, term)
+            if access[0] == "write"
+        ]
+        for reader in readers:
+            if reader.id in gone:
+                continue
+            for kind, name, at, part in schedule._accesses(reader, term):
+                if kind != "read" or name != array:
+                    continue
+                renaming = {
+                    index.name: plain(value)
+                    for index, value in zip(stored, at, strict=True)
+                }
+                for _kind, read, indices, _part in reads:
+                    moved = tuple(substitute(plain(i), renaming) for i in indices)
+                    mine = ("read", read, moved, part)
+                    for writer, access in writes:
+                        if access[1] != read or len(access[2]) != len(moved):
+                            continue
+                        for stored_first in (True, False):
+                            pair = (
+                                (reader, writer, mine, access)
+                                if stored_first
+                                else (writer, reader, access, mine)
+                            )
+                            a, b, first, second = pair
+                            out.append(
+                                _Class(
+                                    f"carried_{count}",
+                                    _class_label(a, b, first, second)
+                                    + f", through {producer.id}",
+                                    a,
+                                    b,
+                                    first,
+                                    second,
+                                    kind="carried",
+                                    through=(producer, tuple(at), stored_first),
+                                )
+                            )
+                            count += 1
+    count = 0
+    for step in steps:
+        window = step.window
+        if window is None:
+            continue
+        found = [
+            *win.accesses(term, window.array, [window.producer]),
+            *(
+                access
+                for access in win.accesses(term, window.array, window.readers)
+                if access.kind == "read"
+            ),
+        ]
+        for one in found:
+            for other in found:
+                if one.kind == "read" and other.kind == "read":
+                    continue
+                first = (one.kind, window.array, one.indices, one.part)
+                second = (other.kind, window.array, other.indices, other.part)
+                out.append(
+                    _Class(
+                        f"window_{count}",
+                        _class_label(one.stmt, other.stmt, first, second)
+                        + f", one slot of {window.placement}",
+                        one.stmt,
+                        other.stmt,
+                        first,
+                        second,
+                        kind="window",
+                        window=window,
+                        accesses=(one, other),
+                    )
+                )
+                count += 1
+    return out
 
 
 def _bijective_parts(origin: Any, steps: Sequence[Any]) -> list[Any]:
@@ -1773,9 +2018,12 @@ def _bijective_parts(origin: Any, steps: Sequence[Any]) -> list[Any]:
     step = steps[-1]
     earlier = steps[:-1]
     assumed = step.assumptions
+    gone: set[str] = set()
+    for earlier_step in steps:
+        gone |= set(earlier_step.gone)
     parts = []
     for stmt in term.stmts:
-        if stmt.id not in step.isl_maps:
+        if stmt.id not in step.isl_maps or stmt.id in gone:
             continue
         old = step.old[stmt.id]
         new = step.new[stmt.id]
@@ -1877,14 +2125,22 @@ def _refusal(
         "waw": ("write", "write"),
     }
     wanted = kinds.get(dep.kind)
-    for n, (a, b, first, second) in enumerate(_classes(origin)):
+    for found in _cast_classes(origin, steps):
+        a, b, first, second = found.a, found.b, found.first, found.second
+        if (found.kind == "window") != (getattr(dep, "window", None) is not None):
+            continue
         if (a.id, b.id) != (dep.source, dep.sink) or (first[0], second[0]) != wanted:
             continue
         if first[1] != dep.array or not structurally_equal(
             tuple(first[2]), tuple(dep.source_indices)
         ) or not structurally_equal(tuple(second[2]), tuple(dep.sink_indices)):
             continue
-        part = next((p for p in parts if p.name == f"dependence_{n}"), None)
+        if found.kind == "carried" or (
+            found.kind == "window" and "sum" in (first[3], second[3])
+        ):
+            # the producer's instance, a sum's binders: no point isl gave
+            return None
+        part = next((p for p in parts if p.name == found.name), None)
         if part is None:
             return None
         try:
@@ -1964,6 +2220,133 @@ def _stages(
         for loop, value in current.items():
             out[named(loop, f"{tag}{k}")] = int(value)
     return out
+
+
+# }}}
+
+
+# {{{ a window: no read sees its slot overwritten
+
+
+def window_obligation(window: Any) -> Any:
+    """The ``no-clobber`` fact of a :class:`loopty.schedule.Window`, for Lean.
+
+    One part per read of the array. Three instances, each in its domain and
+    through every step taken before the window: a read ``r``, the
+    producer's instance ``w`` that stored the cell it reads, and another of
+    its instances ``v`` that stored a different cell into the same slot,
+    after ``w``. Then ``v`` does not run before ``r``, in the order the
+    steps leave: their time vectors do not compare that way. The slot is
+    the placement, a term with ``%`` and ``//`` by numbers, which ``omega``
+    reads; the time vectors are those the checker's order has
+    (:func:`_time`). A refused window is stated with isl's triple, at which
+    Lean proves the part false.
+    """
+    from loopty import window as win
+
+    lanky = _lanky_obligations()
+    origin = window.schedule
+    steps = tuple(window.steps)
+    term = origin._term
+    producer = window.producer
+    placement = window.placement
+    assumed = steps[-1].assumptions if steps else ()
+    found = [
+        access
+        for access in win.accesses(term, window.array, window.readers)
+        if access.kind == "read"
+    ]
+    parts = []
+    try:
+        for k, access in enumerate(found):
+            claim = Claim(term)
+            claim.hypotheses.extend(assumed)
+            chain_r = _chain(claim, origin, access.stmt, steps, "r")
+            chain_w = _chain(claim, origin, producer, steps, "w")
+            chain_v = _chain(claim, origin, producer, steps, "v")
+            at_r = _footprint_place(
+                claim,
+                access.stmt,
+                list(chain_r[0].values()),
+                access.inames,
+                access.domain,
+                "s",
+            )
+            read = [_renamed(i, access.inames, at_r) for i in access.indices]
+            stored = [
+                _renamed(i, producer.inames, list(chain_w[0].values()))
+                for i in producer.assignee.indices
+            ]
+            other = [
+                _renamed(i, producer.inames, list(chain_v[0].values()))
+                for i in producer.assignee.indices
+            ]
+            last = len(steps)
+            time_r = _stage_time(origin, steps, last, access.stmt.id, chain_r[-1])
+            time_w = _stage_time(origin, steps, last, producer.id, chain_w[-1])
+            time_v = _stage_time(origin, steps, last, producer.id, chain_v[-1])
+            claim.hypotheses += [
+                _equal(read, stored),
+                _equal(placement.at(other), placement.at(stored)),
+                LogicalNot(_equal(other, stored)),
+                lexicographically_before(time_w, time_v),
+            ]
+            overwritten = lexicographically_before(time_v, time_r)
+            goal = (
+                not overwritten
+                if isinstance(overwritten, bool)
+                else LogicalNot(overwritten)
+            )
+            cell = f"{window.array}[{', '.join(render(i) for i in access.indices)}]"
+            label = (
+                f"{access.stmt.id} reads {cell} before another cell is stored in "
+                f"its slot, {placement}"
+            )
+            parts.append(lanky.Part(f"read_{k}", label, claim.close(goal)))
+    except Unstatable as exc:
+        return _declined(str(exc))
+    counterexample = None
+    if window.refusal is not None:
+        counterexample = _window_refusal(origin, steps, window, found, parts)
+    return _obligation(parts, counterexample, refuted=window.refuted)
+
+
+def _window_refusal(
+    origin: Any,
+    steps: Sequence[Any],
+    window: Any,
+    found: Sequence[Any],
+    parts: Sequence[Any],
+) -> Any:
+    """isl's triple of a refused window, as a counterexample to its read's part.
+
+    A read in a sum reads at its binders too, which the triple does not
+    give, and is not stated.
+    """
+    k, triple = window.refusal
+    if not triple or not 0 <= k < len(found) or found[k].part == "sum":
+        return None
+    access = found[k]
+    part = next((p for p in parts if p.name == f"read_{k}"), None)
+    if part is None:
+        return None
+    (reader, at), (_, stored), (_, other), params = triple
+    try:
+        values = dict(params)
+        for stmt, coords, tag in (
+            (access.stmt, at, "r"),
+            (window.producer, stored, "w"),
+            (window.producer, other, "v"),
+        ):
+            values |= _stages(origin, stmt, steps, coords, params, tag, part)
+    except (Unstatable, isl.Error, KeyError, ValueError):
+        return None
+    text = (
+        f"{reader}{_shown(at)}, {window.producer.id}{_shown(stored)} and "
+        f"{window.producer.id}{_shown(other)} at "
+        + ", ".join(f"{k}={v}" for k, v in params.items())
+    )
+    return _counterexample(part, values, text)
 
 
 # }}}

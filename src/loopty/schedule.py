@@ -744,6 +744,10 @@ class _Dep:
     relation: isl.Map
     source_part: str = ""
     sink_part: str = ""
+    #: The placement of a window the two accesses share a slot of, for a
+    #: dependence a contraction added (see :meth:`Schedule.contract`): they
+    #: touch one slot, not one cell.
+    window: Any = None
 
     def verbs(self) -> tuple[str, str]:
         """How to say, in the rejection message, what each end did."""
@@ -2473,6 +2477,114 @@ class Step:
     parent: Any = None
     substitution: bool = False
     assumptions: tuple[Any, ...] = ()
+    #: The statements no longer run after this step: a substitution's
+    #: producer and zeros, a window's zeros.
+    gone: frozenset[str] = frozenset()
+    #: The window a contraction keeps an array in (:class:`Window`), whose
+    #: slots every later cast keeps the order of.
+    window: Any = None
+    #: A substitution's array, its producer and the statements that read it.
+    substituted: tuple[str, Any, tuple[Any, ...]] | None = None
+
+
+@dataclass(frozen=True, eq=False)
+class Window:
+    """A window an array is kept in, as :meth:`Schedule.contract` took it.
+
+    ``placement`` puts each cell in a slot, ``extents`` is the window's
+    shape, ``producer`` stores the array and ``readers`` read it. The
+    window was decided over the order of ``schedule`` (the schedule the
+    steps start from) after ``steps``, the records before the contraction,
+    and ``refusal`` is a refused one's read, by its position among the
+    readers' reads (:func:`loopty.window.accesses`), and isl's triple: the
+    read, the instance that stored its cell and the one that overwrote its
+    slot.
+    The term of the ``no-clobber`` fact: Lean states it from these
+    (:func:`loopty.obligations.window_obligation`).
+    """
+
+    array: str
+    placement: Any
+    extents: tuple[Any, ...]
+    producer: Stmt
+    readers: tuple[Stmt, ...]
+    schedule: Any
+    steps: tuple[Any, ...]
+    refusal: Any = None
+    refuted: bool = False
+
+    def lean_obligation(self) -> Any:
+        """How Lean is to check that no read sees its slot overwritten."""
+        from loopty.obligations import window_obligation
+
+        return window_obligation(self)
+
+    def __str__(self) -> str:
+        return f"the window of {self.array}, {self.placement}"
+
+
+@dataclass(frozen=True, eq=False)
+class Defined:
+    """The claim of a strict ``definedness`` fact, for Lean.
+
+    Every read of ``array`` by ``readers`` is of a cell ``producer`` stored
+    before it, in the program's order: what :meth:`Schedule.substitute` and
+    :meth:`Schedule.contract` take an array's reads to need, since neither
+    keeps the zeros the program made it with. Stated as a kernel's
+    definedness is (:func:`loopty.obligations.defined_obligation`), with
+    isl's last writer as the witness; a read isl cannot list leaves it to
+    isl.
+    """
+
+    term: Term
+    array: str
+    producer: Stmt
+    readers: tuple[Stmt, ...]
+
+    def lean_obligation(self) -> Any:
+        """How Lean is to check it (see :mod:`lanky.obligations`)."""
+        from loopty import flow
+        from loopty.obligations import (
+            IslOnly,
+            defined_obligation,
+            stated_writers,
+            written_before,
+        )
+
+        term = self.term
+        places = [
+            (stmt, tuple(indices), inames, domain)
+            for stmt in self.readers
+            for name, indices, kind, inames, domain in flow.statement_accesses(
+                stmt, term
+            )
+            if name == self.array and kind in ("read", "acc")
+        ]
+        writers = stated_writers(term, [self.producer])
+        try:
+            found = written_before(term, self.array, writers, places)
+        except Exception:  # noqa: BLE001 - a question isl cannot be asked is isl's
+            found = None
+        if found is None:
+            return IslOnly(
+                f"a read of {self.array} or its write is one isl cannot list, so "
+                "the last writer of each read is not known"
+            ).lean_obligation()
+        return defined_obligation(
+            term,
+            self.array,
+            tuple(writers),
+            tuple(places),
+            tuple(tuple(per) for per in found[1]),
+            _Settled(True),
+        )
+
+
+@dataclass(frozen=True)
+class _Settled:
+    """isl's verdict on a fact a step decided when it was taken: ``ok``."""
+
+    ok: bool
 
 
 @dataclass(frozen=True, eq=False)
@@ -2680,6 +2792,8 @@ class Schedule:
         #: and no loops in the schedule any more.
         self._substituted: tuple[str, ...] = ()
         self._gone: frozenset[str] = frozenset()
+        #: The arrays :meth:`contract` keeps in a window, and each window.
+        self._windows: dict[str, Window] = {}
         self._deps = _dependences(
             self._term, self._layout, self._instances, before, params
         )
@@ -4407,12 +4521,552 @@ class Schedule:
             if reason is not None:
                 draft.unbuildable = reason
             draft.kernel = staged._ordered_by_dependences(draft)
-        return staged._commit(draft, text, recipe, leading=(fact,))
+        return staged._commit(
+            draft,
+            text,
+            recipe,
+            leading=(fact,),
+            gone=frozenset(gone),
+            substituted=(array, producer, tuple(readers)),
+        )
 
     @property
     def substituted(self) -> tuple[str, ...]:
         """The arrays :meth:`substitute` computes where they are read, in order."""
         return self._substituted
+
+    def contract(
+        self,
+        array: str,
+        placement: Any = None,
+        *,
+        registers: bool | None = None,
+    ) -> Schedule:
+        """Keep an array the program makes in the cells live at once: a window.
+
+        Once a fusion runs a reader a few steps behind the call that stores
+        an array, only a few cells of the array are live at any step, and the
+        array can be kept in that many::
+
+            fused = Schedule(burgers_rhs).fuse("flux", "divergence", shift=1)
+            fused.contract("f")
+
+        reads ``f[j]`` and ``f[j - 2]`` at step ``j``, so ``f`` is kept in
+        three slots, ``f[j]`` in slot ``j % 3``, and no flux is computed
+        twice, which :meth:`substitute` would do. ``placement`` says where
+        each cell is kept, as a Python function from a cell's indices to its
+        slot's, ``lambda j: j % 3``; without it the smallest window along the
+        order as it stands is found, axis by axis, outermost first (see
+        :func:`loopty.window.infer`): one row of ``v`` per element and row
+        after a fusion on both, ``lambda e, a, b: b``. A placement is
+        quasi-affine, a sum of the indices times numbers with ``//`` and ``%``
+        by a number.
+
+        That is a storage decision and not a reordering, and it is legal when
+        three things hold, each asked before anything is rewritten:
+
+        * the array is the program's own, made with ``Arr.zeros_like``,
+          which no caller sees, one statement stores it besides the zeros,
+          once per cell, and reads none of it, and the others read it in
+          values, at indices isl reads exactly: a ``ValueError`` names what
+          stands in the way otherwise, as it does a loop of theirs with a
+          tag that runs its instances in no order (``g.0``, ``l.0``, ``ilp``):
+          contract first, and the tag is then checked against the window;
+        * every cell any statement reads, the statement that stores the array
+          stored before the read, so no read sees the zeros, which a window
+          does not keep: the ``definedness`` fact, as :meth:`substitute`
+          asks it;
+        * no read sees its slot overwritten: between the instance that stored
+          the cell a read reads and the read, in the order the schedule has
+          now, no instance stores another cell into the same slot. That is
+          the ``no-clobber`` fact, decided by isl and refuted with the read,
+          the cell it reads and the instance that overwrote its slot; Lean
+          proves it from loopty's own description (see
+          :mod:`loopty.window`).
+
+        From then on the window is part of the schedule: every pair of
+        accesses that touch one slot, at least one a write, is a dependence
+        in the order they run now, so a later step that runs one backwards,
+        or puts two on two work items, is refused with its pair.
+
+        The kernel keeps the array as a temporary of the window's shape,
+        ``double f_window[3]`` on the C target, and drops the statement that
+        zeroed it. Two lowerings: modulo addressing, ``f_window[j % 3]``,
+        and, with ``registers=True``, a shift register, whose every access
+        has a constant index, ``f_window[2]`` and ``f_window[0]``, the window
+        shifted down by one at each step of its loop, which a device keeps in
+        registers. ``registers`` is ``True`` by default on OpenCL where the
+        window is one along a loop with every access at a fixed distance from
+        it, and ``False`` otherwise; asked for where it cannot be, it is a
+        ``ValueError`` with the reason. A window whose shape is a size, not a
+        number, is a global temporary on OpenCL, and a private one on C.
+        """
+        from loopty import window as win
+
+        term = self._term
+        arrtype = term.array_types.get(array)
+        rank = 0 if arrtype is None else len(arrtype.axes)
+        head = f"contract({array!r})"
+        given = (
+            None
+            if placement is None
+            else win.placement_of(placement, rank, array, head)
+        )
+        kwargs: dict[str, Any] = {}
+        if registers is not None:
+            kwargs["registers"] = registers
+        recipe = ("contract", (array,) if given is None else (array, given), kwargs)
+        text = _call_text(recipe)
+        if array in self._substituted:
+            raise ValueError(
+                f"{text}: {array} is computed where it is read already, so no "
+                "cell of it is kept"
+            )
+        if array in self._windows:
+            raise ValueError(
+                f"{text}: {array} is kept in a window already, "
+                f"{self._windows[array].placement}"
+            )
+        producer, readers = win.preconditions(term, array, self._gone, text)
+        statements = {producer.id, *(reader.id for reader in readers)}
+        tagged = sorted(
+            {
+                loop
+                for stmt_id in statements
+                for loop in self._layout.coords[stmt_id]
+                if parallel_tag(self._tags.get(loop, ""))
+            }
+            | {
+                loop
+                for loop, key in self._reductions.items()
+                if key.rsplit(":", 1)[0] in statements
+                and parallel_tag(self._tags.get(loop, ""))
+            }
+        )
+        if tagged:
+            tags = ", ".join(f"{loop} on {self._tags[loop]}" for loop in tagged)
+            raise ValueError(
+                f"{text}: {tags} runs its instances in no order, and a window is "
+                f"taken over an order; contract {array} before tagging, and the "
+                "tag is then checked against the window"
+            )
+
+        fact = self._definedness_fact(
+            producer, readers, array, text, recipe, losing="a window would not"
+        )
+        if fact.status.value != "decided":
+            raise IllegalCast(
+                fact.provenance["reason"],
+                witness=fact.provenance.get("witness"),
+                fact=fact,
+            )
+
+        layout = self._origin_layout
+        width = layout.width
+        writes = win.uniform_access(
+            producer,
+            layout.index(producer.id),
+            width,
+            producer.inames,
+            producer.domain,
+            producer.assignee.indices,
+        )
+        found = [
+            access
+            for access in win.accesses(term, array, readers)
+            if access.kind == "read"
+        ]
+        reads = [
+            win.uniform_access(
+                access.stmt,
+                layout.index(access.stmt.id),
+                width,
+                access.inames,
+                access.domain,
+                access.indices,
+            )
+            for access in found
+        ]
+        unordered = frozenset().union(*self._outside.values())
+        time = _time_map(self._layout, self._order, self._tags, unordered)
+        schedule = self._reindex.apply_range(time).intersect_domain(self._origin)
+        before = win.earlier(schedule, self._origin)
+        sizes = tuple(_plain(size) for size in arrtype.axes)
+        names = _cell_names(producer, rank)
+        if given is None:
+            pairs = None
+            for read in reads:
+                live = win.live_pairs(read, writes, before)
+                if pairs is None:
+                    pairs = live
+                else:
+                    pairs, live = win._aligned(pairs, live)
+                    pairs = pairs.union(live)
+            chosen = win.infer(pairs, rank, sizes, names)
+            if all(
+                isinstance(slot, prim.Variable) for slot in chosen.slots
+            ) and len(chosen.slots) == rank:
+                raise ValueError(
+                    f"{text}: every cell of {array} is still to be read while the "
+                    "others are stored, in the order as it stands, so no window "
+                    f"is smaller than {array}; fuse its readers with "
+                    f"{producer.id} first, so that fewer cells are live at once"
+                )
+        else:
+            chosen = given
+        from loopty.flow import cell_set
+
+        extents = win.extents_of(chosen, cell_set(arrtype), sizes, text, array)
+        # the step as it reads, the window it keeps the array in written out
+        shown = _call_text(("contract", (array, chosen), kwargs))
+        window = Window(
+            array=array,
+            placement=chosen,
+            extents=extents,
+            producer=producer,
+            readers=tuple(readers),
+            schedule=self._first(),
+            steps=self._records,
+        )
+        clobbered = self._clobbered(window, found, reads, writes, before, shown)
+        facts = [fact]
+        no_clobber = self._no_clobber_fact(window, clobbered, shown, recipe, fact)
+        facts.append(no_clobber)
+        if no_clobber.status.value != "decided":
+            raise IllegalCast(
+                no_clobber.provenance["reason"],
+                witness=no_clobber.provenance.get("witness"),
+                fact=no_clobber,
+            )
+
+        zeros = f"{array}.zeros"
+        gone = {zeros} if zeros in layout.coords and zeros not in self._gone else set()
+        staged = self._clone()
+        staged._windows = {**self._windows, array: window}
+        staged._gone = self._gone | gone
+        origin = self._origin
+        for stmt_id in sorted(gone):
+            instances = _embed(self._domains[stmt_id], layout.index(stmt_id), layout)
+            instances = instances.align_params(origin.get_space())
+            origin = origin.align_params(instances.get_space()).subtract(instances)
+        staged._origin = origin.coalesce()
+        slots = self._slot_dependences(window, staged._origin, before)
+        staged._deps = (
+            *(
+                dep
+                for dep in self._deps
+                if dep.source not in gone and dep.sink not in gone
+            ),
+            *slots,
+        )
+        staged._within = tuple(dep for dep in self._within if dep.source not in gone)
+        kept = (
+            None
+            if self._deps_total is None
+            else self._deps_total.intersect_domain(staged._origin).intersect_range(
+                staged._origin
+            )
+        )
+        staged._deps_total = _union(
+            relation
+            for relation in (
+                *(() if kept is None or kept.is_empty() else (kept,)),
+                *(dep.relation for dep in slots),
+            )
+        )
+        staged._flow_note = (
+            f"{self._flow_note}; with {array} kept in a window, the pairs of "
+            "accesses to one of its slots, in the order they ran when it was taken"
+        )
+        staged._reindex = self._reindex.intersect_domain(staged._origin)
+        staged._instances = staged._reindex.range().coalesce()
+        live = {
+            loop
+            for stmt_id, coords in self._layout.coords.items()
+            if stmt_id not in staged._gone
+            for loop in coords
+        }
+        staged._order = [loop for loop in self._order if loop in live]
+        draft = staged._draft()
+        if draft.kernel is not None:
+            ids = self._lowering.insn_ids
+            removed = [ids[stmt_id] for stmt_id in sorted(gone)]
+            entry = draft.kernel.default_entrypoint
+            name = win.window_name(array, set(entry.all_variable_names()))
+            literal = all(isinstance(extent, int) for extent in extents)
+            space = (
+                lp.AddressSpace.GLOBAL
+                if self._target == "opencl" and not literal
+                else lp.AddressSpace.PRIVATE
+            )
+            register = None
+            if registers or (registers is None and self._target == "opencl"):
+                plan = win.register_plan(
+                    draft.kernel, array, ids[producer.id], chosen, removed
+                )
+                if not isinstance(plan, str) and plan[0] in self._strides:
+                    plan = (
+                        f"the loop {plan[0]} steps over a lattice, and a shift "
+                        "register shifts once per step of a loop over every value"
+                    )
+                if isinstance(plan, str):
+                    if registers:
+                        raise ValueError(f"{shown}: registers=True: {plan}")
+                else:
+                    register = plan
+            kernel, reason = win.windowed_kernel(
+                draft.kernel, array, removed, chosen, extents, name, space, register
+            )
+            draft.kernel = kernel
+            if reason is not None:
+                draft.unbuildable = reason
+            draft.kernel = staged._ordered_by_dependences(draft)
+        return staged._commit_storage(
+            draft, shown, recipe, facts, gone=frozenset(gone), window=window
+        )
+
+    @property
+    def windows(self) -> dict[str, Any]:
+        """The arrays :meth:`contract` keeps in a window, and each window."""
+        return dict(self._windows)
+
+    def _clobbered(
+        self,
+        window: Window,
+        found: Sequence[Any],
+        reads: Sequence[isl.Map],
+        writes: isl.Map,
+        before: isl.Map,
+        text: str,
+    ) -> tuple[Any, tuple, str] | None:
+        """The first read whose slot is overwritten before it, or ``None``.
+
+        Returns the read's position among ``found``, the triple of instances
+        (the read, the instance that stored its cell, the one that overwrote
+        the slot) with the sizes they were read at, and the message.
+        """
+        from loopty import window as win
+
+        mapping = window.placement.isl_map()
+        for k, (access, read) in enumerate(zip(found, reads, strict=True)):
+            bad = win.clobbers(read, writes, mapping, before)
+            if bad.is_empty():
+                continue
+            triple = self._triple_in(bad)
+            (reader, at), (_, stored), (writer, other), params = triple
+            producer = window.producer
+            cell = _cell_text(access.indices, at, params)
+            theirs = _cell_text(producer.assignee.indices, other, params)
+            slot = "its slot"
+            try:
+                from pymbolic import evaluate
+
+                values = [
+                    evaluate(_plain(index), {**params, **stored})
+                    for index in producer.assignee.indices
+                ]
+                found_slot = [
+                    evaluate(expr, {}) for expr in window.placement.at(values)
+                ]
+                slot = "slot " + ", ".join(str(value) for value in found_slot)
+            except Exception:  # noqa: BLE001 - the slot is said in words then
+                pass
+            message = (
+                f"{text} illegal: instance {_instance_text(reader, at)} reads "
+                f"{window.array}[{cell}], which {_instance_text(producer.id, stored)} "
+                f"stored in {slot}, after {_instance_text(writer, other)} stored "
+                f"{window.array}[{theirs}] there"
+                f"{_sizes_text(params, self._sizes)}"
+            )
+            return k, triple, message
+        return None
+
+    def _triple_in(self, relation: isl.Map) -> tuple:
+        """One ``r -> [w -> w']`` of ``relation``, each instance named, with sizes."""
+        bad = self._at_hint(relation)
+        n_params = bad.dim(isl.dim_type.param)
+        points = bad.wrap().flatten()
+        if n_params:
+            points = points.move_dims(
+                isl.dim_type.set, 0, isl.dim_type.param, 0, n_params
+            )
+        point = isl_oracle.sample_point(points)
+        if point is None:  # pragma: no cover - the relation is known to be non-empty
+            return ()
+        params = dict(
+            zip(bad.get_var_names(isl.dim_type.param), point[:n_params], strict=False)
+        )
+        width = self._origin_layout.width + 1
+        values = point[n_params:]
+        return (
+            self._name_instance(values[:width]),
+            self._name_instance(values[width : 2 * width]),
+            self._name_instance(values[2 * width : 3 * width]),
+            params,
+        )
+
+    def _no_clobber_fact(
+        self,
+        window: Window,
+        clobbered: tuple[Any, tuple, str] | None,
+        text: str,
+        recipe: tuple[str, tuple, dict],
+        definedness: Any,
+    ) -> Any:
+        """The ``no-clobber`` fact of a window, decided or refuted with its triple."""
+        from loopty import window as win
+
+        statement = (
+            f"no read of {window.array} sees its slot overwritten after {text}: "
+            f"{win.statement_text(window.array, window.placement, window.extents)}"
+        )
+        if clobbered is None:
+            return self._fact(
+                "no-clobber",
+                statement,
+                status="decided",
+                witness=None,
+                detail="no instance stores another cell into a slot between the "
+                "write of a cell and a read of it",
+                step=recipe,
+                about=window.array,
+                rests_on=(definedness.id,),
+                term=window,
+            )
+        k, triple, message = clobbered
+        refused = dataclasses.replace(window, refusal=(k, triple), refuted=True)
+        return self._fact(
+            "no-clobber",
+            statement,
+            status="refuted",
+            witness=triple,
+            detail="a read sees its slot overwritten by another cell",
+            step=recipe,
+            reason=message,
+            about=window.array,
+            rests_on=(definedness.id,),
+            term=refused,
+        )
+
+    def _slot_dependences(
+        self, window: Window, instances: isl.Set, before: isl.Map
+    ) -> tuple[_Dep, ...]:
+        """The pairs of accesses to one slot of ``window``, as dependences.
+
+        Every pair of accesses of the array, at least one of them a write,
+        whose cells the placement puts in one slot, in the order they run
+        now (``before``): a later step keeps that order, or is refused with
+        the pair, and so the window stays safe.
+        """
+        from loopty import window as win
+
+        layout = self._origin_layout
+        width = layout.width
+        mapping = window.placement.isl_map()
+        found = [
+            *win.accesses(self._term, window.array, [window.producer]),
+            *(
+                access
+                for access in win.accesses(self._term, window.array, window.readers)
+                if access.kind == "read"
+            ),
+        ]
+        relations = [
+            win.uniform_access(
+                access.stmt,
+                layout.index(access.stmt.id),
+                width,
+                access.inames,
+                access.domain,
+                access.indices,
+            )
+            for access in found
+        ]
+        identity = isl.Map.identity(instances.get_space().map_from_set())
+        out: list[_Dep] = []
+        for a, first in zip(found, relations, strict=True):
+            for b, second in zip(found, relations, strict=True):
+                if a.kind == "read" and b.kind == "read":
+                    continue
+                pairs, order, same, within = win._aligned(
+                    win.same_slot(first, second, mapping), before, identity, instances
+                )
+                relation = (
+                    pairs.intersect(order)
+                    .subtract(same)
+                    .intersect_domain(within)
+                    .intersect_range(within)
+                    .coalesce()
+                )
+                if relation.is_empty():
+                    continue
+                kind = {
+                    ("write", "read"): "raw",
+                    ("read", "write"): "war",
+                    ("write", "write"): "waw",
+                }[a.kind, b.kind]
+                out.append(
+                    _Dep(
+                        kind=kind,
+                        array=window.array,
+                        source=a.stmt.id,
+                        sink=b.stmt.id,
+                        source_indices=a.indices,
+                        sink_indices=b.indices,
+                        relation=relation,
+                        source_part=a.part,
+                        sink_part=b.part,
+                        window=window.placement,
+                    )
+                )
+        return tuple(out)
+
+    def _commit_storage(
+        self,
+        draft: _Draft,
+        text: str,
+        recipe: tuple[str, tuple, dict],
+        facts: list[Any],
+        gone: frozenset[str] = frozenset(),
+        window: Window | None = None,
+    ) -> Schedule:
+        """Record a step that keeps an array otherwise and moves no instance.
+
+        No cast: the instances and the order stay as they are, and the step's
+        own facts (``facts``) say why it is legal. The step is recorded for
+        the casts after it (see :class:`Step`), and the target is asked
+        again whether it can build the schedule.
+        """
+        record = Step(
+            text=text,
+            recipe=recipe,
+            old=dict(self._layout.coords),
+            new=dict(self._layout.coords),
+            maps={},
+            isl_maps={},
+            order=tuple(draft.order),
+            tags=dict(draft.tags),
+            parent=self,
+            assumptions=self._assumptions,
+            gone=gone,
+            window=window,
+        )
+        other = self._clone()
+        other._kernel = _transformed(
+            draft.kernel,
+            _with_priority,
+            [
+                *_nests(self._layout, draft.order, draft.tags).values(),
+                *_sum_priorities(draft),
+            ],
+        )
+        other._code, other._strides = _stepped(other._kernel, draft.order, draft.tags)
+        earlier = self._buildable_into(other, draft, text, recipe, facts)
+        other._history = (*self._history, text)
+        other._steps = (*self._steps, recipe)
+        other._records = (*self._records, record)
+        other._facts = (*earlier, *facts)
+        return other
 
     def _definedness_fact(
         self,
@@ -4421,6 +5075,7 @@ class Schedule:
         array: str,
         text: str,
         recipe: tuple[str, tuple, dict],
+        losing: str = "computing it again would not",
     ) -> Any:
         """The ``definedness`` fact of :meth:`substitute`, decided or refuted.
 
@@ -4431,7 +5086,16 @@ class Schedule:
         producer, which would read the zeros. The first refutation is the
         fact's. A read isl cannot list (an index that is not affine, a guard
         it cannot state) leaves the first question open: the step is refused
-        all the same, and the fact is ``assumed``, not refuted.
+        all the same, and the fact is ``assumed``, not refuted. ``losing``
+        says what the step does without the zeros, for the message:
+        ``computing it again would not`` (see them) for a substitution, ``a
+        window would not`` for a contraction.
+
+        Lean states a decided one from loopty's description (:class:`Defined`):
+        every read is of a cell the producer stored before it, in the
+        program's order, with isl's last writer as the witness. The producer
+        stores each cell once, so that is the claim isl decided as two
+        questions.
         """
         from loopty.flow import definedness
 
@@ -4448,7 +5112,7 @@ class Schedule:
             detail = verdict.detail
             message = (
                 f"{text} illegal: {verdict.detail}, so the read would see the "
-                "zeros the array was made with, and computing it again would not"
+                f"zeros the array was made with, and {losing}"
                 if verdict.ok is False
                 else f"{text} illegal: {verdict.detail}"
             )
@@ -4473,7 +5137,7 @@ class Schedule:
                     f"reads {array}[{cell}] before "
                     f"{_instance_text(producer.id, stored)} stores it"
                     f"{_sizes_text(params, self._sizes)}, so the read sees the "
-                    "zeros the array was made with, and computing it again would not"
+                    f"zeros the array was made with, and {losing}"
                 )
         return self._fact(
             "definedness",
@@ -4490,7 +5154,16 @@ class Schedule:
             step=recipe,
             reason=message,
             about=array,
-            term=None if verdict.ok is None else IslOnly(),
+            term=(
+                None
+                if verdict.ok is None
+                else Defined(self._term, array, producer, tuple(readers))
+                if not message
+                else IslOnly(
+                    "isl refuted it with a read, which a counterexample of a "
+                    "∀∃ claim cannot name for Lean"
+                )
+            ),
         )
 
     def _carried_over(
@@ -4759,6 +5432,8 @@ class Schedule:
         text: str,
         recipe: tuple[str, tuple, dict],
         leading: Sequence[Any] = (),
+        gone: frozenset[str] = frozenset(),
+        substituted: tuple[str, Any, tuple[Any, ...]] | None = None,
     ) -> Schedule:
         """Check one transformation and return the schedule it produces.
 
@@ -4787,6 +5462,8 @@ class Schedule:
             parent=self,
             substitution=recipe[0] == "substitute",
             assumptions=self._assumptions,
+            gone=gone,
+            substituted=substituted,
         )
         records = (*self._records, record)
 
@@ -4912,36 +5589,7 @@ class Schedule:
         other._sums = dict(draft.sums)
         other._outside = dict(draft.outside)
         other._data_dependent = frozenset(draft.data_dependent)
-        # The cast is legal; whether the target can build it is a separate
-        # question, about the schedule as it now stands, so it is asked again
-        # at every step. A kernel the rewrite could not write stays unwritten;
-        # anything else is read off the draft, and a later step can put right
-        # what an earlier one broke, such as an order loopy cannot keep.
-        if draft.kernel is None:
-            reason = draft.unbuildable or self._unbuildable
-        else:
-            reason = _unbuildable_reason(draft)
-        other._unbuildable = reason
-        earlier = self._facts
-        if reason != self._unbuildable:
-            # The one ``buildable`` fact a schedule carries is about its
-            # current reason, and is the fact ``require_buildable`` raises
-            # with, so it goes when the reason goes or changes.
-            earlier = tuple(fact for fact in earlier if fact.kind != "buildable")
-            if reason is not None:
-                facts.append(
-                    self._fact(
-                        "buildable",
-                        f"{self._target} code can be generated for "
-                        f"{self._term.name} after {text}",
-                        status="refuted",
-                        witness=None,
-                        detail=reason,
-                        step=recipe,
-                        oracle="loopy-target",
-                        reason=reason,
-                    )
-                )
+        earlier = self._buildable_into(other, draft, text, recipe, facts)
         for accumulated in sorted(set(draft.reassoc) - set(self._reassoc)):
             facts.append(
                 self._fact(
@@ -4960,6 +5608,50 @@ class Schedule:
         other._records = records
         other._facts = (*earlier, *facts)
         return other
+
+    def _buildable_into(
+        self,
+        other: Schedule,
+        draft: _Draft,
+        text: str,
+        recipe: tuple[str, tuple, dict],
+        facts: list[Any],
+    ) -> tuple[Any, ...]:
+        """Ask whether ``other`` can be built, and return the facts it keeps.
+
+        The cast is legal; whether the target can build it is a separate
+        question, about the schedule as it now stands, so it is asked again
+        at every step. A kernel the rewrite could not write stays unwritten;
+        anything else is read off the draft, and a later step can put right
+        what an earlier one broke, such as an order loopy cannot keep. The
+        one ``buildable`` fact a schedule carries is about its current
+        reason, and is the fact ``require_buildable`` raises with, so it goes
+        when the reason goes or changes; a new one is added to ``facts``.
+        Returns this schedule's facts that ``other`` keeps.
+        """
+        if draft.kernel is None:
+            reason = draft.unbuildable or self._unbuildable
+        else:
+            reason = _unbuildable_reason(draft)
+        other._unbuildable = reason
+        earlier = self._facts
+        if reason != self._unbuildable:
+            earlier = tuple(fact for fact in earlier if fact.kind != "buildable")
+            if reason is not None:
+                facts.append(
+                    self._fact(
+                        "buildable",
+                        f"{self._target} code can be generated for "
+                        f"{self._term.name} after {text}",
+                        status="refuted",
+                        witness=None,
+                        detail=reason,
+                        step=recipe,
+                        oracle="loopy-target",
+                        reason=reason,
+                    )
+                )
+        return earlier
 
     def _first(self) -> Schedule:
         """The schedule the steps start from: this one, before any step."""
@@ -5056,6 +5748,9 @@ class Schedule:
         source_verb, sink_verb = dep.verbs()
         cell = _cell_text(dep.source_indices, source_coords, params)
         at = _sizes_text(params, self._sizes)
+        if dep.window is not None:
+            pair = _slot_pair_text(dep, witness)
+            return f"{text} illegal: {pair}, scheduled earlier{at}"
         return (
             f"{text} illegal: instance {_instance_text(source_id, source_coords)} "
             f"{source_verb} {dep.array}[{cell}] {sink_verb} by "
@@ -5285,10 +5980,15 @@ class Schedule:
         source_verb, sink_verb = dep.verbs()
         cell = _cell_text(dep.source_indices, source_coords, params)
         at = _sizes_text(params, self._sizes)
-        message = (
-            f"{text} illegal: instance {_instance_text(source_id, source_coords)} "
+        pair = (
+            f"instance {_instance_text(source_id, source_coords)} "
             f"{source_verb} {dep.array}[{cell}] {sink_verb} by "
-            f"{_instance_text(sink_id, sink_coords)} on another work item{at}: "
+            f"{_instance_text(sink_id, sink_coords)}"
+            if dep.window is None
+            else _slot_pair_text(dep, witness)
+        )
+        message = (
+            f"{text} illegal: {pair}, on another work item{at}: "
             f"{how}, and nothing in a kernel orders two work items through "
             "global memory"
         )
@@ -5531,6 +6231,45 @@ def _element_exactness(term: Term, name: str) -> str:
         except Exception:
             break
     return "approx"
+
+
+def _slot_pair_text(dep: _Dep, witness: tuple) -> str:
+    """Two accesses to one slot of a window, in words, ``source`` first.
+
+    ``instance divergence.S0[i=1] reads f[0] from its slot of the window
+    lambda j: j % 3, which flux.S0[j=3] overwrites with f[3]``.
+    """
+    (source_id, source_coords), (sink_id, sink_coords), params = witness
+    mine = _cell_text(dep.source_indices, source_coords, params)
+    theirs = _cell_text(dep.sink_indices, sink_coords, params)
+    source = _instance_text(source_id, source_coords)
+    sink = _instance_text(sink_id, sink_coords)
+    window = f"the window {dep.window}"
+    if dep.kind == "war":
+        return (
+            f"instance {source} reads {dep.array}[{mine}] from its slot of "
+            f"{window}, which {sink} overwrites with {dep.array}[{theirs}]"
+        )
+    verb, where = ("reads", "from") if dep.kind == "raw" else ("stores", "in")
+    return (
+        f"instance {source} stores {dep.array}[{mine}] in the slot of {window} "
+        f"that {sink} {verb} {dep.array}[{theirs}] {where}"
+    )
+
+
+def _cell_names(producer: Stmt, rank: int) -> tuple[str, ...]:
+    """Names for the indices of a cell, as a placement names them.
+
+    The loop variables the producer stores at, ``j`` for ``f[j]``, when it
+    stores at its loop variables, each once; ``i0``, ``i1``, ... otherwise.
+    """
+    indices = producer.assignee.indices
+    names = [
+        index.name if isinstance(index, prim.Variable) else None for index in indices
+    ]
+    if None in names or len(set(names)) != len(names) or len(names) != rank:
+        return tuple(f"i{k}" for k in range(rank))
+    return tuple(name for name in names if name is not None)
 
 
 def _not_pointwise(stmt: Stmt, array: str, term: Term) -> str | None:
