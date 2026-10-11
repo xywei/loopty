@@ -446,7 +446,8 @@ class _OpenCLExpressions(NumpyArithmetic, ExpressionToPyOpenCLCExpressionMapper)
         ``!=`` true. Each operand is first converted into the complex type
         numpy compares in, the type loopy infers for their difference, as a
         sum of the two converts it; a real operand is compared with the real
-        part, in that type's precision, and ``0`` with the imaginary part.
+        part, in that type's precision, and ``0`` with the imaginary part,
+        and a complex literal by its two parts.
         Any other comparison is :class:`NumpyArithmetic`'s, and the C targets
         compare C99's complex types with C's own operators.
         """
@@ -463,6 +464,12 @@ class _OpenCLExpressions(NumpyArithmetic, ExpressionToPyOpenCLCExpressionMapper)
         real = NumpyType(np.dtype(common.numpy_dtype.type(0).real.dtype))
 
         def parts(operand: Any) -> tuple[Any, Any]:
+            if isinstance(operand, complex | np.complexfloating):
+                kind = real.numpy_dtype.type
+                return (
+                    self.rec(kind(operand.real), context),
+                    self.rec(kind(operand.imag), context),
+                )
             if self.infer_type(operand).is_complex():
                 value = self.rec(operand, context, common)
                 return (

@@ -485,6 +485,90 @@ def test_an_affine_subscript_with_no_division_is_left_as_it_was() -> None:
     agrees(scaled_mod_seven, lambda: {"x": np.arange(7.0), "y": np.zeros(rows)})
 
 
+@kernel
+def far_remainder(
+    e: Arr[Fin[k], np.int8],  # noqa: F821
+    x: Arr[Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[m], Real],  # noqa: F821
+):
+    """A cell found by the remainder of a loop variable plus a size."""
+    for i in y.dom:
+        with when(i < e.dom.size):
+            y[i] = x[(i + e.dom.size) % x.dom.size] + e[i]
+
+
+@kernel
+def far_half(
+    e: Arr[Fin[k], np.int8],  # noqa: F821
+    x: Arr[Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[m], Real],  # noqa: F821
+):
+    """A cell found by half a loop variable plus a size, wrapped round ``m``."""
+    for i in y.dom:
+        with when(i < e.dom.size):
+            y[i] = x[((i + e.dom.size) // 2) % x.dom.size] + e[i]
+
+
+@kernel
+def half_of_sum(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """A cell found by half the loop variable plus the size: affine, divided."""
+    for i in y.dom:
+        y[i] = x[(i + y.dom.size) // 2]
+
+
+@kernel
+def mirrored(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """A cell found by ``abs`` of the loop variable less the size."""
+    for i in y.dom:
+        y[i] = x[abs(i + 1 - y.dom.size)]
+
+
+def test_an_index_sum_in_a_dividing_subscript_is_computed_in_64_bits() -> None:
+    # A sum of loop variables and sizes is computed in 32 bits, as loopy
+    # computes a loop bound, and a remainder or a floor division of it used
+    # the wrapped value once i + k passed 2**31: at k = 2**31 - 1 and i = 1,
+    # (i + k) % 3 was (-2**31) % 3, 1, where numpy computes 2. Such a sum in
+    # a subscript loopy does not read as affine with no division is widened
+    # (#149). The 2**31 - 1 cells of e are zeros the operating system gives
+    # lazily: the kernel touches one page of them.
+    def make() -> dict:
+        return {
+            "e": np.zeros(2**31 - 1, dtype=np.int8),
+            "x": np.arange(3.0),
+            "y": np.zeros(3),
+        }
+
+    for kern, want in ((far_remainder, [1.0, 2.0, 0.0]), (far_half, [0.0, 1.0, 1.0])):
+        native = make()
+        kern(**native)
+        assert list(native["y"]) == want
+        compiled = make()
+        LoopyExecutor().run(kern, **compiled)
+        assert list(compiled["y"]) == want, kern.__name__
+    assert "x[loopty_mod_int64((int64_t) (i) + k, (int64_t) (m))]" in emit_code(
+        far_remainder
+    )
+    assert (
+        "x[loopty_mod_int64(loopty_floor_div_int64((int64_t) (i) + k, "
+        "(int64_t) (2)), (int64_t) (m))]" in emit_code(far_half)
+    )
+
+
+def test_an_index_sum_loopy_reads_with_a_division_is_widened_too() -> None:
+    # loopy reads (i + n) // 2 as affine, with a division, and wrote isl's
+    # form in its 32-bit index type, (i + n) / 2, which reads a negative
+    # cell once i + n passes 2**31. abs(i + 1 - n) it does not read, and
+    # abs of the widened sum takes its sign from bit 63.
+    agrees(half_of_sum, lambda: {"x": np.arange(9.0), "y": np.zeros(9)})
+    assert "y[i] = x[loopty_floor_div_int64((int64_t) (i) + n, (int64_t) (2))];" in (
+        emit_code(half_of_sum)
+    )
+    agrees(mirrored, lambda: {"x": np.arange(9.0), "y": np.zeros(9)})
+    code = emit_code(mirrored)
+    assert "(int64_t) (i) + 1 + -1 * n" in code
+    assert "(int64_t) (63)" in code
+
+
 # }}}
 
 
