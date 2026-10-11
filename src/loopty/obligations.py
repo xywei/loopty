@@ -232,15 +232,16 @@ class Claim:
         sized = [
             Comparison(Var(name), ">=", 0) for name in scalars if name in self.sizes
         ]
-        # each hypothesis once, conjunct by conjunct, and a conjunct of the goal
-        # that is one of them left out: it is what the hypothesis says
+        # each hypothesis once, conjunct by conjunct, and a size's
+        # non-negativity left out of the goal, where a cell set repeats it
         seen: dict[str, Any] = {}
         for hypothesis in (*sized, *self.hypotheses):
             for part in conjuncts(hypothesis):
                 if part is not True:
                     seen.setdefault(render(part), part)
         if isinstance(goal, LogicalAnd):
-            kept = [part for part in conjuncts(goal) if render(part) not in seen]
+            said = {render(part) for part in sized}
+            kept = [part for part in conjuncts(goal) if render(part) not in said]
             goal = conjunction(kept)
         guard = conjunction(list(seen.values()))
         return Forall(tuple(binders), goal, None if guard is True else guard)
