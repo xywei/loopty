@@ -274,3 +274,28 @@ def test_a_sum_by_a_binder_named_like_a_size_is_refused() -> None:
 
 
 # }}}
+
+
+# {{{ the points the compiled run's refusal asks isl about (#153)
+
+
+def test_the_points_a_refusal_asks_about_are_checked() -> None:
+    # loopty.refusal states to isl the points of a statement's loops where
+    # loop arithmetic leaves a numpy integer's type, reading the sizes the
+    # arithmetic names as parameters. A loop named like one of them would
+    # take it for itself, as j did over Fin[j], and the size would be gone:
+    # n - 3 over a loop n would be asked at the loop's n.
+    from loopty.refusal import _leaves
+
+    term = summed_after_a_loop.trace()
+    uint32 = np.dtype(np.uint32)
+    loops = isl.Set("[n] -> { [i] : 0 <= i < n }")
+    found = _leaves(V("i") - 3, uint32, loops, {"n": 4}, term, ())
+    assert found is not None and found.endswith("at i = 0")
+    assert _leaves(V("n") - 3, uint32, loops, {"n": 4}, term, ()) is None
+    misnamed = isl.Set("{ [n] : 0 <= n < 4 }")
+    with pytest.raises(NamingError, match="n names a dimension and is meant as a"):
+        _leaves(V("n") - 3, uint32, misnamed, {"n": 4}, term, ())
+
+
+# }}}

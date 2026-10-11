@@ -44,6 +44,7 @@ import pymbolic.primitives as prim
 from loopy.diagnostic import LoopyIndexError
 
 from loopty.lower import LoweringError, walk
+from loopty.names import NamingError, check_names
 from loopty.term import Access, ArrType, Reduction, Stmt, Term, subtracted
 
 if TYPE_CHECKING:
@@ -189,6 +190,9 @@ def _in_bounds_guards(stmt: Stmt, lowering: Lowering) -> list[str]:
                 return []
             if guard not in out:
                 out.append(guard)
+    except NamingError:
+        # Not the kernel's: an isl object loopty built is misnamed.
+        raise
     except Exception:  # noqa: BLE001 - a suggestion is extra; the message stands
         return []
     return out
@@ -489,6 +493,7 @@ def _summed_points(reduction: Reduction, stmt: Stmt) -> isl.Set:
         guarded = stmt.domain.add_dims(isl.dim_type.set, len(names) - len(outer))
         for k in range(len(outer), len(names)):
             guarded = guarded.set_dim_name(isl.dim_type.set, k, names[k])
+        guarded = check_names(guarded, f"the domain of {stmt.id} over its sum's loops")
         guarded, loops = isl.align_two(guarded, loops)
         narrowed, domain = isl.align_two(loops.intersect(guarded), reduction.domain)
         if narrowed.is_equal(domain):
@@ -668,9 +673,16 @@ def _leaves(
         return None
     fixed = " and ".join(f"{name} = {sizes[name]}" for name in params) or "true"
     try:
-        outside = isl.Set(
-            f"[{', '.join(params)}] -> {{ [{', '.join(dims)}] : "
-            f"({text} < {int(info.min)} or {text} > {int(info.max)}) and {fixed} }}"
+        # A size the text reads is a parameter, which a loop of its name
+        # would take for itself (loopty.names).
+        outside = check_names(
+            isl.Set(
+                f"[{', '.join(params)}] -> {{ [{', '.join(dims)}] : "
+                f"({text} < {int(info.min)} or {text} > {int(info.max)}) "
+                f"and {fixed} }}"
+            ),
+            f"the points where {text} leaves {dtype}",
+            meant=named & set(sizes),
         )
         loops = loops.align_params(outside.get_space().params())
         outside = outside.align_params(loops.get_space().params()).intersect(loops)
@@ -693,6 +705,8 @@ def _leaves(
             name: int(point.get_coordinate_val(isl.dim_type.set, k).to_python())
             for k, name in enumerate(dims)
         }
+    except NamingError:
+        raise
     except (isl.Error, flow.NonAffine, ValueError):
         return None
     values.update({name: sizes[name] for name in params})
