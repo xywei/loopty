@@ -525,6 +525,23 @@ PLAIN = {
     ),
 }
 
+
+def _nested(target: str, iname: str, factor: str, first: str, second: str) -> list:
+    """``target = sum(iname, factor * (first * second))``, the product kept nested.
+
+    loopy's parser, and its substitution rules, flatten ``a * (b * c)`` into
+    ``a * b * c``, which rounds differently and is other code; an assignment
+    built from pymbolic's expressions keeps the product as written.
+    """
+    import loopy as lp
+    from loopy.symbolic import Reduction
+    from pymbolic import parse
+    from pymbolic.primitives import Product
+
+    body = Product((parse(factor), Product((parse(first), parse(second)))))
+    return [lp.Assignment(parse(target), Reduction("sum", (iname,), body))]
+
+
 #: The same launches in plain loopy as loopty lowers them: the metric product
 #: a substitution rule (loopy's assignment_to_subst, which substitute uses),
 #: and the three sums of a sum over Fin[3] in one loop.
@@ -532,8 +549,14 @@ MIRROR = {
     "weak_grad": (
         (
             f"{{[q, e, k, j, i, a]: 0 <= q < nq and {_BOX} and 0 <= a < n}}",
-            "w(q, e, k, j, a) := G[q, e, k, j, a] * u[e, k, j, a]\n"
-            "v[q, e, k, j, i] = sum(a, Fr[q, i, a] * w(q, e, k, j, a))",
+            # Fr * (G * u): a substitution rule's product would be flattened
+            lambda: _nested(
+                "v[q, e, k, j, i]",
+                "a",
+                "Fr[q, i, a]",
+                "G[q, e, k, j, a]",
+                "u[e, k, j, a]",
+            ),
         ),
         PLAIN["weak_grad"][1],
         (
@@ -580,7 +603,7 @@ def plain_launches(
     ):
         kernel = lp.make_kernel(
             "[n, ne, nq] -> " + domain,
-            instruction,
+            instruction() if callable(instruction) else instruction,
             [lp.GlobalArg(arg, np.float64, shape=lp.auto) for arg in args]
             + [lp.ValueArg(size, np.int32) for size in ("n", "ne", "nq")],
             name=name,
