@@ -259,26 +259,21 @@ def emit(record: dict, out: str | None) -> None:
             handle.write(line + "\n")
 
 
-@contextlib.contextmanager
-def cold_caches(cold: bool):
-    """Fresh code caches, loopy's, PoCL's and CUDA's, in the block when ``cold``."""
-    if not cold:
-        yield
-        return
-    keys = ("XDG_CACHE_HOME", "POCL_CACHE_DIR", "CUDA_CACHE_DISABLE")
-    saved = {key: os.environ.get(key) for key in keys}
-    with tempfile.TemporaryDirectory(prefix="l2p-cache-") as fresh:
-        os.environ["XDG_CACHE_HOME"] = os.path.join(fresh, "xdg")
-        os.environ["POCL_CACHE_DIR"] = os.path.join(fresh, "pocl")
-        os.environ["CUDA_CACHE_DISABLE"] = "1"
-        try:
-            yield
-        finally:
-            for key, value in saved.items():
-                if value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = value
+def cold_caches() -> None:
+    """Fresh code caches, loopy's, PoCL's and CUDA's, for the rest of the process.
+
+    Set before loopy or pyopencl is imported, which read where their caches
+    are when they are imported, so that the first call generates and
+    compiles everything; the directory is removed when the process exits.
+    """
+    import atexit
+    import shutil
+
+    fresh = tempfile.mkdtemp(prefix="l2p-cache-")
+    atexit.register(shutil.rmtree, fresh, ignore_errors=True)
+    os.environ["XDG_CACHE_HOME"] = os.path.join(fresh, "xdg")
+    os.environ["POCL_CACHE_DIR"] = os.path.join(fresh, "pocl")
+    os.environ["CUDA_CACHE_DISABLE"] = "1"
 
 
 def opencl_queue() -> Any:
@@ -355,42 +350,41 @@ def run_sumpy(inputs: dict, args: argparse.Namespace) -> tuple[dict, np.ndarray]
     queue = opencl_queue()
     nboxes = inputs["centers"].shape[1]
     ntargets = inputs["targets"].shape[1]
-    with cold_caches(args.cold):
-        start = time.perf_counter()
-        program = E2PFromSingleBox(expansion, [kernel]).get_optimized_kernel()
-        prepared = time.perf_counter() - start
-        device_args = {
-            "src_expansions": cla.to_device(queue, coeffs),
-            "src_base_ibox": np.int32(0),
-            "nsrc_level_boxes": np.int32(nboxes),
-            "naligned_boxes": np.int32(nboxes),
-            "target_boxes": cla.to_device(queue, np.arange(nboxes, dtype=np.int32)),
-            "box_target_starts": cla.to_device(
-                queue, inputs["starts"].astype(np.int32)
-            ),
-            "box_target_counts_nonchild": cla.to_device(
-                queue, inputs["counts"].astype(np.int32)
-            ),
-            "centers": cla.to_device(queue, np.ascontiguousarray(inputs["centers"])),
-            "targets": [
-                cla.to_device(queue, np.ascontiguousarray(inputs["targets"][d]))
-                for d in range(2)
-            ],
-            "rscale": np.float64(inputs["rscale"]),
-            "ntargets": np.int32(ntargets),
-            "result": [cla.zeros(queue, ntargets, np.float64)],
-        }
+    start = time.perf_counter()
+    program = E2PFromSingleBox(expansion, [kernel]).get_optimized_kernel()
+    prepared = time.perf_counter() - start
+    device_args = {
+        "src_expansions": cla.to_device(queue, coeffs),
+        "src_base_ibox": np.int32(0),
+        "nsrc_level_boxes": np.int32(nboxes),
+        "naligned_boxes": np.int32(nboxes),
+        "target_boxes": cla.to_device(queue, np.arange(nboxes, dtype=np.int32)),
+        "box_target_starts": cla.to_device(
+            queue, inputs["starts"].astype(np.int32)
+        ),
+        "box_target_counts_nonchild": cla.to_device(
+            queue, inputs["counts"].astype(np.int32)
+        ),
+        "centers": cla.to_device(queue, np.ascontiguousarray(inputs["centers"])),
+        "targets": [
+            cla.to_device(queue, np.ascontiguousarray(inputs["targets"][d]))
+            for d in range(2)
+        ],
+        "rscale": np.float64(inputs["rscale"]),
+        "ntargets": np.int32(ntargets),
+        "result": [cla.zeros(queue, ntargets, np.float64)],
+    }
 
-        start = time.perf_counter()
-        executor = program.executor(queue.context)
+    start = time.perf_counter()
+    executor = program.executor(queue.context)
 
-        def call() -> Any:
-            event, _out = executor(queue, **device_args)
-            return event
+    def call() -> Any:
+        event, _out = executor(queue, **device_args)
+        return event
 
-        call()
-        queue.finish()
-        compiled = time.perf_counter() - start
+    call()
+    queue.finish()
+    compiled = time.perf_counter() - start
     times = time_opencl(call, queue, args.warmup, args.repeat)
     pot = device_args["result"][0].get()
     record = {
@@ -595,43 +589,42 @@ def run_loopy(inputs: dict, args: argparse.Namespace) -> tuple[dict, np.ndarray]
     import loopy  # noqa: F401 - imported before anything is timed
 
     queue = opencl_queue() if args.target == "opencl" else None
-    with cold_caches(args.cold):
+    start = time.perf_counter()
+    knl = plain_loopy_kernel(order, args.target, args.variant)
+    record["prepare"] = time.perf_counter() - start
+    if queue is None:
         start = time.perf_counter()
-        knl = plain_loopy_kernel(order, args.target, args.variant)
-        record["prepare"] = time.perf_counter() - start
-        if queue is None:
-            start = time.perf_counter()
-            executor = knl.executor()
+        executor = knl.executor()
 
-            def call() -> Any:
-                return executor(**call_args)
+        def call() -> Any:
+            return executor(**call_args)
 
-            call()
-            record["compile"] = time.perf_counter() - start
-            times = time_c(call, args.warmup, args.repeat)
-            record["toolchain"] = c_toolchain()
-            pot = call_args["result"]
-        else:
-            import pyopencl.array as cla
+        call()
+        record["compile"] = time.perf_counter() - start
+        times = time_c(call, args.warmup, args.repeat)
+        record["toolchain"] = c_toolchain()
+        pot = call_args["result"]
+    else:
+        import pyopencl.array as cla
 
-            device_args = {
-                key: cla.to_device(queue, value) if isinstance(value, np.ndarray)
-                else value
-                for key, value in call_args.items()
-            }
-            start = time.perf_counter()
-            executor = knl.executor(queue.context)
+        device_args = {
+            key: cla.to_device(queue, value) if isinstance(value, np.ndarray)
+            else value
+            for key, value in call_args.items()
+        }
+        start = time.perf_counter()
+        executor = knl.executor(queue.context)
 
-            def call() -> Any:
-                event, _out = executor(queue, **device_args)
-                return event
+        def call() -> Any:
+            event, _out = executor(queue, **device_args)
+            return event
 
-            call()
-            queue.finish()
-            record["compile"] = time.perf_counter() - start
-            times = time_opencl(call, queue, args.warmup, args.repeat)
-            record["device"] = opencl_device(queue)
-            pot = device_args["result"].get()
+        call()
+        queue.finish()
+        record["compile"] = time.perf_counter() - start
+        times = time_opencl(call, queue, args.warmup, args.repeat)
+        record["device"] = opencl_device(queue)
+        pot = device_args["result"].get()
     record["first_call"] = record["prepare"] + record["compile"]
     record["time"] = summary(times)
     record["times"] = times
@@ -792,7 +785,7 @@ def run_loopty(inputs: dict, args: argparse.Namespace) -> tuple[dict, np.ndarray
     queue = opencl_queue() if args.target == "opencl" else None
     # loopy reads loopty's kernels with loopty's readings of their subscripts
     # and guards, which it has inside declining() (docs/loopy-notes.md, note 23)
-    with cold_caches(args.cold), declining():
+    with declining():
         start = time.perf_counter()
         example = example_at(order)
         schedule = loopty_schedule(example, args.variant, args.target)
@@ -1021,6 +1014,8 @@ def main(argv: list[str] | None = None) -> int:
         out = args.out or str(repository() / "examples" / "l2p_sumpy.json")
         record(load_inputs(args.inputs), args.pot, args.run, out)
         return 0
+    if getattr(args, "cold", False):
+        cold_caches()
     inputs = load_inputs(args.inputs)
     if args.command == "compare":
         for row in compare(inputs, args.pots):
