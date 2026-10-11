@@ -195,6 +195,21 @@ table of row starts. Both compiled runs agree with the native one.
   the output. Over an `exact` accumulation the same cast is refused, and a
   kernel with an `exact` output is compiled with floating-point contraction
   off, so a fused multiply-add cannot change its last bit.
+- **An assembly's race is named by the mesh.** PyOP2 adds each cell's values
+  into the cell's nodes, `y[cell[c, k]] += yl[c, k]`, and two cells that share
+  a node add into one cell of `y`. That is an update: either order gives the
+  sum, so the kernel owes the class of the sum and not distinct writes, and a
+  schedule may run two updates of one cell in another order but not at the
+  same time. A split of the cells onto work items is refused with the two
+  updates that collide on the example inputs, the node PyOP2's two triangles
+  share, not with a pair isl picked out of every cell the map could reach,
+  and accepted once the updates are atomic:
+
+  ```python
+  Schedule(mass_action, target="opencl").atomic("y").split("c", 32).tag(
+      c_outer="g.0", c_inner="l.0"
+  )
+  ```
 - **Legal and buildable are different questions, and both are answered.** A
   transformation can preserve the meaning of a program and still be one the
   backend cannot generate. Every accepted step is asked whether the target can
@@ -630,6 +645,24 @@ release; the CHANGELOG says when one does.
   a table is read as an array is, and it is no argument: an array of its
   values is passed instead, `Arr.from_numpy(W.values.copy())`.
   `examples/quadrature.py` is firedrake's P1 mass kernel.
+- Updates and atomics. A statement that adds to the cell it writes a value
+  that reads nothing else of the array, `y[cell[c, k]] += yl[c, k]` or `y[r]
+  += v[r, j]`, is an update. Its sum has the class of what it adds, as a
+  reduction's has (`approx` for `Real`). An update whose instances can add to
+  one cell owes that class, `the accumulation into y[cell[c, k]] over c, k is
+  approx`, and no distinct writes; one that updates a cell of its own at
+  every instance, `y[i] += a * x[i]`, owes its distinct writes. Two updates
+  of one cell are no dependence, so a schedule may reorder them, which it
+  records as a reassociation. A step that runs two of them at the same time,
+  on two work items or in no order (`ilp`, `vec`), is refused with the pair
+  and the fix until `Schedule.atomic("y")`. Then each update is loopy's
+  `AtomicUpdate` on OpenCL, a compare-and-swap, and the C target, which runs
+  in one thread, keeps its code. A refused cast through a cell read from an
+  array names two instances that touch one cell on the example inputs, with
+  what the subscripts read, `where cell[0, 2] = 3 and cell[1, 1] = 3`. A
+  write of that kind, `y[perm[i]] = x[i]`, has its distinct writes decided
+  on the native runs. `examples/assembly.py` is PyOP2's P1 mass action,
+  assembled.
 - The argument contract, enforced at every entry point that runs a kernel
   (compiled, differential and native): two distinct array parameters may not
   share storage, a ragged argument has to agree with the counts array its type
@@ -900,9 +933,14 @@ release; the CHANGELOG says when one does.
 - `realize(var, tree=True)` checks and marks the reassociation; the reduction
   tree itself comes from splitting and tagging the reduction iname, which is
   checked separately and not verified on the C target.
-- The accumulation convention: a traced `y[r] += ...` under a parallel iname is
-  reported as a disjointness refutation, which is the conservative reading. The
-  `reassoc` fact is what should license it and nothing consumes that yet.
+- An update's cell read from an array is any cell to isl, so a step that runs
+  two updates through it at the same time is refused even where no input can
+  make them collide (`y[perm[i]] += x[i]` of a permutation `perm`), with a pair
+  from the example inputs where they have one and isl's otherwise, which the
+  message says: make the updates atomic (#202). An `exact` update,
+  `m[cell[c, k]] += 1` of integers, keeps the order of its updates and is
+  refused `atomic`, as an `exact` sum is refused a tree, although integer
+  addition gives the same bits in any order (#200).
 - The target-capability check knows the limits of loopy 2025.2 listed in notes
   6, 11 and 14 of `docs/loopy-notes.md` and no others, so it is a list rather
   than a model of what the backend can do. A schedule it passes can still fail
@@ -1035,8 +1073,11 @@ on the inputs it runs.
   [#214](https://github.com/xywei/loopty/issues/214),
   [#229](https://github.com/xywei/loopty/issues/229),
   [#133](https://github.com/xywei/loopty/issues/133)). `Schedule.contract`
-  refuses an array its producer reads (a recurrence) or that two statements
-  store, and a loop tagged with no order before it; a window that drops a
+  refuses an array its producer reads (a recurrence) or updates (`f[j] +=
+  v` adds to the zeros a window drops: store each cell once, or keep the
+  array whole), or that two statements store, and a loop tagged with no
+  order before it; an update of another array may read a window, and
+  `atomic` does not lift the order of its slots. A window that drops a
   loop is shared by its every value, so putting that loop on a hardware axis
   after it is refused, where one window per work item would do. An array
   kept in a window, and another computed from it where it is read, are

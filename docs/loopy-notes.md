@@ -1,6 +1,6 @@
 # Notes on loopy and islpy
 
-Twenty-six interactions with loopty's dependencies that cost real debugging
+Thirty-one interactions with loopty's dependencies that cost real debugging
 time, each with the local workaround and the reason it is local. No upstream
 issues were filed: these are notes so that the next person meets the answer
 instead of the symptom.
@@ -1589,3 +1589,38 @@ window whose extents are numbers is a private temporary, on the stack on the
 C target and in registers on a device; one whose extent is a size, a row of
 `n` cells, is a variable-length array on the C target and a global temporary
 on OpenCL, where a private array has to have a constant size.
+
+## 31. loopy's atomic updates: none on the C target, four dtypes on OpenCL, and every access atomic
+
+**Symptom.** A kernel whose update `y[cell[c, k]] = y[cell[c, k]] + yl[c, k]`
+is given `atomicity=(lp.AtomicUpdate("y"),)` raises `NotImplementedError`
+when its code is generated for the C target, and on OpenCL for a `complex128`
+or an `int8` `y`. On OpenCL, with `y` declared for atomics
+(`for_atomic=True`), an instruction that reads `y` or writes it without an
+atomicity of its own fails loopy's check: "atomic variable(s) 'y' in
+instruction ... used in non-atomic access". So does a sum of `y`, given
+`AtomicLoad("y")`, with the same message about its accumulator,
+`'acc_i_0' in instruction 'S2_i_0_init'`.
+
+**Cause.** loopy's C builder (`CFamilyASTBuilder.emit_atomic_update`) has no
+atomics: its C code runs in one thread. Its OpenCL builder writes an update
+as a compare-and-swap loop, `atomic_cmpxchg` or `atom_cmpxchg` on the bits
+of the value, for `int32`, `int64`, `float32` and `float64` alone, and
+enables `cl_khr_int64_base_atomics` for the eight-byte ones. The loop reads
+the cell, computes the right-hand side with the cell's read replaced by the
+value read, and stores it if the cell still holds that value; it finds the
+read by comparing the assignee with the right-hand side, so the two have to
+be the same expression. `check_atomic_loads` asks every access to an array
+declared for atomics to declare its atomicity. And loopy types an
+expression of an atomic array as atomic: a sum's accumulator, typed by its
+body, is declared for atomics, and its start is a plain assignment.
+
+**Local fix.** `Schedule.atomic("y")` changes the kernel on OpenCL only.
+`y` is declared for atomics; each update becomes `AtomicUpdate`, any other
+write `AtomicInit` and any read `AtomicLoad`; and a read is cast to the
+array's own dtype, `(double) (y[i_0])`, so that nothing computed from it is
+typed as atomic. The lowering writes an update's right-hand side with the
+cell's read as the assignee, which is how the trace records it
+(`loopty.term.Stmt`). On the C target the step changes the checks and not the
+code, since one thread makes every update atomic. An array of any other
+dtype is a `buildable` fact refuted on OpenCL, naming the four.

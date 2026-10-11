@@ -1610,10 +1610,14 @@ def _classes(origin: Any) -> list[tuple[Stmt, Stmt, tuple, tuple]]:
     access of ``a`` and one of ``b`` to the same array, of the same rank, at
     least one a write (:func:`loopty.schedule._accesses`). A class isl finds
     empty is listed too: that it is empty is isl's verdict, and Lean proves
-    it again.
+    it again. Two updates of one array that commute, where they can update
+    one cell, are no class: they need no order
+    (:func:`loopty.schedule._updates`), and what they ask of a schedule
+    instead is stated for isl only.
     """
     schedule = _schedule_module()
     term = origin._term
+    updating = {(dep.source, dep.sink) for dep in origin._updates}
     out = []
     for a in term.stmts:
         for b in term.stmts:
@@ -1622,6 +1626,10 @@ def _classes(origin: Any) -> list[tuple[Stmt, Stmt, tuple, tuple]]:
                     if first[1] != second[1] or len(first[2]) != len(second[2]):
                         continue
                     if first[0] == "read" and second[0] == "read":
+                        continue
+                    if (a.id, b.id) in updating and schedule._updating(
+                        a, b, first[1]
+                    ):
                         continue
                     out.append((a, b, first, second))
     return out
@@ -1854,6 +1862,15 @@ def _monotone_parts(origin: Any, steps: Sequence[Any]) -> list[Any]:
             _stage_time(origin, steps, len(steps), b.id, chain_b[-1]),
         )
         parts.append(lanky.Part(found.name, found.label, claim.close(goal)))
+    if not parts:
+        # no two accesses a dependence can join: there is nothing to reverse
+        parts.append(
+            lanky.Part(
+                "no_dependence",
+                f"{term.name} has no two accesses a dependence can join",
+                Claim(term).close(True),
+            )
+        )
     return parts
 
 

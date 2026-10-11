@@ -31,6 +31,7 @@ marked with `...` is an excerpt and the lines it keeps are checked verbatim.
 | `layer_potential.py` | pytential's QBX single layer over complex points with `real` and `log` from `loopty.math`, scheduled as sumpy's CPU tile, the sources' loop outside the targets', and the same order on a loop loopy cannot keep it on |
 | `sum_factorization.py` | grudge's two passes of a sum-factorized operator, fused on the element and the row and no deeper: the deeper fusion refused with its pair, the fusion of fewer loops it names, and what passes between them kept one row at a time |
 | `storage_layouts.py` | where cells are stored, as checked maps: sumpy's compressed-Taylor storage index in two pieces, one for one onto its buffer, and grudge's `dim_tags` `N3,N0,N1,N2` the same layout as modepy's reshape of the DOFArray, a wrong nesting refuted with a cell; two kernels read through them |
+| `assembly.py` | PyOP2's assembly loop around the P1 mass kernel, `y[cell[c, k]] += yl[c, k]`: an update that owes the class of its sum and not distinct writes, PyOP2's GPU split refused with the node its two triangles share, and accepted once the updates are atomic |
 
 Run them with `uv run` from the repository root:
 
@@ -1270,3 +1271,98 @@ Both run the same three ways and are documented in their own module docstrings.
 ledger of what isl decided about them; `p2p.py` prints the near-field potential
 of sixteen points in a four by four grid of boxes and checks it against a direct
 sum over the same interaction lists.
+
+## assembly.py
+
+PyOP2's assembly loop around the element kernel of `quadrature.py`: per cell,
+gather the field at the cell's nodes, compute the cell's three values, and add
+them into the nodes, `y[cell[c, k]] += yl[c, k]`. Two cells that share a node
+add into one cell of `y`. Such a statement is an update: either order of two
+updates of one cell gives the same sum, to the class of the sum, so the kernel
+owes that class and not distinct writes, and a schedule may reorder the
+updates but not run two of one cell at the same time. The cell an update
+writes is read from the cell map, which isl cannot follow, so the refusal of
+PyOP2's GPU split names two updates that collide on the example inputs, the
+node the two triangles share, and `atomic("y")` is what makes the split legal.
+
+### python examples/assembly.py
+
+Both meshes against the assembled matrix, PyOP2's split of the cells onto
+groups and work items refused and then accepted with atomic updates (on the C
+target, which has no work items, it is legal and cannot be built), and Sun et
+al.'s schedule, the cells four at a time, compiled and compared.
+
+```console
+$ uv run python examples/assembly.py
+PyOP2's two triangles: 2 cells, y agrees with the assembled matrix: True
+a square: 32 cells, y agrees with the assembled matrix: True
+
+Schedule(mass_action).split('c', 32).tag(c_outer='g.0', c_inner='l.0') ->
+  IllegalCast: tag(c_outer='g.0', c_inner='l.0') illegal: S1[c=0, k=2] and S1[c=1, k=1] both update y[3] on example_inputs() (nc=2, nv=4), where cell[0, 2] = 3 and cell[1, 1] = 3, and the loop c_inner on l.0 runs them on two work items, so one can overwrite what the other added; make the updates atomic, with atomic('y') before this step
+
+accepted: Schedule(mass_action, target='c').atomic('y').split(c, 32).tag(c_outer='g.0', c_inner='l.0')
+  decided  isl  split(c, 32) renames the instances of mass_action one for one
+  decided  isl  the order after split(c, 32) runs every dependence of mass_action forward
+  decided  isl  tag(c_outer='g.0', c_inner='l.0') renames the instances of mass_action one for one
+  decided  isl  the order after tag(c_outer='g.0', c_inner='l.0') runs every dependence of mass_action forward, within one work item
+  decided  isl  atomic updates of y run at the same time after tag(c_outer='g.0', c_inner='l.0'), so their sum is reassociated and compared at 'reassoc'
+  buildable on c: False: the tag c_outer='g.0', c_inner='l.0' puts a loop on a hardware axis, and the C target has none
+
+schedule: Schedule(mass_action, target='c').atomic('y').split(c, 4).tag(c_inner='ilp')
+  yl: difference 0 within 1.01e-06 (approx) -> tested
+  y: difference 0 within 1.01e-06 (approx) -> tested
+```
+
+### lanky check examples/assembly.py
+
+```console
+$ uv run lanky check examples/assembly.py
+STATUS   BY           WHERE           OWNER        STATEMENT
+-------  -----------  --------------  -----------  ---------------------------------------------------------
+decided  isl          assembly.py:83  mass_action  yl[c, j] is in bounds for every instance of S0
+decided  type         assembly.py:83  mass_action  X[cell[c, 1]] is in bounds by type (cell[c, 1] : Fin(nv))
+decided  isl          assembly.py:83  mass_action  cell[c, 1] is in bounds for every instance of S0
+decided  type         assembly.py:83  mass_action  X[cell[c, 0]] is in bounds by type (cell[c, 0] : Fin(nv))
+decided  isl          assembly.py:83  mass_action  cell[c, 0] is in bounds for every instance of S0
+decided  type         assembly.py:83  mass_action  Y[cell[c, 2]] is in bounds by type (cell[c, 2] : Fin(nv))
+decided  isl          assembly.py:83  mass_action  cell[c, 2] is in bounds for every instance of S0
+decided  type         assembly.py:83  mass_action  Y[cell[c, 0]] is in bounds by type (cell[c, 0] : Fin(nv))
+decided  type         assembly.py:83  mass_action  X[cell[c, 2]] is in bounds by type (cell[c, 2] : Fin(nv))
+decided  type         assembly.py:83  mass_action  Y[cell[c, 1]] is in bounds by type (cell[c, 1] : Fin(nv))
+decided  isl          assembly.py:83  mass_action  W[q] is in bounds for every instance of S0
+decided  isl          assembly.py:83  mass_action  PHI[q, j] is in bounds for every instance of S0
+decided  isl          assembly.py:83  mass_action  PHI[q, k] is in bounds for every instance of S0
+decided  type         assembly.py:83  mass_action  u[cell[c, k]] is in bounds by type (cell[c, k] : Fin(nv))
+decided  isl          assembly.py:83  mass_action  cell[c, k] is in bounds for every instance of S0
+decided  type         assembly.py:89  mass_action  y[cell[c, k]] is in bounds by type (cell[c, k] : Fin(nv))
+decided  isl          assembly.py:89  mass_action  cell[c, k] is in bounds for every instance of S1
+decided  isl          assembly.py:89  mass_action  yl[c, k] is in bounds for every instance of S1
+decided  isl          assembly.py:83  mass_action  distinct instances of S0 write distinct cells of yl
+decided  isl          assembly.py:89  mass_action  every cell of yl that S1 reads, S0 wrote before the read
+decided  isl          assembly.py:67  mass_action  the source order runs every dependence forward in time
+decided  type         assembly.py:83  mass_action  the accumulation into yl[c, j] over q, k is approx
+decided  type         assembly.py:89  mass_action  the accumulation into y[cell[c, k]] over c, k is approx
+tested   interpreter  assembly.py:67  mass_action  the traced term computes what the body computes
+
+24 facts: 23 decided, 1 tested
+```
+
+### loopty run examples/assembly.py
+
+```console
+$ uv run loopty run examples/assembly.py
+mass_action: Schedule(mass_action, target='c').atomic('y').split(c, 4).tag(c_inner='ilp')
+  yl: difference 0 within 1.01e-06 (approx) -> tested
+  y: difference 0 within 1.01e-06 (approx) -> tested
+
+STATUS   BY     WHERE           OWNER        STATEMENT
+-------  -----  --------------  -----------  ------------------------------------------------------------------------
+decided  isl    assembly.py:83  mass_action  split(c, 4) renames the instances of mass_action one for one
+decided  isl    assembly.py:83  mass_action  the order after split(c, 4) runs every dependence of mass_action forward
+decided  isl    assembly.py:83  mass_action  tag(c_inner='ilp') renames the instances of mass_action one for one
+decided  isl    assembly.py:83  mass_action  the order after tag(c_inner='ilp') runs every dependence of mass_acti...
+decided  isl    assembly.py:83  mass_action  atomic updates of y run at the same time after tag(c_inner='ilp'), so...
+tested   loopy  assembly.py:83  mass_action  the scheduled run of mass_action agrees with the native run to the ac...
+
+6 facts: 5 decided, 1 tested
+```

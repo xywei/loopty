@@ -38,6 +38,17 @@ from then on, in the order it ran them when the window was taken (see
 refused with its pair, as every cast is, and one that puts two of them on two
 work items is refused too.
 
+A window keeps a value stored once per cell. An update, ``f[j] += v`` or a
+scatter-add ``f[cell[c, k]] += v``, adds to the zeros the array was made
+with, which the window drops, and a slot holds another cell when the next
+cell's first update comes, so a window of an array that is updated is
+refused, naming the fix: store each cell once (a ``reduce_sum`` where the
+updates run over a loop), or keep the array whole. An update of another
+array may read a window, ``y[node[i]] += f[i + 1] - f[i - 1]``: its updates
+commute with each other as any update's do, and the window's slots keep
+their order all the same, which :meth:`~loopty.schedule.Schedule.atomic`
+does not lift.
+
 Two lowerings. Modulo addressing, on every target: the array becomes a
 temporary of the window's shape, ``f_window[j % 3]``, and every access goes
 through the placement. A shift register, for registers on a device: the
@@ -367,7 +378,8 @@ def preconditions(
     The array is one the program made (``Arr.zeros_like``), which no caller
     sees; one statement stores it besides its zeros, once per cell
     (``assign``, at indices isl reads exactly, under no guard isl cannot
-    state), and reads none of it; and every other statement that reads it
+    state), and reads none of it: not an update, ``f[j] += v``, which adds
+    to the zeros a window drops; and every other statement that reads it
     reads it in a value, at indices isl reads exactly, not in a guard or in
     the subscript of what it stores, since a window is safe only where the
     order of the reads is the instances'. Each is a :class:`WindowError`
@@ -400,9 +412,21 @@ def preconditions(
         )
     (producer,) = producers
     if producer.kind != "assign":
+        # An update, f[j] += v, starts from the zeros, which a window drops,
+        # and its slot holds another cell when the next cell's first update
+        # comes: the window would add to that cell's value (#213).
+        shown = ", ".join(str(index) for index in producer.assignee.indices)
+        cell = f"{array}[{shown}]"
+        fix = (
+            f"store each cell once, {cell} = ... (a reduce_sum where the updates "
+            f"run over a loop), or keep {array} whole"
+            if affine_indices(producer.assignee.indices)
+            else f"keep {array} whole"
+        )
         raise WindowError(
-            f"{text}: {producer.id} accumulates into {array}, and a window keeps "
-            "a value stored once"
+            f"{text}: {producer.id} updates {cell} in place, starting from the "
+            f"zeros {array} was made with, and a window keeps a value stored "
+            f"once, without them; {fix}"
         )
     if not affine_indices(producer.assignee.indices):
         shown = ", ".join(str(index) for index in producer.assignee.indices)
