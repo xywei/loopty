@@ -62,6 +62,7 @@ from lanky.terms import (
     conjuncts,
     render,
 )
+from lanky.terms import Sum as LankySum
 
 from loopty import flow
 from loopty.description import (
@@ -71,7 +72,7 @@ from loopty.description import (
     description_of,
     disjunction,
 )
-from loopty.hypotheses import substitute
+from loopty.hypotheses import _sort_terms, substitute
 from loopty.term import Stmt, Term
 
 __all__ = [
@@ -81,6 +82,7 @@ __all__ = [
     "Stated",
     "argument_obligation",
     "defined_obligation",
+    "conjunct_obligations",
     "discharged_obligation",
     "disjoint_writes_obligation",
     "distinct_arguments_obligation",
@@ -99,6 +101,7 @@ __all__ = [
     "ordering_obligation",
     "prove",
     "shadow_hints",
+    "single_assignment_obligation",
     "stated_writers",
     "written_before",
 ]
@@ -137,11 +140,17 @@ def _names(expr: Any, out: dict[str, int], bound: frozenset[str] = frozenset()) 
         for item in expr:
             _names(item, out, bound)
         return
-    if isinstance(expr, Forall) or type(expr).__name__ == "Exists":
-        inner = bound | {var.name for var, _ in expr.binders}
-        _names(expr.body, out, inner)
+    if isinstance(expr, Forall | LankySum) or type(expr).__name__ == "Exists":
+        # a binder's sort may name what is free, a size in Fin[n + 1] or in
+        # Fn[Fin[n], Real], read with the binders before it bound; a sum
+        # binds as a quantifier does
+        inner = set(bound)
+        for var, sort in expr.binders:
+            _names(_sort_terms(sort), out, frozenset(inner))
+            inner.add(var.name)
+        _names(expr.body, out, frozenset(inner))
         if expr.guard is not None:
-            _names(expr.guard, out, inner)
+            _names(expr.guard, out, frozenset(inner))
         return
     if isinstance(expr, prim.Subscript):
         index = expr.index if isinstance(expr.index, tuple) else (expr.index,)
@@ -168,9 +177,13 @@ def _names(expr: Any, out: dict[str, int], bound: frozenset[str] = frozenset()) 
             _names(child, out, bound)
 
 
-def _array_sort(rank: int) -> Any:
-    """``Int → Int → Int`` for a rank-two array: a cell is an integer atom."""
-    sort: Any = Int
+def _array_sort(rank: int, element: Any = Int) -> Any:
+    """``Int → Int → Int`` for a rank-two array: a cell is an integer atom.
+
+    ``element`` is what a cell is, ``Int`` but for an array of reals in a
+    claim about them, whose cells are ``Real`` (:func:`discharged_obligation`).
+    """
+    sort: Any = element
     for _ in range(rank):
         sort = FnType(Int, sort)
     return sort
@@ -192,8 +205,12 @@ class Claim:
         term: Term | None,
         sizes: frozenset[str] | None = None,
         taken: frozenset[str] = frozenset(),
+        sorts: Mapping[str, Any] | None = None,
     ) -> None:
         self.term = term
+        #: The sort of a name that is not an integer: a scalar's, or the
+        #: cells' of an array, ``Real``; every other name is an ``Int``.
+        self.sorts = dict(sorts or {})
         self.taken: set[str] = set(taken)
         if term is not None:
             self.sizes = flow.size_names(term) if sizes is None else sizes
@@ -240,8 +257,11 @@ class Claim:
         others = sorted(name for name in names if name not in own)
         scalars = [name for name in others if names[name] == 0]
         arrays = [name for name in others if names[name] > 0]
-        binders = [(Var(name), Int) for name in scalars]
-        binders += [(Var(name), _array_sort(names[name])) for name in arrays]
+        binders = [(Var(name), self.sorts.get(name, Int)) for name in scalars]
+        binders += [
+            (Var(name), _array_sort(names[name], self.sorts.get(name, Int)))
+            for name in arrays
+        ]
         binders += [(var, Int) for var in self.coords]
         sized = [
             Comparison(Var(name), ">=", 0) for name in scalars if name in self.sizes
@@ -378,16 +398,12 @@ def _obligation(
     lanky = _lanky_obligations()
     if "fallback" in getattr(lanky.Part, "__dataclass_fields__", {}):
         # what isl finds only when Lean asks: the case splits of shadow_hints
+        from dataclasses import replace
+
         parts = [
             part
             if part.fallback is not None
-            else lanky.Part(
-                part.name,
-                part.label,
-                part.term,
-                part.hints,
-                fallback=partial(shadow_hints, part.term),
-            )
+            else replace(part, fallback=partial(shadow_hints, part.term))
             for part in parts
         ]
     extra = {}
@@ -1107,6 +1123,142 @@ def _writer_pieces(
 # }}}
 
 
+# {{{ inside one kernel, a cell stored once, and read after its store
+
+
+def single_assignment_obligation(
+    term: Term,
+    array: str,
+    writers: Sequence[Stmt],
+    places: Sequence[tuple],
+    verdict: Any,
+) -> Any:
+    """No cell of ``array`` is stored twice, or read before its store.
+
+    The fact :mod:`loopty.dataflow` decides a postcondition under.
+
+    One part per pair of statements that store into the array, a statement
+    with itself among them: two instances, distinct where they are of one
+    statement, store into cells that differ. And one part per read of the
+    array and statement that stores into it: an instance that stores the
+    cell an instance reads runs before it, in the source order, and so is
+    not the instance that reads, which reads before it stores. A
+    read whose index isl does not read exactly is about every cell, as its
+    footprint is, so no instance may store into the array after it. A read
+    made at a statement's outer loops alone, the length of a ragged row, is
+    taken at every instance of the row, its inner loops free, as isl takes
+    it.
+    """
+    lanky = _lanky_obligations()
+    depth = flow.instance_space_depth(term)
+    parts = []
+    try:
+        for k, first in enumerate(writers):
+            for second in writers[k:]:
+                claim = Claim(term)
+                x = claim.coordinates(first.inames, "a")
+                y = claim.coordinates(second.inames, "b")
+                for stmt, coords in ((first, x), (second, y)):
+                    domain = _described(stmt.domain, f"the loops of {stmt.id}")
+                    claim.hypotheses.append(domain.predicate(coords))
+                if second is first:
+                    # a statement without loops runs once: no two of its
+                    # instances differ, a hypothesis False as written
+                    claim.hypotheses.append(LogicalNot(_equal(x, y)) if x else False)
+                goal = LogicalNot(
+                    _equal(
+                        [_renamed(i, first.inames, x) for i in first.assignee.indices],
+                        [
+                            _renamed(i, second.inames, y)
+                            for i in second.assignee.indices
+                        ],
+                    )
+                )
+                label = (
+                    f"two instances of {first.id} storing into {array}"
+                    if second is first
+                    else f"{first.id} and {second.id} storing into {array}"
+                )
+                parts.append(
+                    lanky.Part(f"stores_{len(parts)}", label, claim.close(goal))
+                )
+        for stmt, indices, inames, domain in places:
+            for writer in writers:
+                claim = Claim(term)
+                x = claim.coordinates(inames, "r")
+                inner = claim.coordinates(stmt.inames[len(inames) :], "i")
+                y = claim.coordinates(writer.inames, "w")
+                loops = ", ".join(inames)
+                described = _described(domain, f"the loops {loops} of {stmt.id}")
+                claim.hypotheses.append(described.predicate(x))
+                written = _described(writer.domain, f"the loops of {writer.id}")
+                claim.hypotheses.append(written.predicate(y))
+                if all(_affine(index) for index in indices):
+                    claim.hypotheses.append(
+                        _equal(
+                            [_renamed(i, inames, x) for i in indices],
+                            [
+                                _renamed(i, writer.inames, y)
+                                for i in writer.assignee.indices
+                            ],
+                        )
+                    )
+                at = [*x, *inner][: len(stmt.inames)]
+                # strictly before: the instance that reads a cell and stores
+                # it reads it first, as isl's lex_le counts it
+                # (loopty.dataflow); the positions both times hold as numbers
+                # may settle it
+                goal = lexicographically_before(
+                    _source_time(writer, depth, y), _source_time(stmt, depth, at)
+                )
+                cell = f"{array}[{', '.join(render(i) for i in indices)}]"
+                parts.append(
+                    lanky.Part(
+                        f"read_{len(parts)}",
+                        f"{writer.id} storing the {cell} {stmt.id} reads, before it",
+                        claim.close(goal),
+                    )
+                )
+    except Unstatable as exc:
+        return _declined(str(exc))
+    if not parts:
+        return _declined(f"no statement stores into {array}")
+    return _obligation(parts, refuted=verdict.ok is False)
+
+
+def conjunct_obligations(
+    questions: Sequence[Any], labels: Sequence[str], verdict: Any
+) -> Any:
+    """A conjunction, each conjunct decided on its own: their parts, together.
+
+    A kernel's postcondition decided under what its statements store
+    (:mod:`loopty.dataflow`) is one question per conjunct, each stated as
+    :func:`discharged_obligation` states it; a conjunct not stated for Lean
+    leaves the claim unstated, with its reason.
+    """
+    from dataclasses import replace
+
+    parts = []
+    rests: list[str] = []
+    for k, (question, label) in enumerate(zip(questions, labels, strict=True)):
+        obligation = question.lean_obligation()
+        if obligation is None or getattr(obligation, "declined", ""):
+            reason = getattr(obligation, "declined", "") or "it is not stated for Lean"
+            return _declined(f"the conjunct {label}: {reason}")
+        for part in obligation.parts:
+            name = f"conjunct_{k}"
+            if len(obligation.parts) > 1:
+                name = f"{name}_{part.name}"
+            parts.append(replace(part, name=name, label=label))
+        rests.extend(obligation.rests_on)
+    return _obligation(
+        parts, rests_on=tuple(dict.fromkeys(rests)), refuted=verdict.ok is False
+    )
+
+
+# }}}
+
+
 # {{{ a program's facts, under what held where a call is made
 
 
@@ -1115,12 +1267,17 @@ def _writer_pieces(
 _UNPRINTABLE = ("Sum", "Abs", "Elementary", "Quotient")
 
 
-def _statable(expr: Any, arrays: frozenset[str], names: frozenset[str]) -> bool:
+def _statable(
+    expr: Any, arrays: frozenset[str], names: frozenset[str], reals: bool = False
+) -> bool:
     """Whether ``expr`` is integer arithmetic over ``names`` and cells of ``arrays``.
 
     A hypothesis about a real cell, read over the integers, would be another
     hypothesis, one that may give Lean what the reals do not; it is left
-    out, which can only make the claim harder.
+    out, which can only make the claim harder. With ``reals``, the cells of
+    an array of reals, a real scalar, a float and true division are
+    arithmetic too, which Mathlib's dialect states (:func:`discharged_obligation`);
+    a sum of loopty's is not, whatever the dialect.
     """
     found: dict[str, int] = {}
     try:
@@ -1134,7 +1291,10 @@ def _statable(expr: Any, arrays: frozenset[str], names: frozenset[str]) -> bool:
             return False
 
     def plain(node: Any) -> bool:
-        if isinstance(node, float | complex) or type(node).__name__ in _UNPRINTABLE:
+        if reals:
+            if isinstance(node, complex) or type(node).__name__ in ("Sum", "Reduction"):
+                return False
+        elif isinstance(node, float | complex) or type(node).__name__ in _UNPRINTABLE:
             return False
         if isinstance(node, tuple | list):
             return all(plain(item) for item in node)
@@ -1163,6 +1323,7 @@ def discharged_obligation(
     known: frozenset[str],
     nonneg: frozenset[str],
     verdict: Any,
+    sorts: tuple[tuple[str, Any], ...] = (),
 ) -> Any:
     """A claim isl decided under hypotheses (:func:`loopty.hypotheses.discharge`).
 
@@ -1175,28 +1336,55 @@ def discharged_obligation(
     cells the claim reads, are the part's hints. A hypothesis or a part of
     one that is not integer arithmetic over integer arrays is left out, as
     isl leaves it out (:func:`_statable`).
+
+    ``sorts`` names what is real (``Real``): arrays of reals and real
+    scalars, which a claim about what a kernel stores may read
+    (:mod:`loopty.dataflow`). A claim that reads one is a part about reals,
+    printed in Mathlib's dialect and closed by ``linarith``
+    (:attr:`lanky.obligations.Part.mathlib`), its arrays of reals functions
+    into ``ℝ``; isl decided it with each equation of reals an atom, which
+    is what ``linarith`` does with them too. A goal ``¬g ∨ b``, the claim
+    of a universal with a guard, is stated with ``g`` among the hypotheses
+    and ``b`` as the goal, which says the same and ``linarith`` can read.
     """
     lanky = _lanky_obligations()
+    real = dict(sorts)
+    reals = bool(real) and "mathlib" in getattr(lanky.Part, "__dataclass_fields__", {})
     try:
         described = _described(domain, "the claim's domain")
         dims = tuple(domain.get_var_names(isl.dim_type.set))
         claims = [entry[2] for entry in record if entry[0] == "claim"]
         names = frozenset(known) | frozenset(dims)
-        if not _statable(goal, integral, names):
+        arrays = frozenset(integral)
+        if reals:
+            names |= frozenset(name for name in real if name not in integral)
+            arrays |= frozenset(real)
+        if not _statable(goal, arrays, names, reals=reals):
             return _declined(
                 "the claim reads what is not integer arithmetic over integer "
                 "arrays, which is stated for isl only"
+                if not real
+                else "the claim reads what neither core Lean nor Mathlib's dialect "
+                "states as loopty reads it, which is stated for isl only"
             )
-        claim = Claim(None, sizes=frozenset(nonneg), taken=names)
+        claim = Claim(
+            None,
+            sizes=frozenset(nonneg),
+            taken=names,
+            sorts=dict(real) if reals else None,
+        )
         coords = claim.coordinates(dims)
         claim.hypotheses.append(described.predicate(coords))
+        under, goal = _split_guard(goal)
+        claim.hypotheses.extend(under)
         for hypothesis in claims:
             for part in conjuncts(hypothesis):
-                if _statable(part, integral, names):
+                if _statable(part, arrays, names, reals=reals):
                     claim.hypotheses.append(part)
         term = claim.close(goal)
     except Unstatable as exc:
         return _declined(str(exc))
+    uses_reals = reals and _reads_any(term, frozenset(real))
     guard = (
         [render(part) for part in conjuncts(term.guard)]
         if term.guard is not None
@@ -1218,8 +1406,35 @@ def discharged_obligation(
             seen.add(key)
             instances.append(lanky.Instance(position, tuple(values)))
     hints = lanky.Hints(instances=tuple(instances))
-    part = lanky.Part("claim", "the claim where the hypotheses hold", term, hints)
+    extra = {"mathlib": True} if uses_reals else {}
+    label = "the claim where the hypotheses hold"
+    part = lanky.Part("claim", label, term, hints, **extra)
     return _obligation([part], refuted=verdict.ok is False)
+
+
+def _split_guard(goal: Any) -> tuple[list[Any], Any]:
+    """``¬g ∨ b`` as ``([g], b)``: a guarded claim's guard among the hypotheses.
+
+    Any other goal is ``([], goal)``. The two say the same at every point.
+    """
+    if (
+        isinstance(goal, LogicalOr)
+        and len(goal.children) == 2
+        and isinstance(goal.children[0], LogicalNot)
+    ):
+        return list(conjuncts(goal.children[0].child)), goal.children[1]
+    return [], goal
+
+
+def _reads_any(term: Any, names: frozenset[str]) -> bool:
+    """Whether ``term`` mentions one of ``names``, bound or free."""
+    found: dict[str, int] = {}
+    try:
+        _names(term, found)
+    except Unstatable:
+        return True
+    binders = {var.name for var, _ in getattr(term, "binders", ())}
+    return bool((set(found) | binders) & names)
 
 
 # }}}

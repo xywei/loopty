@@ -8,6 +8,79 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Added
 
+- **A kernel's postcondition decided from what its statements store**
+  (`loopty.dataflow`, #113). Where no cell of an array a kernel writes is
+  stored twice, or read before its store, a `single-assignment` fact says
+  so, decided by isl, and what each statement stores is what the kernel
+  leaves: its value equation, `off[r + 1] == off[r] + cnt[r]` at every `r`
+  of `S1`'s loop. isl decides the postcondition under the equations, each
+  taken at the cells the claim reads, so `scan`'s reads `decided isl`,
+  resting on the `single-assignment` fact of `off`, and with Lean `proved
+  lean`, where it read `tested native`. An equation of reals isl cannot read
+  is an atom, one per equation as written, its cells canonical and its sides
+  in either order (`discharge(..., atoms=True)`), so `R[a + 2, b] == -R[a, b
+  + 2]` is decided as what the recurrence stores at `(a + 2, b)`; Lean
+  states it with Mathlib's reals and proves it by `linarith`. The native
+  runs still test the postcondition (`native` in its provenance), and one
+  that refutes it refutes it; one the equations do not decide keeps the
+  runs' status, with why (`undecided`): a cell stored twice, a read before
+  its store (the instance that stores a cell and reads it, however its
+  index is spelled, `x[i] = 2 * x[i + 1 - 1] - 5`, reads it first), a write
+  under a guard isl cannot state, an update (`y[i] += v`, or a scatter-add
+  through a map, `y[cell[c, k]] += v`), whose cells hold what they held on
+  entry plus every update: `S0 updates y[cell[c, k]] in place, so a cell of
+  y holds what it held on entry plus every update, not what one statement
+  stores`.
+- **Theorems a kernel cites**, `@kernel(uses=[on_the_triangle])`. A theorem
+  whose hypotheses are conjuncts of the postcondition, up to the names of
+  their binders, with a family `R(a)(b)` matching the cell `R[a, b]`, gives
+  its conclusion at the kernel's arrays: a `by-theorem` fact, `decided` by
+  `theorem` and resting on the theorem and the postcondition, whose
+  unbound variables stay universal and whose unmatched hypotheses are its
+  own, named in the row. For `examples/taylor_reconstruction.py` it reads
+  `by on_the_triangle, for every D with pde and stored: ... R[a, b] ==
+  D(a)(b)`. Lean checks the application, the theorem as it was proved
+  applied with the arrays loopty matched, so a wrong match is no proof. A
+  theorem whose conclusion is a conjunct of the postcondition decides that
+  conjunct instead. A match is made only where it says something of what
+  the kernel computes: every hypothesis about an array the kernel writes is
+  a conjunct of the postcondition (a kernel whose recurrence is off by one
+  gets nothing), and a conjunct about reals is matched only where nothing
+  in it rounds, copies and sign changes, since the theorem reads it as
+  reals. A family into `Nat` or a `Fin` sort stands for an array the kernel
+  does not write; the cells it writes take a theorem over `Int`. The
+  theorem's variables are put in wherever they are, every sort included: a
+  `D: Fn[Fin[n], Real]` nothing binds, with `n` matched to the kernel's `p`,
+  ranges over `Fin[p]` (#239), and `m` in `m**2` is the `m` the match bound,
+  never a kernel name of the same spelling. A family is applied as `R(a)(b)`,
+  `R(a, b)` or `R[a, b]`, as lanky reads them.
+
+  ```python
+  @kernel(uses=[on_the_triangle])
+  def reconstruct(
+      c: Arr[Where[a : Fin[2], b : Fin[p + 1], a + b <= p], Real],
+      R: Arr[Where[a : Fin[p + 1], b : Fin[p + 1], a + b <= p], Real],
+  ) -> copies & recurrence:  # the two conjuncts, written out in the example
+      ...
+  ```
+
+  ```console
+  $ lanky check examples/taylor_reconstruction.py
+  ...
+  decided under on_the_triangle  assumed    theorem      taylor_reconstruction.py:116  reconstruct      by on_the_triangle, for every D with pde and stored: forall a in Fin(...
+  ...
+  ```
+- **`lanky check` lists a file's schedules** (#191). The casts of every
+  schedule a file holds at module level are rows of its ledger, under the
+  kernel or program they schedule, decided by isl as each step was taken
+  and proved by Lean where it is installed; two schedules that share their
+  first steps share those facts, which are listed once.
+- `examples/taylor_reconstruction.py`: sumpy's compressed Taylor
+  reconstruction from the theorem to the kernel to the schedule, in one
+  file and one ledger, the seed of the demo's flagship.
+- A matched theorem's family of families applied one index at a time,
+  `R(a)(b)`, stands for an array indexed at once, `R[a, b]`, for a program's
+  cited theorems too.
 - **Window contraction** (`Schedule.contract`,
   [#132](https://github.com/xywei/loopty/issues/132)): an array a program
   makes, kept in the cells live at once. Fused one step behind, the Burgers
@@ -360,6 +433,20 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Changed
 
+- A kernel's postcondition that its statements' stores decide reads
+  `decided isl` where it read `tested native`, after a new `single-assignment`
+  row, and the restatements of it in programs are worth `decided`; the
+  ledger of a file with schedules at module level lists their casts, a
+  window's `no-clobber` and an atomic step's reassociation among them. The
+  `definedness` fact a substitution or a window asks of a schedule leads
+  with its step, `for substitute('f'), every cell of f that burgers_rhs
+  reads, flux.S0 has stored by the time it is read`, so that the two rows of
+  `examples/fusion.py`, one per step after one fusion, read apart. The
+  transcripts in the documentation are regenerated.
+- `loopty.hypotheses.discharge` names a universal hypothesis's binders apart
+  from the claim's own names before taking it at the claim's cells: an
+  instance at the claim's `r` of a hypothesis over `r` was left out, which
+  lost a verdict.
 - Where Lean is installed, a rewritten layout's facts are proved
   ([#186](https://github.com/xywei/loopty/issues/186)): one decided by the
   row starts is stated as the induction step, each write of the offsets
@@ -378,11 +465,13 @@ All notable changes to loopty are recorded here. The format follows
   computed where it is read.
 - The coverage report in `docs/lean-checks.md` covers the four examples the
   demo kernels added (`assembly.py`, `layer_potential.py`, `quadrature.py`,
-  `sum_factorization.py`), the windows, updates and layouts above, and the
-  calls in loops (`examples/calls.py`, `tests/kernels/calls.py`,
-  `tests/kernels/program_domains.py`): of 888 facts isl decides in 25 files,
-  Lean proves 860 and confirms the counterexample of the 28 refuted ones,
-  and none stays decided.
+  `sum_factorization.py`), `storage_layouts.py`, `taylor_reconstruction.py`,
+  and the windows, updates, layouts, postconditions decided from what
+  kernels store and cited theorems above: of 953 facts isl decides in 24
+  files, Lean proves 919 and confirms the counterexample of the 22 refuted
+  ones. The 12 it leaves decided are claims about reals, which core Lean has
+  no words for; with Mathlib it proves them too, 931 in all, and none stays
+  decided.
 - A ledger gains a `definedness` row for each array a kernel reads only where
   it wrote it before (`scan`'s `off`, `p2p`'s `term`, `pairs`' `f`), and an
   access with mixed subscripts is decided where it was assumed; the
