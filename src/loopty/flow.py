@@ -125,6 +125,7 @@ import islpy as isl
 import pymbolic.primitives as prim
 from lanky.terms import init_args
 
+from loopty.description import Description, Disjunct, describe, description_of
 from loopty.idx import Reflections
 from loopty.names import check_names
 from loopty.term import ArrType, Stmt, Term, count_param_names
@@ -426,10 +427,28 @@ def domain_set(
     sized: set[str] = set(params) | set(reflected)
     for piece in bound_pieces:
         sized |= free_names(piece)
-    return check_names(
-        isl.Set(_assemble(list(names), pieces, parameters, sized - set(names))),
+    nonneg = sized - set(names)
+    out = check_names(
+        isl.Set(_assemble(list(names), pieces, parameters, nonneg)),
         f"the loops over {', '.join(names)}",
         meant=meant,
+    )
+    # The text isl was given, kept on the set for a fact Lean checks
+    # (loopty.description): the constraints, the sizes taken non-negative, in
+    # the order _assemble writes them, and what each reflected parameter is.
+    return describe(
+        out,
+        Description(
+            dims=tuple(names),
+            names=tuple(inames),
+            disjuncts=(
+                Disjunct(
+                    tuple(pieces),
+                    tuple(name for name in dict.fromkeys(parameters) if name in nonneg),
+                ),
+            ),
+            reflected=tuple(reflected.items()),
+        ),
     )
 
 
@@ -915,6 +934,11 @@ def loops_outside(domain: isl.Set, keep: int) -> isl.Set:
         isl.dim_type.set, keep, inner
     ).project_out(isl.dim_type.set, keep, inner)
     if dropped.is_bounded():
+        # the same loops as loopty wrote them: the constraints of the outer
+        # loops alone (loopty.description)
+        described = description_of(domain)
+        if described is not None:
+            describe(dropped, described.outside(keep))
         return dropped
     return domain.project_out(isl.dim_type.set, keep, inner)
 

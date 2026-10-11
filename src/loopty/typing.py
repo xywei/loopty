@@ -116,6 +116,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 import islpy as isl
@@ -125,6 +126,12 @@ from lanky.prelude import FinType
 from lanky.terms import render, structurally_equal
 
 from loopty import flow
+from loopty.obligations import (
+    Stated,
+    disjoint_writes_obligation,
+    element_sort_obligation,
+    in_bounds_obligation,
+)
 from loopty.oracle import Empty, Monotone, Subset
 from loopty.term import ArrType, Term
 from loopty.trace import reductions_in
@@ -406,8 +413,8 @@ def in_bounds_facts(
                         reached, part = _align_both(reached, part)
                         part = reached.union(part).coalesce()
                     reached = part
-                cells = flow.cell_set(arrtype, indices, reflections=reflections)
-                reached, cells = _align_both(reached, cells)
+                described = flow.cell_set(arrtype, indices, reflections=reflections)
+                reached, cells = _align_both(reached, described)
                 reached = flow.assume_sizes(reached, sizes)
                 cells = flow.assume_sizes(cells, sizes)
             except Exception as exc:  # noqa: BLE001 - an unstatable rule is ASSUMED
@@ -457,6 +464,16 @@ def in_bounds_facts(
                         cells,
                         description=f"cells {text} reaches are cells {array} has",
                         labels=tuple(f"a{k}" for k in range(len(indices))),
+                        lean=Stated(
+                            partial(
+                                in_bounds_obligation,
+                                term,
+                                tuple(places),
+                                described,
+                                array,
+                                text,
+                            )
+                        ),
                     ),
                     status=Status.ASSUMED,
                     provenance={
@@ -688,8 +705,8 @@ def element_sort_facts(
             relation = flow.access_relation(stmt.inames, stmt.domain, (value,))
             if _is_widened(relation, (value,)):
                 raise flow.NonAffine("widened")
-            points = flow.cell_set(virtual, (value,), reflections=reflections)
-            relation, points = _align_both(relation, points)
+            described = flow.cell_set(virtual, (value,), reflections=reflections)
+            relation, points = _align_both(relation, described)
             outside = relation.intersect_range(points.complement()).domain()
             outside = flow.assume_sizes(outside, sizes)
         except Exception as exc:  # noqa: BLE001 - an unstatable rule is ASSUMED
@@ -724,6 +741,9 @@ def element_sort_facts(
                         f"into {written.array}"
                     ),
                     labels=tuple(stmt.inames),
+                    lean=Stated(
+                        partial(element_sort_obligation, term, stmt, described, sort)
+                    ),
                 ),
                 status=Status.ASSUMED,
                 provenance={**common, **_unnarrowed(stmt)},
@@ -1684,6 +1704,15 @@ def write_disjointness_facts(
                     collisions,
                     description=f"pairs of {stmt.id} instances writing the same cell",
                     labels=labels,
+                    lean=Stated(
+                        partial(
+                            disjoint_writes_obligation,
+                            term,
+                            stmt,
+                            footprint.array,
+                            tuple(stmt.assignee.indices),
+                        )
+                    ),
                 ),
                 status=Status.ASSUMED,
                 provenance={

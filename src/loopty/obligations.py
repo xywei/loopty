@@ -1,0 +1,1121 @@
+"""loopty's facts stated for Lean: isl decides, Lean checks.
+
+The design idea. isl decides every fact of :mod:`loopty.typing` and every cast
+of :mod:`loopty.schedule` in milliseconds, at the trust of a decision
+procedure. isl produces no proofs, only verdicts, so a fact it decided reads
+``decided``. Lean can re-decide the same fact on its own, and does: each fact
+is stated as a lanky term, a guarded universal, and lanky's Lean oracle proves
+it with ``omega`` (:mod:`lanky.obligations`). A fact Lean proves reads
+``proved``.
+
+That is worth something only if Lean's statement is independent of isl's
+work. So every statement here is built from loopty's own description of the
+kernel (:mod:`loopty.description`): the loops' names, bounds and guards as
+loopty wrote them for isl, the subscripts as the tracer recorded them, the
+source order as the 2d+1 vectors :mod:`loopty.flow` defines, and a
+schedule's steps as the maps each step wrote (:class:`loopty.schedule.Step`).
+Never from a set isl computed: no dependence relation, no image, no
+coalesced or simplified set. A fact over such a set is not stated, and says
+why, and stays ``decided``.
+
+isl's work is used, but only as hints, which Lean re-checks and which carry
+no trust (see :mod:`lanky.obligations`): the functional form of a step's map
+as the witness that the step is total, the pieces of ``lexmax`` as the
+witness of an existential, and isl's counterexample to a refuted fact, at
+which Lean proves the fact false. A wrong hint leaves a goal ``omega``
+cannot close, and a wrong counterexample one Lean cannot prove false, which
+the ledger names.
+
+A fact is stated as parts, each a closed term proved on its own: one per
+place an access is made over, one per dependence class of a cast. A part
+reads like the claim on a whiteboard::
+
+    ∀ (n : Int) (cnt : Int → Int) (r j : Int),
+      n ≥ 0 → (0 ≤ r ∧ r < n ∧ 0 ≤ j ∧ j < cnt r ∧ cnt r ≥ 0) →
+      0 ≤ r ∧ r < n ∧ 0 ≤ j ∧ j < cnt r
+
+A reflected array cell, ``cnt[r]`` in a ragged bound, is the application
+``cnt r``: an atom for ``omega`` as its parameter is one for isl.
+
+Nothing here runs unless Lean is asked: a fact's question carries a function
+that states it (:attr:`loopty.oracle.Subset.lean`), which lanky's Lean oracle
+calls, and a check without Lean costs nothing more than before.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
+from typing import Any
+
+import islpy as isl
+import pymbolic.primitives as prim
+from lanky.prelude import FnType, Int
+from lanky.terms import Comparison, Forall, LogicalAnd, LogicalNot, LogicalOr, Var
+
+from loopty import flow
+from loopty.description import (
+    Description,
+    Unstatable,
+    conjunction,
+    description_of,
+)
+from loopty.hypotheses import substitute
+from loopty.term import Stmt, Term
+
+__all__ = [
+    "Claim",
+    "Stated",
+    "disjoint_writes_obligation",
+    "element_sort_obligation",
+    "in_bounds_obligation",
+    "cast_obligation",
+    "lexicographically_before",
+    "prove",
+]
+
+
+def _lanky_obligations() -> Any:
+    """lanky's obligation types, imported when Lean asks, never with loopty.
+
+    A lanky without them has a Lean oracle that never asks, so loopty runs
+    against it as before.
+    """
+    import lanky.obligations
+
+    return lanky.obligations
+
+
+# {{{ a closed claim: its variables, hypotheses and goal
+
+
+def _names(expr: Any, out: dict[str, int], bound: frozenset[str] = frozenset()) -> None:
+    """Collect the free names of ``expr``: a variable's arity is 0, an array's its rank.
+
+    Raises:
+        Unstatable: If a name is read both as a number and as an array, or as
+            arrays of two ranks.
+    """
+
+    def note(name: str, arity: int) -> None:
+        if name in bound:
+            return
+        if out.get(name, arity) != arity:
+            raise Unstatable(f"{name} is read both as a number and as an array")
+        out[name] = arity
+
+    if isinstance(expr, tuple | list):
+        for item in expr:
+            _names(item, out, bound)
+        return
+    if isinstance(expr, Forall) or type(expr).__name__ == "Exists":
+        inner = bound | {var.name for var, _ in expr.binders}
+        _names(expr.body, out, inner)
+        if expr.guard is not None:
+            _names(expr.guard, out, inner)
+        return
+    if isinstance(expr, prim.Subscript):
+        index = expr.index if isinstance(expr.index, tuple) else (expr.index,)
+        if isinstance(expr.aggregate, prim.Variable):
+            note(expr.aggregate.name, len(index))
+        else:
+            _names(expr.aggregate, out, bound)
+        _names(index, out, bound)
+        return
+    if isinstance(expr, prim.Call):
+        if isinstance(expr.function, prim.Variable):
+            note(expr.function.name, len(expr.parameters))
+        else:
+            _names(expr.function, out, bound)
+        _names(tuple(expr.parameters), out, bound)
+        return
+    if isinstance(expr, prim.Variable):
+        note(expr.name, 0)
+        return
+    if isinstance(expr, prim.ExpressionNode):
+        from lanky.terms import init_args
+
+        for child in init_args(expr):
+            _names(child, out, bound)
+
+
+def _array_sort(rank: int) -> Any:
+    """``Int → Int → Int`` for a rank-two array: a cell is an integer atom."""
+    sort: Any = Int
+    for _ in range(rank):
+        sort = FnType(Int, sort)
+    return sort
+
+
+class Claim:
+    """One part's term, built up: its coordinates, hypotheses, and goal.
+
+    The variables of the closed term are the coordinates the builder made
+    (:meth:`coordinates`), and every other name the hypotheses and the goal
+    mention: a size or a scalar of the kernel, an ``Int``, and an array whose
+    cells a bound or a subscript reads, a function from its indices. A size
+    of the kernel (:func:`loopty.flow.size_names`) is not negative, as isl is
+    told of every size, and the claim says so.
+    """
+
+    def __init__(self, term: Term) -> None:
+        self.term = term
+        self.sizes = flow.size_names(term)
+        self.taken: set[str] = {name for name, _ in (*term.params, *term.temporaries)}
+        self.taken |= set(term.sizes) | {name for name, _ in term.reflected}
+        for stmt in term.stmts:
+            self.taken |= set(stmt.inames)
+        self.coords: list[Var] = []
+        self.hypotheses: list[Any] = []
+
+    def fresh(self, stem: str) -> Var:
+        """A variable named like ``stem`` and like nothing else the claim names."""
+        name = stem
+        while name in self.taken:
+            name += "_"
+        self.taken.add(name)
+        return Var(name)
+
+    def coordinates(self, inames: Sequence[str], tag: str = "") -> list[Var]:
+        """Variables for one instance's loops: the loops' own names, or tagged."""
+        out = []
+        for iname in inames:
+            if tag:
+                var = self.fresh(f"{iname}_{tag}")
+            else:
+                var = Var(iname)
+                self.taken.add(iname)
+            out.append(var)
+        self.coords.extend(out)
+        return out
+
+    def fresh_all(self, names: Sequence[str], tag: str) -> dict[str, Var]:
+        """Fresh variables for the loops ``names``, which the goal binds."""
+        return {name: self.fresh(f"{name}_{tag}") for name in names}
+
+    def close(self, goal: Any) -> Forall:
+        """The closed term: every variable, the hypotheses, the goal."""
+        names: dict[str, int] = {}
+        _names(self.hypotheses, names)
+        _names(goal, names)
+        own = [var.name for var in self.coords]
+        others = sorted(name for name in names if name not in own)
+        scalars = [name for name in others if names[name] == 0]
+        arrays = [name for name in others if names[name] > 0]
+        binders = [(Var(name), Int) for name in scalars]
+        binders += [(Var(name), _array_sort(names[name])) for name in arrays]
+        binders += [(var, Int) for var in self.coords]
+        sized = [
+            Comparison(Var(name), ">=", 0) for name in scalars if name in self.sizes
+        ]
+        guard = conjunction([*sized, *self.hypotheses])
+        return Forall(tuple(binders), goal, None if guard is True else guard)
+
+
+def _equal(left: Sequence[Any], right: Sequence[Any]) -> Any:
+    """``l0 = r0 ∧ l1 = r1 ∧ ...``."""
+    pairs = zip(left, right, strict=True)
+    return conjunction([Comparison(a, "==", b) for a, b in pairs])
+
+
+def _described(domain: Any, what: str) -> Description:
+    """The description loopty kept on ``domain``, or why there is none.
+
+    Raises:
+        Unstatable: For a set isl computed.
+    """
+    found = description_of(domain)
+    if found is None:
+        raise Unstatable(
+            f"{what} is a set isl computed, which has no description of loopty's to "
+            "state it from"
+        )
+    return found
+
+
+def _renamed(expr: Any, inames: Sequence[str], coords: Sequence[Any]) -> Any:
+    """``expr`` over the loops ``inames``, at the coordinates ``coords``."""
+    mapping = {name: coord for name, coord in zip(inames, coords, strict=True)}
+    return substitute(expr, mapping) if mapping else expr
+
+
+def _affine(expr: Any) -> bool:
+    """Whether isl reads ``expr`` exactly: no array read, no product of unknowns."""
+    try:
+        flow.expr_text(expr, None, None)
+    except (flow.NonAffine, ValueError):
+        return False
+    return True
+
+
+# }}}
+
+
+# {{{ what a fact's question carries
+
+
+@dataclass(frozen=True)
+class Stated:
+    """How a fact is stated for Lean: a function of isl's verdict, kept on its question.
+
+    :attr:`loopty.oracle.Subset.lean` and the other questions hold one, and
+    their ``lean_obligation()`` calls it with what :func:`loopty.oracle.decide`
+    answers, so that a refuted fact is stated with its counterexample.
+    """
+
+    state: Callable[[Any], Any]
+    rests_on: tuple[str, ...] = field(default=())
+
+    def __call__(self, verdict: Any) -> Any:
+        return self.state(verdict)
+
+
+def _declined(reason: str) -> Any:
+    """An obligation that says why there is nothing for Lean to check."""
+    return _lanky_obligations().Obligation(declined=reason)
+
+
+def _obligation(
+    parts: Sequence[Any],
+    counterexample: Any = None,
+    rests_on: Sequence[str] = (),
+) -> Any:
+    lanky = _lanky_obligations()
+    return lanky.Obligation(
+        parts=tuple(parts),
+        counterexample=counterexample,
+        rests_on=tuple(rests_on),
+        decider="isl",
+    )
+
+
+def _point(names: Sequence[str], values: Sequence[int]) -> dict[str, int]:
+    return {name: int(value) for name, value in zip(names, values, strict=True)}
+
+
+def _counterexample(part: Any, point: Mapping[str, int], text: str) -> Any:
+    """A counterexample to ``part``, with a value for each of its variables.
+
+    Variables the point does not reach (a size that is not one of isl's
+    parameters, since nothing in the question mentions it) take ``0``,
+    which a size's non-negativity allows; an array has no value, and a
+    counterexample to a part that reads one is not stated
+    (:func:`lanky.obligations.negation_source` says so).
+    """
+    values: dict[str, int] = {}
+    for var, sort in part.term.binders:
+        if sort is Int:
+            values[var.name] = int(point.get(var.name, 0))
+    return _lanky_obligations().Counterexample(part.name, values, text)
+
+
+# }}}
+
+
+# {{{ in bounds
+
+
+def in_bounds_obligation(
+    term: Term,
+    places: Sequence[tuple[tuple[Any, ...], tuple[str, ...], Any]],
+    cells: Any,
+    array: str,
+    text: str,
+    verdict: Any,
+) -> Any:
+    """The in-bounds fact of one access, one part per place it is made over.
+
+    ``places`` are what :func:`loopty.typing.in_bounds_facts` gathers for the
+    access: ``(indices, inames, domain)``, the access made over the loops
+    ``inames`` at the points of ``domain``. ``cells`` is the set of cells the
+    array has, which :func:`loopty.flow.cell_set` built and described. Each
+    part says: every point of the domain reaches a cell of the array.
+
+    A refuted fact is stated with its counterexample: isl names a cell
+    outside the array, and the instance that reaches it is read off the
+    access, as a hint.
+    """
+    try:
+        cell_set = _described(cells, f"the cells of {array}")
+        parts = []
+        for k, (indices, inames, domain) in enumerate(places):
+            claim = Claim(term)
+            coords = claim.coordinates(inames)
+            described = _described(domain, f"the loops {', '.join(inames)} of {text}")
+            claim.hypotheses.append(described.predicate(coords))
+            at = [_renamed(index, inames, coords) for index in indices]
+            goal = cell_set.predicate(at, others=dict(zip(inames, coords, strict=True)))
+            name = "in_bounds" if len(places) == 1 else f"in_bounds_{k}"
+            label = f"{text} over the loops {', '.join(inames)}"
+            parts.append(_lanky_obligations().Part(name, label, claim.close(goal)))
+    except Unstatable as exc:
+        return _declined(str(exc))
+    counterexample = None
+    if not verdict.ok:
+        counterexample = _reaching(places, verdict, parts, text)
+    return _obligation(parts, counterexample)
+
+
+def _reaching(
+    places: Sequence[tuple[tuple[Any, ...], tuple[str, ...], Any]],
+    verdict: Any,
+    parts: Sequence[Any],
+    text: str,
+) -> Any:
+    """The instance that reaches isl's cell outside the array, as a counterexample."""
+    cell = verdict.witness
+    parameters = dict(verdict.parameters or {})
+    if cell is None:
+        return None
+    for (indices, inames, domain), part in zip(places, parts, strict=True):
+        try:
+            relation = flow.access_relation(inames, domain, indices)
+            names = relation.get_var_names(isl.dim_type.param)
+            for name, value in parameters.items():
+                if name in names:
+                    relation = relation.fix_val(
+                        isl.dim_type.param,
+                        names.index(name),
+                        isl.Val.int_from_si(relation.get_ctx(), int(value)),
+                    )
+            for position, value in enumerate(cell):
+                relation = relation.fix_val(
+                    isl.dim_type.out,
+                    position,
+                    isl.Val.int_from_si(relation.get_ctx(), int(value)),
+                )
+            reached = relation.domain()
+            if reached.is_empty():
+                continue
+            point = reached.sample_point()
+            coords = [
+                point.get_coordinate_val(isl.dim_type.set, k).to_python()
+                for k in range(len(inames))
+            ]
+        except Exception:  # noqa: BLE001 - a hint that cannot be had is no hint
+            continue
+        values = {**parameters, **_point(inames, coords)}
+        shown = ", ".join(f"{name}={value}" for name, value in values.items())
+        return _counterexample(part, values, f"{text} at {shown}")
+    return None
+
+
+# }}}
+
+
+# {{{ distinct instances write distinct cells
+
+
+def disjoint_writes_obligation(
+    term: Term, stmt: Stmt, array: str, indices: Sequence[Any], verdict: Any
+) -> Any:
+    """Distinct instances of ``stmt`` write distinct cells of ``array``.
+
+    One part: two points of the statement's domain that differ write cells
+    that differ. A write isl widened, through an index that is no affine
+    expression, is about every cell and not the one written, and is not
+    stated. A refuted fact is stated with isl's pair.
+    """
+    if not all(_affine(index) for index in indices):
+        return _declined(
+            f"the write {array}[...] has an index isl does not read exactly, so isl "
+            "decided the question for every cell of the array, which is not this claim"
+        )
+    try:
+        domain = _described(stmt.domain, f"the loops of {stmt.id}")
+        claim = Claim(term)
+        first = claim.coordinates(stmt.inames, "a")
+        second = claim.coordinates(stmt.inames, "b")
+        claim.hypotheses += [domain.predicate(first), domain.predicate(second)]
+        if stmt.inames:
+            claim.hypotheses.append(LogicalNot(_equal(first, second)))
+            goal = LogicalNot(
+                _equal(
+                    [_renamed(i, stmt.inames, first) for i in indices],
+                    [_renamed(i, stmt.inames, second) for i in indices],
+                )
+            )
+        else:
+            goal = True
+        label = f"two instances of {stmt.id} writing {array}"
+        part = _lanky_obligations().Part("disjoint", label, claim.close(goal))
+    except Unstatable as exc:
+        return _declined(str(exc))
+    counterexample = None
+    if not verdict.ok and verdict.witness:
+        (source, sink) = verdict.witness
+        values = dict(verdict.parameters or {})
+        values |= _point([v.name for v in first], source[1 : 1 + len(first)])
+        values |= _point([v.name for v in second], sink[1 : 1 + len(second)])
+        counterexample = _counterexample(
+            part, values, ", ".join(f"{k}={v}" for k, v in values.items())
+        )
+    return _obligation([part], counterexample)
+
+
+# }}}
+
+
+# {{{ the value written is a point of the element sort
+
+
+def element_sort_obligation(
+    term: Term, stmt: Stmt, cells: Any, sort: Any, verdict: Any
+) -> Any:
+    """The value ``stmt`` writes is a point of ``sort``, at every instance."""
+    try:
+        domain = _described(stmt.domain, f"the loops of {stmt.id}")
+        points = _described(cells, f"the points of {sort}")
+        claim = Claim(term)
+        coords = claim.coordinates(stmt.inames)
+        claim.hypotheses.append(domain.predicate(coords))
+        value = _renamed(stmt.expr, stmt.inames, coords)
+        others = dict(zip(stmt.inames, coords, strict=True))
+        goal = points.predicate([value], others=others)
+        label = f"the value {stmt.id} writes"
+        part = _lanky_obligations().Part("element_sort", label, claim.close(goal))
+    except Unstatable as exc:
+        return _declined(str(exc))
+    counterexample = None
+    if not verdict.ok and verdict.witness is not None:
+        values = dict(verdict.parameters or {})
+        values |= _point(stmt.inames, verdict.witness)
+        counterexample = _counterexample(
+            part, values, ", ".join(f"{k}={v}" for k, v in values.items())
+        )
+    return _obligation([part], counterexample)
+
+
+# }}}
+
+
+# {{{ the order of instances
+
+
+def lexicographically_before(first: Sequence[Any], second: Sequence[Any]) -> Any:
+    """``first`` before ``second`` in lexicographic order, as a lanky proposition.
+
+    ``a0 < b0 ∨ (a0 = b0 ∧ (a1 < b1 ∨ ...))``, with the positions both sides
+    hold as numbers settled here: a time vector's constants, which say where
+    a statement sits among its siblings, mostly are.
+    """
+    out: Any = False
+    for a, b in reversed(list(zip(first, second, strict=True))):
+        if isinstance(a, int) and isinstance(b, int):
+            if a < b:
+                out = True
+            elif a > b:
+                out = False
+            continue
+        earlier = Comparison(a, "<", b)
+        if out is False:
+            out = earlier
+        elif out is True:
+            out = LogicalOr((earlier, Comparison(a, "==", b)))
+        else:
+            out = LogicalOr((earlier, LogicalAnd((Comparison(a, "==", b), out))))
+    return out
+
+
+# }}}
+
+
+
+# {{{ isl's functions, as terms: the hints
+
+
+def _rational(value: Any) -> Any:
+    """An isl value as a Python ``Fraction``."""
+    from fractions import Fraction
+
+    return Fraction(str(value))
+
+
+def _aff_term(aff: Any, inputs: Sequence[Any], params: Mapping[str, Any]) -> Any:
+    """An isl quasi-affine function as a lanky term over ``inputs``.
+
+    Raises:
+        Unstatable: For a function whose value is not an integer combination
+            of its inputs, its parameters and the floors of such.
+    """
+    from math import lcm
+
+    parts: list[tuple[Any, Any]] = []
+    for k, value in enumerate(inputs):
+        parts.append((_rational(aff.get_coefficient_val(isl.dim_type.in_, k)), value))
+    names = aff.get_var_names(isl.dim_type.param)
+    for k, name in enumerate(names):
+        parts.append(
+            (_rational(aff.get_coefficient_val(isl.dim_type.param, k)), params[name])
+        )
+    for k in range(aff.dim(isl.dim_type.div)):
+        argument = aff.get_div(k)
+        coefficients = [
+            _rational(argument.get_coefficient_val(isl.dim_type.in_, j))
+            for j in range(len(inputs))
+        ]
+        coefficients += [
+            _rational(argument.get_coefficient_val(isl.dim_type.param, j))
+            for j in range(len(names))
+        ]
+        constant = _rational(argument.get_constant_val())
+        if any(
+            not argument.get_coefficient_val(isl.dim_type.div, j).is_zero()
+            for j in range(argument.dim(isl.dim_type.div))
+        ):
+            raise Unstatable("a floor of a floor in isl's function")
+        scale = lcm(*(c.denominator for c in (*coefficients, constant)))
+        values = (*inputs, *(params[n] for n in names))
+        numerator = _linear(
+            [(c * scale, v) for c, v in zip(coefficients, values, strict=True)],
+            constant * scale,
+        )
+        floor = prim.FloorDiv(numerator, scale) if scale != 1 else numerator
+        parts.append((_rational(aff.get_coefficient_val(isl.dim_type.div, k)), floor))
+    return _linear(parts, _rational(aff.get_constant_val()))
+
+
+def _linear(parts: Sequence[tuple[Any, Any]], constant: Any) -> Any:
+    """``c0 * x0 + ... + constant`` from integer coefficients, with zeros left out."""
+    terms: list[Any] = []
+    for coefficient, value in parts:
+        if coefficient.denominator != 1:
+            raise Unstatable(f"a rational coefficient {coefficient} in isl's function")
+        coefficient = int(coefficient)
+        if coefficient == 0:
+            continue
+        terms.append(value if coefficient == 1 else prim.Product((coefficient, value)))
+    if constant.denominator != 1:
+        raise Unstatable(f"a rational constant {constant} in isl's function")
+    if int(constant) or not terms:
+        terms.append(int(constant))
+    return terms[0] if len(terms) == 1 else prim.Sum(tuple(terms))
+
+
+def _functional_form(
+    mapping: Any, inputs: Sequence[Any], params: Mapping[str, Any]
+) -> list[Any] | None:
+    """isl's functional form of a step's map, as one value per output: the witness.
+
+    ``None`` when isl gives none in one piece over every input, which leaves
+    the part to ``omega`` alone (and to fail, since its goal is an
+    existential): the witness is a hint and nothing rests on it.
+    """
+    try:
+        function = isl.PwMultiAff.from_map(mapping)
+        pieces: list[tuple[Any, Any]] = []
+        function.foreach_piece(lambda where, value: pieces.append((where, value)))
+        if len(pieces) != 1 or not pieces[0][0].complement().is_empty():
+            return None
+        value = pieces[0][1]
+        return [
+            _aff_term(value.get_at(k), inputs, params)
+            for k in range(value.dim(isl.dim_type.out))
+        ]
+    except (Unstatable, isl.Error, KeyError, ValueError):
+        return None
+
+
+# }}}
+
+
+# {{{ a schedule's casts
+
+
+def _schedule_module() -> Any:
+    """:mod:`loopty.schedule`, imported when a cast is stated (it imports this one)."""
+    from loopty import schedule
+
+    return schedule
+
+
+def _time(
+    coords: Mapping[str, tuple[str, ...]],
+    order: Sequence[str],
+    tags: Mapping[str, str],
+    stmt_id: str,
+    values: Mapping[str, Any],
+) -> list[Any]:
+    """A statement's time vector at ``values``, as :func:`loopty.schedule._time_map`.
+
+    The loops interleaved with the constants that place the statement among
+    its siblings, its parallel loops left out, padded with zeros to the
+    length the deepest statement needs.
+    """
+    schedule = _schedule_module()
+    layout = schedule._Layout(stmt_ids=tuple(coords), coords=dict(coords))
+    nests = schedule._nests(layout, order, dict(tags))
+    coefficients = schedule._coefficients(layout.stmt_ids, nests)
+    depth = max((len(nest) for nest in nests.values()), default=0)
+    nest = nests[stmt_id]
+    out: list[Any] = []
+    for level, iname in enumerate(nest):
+        out.append(coefficients[stmt_id][level])
+        out.append(values[iname])
+    out.append(coefficients[stmt_id][len(nest)])
+    return out + [0] * (2 * depth + 1 - len(out))
+
+
+def _relation(
+    step: Any, stmt_id: str, before: Mapping[str, Any], after: Mapping[str, Any]
+) -> Any:
+    """One step's map of one statement, as a proposition between its coordinates.
+
+    The statement's map as the step wrote it, and every coordinate the map
+    does not take kept as it was, as :func:`loopty.schedule._step_map` keeps it.
+
+    Raises:
+        Unstatable: For a map isl computed (the part of a tile over one of its
+            loops), which has no text of loopty's.
+    """
+    parts: list[Any] = []
+    inputs: tuple[str, ...] = ()
+    if stmt_id in step.isl_maps:
+        written = step.maps.get(stmt_id)
+        if written is None:
+            raise Unstatable(
+                f"{step.text} moves {stmt_id} by the part of its map over the loops "
+                f"{stmt_id} runs in, which isl computed"
+            )
+        inputs = written.inputs
+        parts.append(written.relation(before, after))
+    for name in step.old[stmt_id]:
+        if name not in inputs:
+            parts.append(Comparison(after[name], "==", before[name]))
+    return conjunction(parts)
+
+
+def _chain(
+    claim: Claim,
+    origin: Any,
+    stmt: Stmt,
+    steps: Sequence[Any],
+    tag: str,
+) -> list[dict[str, Any]]:
+    """One instance of ``stmt`` through ``steps``: its coordinates at every stage.
+
+    Stage 0 is the instance in the term's loops, in the statement's domain;
+    each step's map relates a stage to the next (:func:`_relation`). The
+    hypotheses go to ``claim``, and the coordinates of each stage come back,
+    by loop name.
+    """
+    names = origin._origin_layout.coords[stmt.id]
+    coords = claim.coordinates(names, tag)
+    domain = _described(stmt.domain, f"the loops of {stmt.id}")
+    claim.hypotheses.append(domain.predicate(coords))
+    stages = [dict(zip(names, coords, strict=True))]
+    for k, step in enumerate(steps, start=1):
+        after = dict(
+            zip(
+                step.new[stmt.id],
+                claim.coordinates(step.new[stmt.id], f"{tag}{k}"),
+                strict=True,
+            )
+        )
+        claim.hypotheses.append(_relation(step, stmt.id, stages[-1], after))
+        stages.append(after)
+    return stages
+
+
+def _classes(origin: Any) -> list[tuple[Stmt, Stmt, tuple, tuple]]:
+    """Every pair of accesses a dependence can join, as the checker lists them.
+
+    ``(a, b, (kind, array, indices, part), (kind, array, indices, part))``: an
+    access of ``a`` and one of ``b`` to the same array, of the same rank, at
+    least one a write (:func:`loopty.schedule._accesses`). A class isl finds
+    empty is listed too: that it is empty is isl's verdict, and Lean proves
+    it again.
+    """
+    schedule = _schedule_module()
+    term = origin._term
+    out = []
+    for a in term.stmts:
+        for b in term.stmts:
+            for first in schedule._accesses(a, term):
+                for second in schedule._accesses(b, term):
+                    if first[1] != second[1] or len(first[2]) != len(second[2]):
+                        continue
+                    if first[0] == "read" and second[0] == "read":
+                        continue
+                    out.append((a, b, first, second))
+    return out
+
+
+def _same_cell(
+    origin: Any,
+    a: Stmt,
+    b: Stmt,
+    first: Sequence[Any],
+    second: Sequence[Any],
+    at_a: Mapping[str, Any],
+    at_b: Mapping[str, Any],
+) -> Any:
+    """The two accesses touch one cell, axis by axis, as the checker reads it.
+
+    An axis either side cannot state in isl is left out, as
+    :func:`loopty.schedule._same_cell` leaves it out, and an access with an
+    index that is not affine at all is about every cell, as
+    :func:`loopty.flow.access_relation` widens it; the checker asks about
+    the union of the two, and leaving out is the wider.
+    """
+    schedule = _schedule_module()
+    plain = schedule._plain
+    if not all(_affine(index) for index in (*first, *second)):
+        return True
+    params = set(origin._params) | set(origin._term.sizes)
+    names_a = origin._origin_layout.coords[a.id]
+    names_b = origin._origin_layout.coords[b.id]
+    renaming_a = {name: prim.Variable(f"x{k}'") for k, name in enumerate(names_a)}
+    renaming_b = {name: prim.Variable(f"y{k}'") for k, name in enumerate(names_b)}
+    allowed_a = {f"x{k}'" for k in range(len(names_a))} | params
+    allowed_b = {f"y{k}'" for k in range(len(names_b))} | params
+    parts = []
+    for left, right in zip(first, second, strict=True):
+        if (
+            schedule._index_text(left, renaming_a, allowed_a) is None
+            or schedule._index_text(right, renaming_b, allowed_b) is None
+        ):
+            continue
+        parts.append(
+            Comparison(
+                substitute(plain(left), dict(at_a)),
+                "==",
+                substitute(plain(right), dict(at_b)),
+            )
+        )
+    return conjunction(parts)
+
+
+_VERBS = {
+    ("write", "read"): "read after",
+    ("read", "write"): "overwritten after",
+    ("write", "write"): "written again after",
+}
+
+
+def _class_label(a: Stmt, b: Stmt, first: tuple, second: tuple) -> str:
+    """``u[t, i - 1] read by S0 after u[t + 1, i] is written by S0``."""
+    from lanky.terms import render
+
+    def cell(access: tuple) -> str:
+        return f"{access[1]}[{', '.join(render(i) for i in access[2])}]"
+
+    verb = {
+        ("write", "read"): ("read", "written"),
+        ("read", "write"): ("overwritten", "read"),
+        ("write", "write"): ("written again", "written"),
+    }[first[0], second[0]]
+    return (
+        f"{cell(second)} {verb[0]} by {b.id} after {cell(first)} is {verb[1]} "
+        f"by {a.id}"
+    )
+
+
+def cast_obligation(cast: Any) -> Any:
+    """A cast fact of a schedule, stated for Lean (:class:`loopty.schedule.Cast`).
+
+    ``monotone``: one part per dependence class. Two instances, one of each
+    statement, in their domains, that touch one cell and that the source runs
+    in that order, keep that order after every step: the time vectors of the
+    last step's order (its parallel loops left out) compare as the source's
+    do. A cast whose tags put a loop on a hardware axis claims besides that no
+    dependence joins two work items, which is not stated here yet, and the
+    cast is left to isl with that reason.
+
+    ``bijective``: three parts per statement the last step moves, over the
+    instances as the steps before it left them: every instance has an image
+    (an existential, with isl's functional form of the map as the witness),
+    one only, and no two instances share one.
+
+    A cast after a substitution is not stated: it changed what the instances
+    read, and the dependences its later steps are checked against are isl's.
+    """
+    origin = cast.schedule
+    steps = tuple(cast.steps)
+    if any(step.substitution for step in steps):
+        return _declined(
+            "a substitution before this step changed what the instances read, and "
+            "the dependences the step is checked against are isl's, not loopty's "
+            "description"
+        )
+    try:
+        if cast.kind == "bijective":
+            parts = _bijective_parts(origin, steps)
+        else:
+            hardware = sorted(
+                name
+                for name, tag in steps[-1].tags.items()
+                if tag.startswith(("g.", "l."))
+            )
+            if hardware:
+                return _declined(
+                    f"the loops {', '.join(hardware)} are on hardware axes, and the "
+                    "claim that no dependence joins two work items is stated for "
+                    "isl only"
+                )
+            parts = _monotone_parts(origin, steps)
+    except Unstatable as exc:
+        return _declined(str(exc))
+    counterexample = None
+    if cast.refusal is not None:
+        counterexample = _refusal(origin, steps, cast.refusal, parts)
+    return _obligation(parts, counterexample)
+
+
+def _monotone_parts(origin: Any, steps: Sequence[Any]) -> list[Any]:
+    lanky = _lanky_obligations()
+    term = origin._term
+    stages_order = steps[-1].order if steps else origin._origin_order
+    tags = steps[-1].tags if steps else {}
+    last = steps[-1].new if steps else origin._origin_layout.coords
+    parts = []
+    for n, (a, b, first, second) in enumerate(_classes(origin)):
+        claim = Claim(term)
+        chain_a = _chain(claim, origin, a, steps, "a")
+        chain_b = _chain(claim, origin, b, steps, "b")
+        claim.hypotheses.append(
+            _same_cell(origin, a, b, first[2], second[2], chain_a[0], chain_b[0])
+        )
+        source = origin._origin_layout.coords
+        claim.hypotheses.append(
+            lexicographically_before(
+                _time(source, origin._origin_order, {}, a.id, chain_a[0]),
+                _time(source, origin._origin_order, {}, b.id, chain_b[0]),
+            )
+        )
+        goal = lexicographically_before(
+            _time(last, stages_order, tags, a.id, chain_a[-1]),
+            _time(last, stages_order, tags, b.id, chain_b[-1]),
+        )
+        label = _class_label(a, b, first, second)
+        parts.append(lanky.Part(f"dependence_{n}", label, claim.close(goal)))
+    return parts
+
+
+def _bijective_parts(origin: Any, steps: Sequence[Any]) -> list[Any]:
+    lanky = _lanky_obligations()
+    term = origin._term
+    step = steps[-1]
+    earlier = steps[:-1]
+    parts = []
+    for stmt in term.stmts:
+        if stmt.id not in step.isl_maps:
+            continue
+        old = step.old[stmt.id]
+        new = step.new[stmt.id]
+        mapping = step.isl_maps[stmt.id]
+        inputs = tuple(mapping.get_var_names(isl.dim_type.in_))
+
+        # every instance has an image, isl's functional form the witness
+        claim = Claim(term)
+        before = _chain(claim, origin, stmt, earlier, "a")[-1]
+        images = claim.fresh_all(new, "image")
+        relation = _relation(step, stmt.id, before, images)
+        params = {name: Var(name) for name in mapping.get_var_names(isl.dim_type.param)}
+        form = _functional_form(mapping, [before[name] for name in inputs], params)
+        values = None
+        if form is not None:
+            names = mapping.get_var_names(isl.dim_type.out)
+            outputs = dict(zip(names, form, strict=True))
+            values = tuple(outputs.get(name, before.get(name)) for name in new)
+        from lanky.terms import Exists
+
+        goal = Exists(tuple((images[name], Int) for name in new), relation)
+        hints = lanky.Hints(witness=(lanky.Piece(values),)) if values else lanky.Hints()
+        parts.append(
+            lanky.Part(
+                f"{stmt.id}_total",
+                f"every instance of {stmt.id} has an image",
+                claim.close(goal),
+                hints,
+            )
+        )
+
+        # one image only
+        claim = Claim(term)
+        before = _chain(claim, origin, stmt, earlier, "a")[-1]
+        first = dict(zip(new, claim.coordinates(new, "c"), strict=True))
+        second = dict(zip(new, claim.coordinates(new, "d"), strict=True))
+        claim.hypotheses.append(_relation(step, stmt.id, before, first))
+        claim.hypotheses.append(_relation(step, stmt.id, before, second))
+        goal = _equal([first[n] for n in new], [second[n] for n in new])
+        parts.append(
+            lanky.Part(
+                f"{stmt.id}_single_valued",
+                f"no instance of {stmt.id} has two images",
+                claim.close(goal),
+            )
+        )
+
+        # no two instances share an image
+        claim = Claim(term)
+        one = _chain(claim, origin, stmt, earlier, "a")[-1]
+        other = _chain(claim, origin, stmt, earlier, "b")[-1]
+        image = dict(zip(new, claim.coordinates(new, "c"), strict=True))
+        claim.hypotheses.append(_relation(step, stmt.id, one, image))
+        claim.hypotheses.append(_relation(step, stmt.id, other, image))
+        goal = _equal([one[n] for n in old], [other[n] for n in old])
+        parts.append(
+            lanky.Part(
+                f"{stmt.id}_injective",
+                f"no two instances of {stmt.id} share an image",
+                claim.close(goal),
+            )
+        )
+    if not parts:
+        # a step that moves no statement renames nothing, which is one for one
+        claim = Claim(term)
+        parts.append(
+            lanky.Part(
+                "identity",
+                f"{step.text} moves no instance",
+                claim.close(True),
+            )
+        )
+    return parts
+
+
+def _refusal(
+    origin: Any, steps: Sequence[Any], refusal: Any, parts: Sequence[Any]
+) -> Any:
+    """The refused class and isl's pair, as a counterexample to its part.
+
+    isl's pair is two instances in the term's loops and the sizes; the
+    coordinates after each step are read off the steps' maps by isl, a hint
+    the counterexample's check re-reads.
+    """
+    from lanky.terms import structurally_equal
+
+    dep, witness = refusal
+    if not witness:
+        return None
+    (source_id, source), (sink_id, sink), params = witness
+    kinds = {
+        "raw": ("write", "read"),
+        "war": ("read", "write"),
+        "waw": ("write", "write"),
+    }
+    wanted = kinds.get(dep.kind)
+    for n, (a, b, first, second) in enumerate(_classes(origin)):
+        if (a.id, b.id) != (dep.source, dep.sink) or (first[0], second[0]) != wanted:
+            continue
+        if first[1] != dep.array or not structurally_equal(
+            tuple(first[2]), tuple(dep.source_indices)
+        ) or not structurally_equal(tuple(second[2]), tuple(dep.sink_indices)):
+            continue
+        part = next((p for p in parts if p.name == f"dependence_{n}"), None)
+        if part is None:
+            return None
+        try:
+            values = dict(params)
+            for stmt, coords, tag in ((a, source, "a"), (b, sink, "b")):
+                values |= _stages(origin, stmt, steps, coords, params, tag, part)
+        except (Unstatable, isl.Error, KeyError, ValueError):
+            return None
+        text = (
+            f"{source_id}{_shown(source)} and {sink_id}{_shown(sink)} at "
+            + ", ".join(f"{k}={v}" for k, v in params.items())
+        )
+        return _counterexample(part, values, text)
+    return None
+
+
+def _shown(coords: Mapping[str, int]) -> str:
+    return "[" + ", ".join(f"{k}={v}" for k, v in coords.items()) + "]"
+
+
+def _stages(
+    origin: Any,
+    stmt: Stmt,
+    steps: Sequence[Any],
+    coords: Mapping[str, int],
+    params: Mapping[str, int],
+    tag: str,
+    part: Any,
+) -> dict[str, int]:
+    """Every coordinate of one instance at every stage, by its name in ``part``.
+
+    The names are the part's variables, which :func:`_chain` made as
+    ``loop_tag`` and ``loop_tagk``; each stage's values are the image of the
+    one before by the step's map, which isl computes at the point.
+    """
+    binders = {var.name for var, _ in part.term.binders}
+
+    def named(loop: str, suffix: str) -> str:
+        name = f"{loop}_{suffix}"
+        while name not in binders and name + "_" in binders:
+            name += "_"
+        return name
+
+    out: dict[str, int] = {}
+    current = dict(coords)
+    for loop, value in current.items():
+        out[named(loop, tag)] = int(value)
+    for k, step in enumerate(steps, start=1):
+        after: dict[str, int] = {}
+        mapping = step.isl_maps.get(stmt.id)
+        if mapping is not None:
+            inputs = mapping.get_var_names(isl.dim_type.in_)
+            outputs = mapping.get_var_names(isl.dim_type.out)
+            fixed = mapping
+            names = fixed.get_var_names(isl.dim_type.param)
+            for name, value in params.items():
+                if name in names:
+                    fixed = fixed.fix_val(
+                        isl.dim_type.param,
+                        names.index(name),
+                        isl.Val.int_from_si(fixed.get_ctx(), int(value)),
+                    )
+            for position, name in enumerate(inputs):
+                fixed = fixed.fix_val(
+                    isl.dim_type.in_,
+                    position,
+                    isl.Val.int_from_si(fixed.get_ctx(), int(current[name])),
+                )
+            point = fixed.range().sample_point()
+            for position, name in enumerate(outputs):
+                value = point.get_coordinate_val(isl.dim_type.set, position)
+                after[name] = value.to_python()
+        for name in step.old[stmt.id]:
+            if name not in after and name in current:
+                after[name] = current[name]
+        current = {name: after[name] for name in step.new[stmt.id]}
+        for loop, value in current.items():
+            out[named(loop, f"{tag}{k}")] = int(value)
+    return out
+
+
+# }}}
+
+
+def prove(fact: Any) -> Any:
+    """``fact`` as Lean leaves it, where a Lean oracle is registered and available.
+
+    For a fact loopty's checker settled when it was made, a schedule's casts
+    decided or refuted as each step is taken, which no check offers the
+    oracles, so that a ledger of them (``loopty run``'s) shows what Lean
+    made of them: ``proved`` by ``lean``, or the status it had with Lean's
+    reason (a refuted one with whether Lean proved it false at isl's pair).
+    Without Lean, the fact comes back as it is.
+    """
+    from lanky.ledger import Status
+    from lanky.plugins import oracle_availability, registry
+
+    for oracle in registry.sorted_oracles():
+        if oracle.trust_class() != "kernel":
+            continue
+        available, _ = oracle_availability(oracle)
+        if not available:
+            continue
+        try:
+            if not oracle.can_establish(fact):
+                continue
+            result = oracle.establish(fact)
+        except Exception:  # noqa: BLE001 - a failing oracle leaves the fact as it was
+            continue
+        if result is None:
+            continue
+        if result.status is Status.PROVED:
+            return result.with_status(Status.PROVED, trust_class=oracle.trust_class())
+        return result
+    return fact

@@ -233,6 +233,7 @@ from pymbolic.mapper.substitutor import substitute
 
 from loopty import idx
 from loopty import oracle as isl_oracle
+from loopty.description import MapText, Unstatable, describe, map_text, map_text_of
 from loopty.flow import bounds_dimension
 from loopty.isl_reading import declining_methods
 from loopty.lower import (
@@ -625,7 +626,8 @@ def _reindexing(
         out = out.set_dim_name(isl.dim_type.in_, k, name)
     for k, name in enumerate(outputs):
         out = out.set_dim_name(isl.dim_type.out, k, name)
-    return out
+    # the text the map was written as, for a cast Lean checks (loopty.description)
+    return describe(out, MapText(tuple(inputs), tuple(outputs), tuple(constraints)))
 
 
 def _as_maps(mapping: Any) -> tuple[Any, dict[str, isl.Map] | None]:
@@ -639,7 +641,14 @@ def _as_maps(mapping: Any) -> tuple[Any, dict[str, isl.Map] | None]:
     with its tuple name taken off, since the checker and the kernel rewrite
     match loops by name and not by tuple; ``None`` for one map.
     """
+    written: dict[str | None, MapText] = {}
     if isinstance(mapping, str):
+        try:
+            written = map_text(mapping)
+        except Unstatable:
+            # isl's reader takes more than loopty's; such a map is checked by
+            # isl alone, and a cast after it is not stated for Lean
+            written = {}
         try:
             mapping = isl.UnionMap(mapping)
         except isl.Error as exc:
@@ -672,6 +681,8 @@ def _as_maps(mapping: Any) -> tuple[Any, dict[str, isl.Map] | None]:
                 "loops, and one map moves every statement in its loops; give "
                 "one map, or name the statement of each"
             )
+        if None in written and len(written) == 1:
+            describe(maps[0], written[None])
         return maps[0], None
     if not all(named):
         raise ValueError(
@@ -689,6 +700,8 @@ def _as_maps(mapping: Any) -> tuple[Any, dict[str, isl.Map] | None]:
                 "moves by one"
             )
         pieces[stmt_id] = piece.reset_tuple_id(isl.dim_type.in_)
+        if stmt_id in written:
+            describe(pieces[stmt_id], written[stmt_id])
     return mapping, pieces
 
 
@@ -2316,6 +2329,64 @@ class _Draft:
     target: str = "c"
 
 
+@dataclass(frozen=True, eq=False)
+class Step:
+    """One step of a schedule as its checker saw it, kept for a cast Lean checks.
+
+    ``old`` and ``new`` are each statement's coordinates before and after the
+    step (the layouts, by statement id), ``maps`` the map of each statement
+    the step moves as it was written (:class:`loopty.description.MapText`),
+    or ``None`` where isl computed it (the part of a tile over one of its
+    loops), and ``isl_maps`` the maps themselves, whose functional form isl
+    gives as the witness that a step is total. ``order`` and ``tags`` are the
+    loop nest after the step. ``parent`` is the schedule the step was taken
+    from, and ``substitution`` whether the step computed an array where it is
+    read, which changes what the instances read and so the dependences the
+    later steps are checked against.
+    """
+
+    text: str
+    recipe: tuple[str, tuple, dict]
+    old: Mapping[str, tuple[str, ...]]
+    new: Mapping[str, tuple[str, ...]]
+    maps: Mapping[str, MapText | None]
+    isl_maps: Mapping[str, Any]
+    order: tuple[str, ...]
+    tags: Mapping[str, str]
+    parent: Any = None
+    substitution: bool = False
+
+
+@dataclass(frozen=True, eq=False)
+class Cast:
+    """The claim of a cast fact, for Lean: the schedule's steps up to this one.
+
+    ``kind`` is ``bijective`` (the step renames the instances one for one) or
+    ``monotone`` (the order after the step runs every dependence forward).
+    ``schedule`` is the schedule the steps start from, which holds the
+    kernel's term, its source order and its first layout, and ``steps`` are
+    every step from there to this one. A refused ``monotone`` cast carries
+    the dependence it reverses and isl's pair as ``refusal``. Lean states it
+    from those (:func:`loopty.obligations.cast_obligation`); isl decided it
+    when the step was taken, so the question is not asked again.
+    """
+
+    schedule: Any
+    steps: tuple[Step, ...]
+    kind: str
+    refusal: Any = None
+
+    def lean_obligation(self) -> Any:
+        """How Lean is to check this cast (see :mod:`lanky.obligations`)."""
+        from loopty.obligations import cast_obligation
+
+        return cast_obligation(self)
+
+    def __str__(self) -> str:
+        steps = ".".join(step.text for step in self.steps)
+        return f"{self.kind} cast of {self.schedule._term.name}.{steps}"
+
+
 def _transformed(kernel: Any, transform: Any, *args: Any, **kwargs: Any) -> Any:
     """``transform(kernel, ...)``, or ``None`` when there is no kernel left.
 
@@ -2415,6 +2486,11 @@ class Schedule:
                 if iname not in order:
                     order.append(iname)
         self._order = order
+        #: The loop order the term was written in, which the source order of
+        #: its instances is read in (:func:`_time_map`), and every step's
+        #: record from there (see :class:`Step`), for a cast Lean checks.
+        self._origin_order = tuple(order)
+        self._records: tuple[Step, ...] = ()
         self._tags: dict[str, str] = {}
         # A reduction iname is not a coordinate of the instance space: a whole
         # reduction happens inside one statement instance. Splitting or tagging
@@ -4292,6 +4368,22 @@ class Schedule:
             stmt_ids=self._layout.stmt_ids, coords=dict(draft.coords)
         )
         step = _step_map(self._layout, layout, draft.mappings)
+        record = Step(
+            text=text,
+            recipe=recipe,
+            old=dict(self._layout.coords),
+            new=dict(draft.coords),
+            maps={
+                stmt_id: map_text_of(mapping)
+                for stmt_id, mapping in draft.mappings.items()
+            },
+            isl_maps=dict(draft.mappings),
+            order=tuple(draft.order),
+            tags=dict(draft.tags),
+            parent=self,
+            substitution=recipe[0] == "substitute",
+        )
+        records = (*self._records, record)
 
         facts: list[Any] = list(leading)
 
@@ -4315,6 +4407,7 @@ class Schedule:
                 detail=verdict.detail,
                 step=recipe,
                 reason=message,
+                term=Cast(self._first(), records, "bijective"),
             )
         )
         if not verdict.ok:
@@ -4374,6 +4467,12 @@ class Schedule:
                 step=recipe,
                 reason=message,
                 rests_on=self._layout_ids,
+                term=Cast(
+                    self._first(),
+                    records,
+                    "monotone",
+                    refusal=None if bad is None else (bad[0], bad[1]),
+                ),
             )
         )
         if refused:
@@ -4442,8 +4541,13 @@ class Schedule:
             )
         other._history = (*self._history, text)
         other._steps = (*self._steps, recipe)
+        other._records = records
         other._facts = (*earlier, *facts)
         return other
+
+    def _first(self) -> Schedule:
+        """The schedule the steps start from: this one, before any step."""
+        return self._records[0].parent if self._records else self
 
     def _first_violation(
         self, schedule: isl.Map
@@ -4791,6 +4895,7 @@ class Schedule:
         reason: str = "",
         about: str = "",
         rests_on: tuple[str, ...] = (),
+        term: Any = None,
     ) -> Any:
         """One ledger entry for one question about one step.
 
@@ -4828,6 +4933,10 @@ class Schedule:
         ``rests_on`` names the facts the answer takes for granted, which for a
         ``monotone`` cast of a kernel that rewrites its layout are the layout's
         facts (see :attr:`_layout_ids`).
+
+        ``term`` is the claim for Lean, a :class:`Cast` for the two questions
+        about meaning, which Lean states from the steps' records and proves
+        when it is asked (see :func:`prove`).
         """
         from lanky.ledger import Fact, Status
 
@@ -4846,7 +4955,7 @@ class Schedule:
             id=self._fact_id("cast", (*self._steps, step), f"{kind}{suffix}"),
             kind=kind,
             statement=statement,
-            term=None,
+            term=term,
             status=(
                 Status.REFUTED
                 if status == "refuted"

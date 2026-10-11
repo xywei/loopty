@@ -71,6 +71,7 @@ import pymbolic.primitives as prim
 from lanky.prelude import FinType, SumType
 from lanky.terms import Comparison, init_args, render, structurally_equal
 
+from loopty.description import Description, Disjunct, describe
 from loopty.names import check_names
 
 __all__ = [
@@ -518,10 +519,16 @@ class Polyhedron:
             names = dimension_names(count, self.size_names())
         names = tuple(names)
         pieces, params, sizes = self.constraint_texts(names, upto)
-        return check_names(
-            isl.Set(_assembled(names[:count], [(pieces, sizes)], params)),
-            f"the points of {self}",
-            meant=sizes,
+        return describe(
+            check_names(
+                isl.Set(_assembled(names[:count], [(pieces, sizes)], params)),
+                f"the points of {self}",
+                meant=sizes,
+            ),
+            Description(
+                dims=names[:count],
+                disjuncts=(Disjunct(tuple(pieces), tuple(sorted(sizes))),),
+            ),
         )
 
     def prefix_constraints(self, prefix: Sequence[Any], var: Any) -> tuple[Any, ...]:
@@ -678,10 +685,19 @@ class Union:
             disjuncts.append(([f"{names[0]} = {position}", *pieces], extents))
             params |= mentioned
             sizes |= extents
-        return check_names(
-            isl.Set(_assembled(names, disjuncts, params)),
-            f"the points of {self}",
-            meant=sizes,
+        return describe(
+            check_names(
+                isl.Set(_assembled(names, disjuncts, params)),
+                f"the points of {self}",
+                meant=sizes,
+            ),
+            Description(
+                dims=names,
+                disjuncts=tuple(
+                    Disjunct(tuple(pieces), tuple(sorted(extents)))
+                    for pieces, extents in disjuncts
+                ),
+            ),
         )
 
     def fixed(self, sizes: Mapping[str, int]) -> Fixed:
