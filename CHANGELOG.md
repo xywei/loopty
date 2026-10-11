@@ -126,11 +126,14 @@ All notable changes to loopty are recorded here. The format follows
   `A[p[i]]`), is owed in bounds at every point of the call, whether the
   callee uses the parameter or not, and a call whose
   callee writes an array an argument reads (`scale(A[i], A[i, 0])`) is
-  refused, naming both. A scalar argument is converted into the sort the
-  callee declares, as its contract converts it natively (#232): a double
-  given for `s: np.float32` is `np.float32(x[i])` in the caller's term,
-  which the interpreter computes as numpy does and the lowering writes as
-  C's cast, and a loop variable given for `Int` is a numpy `int64` beside a
+  refused, naming both; so is a function given whose default or captured
+  name holds a value read from such an array (`lambda q, saved=x[0]:
+  saved`), which natively is the value when the function was made. A
+  scalar argument is converted into the sort the callee declares, as its
+  contract converts it natively (#232): a double given for `s:
+  np.float32` is `np.float32(x[i])` in the caller's term, which the
+  interpreter computes as numpy does and the lowering writes as C's cast,
+  and a loop variable given for `Int` is a numpy `int64` beside a
   `float32`, while an index or a comparison of it reads as the caller's
   own, `A[i, i]`. What the contract refuses is refused where it is passed:
   a real or a truth value for an integral sort, a number for `Bool`, a
@@ -178,9 +181,11 @@ All notable changes to loopty are recorded here. The format follows
   points where the program makes it, its edges have definedness facts as a
   dense temporary's do, and a schedule fuses through it; `Schedule.pack`
   stores a program's argument over a domain packed. A declared dense shape
-  is `Arr.zeros((x.dom.size, 3))`, which `Schedule.contract` may keep in a
-  window; one over a domain is refused there, naming the fix, keep it whole
-  or `substitute` it ([#244](https://github.com/xywei/loopty/issues/244)).
+  is `Arr.zeros((x.dom.size, 3))`, and a run whose sizes make one of its
+  lengths negative is refused compiled, as numpy refuses it natively.
+  `Schedule.contract` may keep a dense one in a window; one over a domain is
+  refused there, naming the fix, keep it whole or `substitute` it
+  ([#244](https://github.com/xywei/loopty/issues/244)).
 
 - **Constant tables** (`loopty.table`): quadrature weights, a basis
   tabulated at the quadrature points, a differentiation matrix, declared

@@ -921,7 +921,7 @@ release; the CHANGELOG says when one does.
   the callee writes have to be two rows of it, decided at every call; a
   whole array and a part of it are refused, and so is an argument that
   reads an array the callee writes, since natively it is read once, when
-  the call is made. A rule's claim about its value (`-> Real & (...)`)
+  the call is made, a value a function given captured included. A rule's claim about its value (`-> Real & (...)`)
   is refused: state it as a theorem about the rule (#206). A call made
   inside a sum over `Fin[...]` of a size, rather than over an array's `.dom`,
   has points the trace does not see, and its facts are `assumed` (#207). A rule that
