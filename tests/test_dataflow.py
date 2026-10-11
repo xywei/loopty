@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 from lanky.ledger import Ledger, Status
+from lanky.plugins import registry
 from lanky.terms import render
 
 from loopty.dataflow import APPLIED, KIND, stores
@@ -43,7 +44,10 @@ def load(path: Path) -> Any:
     return module
 
 
-kernels = load(KERNELS / "dataflow.py")
+# imported with what it registers released again, so that the registry other
+# test modules read is the one they made
+with registry.collecting():
+    kernels = load(KERNELS / "dataflow.py")
 
 
 def facts(kernel: Any, kind: str) -> list[Any]:

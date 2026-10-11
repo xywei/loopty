@@ -286,9 +286,8 @@ def test_a_kernels_postcondition_is_tested_against_its_native_runs() -> None:
     assert post.provenance["compared"] >= 1
     assert post.status is Status.DECIDED
     assert post.decided_by == "isl"
-    assert post.provenance["used"] == [
-        f"what S0 stores in perm at {post.where}"
-    ]
+    (stmt,) = travel.number.term.stmts
+    assert post.provenance["used"] == [f"what S0 stores in perm at {stmt.where}"]
 
 
 def test_a_false_postcondition_is_refuted_by_a_native_run() -> None:

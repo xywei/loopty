@@ -131,12 +131,41 @@ its own, in parallel.
 | a cast is bijective | statement the step moves | every instance has an image (an existential), one only, and no two share one |
 | a cast is monotone | dependence class, a pair of accesses | two instances that touch one cell, in the source's order, keep it after every step: their time vectors compare as the source's do |
 | what a program's call may assume | requirement, or flat access | the claim at every point of its domain, under the hypotheses isl used (a callee's postcondition, a theorem the program cites, a type the contract checks) |
+| single assignment | pair of statements that store into the array; read of the array and statement that stores into it | two instances, distinct where they are of one statement, store into cells that differ; an instance that stores the cell an instance reads does not run after it, in the source order |
+| a kernel's postcondition | conjunct | the conjunct at every point of its binders' domain, under what each statement stores, its value equation, with the instances isl took of the equations as hints; one about reals is stated with Mathlib's `ℝ` and closed by `linarith` |
+| a cited theorem, applied | (one part) | the theorem as it was proved, and the conjuncts of the postcondition it was matched with, imply the claim: Lean applies the theorem with the arrays and sizes loopty bound given by name, and each premise left is a hypothesis |
 | an assumption of a schedule | (a hypothesis of every later cast) | |
 
 A class two statements never form, `S1` before `S0` in a program whose `S0`
 runs first, has a hypothesis that is `False` as written, and is closed by
 `contradiction`: that a class is empty is isl's verdict too, and Lean proves
 it again.
+
+A kernel's postcondition is decided from what its statements store
+(`loopty.dataflow`): where no cell of an array is stored twice or read before
+its store, what a statement stores is what the cell holds when the kernel
+returns, so each statement is an equation about the arrays the kernel leaves,
+`∀ r, 0 ≤ r → r < n → off (r + 1) = off r + cnt r`. Lean proves the
+postcondition from those equations, and the `single-assignment` fact that
+licenses them is a fact of its own, which Lean proves too:
+
+```console
+$ lanky check examples/spmv.py --show-lean "off[r + 1] == off[r] + cnt[r])"
+...
+```
+
+That the equations are what the kernel does is the reading of a kernel's
+source order loopty and isl share (below), and the native runs test the
+postcondition besides. A claim about reals is decided by isl with each
+equation it cannot read an atom, the same equation at the same point being
+one atom, and stated for Lean with Mathlib's reals (`LANKY_LEAN_MATHLIB`),
+where `linarith` closes it; core Lean has no reals, and says so.
+
+A theorem a kernel cites, `@kernel(uses=[on_the_triangle])`, is applied to its
+postcondition: Lean is handed the theorem as it was proved, as a hypothesis,
+and applies it to the claim with the arrays loopty matched to its families,
+`apply h1 (p := p) (c := c) (R := R)`, so that a wrong match is a part Lean
+does not prove.
 
 ## What isl gives Lean, which Lean checks
 
@@ -186,7 +215,14 @@ stays `decided`.
     Lean's `decide` of the printed predicate agrees with isl at points in and
     out of it.
 - loopty's collectors, which isl and Lean share: the accesses a statement
-  makes, the trace (the `trace-faithful` fact checks it), the source order.
+  makes, the trace (the `trace-faithful` fact checks it), the source order,
+  and the value equation of a statement whose array is stored once per cell,
+  that what it stores is what the kernel leaves, which follows from the
+  source order and the `single-assignment` fact Lean proves.
+- An equation of reals is read as the reals read it, where a value equals
+  itself: a `NaN` a kernel stores, or is given, is not equal to itself in a
+  float, so a postcondition decided `R[a, b] == c[a, b]` is false natively
+  at a `NaN` of `c`.
 - The gap between the model and the code: lowering, loopy and the compiler,
   which the native and compiled differential covers, by sampling.
 
@@ -201,7 +237,11 @@ is kept, by the hash of the Lean version and the declaration
 back: the stencil's ledger takes 2.5 s the first time on the machine the
 coverage report ran on, and 1.3 s the next, against 0.6 s without Lean; the
 slowest example, `travel.py`, 8.5 s, 4.4 s and 2.1 s.
-`LANKY_LEAN_DISABLE=1` turns Lean off, and the ledger reads `decided` as before.
+A check whose every answer is in the cache starts no Lean at all (lanky
+#118): the cache is keyed by the version a session would run, which lanky
+reads without starting one, so a warm check costs what a check without Lean
+does. `LANKY_LEAN_DISABLE=1` turns Lean off, and the ledger reads `decided` as
+before.
 
 ## Coverage
 

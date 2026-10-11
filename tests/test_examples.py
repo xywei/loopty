@@ -237,7 +237,13 @@ def test_the_spmv_ledger_has_both_deciders_and_the_accumulations_class() -> None
     # the sum is ``approx``. ``reassoc`` is not something a trace may assume;
     # it is what a schedule lowers an accumulation to when it reorders one, and
     # that fact is emitted by the schedule, below.
-    exactness = [fact for fact in facts if fact["kind"] == "exactness"]
+    # lanky check lists the casts of the file's schedule too (#191), among
+    # them the reassociation realize() makes; the kernel's own is approx
+    exactness = [
+        fact
+        for fact in facts
+        if fact["kind"] == "exactness" and not fact["id"].startswith("cast:")
+    ]
     assert exactness, "the accumulation's exactness class was never stated"
     assert all("is approx" in fact["statement"] for fact in exactness), exactness
     assert all(fact["status"] == "decided" for fact in exactness)
@@ -871,7 +877,13 @@ def test_the_fusion_demo_prints_the_refusal_and_two_kernels() -> None:
 
 def test_the_fusion_demo_states_the_definedness_of_its_intermediate() -> None:
     _result, facts = _invoke("fusion", "check")
-    (fact,) = [fact for fact in facts if fact["kind"] == "definedness"]
+    # the substitution's own definedness, a cast of the file's schedule, is
+    # listed too (#191)
+    (fact,) = [
+        fact
+        for fact in facts
+        if fact["kind"] == "definedness" and not fact["id"].startswith("cast:")
+    ]
     assert (fact["status"], fact["decided_by"]) == ("decided", "isl")
     assert fact["owner"] == "burgers_rhs"
 

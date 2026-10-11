@@ -223,7 +223,7 @@ def test_the_ledger_of_a_file_says_what_its_program_rests_on() -> None:
     assert row["rests_on"] == [post.id]
     assert row["under"] == []
     assert row["status"] == "decided"
-    assert row["effective"] == "tested"
+    assert row["effective"] == "decided"
 
 
 CALLEE = '''

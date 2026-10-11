@@ -8,6 +8,48 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Added
 
+- **A kernel's postcondition decided from what its statements store**
+  (`loopty.dataflow`, #113). Where no cell of an array a kernel writes is
+  stored twice, or read before its store, a `single-assignment` fact says
+  so, decided by isl, and what each statement stores is what the kernel
+  leaves: its value equation, `off[r + 1] == off[r] + cnt[r]` at every `r`
+  of `S1`'s loop. isl decides the postcondition under the equations, each
+  taken at the cells the claim reads, so `scan`'s reads `decided isl`,
+  resting on the `single-assignment` fact of `off`, and with Lean `proved
+  lean`, where it read `tested native`. An equation of reals isl cannot read
+  is an atom, one per equation as written, its cells canonical and its sides
+  in either order (`discharge(..., atoms=True)`), so `R[a + 2, b] == -R[a, b
+  + 2]` is decided as what the recurrence stores at `(a + 2, b)`; Lean
+  states it with Mathlib's reals and proves it by `linarith`. The native
+  runs still test the postcondition (`native` in its provenance), and one
+  that refutes it refutes it; one the equations do not decide keeps the
+  runs' status, with why (`undecided`): a cell stored twice, a read before
+  its store, a write under a guard isl cannot state, an accumulation.
+- **Theorems a kernel cites**, `@kernel(uses=[on_the_triangle])`. A theorem
+  whose hypotheses are conjuncts of the postcondition, up to the names of
+  their binders, with a family `R(a)(b)` matching the cell `R[a, b]`, gives
+  its conclusion at the kernel's arrays: a `by-theorem` fact, `decided` by
+  `theorem` and resting on the theorem and the postcondition, whose
+  unbound variables stay universal and whose unmatched hypotheses are its
+  own. For `examples/taylor_reconstruction.py` it reads `by on_the_triangle:
+  forall D ... R[a, b] == D(a)(b)`. Lean checks the application, the theorem
+  as it was proved applied with the arrays loopty matched, so a wrong match
+  is no proof. A theorem whose conclusion is a conjunct of the postcondition
+  decides that conjunct instead. A family into `Nat` or a `Fin` sort stands
+  for an array the kernel does not write; the cells it writes take a
+  theorem over `Int`.
+- **`lanky check` lists a file's schedules** (#191). The casts of every
+  schedule a file holds at module level are rows of its ledger, under the
+  kernel or program they schedule, decided by isl as each step was taken
+  and proved by Lean where it is installed; two schedules that share their
+  first steps share those facts, which are listed once.
+- `examples/taylor_reconstruction.py`: sumpy's compressed Taylor
+  reconstruction from the theorem to the kernel to the schedule, in one
+  file and one ledger, the seed of the demo's flagship.
+- A matched theorem's family of families applied one index at a time,
+  `R(a)(b)`, stands for an array indexed at once, `R[a, b]`, for a program's
+  cited theorems too.
+
 - **Constant tables** (`loopty.table`): quadrature weights, a basis
   tabulated at the quadrature points, a differentiation matrix, declared
   next to the kernel as the numpy array they are, `W = table([1 / 6, 1 / 6,
@@ -134,6 +176,15 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Changed
 
+- A kernel's postcondition that its statements' stores decide reads
+  `decided isl` where it read `tested native`, after a new `single-assignment`
+  row, and the restatements of it in programs are worth `decided`; the
+  ledger of a file with schedules at module level lists their casts. The
+  transcripts in the documentation are regenerated.
+- `loopty.hypotheses.discharge` names a universal hypothesis's binders apart
+  from the claim's own names before taking it at the claim's cells: an
+  instance at the claim's `r` of a hypothesis over `r` was left out, which
+  lost a verdict.
 - A ledger gains a `definedness` row for each array a kernel reads only where
   it wrote it before (`scan`'s `off`, `p2p`'s `term`, `pairs`' `f`), and an
   access with mixed subscripts is decided where it was assumed; the
