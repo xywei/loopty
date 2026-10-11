@@ -73,7 +73,7 @@ def test_the_scans_postcondition_is_decided_from_what_it_stores() -> None:
         single.statement == "no cell of off is stored twice, or read before its store"
     )
     assert post.rests_on == (single.id,)
-    assert single.id == f"{KIND}:dataflow.scan@17:off"
+    assert single.id == f"{KIND}:dataflow.scan@18:off"
     ids = [fact.id for fact in kernels.scan.facts()]
     assert ids.index(single.id) == ids.index(post.id) - 1
     assert post.provenance["used"] == [
@@ -309,6 +309,20 @@ def test_a_conjunct_reads_the_same_as_reals_where_nothing_in_it_rounds() -> None
     assert not exact(kernels.summed.term.post, {"a", "b", "s"})
     # over the integers, every comparison is exact
     assert all(exact(part, set()) for part in conjuncts(kernels.scan.term.post))
+
+
+def test_a_theorems_integer_is_never_taken_at_a_real() -> None:
+    """``integral_fill``'s ``k`` is an integer: taken at ``fill``'s real ``s`` it says
+    ``R[i] * 2 != 1``, false at ``s = 0.5``. The match is refused (Codex).
+    """
+    (post,) = facts(kernels.fill, "postcondition")
+    assert (post.status, post.decided_by) == (Status.DECIDED, "isl")
+    assert not facts(kernels.fill, APPLIED)
+
+
+def test_numpys_floats_are_reals_to_a_theorem_about_reals() -> None:
+    (applied,) = facts(kernels.copy64, APPLIED)
+    assert applied.statement == "by copied: forall i in Fin(n). R[i] - c[i] == 0"
 
 
 def test_a_theorem_that_does_not_apply_gives_nothing() -> None:

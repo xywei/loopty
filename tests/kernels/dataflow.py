@@ -6,6 +6,7 @@ the rest is not.
 
 from __future__ import annotations
 
+import numpy as np
 from lanky import theorem
 from lanky.prelude import Fn, Int, Nat, Real
 
@@ -346,6 +347,39 @@ def scan_naturals(cnt: Arr[Fin[n], Nat], off: Arr[Fin[n + 1], Int]) -> (
     off[0] = 0
     for r in cnt.dom:
         off[r + 1] = off[r] + cnt[r]
+
+
+@theorem
+def integral_fill(
+    n: Nat, k: Int, R: Fn[Nat, Real], h: all(R(i) == k for i in Fin[n])
+) -> all(R(i) * 2 != 1 for i in Fin[n]):
+    """A table of an integer ``k`` is nowhere a half."""
+
+
+@kernel(uses=[integral_fill])
+def fill(s: Real, R: Arr[Fin[n], Real]) -> all(R[i] == s for i in Fin[n]):
+    """Fills ``R`` with a real ``s``, which the theorem's integer ``k`` is not.
+
+    At ``s = 0.5``, ``R[i] * 2 != 1`` is false: the theorem is not applied.
+    """
+    for i in R.dom:
+        R[i] = s
+
+
+@theorem
+def copied(
+    n: Nat, c: Fn[Nat, Real], R: Fn[Nat, Real], h: all(R(i) == c(i) for i in Fin[n])
+) -> all(R(i) - c(i) == 0 for i in Fin[n]):
+    """A copy differs from what it copies by nothing."""
+
+
+@kernel(uses=[copied])
+def copy64(c: Arr[Fin[n], np.float64], R: Arr[Fin[n], np.float64]) -> all(
+    R[i] == c[i] for i in Fin[n]
+):
+    """Arrays of numpy's ``float64`` are arrays of reals to a theorem about reals."""
+    for i in R.dom:
+        R[i] = c[i]
 
 
 # }}}

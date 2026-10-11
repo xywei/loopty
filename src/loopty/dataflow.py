@@ -714,7 +714,7 @@ def applicable(term: Term, written: set[str], array: str, codomain: Any) -> str 
     wanted = codomain.base if isinstance(codomain, Refined) else codomain
     name = getattr(wanted, "name", None)
     if name == "Real":
-        if getattr(element, "name", None) == "Real":
+        if _real(element):
             return None
         return f"the elements of {array} are not reals"
     if not _integral(element):
@@ -916,11 +916,19 @@ def _fits(
     A family stands for an array of as many axes as the family takes
     arguments, whose cells are points of the family's values
     (:func:`applicable`); a natural scalar for an expression of the sizes
-    that is never negative.
+    that is never negative; an integer scalar for an affine expression of
+    the sizes and the kernel's integer scalars, never of a real one: a
+    theorem about an integer ``k`` taken at a real ``s`` says what may be
+    false of it.
     """
     from lanky.prelude import FnType
 
     types = dict(term.params)
+    integral = set(sizes) | {
+        name
+        for name, typ in term.params
+        if not isinstance(typ, ArrType) and _integral(typ)
+    }
     for name, sort in variables.items():
         if name not in sigma:
             continue
@@ -941,7 +949,11 @@ def _fits(
             names, constant = form
             if constant < 0 or any(c < 0 or n not in sizes for n, c in names.items()):
                 return False
-        elif getattr(sort, "name", None) != "Int":
+        elif getattr(sort, "name", None) == "Int":
+            form = linear(sigma[name])
+            if form is None or any(n not in integral for n in form[0]):
+                return False
+        else:
             return False
     return True
 
