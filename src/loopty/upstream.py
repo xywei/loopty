@@ -8,7 +8,7 @@ that computes, on the kernel's example inputs, what the code the kernel
 mirrors computes there::
 
     @upstream(l2p)
-    def sumpy_l2p(coeffs, R, cx, cy, cnt, tx, ty, pot, rscale):
+    def sumpy_l2p(coeffs, cx, cy, cnt, tx, ty, pot, rscale):
         '''sumpy's own E2PFromSingleBox, run on these inputs and recorded.'''
         return {"pot": recorded_potential()}
 

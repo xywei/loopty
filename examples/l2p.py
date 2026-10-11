@@ -14,17 +14,19 @@ L2P, read top to bottom, in three layers:
    with the derivatives where sumpy stores them and follows the recurrence
    everywhere else is the table of derivatives. ``on_every_triangle`` is its
    form for a kernel of order ``p``: box by box, on the triangle ``a + b <=
-   p``, with the coefficients in sumpy's storage order. Lean proves both, for
+   p``, with what sumpy stores a table ``c[i, a, b]``. Lean proves both, for
    every order, with Mathlib; ``lanky check --show-lean`` prints the Lean.
-2. **The kernels, in loopty.** ``reconstruct`` fills each box's triangle from
-   the coefficients sumpy stores, read through sumpy's storage index,
-   ``storage_index``, a layout whose three facts say it is one for one onto
-   the ``2p + 1`` addresses. Its postcondition is what it stores, decided from
-   its statements, and is the theorem's hypotheses about the kernel, so the
+2. **The kernels, in loopty.** ``unpack`` reads each box's ``2p + 1``
+   coefficients, in sumpy's storage order, into that table: through sumpy's
+   storage index, ``storage_index``, a layout whose three facts say it is one
+   for one onto the ``2p + 1`` addresses, and its postcondition says which
+   coefficient each cell holds. ``reconstruct`` fills each box's triangle
+   from the table. Its postcondition is what it stores, decided from its
+   statements, and is the theorem's hypotheses about the kernel, so the
    theorem applies: the triangle is the table of derivatives, for any
-   harmonic table sumpy's coefficients hold. ``evaluate`` sums the Taylor
-   polynomial at each target, and ``l2p`` runs one and then the other, the
-   triangles an array it makes.
+   harmonic table whose derivatives the coefficients hold. ``evaluate`` sums
+   the Taylor polynomial at each target, and ``l2p`` runs the three in turn,
+   the table and the triangles arrays it makes.
 3. **The schedule.** Running ``b`` outside ``a`` is refused, with the pair of
    instances it would reorder: ``R[i, a, b]`` reads ``R[i, a - 2, b + 2]``,
    stored in an earlier row. ``fused`` runs each box's stored coefficients,
@@ -212,8 +214,20 @@ storage_index = layout(centre, derivatives)
 def unpack(
     coeffs: Arr[Fin[nb], Fin[2 * P + 1], Real],
     C: Arr[Where[i: Fin[nb], a: Fin[2], b: Fin[Q], a + b <= P], Real],
+) -> all(C[i, 0, 0] == coeffs[i, 0] for i in Fin[nb]) & all(
+    C[i, a, b] == coeffs[i, 2 * (a + b) - 1 + a]
+    for i in Fin[nb]
+    for a in Nat
+    for b in Nat
+    if a < 2
+    if a + b >= 1
+    if a + b <= P
 ):
-    """What sumpy stores for each box, read through its storage index as a table."""
+    """What sumpy stores for each box, read through its storage index as a table.
+
+    The postcondition is sumpy's storage order, ``2 (a + b) - 1 + a`` after
+    the value at the centre, decided from what the body stores.
+    """
     for i in C.dom:
         for a in C.dom[i]:
             for b in C.dom[i, a]:

@@ -1131,6 +1131,11 @@ def test_the_l2p_demo_applies_its_theorem_to_what_reconstruct_stores() -> None:
         "by on_every_triangle, for every D with pde and stored: "
     )
     assert owned[("reconstruct", "single-assignment")]["status"] == "decided"
+    # the table the theorem's hypothesis is about holds sumpy's coefficients
+    # in sumpy's storage order, decided from what unpack stores
+    stored = owned[("unpack", "postcondition")]
+    assert (stored["status"], stored["decided_by"]) == ("decided", "isl")
+    assert "C[i, a, b] == coeffs[i, 2*(a + b) - 1 + a]" in stored["statement"]
     # sumpy's storage index is one for one onto its 2P + 1 addresses
     layout = [fact for fact in facts if fact["owner"] == "storage_index"]
     assert len(layout) == 3

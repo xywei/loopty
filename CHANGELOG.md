@@ -13,14 +13,15 @@ All notable changes to loopty are recorded here. The format follows
   in one file and one ledger. The claim sumpy's reconstruction rests on,
   for every order (lanky#86), and its form box by box on the triangle `a + b
   <= p`, both proved by Lean with Mathlib; sumpy's storage index as a
-  checked layout; `unpack`, `reconstruct`, whose postcondition is decided
-  from what it stores and is the theorem's hypotheses, so the theorem
-  applies, and `evaluate`, composed by the program `l2p` and fused box by
-  box; the interchange of the triangle's loops refused with isl's pair, and
-  the window of the triangles refused with the reason (#244, #213). The
-  program agrees with sumpy's own kernel on the file's inputs to round-off
-  (`upstream`, below), and with the charges' potential to `4e-13` at order
-  10.
+  checked layout; `unpack`, whose postcondition, decided from what it
+  stores, is sumpy's storage order, `reconstruct`, whose postcondition is
+  decided from what it stores and is the theorem's hypotheses, so the
+  theorem applies, and `evaluate`, composed by the program `l2p` and fused
+  box by box; the interchange of the triangle's loops refused with isl's
+  pair, and the window of the triangles refused with the reason (#244,
+  #213). The program agrees with sumpy's own kernel on the file's inputs to
+  round-off (`upstream`, below), and with the charges' potential to `4e-13`
+  at order 10.
 - **Agreement with the code a kernel mirrors**, `@upstream(kernel)`
   (`loopty.upstream`). The decorated function computes, on the file's
   example inputs, what the code the kernel is written after computes there;
@@ -37,18 +38,21 @@ All notable changes to loopty are recorded here. The format follows
   library's `pow` in both runs; at the flagship's Taylor sum `ipow` is an
   order of magnitude faster on the C target (`benchmarks/l2p.py`).
 - The coverage report (`docs/lean-checks.md`) covers the flagship and the
-  upstream test kernels: of 1213 facts isl decides in 29 files, Lean proves
-  1169 in core Lean and confirms the counterexample of the 30 refuted ones;
-  the 14 left decided are claims about reals, and with Mathlib it proves
-  them too, 1183 in all. `examples/l2p.py` has 39: 38 proved with Mathlib,
+  upstream test kernels: of 1215 facts isl decides in 29 files, Lean proves
+  1170 in core Lean and confirms the counterexample of the 30 refuted ones;
+  the 15 left decided are claims about reals, and with Mathlib it proves
+  them too, 1185 in all. `examples/l2p.py` has 41: 40 proved with Mathlib,
   and its refused interchange, whose negation Lean proves.
 - **`benchmarks/l2p.py`**, which times sumpy's own `E2PFromSingleBox`, the
   same algorithm written directly in plain loopy (loopy #970's L2P
   microkernel with the Laplace step put back, and variants that make
   loopty's choices), and loopty's schedules of `examples/l2p.py`, on one
   tree and one device, and compares their potentials with each other and
-  with the direct sum. It also records sumpy's potential on the example's
-  inputs, for the `upstream` row.
+  with the direct sum. On the C target plain loopy is built with the flags
+  loopty builds its kernels with (`-fwrapv`; `--no-wrapv` for loopy's
+  alone), and each record names the flags it was built with. It also
+  records sumpy's potential on the example's inputs, for the `upstream`
+  row.
 
 - **A kernel's postcondition decided from what its statements store**
   (`loopty.dataflow`, #113). Where no cell of an array a kernel writes is

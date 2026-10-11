@@ -243,11 +243,19 @@ def c_toolchain(kernel: Any) -> dict[str, str]:
     }
 
 
-def device_kernels(kernel: Any) -> int:
-    """How many device kernels loopy makes of ``kernel``, several at a barrier."""
+def device_kernels(kernel: Any) -> int | None:
+    """How many device kernels loopy makes of ``kernel``, several at a barrier.
+
+    ``None`` where loopy cannot generate the code before the call gives the
+    arguments' types, as for sumpy's kernel, which is one loop over the boxes
+    with no barrier, so one kernel.
+    """
     import loopy as lp
 
-    return len(lp.generate_code_v2(kernel).device_programs)
+    try:
+        return len(lp.generate_code_v2(kernel).device_programs)
+    except lp.LoopyError:
+        return None
 
 
 def cpu_model() -> str:
@@ -306,7 +314,7 @@ def opencl_queue() -> Any:
 
 
 def time_opencl(
-    call: Any, queue: Any, warmup: int, repeat: int, kernels: int = 1
+    call: Any, queue: Any, warmup: int, repeat: int, kernels: int | None = 1
 ) -> list[float]:
     """The device time of ``repeat`` calls of ``call()``, after ``warmup`` calls.
 
@@ -324,7 +332,7 @@ def time_opencl(
         queue.finish()
         wall = time.perf_counter() - start
         device = None
-        if kernels == 1:
+        if kernels in (1, None):
             with contextlib.suppress(Exception):
                 device = (event.profile.end - event.profile.start) * 1e-9
         times.append(wall if device is None else device)
