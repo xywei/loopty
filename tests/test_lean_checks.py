@@ -346,6 +346,21 @@ def test_a_cast_after_a_substitution_is_left_to_isl() -> None:
     assert "a substitution before this step" in cast_obligation(monotone.term).declined
 
 
+def test_a_substitutions_definedness_is_isls_and_says_why() -> None:
+    # Decided over the dependences isl computed of what the substitution
+    # leaves: its term says it is isl's, and why Lean is not asked, where it
+    # had none and read as a fact isl did not decide.
+    module = load(EXAMPLES / "fusion.py")
+    schedule = next(
+        value
+        for value in vars(module).values()
+        if isinstance(value, Schedule) and "substitute" in repr(value)
+    )
+    (fact,) = [fact for fact in schedule.facts() if fact.kind == "definedness"]
+    assert (fact.status, fact.decided_by) == (Status.DECIDED, "isl")
+    assert "for isl only" in fact.term.lean_obligation().declined
+
+
 def _pugh() -> Any:
     from lanky.prelude import Int
     from lanky.terms import Forall, LogicalAnd
@@ -546,14 +561,12 @@ def _isl_facts(path: Path) -> list[Any]:
 
 
 #: What loopty states for isl alone so far, by the words of the statement: a
-#: layout fact, an induction over the run; the casts after a substitution,
-#: whose dependences are isl's; and a program's definedness, over the union
-#: of the writes isl computed. The coverage report lists them with the reason
-#: (docs/lean-checks.md), and an issue each.
+#: layout fact, an induction over the run; and a substitution's definedness
+#: and the casts after it, whose dependences are isl's. The coverage report
+#: lists them with the reason (docs/lean-checks.md), and an issue each.
 NOT_STATED = (
     "stay inside their buffers",
     "substitute(",
-    "stored before it",
     "has stored by the time",
 )
 
@@ -618,6 +631,32 @@ def _refused_casts() -> list[tuple[str, IllegalCast]]:
             ask()
         out.append((label, refused.value))
     return out
+
+
+def test_run_proves_the_casts_and_shows_their_lean(
+    lean: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    # loopty run asks Lean about every cast isl decided as the steps were
+    # taken: they read proved by lean, a LEAN line says what that means, and
+    # --show-lean prints the theorems of the rows whose statement has the text.
+    from lanky.oracles.lean import LeanOracle, ProofCache
+    from lanky.plugins import registry
+
+    from loopty.cli import main
+
+    for oracle in registry.sorted_oracles():
+        if isinstance(oracle, LeanOracle):
+            monkeypatch.setattr(oracle, "proofs", ProofCache(str(tmp_path)))
+    path = EXAMPLES / "stencil_skew.py"
+    assert main(["run", str(path), "--show-lean", "tile("]) == 0
+    out = capsys.readouterr().out
+    rows = [line for line in out.splitlines() if "tile(t,i,8,8)" in line]
+    assert any(line.startswith("proved") and " lean " in line for line in rows)
+    assert not any(line.startswith("decided") for line in rows)
+    assert "LEAN proved" in out
+    shown = [line for line in out.splitlines() if line.startswith("LEAN jacobi at")]
+    assert shown and all("tile(" in line for line in shown)
+    assert "theorem Lanky." in out
 
 
 def test_every_refused_cast_is_proved_false_at_isls_pair(lean: Any) -> None:

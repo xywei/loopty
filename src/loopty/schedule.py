@@ -246,6 +246,7 @@ from loopty.lower import (
     lower_generic,
     reductions_of,
 )
+from loopty.obligations import IslOnly
 from loopty.term import Stmt, Term
 from loopty.typing import layout_fact_ids
 
@@ -4178,6 +4179,7 @@ class Schedule:
             step=recipe,
             reason=message,
             about=array,
+            term=None if verdict.ok is None else IslOnly(),
         )
 
     def _carried_over(

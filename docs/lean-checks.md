@@ -199,9 +199,10 @@ asked about; each says so with `--verbose`, and the coverage report lists them.
 - **A layout a kernel rewrites** (`the rows of val stay inside their buffers
   and apart`): an induction over the run, decided by isl over the cells a
   write reads; issue [#186](https://github.com/xywei/loopty/issues/186).
-- **The casts after a substitution:** a substitution changes what the
-  instances read, and the dependences the later steps are checked against are
-  isl's; issue [#187](https://github.com/xywei/loopty/issues/187).
+- **A substitution's definedness, and the casts after it:** a substitution
+  changes what the instances read, and the dependences its definedness and the
+  later steps are checked against are isl's; issue
+  [#187](https://github.com/xywei/loopty/issues/187).
 - **Work items:** a cast that puts a loop on a hardware axis also claims that
   no dependence joins two work items, which is stated for isl only; the cast
   is then left `decided` as a whole; issue [#188](https://github.com/xywei/loopty/issues/188).

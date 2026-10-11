@@ -13,7 +13,8 @@ with none, its ``main``). The report counts, file by file and kind by kind,
   states for isl only, a part ``omega`` did not close, or one that ran out of
   time;
 - the refuted facts whose negation Lean proved at isl's counterexample, and
-  any it could not, which would be a disagreement between the two;
+  any it could not, which would be a disagreement between the two (a refuted
+  fact loopty states for isl only is counted apart);
 
 and the time Lean took per part (a dependence class of a cast, a place of an
 access), from an empty proof cache, so that the times are Lean's and not the
@@ -155,9 +156,14 @@ def check(paths: list[Path]) -> list[dict[str, Any]]:
             seconds = time.monotonic() - start
             provenance = result.provenance
             parts = provenance.get("lean_parts") or []
+            refuted = result.status is Status.REFUTED or fact.status is Status.REFUTED
             if result.status is Status.PROVED:
                 outcome, why = "proved", ""
-            elif result.status is Status.REFUTED or fact.status is Status.REFUTED:
+            elif refuted and provenance.get("lean_declined") and not parts:
+                # isl's alone, its counterexample too: nothing Lean disagrees with
+                outcome = "refuted, not stated"
+                why = provenance["lean_declined"]
+            elif refuted:
                 said = provenance.get("lean_counterexample", "")
                 outcome = (
                     "refuted, negation proved"
@@ -209,6 +215,12 @@ def report(records: list[dict[str, Any]]) -> str:
         + (
             f", and {counts['refuted, negation not proved']} do not"
             if counts["refuted, negation not proved"]
+            else ""
+        )
+        + (
+            f"; {counts['refuted, not stated']} refuted facts are stated for isl "
+            "only"
+            if counts["refuted, not stated"]
             else ""
         )
         + f". {len(records) - len(isl)} more facts are not isl's to decide "

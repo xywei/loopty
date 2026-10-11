@@ -327,13 +327,10 @@ class _Stated:
 
     def lean_obligation(self) -> Any:
         """How Lean is to check this question's fact (see :mod:`lanky.obligations`)."""
-        from lanky.obligations import Obligation
+        from loopty.obligations import IslOnly
 
         if self.lean is None:
-            return Obligation(
-                declined="loopty states this kind of fact for isl only, from sets isl "
-                "computed, and not yet from its own description of the kernel"
-            )
+            return IslOnly().lean_obligation()
         return self.lean(decide(self))
 
 

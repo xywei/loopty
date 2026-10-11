@@ -56,7 +56,9 @@ All notable changes to loopty are recorded here. The format follows
   transcripts in the documentation are regenerated.
 - The questions isl answers (`Empty`, `Subset`, `Bijective`, `Monotone`)
   carry a `lean` field, how the fact is stated for Lean, and a schedule's
-  cast facts have a `Cast` as their term where they had none.
+  cast facts have a `Cast` as their term where they had none (a
+  substitution's definedness fact an `IslOnly`, which says why Lean is not
+  asked).
 
 ## [0.2.0] - 2026-10-11
 

@@ -75,7 +75,9 @@ from loopty.hypotheses import substitute
 from loopty.term import Stmt, Term
 
 __all__ = [
+    "ISL_ONLY",
     "Claim",
+    "IslOnly",
     "Stated",
     "defined_obligation",
     "discharged_obligation",
@@ -310,6 +312,34 @@ class Stated:
 def _declined(reason: str) -> Any:
     """An obligation that says why there is nothing for Lean to check."""
     return _lanky_obligations().Obligation(declined=reason)
+
+
+#: Why a fact loopty states for isl only is not stated for Lean.
+ISL_ONLY = (
+    "loopty states this kind of fact for isl only, from sets isl computed, and "
+    "not yet from its own description of the kernel"
+)
+
+
+@dataclass(frozen=True)
+class IslOnly:
+    """The claim of a fact isl decided from sets it computed, which Lean is not asked.
+
+    A fact with no term reads as one isl did not decide, to the coverage
+    report and to ``--verbose``; a fact with this one says it is isl's, and
+    why Lean is not asked about it. The ``definedness`` fact of
+    :meth:`loopty.schedule.Schedule.substitute` has it: it is decided over the
+    dependences of what the substitution leaves, which isl computes.
+    """
+
+    reason: str = ISL_ONLY
+
+    def lean_obligation(self) -> Any:
+        """Nothing for Lean to check, and why (see :mod:`lanky.obligations`)."""
+        return _declined(self.reason)
+
+    def __str__(self) -> str:
+        return f"stated for isl only: {self.reason}"
 
 
 def _obligation(
