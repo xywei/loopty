@@ -55,7 +55,7 @@ decided  decided    type           spmv.py:112  spmv           the accumulation 
 tested   tested     interpreter    spmv.py:102  spmv           the traced term computes what the body computes
 decided  tested     call           spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
 ...
-22 facts: 16 decided, 6 tested
+23 facts: 17 decided, 6 tested
 ```
 
 Look at the `x[col[r, j]]` row, and at what decided it. That indirection is the
@@ -143,13 +143,13 @@ the exact set:
 ```console
 $ lanky check examples/pairs.py
 STATUS   BY           WHERE        OWNER  STATEMENT
--------  -----------  -----------  -----  ------------------------------------------------------
+-------  -----------  -----------  -----  -------------------------------------------------------
 decided  isl          pairs.py:78  pairs  f[i, j] is in bounds for every instance of S0
 ...
 decided  isl          pairs.py:80  pairs  f[p, j] is in bounds for every instance of S1
 decided  isl          pairs.py:80  pairs  f[k, p] is in bounds for every instance of S1
 ...
-16 facts: 15 decided, 1 tested
+17 facts: 16 decided, 1 tested
 ```
 
 `f[k, p]` is read under `k > p`, which makes `(k, p)` a point of the triangle,

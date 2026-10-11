@@ -127,6 +127,7 @@ decided  decided    isl            spmv.py:81   scan           off[r] is in boun
 decided  decided    isl            spmv.py:81   scan           cnt[r] is in bounds for every instance of S1
 decided  decided    isl            spmv.py:79   scan           distinct instances of S0 write distinct cells of off
 decided  decided    isl            spmv.py:81   scan           distinct instances of S1 write distinct cells of off
+decided  decided    isl            spmv.py:81   scan           every cell of off that S1 reads, S0 or S1 wrote before the read
 decided  decided    isl            spmv.py:69   scan           the source order runs every dependence forward in time
 tested   tested     native         spmv.py:69   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
 tested   tested     interpreter    spmv.py:69   scan           the traced term computes what the body computes
@@ -144,7 +145,7 @@ tested   tested     interpreter    spmv.py:102  spmv           the traced term c
 decided  tested     call           spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
 tested   tested     interpreter    spmv.py:115  solve          the traced term computes what the body computes
 
-22 facts: 16 decided, 6 tested
+23 facts: 17 decided, 6 tested
 ```
 
 ### loopty run examples/spmv.py
@@ -470,7 +471,7 @@ schedule: Schedule(pairs, target='c').pack(f)
 ```console
 $ uv run lanky check examples/pairs.py
 STATUS   BY           WHERE        OWNER  STATEMENT
--------  -----------  -----------  -----  ------------------------------------------------------
+-------  -----------  -----------  -----  -------------------------------------------------------
 decided  isl          pairs.py:78  pairs  f[i, j] is in bounds for every instance of S0
 decided  isl          pairs.py:78  pairs  q[i] is in bounds for every instance of S0
 decided  isl          pairs.py:78  pairs  q[j] is in bounds for every instance of S0
@@ -483,12 +484,13 @@ decided  isl          pairs.py:80  pairs  f[p, j] is in bounds for every instanc
 decided  isl          pairs.py:80  pairs  f[k, p] is in bounds for every instance of S1
 decided  isl          pairs.py:78  pairs  distinct instances of S0 write distinct cells of f
 decided  isl          pairs.py:80  pairs  distinct instances of S1 write distinct cells of e
+decided  isl          pairs.py:80  pairs  every cell of f that S1 reads, S0 wrote before the read
 decided  isl          pairs.py:65  pairs  the source order runs every dependence forward in time
 decided  type         pairs.py:80  pairs  the accumulation into e[p] over j is approx
 decided  type         pairs.py:80  pairs  the accumulation into e[p] over k is approx
 tested   interpreter  pairs.py:65  pairs  the traced term computes what the body computes
 
-16 facts: 15 decided, 1 tested
+17 facts: 16 decided, 1 tested
 ```
 
 ### loopty run examples/pairs.py
@@ -729,7 +731,7 @@ decided                                                      tested     isl     
 assumed                                                      assumed    -              travel.py:193  flat           the elements of off are points of Fin(nnz + 1) where weigh is called ...
 decided under requirement:travel.flat@189:weigh:element:off  assumed    isl            travel.py:186  flat           val[off[r_0] + j] is in bounds for every instance of weigh.S0, where ...
 ...
-71 facts: 4 assumed, 51 decided, 16 tested
+73 facts: 4 assumed, 53 decided, 16 tested
 ```
 
 ### loopty run examples/travel.py

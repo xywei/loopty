@@ -8,6 +8,46 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Added
 
+- **isl decides, Lean checks** (`loopty.description`, `loopty.obligations`).
+  Every fact isl decides about a kernel, a program or a schedule's step is
+  also stated as lanky terms for lanky's Lean oracle, which proves it with
+  `omega`; where Lean is installed such a fact reads `proved` by `lean`, and
+  where it is not, nothing changes. The statements come from loopty's own
+  description of the kernel and never from a set isl computed: every set
+  loopty builds keeps the text it was written from, on the set itself
+  (`description_of`), with each call's renaming, and every schedule step a
+  record of its maps as written (`Schedule._records`, `loopty.schedule.Step`).
+  In bounds, distinct writes, element sorts, the source order, a cast's
+  bijectivity and its legality (one part per dependence class), and what a
+  program's call may assume (requirements and flat accesses under the
+  hypotheses isl used) are stated. isl's work is used as hints Lean checks:
+  its functional form of a step's map as the witness that the step is total,
+  its `lexmax` pieces as the witness of a definedness, the instances it took
+  of a universal hypothesis, and its counterexample to a refuted fact, which
+  Lean proves false. Facts loopty states for isl alone (a rewritten layout,
+  the casts after a substitution, a cast with a hardware axis) say so.
+  `docs/lean-checks.md` explains it, and `scripts/lean_coverage.py` reports
+  what Lean proves of every example and test kernel.
+- `loopty run` asks Lean about each cast it reports, names what Lean did not
+  prove under the table, and prints the Lean with `--show-lean [TEXT]`;
+  `loopty check --show-lean` passes it to `lanky check`.
+- **Definedness inside one kernel** (#4 of the demo's gaps). An array a
+  kernel reads only at cells an earlier instance of its own wrote, as `scan`
+  reads `off[r]`, gets a `definedness` fact where isl shows it, stated for
+  Lean as a ∀∃ with isl's last writer as the witness. A kernel that reads
+  what an array held when it was called gets none. A program's definedness
+  of an edge is stated the same way.
+- **Mixed subscripts** (#17 of the demo's gaps). An access whose indirect
+  axes are indexed by a value of their own sort and whose other axes are
+  affine, `X[cell[c, k], d]`, is in bounds by type on the first and decided by
+  isl on the rest, where it was `assumed`; Lean states the whole access with
+  the type as a hypothesis.
+- **`Schedule.assume(condition)`** (#20 of the demo's gaps): a condition of
+  the sizes, `"n % 4 == 0"`, taken as given, as loopy's `assume`. loopy is
+  told, every later cast is decided and stated where it holds and rests on an
+  `assumption` fact, and a call whose sizes break it is refused before
+  anything is compiled.
+
 - **The names of isl dimensions** (`loopty.names`, #161). Every isl object
   loopty names the dimensions of keeps namedisl's invariants: each
   dimension has a name, no two share one, and none is named like a
@@ -24,6 +64,13 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Changed
 
+- A ledger gains a `definedness` row for each array a kernel reads only where
+  it wrote it before (`scan`'s `off`, `p2p`'s `term`, `pairs`' `f`), and an
+  access with mixed subscripts is decided where it was assumed; the
+  transcripts in the documentation are regenerated.
+- The questions isl answers (`Empty`, `Subset`, `Bijective`, `Monotone`)
+  carry a `lean` field, how the fact is stated for Lean, and a schedule's
+  cast facts have a `Cast` as their term where they had none.
 - CI also tests loopty as `pip install loopty` gets it: a second job installs
   it without `[tool.uv.sources]`, so with lanky from PyPI, and runs the suite
   and the worked example's `lanky check` and `loopty run` (#147).
