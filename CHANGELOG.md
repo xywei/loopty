@@ -8,6 +8,22 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Added
 
+- **A sum's loop ordered outside a loop of its statement**
+  (`Schedule.prioritize("s_outer", "t_inner")`, gap 13). sumpy's CPU tile of
+  a layer potential splits the targets by 16 onto a group and its work
+  items, splits the sources by 256, and runs the sources' outer loop
+  outside the work items' loop; `prioritize` and `interchange` refused the
+  sum's loop as no loop of the kernel. A loop of a sum named before loops
+  of its statement now runs outside them, each sum still adding its terms
+  in its own order, so nothing is reassociated; a loop the sum runs outside
+  of orders none of the instances in it, so a dependence between two of
+  them is refused with its pair, as one across an `ilp` loop is. loopy runs
+  the order only where it keeps an accumulator per instance, on a hardware
+  axis or an `ilp` loop (`acc[16]` on the C target); on a loop that runs in
+  sequence it keeps one and drops the order, and the schedule's `buildable`
+  fact is refuted with that reason and the tag that fixes it. Two loops of
+  one sum are never reordered, and an inner one never runs outside a loop
+  its outer one does not.
 - **Fusion on chosen outer loops** (`Schedule.fuse(..., loops=1)`). A
   fusion took every loop both sides have, so two passes over elements, the
   second of which reads every cell of the element the first wrote (a
@@ -63,6 +79,12 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Fixed
 
+- A split sum adds its terms in order. `split("s", 256)` of a sum's loop
+  left loopy to choose the order of the two loops it makes, and loopy ran
+  the inner one outside, `for s_inner ... for s_outer`, adding every 256th
+  term first: another sum in floating point, `2**53` where the native run
+  adds `1 + 1 + 2**53` to `2**53 + 2`. Every schedule now gives loopy a sum's
+  loops in order, outermost first, as it gives it each statement's nest.
 - A sum is computed as the body wrote it (#151). pymbolic builds `a - b` as
   `a + -1 * b` and `u - 1` as `u + -1`, the same nodes `a + -b` and `u + -1`
   build, and the trace, the plan and the interpreter read every such sum as
