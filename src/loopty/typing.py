@@ -2406,6 +2406,13 @@ def _definedness_fact(
                 verdict.stored,
                 description,
                 tuple(f"a{k}" for k in range(dims)),
+                lean=_program_definedness_statement(
+                    term,
+                    array,
+                    writers,
+                    reading,
+                    zeros if verdict.zeros is not None else (),
+                ),
             ),
             status=Status.ASSUMED,
             provenance=provenance,
@@ -2443,6 +2450,48 @@ def _definedness_fact(
         provenance=provenance,
         where=scope.where,
         owner=owner,
+    )
+
+
+def _program_definedness_statement(
+    term: Term,
+    array: str,
+    writers: Sequence[Any],
+    reading: Sequence[Any],
+    zeros: Sequence[Any],
+) -> Any:
+    """How Lean states a program's definedness fact, or ``None`` where it cannot.
+
+    As a kernel's (:func:`kernel_definedness_facts`): every read of the call
+    is of a cell some statement that stores it wrote before, the writers'
+    calls and, where the claim says so, the zeros the program made the array
+    with. isl's last writer is the witness; a read or a write it cannot list
+    leaves the fact to isl.
+    """
+    from loopty.obligations import defined_obligation, written_before
+
+    places = [
+        (stmt, tuple(indices), inames, domain)
+        for stmt in reading
+        for name, indices, kind, inames, domain in flow.statement_accesses(stmt, term)
+        if name == array and kind in ("read", "acc")
+    ]
+    stores = (*zeros, *writers)
+    try:
+        found = written_before(term, array, stores, places)
+    except Exception:  # noqa: BLE001 - a question isl cannot be asked is isl's
+        found = None
+    if found is None:
+        return None
+    return Stated(
+        partial(
+            defined_obligation,
+            term,
+            array,
+            tuple(stores),
+            tuple(places),
+            tuple(tuple(per) for per in found[1]),
+        )
     )
 
 
