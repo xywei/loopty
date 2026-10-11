@@ -748,6 +748,17 @@ FIELDS = (
 )
 
 
+def _provenance(package: str) -> str:
+    """A package's version, and the commit it was installed from when it says."""
+    import importlib.metadata as metadata
+    import json
+
+    distribution = metadata.distribution(package)
+    found = distribution.read_text("direct_url.json")
+    commit = json.loads(found).get("vcs_info", {}).get("commit_id") if found else None
+    return distribution.version + (f" at {commit[:7]}" if commit else "")
+
+
 def _said(ndofs: int, timing: Timing) -> str:
     """A time in words: GDOFs/s, the median and its spread, and the kernels'."""
     rate = ndofs / timing.median / 1e9
@@ -814,78 +825,93 @@ def mode_loopty(options: argparse.Namespace) -> None:
     meta = describe(queue)
     demo = load_demo()
     handle, writer = _rows_writer(options.csv, FIELDS)
-    ne = options.elements**3
     for order in options.orders:
-        arrays = buffers(queue, demo, order, ne)
-        sample = slice(0, min(ne, 7))
-        for name in options.operators:
-            expected = reference(arrays, name, sample)
-            out = "grad" if name == "weak_grad" else "div"
-            for variant, (build, shape) in variants(name).items():
-                if options.only and not any(word in variant for word in options.only):
-                    continue
-                try:
-                    launches = build(demo, order, ne)
-                    calls = [launch.executor(context) for launch in launches]
-                except Exception as exc:  # noqa: BLE001 - a variant that does not build
-                    print(
-                        f"{name} order {order} {variant}: does not build: "
-                        f"{type(exc).__name__}: {exc}",
-                        flush=True,
-                    )
-                    continue
+        # one order's buffers at a time: they are freed when it returns
+        _time_order(options, context, queue, demo, order, meta, writer, handle)
+        queue.finish()
+    handle.close()
 
-                def call(calls: list[Any] = calls, arrays: dict = arrays) -> None:
-                    for run in calls:
-                        run(queue, arrays)
 
-                arrays[out].fill(0)
-                call()
-                got = (
-                    arrays[out].get()[:, sample]
-                    if name == "weak_grad"
-                    else arrays[out].get()[sample]
-                )
-                gap = float(np.abs(got - expected).max() / np.abs(expected).max())
-                if not gap <= AGREEMENT:
-                    # a wrong answer is not a throughput: said, and not timed
-                    print(
-                        f"{name} order {order} {variant}: DISAGREES with numpy by "
-                        f"{gap:.1e} of the largest value, so it is not timed",
-                        flush=True,
-                    )
-                    continue
-                timing = clock(queue, call, options.warmup, options.reps, options.batch)
-                ndofs = ne * (order + 1) ** 3
-                row = {
-                    "side": variant.split(",")[0],
-                    "operator": name,
-                    "variant": variant,
-                    "order": order,
-                    "elements": options.elements,
-                    "ndofs": ndofs,
-                    "launches": len(launches),
-                    "median_s": timing.median,
-                    "min_s": timing.low,
-                    "max_s": timing.high,
-                    "kernel_s": timing.kernel,
-                    "agree": f"{gap:.1e}",
-                    "contraction": (
-                        "compiler default"
-                        if shape.contraction
-                        else "off: #pragma OPENCL FP_CONTRACT OFF"
-                    ),
-                    **meta,
-                }
-                writer.writerow(row)
-                handle.flush()
+def _time_order(
+    options: argparse.Namespace,
+    context: Any,
+    queue: Any,
+    demo: dict[str, Any],
+    order: int,
+    meta: dict[str, str],
+    writer: Any,
+    handle: Any,
+) -> None:
+    """Every variant at one order, on that order's buffers."""
+    ne = options.elements**3
+    arrays = buffers(queue, demo, order, ne)
+    sample = slice(0, min(ne, 7))
+    for name in options.operators:
+        expected = reference(arrays, name, sample)
+        out = "grad" if name == "weak_grad" else "div"
+        for variant, (build, shape) in variants(name).items():
+            if options.only and not any(word in variant for word in options.only):
+                continue
+            try:
+                launches = build(demo, order, ne)
+                calls = [launch.executor(context) for launch in launches]
+            except Exception as exc:  # noqa: BLE001 - a variant that does not build
                 print(
-                    f"{name} order {order} {variant}: {_said(ndofs, timing)}, "
-                    f"agrees to {gap:.1e}",
+                    f"{name} order {order} {variant}: does not build: "
+                    f"{type(exc).__name__}: {exc}",
                     flush=True,
                 )
-        del arrays
-    handle.close()
+                continue
+
+            def call(calls: list[Any] = calls) -> None:
+                for run in calls:
+                    run(queue, arrays)
+
+            arrays[out].fill(0)
+            call()
+            got = (
+                arrays[out].get()[:, sample]
+                if name == "weak_grad"
+                else arrays[out].get()[sample]
+            )
+            gap = float(np.abs(got - expected).max() / np.abs(expected).max())
+            if not gap <= AGREEMENT:
+                # a wrong answer is not a throughput: said, and not timed
+                print(
+                    f"{name} order {order} {variant}: DISAGREES with numpy by "
+                    f"{gap:.1e} of the largest value, so it is not timed",
+                    flush=True,
+                )
+                continue
+            timing = clock(queue, call, options.warmup, options.reps, options.batch)
+            ndofs = ne * (order + 1) ** 3
+            row = {
+                "side": variant.split(",")[0],
+                "operator": name,
+                "variant": variant,
+                "order": order,
+                "elements": options.elements,
+                "ndofs": ndofs,
+                "launches": len(launches),
+                "median_s": timing.median,
+                "min_s": timing.low,
+                "max_s": timing.high,
+                "kernel_s": timing.kernel,
+                "agree": f"{gap:.1e}",
+                "contraction": (
+                    "compiler default"
+                    if shape.contraction
+                    else "off: #pragma OPENCL FP_CONTRACT OFF"
+                ),
+                **meta,
+            }
+            writer.writerow(row)
+            handle.flush()
+            print(
+                f"{name} order {order} {variant}: {_said(ndofs, timing)}, "
+                f"agrees to {gap:.1e}",
+                flush=True,
+            )
 
 
 def _grudge_setup(
@@ -925,7 +951,6 @@ def _grudge_setup(
 
 def mode_grudge(options: argparse.Namespace) -> None:
     """grudge's own weak gradient and divergence, eager and lazy."""
-    import grudge
     from grudge import op as gop
     from pytools.obj_array import new_1d
 
@@ -935,97 +960,104 @@ def mode_grudge(options: argparse.Namespace) -> None:
     handle, writer = _rows_writer(options.csv, FIELDS)
     for order in options.orders:
         for lazy in options.grudge_modes:
-            mode = None if lazy == "eager" else lazy
+            # one setup at a time: its context, mesh and fields are freed
+            # when the helper returns
+            _time_grudge(options, queue, gop, new_1d, order, lazy, meta, writer, handle)
+            queue.finish()
+    handle.close()
+
+
+def _time_grudge(
+    options: argparse.Namespace,
+    queue: Any,
+    gop: Any,
+    new_1d: Any,
+    order: int,
+    lazy: str,
+    meta: dict[str, str],
+    writer: Any,
+    handle: Any,
+) -> None:
+    """grudge's operators in one array context at one order."""
+    mode = None if lazy == "eager" else lazy
+    try:
+        actx, dcoll = _grudge_setup(queue, options.elements, order, mode, warped=False)
+    except Exception as exc:  # noqa: BLE001 - said, and the next is tried
+        print(
+            f"grudge {lazy} order {order}: setup failed: {type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        return
+    x = actx.thaw(dcoll.nodes())
+    u = actx.freeze(actx.np.sin(x[0]) * actx.np.cos(x[1]) + x[2])
+    f = actx.freeze(new_1d([actx.np.sin(x[0]), actx.np.cos(x[1]), x[2] * x[0]]))
+    ndofs = dcoll.discr_from_dd("vol").ndofs
+    for name in options.operators:
+        for factorized in (kind == "factorized" for kind in options.kinds):
+
+            def apply(
+                u: Any,
+                f: Any,
+                name: str = name,
+                factorized: bool = factorized,
+                dcoll: Any = dcoll,
+            ) -> Any:
+                if name == "weak_grad":
+                    return gop.weak_local_grad(
+                        dcoll, u, enable_sum_factorization=factorized
+                    )
+                return gop.weak_local_div(dcoll, f, enable_sum_factorization=factorized)
+
+            run = apply if mode is None else actx.compile(apply)
+
+            def call(run: Any = run, actx: Any = actx, u: Any = u, f: Any = f):
+                return run(actx.thaw(u), actx.thaw(f))
+
+            if options.profile:
+                call()
+                queue.finish()
+                with KernelClock() as one:
+                    call()
+                for kname, (count, seconds) in sorted(
+                    one.by_kernel().items(), key=lambda kv: -kv[1][1]
+                ):
+                    print(
+                        f"    {kname}: {count} launches, {seconds * 1e3:.3f} ms",
+                        flush=True,
+                    )
             try:
-                actx, dcoll = _grudge_setup(
-                    queue, options.elements, order, mode, warped=False
-                )
+                timing = clock(queue, call, options.warmup, options.reps, options.batch)
             except Exception as exc:  # noqa: BLE001 - said, and the next is tried
                 print(
-                    f"grudge {lazy} order {order}: setup failed: "
+                    f"grudge {lazy} {name} order {order}: failed: "
                     f"{type(exc).__name__}: {exc}",
                     flush=True,
                 )
                 continue
-            x = actx.thaw(dcoll.nodes())
-            u = actx.freeze(actx.np.sin(x[0]) * actx.np.cos(x[1]) + x[2])
-            f = actx.freeze(new_1d([actx.np.sin(x[0]), actx.np.cos(x[1]), x[2] * x[0]]))
-            ndofs = dcoll.discr_from_dd("vol").ndofs
-            for name in options.operators:
-                for factorized in (kind == "factorized" for kind in options.kinds):
-
-                    def apply(
-                        u: Any,
-                        f: Any,
-                        name: str = name,
-                        factorized: bool = factorized,
-                        dcoll: Any = dcoll,
-                    ) -> Any:
-                        if name == "weak_grad":
-                            return gop.weak_local_grad(
-                                dcoll, u, enable_sum_factorization=factorized
-                            )
-                        return gop.weak_local_div(
-                            dcoll, f, enable_sum_factorization=factorized
-                        )
-
-                    run = apply if mode is None else actx.compile(apply)
-
-                    def call(run: Any = run, actx: Any = actx, u: Any = u, f: Any = f):
-                        return run(actx.thaw(u), actx.thaw(f))
-
-                    if options.profile:
-                        call()
-                        queue.finish()
-                        with KernelClock() as one:
-                            call()
-                        for kname, (count, seconds) in sorted(
-                            one.by_kernel().items(), key=lambda kv: -kv[1][1]
-                        ):
-                            print(
-                                f"    {kname}: {count} launches, "
-                                f"{seconds * 1e3:.3f} ms",
-                                flush=True,
-                            )
-                    try:
-                        timing = clock(
-                            queue, call, options.warmup, options.reps, options.batch
-                        )
-                    except Exception as exc:  # noqa: BLE001 - said, and the next is tried
-                        print(
-                            f"grudge {lazy} {name} order {order}: failed: "
-                            f"{type(exc).__name__}: {exc}",
-                            flush=True,
-                        )
-                        continue
-                    variant = (
-                        f"grudge {lazy}, {'sum-factorized' if factorized else 'dense'}"
-                    )
-                    row = {
-                        "side": "grudge",
-                        "operator": name,
-                        "variant": variant,
-                        "order": order,
-                        "elements": options.elements,
-                        "ndofs": ndofs,
-                        "launches": "",
-                        "median_s": timing.median,
-                        "min_s": timing.low,
-                        "max_s": timing.high,
-                        "kernel_s": timing.kernel,
-                        "agree": "",
-                        "contraction": "compiler default",
-                        **meta,
-                        "loopy": meta["loopy"] + f"; grudge {grudge.__file__}",
-                    }
-                    writer.writerow(row)
-                    handle.flush()
-                    print(
-                        f"{name} order {order} {variant}: {_said(ndofs, timing)}",
-                        flush=True,
-                    )
-            del actx, dcoll
-    handle.close()
+            variant = f"grudge {lazy}, {'sum-factorized' if factorized else 'dense'}"
+            row = {
+                "side": "grudge",
+                "operator": name,
+                "variant": variant,
+                "order": order,
+                "elements": options.elements,
+                "ndofs": ndofs,
+                "launches": "",
+                "median_s": timing.median,
+                "min_s": timing.low,
+                "max_s": timing.high,
+                "kernel_s": timing.kernel,
+                "agree": "",
+                "contraction": "compiler default",
+                **meta,
+                "loopy": meta["loopy"] + f"; grudge {_provenance('grudge')}",
+            }
+            writer.writerow(row)
+            handle.flush()
+            print(
+                f"{name} order {order} {variant}: {_said(ndofs, timing)}",
+                flush=True,
+            )
 
 
 def mode_fields(options: argparse.Namespace) -> None:
