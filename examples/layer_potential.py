@@ -251,13 +251,14 @@ def _panels(panels: int, nodes: int) -> tuple:
 def starfish(panels: int, source_panels: int | None = None) -> dict:
     """pytential's discretization of the starfish at ``panels`` panels.
 
-    The targets are the stage-1 nodes, 9 a panel (target order 8); the
-    sources are the upsampled nodes, 17 a panel (order 4 * 8), on the same
-    panels unless ``source_panels`` says how many; each target's centers are
-    half its panel's size inside and outside along the normal.
+    The targets are the stage-1 nodes, 9 a panel (meshmode's group of order
+    8); the sources are the upsampled nodes, 33 a panel (its quadrature group
+    of order 4 * 8, Gauss-Legendre nodes that integrate degree 65), on the
+    same panels unless ``source_panels`` says how many; each target's centers
+    are half its panel's size inside and outside along the normal.
     """
     z, normal, _, size = _panels(panels, 9)
-    y, ny, wy, _ = _panels(source_panels or panels, 17)
+    y, ny, wy, _ = _panels(source_panels or panels, 33)
     return {
         "z": z,
         "normal": normal,
@@ -311,7 +312,7 @@ def density(x: np.ndarray) -> np.ndarray:
 
 
 def example_inputs() -> dict:
-    """Four panels, small enough to run natively: 36 targets, 68 sources."""
+    """Four panels, small enough to run natively: 36 targets, 132 sources."""
     curve = starfish(4)
     sigma = density(curve["y"])
     return {

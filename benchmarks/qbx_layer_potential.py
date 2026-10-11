@@ -35,7 +35,7 @@ Usage::
     python benchmarks/qbx_layer_potential.py compare a.npy b.npy
     python benchmarks/qbx_layer_potential.py capture --panels 30 --out calls.npz
     python benchmarks/qbx_layer_potential.py agree --reference calls.npz
-    python benchmarks/qbx_layer_potential.py inputs --targets 36 --sources 68 \\
+    python benchmarks/qbx_layer_potential.py inputs --targets 36 --sources 132 \\
         --out example.npz
     python benchmarks/qbx_layer_potential.py record --inputs example.npz \\
         --out examples/layer_potential_sumpy.json
@@ -56,7 +56,7 @@ that two environments' runs can be compared (``compare``).
 D, from inside and from outside. ``agree`` runs loopty's kernels on exactly
 those arguments and reports the difference. ``write-race`` asks loopy whether
 sumpy's kernel races once its ``write_race(write_lpot*)`` silence is lifted.
-``record`` keeps what sumpy returns on saved inputs; at 36 targets and 68
+``record`` keeps what sumpy returns on saved inputs; at 36 targets and 132
 sources those are the example's own, and the recording is the one its
 ``agrees_with_sumpy`` row compares with.
 
@@ -116,11 +116,11 @@ def example() -> Any:
 def inputs(targets: int, sources: int) -> dict[str, np.ndarray]:
     """The starfish at about ``targets`` targets and ``sources`` sources.
 
-    9 targets and 17 sources a panel, as the example discretizes it; the
+    9 targets and 33 sources a panel, as the example discretizes it; the
     centers are inside, and the density is the example's ``cos(3 theta)``.
     """
     ex = example()
-    curve = ex.starfish(max(1, round(targets / 9)), max(1, round(sources / 17)))
+    curve = ex.starfish(max(1, round(targets / 9)), max(1, round(sources / 33)))
     return {
         "z": curve["z"],
         "c": curve["inside"],

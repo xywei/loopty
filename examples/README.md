@@ -1122,7 +1122,7 @@ beside sumpy's own kernel and plain loopy.
 
 ```console
 $ uv run python examples/layer_potential.py
-pytential's starfish, QBX order 5, at 4 panels: 36 targets, 68 sources
+pytential's starfish, QBX order 5, at 4 panels: 36 targets, 132 sources
   single_layer: compiled on C agrees with native to the approx tolerance: True -> tested
   double_layer: compiled on C agrees with native to the approx tolerance: True -> tested
   sumpy's own kernel, as pytential calls it: agrees within 1e-12 of the largest value -> tested
@@ -1188,10 +1188,10 @@ decided  isl          layer_potential.py:218  double_layer       split(s, 256) r
 decided  isl          layer_potential.py:218  double_layer       the order after split(s, 256) runs every dependence of double_layer f...
 decided  isl          layer_potential.py:218  double_layer       prioritize(s_outer, t_inner) renames the instances of double_layer on...
 decided  isl          layer_potential.py:218  double_layer       the order after prioritize(s_outer, t_inner) runs every dependence of...
-tested   run          layer_potential.py:385  agrees_with_sumpy  S and D agree with sumpy's LayerPotential on the example's starfish
-tested   run          layer_potential.py:479  green_identity     S(du/dn) - D(u) = u/2, Green's identity, at order 5 - 1.6 or faster
-tested   run          layer_potential.py:485  jump_S             S(+) - S(-) = 0: S is continuous, at order 5 - 1.6 or faster
-tested   run          layer_potential.py:491  jump_D             D(+) - D(-) = sigma: D jumps by the density, at order 5 - 1.6 or faster
+tested   run          layer_potential.py:386  agrees_with_sumpy  S and D agree with sumpy's LayerPotential on the example's starfish
+tested   run          layer_potential.py:480  green_identity     S(du/dn) - D(u) = u/2, Green's identity, at order 5 - 1.6 or faster
+tested   run          layer_potential.py:486  jump_S             S(+) - S(-) = 0: S is continuous, at order 5 - 1.6 or faster
+tested   run          layer_potential.py:492  jump_D             D(+) - D(-) = sigma: D jumps by the density, at order 5 - 1.6 or faster
 
 41 facts: 1 assumed, 33 decided, 7 tested
 ```
