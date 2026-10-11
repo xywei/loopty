@@ -6144,10 +6144,13 @@ def _cut_for(domains: Sequence[Any], groups: Iterable[Sequence[str]]) -> list[An
     domain because no statement of the kernel left the nest between them.
     The domain is cut as the lowering cuts it when one does
     (:func:`loopty.lower._statement_domains`): ``{ [i] }`` over the loops the
-    map takes, which are the first of the domain's, and ``[i] -> { [j] }``,
-    nested in it, with every constraint of the domain. A domain whose loops
-    a map takes are not its first ones is left as it is, and refused by
-    :func:`_fused_plan`.
+    map takes, and ``[i] -> { [j] }``, nested in it, with every constraint of
+    the domain. The loops a map takes are the outer ones of its statements'
+    nest, and are found in the domain by name: a domain's order of loops is
+    not the nest's (loopy 2025.2 puts the two loops of a split after the
+    others, ``[j, i_outer, i_inner]``), so they are put first
+    (:func:`_leading`) before the cut. A domain that does not have every loop
+    a map takes is left as it is, and refused by :func:`_fused_plan`.
     """
     from loopty.lower import _outer_part
 
@@ -6163,17 +6166,38 @@ def _cut_for(domains: Sequence[Any], groups: Iterable[Sequence[str]]) -> list[An
         (k,) = defining
         names = list(out[k].get_var_names(isl.dim_type.set))
         keep = len(inputs)
-        if len(names) <= keep or set(names[:keep]) != set(inputs):
+        if len(names) <= keep or not set(inputs) <= set(names):
             continue
-        outer = _outer_part(out[k], keep)
-        inner = out[k].move_dims(
+        domain = _leading(out[k], inputs)
+        outer = _outer_part(domain, keep)
+        inner = domain.move_dims(
             isl.dim_type.param,
-            out[k].dim(isl.dim_type.param),
+            domain.dim(isl.dim_type.param),
             isl.dim_type.set,
             0,
             keep,
         )
         out[k : k + 1] = [outer, inner]
+    return out
+
+
+def _leading(domain: Any, first: Sequence[str]) -> Any:
+    """``domain`` with the loops ``first`` as its first dimensions, in that order.
+
+    The other loops follow in the order the domain has them. Only the order
+    of the dimensions changes, not the points, and a basic set stays one.
+    """
+    names = list(domain.get_var_names(isl.dim_type.set))
+    order = [*first, *(name for name in names if name not in first)]
+    if order == names:
+        return domain
+    out = _as_set(domain).apply(
+        _picking(len(names), [names.index(name) for name in order])
+    )
+    for k, name in enumerate(order):
+        out = out.set_dim_name(isl.dim_type.set, k, name)
+    if isinstance(domain, isl.BasicSet):
+        return _one_basic_set(out, domain)
     return out
 
 

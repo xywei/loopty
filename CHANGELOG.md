@@ -174,6 +174,13 @@ All notable changes to loopty are recorded here. The format follows
   term first: another sum in floating point, `2**53` where the native run
   adds `1 + 1 + 2**53` to `2**53 + 2`. Every schedule now gives loopy a sum's
   loops in order, outermost first, as it gives it each statement's nest.
+- `fuse` after a `split` or a `tile` of the producer's outer loop is no
+  longer refused as unbuildable. The producer's domain is cut after the fused
+  loops by name, not by position: loopy 2025.2 puts a split loop's two after
+  the others, `[j, i_outer, i_inner]`, so
+  `Schedule(squared_rows).split(i, 2).fuse("square2", "row_total")` read
+  `buildable` refuted though both casts were decided
+  ([#192](https://github.com/xywei/loopty/issues/192)).
 
 ## [0.2.0] - 2026-10-11
 
