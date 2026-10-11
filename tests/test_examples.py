@@ -1048,10 +1048,11 @@ def test_the_assembly_owes_its_sum_and_not_distinct_writes_of_y() -> None:
         if fact["kind"] == "disjoint-writes"
     ]
     assert disjoint == ["yl"]
+    # the kernel's own; the reassociation a schedule records has no op
     (update,) = [
         fact
         for fact in facts
-        if fact["kind"] == "exactness" and fact["provenance"]["op"] == "update"
+        if fact["kind"] == "exactness" and fact["provenance"].get("op") == "update"
     ]
     assert update["statement"] == (
         "the accumulation into y[cell[c, k]] over c, k is approx"

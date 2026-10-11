@@ -23,7 +23,7 @@ Run this file three ways.
 ``lanky check examples/assembly.py``
     The kernel's obligations: the gathers and the scatter through the cell map
     in bounds by type, and the accumulation into ``y`` approx, which is what
-    an update owes in place of distinct writes.
+    an update owes in place of distinct writes; then Sun et al.'s casts.
 
 ``loopty run examples/assembly.py``
     Sun et al.'s schedule compiled and compared with the native run;

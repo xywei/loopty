@@ -883,7 +883,7 @@ void burgers_rhs(int32_t const n, double const *__restrict__ u, double *__restri
 accepted: Schedule(burgers_rhs, target='c').fuse(flux, divergence, shift=1).substitute('f')
   decided  isl  fuse(flux, divergence, shift=1) renames the instances of burgers_rhs one for one
   decided  isl  the order after fuse(flux, divergence, shift=1) runs every dependence of burgers_rhs forward
-  decided  isl  every cell of f that burgers_rhs reads, flux.S0 has stored by the time it is read
+  decided  isl  for substitute('f'), every cell of f that burgers_rhs reads, flux.S0 has stored by the time it is read
   decided  isl  substitute('f') renames the instances of burgers_rhs one for one
   decided  isl  the order after substitute('f') runs every dependence of burgers_rhs forward
 
@@ -902,7 +902,7 @@ void burgers_rhs(int32_t const n, double const *__restrict__ u, double *__restri
 accepted: Schedule(burgers_rhs, target='c').fuse(flux, divergence, shift=1).contract('f', lambda j: j % 3)
   decided  isl  fuse(flux, divergence, shift=1) renames the instances of burgers_rhs one for one
   decided  isl  the order after fuse(flux, divergence, shift=1) runs every dependence of burgers_rhs forward
-  decided  isl  every cell of f that burgers_rhs reads, flux.S0 has stored by the time it is read
+  decided  isl  for contract('f'), every cell of f that burgers_rhs reads, flux.S0 has stored by the time it is read
   decided  isl  no read of f sees its slot overwritten after contract('f', lambda j: j % 3): f kept in 3 cells, f[j] in slot j % 3
 
 #include <stdint.h>
@@ -926,13 +926,16 @@ void burgers_rhs(int32_t const n, double const *__restrict__ u, double *__restri
 ### lanky check examples/fusion.py
 
 The kernels' obligations, and the program's: the definedness of `f`, decided
-by isl, and the program's `trace-faithful` fact. The schedules' facts are in
-the ledger `loopty run` prints.
+by isl, and the program's `trace-faithful` fact. Then the casts of the file's
+schedules, under the program, each fact once: the fusion's, shared by the
+schedules that start with it, and what the substitution and the window each
+need, every cell of `f` stored before it is read, and the window's
+`no-clobber`.
 
 ```console
 $ uv run lanky check examples/fusion.py
 STATUS   BY           WHERE         OWNER        STATEMENT
--------  -----------  ------------  -----------  ------------------------------------------------------------
+-------  -----------  ------------  -----------  ------------------------------------------------------------------------
 decided  isl          fusion.py:81  flux         f[j] is in bounds for every instance of S0
 decided  isl          fusion.py:81  flux         u[j] is in bounds for every instance of S0
 decided  isl          fusion.py:81  flux         distinct instances of S0 write distinct cells of f
@@ -946,8 +949,15 @@ decided  isl          fusion.py:84  divergence   the source order runs every dep
 tested   interpreter  fusion.py:84  divergence   the traced term computes what the body computes
 decided  isl          fusion.py:97  burgers_rhs  every cell of f that divergence reads, flux stored before it
 tested   interpreter  fusion.py:92  burgers_rhs  the traced term computes what the body computes
+decided  isl          fusion.py:95  burgers_rhs  fuse(flux, divergence, shift=1) renames the instances of burgers_rhs ...
+decided  isl          fusion.py:95  burgers_rhs  the order after fuse(flux, divergence, shift=1) runs every dependence...
+decided  isl          fusion.py:95  burgers_rhs  for substitute('f'), every cell of f that burgers_rhs reads, flux.S0 ...
+decided  isl          fusion.py:95  burgers_rhs  substitute('f') renames the instances of burgers_rhs one for one
+decided  isl          fusion.py:95  burgers_rhs  the order after substitute('f') runs every dependence of burgers_rhs ...
+decided  isl          fusion.py:95  burgers_rhs  for contract('f'), every cell of f that burgers_rhs reads, flux.S0 ha...
+decided  isl          fusion.py:95  burgers_rhs  no read of f sees its slot overwritten after contract('f', lambda j: ...
 
-18 facts: 15 decided, 3 tested
+20 facts: 17 decided, 3 tested
 ```
 
 ### loopty run examples/fusion.py
@@ -973,11 +983,11 @@ STATUS   BY     WHERE         OWNER        STATEMENT
 decided  isl    fusion.py:95  burgers_rhs  fuse(flux, divergence, shift=1) renames the instances of burgers_rhs ...
 decided  isl    fusion.py:95  burgers_rhs  the order after fuse(flux, divergence, shift=1) runs every dependence...
 tested   loopy  fusion.py:92  burgers_rhs  the scheduled run of burgers_rhs agrees with the native run to the ac...
-decided  isl    fusion.py:95  burgers_rhs  every cell of f that burgers_rhs reads, flux.S0 has stored by the tim...
+decided  isl    fusion.py:95  burgers_rhs  for substitute('f'), every cell of f that burgers_rhs reads, flux.S0 ...
 decided  isl    fusion.py:95  burgers_rhs  substitute('f') renames the instances of burgers_rhs one for one
 decided  isl    fusion.py:95  burgers_rhs  the order after substitute('f') runs every dependence of burgers_rhs ...
 tested   loopy  fusion.py:92  burgers_rhs  the scheduled run of burgers_rhs agrees with the native run to the ac...
-decided  isl    fusion.py:95  burgers_rhs  every cell of f that burgers_rhs reads, flux.S0 has stored by the tim...
+decided  isl    fusion.py:95  burgers_rhs  for contract('f'), every cell of f that burgers_rhs reads, flux.S0 ha...
 decided  isl    fusion.py:95  burgers_rhs  no read of f sees its slot overwritten after contract('f', lambda j: ...
 tested   loopy  fusion.py:92  burgers_rhs  the scheduled run of burgers_rhs agrees with the native run to the ac...
 tested   loopy  fusion.py:81  flux         the scheduled run of flux agrees with the native run to the accuracy ...
@@ -1165,7 +1175,7 @@ accepted: Schedule(weak_derivative, target='c').fuse(along_r, along_s, loops=2)
 
 accepted: Schedule(weak_derivative, target='c').fuse(along_r, along_s, loops=2).contract('v', lambda e, a, b: b)
   v kept in n cells, lambda e, a, b: b
-  decided  isl  every cell of v that weak_derivative reads, along_r.S0 has stored by the time it is read
+  decided  isl  for contract('v'), every cell of v that weak_derivative reads, along_r.S0 has stored by the time it is read
   decided  isl  no read of v sees its slot overwritten after contract('v', lambda e, a, b: b): v kept in n cells, v[e, a, b] in slot b
   w: agrees with the native run -> tested
 ```
@@ -1175,7 +1185,7 @@ accepted: Schedule(weak_derivative, target='c').fuse(along_r, along_s, loops=2).
 ```console
 $ uv run lanky check examples/sum_factorization.py
 STATUS   BY           WHERE                     OWNER            STATEMENT
--------  -----------  ------------------------  ---------------  ------------------------------------------------------------
+-------  -----------  ------------------------  ---------------  ------------------------------------------------------------------------
 decided  isl          sum_factorization.py:82   along_r          v[e, a, b] is in bounds for every instance of S0
 decided  isl          sum_factorization.py:82   along_r          F[a, m] is in bounds for every instance of S0
 decided  isl          sum_factorization.py:82   along_r          u[e, m, b] is in bounds for every instance of S0
@@ -1192,8 +1202,12 @@ decided  type         sum_factorization.py:95   along_s          the accumulatio
 tested   interpreter  sum_factorization.py:85   along_s          the traced term computes what the body computes
 decided  isl          sum_factorization.py:103  weak_derivative  every cell of v that along_s reads, along_r stored before it
 tested   interpreter  sum_factorization.py:98   weak_derivative  the traced term computes what the body computes
+decided  isl          sum_factorization.py:101  weak_derivative  fuse(along_r, along_s, loops=2) renames the instances of weak_derivat...
+decided  isl          sum_factorization.py:101  weak_derivative  the order after fuse(along_r, along_s, loops=2) runs every dependence...
+decided  isl          sum_factorization.py:101  weak_derivative  for contract('v'), every cell of v that weak_derivative reads, along_...
+decided  isl          sum_factorization.py:101  weak_derivative  no read of v sees its slot overwritten after contract('v', lambda e, ...
 
-18 facts: 15 decided, 3 tested
+20 facts: 17 decided, 3 tested
 ```
 
 ### loopty run examples/sum_factorization.py
@@ -1214,7 +1228,7 @@ STATUS   BY     WHERE                     OWNER            STATEMENT
 decided  isl    sum_factorization.py:101  weak_derivative  fuse(along_r, along_s, loops=2) renames the instances of weak_derivat...
 decided  isl    sum_factorization.py:101  weak_derivative  the order after fuse(along_r, along_s, loops=2) runs every dependence...
 tested   loopy  sum_factorization.py:98   weak_derivative  the scheduled run of weak_derivative agrees with the native run to th...
-decided  isl    sum_factorization.py:101  weak_derivative  every cell of v that weak_derivative reads, along_r.S0 has stored by ...
+decided  isl    sum_factorization.py:101  weak_derivative  for contract('v'), every cell of v that weak_derivative reads, along_...
 decided  isl    sum_factorization.py:101  weak_derivative  no read of v sees its slot overwritten after contract('v', lambda e, ...
 tested   loopy  sum_factorization.py:98   weak_derivative  the scheduled run of weak_derivative agrees with the native run to th...
 tested   loopy  sum_factorization.py:82   along_r          the scheduled run of along_r agrees with the native run to the accura...
@@ -1352,7 +1366,7 @@ schedule: Schedule(mass_action, target='c').atomic('y').split(c, 4).tag(c_inner=
 ```console
 $ uv run lanky check examples/assembly.py
 STATUS   BY           WHERE           OWNER        STATEMENT
--------  -----------  --------------  -----------  ---------------------------------------------------------
+-------  -----------  --------------  -----------  ------------------------------------------------------------------------
 decided  isl          assembly.py:83  mass_action  yl[c, j] is in bounds for every instance of S0
 decided  type         assembly.py:83  mass_action  X[cell[c, 1]] is in bounds by type (cell[c, 1] : Fin(nv))
 decided  isl          assembly.py:83  mass_action  cell[c, 1] is in bounds for every instance of S0
@@ -1377,8 +1391,13 @@ decided  isl          assembly.py:67  mass_action  the source order runs every d
 decided  type         assembly.py:83  mass_action  the accumulation into yl[c, j] over q, k is approx
 decided  type         assembly.py:89  mass_action  the accumulation into y[cell[c, k]] over c, k is approx
 tested   interpreter  assembly.py:67  mass_action  the traced term computes what the body computes
+decided  isl          assembly.py:83  mass_action  split(c, 4) renames the instances of mass_action one for one
+decided  isl          assembly.py:83  mass_action  the order after split(c, 4) runs every dependence of mass_action forward
+decided  isl          assembly.py:83  mass_action  tag(c_inner='ilp') renames the instances of mass_action one for one
+decided  isl          assembly.py:83  mass_action  the order after tag(c_inner='ilp') runs every dependence of mass_acti...
+decided  isl          assembly.py:83  mass_action  atomic updates of y run at the same time after tag(c_inner='ilp'), so...
 
-24 facts: 23 decided, 1 tested
+29 facts: 28 decided, 1 tested
 ```
 
 ### loopty run examples/assembly.py
