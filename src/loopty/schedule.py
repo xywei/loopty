@@ -1831,13 +1831,12 @@ def _sum_place_reason(draft: _Draft) -> str | None:
             return (
                 f"the loop {name} of the sum over {loops} in {stmt_id} is "
                 f"ordered outside {shown}, which runs in sequence: loopy keeps "
-                "one accumulator for the sum, and so runs the sum's loops "
-                f"inside every loop of {stmt_id}, and would drop the loop "
-                "priority and run a nest the cast facts say nothing about. Tag "
-                f"{sequential[0]} 'ilp', which gives each of its iterations an "
-                "accumulator of its own, or put it on a hardware axis on a "
-                "device, as tag("
-                f"{sequential[0]}='l.0') does"
+                "one accumulator for the sum, so it would run the sum inside "
+                f"every loop of {stmt_id} anyway, in another order than the one "
+                f"this schedule's facts were checked for. Tag {sequential[0]} "
+                f"'ilp', tag({sequential[0]}='ilp'), which gives each of its "
+                "iterations an accumulator of its own, or on a device put it on "
+                f"a hardware axis, tag({sequential[0]}='l.0')"
             )
     return None
 
@@ -5531,9 +5530,12 @@ def _fused_depth(
     if loops is None:
         return most
     if isinstance(loops, bool) or not isinstance(loops, int):
+        example = (
+            f" (loops=1 fuses {mine[0]} with {theirs[0]})" if most else ""
+        )
         raise TypeError(
-            f"{text}: loops is the number of outer loops to fuse, a whole "
-            f"number, not {loops!r}"
+            f"{text}: loops is how many of the outer loops to fuse, a whole "
+            f"number counted from the outermost{example}, not {loops!r}"
         )
     if not 1 <= loops <= most:
         plural = "s" if most > 1 else ""

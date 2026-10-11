@@ -1267,8 +1267,10 @@ def test_loops_counts_the_outer_loops_a_fusion_takes() -> None:
     [
         (0, ValueError, "takes from 1 to 2 of their outer loops, not 0"),
         (3, ValueError, "takes from 1 to 2 of their outer loops, not 3"),
-        (True, TypeError, "a whole number, not True"),
-        (1.0, TypeError, "a whole number, not 1.0"),
+        (True, TypeError, "a whole number counted from the outermost .*, not True"),
+        (1.0, TypeError, "a whole number counted from the outermost .*, not 1.0"),
+        # A loop's name is not how many: the message says what loops=1 fuses.
+        ("i", TypeError, r"\(loops=1 fuses i with p\), not 'i'"),
     ],
 )
 def test_a_fusion_of_more_loops_than_both_sides_have_is_refused(
