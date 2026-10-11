@@ -5486,9 +5486,11 @@ class Schedule:
         """
         from loopty.flow import definedness
 
+        # led by the step, so that two steps' facts, a substitution's and a
+        # window's after one fusion, read apart in a ledger that lists both
         statement = (
-            f"every cell of {array} that {self._term.name} reads, {producer.id} "
-            "has stored by the time it is read"
+            f"for {text}, every cell of {array} that {self._term.name} reads, "
+            f"{producer.id} has stored by the time it is read"
         )
         verdict = definedness(self._term, array, [producer], readers)
         message = ""

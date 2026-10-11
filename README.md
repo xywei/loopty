@@ -827,7 +827,9 @@ release; the CHANGELOG says when one does.
   against its native runs, on the file's example inputs and on drawn ones,
   and its provenance says why it is not decided (`undecided`). A cell stored
   twice, a running value a loop overwrites, needs the last store before
-  each read, which is not done.
+  each read, which is not done; nor is an update, `y[i] += v` or a
+  scatter-add `y[cell[c, k]] += v`, whose cell holds what it held on entry
+  plus every update.
   `@program` restates a callee's postcondition as a fact in scope, `decided` by
   the call and resting on the callee's own fact (lanky's `rests_on`), and
   offers it as a hypothesis to the calls after it, until a call writes an

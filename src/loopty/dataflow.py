@@ -39,12 +39,14 @@ isl and stated for Lean (:func:`loopty.obligations.single_assignment_obligation`
   reads ``x[i]`` as it was before its store, so it says nothing of what the
   kernel leaves there, and ``x`` has no such fact.
 
-An array that accumulates (``y[r] += ...``), that is stored under a guard isl
-cannot state (whose instances store nowhere it can name), or that is stored
-or read through an index isl does not read exactly, has no such fact, and its
-statements no equation: the postcondition is then left to the native runs, as
-before. So is a statement that reads an array without the fact: what it read
-may have been stored over since.
+An array that is updated in place (``y[r] += ...``, or a scatter-add through
+a map, ``y[cell[c, k]] += ...``), whose cells hold what they held on entry
+plus every update and so no one statement's value, that is stored under a
+guard isl cannot state (whose instances store nowhere it can name), or that
+is stored or read through an index isl does not read exactly, has no such
+fact, and its statements no equation: the postcondition is then left to the
+native runs, as before, with the reason. So is a statement that reads an
+array without the fact: what it read may have been stored over since.
 
 The postcondition fact rests on the ``single-assignment`` facts of the
 arrays whose equations decided it, and on any theorem the kernel cites that
@@ -220,8 +222,21 @@ def _single_assignment(term: Term, array: str) -> tuple[Any, list[Stmt], list] |
     from loopty.obligations import _affine, _both, _time_map, stated_writers
 
     writers = [stmt for stmt in term.stmts if stmt.assignee.array == array]
-    if any(stmt.kind != "assign" for stmt in writers):
-        return f"a statement accumulates into {array}"
+    for stmt in writers:
+        if stmt.kind == "assign":
+            continue
+        if stmt.exactness is None:
+            # y[i] = 2 * y[i]: the store reads the cell it stores, first
+            return f"{stmt.id} stores a cell of {array} that {stmt.id} reads before it"
+        # an update, y[i] += v or a scatter-add y[cell[c, k]] += v: the cell
+        # holds what it held on entry and every update, which is no one
+        # statement's value
+        shown = ", ".join(str(index) for index in stmt.assignee.indices)
+        return (
+            f"{stmt.id} updates {array}[{shown}] in place, so a cell of {array} "
+            "holds what it held on entry plus every update, not what one "
+            "statement stores"
+        )
     if len(stated_writers(term, writers)) != len(writers):
         return (
             f"a statement stores into {array} under a guard isl cannot state, so "

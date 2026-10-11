@@ -10,7 +10,7 @@ import numpy as np
 from lanky import theorem
 from lanky.prelude import Fn, Int, Nat, Real
 
-from loopty import Arr, Fin, Schedule, Where, kernel, when
+from loopty import Arr, Fin, Schedule, Where, kernel, layout, program, when
 
 # {{{ decided
 
@@ -127,6 +127,56 @@ def lost_sign(
                 R[a, b] = c[a, b]
             with when(a >= 2):
                 R[a, b] = -R[a - 2, b + 2]
+
+
+# }}}
+
+
+# {{{ updates: a cell holds what it held, plus every update
+
+
+@kernel
+def bumped(y: Arr[Fin[n], Int]) -> all(y[i] != 1000003 for i in Fin[n]):
+    """Adds 5 to each cell: false where a cell held 999998, which no run draws.
+
+    The store is ``y[i] + 5``, and read as an equation, ``y[i] == y[i] + 5``,
+    it holds nowhere, so it would decide any claim, this false one too.
+    """
+    for i in y.dom:
+        y[i] += 5
+
+
+@kernel
+def scattered(
+    cell: Arr[Fin[nc], Fin[3], Fin[nv]],
+    yl: Arr[Fin[nc], Fin[3], Int],
+    y: Arr[Fin[nv], Int],
+) -> all(y[v] != 1000003 for v in Fin[nv]):
+    """Each cell's values added into the nodes it names: a scatter-add."""
+    for c in yl.dom:
+        for k in yl.dom[c]:
+            y[cell[c, k]] += yl[c, k]
+
+
+@kernel
+def zeroed_then_added(x: Arr[Fin[n], Int], y: Arr[Fin[n], Int]) -> all(
+    y[i] == x[i] for i in Fin[n]
+):
+    """Zeros, then adds ``x``: true, and left to the runs, since ``y`` is updated."""
+    for i in y.dom:
+        y[i] = 0
+    for i in y.dom:
+        y[i] += x[i]
+
+
+@kernel
+def doubled_beside(
+    x: Arr[Fin[n], Int], z: Arr[Fin[n], Int], y: Arr[Fin[n], Int]
+) -> all(z[i] == 2 * x[i] for i in Fin[n]):
+    """Stores ``z`` once per cell beside an update of ``y``: decided from ``z``'s."""
+    for i in x.dom:
+        z[i] = 2 * x[i]
+        y[i] += x[i]
 
 
 # }}}
@@ -432,6 +482,62 @@ def fill_half(s: Real, R: Arr[Fin[n], Real]) -> all(R[i] == s for i in Fin[n]) &
 #: Two schedules of the scan that share their first step: its facts are one claim.
 split = Schedule(scan, target="c").split("r", 2)
 split_twice = Schedule(scan, target="c").split("r", 2).split("r_outer", 2)
+
+
+# }}}
+
+
+# {{{ a layout and a window: the postcondition is the term's either way
+
+
+#: The cells of a vector of four, stored back to front.
+M = 4
+
+
+@layout
+def back_to_front(i: Fin[M]) -> Fin[M]:
+    """Cell ``i`` at address ``M - 1 - i``."""
+    return M - 1 - i
+
+
+@kernel
+def reversed_copy(x: Arr[Fin[M], Int], y: Arr[Fin[M], Int]) -> all(
+    y[i] == x[M - 1 - i] for i in Fin[M]
+):
+    """Reads ``x`` through the layout: its postcondition is decided as any other."""
+    for i in y.dom:
+        y[i] = x[back_to_front(i)]
+
+
+@kernel
+def doubled(u: Arr[Fin[n], Int], f: Arr[Fin[n], Int]) -> all(
+    f[j] == 2 * u[j] for j in Fin[n]
+):
+    """Twice each cell, stored once per cell: decided."""
+    for j in u.dom:
+        f[j] = 2 * u[j]
+
+
+@kernel
+def differenced(f: Arr[Fin[n], Int], d: Arr[Fin[n], Int]):
+    """The backward difference, at every point after the first."""
+    for i in d.dom:
+        with when(i > 0):
+            d[i] = f[i] - f[i - 1]
+
+
+@program
+def differences(u, d):
+    """The doubled cells into an array of the program's own, then their differences."""
+    f = Arr.zeros_like(u)
+    doubled(u, f)
+    differenced(f, d)
+
+
+#: The two loops fused, and ``f`` kept in the two cells live at once.
+windowed_differences = (
+    Schedule(differences, sizes={"n": 16}).fuse("doubled", "differenced").contract("f")
+)
 
 
 # }}}

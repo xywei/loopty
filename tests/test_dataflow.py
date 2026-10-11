@@ -201,6 +201,62 @@ def test_a_recurrence_with_its_sign_lost_is_no_atom_it_stores() -> None:
 # }}}
 
 
+# {{{ updates: a cell holds what it held, plus every update
+
+
+def _update_reason(stmt: str, cell: str) -> str:
+    return (
+        f"{stmt} updates {cell} in place, so a cell of y holds what it held on "
+        "entry plus every update, not what one statement stores"
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "stmt", "cell"),
+    [
+        ("bumped", "S0", "y[i]"),
+        ("scattered", "S0", "y[cell[c, k]]"),
+        ("zeroed_then_added", "S1", "y[i_0]"),  # its second loop's i
+    ],
+)
+def test_an_updated_array_has_no_equation_and_its_claim_is_left_to_the_runs(
+    name: str, stmt: str, cell: str
+) -> None:
+    """``y[i] += v`` stores ``y[i] + v``: the cell's value on entry, plus each update.
+
+    So no one statement says what the kernel leaves, and the claim is left to
+    the native runs, with why. Read as an equation, ``bumped``'s ``y[i] ==
+    y[i] + 5`` holds nowhere and would decide its claim, which is false where
+    a cell held 999998; ``zeroed_then_added``'s is true, and is not decided
+    either.
+    """
+    k = getattr(kernels, name)
+    (post,) = facts(k, "postcondition")
+    assert post.status is not Status.DECIDED
+    assert post.status is not Status.REFUTED
+    assert _update_reason(stmt, cell) in post.provenance["undecided"]
+    assert not facts(k, KIND)
+    found = stores(k.term, name)
+    assert not found.equations
+    assert found.why == {"y": _update_reason(stmt, cell)}
+
+
+def test_an_update_beside_an_array_stored_once_leaves_that_arrays_claim_decided() -> (
+    None
+):
+    """``z`` is stored once per cell and reads nothing of ``y``: decided from it."""
+    (post,) = facts(kernels.doubled_beside, "postcondition")
+    assert (post.status, post.decided_by) == (Status.DECIDED, "isl")
+    (single,) = facts(kernels.doubled_beside, KIND)
+    assert single.provenance["array"] == "z"
+    assert post.rests_on == (single.id,)
+    found = stores(kernels.doubled_beside.term, "doubled_beside")
+    assert found.why == {"y": _update_reason("S1", "y[i]")}
+
+
+# }}}
+
+
 # {{{ a cited theorem
 
 
@@ -598,6 +654,85 @@ def test_lanky_check_lists_the_casts_of_the_files_schedules_once(capsys: Any) ->
     out = capsys.readouterr().out
     assert "DUPLICATE" not in out
     assert "split('r', 2" in out or "split(r, 2" in out
+
+
+# }}}
+
+
+# {{{ a layout and a window: the postcondition is the term's either way
+
+
+def test_a_postcondition_read_through_a_layout_is_decided() -> None:
+    """``x[back_to_front(i)]`` is ``x[3 - i]`` in the term, and the claim says so."""
+    (post,) = facts(kernels.reversed_copy, "postcondition")
+    assert (post.status, post.decided_by) == (Status.DECIDED, "isl")
+    (single,) = facts(kernels.reversed_copy, KIND)
+    assert post.rests_on == (single.id,)
+
+
+def test_a_window_leaves_the_producers_postcondition_decided_from_its_term() -> None:
+    """``contract('f')`` is the program's schedule; ``doubled``'s claim, its term's."""
+    assert kernels.windowed_differences.facts()
+    (post,) = facts(kernels.doubled, "postcondition")
+    assert (post.status, post.decided_by) == (Status.DECIDED, "isl")
+    (restated,) = [
+        fact
+        for fact in kernels.differences.facts()
+        if fact.kind == "postcondition-in-scope"
+    ]
+    assert restated.rests_on == (post.id,)
+
+
+def test_lanky_check_lists_a_layouts_facts_and_a_windows_casts_once() -> None:
+    """The layout's three facts, the window's casts under the program, each once."""
+    from lanky.check import check_path
+
+    ledger = list(check_path(KERNELS / "dataflow.py"))
+    ids = [fact.id for fact in ledger]
+    assert len(ids) == len(set(ids))
+    kinds = {
+        fact.kind: fact.status
+        for fact in ledger
+        if fact.owner == "back_to_front" and fact.kind.startswith("layout-")
+    }
+    assert kinds == {
+        "layout-in-bounds": Status.DECIDED,
+        "layout-one-for-one": Status.DECIDED,
+        "layout-onto": Status.DECIDED,
+    }
+    posts = {fact.owner: fact for fact in ledger if fact.kind == "postcondition"}
+    for owner in ("reversed_copy", "doubled"):
+        assert (posts[owner].status, posts[owner].decided_by) == (
+            Status.DECIDED,
+            "isl",
+        )
+    (clobber,) = [fact for fact in ledger if fact.kind == "no-clobber"]
+    assert clobber.owner == "differences"
+    assert (clobber.status, clobber.decided_by) == (Status.DECIDED, "isl")
+    assert clobber.id in {fact.id for fact in kernels.windowed_differences.facts()}
+    window = [fact for fact in ledger if ".contract('f'" in fact.id]
+    assert window
+    assert all(fact.owner == "differences" for fact in window)
+
+
+def test_a_substitutions_and_a_windows_definedness_read_apart_in_the_ledger() -> None:
+    """Both steps need every cell of ``f`` stored before it is read: two rows.
+
+    ``examples/fusion.py`` substitutes ``f`` in one schedule and keeps it in a
+    window in another, after the same fusion. Each step's fact leads with the
+    step, so the two rows of ``lanky check`` read apart.
+    """
+    from lanky.check import check_path
+
+    ledger = list(check_path(EXAMPLES / "fusion.py"))
+    rows = [
+        fact.statement
+        for fact in ledger
+        if fact.kind == "definedness" and fact.statement.startswith("for ")
+    ]
+    assert len(rows) == len(set(rows)) == 2
+    assert any(row.startswith("for substitute('f'), every cell of f") for row in rows)
+    assert any(row.startswith("for contract('f'") for row in rows)
 
 
 # }}}
