@@ -56,7 +56,14 @@ FUNCTIONS: dict[str, Callable[[Any], Any]] = {
 
 
 def _applied(name: str, value: Any) -> Any:
-    """``name`` of ``value``: numpy's natively, a recorded call when traced."""
+    """``name`` of ``value``: numpy's natively, a recorded call when traced.
+
+    The call is lanky's, as every traced value is, so that it compares and
+    combines like one: ``when(sqrt(x[i]) > 1.5)`` is a guard, where a plain
+    pymbolic call refused the comparison ("expressions don't have an order").
+    """
+    from lanky.terms import Call, Var
+
     from loopty.arr import Arr
 
     if isinstance(value, Arr) or isinstance(value, np.ndarray) and value.ndim:
@@ -65,7 +72,7 @@ def _applied(name: str, value: Any) -> Any:
             "an array: a kernel computes cell by cell"
         )
     if isinstance(value, prim.ExpressionNode):
-        return prim.Call(prim.Variable(name), (value,))
+        return Call(Var(name), (value,))
     return FUNCTIONS[name](value)
 
 

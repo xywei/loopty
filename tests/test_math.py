@@ -12,13 +12,15 @@ precision, which no target has, is refused when the body is traced.
 
 from __future__ import annotations
 
+import math as python_math
+
 import numpy as np
 import pymbolic.primitives as prim
 import pytest
 from lanky.ledger import Status
 from lanky.prelude import Int, Real
 
-from loopty import Arr, Fin, Schedule, TraceError, kernel, reduce_sum
+from loopty import Arr, Fin, Schedule, TraceError, kernel, reduce_sum, when
 from loopty.executor import LoopyExecutor, emit_code
 from loopty.faithful import KIND
 from loopty.math import conj, cos, exp, imag, log, real, sin, sqrt
@@ -131,6 +133,49 @@ def roots(
         y[i] = sqrt(x[i])
 
 
+@kernel
+def compared(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """A function's value in a guard, compared as any value is.
+
+    The value calls ``sqrt`` too: loopy resolves a function by the values
+    that call it, and a guard alone is refused when lowered (note 20).
+    """
+    for i in y.dom:
+        with when(sqrt(x[i]) > 1.5):
+            y[i] = sqrt(x[i]) + abs(sin(x[i]))
+
+
+@kernel
+def numpys_sqrt(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """numpy's sqrt, as a body that runs on numbers may call it."""
+    for i in y.dom:
+        y[i] = np.sqrt(x[i])
+
+
+@kernel
+def numpys_tanh(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """numpy's tanh, which loopty.math has not."""
+    for i in y.dom:
+        y[i] = np.tanh(x[i])
+
+
+@kernel
+def pythons_sqrt(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """Python's math.sqrt."""
+    for i in y.dom:
+        y[i] = python_math.sqrt(x[i])
+
+
+@kernel
+def real_part(
+    z: Arr[Fin[n], np.complex128],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The real part, read as numpy's attribute."""
+    for i in y.dom:
+        y[i] = z[i].real
+
+
 # }}}
 
 
@@ -154,7 +199,7 @@ def test_natively_each_function_is_numpys() -> None:
 def test_traced_each_is_a_call_the_term_keeps() -> None:
     (stmt, *_rest) = of_reals.term.stmts
     assert isinstance(stmt.expr, prim.Call)
-    assert stmt.expr.function == prim.Variable("sqrt")
+    assert stmt.expr.function.name == "sqrt"
 
 
 def test_functions_of_reals_agree_compiled_and_native() -> None:
@@ -299,3 +344,50 @@ def test_a_postcondition_calls_the_functions_the_body_calls() -> None:
     assert post.statement.endswith("y[i] == sqrt(x[i])")
     assert post.status is Status.TESTED, post.provenance
 
+
+
+def test_a_functions_value_compares_in_a_guard() -> None:
+    # A plain pymbolic call refused the comparison: "expressions don't have
+    # an order".
+    x = np.array([1.0, 4.0, 2.25, 9.0])
+    native = {"x": Arr.from_numpy(x), "y": Arr.zeros(4)}
+    compared(**native)
+    assert native["y"].numpy()[0] == 0.0 and native["y"].numpy()[1] > 0.0
+    agrees(compared, {"x": Arr.from_numpy(x), "y": Arr.zeros(4)})
+
+
+@pytest.mark.parametrize(
+    ("kern", "message"),
+    [
+        (
+            numpys_sqrt,
+            r"numpy.sqrt of a traced value at test_math.py:\d+: numpy's "
+            r"functions compute on numbers, .* Write sqrt\(...\) from "
+            r"loopty.math \(from loopty.math import sqrt\)",
+        ),
+        (
+            numpys_tanh,
+            r"numpy.tanh of a traced value at test_math.py:\d+: .* loopty.math "
+            r"has sqrt, exp, log, sin, cos, real, imag and conj, .* and no tanh",
+        ),
+        (
+            pythons_sqrt,
+            r"a traced value was made a Python number at test_math.py:\d+, as "
+            r"float\(\) does, and math.sqrt .* Call loopty.math's functions",
+        ),
+        (
+            real_part,
+            r"z\[i\].real at test_math.py:\d+: while a kernel is traced z\[i\] "
+            r"is a term, which has no attribute real. Write real\(z\[i\]\)",
+        ),
+    ],
+)
+def test_numpy_and_pythons_math_name_loopty_math_when_traced(
+    kern, message: str
+) -> None:
+    # Natively each is fine; traced, each failed far from the body, with
+    # numpy's "loop of ufunc does not support argument 0 of type Subscript",
+    # pymbolic's "UnknownVariableError: x", or "'Subscript' object has no
+    # attribute 'real'".
+    with pytest.raises(TraceError, match=message):
+        kern.trace()

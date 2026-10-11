@@ -76,6 +76,7 @@ import inspect
 import itertools
 import os
 import random
+import re
 import sys
 import sysconfig
 import threading
@@ -151,6 +152,143 @@ def _abandoned_message(inames: Sequence[str]) -> str:
         "part that should not run instead: it records the condition, narrows "
         "the statement's domain, and masks the writes under plain python."
     )
+
+
+#: numpy's name of each function :mod:`loopty.math` has, as numpy's loop over
+#: objects asks a value for it (``numpy.conj`` asks for ``conjugate``), and as
+#: an attribute a value is asked for (``x.real``), with its name there.
+_NUMPY_NAMES = {
+    "sqrt": "sqrt",
+    "exp": "exp",
+    "log": "log",
+    "sin": "sin",
+    "cos": "cos",
+    "real": "real",
+    "imag": "imag",
+    "conjugate": "conj",
+    "conj": "conj",
+}
+
+#: What numpy says when one of its functions meets a value it cannot compute
+#: with: it asks the object for a method of the function's name.
+_UFUNC_OF_AN_OBJECT = re.compile(
+    r"loop of ufunc does not support argument \d+ of type \w+ which has no "
+    r"callable (\w+) method"
+)
+
+#: What loopty.math has, for a message about a function it has not.
+_MATH_HAS = "sqrt, exp, log, sin, cos, real, imag and conj"
+
+
+def _numbers_message(exc: BaseException) -> str | None:
+    """What to say about numpy or Python's ``math`` given a traced value, or ``None``.
+
+    A body that runs natively on numbers is free to call ``numpy.sqrt`` or
+    ``math.sqrt`` on them, or to read ``x[i].real``; traced, each value is a
+    term, and the three fail far from the body, with numpy's "loop of ufunc
+    does not support argument 0 of type Subscript which has no callable sqrt
+    method", pymbolic's ``UnknownVariableError: x`` (``math.sqrt`` asks
+    ``float()`` of the term, which pymbolic answers by evaluating it), and
+    "'Subscript' object has no attribute 'real'". Each is named here, at the
+    body's line, with the function of :mod:`loopty.math` that is numpy's
+    natively and a call of the target's when compiled.
+    """
+    where = _body_location(exc)
+    at = f" at {where}" if where else ""
+    if isinstance(exc, TypeError):
+        match = _UFUNC_OF_AN_OBJECT.search(str(exc))
+        if match is None:
+            return None
+        numpy_name = match.group(1)
+        return (
+            f"numpy.{numpy_name} of a traced value{at}: numpy's functions "
+            "compute on numbers, and while a kernel is traced its values are "
+            f"terms. {_math_fix(numpy_name)}"
+        )
+    if isinstance(exc, AttributeError):
+        name = getattr(exc, "name", None)
+        value = getattr(exc, "obj", None)
+        if name not in _NUMPY_NAMES or not isinstance(value, prim.ExpressionNode):
+            return None
+        shown = _shown(value)
+        math_name = _NUMPY_NAMES[name]
+        return (
+            f"{shown}.{name}{at}: while a kernel is traced {shown} is a term, "
+            f"which has no attribute {name}. Write {math_name}({shown}), with "
+            f"{math_name} from loopty.math (from loopty.math import "
+            f"{math_name}), which is numpy's {math_name} when the body runs "
+            "natively and the target's when it is compiled"
+        )
+    if _through_float(exc):
+        return (
+            f"a traced value was made a Python number{at}, as float() does, and "
+            "math.sqrt and the other functions of Python's math and cmath "
+            "modules: while a kernel is traced its values are terms, not "
+            f"numbers. Call loopty.math's functions on them ({_MATH_HAS}; "
+            "from loopty.math import sqrt), which are numpy's when the body "
+            "runs natively and the target's when it is compiled"
+        )
+    return None
+
+
+def _math_fix(numpy_name: str) -> str:
+    """The function of :mod:`loopty.math` to write for numpy's ``numpy_name``."""
+    math_name = _NUMPY_NAMES.get(numpy_name)
+    if math_name is not None:
+        return (
+            f"Write {math_name}(...) from loopty.math (from loopty.math import "
+            f"{math_name}), which is numpy.{numpy_name} when the body runs "
+            "natively and the target's when it is compiled"
+        )
+    return (
+        f"loopty.math has {_MATH_HAS}, each numpy's when the body runs natively "
+        f"and the target's when it is compiled, and no {numpy_name} yet. Until "
+        "it has, a body builds the call itself where it is traced, "
+        f"pymbolic.primitives.Call(Variable({numpy_name!r}), (x,)), and calls "
+        "numpy's on numbers (note 2 in docs/loopy-notes.md)"
+    )
+
+
+def _body_location(exc: BaseException) -> str:
+    """``file:line`` of the last frame of the kernel's code ``exc`` came through.
+
+    The body, or a helper of it: the last frame that is not the machinery's
+    (:func:`_machinery_module`) and has a file, which numpy's and Python's
+    functions written in C have no frame for at all.
+    """
+    where = ""
+    tb = exc.__traceback__
+    while tb is not None:
+        frame = tb.tb_frame
+        filename = frame.f_code.co_filename
+        module = frame.f_globals.get("__name__")
+        # Code a library generates (a dataclass's methods) has no file.
+        if not filename.startswith("<") and not _machinery_module(module, filename):
+            where = f"{filename.rsplit('/', 1)[-1]}:{tb.tb_lineno}"
+        tb = tb.tb_next
+    return where
+
+
+def _through_float(exc: BaseException) -> bool:
+    """Whether ``exc`` was raised making a term a number, as ``float()`` does.
+
+    pymbolic answers ``float()`` of a term by evaluating it, which fails on
+    the first array or loop variable it meets, ``UnknownVariableError``, or on
+    a warning a test run turns into an error on the way there.
+    """
+    if isinstance(exc, TraceError):
+        return False
+    tb = exc.__traceback__
+    while tb is not None:
+        frame = tb.tb_frame
+        module = (frame.f_globals.get("__name__") or "").split(".", 1)[0]
+        if frame.f_code.co_name in ("__float__", "__complex__") and module in (
+            "pymbolic",
+            "lanky",
+        ):
+            return True
+        tb = tb.tb_next
+    return False
 
 
 def _refuse_table_bounds(tracer: Tracer) -> None:
@@ -4794,6 +4932,11 @@ def trace(kernel: Any, arg_types: Any) -> Term:
             "write 'with when(condition):' instead of 'if condition:', which "
             "masks the writes of the block rather than choosing a branch."
         ) from exc
+    except Exception as exc:
+        message = _numbers_message(exc)
+        if message is None:
+            raise
+        raise TraceError(message) from exc
     finally:
         if watching:
             _CallWatch.stop()
