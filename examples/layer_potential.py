@@ -13,13 +13,15 @@ y`` and ``beta = z - c``, expanded in ``tau`` to the QBX order and summed at
 
 One file holds the three layers of it:
 
-- **The algorithm.** ``line_taylor`` is the theorem that the ``c(k)`` are the
-  Taylor coefficients of ``log(alpha + tau * beta)`` for every order, lanky's
-  ``examples/line_taylor.py``: a table that satisfies what the differential
-  equation ``(alpha + tau * beta) f'(tau) == beta`` says about its
-  coefficients is the closed form ``coefficient`` writes, at the ratio
-  ``-beta / alpha``. The kernels add ``coefficient(ratio, k)``, the same
-  function, with the ratio computed as ``-beta * conj(alpha) / |alpha|**2``.
+- **The algorithm.** ``line_taylor`` is the theorem behind the ``c(k)``, for
+  every order, lanky's ``examples/line_taylor.py``: a table that satisfies
+  what the differential equation ``(alpha + tau * beta) f'(tau) == beta`` says
+  about its coefficients is the closed form ``coefficient`` writes, at the
+  ratio ``-beta / alpha``. That the Taylor coefficients of ``log(alpha + tau
+  * beta)`` satisfy it is cited, not proved. The kernels add
+  ``coefficient(ratio, k)``, the same function, with the ratio computed as
+  ``-beta * conj(alpha) / |alpha|**2``; no row of the ledger links the two
+  yet.
 - **The kernels and their transforms.** ``single_layer`` and ``double_layer``
   are pytential's ``S`` and ``D`` as sumpy computes them, over complex points.
   ``sumpy_tile()`` is sumpy's CPU schedule, as ``get_optimized_kernel`` writes
