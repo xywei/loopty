@@ -46,6 +46,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any
 
 import islpy as isl
@@ -86,6 +87,7 @@ __all__ = [
     "lexicographically_before",
     "ordering_obligation",
     "prove",
+    "shadow_hints",
     "written_before",
 ]
 
@@ -316,6 +318,20 @@ def _obligation(
     rests_on: Sequence[str] = (),
 ) -> Any:
     lanky = _lanky_obligations()
+    if "fallback" in getattr(lanky.Part, "__dataclass_fields__", {}):
+        # what isl finds only when Lean asks: the case splits of shadow_hints
+        parts = [
+            part
+            if part.fallback is not None
+            else lanky.Part(
+                part.name,
+                part.label,
+                part.term,
+                part.hints,
+                fallback=partial(shadow_hints, part.term),
+            )
+            for part in parts
+        ]
     return lanky.Obligation(
         parts=tuple(parts),
         counterexample=counterexample,
@@ -1022,6 +1038,201 @@ def discharged_obligation(
     hints = lanky.Hints(instances=tuple(instances))
     part = lanky.Part("claim", "the claim where the hypotheses hold", term, hints)
     return _obligation([part])
+
+
+# }}}
+
+
+# {{{ isl's case splits, for a part omega did not close
+
+
+#: How fine the rational relaxation is read: a rational point with this
+#: denominator is an integer point of the set scaled by it.
+_SCALE = 64
+
+#: The most values a variable may take for a split on it to be offered.
+_SPLIT_VALUES = 4
+
+
+def shadow_hints(term: Any) -> Any:
+    """isl's case splits for a part ``omega`` did not close: a fallback hint.
+
+    ``omega`` has no dark or grey shadows: it eliminates over the reals and
+    can miss that the integers in between are none (Pugh's example, ``27 <=
+    11x + 13y <= 45`` and ``-10 <= 7x - 9y <= 4``). Two splits give it the
+    cases a person would:
+
+    - *by rational bounds*: the variable whose values the hypotheses confine,
+      over the rationals, to the fewest integers, at most four, split on each
+      of them (``x = 1 ∨ x = 2``). The bounds are isl's, of the set scaled by
+      :data:`_SCALE`, rounded outward, so the split holds of every point of
+      the hypotheses;
+    - *by the carrying level*: a hypothesis that is a disjunction, the source
+      order of a dependence (``t_a < t_b ∨ t_a = t_b ∧ i_a < i_b``), split on
+      the disjuncts isl finds possible beside the other hypotheses, the
+      levels that can carry it.
+
+    Only the linear hypotheses are read, an array cell an atom, and a
+    hypothesis this cannot read is left out, which only widens the set:
+    the splits hold all the same, and Lean proves each before it uses it.
+    """
+    lanky = _lanky_obligations()
+    if not isinstance(term, Forall) or term.guard is None:
+        return lanky.Hints()
+    try:
+        atoms: dict[str, Any] = {}
+        names = [var.name for var, sort in term.binders if sort is Int]
+        linear: list[str] = []
+        disjunctive: list[Any] = []
+        for hypothesis in conjuncts(term.guard):
+            if isinstance(hypothesis, LogicalOr):
+                disjunctive.append(hypothesis)
+                continue
+            text = _linear_text(hypothesis, names, atoms)
+            if text is not None:
+                linear.append(text)
+    except (Unstatable, isl.Error, ValueError):
+        return lanky.Hints()
+    variables = [*names, *atoms]
+    splits: list[Any] = []
+    try:
+        bound = _bounded_variable(linear, variables, names)
+    except (Unstatable, isl.Error, ValueError):
+        bound = None
+    if bound is not None:
+        name, values = bound
+        splits.append(
+            disjunction([Comparison(Var(name), "==", value) for value in values])
+        )
+    for hypothesis in disjunctive[:1]:
+        possible = []
+        try:
+            for option in hypothesis.children:
+                text = _linear_text(option, names, atoms)
+                if text is None or _satisfiable([*linear, text], [*names, *atoms]):
+                    possible.append(option)
+        except (Unstatable, isl.Error, ValueError):
+            continue
+        if possible and len(possible) < len(hypothesis.children):
+            splits.append(disjunction(possible))
+    return lanky.Hints(splits=tuple(splits))
+
+
+def _linear_text(prop: Any, names: Sequence[str], atoms: dict[str, Any]) -> str | None:
+    """Linear comparisons, conjoined, as isl text over ``v0, v1, ...``; else ``None``.
+
+    An array cell becomes a variable of its own, named in ``atoms`` by its
+    text, the same cell the same variable.
+    """
+    from loopty.hypotheses import linear
+
+    if isinstance(prop, LogicalAnd):
+        parts = [_linear_text(child, names, atoms) for child in prop.children]
+        return None if None in parts else " and ".join(f"({p})" for p in parts)
+    if not isinstance(prop, prim.Comparison) or prop.operator == "!=":
+        return None
+    difference = prim.Sum((prop.left, prim.Product((-1, prop.right))))
+    difference = _atomized(difference, atoms)
+    form = linear(difference)
+    if form is None:
+        return None
+    coefficients, constant = form
+    order = [*names, *atoms]
+    terms = []
+    for name, value in coefficients.items():
+        if name not in order:
+            return None
+        terms.append(f"{value} * v{order.index(name)}")
+    expression = " + ".join([*terms, str(constant)]) or "0"
+    relation = {"==": "=", "<": "<", "<=": "<=", ">": ">", ">=": ">="}[prop.operator]
+    return f"{expression} {relation} 0"
+
+
+def _atomized(expr: Any, atoms: dict[str, Any]) -> Any:
+    """``expr`` with each array cell a variable named after its text."""
+    if isinstance(expr, prim.Subscript | prim.Call):
+        key = f"__cell_{len(atoms)}"
+        for name, cell in atoms.items():
+            if render(cell) == render(expr):
+                return Var(name)
+        atoms[key] = expr
+        return Var(key)
+    if isinstance(expr, prim.ExpressionNode):
+        from lanky.terms import init_args
+
+        return type(expr)(*(_atomized(arg, atoms) for arg in init_args(expr)))
+    if isinstance(expr, tuple):
+        return tuple(_atomized(item, atoms) for item in expr)
+    return expr
+
+
+def _satisfiable(constraints: Sequence[str], variables: Sequence[str]) -> bool:
+    """Whether the constraints, over ``v0, v1, ...``, have an integer point."""
+    dims = ", ".join(f"v{k}" for k in range(len(variables)))
+    body = " and ".join(f"({c})" for c in constraints) or "1 = 1"
+    return not isl.Set(f"{{ [{dims}] : {body} }}").is_empty()
+
+
+def _bounded_variable(
+    constraints: Sequence[str], variables: Sequence[str], names: Sequence[str]
+) -> tuple[str, list[int]] | None:
+    """The variable the rational relaxation confines to the fewest integers.
+
+    The relaxation is read off the set scaled by :data:`_SCALE`: ``x = w / D``
+    turns a rational point with denominator ``D`` into an integer point ``w``,
+    so the bounds of ``w`` over it, divided by ``D`` and rounded outward,
+    bound ``x`` over the rationals to within ``1 / D``, which can only add
+    values. ``None`` when no variable is confined to :data:`_SPLIT_VALUES`
+    integers or fewer, or the relaxation is empty, which ``omega``'s own
+    elimination shows.
+    """
+    if not constraints:
+        return None
+    dims = ", ".join(f"v{k}" for k in range(len(variables)))
+    scaled = [_scaled(text) for text in constraints]
+    points = isl.Set(f"{{ [{dims}] : {' and '.join(scaled)} }}")
+    if points.is_empty():
+        return None
+    best: tuple[str, list[int]] | None = None
+    for position, name in enumerate(variables):
+        if name not in names:
+            continue
+        try:
+            low = _extreme(points.dim_min(position))
+            high = _extreme(points.dim_max(position))
+        except (isl.Error, ValueError):
+            continue
+        if low is None or high is None:
+            continue
+        values = list(range(low // _SCALE, -(-high // _SCALE) + 1))
+        fewer = best is None or len(values) < len(best[1])
+        if len(values) <= _SPLIT_VALUES and fewer:
+            best = (name, values)
+    return best
+
+
+def _scaled(text: str) -> str:
+    """``a * v + c rel 0`` as ``a * v + c * D rel 0``, the constraint at ``v / D``."""
+    expression, relation = text.rsplit(" ", 2)[0], text.rsplit(" ", 2)[1]
+    *terms, constant = expression.split(" + ")
+    return " + ".join([*terms, str(int(constant) * _SCALE)]) + f" {relation} 0"
+
+
+def _extreme(value: Any) -> int | None:
+    """The constant a bound isl gives is, or ``None`` for one that is not."""
+    pieces = value.get_pieces()
+    if len(pieces) != 1:
+        return None
+    aff = pieces[0][1]
+    if any(
+        not aff.get_coefficient_val(isl.dim_type.in_, k).is_zero()
+        for k in range(aff.dim(isl.dim_type.in_))
+    ):
+        return None
+    found = aff.get_constant_val()
+    if not found.is_int():
+        return None
+    return int(found.to_python())
 
 
 # }}}

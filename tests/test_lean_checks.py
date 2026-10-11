@@ -346,6 +346,47 @@ def test_a_cast_after_a_substitution_is_left_to_isl() -> None:
     assert "a substitution before this step" in cast_obligation(monotone.term).declined
 
 
+def _pugh() -> Any:
+    from lanky.prelude import Int
+    from lanky.terms import Forall, LogicalAnd
+
+    x, y = Var("x"), Var("y")
+    hypotheses = (
+        11 * x + 13 * y >= 27,
+        11 * x + 13 * y <= 45,
+        7 * x - 9 * y >= -10,
+        7 * x - 9 * y <= 4,
+    )
+    return Forall(((x, Int), (y, Int)), False, LogicalAnd(hypotheses))
+
+
+def test_isl_splits_a_part_by_the_rational_bounds_of_a_variable() -> None:
+    """Pugh's example: rational points, no integer ones, which omega cannot tell.
+
+    The split is on the variable the rational relaxation confines to the
+    fewest integers, read off isl's set scaled by 64 and rounded outward.
+    """
+    from loopty.obligations import shadow_hints
+
+    (split,) = shadow_hints(_pugh()).splits
+    text = render(split)
+    assert text in ("x == 0 or x == 1 or x == 2 or x == 3", "x == 1 or x == 2"), text
+
+
+def test_isl_splits_a_disjunctive_hypothesis_on_the_disjuncts_it_allows() -> None:
+    """The level that carries a dependence: the source order's disjuncts isl allows."""
+    from lanky.prelude import Int
+    from lanky.terms import Forall, LogicalAnd, LogicalOr
+
+    from loopty.obligations import shadow_hints
+
+    a, b = Var("a"), Var("b")
+    source = LogicalOr((a < b, LogicalAnd((a == b, a + 1 < b))))
+    term = Forall(((a, Int), (b, Int)), a <= b, LogicalAnd((a >= 0, source)))
+    splits = shadow_hints(term).splits
+    assert [render(split) for split in splits] == ["a < b"]
+
+
 # }}}
 
 
@@ -674,6 +715,29 @@ def test_lean_refuses_a_perturbed_subscript_exactly_where_isl_does(
         refuted = lean.establish(fact.with_status(Status.REFUTED, "isl"))
         said = refuted.provenance["lean_counterexample"]
         assert said.startswith("Lean proved the claim false"), (fact.statement, said)
+
+
+def test_isls_split_closes_what_omega_cannot(lean: Any) -> None:
+    """The fallback of every part loopty states: asked once omega has failed."""
+    from lanky.obligations import Obligation
+
+    from loopty.obligations import _obligation
+
+    (part,) = _obligation(
+        [lanky_obligations.Part("pugh", "Pugh's example", _pugh())]
+    ).parts
+    assert part.fallback is not None
+
+    class Stated:
+        def lean_obligation(self) -> Any:
+            return Obligation(parts=(part,), decider="isl")
+
+    from lanky.ledger import Fact
+
+    handed = Fact(id="pugh", kind="in-bounds", statement="", term=Stated())
+    fact = lean.establish(handed)
+    assert fact.status is Status.PROVED
+    assert fact.provenance["lean_parts"][0]["how"] == "omega, with a case split"
 
 
 def _sample(part: Any) -> dict[str, int] | None:
