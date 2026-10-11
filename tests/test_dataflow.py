@@ -164,6 +164,26 @@ def test_a_cell_the_storing_instance_reads_first_is_read_before_its_store(
     assert not stores(k.term, name).equations
 
 
+def test_a_cell_no_statement_stores_leaves_the_claim_about_it_undecided() -> None:
+    """``y[i] == 1`` past ``i = 3`` is what ``y`` held, which no equation says."""
+    from loopty.dataflow import decide_postcondition
+
+    (post,) = facts(kernels.first_three, "postcondition")
+    assert post.status is not Status.DECIDED
+    term = kernels.first_three.term
+    found = stores(term, "first_three")
+    assert found.equations  # y is stored once where it is stored
+    assert isinstance(decide_postcondition(term, found.equations), str)
+
+
+def test_a_read_before_the_statement_that_stores_it_runs_leaves_it_undecided() -> None:
+    """The scan's loop reads ``off[0]``, which ``S1`` stores after it."""
+    (post,) = facts(kernels.scan_backwards, "postcondition")
+    assert post.status is not Status.DECIDED
+    assert not facts(kernels.scan_backwards, KIND)
+    assert not stores(kernels.scan_backwards.term, "scan_backwards").equations
+
+
 def test_a_recurrence_with_its_sign_lost_is_no_atom_it_stores() -> None:
     """Refuted by the native runs, never decided: another equation than the stored."""
     (post,) = facts(kernels.lost_sign, "postcondition")
@@ -230,6 +250,21 @@ def test_the_flagships_theorem_gives_r_is_d_for_every_d_c_holds() -> None:
     assert applied.provenance["matched"] == [
         render(part) for part in kernels.reconstruct.term.post.children
     ]
+
+
+def test_a_kernel_computing_another_recurrence_gets_nothing_from_its_theorem() -> None:
+    """It claims the theorem's recurrence: refuted by its runs, never applied."""
+    (post,) = facts(kernels.wrong_coefficient, "postcondition")
+    assert post.status is Status.REFUTED
+    assert not facts(kernels.wrong_coefficient, APPLIED)
+    from loopty.dataflow import decide_postcondition
+
+    term = kernels.wrong_coefficient.term
+    found = stores(term, "wrong_coefficient")
+    decision = decide_postcondition(
+        term, found.equations, theorems=kernels.wrong_coefficient.uses
+    )
+    assert isinstance(decision, str)
 
 
 def test_a_kernel_off_by_one_gets_nothing_from_the_theorem() -> None:

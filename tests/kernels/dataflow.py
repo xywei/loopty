@@ -95,6 +95,24 @@ def halves(y: Arr[Fin[n], Int]) -> all(y[i] != 1000003 for i in Fin[n]):
 
 
 @kernel
+def first_three(y: Arr[Fin[n], Int]) -> all(y[i] == 1 for i in Fin[n]):
+    """Stores only where ``i < 3``: a cell past them holds what it was given."""
+    for i in y.dom:
+        with when(i < 3):
+            y[i] = 1
+
+
+@kernel
+def scan_backwards(cnt: Arr[Fin[n], Nat], off: Arr[Fin[n + 1], Int]) -> (
+    off[0] == 0
+) & all(off[r + 1] == off[r] + cnt[r] for r in Fin[n]):
+    """The scan's statements the other way round: the loop reads ``off[0]`` first."""
+    for r in cnt.dom:
+        off[r + 1] = off[r] + cnt[r]
+    off[0] = 0
+
+
+@kernel
 def lost_sign(
     c: Arr[Where[a : Fin[2], b : Fin[p + 1], a + b <= p], Real],
     R: Arr[Where[a : Fin[p + 1], b : Fin[p + 1], a + b <= p], Real],
@@ -220,6 +238,27 @@ def off_by_one(
     The postcondition is what it stores, and is decided; the theorem's
     recurrence is not it, and the theorem gives nothing.
     """
+    for a in R.dom:
+        for b in R.dom[a]:
+            with when(a < 2):
+                R[a, b] = c[a, b]
+            with when(a >= 2):
+                R[a, b] = -R[a - 2, b + 1]
+
+
+@kernel(uses=[on_the_triangle])
+def wrong_coefficient(
+    c: Arr[Where[a : Fin[2], b : Fin[p + 1], a + b <= p], Real],
+    R: Arr[Where[a : Fin[p + 1], b : Fin[p + 1], a + b <= p], Real],
+) -> all(
+    R[a, b] == c[a, b] for a in Fin[p + 1] for b in Fin[p + 1] if a < 2 if a + b <= p
+) & all(
+    R[a + 2, b] == -R[a, b + 2]
+    for a in Fin[p + 1]
+    for b in Fin[p + 1]
+    if a + b + 2 <= p
+):
+    """Claims the theorem's recurrence and computes another, off by one in ``b``."""
     for a in R.dom:
         for b in R.dom[a]:
             with when(a < 2):
