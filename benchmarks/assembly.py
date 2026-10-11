@@ -36,6 +36,13 @@ otherwise quiet machine::
 
 ``--baseline-only`` times the plain-loopy side alone, without importing loopty,
 for a loopy that loopty does not run on.
+
+``--nested`` (C target) adds ``serial-nested`` and ``sun-nested`` on the
+plain-loopy side: the transcription with the loops inside a cell nested under
+the loop over the cells (:func:`nested`), as loopty's kernel has them. With
+Sun et al.'s split that decides where loopy puts the ``ilp`` loop, and so
+whether the four cells run interleaved or one after another; these two cases
+say how much of a difference between the sides that is.
 """
 
 from __future__ import annotations
@@ -184,6 +191,50 @@ def pyop2_transcription(target):
     merged = lp.merge([wrapper, element])
     merged = merged.copy(entrypoints=frozenset({"wrap_mass_action"}))
     return lp.inline_callable_kernel(merged, "mass_ffc")
+
+
+def nested(t_unit, iname: str = "c"):
+    """The transcription with each loop inside a cell nested under the cell loop.
+
+    TSFC and rep2loopy write one rectangular domain per index, none of them
+    depending on the loop over the cells. loopty's kernel nests the loops of
+    a cell under it (their domains take ``c`` as a parameter), which leaves
+    loopy no choice but to enter a cell before its loops. The two give the
+    same loops and the same code without a schedule; with Sun et al.'s
+    split, loopy's scheduler places an ``ilp`` loop innermost where it can,
+    so the transcription runs the four cells interleaved inside the
+    element's loops and loopty's kernel runs each cell whole, four in a row.
+    This variant gives the transcription loopty's nesting, and nothing else:
+    the domains an instruction uses together are joined (loopy's domain tree
+    does not branch), and each is made a child of the cell loop's.
+    """
+    from functools import reduce
+
+    import islpy as isl
+
+    kernel = t_unit.default_entrypoint
+
+    def names(domain) -> set[str]:
+        return set(domain.get_var_names(isl.dim_type.set))
+
+    (cell,) = [domain for domain in kernel.domains if iname in names(domain)]
+    others = [domain for domain in kernel.domains if iname not in names(domain)]
+    groups = [{i} for i in range(len(others))]
+    for insn in kernel.instructions:
+        used = set(insn.within_inames) | set(insn.reduction_inames())
+        hit = [g for g in groups if any(names(others[i]) & used for i in g)]
+        if len(hit) > 1:
+            groups = [g for g in groups if g not in hit] + [set().union(*hit)]
+    domains = [cell]
+    for group in groups:
+        domain = reduce(
+            lambda a, b: a.flat_product(b), [others[i] for i in sorted(group)]
+        )
+        domain = domain.insert_dims(isl.dim_type.param, 0, 1).set_dim_name(
+            isl.dim_type.param, 0, iname
+        )
+        domains.append(domain)
+    return t_unit.with_kernel(kernel.copy(domains=domains))
 
 
 def sun_transform(t_unit):
@@ -397,6 +448,11 @@ def main() -> int:
     parser.add_argument("--repeat", type=int, default=20)
     parser.add_argument("--flags", choices=tuple(FLAGS), default="default")
     parser.add_argument("--baseline-only", action="store_true")
+    parser.add_argument(
+        "--nested",
+        action="store_true",
+        help="also time the transcription with loopty's nesting of its loops (C)",
+    )
     parser.add_argument("--csv", help="append the rows to this CSV file")
     args = parser.parse_args()
 
@@ -419,6 +475,10 @@ def main() -> int:
         target = lp.ExecutableCTarget()
         baseline = pyop2_transcription(target)
         cases = {"serial": baseline, "sun": sun_transform(baseline)}
+        if args.nested:
+            inside = nested(baseline)
+            cases["serial-nested"] = inside
+            cases["sun-nested"] = sun_transform(inside)
     else:
         target = lp.PyOpenCLTarget()
         cases = {"kulkarni": kulkarni_transform(pyop2_transcription(target))}
