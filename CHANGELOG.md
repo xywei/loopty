@@ -70,7 +70,9 @@ All notable changes to loopty are recorded here. The format follows
   loopy's `dim_tags`, stores it; isl decides each and Lean proves it, the
   third with isl's inverse of the layout, in pieces with `//` and `%`, as
   its witness. A layout of one piece is called as its function, so a kernel
-  reads through it. `examples/storage_layouts.py` checks sumpy's
+  reads through it, and a call after a number the function computes with
+  has changed since its facts were stated is refused, naming the number.
+  `examples/storage_layouts.py` checks sumpy's
   compressed-Taylor storage index in two pieces, and grudge #418's
   `N3,N0,N1,N2` against modepy's F-order reshape of the DOFArray; the
   reshape in C order, `N3,N2,N1,N0`, is refuted with a cell, in words:

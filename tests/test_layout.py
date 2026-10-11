@@ -191,6 +191,31 @@ def test_a_size_in_a_layouts_body_is_said_to_be_one() -> None:
     )
 
 
+#: A module constant a layout computes with.
+SHIFT = 1
+
+
+def test_a_layout_called_after_a_number_it_reads_changed_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The facts are about the address as it was when the layout was
+    # declared; a kernel that read through it after SHIFT changed would read
+    # cells the facts say nothing about.
+    def shifted(i: Fin[4]) -> Fin[4]:  # noqa: F821
+        return (i + SHIFT) % 4
+
+    checked = layout(shifted)
+    assert checked(2) == 3
+    assert [status for status, _ in reasons(checked)] == ["decided"] * 3
+    monkeypatch.setitem(globals(), "SHIFT", 2)
+    with pytest.raises(LayoutError) as caught:
+        checked(2)
+    assert str(caught.value) == (
+        "shifted computes with SHIFT, which was 1 when its facts were stated and "
+        "is 2 now; declare the layout after SHIFT is set, and do not change it"
+    )
+
+
 def test_a_kernel_reads_through_the_layout_it_declares() -> None:
     inputs = EXAMPLE.example_inputs()
     EXAMPLE.unflatten(**inputs["unflatten"])

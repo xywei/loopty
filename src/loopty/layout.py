@@ -77,7 +77,9 @@ class Piece:
     ``names`` name the cell's indices as the function names them, ``cells``
     is the isl set of them, described (:mod:`loopty.description`), and
     ``address`` the term the function returns. ``buffer`` is the bound of the
-    return annotation's ``Fin``.
+    return annotation's ``Fin``. ``numbers`` are the module constants (and
+    the closure's) the function read, a number each, as they were when the
+    address was computed, which is the address the facts are about.
     """
 
     fn: Any
@@ -85,6 +87,23 @@ class Piece:
     cells: isl.Set
     address: Any
     buffer: Any
+    numbers: tuple[tuple[str, Any], ...] = ()
+
+    def changed(self) -> tuple[str, Any, Any] | None:
+        """A number the function reads that is no longer what it was, or ``None``."""
+        if not self.numbers:
+            return None
+        fn = self.fn
+        free = dict(zip(fn.__code__.co_freevars, fn.__closure__ or (), strict=False))
+        scope = getattr(fn, "__globals__", {})
+        for name, then in self.numbers:
+            try:
+                now = free[name].cell_contents if name in free else scope[name]
+            except (KeyError, ValueError):
+                now = None
+            if now is not then and now != then:
+                return name, then, now
+        return None
 
     @property
     def label(self) -> str:
@@ -183,7 +202,39 @@ def _piece(fn: Any) -> Piece:
             f"{name}: the address {address} is not a sum of the indices times "
             "numbers, with // and % by numbers, which isl and Lean can state"
         )
-    return Piece(fn, names, cells, address, buffer.bound)
+    return Piece(fn, names, cells, address, buffer.bound, _numbers(fn))
+
+
+def _numbers(fn: Any) -> tuple[tuple[str, Any], ...]:
+    """The numbers ``fn`` reads by name, a module constant or a closure's.
+
+    The names of its code and the code nested in it (a comprehension),
+    looked up in its module and its closure, those whose value is a number:
+    what the address a layout's facts are about depends on besides the
+    indices.
+    """
+    import numbers
+
+    codes = [fn.__code__]
+    names: list[str] = []
+    while codes:
+        code = codes.pop()
+        names.extend(code.co_names)
+        codes.extend(c for c in code.co_consts if hasattr(c, "co_names"))
+    scope = dict(getattr(fn, "__globals__", {}))
+    cells = getattr(fn, "__closure__", None) or ()
+    for name, cell in zip(fn.__code__.co_freevars, cells, strict=False):
+        try:
+            scope[name] = cell.cell_contents
+        except ValueError:  # an empty cell
+            continue
+        names.append(name)
+    out = {}
+    for name in names:
+        value = scope.get(name)
+        if isinstance(value, numbers.Number):
+            out[name] = value
+    return tuple(sorted(out.items()))
 
 
 def _owner(obj: Any, fn: Any) -> str:
@@ -268,7 +319,18 @@ class Layout:
                 f"{', '.join(piece.label for piece in self.pieces)}; call the "
                 "one whose cells you are at"
             )
-        return self.pieces[0].fn(*indices)
+        (piece,) = self.pieces
+        changed = piece.changed()
+        if changed is not None:
+            # the facts are about the address as it was computed when the
+            # layout was declared
+            name, then, now = changed
+            raise LayoutError(
+                f"{self.name} computes with {name}, which was {then} when its "
+                f"facts were stated and is {now} now; declare the layout after "
+                f"{name} is set, and do not change it"
+            )
+        return piece.fn(*indices)
 
     def relation(self) -> isl.Map:
         """The layout as one isl map, ``{ [c0, ...] -> [address] }``."""
