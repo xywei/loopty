@@ -653,8 +653,12 @@ says when one does.
   kernel knows (#159). The written `-1 * u[i]` of an unsigned `u`, which numpy
   refuses, is read as `-u[i]`, which it computes (#168). A numpy scalar on the
   left of a term is traced as the Python number it equals, `np.float64(0.1) *
-  x[i]` as `0.1 * x[i]`, single precision beside a `float32` (#167). See
-  notes 19, 20, 23 and 25 in `docs/loopy-notes.md`.
+  x[i]` as `0.1 * x[i]`, single precision beside a `float32` (#167). Two
+  statements of one kernel whose lowered arithmetic differs only by the dtype
+  of an equal literal are generated with the first one's literal, since loopy
+  maps a subexpression to the result of an equal one, and pymbolic finds a
+  numpy scalar equal to any number of its value (#170). See notes 19, 20, 23
+  and 25 in `docs/loopy-notes.md`.
 - A polyhedral domain is an array's whole index set, so it cannot sit beside
   a dense axis (`Arr[Fin[k], Where[...], Real]` is refused; write the axis as
   a binder of the domain). The pieces of a union have the same number of axes,

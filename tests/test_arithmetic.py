@@ -2262,15 +2262,27 @@ def test_a_spelling_numpy_refuses_at_every_point_is_refused_by_the_trace():
 @kernel
 def numpy_subtrahends(
     k: Arr[Fin[n], Int],  # noqa: F821
-    u: Arr[Fin[n], np.uint64],  # noqa: F821
     y: Arr[Fin[n], Int],  # noqa: F821
     z: Arr[Fin[n], Real],  # noqa: F821
-    w: Arr[Fin[n], np.uint64],  # noqa: F821
 ):
     """numpy scalars subtracted, which pymbolic negates in their own type."""
     for i in k.dom:
         y[i] = k[i] - np.uint8(3) + (k[i] - np.int8(-128))
         z[i] = k[i] - np.uint64(1)
+
+
+@kernel
+def unsigned_subtrahend(
+    u: Arr[Fin[n], np.uint64],  # noqa: F821
+    w: Arr[Fin[n], np.uint64],  # noqa: F821
+):
+    """A ``uint64`` scalar subtracted from a ``uint64``.
+
+    A kernel of its own: in one with ``numpy_subtrahends``'s ``z``, loopy maps
+    ``-1 * np.uint64(1)`` to the ``-1 * np.float64(1.0)`` it met first, which
+    pymbolic finds equal (#170).
+    """
+    for i in u.dom:
         w[i] = u[i] - np.uint64(1)
 
 
@@ -2282,18 +2294,27 @@ def test_a_numpy_scalar_subtracted_is_subtracted_as_written():
     def make() -> dict:
         return {
             "k": np.array([10, -(2**40), 0]),
-            "u": np.array([0, 2**64 - 1, 5], np.uint64),
             "y": np.zeros(3, np.int64),
             "z": np.zeros(3),
-            "w": np.zeros(3, np.uint64),
         }
 
     native = make()
     numpy_subtrahends(**native)
     assert list(native["y"]) == [10 - 3 + 10 + 128, -(2**41) + 125, 125]
     assert list(native["z"]) == [9.0, -(2.0**40) - 1, -1.0]
-    assert list(native["w"]) == [2**64 - 1, 2**64 - 2, 4]
     agrees(numpy_subtrahends, make)
+
+    def unsigned() -> dict:
+        return {
+            "u": np.array([0, 2**64 - 1, 5], np.uint64),
+            "w": np.zeros(3, np.uint64),
+        }
+
+    native = unsigned()
+    unsigned_subtrahend(**native)
+    assert list(native["w"]) == [2**64 - 1, 2**64 - 2, 4]
+    agrees(unsigned_subtrahend, unsigned)
+    assert "u[i] + (uint64_t) (-1 * 1ul)" in emit_code(unsigned_subtrahend)
 
 
 @kernel
