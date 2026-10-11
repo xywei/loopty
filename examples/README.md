@@ -594,8 +594,8 @@ tested   interpreter  composition.py:77  burgers_rhs  the traced term computes w
 ### loopty run examples/composition.py
 
 Each kernel alone, and then the program as one kernel. On the C target the
-temporary is a variable-length array on the stack of the call; see note 16 in
-`../docs/loopy-notes.md`.
+executor allocates the program's array on the heap and passes it after the
+program's own arguments; see note 16 in `../docs/loopy-notes.md`.
 
 ```console
 $ uv run loopty run examples/composition.py

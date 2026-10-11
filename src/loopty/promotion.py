@@ -53,9 +53,12 @@ else, with no cast (``when(i * i < m)`` wrapped round at ``i = 46341``), and
 in a subscript as everywhere else (``x[(i * i) % n]``, #129), unless loopy
 reads the subscript as affine with no division, which it then computes in
 its 32-bit index type whatever is written, and which wraps round to the cell
-it names (:meth:`loopty.lower.ExpressionLowerer._index`). A result outside
-64 bits wraps round compiled and is refused or wraps natively, which is
-numpy's limit too.
+it names (:meth:`loopty.lower.ExpressionLowerer._index`). In any other
+subscript a sum of loop variables and sizes is widened too
+(:meth:`Promotion.index_sum`, #149), since a division or a remainder of it
+uses its value as it is; in a value and in a guard on the loops it is not
+(#162). A result outside 64 bits wraps round compiled and is refused or
+wraps natively, which is numpy's limit too.
 
 The type C computes an operation in is C's, by its integer promotion and its
 usual arithmetic conversions (:func:`_c_result`), and not numpy's, in two

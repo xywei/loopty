@@ -635,8 +635,9 @@ class ExpressionLowerer(Mapper):
     (:mod:`loopty.promotion`): ``k[i] / 2`` of an integer ``k`` is
     ``(double) (k[i]) / 2``, ``0.1`` beside a ``float32`` is ``0.1f``, and
     ``col[i] * col[i]`` of a ``Fin[m]`` array is computed in 64 bits. So is a
-    subscript, ``x[(i * i) % n]`` (#129), unless loopy reads it as affine
-    with no division (:meth:`_index`). A guard that reads no array is a
+    subscript, ``x[(i * i) % n]`` (#129), a sum of loop variables and sizes in
+    it included (#149), unless loopy reads it as affine with no division
+    (:meth:`_index`). A guard that reads no array is a
     condition on the loops, which loopy reads into isl too (note 20 in
     ``docs/loopy-notes.md``), so nothing in one is cast at all: a literal is
     still written in numpy's dtype, an operand is converted by a product with
@@ -713,8 +714,8 @@ class ExpressionLowerer(Mapper):
         simplifies to the affine expression isl gives back, which it computes
         in its 32-bit index type whatever the subscript was written as. One
         it does not read so it generates as it is written. So an index is
-        lowered first with no integer widened (a step converting to an
-        integer dtype left out). Where that left nothing out, it is the
+        lowered first with no integer widened (a step converting an operand
+        to an integer dtype left out). Where that left nothing out, it is the
         index. So it is where loopy reads it as affine and isl's form has no
         division: ``x[2 * i]`` stays readable, and its bounds checked, as it
         always was, and C computes its sums and products modulo ``2**32``
@@ -728,9 +729,18 @@ class ExpressionLowerer(Mapper):
         ``i * i`` wrapped round at ``i = 46341``. loopy's reader declines the
         cast (:mod:`loopty.isl_reading`), so the subscript is generated with
         it. A reduction's domain the first walk recorded is dropped before
-        the second records it again. What the plan leaves in 32 bits, a sum
-        of loop variables and sizes (``x[(i + n) // 2]``), stays so, as a
-        loop bound does (#149).
+        the second records it again.
+
+        What the plan leaves in 32 bits, a sum of loop variables, sizes and
+        small literals (:meth:`loopty.promotion.Promotion.index_sum`), counts
+        as a widening left out: in a subscript lowered again it is widened
+        too (:meth:`_index_sum`), since a division, a remainder or a 64-bit
+        sum of it uses its value as it is, which wraps round once it passes
+        ``2**31``: ``x[(i + k) % m]`` is ``x[loopty_mod_int64((int64_t) (i)
+        + k, (int64_t) (m))]``, and ``x[(i + n) // 2]``, which loopy wrote
+        ``x[(i + n) / 2]``, is widened as well (#149). A conversion of a
+        result back into a narrower type numpy computes in is no widening,
+        and is kept in both walks (:func:`_without_widening`, #157).
         """
         outer = self._widened_index
         domains = getattr(self.lowering, "extra_domains", None)
@@ -875,8 +885,9 @@ class ExpressionLowerer(Mapper):
         did. See note 19 in ``docs/loopy-notes.md``.
 
         Inside a subscript loopy reads as affine with no division an integer
-        is not widened: a step converting to an integer dtype is left out
-        there (:meth:`_index`).
+        is not widened: a step converting an operand to an integer dtype is
+        left out there (:meth:`_index`), and an index sum stays in 32 bits;
+        in any other subscript an index sum is widened (:meth:`_index_sum`).
         In a guard on the loops no operand is cast at all (:meth:`_convert`).
         An integer literal past 64 bits is written in the dtype its step gives
         it, and refused where none does (#140).
@@ -1071,8 +1082,10 @@ class ExpressionLowerer(Mapper):
         ``If``'s condition, so ``acc < 0 ? -acc : acc`` added a term only
         where the sum so far was negative (note 25). Of an integer narrower
         than ``int`` the result is converted back into its type, which C's
-        ``int`` leaves (:meth:`loopty.promotion.Promotion._absolute`). The
-        operand is written three times; a sum in it is computed for each.
+        ``int`` leaves (:meth:`loopty.promotion.Promotion._absolute`), in a
+        subscript too (#157); of an index sum a widened subscript computes in
+        64 bits the sign is bit 63 (#149). The operand is written three
+        times; a sum in it is computed for each.
         """
         promotion = self.lowering.promotion
         native, compiled = (
@@ -1296,7 +1309,9 @@ class Lowering:
     fuse ``a * b + c`` into one multiply-add; it is ``False`` when an output is
     compared bit for bit, see :func:`allows_contraction`. ``temporaries``
     names the arrays declared as loopy temporaries, a program's own arrays
-    (:attr:`loopty.term.Term.temporaries`), which are nobody's argument.
+    (:attr:`loopty.term.Term.temporaries`), which are no argument of the
+    program's; on C the executor passes each as one it allocates
+    (:func:`heap_temporaries`).
 
     ``storage`` says, for every array over a polyhedral domain, which layout
     it is stored in, ``"box"`` or ``"packed"`` (:mod:`loopty.domain`), and
