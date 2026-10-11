@@ -234,6 +234,12 @@ All notable changes to loopty are recorded here. The format follows
   writes it does instead. `examples/assembly.py` is PyOP2's P1 mass action:
   its GPU split refused with the node PyOP2's two triangles share, accepted
   with atomics, and run on the PoCL CPU device (`docs/device-runs.md`).
+  An update may read a window (`Schedule.contract`), `y[node[i]] += f[i +
+  1] - f[i - 1]`, and `atomic` does not lift the order of the window's
+  slots; a window of an array that is updated is refused, since the
+  updates add to the zeros a window drops, with the fix: `contract('f'):
+  added_flux.S0 updates f[j] in place, ...; store each cell once, f[j] =
+  ... (a reduce_sum where the updates run over a loop), or keep f whole`.
 - **Refusals name a pair from the data.** isl cannot follow a cell read
   from an array, `y[cell[c, k]]`: it takes it to be any cell, so the pair it
   picks need not share one. A refused cast through such a cell now names two

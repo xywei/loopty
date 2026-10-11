@@ -1073,8 +1073,11 @@ on the inputs it runs.
   [#214](https://github.com/xywei/loopty/issues/214),
   [#229](https://github.com/xywei/loopty/issues/229),
   [#133](https://github.com/xywei/loopty/issues/133)). `Schedule.contract`
-  refuses an array its producer reads (a recurrence) or that two statements
-  store, and a loop tagged with no order before it; a window that drops a
+  refuses an array its producer reads (a recurrence) or updates (`f[j] +=
+  v` adds to the zeros a window drops: store each cell once, or keep the
+  array whole), or that two statements store, and a loop tagged with no
+  order before it; an update of another array may read a window, and
+  `atomic` does not lift the order of its slots. A window that drops a
   loop is shared by its every value, so putting that loop on a hardware axis
   after it is refused, where one window per work item would do. An array
   kept in a window, and another computed from it where it is read, are

@@ -17,6 +17,10 @@ And windows the review asked about: a second statement that reads further
 back (a window of four), the fused loop run backwards (the window taken
 along the reversed order), and the flux of every row of a 2-D array, the
 window's loop inside the rows' (a shift register shifted in each row).
+
+And a window read by an update: the divergence added into the node each
+point names, ``y[node[i]] += ...``, a scatter-add, whose updates are made
+atomic after the window, and the loop split after both.
 """
 
 from __future__ import annotations
@@ -85,6 +89,16 @@ def row_divergence(f: Arr[Fin[m], Fin[n], Real], rhs: Arr[Fin[m], Fin[n], Real])
                 rhs[e, i] = -(f[e, i + 1] - f[e, i - 1]) / 2
 
 
+@kernel
+def assembled_divergence(
+    f: Arr[Fin[n], Real], node: Arr[Fin[n], Fin[m]], y: Arr[Fin[m], Real]
+):
+    """The divergence at the interior points, added into the node each names."""
+    for i in f.dom:
+        with when((i > 0) & (i + 1 < f.dom.size)):
+            y[node[i]] += -(f[i + 1] - f[i - 1]) / 2
+
+
 @program
 def two_readers(u, rhs, z):
     """The flux, read by the divergence and by a statement two cells back."""
@@ -108,6 +122,14 @@ def bumped_after(u, rhs):
     flux(u, f)
     divergence(f, rhs)
     bump(u)
+
+
+@program
+def burgers_assembled(u, node, y):
+    """The flux, and its divergence added into the nodes: a scatter-add."""
+    f = Arr.zeros_like(u)
+    flux(u, f)
+    assembled_divergence(f, node, y)
 
 
 SIZES = {"n": 16}
@@ -140,6 +162,17 @@ row_registers = (
     Schedule(rows, sizes={"m": 3, "n": 8})
     .fuse("row_flux", "row_divergence", shift=(0, 1))
     .contract("f", registers=True)
+)
+
+#: The divergence added into the nodes, one step behind the flux: ``f`` in
+#: the window of three cells, the updates of ``y`` atomic, and a split after
+#: both, whose cast keeps every slot's order and no order of two updates.
+assembled = (
+    Schedule(burgers_assembled, sizes={"n": 16, "m": 4})
+    .fuse("flux", "assembled_divergence", shift=1)
+    .contract("f")
+    .atomic("y")
+    .split("j", 4)
 )
 
 #: The flux computed where it is read, before ``bump`` writes what it read.

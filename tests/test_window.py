@@ -583,6 +583,124 @@ def test_a_window_and_a_substitution_through_it_are_refused_together() -> None:
 # }}}
 
 
+# {{{ a window and updates
+
+
+@kernel
+def added_flux(u: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):  # noqa: F821
+    """The flux added into the zeros of f: an update of each cell."""
+    for j in u.dom:
+        f[j] += 0.5 * u[j] * u[j]
+
+
+@kernel
+def scattered_flux(
+    u: Arr[Fin[n], Real],  # noqa: F821
+    node: Arr[Fin[n], Fin[n]],  # noqa: F821
+    f: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The flux added into the cell each point names: a scatter-add."""
+    for j in u.dom:
+        f[node[j]] += 0.5 * u[j] * u[j]
+
+
+@program
+def added(u, rhs):
+    """The flux added into f, then its divergence."""
+    f = Arr.zeros_like(u)
+    added_flux(u, f)
+    WINDOWS.divergence(f, rhs)
+
+
+@program
+def scattered(u, node, rhs):
+    """The flux scattered into f, then its divergence."""
+    f = Arr.zeros_like(u)
+    scattered_flux(u, node, f)
+    WINDOWS.divergence(f, rhs)
+
+
+def test_a_window_of_an_array_that_is_updated_is_refused_with_the_fix() -> None:
+    # An update adds to the zeros, which a window drops, and the slot of
+    # f[j] holds f[j - 3] when f[j] is first updated: the window would add
+    # to it. So it is refused, found or given, with the two fixes.
+    fused = Schedule(added, sizes={"n": 16}).fuse("added_flux", "divergence", shift=1)
+    for placement in (None, lambda j: j % 3):
+        with pytest.raises(WindowError) as caught:
+            fused.contract("f", placement)
+        assert str(caught.value).endswith(
+            "added_flux.S0 updates f[j] in place, starting from the zeros f was "
+            "made with, and a window keeps a value stored once, without them; "
+            "store each cell once, f[j] = ... (a reduce_sum where the updates run "
+            "over a loop), or keep f whole"
+        )
+    # through a map, which cell an update adds into is read from an array
+    with pytest.raises(WindowError) as caught:
+        Schedule(scattered, sizes={"n": 16}).contract("f")
+    assert str(caught.value) == (
+        "contract('f'): scattered_flux.S0 updates f[node[j]] in place, starting "
+        "from the zeros f was made with, and a window keeps a value stored once, "
+        "without them; keep f whole"
+    )
+
+
+def assembled_inputs(n: int = 16, m: int = 4) -> dict:
+    """The flux's points, each added into node ``i % m``."""
+    return {
+        "u": Arr.from_numpy(velocity(n)),
+        "node": Arr.from_numpy(np.arange(n) % m),
+        "y": Arr.zeros(m),
+    }
+
+
+def test_an_update_may_read_a_window_which_keeps_its_slots_in_order() -> None:
+    fused = Schedule(WINDOWS.burgers_assembled, sizes={"n": 16, "m": 4}).fuse(
+        "flux", "assembled_divergence", shift=1
+    )
+    schedule = WINDOWS.assembled
+    assert repr(schedule.windows["f"].placement) == "lambda j: j % 3"
+    assert schedule.atomics == frozenset({"y"})
+    assert ("no-clobber", "decided") in facts(schedule)
+    assert facts(schedule)[-2:] == [("bijective", "decided"), ("monotone", "decided")]
+    # atomic before the window takes the same window
+    before = fused.atomic("y").contract("f").windows["f"]
+    assert (repr(before.placement), before.extents) == ("lambda j: j % 3", (3,))
+    # the updates run in the source's order on C: the same bits as the array
+    # stored in full
+    whole = run(fused, assembled_inputs())["y"]
+    assert np.array_equal(np.asarray(run(schedule, assembled_inputs())["y"]), whole)
+    agrees(WINDOWS.burgers_assembled, schedule, assembled_inputs())
+    # ilp leaves the updates of a node in no order, which atomic allows, and
+    # the window's slots in no order, which nothing does
+    with pytest.raises(IllegalCast) as caught:
+        fused.tag(j="ilp")
+    assert "both update y[" in str(caught.value)
+    assert "with atomic('y') before this step" in str(caught.value)
+    fused.atomic("y").tag(j="ilp")
+    for windowed in (fused.contract("f"), fused.contract("f").atomic("y")):
+        with pytest.raises(IllegalCast) as caught:
+            windowed.tag(j="ilp")
+        assert str(caught.value).endswith(
+            "; f is kept in a window over the order this tag drops"
+        )
+
+
+def test_a_window_and_atomic_updates_compile_together_on_opencl(plain_opencl) -> None:
+    schedule = (
+        Schedule(WINDOWS.burgers_assembled, target="opencl", sizes={"n": 16, "m": 4})
+        .fuse("flux", "assembled_divergence", shift=1)
+        .contract("f")
+        .atomic("y")
+    )
+    assert schedule.buildable == (True, ""), schedule.buildable
+    code = emit_code(schedule)
+    assert "f_window[0] = f_window[1];" in code
+    assert "atom_cmpxchg" in code
+
+
+# }}}
+
+
 # {{{ the statements Lean is given, without Lean
 
 
@@ -608,6 +726,18 @@ def test_the_casts_after_a_window_state_its_slots() -> None:
         part.name.startswith("dependence_") and "f.zeros" in part.label
         for part in cast_obligation(monotone.term).parts
     )
+
+
+def test_the_casts_after_a_window_read_by_updates_order_no_two_updates() -> None:
+    pytest.importorskip("lanky.obligations", reason="no statements for Lean here")
+    from loopty.obligations import cast_obligation
+
+    monotone = WINDOWS.assembled.facts()[-1]
+    assert monotone.kind == "monotone"
+    parts = cast_obligation(monotone.term).parts
+    assert any(part.name.startswith("window_") for part in parts)
+    # two updates of a node need no order, and are no class
+    assert not any("y[" in part.label for part in parts)
 
 
 # }}}
