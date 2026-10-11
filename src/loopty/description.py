@@ -177,7 +177,24 @@ class Description:
             raise Unstatable(
                 f"{len(coords)} coordinates for a set of {len(self.dims)} dimensions"
             )
-        placeholders = {dim: Var(f"__loopty_dim{k}") for k, dim in enumerate(self.dims)}
+        # placeholders called like nothing the set, its renamings or what is
+        # put in for it mention, so that none stands for a name of the kernel
+        taken: set[str] = set(self.dims) | set(self.names)
+        for disjunct in self.disjuncts:
+            for text in disjunct.constraints:
+                taken |= _names(text)
+            taken |= set(disjunct.nonneg)
+        taken |= _variables(tuple(expr for _, expr in self.reflected))
+        for keyed in self.renamings:
+            taken |= {old for old, _ in keyed}
+            taken |= _variables(tuple(new for _, new in keyed))
+        if others:
+            taken |= set(others) | _variables(tuple(others.values()))
+        taken |= _variables(tuple(coords))
+        stem = "__loopty_dim"
+        while any(name.startswith(stem) for name in taken):
+            stem += "_"
+        placeholders = {dim: Var(f"{stem}{k}") for k, dim in enumerate(self.dims)}
         by_name = {
             name: placeholders[dim]
             for name, dim in zip(self.names, self.dims, strict=True)
@@ -241,20 +258,24 @@ class MapText:
     The constraints name the loops it takes ``a0, a1, ...`` and the loops it
     makes ``b0, b1, ...``, in the order of ``inputs`` and ``outputs``, as
     :func:`loopty.schedule._reindexing` writes them, so that a new loop may
-    keep the name of the one it replaces; any other name is a size.
+    keep the name of the one it replaces; any other name is a size. ``stems``
+    are the two prefixes, ``a`` and ``b`` unless a size of the text is called
+    like one of those names (``a0``), when :func:`map_text` picks others.
     """
 
     inputs: tuple[str, ...]
     outputs: tuple[str, ...]
     constraints: tuple[str, ...]
+    stems: tuple[str, str] = ("a", "b")
 
     def relation(self, before: Mapping[str, Any], after: Mapping[str, Any]) -> Any:
         """The map as a proposition: the loops ``before`` go to the loops ``after``.
 
         ``before`` and ``after`` give a term for each loop by name.
         """
-        table = {f"a{k}": before[name] for k, name in enumerate(self.inputs)}
-        table |= {f"b{k}": after[name] for k, name in enumerate(self.outputs)}
+        into, out_of = self.stems
+        table = {f"{into}{k}": before[name] for k, name in enumerate(self.inputs)}
+        table |= {f"{out_of}{k}": after[name] for k, name in enumerate(self.outputs)}
 
         def resolve(name: str) -> Any:
             return table.get(name, Var(name))
@@ -285,6 +306,11 @@ def map_text(text: str) -> dict[str | None, MapText]:
         body = body[head.end() :]
     if not (body.startswith("{") and body.endswith("}")):
         raise Unstatable(f"not the text of a map: {text}")
+    # the names the coordinates are written with, apart from every name of
+    # the text: a size called a0 stays the size (Codex)
+    names = set(re.findall(r"[A-Za-z_][A-Za-z_0-9']*", text))
+    into = _fresh_stem("a", names)
+    out_of = _fresh_stem("b", names | {into})
     found_pieces: dict[str | None, list[MapText]] = {}
     for piece in body[1:-1].split(";"):
         found = re.match(
@@ -301,19 +327,21 @@ def map_text(text: str) -> dict[str | None, MapText]:
         pattern = r"[A-Za-z_][A-Za-z_0-9']*"
         if not all(re.fullmatch(pattern, x) for x in (*ins, *outs)):
             raise Unstatable(f"a map piece whose loops are not all names: {piece!r}")
-        table = {x: f"a{k}" for k, x in enumerate(ins)}
+        table = {x: f"{into}{k}" for k, x in enumerate(ins)}
         written = (found.group(4) or "").strip()
         constraints: list[str] = []
         for k, x in enumerate(outs):
             if x in table:
-                constraints.append(f"b{k} = {table[x]}")
-        renamed = {**table, **{x: f"b{k}" for k, x in enumerate(outs)}}
+                constraints.append(f"{out_of}{k} = {table[x]}")
+        renamed = {**table, **{x: f"{out_of}{k}" for k, x in enumerate(outs)}}
         if written:
             words = []
             for token in _tokens(written):
                 words.append(renamed.get(token, token))
             constraints.append(" ".join(words))
-        found_pieces.setdefault(name, []).append(MapText(ins, outs, tuple(constraints)))
+        found_pieces.setdefault(name, []).append(
+            MapText(ins, outs, tuple(constraints), (into, out_of))
+        )
     out: dict[str | None, MapText] = {}
     for name, pieces in found_pieces.items():
         first = pieces[0]
@@ -329,8 +357,32 @@ def map_text(text: str) -> dict[str | None, MapText]:
             "(" + (" and ".join(f"({c})" for c in p.constraints) or "0 = 0") + ")"
             for p in pieces
         )
-        out[name] = MapText(first.inputs, first.outputs, (either,))
+        out[name] = MapText(first.inputs, first.outputs, (either,), first.stems)
     return out
+
+
+def _fresh_stem(stem: str, names: set[str]) -> str:
+    """``stem``, or ``stem_``, ``stem__``, ...: one no ``stem<k>`` of ``names`` uses."""
+    while any(re.fullmatch(re.escape(stem) + r"\d+", name) for name in names):
+        stem += "_"
+    return stem
+
+
+def _variables(expr: Any) -> set[str]:
+    """The names of the variables of a term."""
+    if isinstance(expr, prim.Variable):
+        return {expr.name}
+    if isinstance(expr, prim.ExpressionNode):
+        out: set[str] = set()
+        for arg in init_args(expr):
+            out |= _variables(arg)
+        return out
+    if isinstance(expr, tuple | list):
+        out = set()
+        for item in expr:
+            out |= _variables(item)
+        return out
+    return set()
 
 
 def map_text_of(obj: Any) -> MapText | None:

@@ -357,6 +357,21 @@ def test_an_affine_map_given_as_text_keeps_its_pieces() -> None:
         )
 
 
+def test_a_size_called_like_a_coordinate_stays_a_size() -> None:
+    # Codex: a size a0 read as the map's first input, and a size called like
+    # the reader's placeholder read as the coordinate it stands for
+    from loopty.description import Description, Disjunct
+
+    found = map_text("[a0] -> { [i] -> [j] : j = a0 - i }")[None]
+    assert found.stems == ("a_", "b")
+    relation = render(found.relation({"i": Var("x")}, {"j": Var("y")}))
+    assert "a0" in relation and "x" in relation and "y" in relation, relation
+    described = Description(
+        dims=("i",), disjuncts=(Disjunct(("0 <= i < __loopty_dim0",)),)
+    )
+    assert render(described.predicate([Var("x")])) == "0 <= x and x < __loopty_dim0"
+
+
 def test_a_cast_is_stated_one_part_per_dependence_class() -> None:
     schedule = stencil().skewed()
     monotone = schedule.facts()[-1]
