@@ -238,6 +238,21 @@ class Layout:
             return self._shown
         return _owner(self, self.pieces[0].fn)
 
+    def __call__(self, *indices: Any) -> Any:
+        """The address of a cell, as the layout's one function computes it.
+
+        So a kernel reads through the layout it declares, ``flat[dof_array(e,
+        a, b, c)]``, natively and traced. A layout of pieces has a function
+        per piece, and each is called as itself.
+        """
+        if len(self.pieces) != 1:
+            raise LayoutError(
+                f"{self.name} has pieces, "
+                f"{', '.join(piece.label for piece in self.pieces)}; call the "
+                "one whose cells you are at"
+            )
+        return self.pieces[0].fn(*indices)
+
     def relation(self) -> isl.Map:
         """The layout as one isl map, ``{ [c0, ...] -> [address] }``."""
         out: isl.Map | None = None
@@ -263,6 +278,8 @@ class Layout:
         ``dim_tags``, ``"N3,N0,N1,N2"``: a nesting level per axis, ``N0`` the
         fastest (see :func:`dim_tags`).
         """
+        import sys
+
         if isinstance(other, str):
             other = dim_tags(other, self)
         if not isinstance(other, Layout):
@@ -270,7 +287,9 @@ class Layout:
                 f"same_as takes a layout or loopy's dim_tags as a string, "
                 f"'N1,N0', not {other!r}"
             )
-        return SameLayout(self, other)
+        # the claim is written where same_as is called, and named by that line
+        caller = sys._getframe(1)
+        return SameLayout(self, other, line=caller.f_lineno)
 
     def facts(self) -> tuple[Fact, ...]:
         """The layout's three facts: in bounds, one for one, onto its buffer."""
@@ -367,7 +386,9 @@ class Layout:
 class SameLayout:
     """The claim that two layouts store every cell at the same address."""
 
-    def __init__(self, first: Layout, second: Layout) -> None:
+    def __init__(
+        self, first: Layout, second: Layout, line: int | None = None
+    ) -> None:
         if first.rank != second.rank:
             raise LayoutError(
                 f"{first.name} has cells of rank {first.rank} and {second.name} of "
@@ -376,9 +397,9 @@ class SameLayout:
         self.first = first
         self.second = second
         self.__wrapped__ = first.pieces[0].fn
-        self.where = first.where
         self.module = first.module
-        self.line = first.line
+        self.line = first.line if line is None else line
+        self.where = f"{first.where.rsplit(':', 1)[0]}:{self.line}"
         self._facts: tuple[Fact, ...] | None = None
         _register(self)
 
@@ -409,7 +430,7 @@ class SameLayout:
                 apart.wrap(),
                 description=(
                     f"cells {self.first.name} and {second} store at different "
-                    "addresses, with the address one of them stores it at"
+                    "addresses, given with the address one of the two has for it"
                 ),
                 labels=labels,
                 lean=Stated(partial(layout_same_obligation, self.first, self.second)),

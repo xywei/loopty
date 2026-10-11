@@ -795,13 +795,14 @@ def _isl_facts(path: Path) -> list[Any]:
     """Every fact of a file with a statement for Lean: kernels', programs', casts'."""
     from loopty.cli import collect
     from loopty.kernel import Program
+    from loopty.layout import Layout, SameLayout
 
     module = load(path)
     facts = []
     for found in kernels_of(module):
         facts.extend(found.facts())
     for value in vars(module).values():
-        if isinstance(value, Program):
+        if isinstance(value, Program | Layout | SameLayout):
             facts.extend(value.facts())
     schedules, _ = collect(module, [])
     for schedule in schedules:
@@ -999,6 +1000,26 @@ def test_every_refused_cast_is_proved_false_at_isls_pair(lean: Any) -> None:
         said = fact.provenance.get("lean_counterexample", "")
         assert said.startswith("Lean confirmed the counterexample"), (label, said)
         assert fact.provenance["lean_refuted_by"] in ("decide", "omega"), label
+
+
+def test_lean_confirms_a_layouts_refutation_at_isls_cell(lean: Any) -> None:
+    # The DOFArray in C order inside the element, and a layout that folds two
+    # cells onto one address: isl refutes each with a point, and Lean proves
+    # the claim false there (gap 7).
+    from loopty import IslOracle, layout
+
+    layouts = load(EXAMPLES / "storage_layouts.py")
+    (wrong,) = layouts.dof_array.same_as("N3,N2,N1,N0").facts()
+
+    def folded(i: Fin[4]) -> Fin[2]:  # noqa: F821
+        return i // 2
+
+    _bounds, injective, _onto = layout(folded).facts()
+    for fact in (wrong, injective):
+        refuted = IslOracle().establish(fact)
+        assert refuted.status is Status.REFUTED, fact.statement
+        said = lean.establish(refuted).provenance.get("lean_counterexample", "")
+        assert said.startswith("Lean confirmed the counterexample"), said
 
 
 class _Planted:
