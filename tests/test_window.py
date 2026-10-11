@@ -503,9 +503,14 @@ def test_a_loop_run_backwards_takes_its_window_and_a_window_refuses_it() -> None
         WINDOWS.fused.affine(WINDOWS.REVERSED).contract("f", registers=True)
 
 
-@pytest.mark.parametrize("tag", ["l.0", "g.0", "ilp", "vec"])
-def test_the_loop_of_a_window_on_a_parallel_axis_is_refused(tag: str) -> None:
-    on_device = Schedule(WINDOWS.burgers, target="opencl", sizes={"n": 16}).fuse(
+@pytest.mark.parametrize(
+    ("target", "tag"),
+    [("c", "ilp"), ("opencl", "l.0"), ("opencl", "g.0"), ("opencl", "vec")],
+)
+def test_the_loop_of_a_window_on_a_parallel_axis_is_refused(target, tag) -> None:
+    if target == "opencl":
+        pytest.importorskip("pyopencl")
+    on_device = Schedule(WINDOWS.burgers, target=target, sizes={"n": 16}).fuse(
         "flux", "divergence", shift=1
     )
     with pytest.raises(IllegalCast) as caught:

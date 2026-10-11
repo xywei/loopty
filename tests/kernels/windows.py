@@ -172,3 +172,29 @@ def rejected_after_window() -> str:
     except IllegalCast as refused:
         return str(refused)
     raise AssertionError("the window of three cells is too small one step later")
+
+
+def rejected_short_window() -> str:
+    """A window of three cells, one short of the reader of ``f[j - 3]``."""
+    from loopty.schedule import IllegalCast
+
+    try:
+        (
+            Schedule(two_readers, sizes=SIZES)
+            .fuse("flux", "divergence_and_lag", shift=1)
+            .contract("f", lambda j: j % 3)
+        )
+    except IllegalCast as refused:
+        return str(refused)
+    raise AssertionError("the second reader reads a cell a window of three lost")
+
+
+def rejected_reversal_after_window() -> str:
+    """The loop run backwards after the window: each slot overwritten first."""
+    from loopty.schedule import IllegalCast
+
+    try:
+        windowed.affine(REVERSED)
+    except IllegalCast as refused:
+        return str(refused)
+    raise AssertionError("a window keeps the order it was taken in")

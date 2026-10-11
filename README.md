@@ -1033,13 +1033,17 @@ on the inputs it runs.
 - **A window is an edge's, between one writer and its readers**
   ([#213](https://github.com/xywei/loopty/issues/213),
   [#214](https://github.com/xywei/loopty/issues/214),
+  [#229](https://github.com/xywei/loopty/issues/229),
   [#133](https://github.com/xywei/loopty/issues/133)). `Schedule.contract`
   refuses an array its producer reads (a recurrence) or that two statements
   store, and a loop tagged with no order before it; a window that drops a
   loop is shared by its every value, so putting that loop on a hardware axis
-  after it is refused, where one window per work item would do. A
-  substitution through two intermediates, one computed from the other, is
-  refused: substitute one of them.
+  after it is refused, where one window per work item would do. An array
+  kept in a window, and another computed from it where it is read, are
+  refused together, in either order: `substitute` moves the reads of the
+  window to where the other is read. A substitution through two
+  intermediates, one computed from the other, is refused: substitute one of
+  them.
 - **Some facts are isl's alone** ([docs/lean-checks.md](https://github.com/xywei/loopty/blob/main/docs/lean-checks.md#what-stays-isls)).
   Where Lean is installed, a cast that puts a loop on a hardware axis and a
   cast through the part of a tile isl computes stay `decided isl`: loopty

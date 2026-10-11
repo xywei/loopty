@@ -832,7 +832,7 @@ native: the program agrees with the numpy slices: True
 
 refused: fuse(flux, divergence) illegal: instance flux.S0[j=2] writes f[2] read by divergence.S0[i=1] scheduled earlier (at n=16, as hinted); fuse('flux', 'divergence', shift=1) runs every dependence between them forward
 
-refused: contract('f', lambda j: j % 2) illegal: instance divergence.S0[i=14] reads f[13], which flux.S0[j=13] stored in slot 1, after flux.S0[j=15] stored f[15] there (at n=16, as hinted)
+refused: contract('f', lambda j: j % 2) illegal: instance divergence.S0[i=14] reads f[13], which flux.S0[j=13] stored in slot 1, after flux.S0[j=15] stored f[15] there (at n=16, as hinted); contract('f') finds the smallest window that keeps every read, lambda j: j % 3
 
 accepted: Schedule(burgers_rhs, target='c').fuse(flux, divergence, shift=1)
   decided  isl  fuse(flux, divergence, shift=1) renames the instances of burgers_rhs one for one
@@ -1213,7 +1213,7 @@ sumpy's storage index, (a, b) -> address:
   box 0 read through it: R[0, 1, 3] = 8 (address 8)
 grudge's DOFArray through dof_array is modepy's reshape: True
 refuted: dof_array stores every cell where dim_tags N3,N2,N1,N0 does
-  [e=0, a=1, b=0, c=2, address=19] is one of the cells dof_array and dim_tags N3,N2,N1,N0 store at different addresses, given with the address one of the two has for it at [ne=1]
+  dof_array stores (e=0, a=1, b=0, c=2) at 19, and dim_tags N3,N2,N1,N0 at 11 (at ne=1)
 ```
 
 ### lanky check examples/storage_layouts.py

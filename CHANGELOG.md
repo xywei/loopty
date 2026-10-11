@@ -42,7 +42,14 @@ All notable changes to loopty are recorded here. The format follows
   and the time vectors of the order. `examples/fusion.py` and
   `examples/sum_factorization.py` show it; an array its producer reads, or
   that two statements store, and a window per work item are not done (#213,
-  #214).
+  #214). A refused window names the fix, `contract('f') finds the smallest
+  window that keeps every read, lambda j: j % 3`, and a step that breaks one
+  the instance that would now overwrite a slot first. A window and a
+  substitution of an array computed from it are refused together, in either
+  order (#229): the substitution moves the window's reads. Every window of the
+  tests computes the bits the array stored in full does, on C and on an
+  OpenCL device, and a shift register inside an outer loop shifts in each of
+  its steps.
 - **Checked layout maps** (`loopty.layout`): a layout is a Python function
   from a cell's indices to its address, whose annotations say which cells
   (one `Fin` per axis, or one parameter over a `Where`) and which buffer
@@ -66,7 +73,9 @@ All notable changes to loopty are recorded here. The format follows
   reads through it. `examples/storage_layouts.py` checks sumpy's
   compressed-Taylor storage index in two pieces, and grudge #418's
   `N3,N0,N1,N2` against modepy's F-order reshape of the DOFArray; the
-  reshape in C order, `N3,N2,N1,N0`, is refuted with a cell. A buffer of
+  reshape in C order, `N3,N2,N1,N0`, is refuted with a cell, in words:
+  `dof_array stores (e=0, a=1, b=0, c=2) at 19, and dim_tags N3,N2,N1,N0 at
+  11`; so are two cells at one address and an address with none. A buffer of
   several axes, and an argument that names its layout, are not done (#216).
 
 - **Constant tables** (`loopty.table`): quadrature weights, a basis
