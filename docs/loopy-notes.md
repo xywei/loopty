@@ -1417,19 +1417,20 @@ the negation of `2147483648`, a `long`, so `k[i] + -2147483648` of an
 `int32` `k` was computed in 64 bits; loopty's C target writes it as
 `(-2147483647 - 1)`, and the smallest `int64` as `(-9223372036854775807l -
 1)` (`operations.NumpyArithmetic.map_constant`). Its OpenCL target does not:
-OpenCL C has no `-fwrapv`, and PoCL's compiler and Intel's fold `k[i] +
-(-2147483647 - 1)` into `k[i] | (-2147483647 - 1)`, which is the sum where it
-cannot overflow, so loopy's literal, a `long`, is left there, with which the
-sum does not overflow. pymbolic builds `x[i] - 0` as `x[i] + 0` and `x[i] - i`
-as `x[i] + -1 * i`, the integer `0` at `i = 0`, and C's `-0.0 + 0` is `0.0`
-where numpy's `-0.0 - 0` is `-0.0`: a real difference writes a subtracted
-integer zero as `-0.0` in its precision (`lower._subtracted_zero`) and
-converts a subtracted Python int into the real's type before negating it,
-`-1.0 * (double) (i)` (`Promotion._subtracted`). A truth value subtracted,
-`k[i] - True`, is kept as written, as `-1 * True`, so that `b[i] - True` of a
-truth value is refused as a difference of two; pymbolic takes no truth value
-as an operand, and loopy failed on it with an `AssertionError`, so the trace
-refuses it, naming the integer.
+OpenCL C has no `-fwrapv`, and an OpenCL compiler (PoCL's, for one) folds
+`k[i] + (-2147483647 - 1)` into `k[i] | (-2147483647 - 1)`, which is the sum
+where it cannot overflow, so loopy's literal, a `long`, is left there, with
+which the sum does not overflow. pymbolic builds `x[i] - 0` as `x[i] + 0` and
+`x[i] - i` as `x[i] + -1 * i`, the integer `0` at `i = 0`, and C's `-0.0 + 0`
+is `0.0` where numpy's `-0.0 - 0` is `-0.0`: a real difference writes a
+subtracted integer zero as `-0.0` in its precision
+(`lower._subtracted_zero`) and converts a subtracted Python int into the
+real's type before negating it, `-1.0 * (double) (i)`
+(`Promotion._subtracted`). A truth value subtracted, `k[i] - True`, is kept
+as written, as `-1 * True`, so that `b[i] - True` of a truth value is refused
+as a difference of two; pymbolic takes no truth value as an operand, and
+loopy failed on it with an `AssertionError`, so the trace refuses it, naming
+the integer.
 
 **What it does not cover.** A subscript's arithmetic is left in the type loopy
 computes it in, neither widened nor converted back (#129, #157). An `If`,

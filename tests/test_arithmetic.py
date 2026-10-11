@@ -2186,7 +2186,7 @@ def test_the_smallest_int64_is_written_as_c_writes_it():
 
 
 def test_the_smallest_int32_is_left_to_loopy_on_opencl():
-    # OpenCL C has no -fwrapv, and its compilers (PoCL's, Intel's) fold k[i]
+    # OpenCL C has no -fwrapv, and its compilers (PoCL's, for one) fold k[i]
     # + (-2147483647 - 1) of an int32 k into k[i] | (-2147483647 - 1), which
     # a sum that cannot overflow is: -1 at k[i] = -1, where numpy wraps round
     # to 2**31 - 1. loopy's literal, a long, computes that sum without
