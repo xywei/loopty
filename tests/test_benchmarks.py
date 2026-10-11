@@ -76,3 +76,48 @@ def test_every_variant_is_accepted_and_builds(plain_opencl, op: str) -> None:
             assert {fact.status.value for fact in launch.facts} == {"decided"}
         for ours, plain in zip(mine, theirs):
             assert _axes(ours.kernel) == _axes(plain.kernel), shape.name
+
+
+def test_the_report_matches_copies_by_mesh_and_device_and_drops_wrong_rows(
+    tmp_path, capsys
+) -> None:
+    import csv
+
+    driver = _driver()
+    device = {"device": "a GPU", "driver": "1"}
+    copy = tmp_path / "copy.csv"
+    with copy.open("w", newline="") as handle:
+        writer = csv.DictWriter(
+            handle, ["operator", "order", "elements", "device", "driver", "bandwidth"]
+        )
+        writer.writeheader()
+        # 104 bytes a node in a millisecond: 100% of the roof below
+        writer.writerow(
+            {
+                "operator": "weak_grad",
+                "order": 3,
+                "elements": 2,
+                **device,
+                "bandwidth": 104 * 512 / 1e-3,
+            }
+        )
+    rows = tmp_path / "rows.csv"
+    with rows.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, driver["FIELDS"], extrasaction="ignore")
+        writer.writeheader()
+        base = {"operator": "weak_grad", "order": 3, "ndofs": 512, "median_s": 1e-3}
+        writer.writerow(
+            {**base, "variant": "right", "elements": 2, "agree": "1e-16", **device}
+        )
+        writer.writerow(
+            {**base, "variant": "other mesh", "elements": 4, "agree": "1e-16", **device}
+        )
+        writer.writerow(
+            {**base, "variant": "wrong", "elements": 2, "agree": "0.5", **device}
+        )
+    driver["main"](["report", str(copy), str(rows)])
+    out = capsys.readouterr().out
+    assert "left out, it disagrees with numpy: wrong" in out
+    assert "| right | 0.00051 (100%) |" in out
+    assert "| other mesh | 0.00051 |" in out
+    assert "| wrong |" not in out

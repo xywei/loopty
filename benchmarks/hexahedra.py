@@ -628,18 +628,31 @@ OPERATORS = {
 }
 
 
-def variants(op: str) -> dict[str, Callable[[dict[str, Any], int, int], list[Launch]]]:
-    """Each variant of ``op``, loopty's and plain loopy's, by name."""
-    out: dict[str, Callable[[dict[str, Any], int, int], list[Launch]]] = {}
+#: How far a variant's result may be from numpy's, relative to its largest
+#: value, before it is refused rather than timed: the sums are of at most
+#: 3n terms, and every variant measured agrees to below 1e-15.
+AGREEMENT = 1e-12
+
+
+def variants(op: str) -> dict[str, tuple[Callable[..., list[Launch]], Shape]]:
+    """Each variant of ``op``, loopty's and plain loopy's, by name, with its shape."""
+    out: dict[str, tuple[Callable[..., list[Launch]], Shape]] = {}
     for shape in SHAPES:
-        out[f"loopty, {shape.name}"] = lambda demo, order, ne, shape=shape: (
-            loopty_launches(demo, op, shape, order, ne)
+        out[f"loopty, {shape.name}"] = (
+            lambda demo, order, ne, shape=shape: loopty_launches(
+                demo, op, shape, order, ne
+            ),
+            shape,
         )
-        out[f"loopy, {shape.name}"] = lambda demo, order, ne, shape=shape: (
-            plain_launches(op, shape, order, ne)
+        out[f"loopy, {shape.name}"] = (
+            lambda demo, order, ne, shape=shape: plain_launches(op, shape, order, ne),
+            shape,
         )
-        out[f"loopy as lowered, {shape.name}"] = lambda demo, order, ne, shape=shape: (
-            plain_launches(op, shape, order, ne, MIRROR)
+        out[f"loopy as lowered, {shape.name}"] = (
+            lambda demo, order, ne, shape=shape: plain_launches(
+                op, shape, order, ne, MIRROR
+            ),
+            shape,
         )
     return out
 
@@ -808,7 +821,7 @@ def mode_loopty(options: argparse.Namespace) -> None:
         for name in options.operators:
             expected = reference(arrays, name, sample)
             out = "grad" if name == "weak_grad" else "div"
-            for variant, build in variants(name).items():
+            for variant, (build, shape) in variants(name).items():
                 if options.only and not any(word in variant for word in options.only):
                     continue
                 try:
@@ -834,6 +847,14 @@ def mode_loopty(options: argparse.Namespace) -> None:
                     else arrays[out].get()[sample]
                 )
                 gap = float(np.abs(got - expected).max() / np.abs(expected).max())
+                if not gap <= AGREEMENT:
+                    # a wrong answer is not a throughput: said, and not timed
+                    print(
+                        f"{name} order {order} {variant}: DISAGREES with numpy by "
+                        f"{gap:.1e} of the largest value, so it is not timed",
+                        flush=True,
+                    )
+                    continue
                 timing = clock(queue, call, options.warmup, options.reps, options.batch)
                 ndofs = ne * (order + 1) ** 3
                 row = {
@@ -849,7 +870,11 @@ def mode_loopty(options: argparse.Namespace) -> None:
                     "max_s": timing.high,
                     "kernel_s": timing.kernel,
                     "agree": f"{gap:.1e}",
-                    "contraction": "compiler default",
+                    "contraction": (
+                        "compiler default"
+                        if shape.contraction
+                        else "off: #pragma OPENCL FP_CONTRACT OFF"
+                    ),
                     **meta,
                 }
                 writer.writerow(row)
@@ -1153,7 +1178,7 @@ def mode_agree(options: argparse.Namespace) -> None:
         ):
             arrays[name2] = cla.zeros(queue, shape, np.float64)
         for name in ("weak_grad", "weak_div"):
-            build = variants(name)["loopty, element per group"]
+            build, _shape = variants(name)["loopty, element per group"]
             for launch in build(demo, order, ne):
                 launch.executor(context)(queue, arrays)
             out = "grad" if name == "weak_grad" else "div"
@@ -1167,12 +1192,20 @@ def mode_agree(options: argparse.Namespace) -> None:
 def mode_report(options: argparse.Namespace) -> None:
     """GDOFs/s and % of the copy roof, per operator, order and variant."""
     rows: list[dict[str, str]] = []
-    copies: dict[tuple[str, str], float] = {}
+    copies: dict[tuple[str, ...], float] = {}
+
+    def matched(row: dict[str, str]) -> tuple[str, ...]:
+        # size-matched: the same operator, order and mesh, on the same device
+        keys = ("operator", "order", "elements", "device", "driver")
+        return tuple(row[key] for key in keys)
+
     for path in options.files:
         with open(path, newline="") as handle:
             for row in csv.DictReader(handle):
                 if "bandwidth" in row:
-                    copies[(row["operator"], row["order"])] = float(row["bandwidth"])
+                    copies[matched(row)] = float(row["bandwidth"])
+                elif row["agree"] and not float(row["agree"]) <= AGREEMENT:
+                    print(f"left out, it disagrees with numpy: {row['variant']}")
                 else:
                     rows.append(row)
     for name, op in OPERATORS.items():
@@ -1198,7 +1231,7 @@ def mode_report(options: argparse.Namespace) -> None:
                 ndofs = int(r["ndofs"])
                 rate = ndofs / seconds / 1e9
                 text = f"{rate:.2f}" if rate >= 0.1 else f"{rate:.2g}"
-                bandwidth = copies.get((name, order))
+                bandwidth = copies.get(matched(r))
                 if bandwidth:
                     roof = required_bytes(op, ndofs) / (bandwidth * seconds)
                     text += (
