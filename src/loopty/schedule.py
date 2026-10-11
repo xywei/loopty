@@ -4908,7 +4908,7 @@ class Schedule:
                     )
                 if isinstance(plan, str):
                     if registers:
-                        raise ValueError(f"{shown}: registers=True: {plan}")
+                        raise ValueError(f"{shown}: {plan}")
                 else:
                     register = plan
             # the loops the window's loop is nested in, outermost first: its
