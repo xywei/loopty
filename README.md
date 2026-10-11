@@ -720,10 +720,10 @@ release; the CHANGELOG says when one does.
   element sort for it, and every call has to read a ragged family's rows
   through the same offsets; a loop in the body whose trip count is an
   argument (a host loop) is refused, and so are an array made like a ragged
-  one, an array made over a union of pieces, which is stored as one box,
-  and an array over a domain of a `Fin[m]` or `Nat` element sort that an
-  earlier call wrote and a later one is given, whose cells no checked point
-  reads yet. A
+  one, an array made over a union of pieces, which is stored as one box
+  (#208), and an array over a domain of a `Fin[m]` or `Nat` element sort
+  that an earlier call wrote and a later one is given, whose cells no
+  checked point reads yet (#209). A
   temporary made like a parameter, `Arr.zeros_like(u)`, has `u`'s dtype
   natively, so the compiled program refuses a `u` whose dtype does not hold
   what the compiled temporary holds: `float64` for `Real`, the dtype itself
@@ -821,16 +821,16 @@ release; the CHANGELOG says when one does.
   arrays, rows of dense, ragged and table arrays, the cells an index row
   picks, scalars and functions; a row of an array over a domain is not
   passed (a whole one is), and the cells a gather picks are a copy natively,
-  so a called kernel does not write them. Two arguments over one array
+  so a called kernel does not write them (#205). Two arguments over one array
   have to be two rows of it, decided at every call; a whole array and a
   part of it are refused. A rule's claim about its value (`-> Real & (...)`)
-  is refused: state it as a theorem about the rule. A call made inside a
-  sum over `Fin[...]` of a size, rather than over an array's `.dom`, has
-  points the trace does not see, and its facts are `assumed`. A rule that
+  is refused: state it as a theorem about the rule (#206). A call made
+  inside a sum over `Fin[...]` of a size, rather than over an array's `.dom`,
+  has points the trace does not see, and its facts are `assumed` (#207). A rule that
   takes a function is compiled where it is called, not on its own. A domain
   declared outside an annotation, for `Arr.zeros(TRIANGLE, ...)` in a
   program, names its binders and sizes as lanky variables, `i, j, n =
-  Var("i"), Var("j"), Var("n")`.
+  Var("i"), Var("j"), Var("n")` (#210).
 - `loopty.math` has eight functions (#184), and numpy's own functions on a
   traced value are refused rather than read as them (#195). A function
   only a guard calls is refused when lowered: loopy resolves a function by
