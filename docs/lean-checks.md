@@ -236,9 +236,9 @@ and test kernel to Lean, the casts each file's `rejected*` functions refuse
 included, from an empty proof cache. Its report, with Lean v4.29.1 (a
 file's time is Lean's on all its facts, a part's on one declaration):
 
-Of 712 facts isl decides in 22 files, Lean proved 682; 9 stay decided; 21 refuted facts have their negation proved at isl's counterexample. 348 more facts are not isl's to decide (by type, tested, assumed).
+Of 721 facts isl decides in 22 files, Lean proved 690; 9 stay decided; 22 refuted facts have their negation proved at isl's counterexample. 349 more facts are not isl's to decide (by type, tested, assumed).
 
-Not all of them are equally hard. The 108 `ordering` facts, that the source
+Not all of them are equally hard. The 110 `ordering` facts, that the source
 order runs every dependence forward, hold by the definition of a dependence
 (two instances that touch one cell, which the source runs in that order), and
 Lean's proof of them checks only that the printer states the source order the
@@ -246,44 +246,44 @@ same way twice. The others are claims isl could get wrong.
 
 | file | isl facts | proved | decided, not proved | refuted, negation proved | Lean time |
 |---|---:|---:|---:|---:|---:|
-| `examples/calls.py` | 44 | 44 | 0 | 0 | 2.3 s |
-| `examples/composition.py` | 10 | 10 | 0 | 0 | 0.2 s |
-| `examples/fusion.py` | 16 | 12 | 3 | 1 | 0.3 s |
-| `examples/layer_potential.py` | 15 | 15 | 0 | 0 | 0.8 s |
-| `examples/p2p.py` | 19 | 19 | 0 | 0 | 1.4 s |
-| `examples/pairs.py` | 14 | 14 | 0 | 0 | 0.4 s |
-| `examples/quadrature.py` | 12 | 12 | 0 | 0 | 0.6 s |
-| `examples/reshape_layouts.py` | 16 | 16 | 0 | 0 | 0.8 s |
-| `examples/spmv.py` | 18 | 18 | 0 | 0 | 0.4 s |
-| `examples/stencil_skew.py` | 10 | 9 | 0 | 1 | 1.5 s |
-| `examples/sum_factorization.py` | 14 | 13 | 0 | 1 | 1.0 s |
-| `examples/travel.py` | 47 | 45 | 2 | 0 | 2.6 s |
-| `examples/wavefront_acoustic.py` | 24 | 21 | 0 | 3 | 7.9 s |
-| `tests/kernels/axpy.py` | 4 | 4 | 0 | 0 | 0.0 s |
-| `tests/kernels/calls.py` | 89 | 84 | 0 | 5 | 2.3 s |
-| `tests/kernels/domains.py` | 90 | 89 | 0 | 1 | 3.7 s |
+| `examples/calls.py` | 44 | 44 | 0 | 0 | 3.1 s |
+| `examples/composition.py` | 10 | 10 | 0 | 0 | 0.4 s |
+| `examples/fusion.py` | 16 | 12 | 3 | 1 | 0.4 s |
+| `examples/layer_potential.py` | 15 | 15 | 0 | 0 | 1.2 s |
+| `examples/p2p.py` | 19 | 19 | 0 | 0 | 2.4 s |
+| `examples/pairs.py` | 14 | 14 | 0 | 0 | 0.7 s |
+| `examples/quadrature.py` | 12 | 12 | 0 | 0 | 0.9 s |
+| `examples/reshape_layouts.py` | 16 | 16 | 0 | 0 | 1.3 s |
+| `examples/spmv.py` | 18 | 18 | 0 | 0 | 0.6 s |
+| `examples/stencil_skew.py` | 10 | 9 | 0 | 1 | 2.0 s |
+| `examples/sum_factorization.py` | 14 | 13 | 0 | 1 | 1.6 s |
+| `examples/travel.py` | 47 | 45 | 2 | 0 | 2.7 s |
+| `examples/wavefront_acoustic.py` | 24 | 21 | 0 | 3 | 9.8 s |
+| `tests/kernels/axpy.py` | 4 | 4 | 0 | 0 | 0.1 s |
+| `tests/kernels/calls.py` | 98 | 92 | 0 | 6 | 3.3 s |
+| `tests/kernels/domains.py` | 90 | 89 | 0 | 1 | 3.6 s |
 | `tests/kernels/out_of_bounds.py` | 4 | 3 | 0 | 1 | 0.1 s |
-| `tests/kernels/program_domains.py` | 15 | 15 | 0 | 0 | 0.6 s |
+| `tests/kernels/program_domains.py` | 15 | 15 | 0 | 0 | 0.7 s |
 | `tests/kernels/spmv_min.py` | 14 | 14 | 0 | 0 | 0.0 s |
 | `tests/kernels/stencil.py` | 5 | 5 | 0 | 0 | 0.0 s |
-| `tests/kernels/travel.py` | 64 | 61 | 2 | 1 | 1.2 s |
-| `tests/kernels/travel_wrong.py` | 168 | 159 | 2 | 7 | 5.2 s |
+| `tests/kernels/travel.py` | 64 | 61 | 2 | 1 | 1.6 s |
+| `tests/kernels/travel_wrong.py` | 168 | 159 | 2 | 7 | 7.4 s |
 
 By kind:
 
 | kind | isl facts | proved | decided, not proved | refuted, negation proved | parts | median s per part | slowest part |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| argument | 2 | 1 | 0 | 1 | 1 | 0.048 | 0.05 s |
-| bijective | 22 | 21 | 1 | 0 | 76 | 0.081 | 0.46 s |
-| definedness | 22 | 21 | 1 | 0 | 25 | 0.062 | 0.15 s |
-| disjoint-writes | 130 | 130 | 0 | 0 | 130 | 0.009 | 0.07 s |
-| distinct-arguments | 2 | 1 | 0 | 1 | 1 | 0.018 | 0.02 s |
-| element-sort | 28 | 20 | 0 | 8 | 20 | 0.024 | 0.05 s |
-| in-bounds | 348 | 343 | 0 | 5 | 387 | 0.025 | 1.02 s |
+| argument | 2 | 1 | 0 | 1 | 1 | 0.029 | 0.03 s |
+| bijective | 22 | 21 | 1 | 0 | 76 | 0.105 | 0.54 s |
+| definedness | 22 | 21 | 1 | 0 | 25 | 0.077 | 0.13 s |
+| disjoint-writes | 132 | 131 | 0 | 1 | 131 | 0.015 | 0.10 s |
+| distinct-arguments | 2 | 1 | 0 | 1 | 1 | 0.022 | 0.02 s |
+| element-sort | 28 | 20 | 0 | 8 | 20 | 0.034 | 0.07 s |
+| in-bounds | 353 | 348 | 0 | 5 | 392 | 0.034 | 1.27 s |
 | layout | 6 | 0 | 6 | 0 | 0 | - | - |
-| monotone | 28 | 21 | 1 | 6 | 130 | 0.134 | 0.60 s |
-| ordering | 108 | 108 | 0 | 0 | 253 | 0.012 | 0.09 s |
-| requirement | 16 | 16 | 0 | 0 | 16 | 0.064 | 0.24 s |
+| monotone | 28 | 21 | 1 | 6 | 130 | 0.169 | 0.85 s |
+| ordering | 110 | 110 | 0 | 0 | 259 | 0.016 | 0.08 s |
+| requirement | 16 | 16 | 0 | 0 | 16 | 0.086 | 0.31 s |
 
 Every fact Lean did not prove, and why:
 
