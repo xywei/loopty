@@ -623,7 +623,13 @@ class Kernel(_Decorated):
         found = free_name_sorts(params)
         if found:
             raise TraceError(free_name_sorts_message(self.qualname, params, found))
-        self._term = trace(self, self.annotations)
+        # A body that calls this kernel is refused, not traced without end
+        # (loopty.calls).
+        self._tracing = True
+        try:
+            self._term = trace(self, self.annotations)
+        finally:
+            self._tracing = False
         self._facts = None
         return self._term
 

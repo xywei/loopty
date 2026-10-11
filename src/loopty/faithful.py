@@ -672,8 +672,9 @@ def _drawn_function(sort: Any, sizes: Mapping[str, int], rng: Any) -> DrawnFunct
     base = sort.base if isinstance(sort, Refined) else sort
     domain = base.domain
     if not isinstance(domain, FinType):
-        raise _NoSample(f"no way to draw a function over {domain}, not a Fin")
-    return DrawnFunction(_draw(base.codomain, (_extent(domain.bound, sizes),), sizes, rng))
+        raise _NoSample(f"no way to draw a function over {domain}")
+    shape = (_extent(domain.bound, sizes),)
+    return DrawnFunction(_draw(base.codomain, shape, sizes, rng))
 
 
 def with_result(term: Term, arguments: Mapping[str, Any]) -> dict[str, Any]:

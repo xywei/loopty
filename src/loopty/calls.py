@@ -149,7 +149,9 @@ class _Inlining:
 
     def run(self, args: tuple, kwargs: dict) -> Any:
         kernel, tracer = self.kernel, self.tracer
-        if any(entry is kernel for _label, entry in tracer.inlining):
+        if getattr(kernel, "_tracing", False) or any(
+            entry is kernel for _label, entry in tracer.inlining
+        ):
             self.refuse(
                 f"{self.callee} is already being called there, so the call would "
                 "inline it into itself without end; a kernel does not call itself"
@@ -355,7 +357,7 @@ class _Inlining:
         from loopty.contract import integral_sort
 
         if _function_sort(sort):
-            if isinstance(value, prim.Expression | SymArr | SymDom) or not callable(
+            if isinstance(value, prim.ExpressionNode | SymArr | SymDom) or not callable(
                 value
             ):
                 self.refuse(
@@ -371,7 +373,8 @@ class _Inlining:
                 "them"
             )
         if not isinstance(
-            value, bool | int | float | complex | np.number | np.bool_ | prim.Expression
+            value,
+            bool | int | float | complex | np.number | np.bool_ | prim.ExpressionNode,
         ):
             self.refuse(
                 f"its scalar parameter {param} is given {value!r}, which is neither "
@@ -447,7 +450,7 @@ class _Inlining:
                     value.name,
                 )
             )
-        elif str(typ.dtype) != str(given.dtype):
+        elif not _same_sort(typ.dtype, given.dtype):
             self.refuse(
                 f"it declares the elements of its {param} {_sort_text(typ.dtype)}, "
                 f"and the elements of {value.name}, which it is given there, are "
@@ -820,6 +823,24 @@ def _tidy(expr: Any) -> Any:
     from loopty.compose import _tidy as tidy
 
     return tidy(expr)
+
+
+def _same_sort(mine: Any, theirs: Any) -> bool:
+    """Whether an array of ``theirs`` may stand for a parameter of ``mine``.
+
+    The same sort, or two sorts that are not integral and that both runs
+    store alike, ``Real`` and ``np.float64`` say. An integral sort says more
+    than its storage (``Nat`` that no cell is negative), which the callee's
+    facts rest on, so it has to be the same.
+    """
+    from loopty.contract import integral_sort, native_storage
+
+    if str(mine) == str(theirs):
+        return True
+    if integral_sort(mine) or integral_sort(theirs):
+        return False
+    stored = native_storage(mine)
+    return stored is not None and stored == native_storage(theirs)
 
 
 def _sort_text(sort: Any) -> str:

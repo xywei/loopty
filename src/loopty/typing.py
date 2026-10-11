@@ -2949,7 +2949,7 @@ def _argument_fact(
     if not (isinstance(base, FinType) or natural):
         return None
     value = argument.value
-    shown = render(value) if isinstance(value, prim.Expression) else repr(value)
+    shown = render(value) if isinstance(value, prim.ExpressionNode) else repr(value)
     identifier = fact_id(
         "argument", owner, detail=f"{call.label}:{argument.param}", **key
     )
