@@ -34,7 +34,8 @@ All notable changes to loopty are recorded here. The format follows
   loopy multiplies one, by squaring, rounded at every product, in both runs:
   natively by the same loop (`loopty.math.integer_power`), compiled as
   loopy's `loopy_pow_<base>_<exponent>`. The two runs agree bit for bit, in
-  single precision too. `x ** n` of a real `x` stays numpy's power, the C
+  single precision too. An integer base or a real power is refused, natively
+  from the values and traced from the operands' types. `x ** n` of a real `x` stays numpy's power, the C
   library's `pow` in both runs; at the flagship's Taylor sum `ipow` is an
   order of magnitude faster on the C target (`benchmarks/l2p.py`).
 - The coverage report (`docs/lean-checks.md`) covers the flagship and the

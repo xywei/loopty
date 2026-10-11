@@ -449,6 +449,45 @@ def test_ipow_takes_a_real_base_and_an_integer_power(x, k, message: str) -> None
         ipow(x, k)
 
 
+@kernel
+def integer_base(k: Arr[Fin[n], Int], y: Arr[Fin[n], Int]):  # noqa: F821
+    """An integer to a power: natively refused, so traced too."""
+    for i in y.dom:
+        y[i] = ipow(k[i], 2)
+
+
+@kernel
+def real_power(x: Arr[Fin[n], Real], e: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """A real exponent: natively refused, so traced too."""
+    for i in y.dom:
+        y[i] = ipow(x[i], e[i])
+
+
+@pytest.mark.parametrize(
+    ("kern", "message"),
+    [
+        (
+            integer_base,
+            r"ipow\(k\[i\], 2\) at test_math.py:\d+: loopty.math.ipow takes a real "
+            r"base of a floating type, and k\[i\] is an int64; for an integer",
+        ),
+        (
+            real_power,
+            r"ipow\(x\[i\], e\[i\]\) at test_math.py:\d+: loopty.math.ipow takes an "
+            r"integer power, and e\[i\] is a float64; x \*\* n is the power",
+        ),
+    ],
+)
+def test_ipow_of_traced_values_of_other_sorts_is_refused_as_natively(
+    kern, message: str
+) -> None:
+    # Natively ipow refuses an integer base and a real power; traced, its
+    # operands are terms, and the call was built all the same, so that the
+    # compiled run computed a power the native run refuses (Codex on #248).
+    with pytest.raises(TraceError, match=message):
+        kern.trace()
+
+
 def test_ipow_agrees_bit_for_bit_and_calls_no_pow() -> None:
     x = np.array([0.3, 1.1, 2.7, -1.9, 1e-3])
     agrees(powers, {"x": Arr.from_numpy(x), "y": Arr.zeros((5, 9))})

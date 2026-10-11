@@ -3658,6 +3658,7 @@ def _refuse_arithmetic(expr: Any, params: Mapping[str, Any], where: str) -> None
             _refuse_division_by_zero(node, promotion, where)
         elif isinstance(node, prim.Call):
             _refuse_half_precision(node, promotion, where)
+            _refuse_integer_power_sorts(node, promotion, where)
         _refuse_unheld_literal(node, promotion, where)
     _refuse_untyped_literals(expr, promotion, where)
 
@@ -3689,6 +3690,41 @@ def _refuse_half_precision(node: prim.Call, promotion: Any, where: str) -> None:
         f"numpy computes it in for {_a(operand_type)}, and the compiled kernel "
         f"has no {result}; write {function.name}(1.0 * {scaled}) for a double"
     )
+
+
+def _refuse_integer_power_sorts(node: prim.Call, promotion: Any, where: str) -> None:
+    """Refuse ``ipow(x, n)`` of a base that is not real or a power not an integer.
+
+    :func:`loopty.math.ipow` refuses both natively, where it sees the
+    values. Traced it sees terms, so the same refusal is made here from the
+    operands' types, before a kernel is built whose compiled run would
+    compute a power its native run refuses: of an integer base, loopy's
+    integer power in the integer's type; of a real exponent, the C library's
+    ``pow``.
+    """
+    from loopty.promotion import _one_dtype
+
+    function = node.function
+    if not isinstance(function, prim.Variable) or function.name != "ipow":
+        return
+    if len(node.parameters) != 2:
+        return
+    base, power = node.parameters
+    shown = f"ipow({_written(base)}, {_written(power)})"
+    base_type = _one_dtype(promotion.types(base)[0])
+    if base_type is not None and base_type.kind != "f":
+        raise TraceError(
+            f"{shown} at {where}: loopty.math.ipow takes a real base of a "
+            f"floating type, and {_written(base)} is {_a(base_type)}; for an "
+            "integer or a complex number, write x ** n"
+        )
+    power_type = _one_dtype(promotion.types(power)[0])
+    if power_type is not None and power_type.kind not in "iu":
+        raise TraceError(
+            f"{shown} at {where}: loopty.math.ipow takes an integer power, and "
+            f"{_written(power)} is {_a(power_type)}; x ** n is the power of a "
+            "real exponent"
+        )
 
 
 def _a(dtype: Any) -> str:
