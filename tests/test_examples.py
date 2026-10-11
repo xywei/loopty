@@ -1109,9 +1109,33 @@ def test_the_qbx_demo_states_the_fact_sumpy_silences_for_both_layers() -> None:
         assert writes["decided_by"] in ("isl", "lean"), writes
 
 
+def test_the_qbx_demo_agrees_with_what_sumpy_returned_at_the_pinned_commit() -> None:
+    _result, facts = _invoke("layer_potential", "check")
+    (row,) = [fact for fact in facts if fact["owner"] == "agrees_with_sumpy"]
+    assert (row["kind"], row["status"], row["decided_by"]) == (
+        "tested",
+        "tested",
+        "run",
+    ), row
+    measured = row["provenance"]["measured"]
+    assert float(measured.split("difference ", 1)[1].split()[0]) < 1e-12, measured
+    # the recording is of the sumpy the docstring cites, on loopy main
+    module = _module("layer_potential")
+    recorded = json.loads(module.RECORDED.read_text(encoding="utf-8"))
+    assert recorded["sumpy"] == "13a48a0260eec8cf7ac67f1faca701205d9096ae"
+    assert recorded["sumpy"] in module.__doc__
+    assert recorded["versions"]["loopy"].startswith("24a2da6")
+    size = module.example_inputs()["single_layer"]["z"].numpy().size
+    assert len(recorded["single_layer"]) == len(recorded["double_layer"]) == size
+
+
 def test_the_qbx_demo_measures_pytentials_identity_and_the_jumps() -> None:
     _result, facts = _invoke("layer_potential", "check")
-    rows = {fact["owner"]: fact for fact in facts if fact["kind"] == "tested"}
+    rows = {
+        fact["owner"]: fact
+        for fact in facts
+        if fact["kind"] == "tested" and fact["owner"] != "agrees_with_sumpy"
+    }
     assert set(rows) == {"green_identity", "jump_S", "jump_D"}
     for fact in rows.values():
         assert (fact["status"], fact["decided_by"]) == ("tested", "run"), fact
@@ -1174,6 +1198,15 @@ def test_the_qbx_demo_prints_the_tile_the_fact_and_the_rows() -> None:
         "single_layer one for one"
     ) in out
     assert "decided  isl  distinct instances of S0 write distinct cells of out" in out
+    # the tile is shown as sumpy writes it, without the target its casts were
+    # decided on, which cannot build its hardware axes
+    assert (
+        "sumpy's tile, get_optimized_kernel(is_cpu=True): split(t, 16)"
+        ".tag(t_outer='g.0', t_inner='l.0').split(s, 256)"
+        ".prioritize(s_outer, t_inner)"
+    ) in out
+    (line,) = [line for line in out.splitlines() if "sumpy's own kernel" in line]
+    assert line.endswith("agrees within 1e-12 of the largest value -> tested"), line
     for name in ("green_identity", "jump_S", "jump_D"):
         (line,) = [line for line in out.splitlines() if line.strip().startswith(name)]
         assert line.endswith("-> tested"), line

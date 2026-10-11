@@ -35,6 +35,10 @@ Usage::
     python benchmarks/qbx_layer_potential.py compare a.npy b.npy
     python benchmarks/qbx_layer_potential.py capture --panels 30 --out calls.npz
     python benchmarks/qbx_layer_potential.py agree --reference calls.npz
+    python benchmarks/qbx_layer_potential.py inputs --targets 36 --sources 68 \\
+        --out example.npz
+    python benchmarks/qbx_layer_potential.py record --inputs example.npz \\
+        --out examples/layer_potential_sumpy.json
     python benchmarks/qbx_layer_potential.py write-race
 
 ``inputs`` writes the starfish's arrays once, in an environment where loopty
@@ -52,6 +56,20 @@ that two environments' runs can be compared (``compare``).
 D, from inside and from outside. ``agree`` runs loopty's kernels on exactly
 those arguments and reports the difference. ``write-race`` asks loopy whether
 sumpy's kernel races once its ``write_race(write_lpot*)`` silence is lifted.
+``record`` keeps what sumpy returns on saved inputs; at 36 targets and 68
+sources those are the example's own, and the recording is the one its
+``agrees_with_sumpy`` row compares with.
+
+The tables of the demonstration are, on one device and one host, for each
+size (``inputs``) and each of ``--contraction on`` and ``off``: ``time`` of
+``loopty``, ``loopy``, ``loopy-same`` and ``sumpy`` on one tile (``cpu`` on a
+CPU device, ``gpu`` on a GPU), the same again with ``--keep-order`` for the
+implementations whose source loops loopy reorders, ``sumpy --tile cpu`` and
+``sumpy --tile sumpy-gpu`` for what pytential runs on each kind of device, and
+``compare`` of the saved results. Two separate environments take part:
+loopty's (the loopy it is pinned to) for ``loopty``, ``loopy`` and
+``loopy-same``, and sumpy's (the loopy main sumpy needs) for ``sumpy``,
+``capture``, ``record`` and ``write-race``; each record names its versions.
 
 Nothing here names a machine: what the device and the versions are is
 printed, and kept with the results.
@@ -588,6 +606,76 @@ def run_capture(options: Any) -> int:
     return 0
 
 
+def run_record(options: Any) -> int:
+    """``record``: sumpy's LayerPotential on saved inputs, called as pytential calls it.
+
+    The example's ``agrees_with_sumpy`` row compares its kernels with this
+    recording. sumpy is called through its own ``__call__`` with an array
+    context of its own, so it picks its schedule as pytential's calls do
+    (``is_cpu`` from the device), with the points as object arrays of their
+    coordinates, the strengths as weight times density, and, for the double
+    layer, the sources' normals as its ``src_derivative_dir``. What is kept
+    besides the results is what they were computed with: sumpy's commit, the
+    package versions and the kind of device, and nothing that names a machine.
+    """
+    import importlib.metadata as metadata
+
+    import pyopencl as cl
+    from pytools import obj_array
+    from sumpy.array_context import PyOpenCLArrayContext, is_cl_cpu
+
+    data = dict(np.load(options.inputs))
+    queue = cl.CommandQueue(cl.create_some_context(interactive=False))
+    actx = PyOpenCLArrayContext(queue)
+
+    def points(values: np.ndarray) -> Any:
+        return obj_array.new_1d(
+            [actx.from_numpy(values.real.copy()), actx.from_numpy(values.imag.copy())]
+        )
+
+    recorded: dict[str, Any] = {}
+    for name, layer in (("single_layer", "single"), ("double_layer", "double")):
+        extra = {} if layer == "single" else {"src_derivative_dir": points(data["n"])}
+        (result,) = sumpy_layer_potential(layer)(
+            actx,
+            targets=points(data["z"]),
+            sources=points(data["y"]),
+            centers=points(data["c"]),
+            strengths=(actx.from_numpy(data["w"]),),
+            expansion_radii=actx.from_numpy(data["radius"]),
+            **extra,
+        )
+        recorded[name] = [float(value) for value in actx.to_numpy(result)]
+
+    def commit(name: str) -> str:
+        """The commit a package was installed from, else its version."""
+        try:
+            url = json.loads(metadata.distribution(name).read_text("direct_url.json"))
+            return url["vcs_info"]["commit_id"]
+        except Exception:  # noqa: BLE001 - not installed from a repository
+            return metadata.version(name)
+
+    record = {
+        "what": (
+            "sumpy's LayerPotential, LineTaylorLocalExpansion of the 2-D Laplace "
+            f"kernel at order {ORDER}, on {data['z'].size} targets and "
+            f"{data['y'].size} sources, called as pytential calls it"
+        ),
+        "sumpy": commit("sumpy"),
+        "versions": {
+            name: commit(name) for name in ("loopy", "islpy", "pyopencl", "numpy")
+        },
+        "device": "CPU" if is_cl_cpu(actx) else "not a CPU",
+        **recorded,
+    }
+    Path(options.out).write_text(json.dumps(record, indent=1) + "\n", encoding="utf-8")
+    print(
+        f"sumpy {record['sumpy'][:7]}, {data['z'].size} targets, {data['y'].size} "
+        f"sources: {options.out}"
+    )
+    return 0
+
+
 def run_agree(options: Any) -> int:
     """``agree``: loopty's kernels on what pytential gave sumpy, against its result."""
     from loopty import Arr
@@ -714,6 +802,9 @@ def main(argv: list[str] | None = None) -> int:
     agree.add_argument("--reference", required=True)
     agree.add_argument("--target", choices=("c", "opencl"), default="c")
     agree.add_argument("--tolerance", type=float, default=1e-12)
+    record = verbs.add_parser("record")
+    record.add_argument("--inputs", required=True)
+    record.add_argument("--out", required=True)
     verbs.add_parser("write-race")
     options = parser.parse_args(argv)
     if options.verb == "time" and options.tile not in GROUP and options.impl != "sumpy":
@@ -728,6 +819,7 @@ def main(argv: list[str] | None = None) -> int:
         "compare": run_compare,
         "capture": run_capture,
         "agree": run_agree,
+        "record": run_record,
         "write-race": run_write_race,
     }
     return run[options.verb](options)

@@ -27,10 +27,12 @@ One file holds the three layers of it:
   ``write_race(write_lpot*)`` warning on this kernel; here the ledger has the
   fact that stands in its place, ``distinct instances of S0 write distinct
   cells of out``, decided by isl and, with Lean, proved.
-- **The accuracy.** pytential's own identity test on its own curve: Green's
+- **The agreement and the accuracy.** ``agrees_with_sumpy`` compares both
+  kernels with what sumpy's own ``LayerPotential`` returns on the same inputs,
+  called as pytential calls it. pytential's identity test case, Green's
   identity ``S(du/dn) - D(u) - u/2 == 0`` on the five-armed starfish, and the
-  jump relations its integral equations rest on, each a ``tested`` row,
-  measured with the compiled kernels at 30 to 90 panels.
+  jump relations its integral equations rest on are measured with the
+  compiled kernels at 30 to 90 panels. Each is a ``tested`` row.
 
 Run this file three ways.
 
@@ -45,7 +47,8 @@ Run this file three ways.
     table over ``Nat``. Each kernel's accesses are in bounds and its writes
     distinct, and each cast of its tile on C keeps every dependence, decided
     by isl (proved by Lean where it is installed); its trace is faithful to
-    its body, and the three accuracy rows are ``tested``.
+    its body, and the agreement with sumpy and the three accuracy rows are
+    ``tested``.
 
 ``loopty run examples/layer_potential.py``
     Both kernels on their tile, compiled on the C target and compared with
@@ -70,8 +73,10 @@ What it mirrors, at the commits the demonstration pins
   (https://github.com/inducer/pytential/blob/8700a2918085572ae86ace15a0beb2f106458bb2/pytential/symbolic/primitives.py#L1301-L1396),
   and its identity test, ``GreenExpr`` on the starfish at QBX order 5, target
   order 8 and sources upsampled by 4, which asks for an order above ``5 -
-  1.6`` (https://github.com/inducer/pytential/blob/8700a2918085572ae86ace15a0beb2f106458bb2/test/test_layer_pot_identity.py#L87-L99
-  and #L277-L411).
+  1.6`` (https://github.com/inducer/pytential/blob/8700a2918085572ae86ace15a0beb2f106458bb2/test/test_layer_pot_identity.py#L87-L99,
+  #L258-L268 and #L277-L411). pytential runs that case with its FMM; here it
+  is the direct evaluation, ``fmm_order=False``, as pytential's test runs the
+  starfish's Calderon case.
 - meshmode's ``NArmedStarfish(5, 0.25)``
   (https://github.com/inducer/meshmode/blob/bbaf4ab4ecfb3b1cfcdac79165d4ca61fe0de64a/meshmode/mesh/generation.py#L310-L374).
 
@@ -80,9 +85,13 @@ code sympy writes for each order; here it is the same series in complex
 arithmetic, one sum over the order that the trace writes out, with the
 ratio's division multiplied out by the conjugate. The curve here is the
 parametrization itself at Gauss-Legendre points, where meshmode interpolates
-it by polynomials and pytential refines its panels first. The agreement with
-sumpy's own kernel, on the arguments pytential hands it, is measured by
-``benchmarks/qbx_layer_potential.py``.
+it by polynomials and pytential refines its panels first, so the accuracy
+rows measure this discretization and not pytential's. What sumpy's kernel
+returns on this file's own inputs is recorded in
+``layer_potential_sumpy.json`` with the commits it ran at, since sumpy needs a
+newer loopy than loopty's; ``benchmarks/qbx_layer_potential.py`` records it,
+and compares the kernels with sumpy on the arguments pytential itself hands
+it, on its refined starfish.
 
 What loopy does with sumpy's tile: ``prioritize_loops([isrc_outer,
 itgt_inner])`` cannot be kept with the targets on a hardware axis, which
@@ -92,6 +101,9 @@ the order its facts were checked for, and its code keeps it.
 """
 
 from __future__ import annotations
+
+import json
+from pathlib import Path
 
 import numpy as np
 from lanky import theorem
@@ -359,6 +371,37 @@ tiled_double = (
 # }}}
 
 
+# {{{ the agreement with sumpy's own kernel
+
+#: What sumpy's ``LayerPotential`` returns on :func:`example_inputs`, called as
+#: pytential calls it (``benchmarks/qbx_layer_potential.py record``).
+RECORDED = Path(__file__).with_name("layer_potential_sumpy.json")
+
+#: How close is agreement: relative to the largest value, well above the
+#: rounding of two orders of summation and two arithmetics, real and complex.
+AGREEMENT = 1e-12
+
+
+@tested
+def agrees_with_sumpy():
+    """S and D agree with sumpy's LayerPotential on the example's starfish."""
+    recorded = json.loads(RECORDED.read_text(encoding="utf-8"))
+    inputs = example_inputs()
+    worst = 0.0
+    for kern in (single_layer, double_layer):
+        args = inputs[kern.__name__]
+        kern(**args)
+        mine, theirs = args["out"].numpy(), np.array(recorded[kern.__name__])
+        worst = max(worst, np.abs(mine - theirs).max() / np.abs(theirs).max())
+    return bool(worst < AGREEMENT), (
+        f"largest difference {worst:.1e} of the largest value, "
+        f"sumpy {recorded['sumpy'][:7]}"
+    )
+
+
+# }}}
+
+
 # {{{ the accuracy: pytential's identity and the jump relations, measured
 
 #: The panels the accuracy rows are measured at, pytential's starfish resolutions.
@@ -474,9 +517,16 @@ def main() -> int:
         )
         ok = ok and fact.status.value == "tested"
 
+    held, _ = agrees_with_sumpy()
+    print(
+        f"  sumpy's own kernel, as pytential calls it: agrees within {AGREEMENT:.0e} "
+        f"of the largest value -> {'tested' if held else 'REFUTED'}"
+    )
+    ok = ok and held
+
     print()
     tile = sumpy_tile("c")
-    print(f"sumpy's tile: {tile!r}")
+    print(f"sumpy's tile, get_optimized_kernel(is_cpu=True): {'.'.join(tile.history)}")
     writes = [fact for fact in single_layer.facts() if fact.kind == "disjoint-writes"]
     oracle = IslOracle()
     for fact in [*tile.facts(), *writes]:
@@ -485,7 +535,7 @@ def main() -> int:
         if fact.status.value == "assumed":
             fact = oracle.establish(fact) or fact
         print(f"  {fact.status.value:8} {fact.decided_by or '-':4} {fact.statement}")
-    print(f"  on C: {tiled!r}")
+    print(f"  on C, an ilp loop for the work items: {'.'.join(tiled.history)}")
     print()
     print(f"accuracy at {', '.join(map(str, PANELS))} panels:")
     for claim in (green_identity, jump_S, jump_D):

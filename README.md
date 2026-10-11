@@ -746,8 +746,10 @@ release; the CHANGELOG says when one does.
   measured, decorated `@tested`, is a row of the ledger, `tested` by `run`
   with its docstring's first line for statement, or `refuted` with the
   reason. It is for what no oracle reads, an accuracy that converges at its
-  order, and it never reads more than `tested`. `examples/layer_potential.py`
-  measures pytential's Green identity and the jump relations this way.
+  order, or an agreement with a recording of the code a kernel mirrors, and
+  it never reads more than `tested`. `examples/layer_potential.py` measures
+  its agreement with sumpy's own kernel, pytential's Green identity and the
+  jump relations this way.
 - Updates and atomics. A statement that adds to the cell it writes a value
   that reads nothing else of the array, `y[cell[c, k]] += yl[c, k]` or `y[r]
   += v[r, j]`, is an update. Its sum has the class of what it adds, as a

@@ -23,11 +23,13 @@ All notable changes to loopty are recorded here. The format follows
   points; sumpy's CPU tile (`sumpy_tile()`), its casts decided, with the
   write sumpy silences (`write_race(write_lpot*)`) the fact `distinct
   instances of S0 write distinct cells of out`, proved by Lean where it is
-  installed; and pytential's identity test and the jump relations as tested
-  rows, the errors falling faster than the QBX order less 1.6.
+  installed; and, as tested rows, the agreement with what sumpy's own
+  `LayerPotential` returned on the example's inputs (recorded at sumpy's
+  commit, `layer_potential_sumpy.json`), pytential's identity test case and
+  the jump relations, the errors falling faster than the QBX order less 1.6.
   `benchmarks/qbx_layer_potential.py` times the kernel against plain loopy
-  and sumpy's own on one OpenCL device, and runs it on the arguments
-  pytential itself hands sumpy.
+  and sumpy's own on one OpenCL device, records sumpy's results, and runs
+  the kernels on the arguments pytential itself hands sumpy.
 - **A kernel's postcondition decided from what its statements store**
   (`loopty.dataflow`, #113). Where no cell of an array a kernel writes is
   stored twice, or read before its store, a `single-assignment` fact says
