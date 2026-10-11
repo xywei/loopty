@@ -1029,7 +1029,7 @@ schedule: Schedule(single_layer, target='c').split(t, 16).tag(t_inner='ilp').spl
 
 schedule: Schedule(single_layer, target='c').split(t, 16).split(s, 256).prioritize(s_outer, t_inner)
   buildable: False
-  reason: the loop s_outer of the sum over s_outer, s_inner in S0 is ordered outside t_inner, which runs in sequence: loopy keeps one accumulator for the sum, and so runs the sum's loops inside every loop of S0, and would drop the loop priority and run a nest the cast facts say nothing about. Tag t_inner 'ilp', which gives each of its iterations an accumulator of its own, or put it on a hardware axis on a device, as tag(t_inner='l.0') does
+  reason: the loop s_outer of the sum over s_outer, s_inner in S0 is ordered outside t_inner, which runs in sequence: loopy keeps one accumulator for the sum, so it would run the sum inside every loop of S0 anyway, in another order than the one this schedule's facts were checked for. Tag t_inner 'ilp', tag(t_inner='ilp'), which gives each of its iterations an accumulator of its own, or on a device put it on a hardware axis, tag(t_inner='l.0')
 ```
 
 ### lanky check examples/layer_potential.py
