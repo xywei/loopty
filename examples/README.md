@@ -547,10 +547,8 @@ the term of burgers_rhs(u, rhs):
 #include <stdint.h>
 #include <stdbool.h>
 
-void burgers_rhs(int32_t const n, double const *__restrict__ u, double *__restrict__ rhs)
+void burgers_rhs(int32_t const n, double const *__restrict__ u, double *__restrict__ rhs, double *__restrict__ f)
 {
-  double f[n];
-
   for (int32_t i_0 = 0; i_0 <= -1 + n; ++i_0)
     f[i_0] = (double) (0.0);
   for (int32_t j = 0; j <= -1 + n; ++j)
@@ -826,10 +824,8 @@ accepted: Schedule(burgers_rhs, target='c').fuse(flux, divergence, shift=1)
 #include <stdint.h>
 #include <stdbool.h>
 
-void burgers_rhs(int32_t const n, double const *__restrict__ u, double *__restrict__ rhs)
+void burgers_rhs(int32_t const n, double const *__restrict__ u, double *__restrict__ rhs, double *__restrict__ f)
 {
-  double f[n];
-
   for (int32_t i_0 = 0; i_0 <= -1 + n; ++i_0)
     f[i_0] = (double) (0.0);
   for (int32_t j = 0; j <= -1 + n; ++j)
