@@ -29,6 +29,8 @@ All notable changes to loopty are recorded here. The format follows
   is no argument (an array of its values is,
   `Arr.from_numpy(W.values.copy())`), and is read in a statement's values,
   not in a loop's bound (#194); each of these is refused with the fix named.
+  A compiled run refuses a read-only array for a parameter it writes, such
+  as a table's `W.values`, which it wrote into before failing.
 - **`loopty.math`**: `sqrt`, `exp`, `log`, `sin`, `cos`, `real`, `imag` and
   `conj` for kernel bodies. Each is numpy's natively and a call the
   trace records, which the interpreter evaluates with the same numpy function
