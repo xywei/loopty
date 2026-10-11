@@ -72,6 +72,7 @@ from loopty.contract import (
     resolve_sizes,
 )
 from loopty.flow import bounds_dimension
+from loopty.names import check_names, rename
 from loopty.term import (
     Access,
     ArrType,
@@ -575,12 +576,26 @@ class _Run:
         )
 
     def copy_of(self, name: str, spelled: str) -> str:
-        """A fresh parameter that reads what the reflected bound ``name`` reads."""
-        taken = {*self.sizes, *self.scalars, *self.reflected}
+        """A fresh parameter that reads what the reflected bound ``name`` reads.
+
+        Named apart from every size, scalar and reflected bound, and from every
+        loop variable and binder of the term, which a domain may have as a set
+        dimension (:mod:`loopty.names`).
+        """
+        taken = {*self.sizes, *self.scalars, *self.reflected, *self._bound_names()}
         while spelled in taken:
             spelled += "_"
         self.reflected[spelled] = self.reflected[name]
         return spelled
+
+    def _bound_names(self) -> set[str]:
+        """Every loop variable and sum binder of the term."""
+        names: set[str] = set()
+        for stmt in self.term.stmts:
+            names.update(stmt.inames)
+            for node in reductions_in((stmt.expr, stmt.guard)):
+                names.update(node.inames)
+        return names
 
     def block(self, members: Sequence[_Member], level: int) -> None:
         """The statements and loops of one level of the loop tree, in order.
@@ -1102,7 +1117,7 @@ def _read_apart(domain: isl.Set, name: str, reading: Any) -> isl.Set:
     out = isl.Set.empty(widened.get_space())
     for piece in pieces:
         out = out.union(piece)
-    return out
+    return check_names(out, f"a domain with the bound {name} read apart")
 
 
 def _with_domains(node: Any, rewrite: Any) -> Any:
@@ -1131,7 +1146,11 @@ def _fold(apply: Any, values: Sequence[Any]) -> Any:
 
 
 def _fix_param(space: isl.Set, name: str, value: Any) -> isl.Set:
-    """``space`` with the parameter ``name`` fixed to an integer value."""
+    """``space`` with the parameter ``name`` replaced by an integer value.
+
+    Fixed there and projected out, by :func:`loopty.names.rename`: what is
+    left are the parameters still to be read and the loop variables.
+    """
     if isinstance(value, bool) or not isinstance(value, int | np.integer):
         if isinstance(value, float | np.floating) and float(value).is_integer():
             value = int(value)
@@ -1140,8 +1159,7 @@ def _fix_param(space: isl.Set, name: str, value: Any) -> isl.Set:
             raise InterpretError(
                 f"the domain parameter {name} is {shown!r}, which is not an integer"
             )
-    position = space.find_dim_by_name(isl.dim_type.param, name)
-    return space.fix_val(isl.dim_type.param, position, int(value))
+    return rename(space, exprs={name: int(value)}, what=f"a domain at {name}")
 
 
 def _enumerate(space: isl.Set, positions: Sequence[int]) -> list[tuple[int, ...]]:

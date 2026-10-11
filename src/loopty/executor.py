@@ -99,6 +99,28 @@ def _resolve(obj: Any, target: str | None = None) -> tuple[Term, Any, Lowering, 
     return term, lowering.kernel, lowering, target or "c"
 
 
+def _off_the_stack(
+    kernel: Any, term: Term, supplied: Mapping[str, Any] | None = None
+) -> tuple[Any, dict[str, tuple[tuple[int, ...], np.dtype]]]:
+    """``kernel`` on a C target with a program's arrays as arguments (#62).
+
+    :func:`loopty.lower.heap_temporaries`, at the sizes the call's arguments
+    determine when they are given: each array a program makes is allocated
+    by the executor on the heap, where it was a variable-length array on the
+    stack of the compiled call, whose size the stack bounded. Returns the
+    kernel and what to allocate.
+    """
+    from loopty.contract import resolve_sizes
+    from loopty.lower import heap_temporaries
+
+    if not term.temporaries:
+        return kernel, {}
+    sizes = None
+    if supplied is not None:
+        sizes = resolve_sizes(dict(term.params), supplied)
+    return heap_temporaries(kernel, term, sizes)
+
+
 def _as_numpy(value: Any, dtype: np.dtype | None = None) -> np.ndarray:
     """A numpy view of an argument, unwrapping a runtime :class:`~loopty.arr.Arr`.
 
@@ -404,6 +426,10 @@ class LoopyExecutor:
         layouts = _declared_layouts(term, lowering, supplied)
         call = _call_arguments(term, lowering, args, kwargs, layouts)
         call, empty = _pad_empty_arrays(call, lowering)
+        if target_name != "opencl":
+            kernel, heap = _off_the_stack(kernel, term, supplied)
+            for name, (shape, dtype) in heap.items():
+                call[name] = np.zeros(shape, dtype=dtype)
         with naming_the_fix(lowering):
             if target_name == "opencl":
                 out = self._run_opencl(kernel, lowering, call)
@@ -843,14 +869,18 @@ def _agreement_fact(
 def emit_code(obj: Any, target: str | None = None) -> str:
     """The code loopy generates for a kernel or a schedule, as a string.
 
-    Generated inside :func:`loopty.isl_reading.declining`, as a run's is, and
-    a refusal of loopy's is named as a run's is
-    (:func:`loopty.refusal.naming_the_fix`).
+    Generated inside :func:`loopty.isl_reading.declining`, as a run's is, a
+    refusal of loopy's named as a run's is
+    (:func:`loopty.refusal.naming_the_fix`), and, on a C target, with a
+    program's arrays as the arguments a run allocates
+    (:func:`loopty.lower.heap_temporaries`).
     """
     import loopy as lp
 
     from loopty.refusal import naming_the_fix
 
-    _term, kernel, lowering, _target = _resolve(obj, target)
+    term, kernel, lowering, target = _resolve(obj, target)
+    if target != "opencl":
+        kernel, _heap = _off_the_stack(kernel, term)
     with naming_the_fix(lowering):
         return lp.generate_code_v2(kernel).device_code()

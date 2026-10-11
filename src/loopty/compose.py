@@ -173,6 +173,7 @@ from loopty.hypotheses import (
     theorem_instances,
 )
 from loopty.idx import Reflections
+from loopty.names import rename
 from loopty.term import (
     Access,
     ArrType,
@@ -246,37 +247,13 @@ def rename_set(obj: Any, names: Mapping[str, str], exprs: Mapping[str, Any]) -> 
     """An isl set with its dimensions renamed and its parameters replaced.
 
     The same map as :func:`rename_expr`, over a statement's or a reduction's
-    domain. A name is renamed in place. A parameter mapped to an expression, or
-    to a name the set already has as a parameter, is replaced: the set is
-    intersected with ``p = expression`` and ``p`` is projected out, which is
-    exact, since an equality determines it. Every name is first moved out of
-    the way, so that ``a -> b`` beside ``b -> c`` does not give the set two
-    dimensions called ``b``.
+    domain: :func:`loopty.names.rename`, which renames every name at once, so
+    that ``a -> b`` beside ``b -> c`` does not give the set two dimensions
+    called ``b``, replaces a parameter mapped to an expression, or to a name
+    the set already has as a parameter, and checks the names of what it
+    returns.
     """
-    moved: list[tuple[str, Any, str]] = []
-    for kind in (isl.dim_type.param, isl.dim_type.set):
-        for position in range(obj.dim(kind)):
-            original = obj.get_dim_name(kind, position)
-            if original in names or original in exprs:
-                placeholder = f"__loopty_moved_{len(moved)}"
-                obj = obj.set_dim_name(kind, position, placeholder)
-                moved.append((placeholder, kind, original))
-    replaced: list[tuple[str, Any]] = []
-    for placeholder, kind, original in moved:
-        if original not in names:
-            replaced.append((placeholder, exprs[original]))
-            continue
-        target = names[original]
-        present = set(obj.get_var_names(isl.dim_type.param))
-        present |= set(obj.get_var_names(isl.dim_type.set))
-        if target in present and kind == isl.dim_type.param:
-            replaced.append((placeholder, prim.Variable(target)))
-            continue
-        position = obj.find_dim_by_name(kind, placeholder)
-        obj = obj.set_dim_name(kind, position, target)
-    for placeholder, value in replaced:
-        obj = _replace_param(obj, placeholder, value)
-    return obj
+    return rename(obj, names, exprs, what="a callee's domain in its caller's names")
 
 
 def _isl_text(value: Any) -> str:
@@ -300,19 +277,6 @@ def _isl_text(value: Any) -> str:
             f"{render(value)} would have to stand in an iteration domain, and "
             "isl can state only an affine expression of integers there"
         ) from exc
-
-
-def _replace_param(obj: Any, name: str, value: Any) -> Any:
-    """``obj`` with its parameter ``name`` replaced by ``value``."""
-    text = _isl_text(value)
-    params = [name, *sorted(free_names(text) - {name})]
-    kind = isl.BasicSet if isinstance(obj, isl.BasicSet) else isl.Set
-    constraint = kind(f"[{', '.join(params)}] -> {{ : {name} = {text} }}")
-    obj = obj.align_params(constraint.get_space())
-    constraint = constraint.align_params(obj.get_space())
-    obj = obj.intersect_params(constraint)
-    position = obj.find_dim_by_name(isl.dim_type.param, name)
-    return obj.project_out(isl.dim_type.param, position, 1)
 
 
 def _rename_sort(sort: Any, names: Mapping[str, str], exprs: Mapping[str, Any]) -> Any:

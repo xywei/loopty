@@ -53,9 +53,12 @@ else, with no cast (``when(i * i < m)`` wrapped round at ``i = 46341``), and
 in a subscript as everywhere else (``x[(i * i) % n]``, #129), unless loopy
 reads the subscript as affine with no division, which it then computes in
 its 32-bit index type whatever is written, and which wraps round to the cell
-it names (:meth:`loopty.lower.ExpressionLowerer._index`). A result outside
-64 bits wraps round compiled and is refused or wraps natively, which is
-numpy's limit too.
+it names (:meth:`loopty.lower.ExpressionLowerer._index`). In any other
+subscript a sum of loop variables and sizes is widened too
+(:meth:`Promotion.index_sum`, #149), since a division or a remainder of it
+uses its value as it is; in a value and in a guard on the loops it is not
+(#162). A result outside 64 bits wraps round compiled and is refused or
+wraps natively, which is numpy's limit too.
 
 The type C computes an operation in is C's, by its integer promotion and its
 usual arithmetic conversions (:func:`_c_result`), and not numpy's, in two
@@ -802,6 +805,28 @@ class Promotion:
         """The plan for one node: empty for a node that is no operation."""
         self.types(expr)
         return self._steps.get(id(expr), ())
+
+    def index_sum(self, expr: Any) -> bool:
+        """Whether ``expr`` is a sum the plan leaves in 32 bits as index arithmetic.
+
+        A sum of loop variables, sizes and integer literals totalling less
+        than ``2**30``, Python ints natively, which no step converts and C
+        computes in fewer than 64 bits: ``i + n``, ``n - 1 - i``. That is how
+        loopy computes a loop bound, and the lowering leaves it so but in a
+        subscript whose value it is used in as it is, where it is widened
+        (:meth:`loopty.lower.ExpressionLowerer._index`, #149).
+        """
+        if not isinstance(expr, prim.Sum):
+            return False
+        steps = self.steps(expr)
+        return bool(steps) and all(
+            not step.converts
+            and step.compiled is not None
+            and step.compiled.kind in "iu"
+            and step.compiled.itemsize < 8
+            and _weak_integers(step.native)
+            for step in steps
+        )
 
     def types(self, expr: Any) -> tuple[Native, np.dtype | None]:
         """The native type of ``expr`` and the dtype it is computed in compiled."""

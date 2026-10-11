@@ -89,6 +89,7 @@ from loopty.flow import (
 )
 from loopty.idx import linearize
 from loopty.isl_reading import affine_form, declining, require_active
+from loopty.names import check_names, rename
 from loopty.operations import (
     CODE_DIGEST,
     OPERATIONS,
@@ -130,6 +131,7 @@ __all__ = [
     "array_dtype",
     "count_param_name",
     "count_param_names",
+    "heap_temporaries",
     "is_library_name",
     "is_reserved",
     "lower",
@@ -427,10 +429,68 @@ class _LaunchWithoutConditionals(PyOpenCLPythonASTBuilder):
 
 
 class _OpenCLExpressions(NumpyArithmetic, ExpressionToPyOpenCLCExpressionMapper):
-    """loopy's OpenCL C expressions, with numpy's arithmetic."""
+    """loopy's OpenCL C expressions, with numpy's arithmetic.
+
+    A complex number is a struct in OpenCL C, pyopencl's ``cdouble_t`` or
+    ``cfloat_t``, which ``==`` and ``!=`` do not compare: loopy wrote ``z[i]
+    == w[i]`` as it is, and the kernel did not build (#158). numpy compares
+    two complex numbers by both parts, in the complex type of the two, a
+    real operand taken with a zero imaginary part, and so does
+    :meth:`map_comparison`.
+    """
 
     #: OpenCL C has no ``-fwrapv``; see :meth:`NumpyArithmetic.map_constant`.
     wraps = False
+
+    def map_comparison(self, expr: Any, type_context: Any) -> Any:
+        """``==`` and ``!=`` of complex operands, part by part (#158).
+
+        ``cdouble_real(z[i]) == cdouble_real(w[i]) && cdouble_imag(z[i]) ==
+        cdouble_imag(w[i])``, with ``||`` and ``!=`` for ``!=``, which is
+        what numpy computes, NaNs included: a NaN part makes ``==`` false and
+        ``!=`` true. Each operand is first converted into the complex type
+        numpy compares in, the type loopy infers for their difference, as a
+        sum of the two converts it; a real operand is compared with the real
+        part, in that type's precision, and ``0`` with the imaginary part,
+        and a complex literal by its two parts.
+        Any other comparison is :class:`NumpyArithmetic`'s, and the C targets
+        compare C99's complex types with C's own operators.
+        """
+        from loopy.expression import dtype_to_type_context
+        from loopy.types import NumpyType
+
+        if expr.operator not in ("==", "!="):
+            return super().map_comparison(expr, type_context)
+        common = self.infer_type(expr.left - expr.right)
+        if not common.is_complex():
+            return super().map_comparison(expr, type_context)
+        name = self.complex_type_name(common)
+        context = dtype_to_type_context(self.kernel.target, common)
+        real = NumpyType(np.dtype(common.numpy_dtype.type(0).real.dtype))
+
+        def parts(operand: Any) -> tuple[Any, Any]:
+            if isinstance(operand, complex | np.complexfloating):
+                kind = real.numpy_dtype.type
+                return (
+                    self.rec(kind(operand.real), context),
+                    self.rec(kind(operand.imag), context),
+                )
+            if self.infer_type(operand).is_complex():
+                value = self.rec(operand, context, common)
+                return (
+                    prim.Variable(f"{name}_real")(value),
+                    prim.Variable(f"{name}_imag")(value),
+                )
+            return self.rec(operand, context, real), 0
+
+        left, right = parts(expr.left), parts(expr.right)
+        compared = tuple(
+            prim.Comparison(mine, expr.operator, theirs)
+            for mine, theirs in zip(left, right, strict=True)
+        )
+        if expr.operator == "==":
+            return prim.LogicalAnd(compared)
+        return prim.LogicalOr(compared)
 
 
 class _OpenCLCode(PyOpenCLCASTBuilder):
@@ -579,8 +639,9 @@ class ExpressionLowerer(Mapper):
     (:mod:`loopty.promotion`): ``k[i] / 2`` of an integer ``k`` is
     ``(double) (k[i]) / 2``, ``0.1`` beside a ``float32`` is ``0.1f``, and
     ``col[i] * col[i]`` of a ``Fin[m]`` array is computed in 64 bits. So is a
-    subscript, ``x[(i * i) % n]`` (#129), unless loopy reads it as affine
-    with no division (:meth:`_index`). A guard that reads no array is a
+    subscript, ``x[(i * i) % n]`` (#129), a sum of loop variables and sizes in
+    it included (#149), unless loopy reads it as affine with no division
+    (:meth:`_index`). A guard that reads no array is a
     condition on the loops, which loopy reads into isl too (note 20 in
     ``docs/loopy-notes.md``), so nothing in one is cast at all: a literal is
     still written in numpy's dtype, an operand is converted by a product with
@@ -600,6 +661,11 @@ class ExpressionLowerer(Mapper):
         #: how many widenings the walk has left out; see :meth:`_index`.
         self._widened_index = False
         self._left_out = 0
+        #: Each lowered node of a widened subscript that C computes in 64 bits
+        #: where the plan says fewer, by id, with the node, so that its id
+        #: stays its: an index sum widened there, and what is computed of one
+        #: (:meth:`_index`, :meth:`_wide`).
+        self._wide_nodes: dict[int, Any] = {}
         #: The guard the walk is in, when it reads no array; see
         #: :meth:`condition`.
         self._on_loops: Any = None
@@ -659,8 +725,8 @@ class ExpressionLowerer(Mapper):
         simplifies to the affine expression isl gives back, which it computes
         in its 32-bit index type whatever the subscript was written as. One
         it does not read so it generates as it is written. So an index is
-        lowered first with no integer widened (a step converting to an
-        integer dtype left out). Where that left nothing out, it is the
+        lowered first with no integer widened (a step converting an operand
+        to an integer dtype left out). Where that left nothing out, it is the
         index. So it is where loopy reads it as affine and isl's form has no
         division: ``x[2 * i]`` stays readable, and its bounds checked, as it
         always was, and C computes its sums and products modulo ``2**32``
@@ -674,9 +740,18 @@ class ExpressionLowerer(Mapper):
         ``i * i`` wrapped round at ``i = 46341``. loopy's reader declines the
         cast (:mod:`loopty.isl_reading`), so the subscript is generated with
         it. A reduction's domain the first walk recorded is dropped before
-        the second records it again. What the plan leaves in 32 bits, a sum
-        of loop variables and sizes (``x[(i + n) // 2]``), stays so, as a
-        loop bound does (#149).
+        the second records it again.
+
+        What the plan leaves in 32 bits, a sum of loop variables, sizes and
+        small literals (:meth:`loopty.promotion.Promotion.index_sum`), counts
+        as a widening left out: in a subscript lowered again it is widened
+        too (:meth:`_index_sum`), since a division, a remainder or a 64-bit
+        sum of it uses its value as it is, which wraps round once it passes
+        ``2**31``: ``x[(i + k) % m]`` is ``x[loopty_mod_int64((int64_t) (i)
+        + k, (int64_t) (m))]``, and ``x[(i + n) // 2]``, which loopy wrote
+        ``x[(i + n) / 2]``, is widened as well (#149). A conversion of a
+        result back into a narrower type numpy computes in is no widening,
+        and is kept in both walks (:func:`_without_widening`, #157).
         """
         outer = self._widened_index
         domains = getattr(self.lowering, "extra_domains", None)
@@ -821,8 +896,9 @@ class ExpressionLowerer(Mapper):
         did. See note 19 in ``docs/loopy-notes.md``.
 
         Inside a subscript loopy reads as affine with no division an integer
-        is not widened: a step converting to an integer dtype is left out
-        there (:meth:`_index`).
+        is not widened: a step converting an operand to an integer dtype is
+        left out there (:meth:`_index`), and an index sum stays in 32 bits;
+        in any other subscript an index sum is widened (:meth:`_index_sum`).
         In a guard on the loops no operand is cast at all (:meth:`_convert`).
         An integer literal past 64 bits is written in the dtype its step gives
         it, and refused where none does (#140).
@@ -835,15 +911,23 @@ class ExpressionLowerer(Mapper):
             operand if _untyped(operand) else self.rec(operand)
             for operand in operands
         ]
+        index_sum = (
+            self.in_subscript and promotion is not None and promotion.index_sum(expr)
+        )
         if self.in_subscript and not self._widened_index:
             narrow = tuple(_without_widening(step) for step in steps)
             self._left_out += sum(
                 before is not after for before, after in zip(steps, narrow)
             )
+            # An index sum is a widening left out too: whether it may stay in
+            # 32 bits is the subscript's question (_index, #149).
+            self._left_out += index_sum
             steps = narrow
+        if self._widened_index and index_sum:
+            return self._wide(self._index_sum(lowered, build))
         if not any(step.converts for step in steps):
             _refuse_untyped(lowered)
-            return build(lowered)
+            return self._widened(build(lowered), lowered, steps)
         head = [lowered[0]]
         for operand, step in zip(lowered[1:], steps, strict=True):
             if step.left is not None:
@@ -855,7 +939,54 @@ class ExpressionLowerer(Mapper):
             if step.result is not None:
                 head = [self._convert(build(head), step.result, narrowing=True)]
         _refuse_untyped(head)
-        return head[0] if len(head) == 1 else build(head)
+        if len(head) == 1:
+            return head[0]
+        return self._widened(build(head), lowered, steps)
+
+    def _index_sum(self, lowered: Sequence[Any], build: Any) -> prim.Expression:
+        """An index sum of a widened subscript, computed in 64 bits (#149).
+
+        The plan leaves a sum of loop variables, sizes and small literals in
+        32 bits, as loopy computes a loop bound
+        (:meth:`loopty.promotion.Promotion.index_sum`), and so does loopy a
+        subscript it reads as affine with no division, which is right modulo
+        ``2**32`` for a subscript in bounds. Anywhere else in a subscript its
+        value is used as it is: a division or a remainder of ``i + n``, or a
+        sum of it with a 64-bit value, is wrong once ``i + n`` passes
+        ``2**31``, at ``n`` past ``2**30``. So its first operand is converted
+        to 64 bits, ``(int64_t) (i) + n``, unless an operand already is one
+        (``j + ((int64_t) (i) + n)``), and C computes the sum in 64 bits.
+        """
+        operands = list(lowered)
+        if not any(self._is_wide(operand) for operand in operands):
+            operands[0] = self._convert(operands[0], np.dtype(np.int64))
+        return build(operands)
+
+    def _wide(self, node: Any) -> Any:
+        """``node``, recorded as computed in 64 bits; see :attr:`_wide_nodes`."""
+        self._wide_nodes[id(node)] = node
+        return node
+
+    def _is_wide(self, node: Any) -> bool:
+        """Whether ``node`` is one :meth:`_wide` recorded."""
+        return self._wide_nodes.get(id(node)) is node
+
+    def _widened(self, node: Any, operands: Sequence[Any], steps: Sequence[Any]) -> Any:
+        """``node``, recorded as 64 bits wide when an operand is and it is integral.
+
+        C computes an integer operation of a 64-bit operand in 64 bits, so an
+        operation of a widened index sum is one too, whatever the plan says
+        of it, unless the plan converts its result into another type, or the
+        result is a truth value or no integer.
+        """
+        if not any(self._is_wide(operand) for operand in operands):
+            return node
+        compiled = steps[-1].compiled if steps else None
+        if any(step.result is not None for step in steps) or compiled is None:
+            return node
+        if compiled.kind not in "iu":
+            return node
+        return self._wide(node)
 
     def _convert(self, operand: Any, dtype: np.dtype, narrowing: bool = False) -> Any:
         """``operand`` computed in ``dtype``, as a guard on the loops allows.
@@ -878,6 +1009,9 @@ class ExpressionLowerer(Mapper):
         computes it in (``narrowing``, #122), which no product can narrow: it
         is a cast as well.
         """
+        if not narrowing and dtype == np.int64 and self._is_wide(operand):
+            # Already 64 bits wide: an index sum of a widened subscript.
+            return operand
         if self._on_loops is None or (_is_literal(operand) and not narrowing):
             return _converted(operand, dtype)
         if not narrowing and (dtype == np.float64 or dtype.kind in "iu"):
@@ -960,8 +1094,10 @@ class ExpressionLowerer(Mapper):
         ``If``'s condition, so ``acc < 0 ? -acc : acc`` added a term only
         where the sum so far was negative (note 25). Of an integer narrower
         than ``int`` the result is converted back into its type, which C's
-        ``int`` leaves (:meth:`loopty.promotion.Promotion._absolute`). The
-        operand is written three times; a sum in it is computed for each.
+        ``int`` leaves (:meth:`loopty.promotion.Promotion._absolute`), in a
+        subscript too (#157); of an index sum a widened subscript computes in
+        64 bits the sign is bit 63 (#149). The operand is written three
+        times; a sum in it is computed for each.
 
         In a guard, ``abs`` of a real is written without a call as well
         (:func:`_real_absolute`): loopy's type inference visits a statement's
@@ -982,15 +1118,20 @@ class ExpressionLowerer(Mapper):
         )
         if compiled.kind in "bu" or truths:
             return lowered
-        bits = 8 * max(compiled.itemsize, 4) - 1
+        wide = self._is_wide(lowered)
+        bits = 63 if wide else 8 * max(compiled.itemsize, 4) - 1
         sign = prim.RightShift(lowered, bits)
         value: Any = prim.Sum(
             (prim.BitwiseXor((lowered, sign)), prim.Product((-1, sign)))
         )
         assert promotion is not None
-        for step in promotion.steps(expr):
-            if step.result is not None and not self.in_subscript:
+        steps = promotion.steps(expr)
+        for step in steps:
+            if step.result is not None:
                 value = self._convert(value, step.result, narrowing=True)
+        if wide and not steps:
+            # abs of an index sum of a widened subscript, in 64 bits too.
+            return self._wide(value)
         return value
 
     def map_comparison(self, expr: Any) -> prim.Expression:
@@ -1111,19 +1252,26 @@ def _subtracted_zero(expr: Any, promotion: Promotion | None) -> tuple[Any, ...]:
 
 
 def _without_widening(step: Any) -> Any:
-    """``step`` without a conversion to an integer dtype; see ExpressionLowerer.
+    """``step`` without converting an operand to an integer dtype.
 
-    Of an operand or of the result: a subscript's arithmetic is left in the
-    type loopy computes it in, a limit (#129).
+    What :meth:`ExpressionLowerer._index` lowers a subscript with first, to
+    ask whether loopy reads it as affine without the widening: an operand
+    converted into a wider integer holds the value it had, and loopy computes
+    a subscript it reads so in its 32-bit index type, modulo ``2**32``. A
+    conversion of the result (:attr:`loopty.promotion.Step.result`) is kept:
+    it takes the value round in numpy's narrower type, ``(uint8_t) (s + i)``
+    of an ``np.uint8`` ``s``, which no computation modulo ``2**32`` does, and
+    a subscript is computed as numpy computes it, cast and all, which loopy's
+    reader declines (#157).
     """
 
     def kept(dtype: np.dtype | None) -> np.dtype | None:
         return dtype if dtype is None or dtype.kind not in "biu" else None
 
-    left, right, result = kept(step.left), kept(step.right), kept(step.result)
-    if left is step.left and right is step.right and result is step.result:
+    left, right = kept(step.left), kept(step.right)
+    if left is step.left and right is step.right:
         return step
-    return dataclasses.replace(step, left=left, right=right, result=result)
+    return dataclasses.replace(step, left=left, right=right)
 
 
 def _untyped(expr: Any) -> bool:
@@ -1226,7 +1374,9 @@ class Lowering:
     fuse ``a * b + c`` into one multiply-add; it is ``False`` when an output is
     compared bit for bit, see :func:`allows_contraction`. ``temporaries``
     names the arrays declared as loopy temporaries, a program's own arrays
-    (:attr:`loopty.term.Term.temporaries`), which are nobody's argument.
+    (:attr:`loopty.term.Term.temporaries`), which are no argument of the
+    program's; on C the executor passes each as one it allocates
+    (:func:`heap_temporaries`).
 
     ``storage`` says, for every array over a polyhedral domain, which layout
     it is stored in, ``"box"`` or ``"packed"`` (:mod:`loopty.domain`), and
@@ -2516,7 +2666,7 @@ def _domain_over(domain: isl.Set, inames: Sequence[str]) -> isl.Set:
         domain = domain.move_dims(isl.dim_type.param, 0, isl.dim_type.set, 0, extra)
     for k, iname in enumerate(inames):
         domain = domain.set_dim_name(isl.dim_type.set, k, iname)
-    return domain
+    return check_names(domain, f"a domain over {', '.join(inames)}")
 
 
 def _rename_params(domain: isl.Set, renaming: Mapping[str, str]) -> isl.Set:
@@ -2524,12 +2674,14 @@ def _rename_params(domain: isl.Set, renaming: Mapping[str, str]) -> isl.Set:
 
     How a nested reduction's domain follows an enclosing binder that
     :meth:`_Builder.plan_reductions` renamed: the binder is a parameter of the
-    inner domain, and it has to name the loop the renamed binder became.
+    inner domain, and it has to name the loop the renamed binder became. All
+    at once, by :func:`loopty.names.rename`, which checks the result.
     """
-    for position, name in enumerate(_domain_params(domain)):
-        if name in renaming:
-            domain = domain.set_dim_name(isl.dim_type.param, position, renaming[name])
-    return domain
+    params = set(_domain_params(domain))
+    wanted = {old: new for old, new in renaming.items() if old in params}
+    if not wanted:
+        return domain
+    return rename(domain, wanted, what="a nested sum's domain, its binders renamed")
 
 
 def _outermost_reductions(expr: Any) -> tuple[Reduction, ...]:
@@ -3837,7 +3989,10 @@ def _temporary(
     C target declares as a variable-length array on the stack of the call
     (``double f[n];``): the C host code never allocates a global temporary and
     passes the device function a pointer it never set, so a global one there
-    crashes the process. The stack bounds how big such an array can be.
+    crashes the process. A schedule transforms it as a temporary
+    (:meth:`loopty.schedule.Schedule.substitute` computes one where it is
+    read), and the executor then takes it off the stack, as an argument it
+    allocates itself (:func:`heap_temporaries`, #62).
 
     A ragged temporary is refused, since nothing would give it its offsets, and
     so is one whose shape names a size nothing else in the kernel uses, which
@@ -3863,6 +4018,81 @@ def _temporary(
     return lp.TemporaryVariable(
         name, array_dtype(term, name, typ.dtype), shape=shape, address_space=space
     )
+
+
+def heap_temporaries(
+    kernel: Any, term: Term, sizes: Mapping[str, int] | None = None
+) -> tuple[Any, dict[str, tuple[tuple[int, ...], np.dtype]]]:
+    """``kernel`` with a program's arrays off the C stack, and what to allocate.
+
+    On the C targets a program's own array is a private temporary, which loopy
+    declares as a variable-length array on the stack of the call
+    (:func:`_temporary`), so the thread's stack bounded how large an
+    intermediate could be, and one larger crashed the compiled run with no
+    diagnostic (#62). Here each of them that is still a private temporary of
+    ``kernel`` and that an instruction reads or writes (a substituted one is
+    gone) becomes an argument instead, ``double *__restrict__ f`` after the
+    others, with the temporary's shape and dtype, and the caller allocates it
+    on the heap: :meth:`loopty.executor.LoopyExecutor.run` passes zeros, of
+    the shape the call's ``sizes`` give it. The term and the schedule keep it
+    a temporary, which is what a schedule's steps transform.
+
+    With ``sizes``, one with no cells at them is left on the stack, where it
+    takes none: loopy's C invoker cannot pass an empty array (note 3 in
+    ``docs/loopy-notes.md``). Returns the kernel and, with ``sizes``, each
+    argument added, with the shape and the dtype to allocate it in.
+    """
+    from pymbolic import evaluate
+
+    flags = dict(term.checks)
+    entry = kernel.default_entrypoint
+    touched: set[str] = set()
+    for insn in entry.instructions:
+        touched |= insn.dependency_names()
+        touched |= set(insn.assignee_var_names())
+    moved: dict[str, Any] = {}
+    allocations: dict[str, tuple[tuple[int, ...], np.dtype]] = {}
+    for name, _typ in term.temporaries:
+        temporary = entry.temporary_variables.get(name)
+        if (
+            name in flags
+            or name not in touched
+            or temporary is None
+            or temporary.address_space != lp.AddressSpace.PRIVATE
+            or not temporary.shape
+            or getattr(temporary.dtype, "numpy_dtype", None) is None
+        ):
+            continue
+        dtype = temporary.dtype.numpy_dtype
+        if sizes is not None:
+            try:
+                shape = tuple(
+                    int(evaluate(extent, dict(sizes))) for extent in temporary.shape
+                )
+            except Exception:  # noqa: BLE001 - a size the call does not give
+                continue
+            if not all(extent > 0 for extent in shape):
+                continue
+            allocations[name] = (shape, dtype)
+        moved[name] = lp.GlobalArg(
+            name,
+            dtype,
+            shape=temporary.shape,
+            dim_tags=temporary.dim_tags,
+            is_input=True,
+            is_output=False,
+        )
+    if not moved:
+        return kernel, allocations
+    entry = entry.copy(
+        args=[*entry.args, *moved.values()],
+        temporary_variables={
+            name: temporary
+            for name, temporary in entry.temporary_variables.items()
+            if name not in moved
+        },
+    )
+    return kernel.with_kernel(entry), allocations
 
 
 def _names_in(expr: Any) -> set[str]:

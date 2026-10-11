@@ -6,6 +6,22 @@ All notable changes to loopty are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **The names of isl dimensions** (`loopty.names`, #161). Every isl object
+  loopty names the dimensions of keeps namedisl's invariants: each
+  dimension has a name, no two share one, and none is named like a
+  parameter. isl's reader breaks them silently, reading a tuple variable
+  spelled like a parameter as that parameter (#110). `check_names` checks
+  them where such an object is made, a statement's and a sum's domain when
+  the term records it, the loops of a nest, an access relation (its cells
+  are positional), the index tuples of a shape, a dense layout's map and a
+  polyhedral domain's points, and raises `NamingError`, a bug of loopty's,
+  naming the object and the clash. `rename` is the one way loopty renames
+  dimensions and replaces parameters, all at once: composing a program
+  (`compose.rename_set`), the binders of a nested sum in the lowering, and
+  the native run fixing a parameter at the value it reads use it.
+
 ### Changed
 
 - CI also tests loopty as `pip install loopty` gets it: a second job installs
@@ -16,11 +32,23 @@ All notable changes to loopty are recorded here. The format follows
   array's entry, names the statement, where the body wrote it, the guard,
   and a guard over integers that keeps the access in bounds, which loopy
   reads, with a size as the body reads it: `with when(i <= y.dom.size - 5):`
-  for `x[i + 4]` under `when(i * 0.5 < 2)` (#148). It is `loopty.refusal.GuardNotRead`, a `LoopyIndexError` still,
-  with loopy's message at its end. A guard that calls a function no
-  statement's value calls, which loopy never resolves, is refused with a
-  `LoweringError` naming the fix, where loopy failed with `KeyError` and the
-  function's name.
+  for `x[i + 4]` under `when(i * 0.5 < 2)` (#148). It is
+  `loopty.refusal.GuardNotRead`, a `LoopyIndexError` still, with loopy's
+  message at its end. A guard that calls a function no statement's value
+  calls, which loopy never resolves, is refused with a `LoweringError`
+  naming the fix, where loopy failed with `KeyError` and the function's
+  name.
+- An array a program makes is off the C stack (#62). On the C target loopy
+  declared it a variable-length array on the stack of the call, `double
+  f[n];`, so the thread's stack bounded how large an intermediate could be,
+  and a program whose intermediate was larger, eight megabytes on a thread
+  with four, died with no diagnostic. `LoopyExecutor` now allocates it on
+  the heap, zeroed, and passes it after the program's own arguments,
+  `double *__restrict__ f`, and `emit_code` and `loopty run --emit-code`
+  print it so (`lower.heap_temporaries`). The term and its schedules keep it
+  a temporary, which `Schedule.substitute` computes away; an empty one stays
+  where it takes no room, since loopy's C invoker cannot pass an empty
+  array. The OpenCL target's global temporary is unchanged.
 
 ### Fixed
 
@@ -84,6 +112,47 @@ All notable changes to loopty are recorded here. The format follows
   variable under a double power in a single-precision statement is written as
   an integer, `(double) (i + 16777216)`, where loopy wrote `1.0f` and C
   rounded the loop variable past `2**24`.
+- A sum of loop variables and sizes in a dividing subscript is computed in
+  64 bits (#149). The plan leaves such a sum in 32 bits, as loopy computes a
+  loop bound, and a remainder or a floor division in a subscript used the
+  wrapped value once the sum passed `2**31`: `x[(i + k) % m]` at `k = 2**31 -
+  1` read cell `(-2**31) % 3` at `i = 1`, where numpy reads `2**31 % 3`, and
+  loopy wrote `x[(i + n) // 2]`, which it reads as affine with a division,
+  as `x[(i + n) / 2]`. In a subscript loopy does not read as affine with no
+  division the sum's first operand is widened now,
+  `x[loopty_mod_int64((int64_t) (i) + k, (int64_t) (m))]`, and `abs` of one
+  takes its sign from bit 63. The same sum in a value or a guard on the
+  loops is still 32 bits wide (#162).
+- A subscript over a narrow numpy integer type is computed in it, as numpy
+  computes it (#157). The conversion back into `int8`, `uint8`, `int16` or
+  `uint16` that an operation in such a type gets elsewhere (#122) was left
+  out of a subscript, so `x[s + i]` of a `uint8` `s`, which loopy reads as
+  affine, read cell 256 where numpy takes `250 + 6` round to 0, and
+  `x[abs(s) % 7]` of an `int8` `-128` read cell 2, where numpy's `abs` keeps
+  `-128`, whose remainder is 5. It is kept now, `x[(uint8_t) (s + i)]`, and
+  loopy's reader declines the cast, so the subscript is written as it is.
+- `==` and `!=` of complex values build on the OpenCL target (#158).
+  pyopencl's complex types are structs, which OpenCL C does not compare, and
+  loopy wrote `z[i] == w[i]` as it is, so the kernel did not build. They are
+  compared part by part, as numpy compares, in the complex type of the two,
+  a real operand with a zero imaginary part: `cdouble_real(z[i]) ==
+  cdouble_real(w[i]) && cdouble_imag(z[i]) == cdouble_imag(w[i])`. The C
+  targets compare C99's complex types with C's operators, as before.
+- The index tuples of a shape whose size is named `i0`, `idx.to_set((Fin[i0],
+  ...))`, had no points: their dimensions were named `i0, i1, ...` whatever
+  the sizes are called, and isl read the dimension `i0` as the size, `0 <= i0
+  < i0`. They are named clear of the sizes now, as a polyhedral domain's
+  already were (#161).
+- A sum by a binder named like a size or an integer parameter of the kernel,
+  `reduce_sum(x[j] for j in x.dom)` over `x: Arr[Fin[j], Real]`, is refused
+  at the trace, naming the fix (#161). Its domain was `{ [j] : 0 <= j < j }`,
+  a set with a well-named dimension and no points, which the name check
+  could not see: the compiled sum was `0` where numpy's was not, the
+  in-bounds fact of `x[j + 5]` was decided over the empty domain, and a sum
+  by `i` inside a loop bounded by a size `i` did not build. A loop variable
+  so named was already given a name of its own. `flow.domain_set` and a
+  polyhedral domain's points now also refuse a dimension named like a size
+  their bounds meant as a parameter (`check_names(..., meant=...)`).
 
 ## [0.1.0] - 2026-10-09
 

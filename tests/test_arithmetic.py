@@ -2489,6 +2489,202 @@ def test_a_literal_past_int64_is_refused_naming_a_real():
 # }}}
 
 
+# {{{ a narrow integer in a subscript (#157)
+
+
+@kernel
+def narrow_scalar_index(
+    s: np.uint8,
+    x: Arr[Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A cell found by a ``uint8`` sum, which numpy takes round modulo 256."""
+    for i in y.dom:
+        y[i] = x[s + i]
+
+
+@kernel
+def narrow_index(
+    a: Arr[Fin[n], np.uint8],  # noqa: F821
+    b: Arr[Fin[n], np.int8],  # noqa: F821
+    x: Arr[Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+):
+    """Cells found by ``uint8`` and ``int8`` arithmetic, as in #157."""
+    for i in a.dom:
+        y[i] = x[(a[i] * a[i]) % 7]
+        z[i] = x[(b[i] + b[i]) % 7]
+
+
+@kernel
+def narrow_abs_index(
+    s: np.int8,
+    x: Arr[Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A cell found by ``abs`` of an ``int8``, which keeps ``-128`` so."""
+    for i in y.dom:
+        y[i] = x[abs(s) % 7 + i]
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_a_subscript_over_a_narrow_integer_is_computed_in_its_type():
+    # numpy computes s + i of a uint8 s in uint8, which takes 250 + 6 round to
+    # 0, and C in int, and loopy reads x[s + i] as affine and wrote it so:
+    # cell 256 where numpy reads cell 0. The conversion back into uint8 is
+    # kept in a subscript, as everywhere else, and loopy's reader declines
+    # it, so the subscript is written as numpy computes it.
+    def make() -> dict:
+        return {"s": np.uint8(250), "x": np.arange(300.0), "y": np.zeros(10)}
+
+    native = make()
+    narrow_scalar_index(**native)
+    assert list(native["y"][5:7]) == [255.0, 0.0]
+    agrees(narrow_scalar_index, make)
+    assert "y[i] = x[(uint8_t) (s + i)];" in emit_code(narrow_scalar_index)
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_a_subscript_over_narrow_elements_is_computed_in_their_type():
+    # 16 * 16 is 0 in uint8, so numpy reads x[0] where 256 % 7 is cell 4,
+    # and 64 + 64 is -128 in int8, whose remainder by 7 is 5, where 128 % 7
+    # is 2. abs of the smallest int8 is itself, -128, in numpy, and its
+    # remainder 5; C computed abs in int, 128, and read cell 2 + i.
+    def make() -> dict:
+        return {
+            "a": np.array([16, 3, 255], np.uint8),
+            "b": np.array([64, -3, -128], np.int8),
+            "x": np.arange(7.0),
+            "y": np.zeros(3),
+            "z": np.zeros(3),
+        }
+
+    native = make()
+    narrow_index(**native)
+    assert list(native["y"]) == [0.0, 2.0, 1.0]
+    assert list(native["z"]) == [5.0, 1.0, 0.0]
+    agrees(narrow_index, make)
+
+    def small() -> dict:
+        return {"s": np.int8(-128), "x": np.arange(9.0), "y": np.zeros(3)}
+
+    native = small()
+    narrow_abs_index(**native)
+    assert list(native["y"]) == [5.0, 6.0, 7.0]
+    agrees(narrow_abs_index, small)
+    assert "(int8_t) ((s ^ loopty_rshift_int32((int32_t) (s), 31)) + -1 * " in (
+        emit_code(narrow_abs_index)
+    )
+
+
+# }}}
+
+
+# {{{ a comparison of complex values (#158)
+
+
+@kernel
+def complex_compared(
+    z: Arr[Fin[n], np.complex128],  # noqa: F821
+    w: Arr[Fin[n], np.complex128],  # noqa: F821
+    b: Arr[Fin[n], Bool],  # noqa: F821
+    c: Arr[Fin[n], Bool],  # noqa: F821
+    d: Arr[Fin[n], Bool],  # noqa: F821
+):
+    """``==`` and ``!=`` of complex values, of a complex and a real literal."""
+    for i in z.dom:
+        b[i] = z[i] == w[i]
+        c[i] = z[i] != w[i]
+        d[i] = (z[i] == 3.0) | (z[i] != 2j)
+
+
+@kernel
+def complex_mixed(
+    z: Arr[Fin[n], np.complex64],  # noqa: F821
+    x: Arr[Fin[n], np.float64],  # noqa: F821
+    b: Arr[Fin[n], Bool],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A ``complex64`` beside a double, compared in ``complex128``, and a guard."""
+    for i in z.dom:
+        b[i] = z[i] == x[i]
+        with when(x[i] != z[i]):
+            y[i] = 1.0
+
+
+def _complex_inputs(kern) -> dict:
+    """Pairs equal, unequal by either part, and with a NaN, for ``kern``."""
+    nan = complex(np.nan, 0.0)
+    z = np.array([1 + 2j, 3, 3 + 1j, nan, 2j, 0.1, -0.0], np.complex128)
+    w = np.array([1 + 2j, 3, 3 - 1j, nan, 0, 0.1, 0.0], np.complex128)
+    count = z.size
+    if kern is complex_compared:
+        return {"z": z, "w": w, **{k: np.zeros(count, bool) for k in "bcd"}}
+    return {
+        "z": z.astype(np.complex64),
+        "x": np.array([1.0, 3.0, 3.0, np.nan, 0.0, 0.1, 0.0]),
+        "b": np.zeros(count, bool),
+        "y": np.zeros(count),
+    }
+
+
+def test_a_comparison_of_complex_values_is_numpys_on_c():
+    # C99 compares its complex types with == and !=, as numpy compares: both
+    # parts, a NaN unequal to everything.
+    for kern in (complex_compared, complex_mixed):
+        native = _complex_inputs(kern)
+        kern(**native)
+        agrees(kern, lambda kern=kern: _complex_inputs(kern))
+    native = _complex_inputs(complex_compared)
+    complex_compared(**native)
+    assert list(native["b"]) == [True, True, False, False, False, True, True]
+    assert list(native["c"]) == [not b for b in native["b"]]
+
+
+def test_a_comparison_of_complex_values_compares_both_parts_on_opencl():
+    # pyopencl's complex types are structs, which OpenCL C does not compare
+    # with == and !=, and the kernel did not build (#158). Each is compared
+    # part by part, as numpy compares, a real operand with a zero imaginary
+    # part. Generating the code needs pyopencl and no device.
+    pytest.importorskip("pyopencl")
+    code = emit_code(complex_compared, "opencl")
+    assert (
+        "b[i] = (char) (cdouble_real(z[i]) == cdouble_real(w[i]) && "
+        "cdouble_imag(z[i]) == cdouble_imag(w[i]));"
+    ) in code
+    assert (
+        "c[i] = (char) (cdouble_real(z[i]) != cdouble_real(w[i]) || "
+        "cdouble_imag(z[i]) != cdouble_imag(w[i]));"
+    ) in code
+    assert "cdouble_real(z[i]) == 3.0 && cdouble_imag(z[i]) == 0" in code
+    assert "cdouble_real(z[i]) != 0.0 || cdouble_imag(z[i]) != 2.0" in code
+    code = emit_code(complex_mixed, "opencl")
+    assert "cdouble_real(cdouble_cast(z[i])) == x[i]" in code
+    assert "0 != cdouble_imag(cdouble_cast(z[i]))" in code
+
+
+def test_a_comparison_of_complex_values_runs_on_an_opencl_device():
+    cl = pytest.importorskip("pyopencl")
+    try:
+        devices = [d for p in cl.get_platforms() for d in p.get_devices()]
+    except cl.Error:
+        devices = []
+    if not devices:
+        pytest.skip("no OpenCL device")
+    for kern in (complex_compared, complex_mixed):
+        native = _complex_inputs(kern)
+        kern(**native)
+        compiled = _complex_inputs(kern)
+        LoopyExecutor(target="opencl").run(kern, **compiled)
+        for name in ("b", "c", "d", "y"):
+            if name in native:
+                assert np.array_equal(native[name], compiled[name]), name
+
+
+# }}}
+
+
 # {{{ abs of an integer (#123)
 
 
