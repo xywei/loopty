@@ -212,6 +212,18 @@ table of row starts. Both compiled runs agree with the native one.
   in-bounds obligations are decided over the set itself, so a cell of the
   bounding box outside it is refused. Where the cells are kept is a layout,
   boxed or packed, chosen by a schedule step, and changes no fact.
+- **What isl decides, Lean proves.** isl decides a fact in milliseconds and
+  gives no proof. Where Lean is installed, every fact isl decides, an access in
+  bounds, two writes apart, a definedness, a cast's legality one dependence
+  class at a time, is also stated as a Lean theorem and proved by `omega`, so
+  the ledger reads `proved lean` and not `decided isl`. The theorem is built
+  from loopty's own description of the kernel, its loops, guards and
+  subscripts and each step's maps as written, and never from a set isl
+  computed, so the two answers are independent; isl's work comes in as hints
+  Lean checks (the witness of an existential, a counterexample to prove
+  false). `--show-lean` prints the Lean, and
+  [docs/lean-checks.md](https://github.com/xywei/loopty/blob/main/docs/lean-checks.md)
+  has the details and the coverage.
 - **It plugs into a proof host.** loopty registers a theory, an isl oracle, an
   executor and a `run` verb with [lanky](https://github.com/xywei/lanky), so a
   residual obligation an oracle cannot decide is an ordinary theorem a person can
@@ -390,6 +402,32 @@ says when one does.
   array's own layout when the run starts.
 - `IslOracle`: `Empty`, `Subset`, `Bijective`, `Monotone`, each refutation with a
   witness.
+- isl decides, Lean checks (`loopty.description`, `loopty.obligations`;
+  [docs/lean-checks.md](https://github.com/xywei/loopty/blob/main/docs/lean-checks.md)).
+  Every set loopty builds keeps the text it was written from, on the set,
+  with each call's renaming, and every schedule step a record of its maps as
+  written; from those, and from no set isl computed, every fact isl decides
+  is stated for lanky's Lean oracle in parts (one per place an access is
+  made over, one per dependence class of a cast), which proves them with
+  `omega` where Lean is installed. isl's work comes in as hints Lean checks:
+  its functional form of a step's map as the witness that the step is total,
+  its `lexmax` pieces as the writer of each cell a read reads, the instances
+  it took of a program's universal hypotheses, and its counterexample to a
+  refuted fact, which Lean proves false. `loopty run` asks Lean about the
+  casts it reports, and `--show-lean` prints the Lean. On the examples and
+  the test kernels Lean proves every fact isl decides but those listed under
+  Known limits; `scripts/lean_coverage.py` reports it.
+- Definedness inside one kernel. An array a kernel reads only at cells an
+  earlier instance of its own wrote (`scan` reads `off[r]` where `off[0] =
+  0` or the row before stored it) gets a `definedness` fact where isl shows
+  it, stated for Lean as a ∀∃ with isl's last writer as the witness; a
+  kernel that reads what an array held when it was called owes nothing and
+  gets none.
+- Mixed subscripts. `X[cell[c, k], d]` is in bounds by type on its first axis,
+  `cell[c, k] : Fin(nv)`, and by isl on the second, where it was assumed.
+- `Schedule.assume("n % 4 == 0")`, loopy's `assume`, checked: loopy is told,
+  every later cast is decided and stated where the condition holds and rests
+  on an `assumption` fact, and a call whose sizes break it is refused.
 - `Schedule`: `tag`, `split`, `interchange`, `prioritize`, `tile`, `skew`,
   `affine`, `fuse`, `realize`, each checked as a cast, each emitting its fact,
   and `substitute`, checked as a storage decision;
@@ -851,6 +889,11 @@ the runs make of it, since that is what decides whether it can go unnoticed.
   intermediate again at every read; keeping only the cells live at once, a
   window of three cells of `f` after the Burgers fusion, is not done. Nor is
   a substitution through two intermediates, one computed from the other.
+- **Some facts are isl's alone** ([docs/lean-checks.md](https://github.com/xywei/loopty/blob/main/docs/lean-checks.md#what-stays-isls)).
+  Where Lean is installed, a rewritten layout's fact, the casts after a
+  substitution, a cast that puts a loop on a hardware axis, and a cast through
+  the part of a tile isl computes stay `decided isl`: loopty states them for
+  isl only, and `lanky check --verbose` says so.
 - **The OpenCL target is not run in CI.** `--target opencl`, with the `opencl`
   extra, generates OpenCL and runs it through pyopencl, and nothing in CI runs
   a device: the one test that does, of complex comparisons, is skipped
@@ -984,6 +1027,9 @@ loopty is loop + ty, for types: loops, typed. It follows `loopy`, `sumpy`, and
 - [docs/device-runs.md](https://github.com/xywei/loopty/blob/main/docs/device-runs.md) and
   [docs/device-runs/](https://github.com/xywei/loopty/tree/main/docs/device-runs): the demos run on real OpenCL
   devices, with the commands and the transcripts.
+- [docs/lean-checks.md](https://github.com/xywei/loopty/blob/main/docs/lean-checks.md): how a fact isl
+  decides is stated for Lean and proved, what isl hands Lean as hints, what
+  stays trusted, and the coverage over the examples.
 - [docs/loopy-notes.md](https://github.com/xywei/loopty/blob/main/docs/loopy-notes.md): the loopy and islpy
   interactions that cost debugging time, each with its local workaround and
   why it is local.

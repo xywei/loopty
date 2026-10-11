@@ -672,8 +672,9 @@ class RunVerb:
         if len(ledger):
             print()
             print(ledger.render())
-        report_unproved, report_lean = _lean_reports()
-        if report_unproved is not None:
+        report_proved, report_unproved, report_lean = _lean_reports()
+        if report_proved is not None:
+            report_proved(ledger)
             report_unproved(ledger)
         show_lean = getattr(args, "show_lean", None)
         if show_lean is not None and report_lean is not None:
@@ -698,13 +699,13 @@ class RunVerb:
     __call__ = run
 
 
-def _lean_reports() -> tuple[Any, Any]:
+def _lean_reports() -> tuple[Any, Any, Any]:
     """lanky's report of what Lean did not prove, and of the Lean, if it has them."""
     try:
-        from lanky.cli import report_lean, report_unproved
+        from lanky.cli import report_lean, report_proved, report_unproved
     except ImportError:  # a lanky from before them
-        return None, None
-    return report_unproved, report_lean
+        return None, None, None
+    return report_proved, report_unproved, report_lean
 
 
 def build_parser() -> argparse.ArgumentParser:
