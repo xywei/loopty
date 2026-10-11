@@ -13,52 +13,20 @@ facts as a dense one's do.
 
 from __future__ import annotations
 
+import importlib
+
 import numpy as np
 import pytest
 from lanky.ledger import Status
 from lanky.prelude import Fin, Real
-from lanky.terms import Var
 
-from loopty import Arr, Schedule, TraceError, Where, kernel, program, reduce_sum
+from loopty import Arr, Schedule, TraceError, kernel, program
 from loopty.executor import LoopyExecutor
 from loopty.faithful import KIND
 from loopty.oracle import IslOracle
 
-i, j, n = Var("i"), Var("j"), Var("n")
-
-#: The lower triangle, declared where the program makes an array over it.
-TRIANGLE = Where[i : Fin[n], j : Fin[n], j < i]
-
-
-@kernel
-def fill(
-    x: Arr[Fin[n], Real],  # noqa: F821
-    f: Arr[Where[i : Fin[n], j : Fin[n], j < i], Real],  # noqa: F821
-):
-    """``f[i, j] = x[i] x[j]`` on the lower triangle."""
-    for i in f.dom:
-        for j in f.dom[i]:
-            f[i, j] = x[i] * x[j]
-
-
-@kernel
-def rowsum(
-    f: Arr[Where[i : Fin[m], j : Fin[m], j < i], Real],  # noqa: F821
-    e: Arr[Fin[m], Real],  # noqa: F821
-):
-    """Each row of the triangle summed: the callee calls its size ``m``."""
-    for p in e.dom:
-        e[p] = reduce_sum(f[p, q] for q in f.dom[p])
-
-
-@kernel
-def diagonal(
-    f: Arr[Where[i : Fin[n], j : Fin[n], j <= i], Real],  # noqa: F821
-    e: Arr[Fin[n], Real],  # noqa: F821
-):
-    """A triangle with its diagonal: another set of points."""
-    for p in e.dom:
-        e[p] = f[p, p]
+K = importlib.import_module("kernels.program_domains")
+TRIANGLE, fill, rowsum, diagonal = K.TRIANGLE, K.fill, K.rowsum, K.diagonal
 
 
 def _inputs(count: int = 5, *, with_l: bool = False) -> dict:
@@ -83,11 +51,7 @@ def _settled(facts):
 
 
 def test_a_domains_sizes_are_unified_across_calls() -> None:
-    @program
-    def through(x, L, e):
-        fill(x, L)
-        rowsum(L, e)
-
+    through = K.through
     term = through.term
     params = dict(term.params)
     assert str(params["L"].domain) == "Where[i: Fin(n), j: Fin(n), j < i]"
@@ -112,13 +76,7 @@ def test_two_calls_that_see_other_points_are_refused() -> None:
 
 
 def test_an_array_made_like_one_over_a_domain_is_over_it() -> None:
-    @program
-    def like(x, L, e):
-        f = Arr.zeros_like(L)
-        fill(x, f)
-        rowsum(f, e)
-        rowsum(L, e)
-
+    like = K.like
     (name, typ), *_ = like.term.temporaries
     assert name == "f" and str(typ.domain) == str(TRIANGLE)
     zeros = like.term.stmt("f.zeros")
@@ -128,12 +86,7 @@ def test_an_array_made_like_one_over_a_domain_is_over_it() -> None:
 
 
 def test_an_array_of_a_declared_domain_takes_its_sizes_from_the_programs() -> None:
-    @program
-    def declared(x, e):
-        f = Arr.zeros(TRIANGLE, n=x.dom.size)
-        fill(x, f)
-        rowsum(f, e)
-
+    declared = K.declared
     term = declared.term
     (name, typ), *_ = term.temporaries
     assert name == "f" and str(typ.domain) == str(TRIANGLE)
