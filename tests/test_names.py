@@ -135,6 +135,10 @@ def test_a_renaming_is_simultaneous() -> None:
     assert rename(sizes, {"n": "m", "m": "n"}).is_equal(
         isl.Set("[m, n] -> { [i] : 0 <= i < m and i < n }")
     )
+    # A placeholder is named clear of the dimensions the set has already.
+    taken = isl.Set("[n] -> { [__loopty_moved_0, i] : 0 <= i < n }")
+    moved = rename(taken, {"i": "j"})
+    assert moved.get_var_names(isl.dim_type.set) == ["__loopty_moved_0", "j"]
 
 
 def test_a_parameter_is_replaced_by_an_expression_or_a_value() -> None:

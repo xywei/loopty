@@ -172,12 +172,24 @@ def rename(
     """
     names = dict(names or {})
     exprs = dict(exprs or {})
+    kinds = (isl.dim_type.param, *(kind for kind, _shown in _kinds(obj)))
+    # The placeholders are named clear of every name the object has and every
+    # name it is given, so that none of them is found for another dimension.
+    spelled = {
+        obj.get_dim_name(kind, position)
+        for kind in kinds
+        for position in range(obj.dim(kind))
+    }
+    spelled = {name for name in (*spelled, *names.values()) if name}
+    stem = "__loopty_moved"
+    while any(name.startswith(stem) for name in spelled):
+        stem += "_"
     moved: list[tuple[str, Any, str]] = []
-    for kind in (isl.dim_type.param, *(kind for kind, _shown in _kinds(obj))):
+    for kind in kinds:
         for position in range(obj.dim(kind)):
             original = obj.get_dim_name(kind, position)
             if original in names or original in exprs:
-                placeholder = f"__loopty_moved_{len(moved)}"
+                placeholder = f"{stem}_{len(moved)}"
                 obj = obj.set_dim_name(kind, position, placeholder)
                 moved.append((placeholder, kind, original))
     replaced: list[tuple[str, Any]] = []
