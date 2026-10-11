@@ -1425,8 +1425,10 @@ def _monotone_parts(origin: Any, steps: Sequence[Any]) -> list[Any]:
     tags = steps[-1].tags if steps else {}
     last = steps[-1].new if steps else origin._origin_layout.coords
     parts = []
+    assumed = steps[-1].assumptions if steps else ()
     for n, (a, b, first, second) in enumerate(_classes(origin)):
         claim = Claim(term)
+        claim.hypotheses.extend(assumed)
         chain_a = _chain(claim, origin, a, steps, "a")
         chain_b = _chain(claim, origin, b, steps, "b")
         claim.hypotheses.append(
@@ -1453,6 +1455,7 @@ def _bijective_parts(origin: Any, steps: Sequence[Any]) -> list[Any]:
     term = origin._term
     step = steps[-1]
     earlier = steps[:-1]
+    assumed = step.assumptions
     parts = []
     for stmt in term.stmts:
         if stmt.id not in step.isl_maps:
@@ -1464,6 +1467,7 @@ def _bijective_parts(origin: Any, steps: Sequence[Any]) -> list[Any]:
 
         # every instance has an image, isl's functional form the witness
         claim = Claim(term)
+        claim.hypotheses.extend(assumed)
         before = _chain(claim, origin, stmt, earlier, "a")[-1]
         images = claim.fresh_all(new, "image")
         relation = _relation(step, stmt.id, before, images)
@@ -1489,6 +1493,7 @@ def _bijective_parts(origin: Any, steps: Sequence[Any]) -> list[Any]:
 
         # one image only
         claim = Claim(term)
+        claim.hypotheses.extend(assumed)
         before = _chain(claim, origin, stmt, earlier, "a")[-1]
         first = dict(zip(new, claim.coordinates(new, "c"), strict=True))
         second = dict(zip(new, claim.coordinates(new, "d"), strict=True))
@@ -1505,6 +1510,7 @@ def _bijective_parts(origin: Any, steps: Sequence[Any]) -> list[Any]:
 
         # no two instances share an image
         claim = Claim(term)
+        claim.hypotheses.extend(assumed)
         one = _chain(claim, origin, stmt, earlier, "a")[-1]
         other = _chain(claim, origin, stmt, earlier, "b")[-1]
         image = dict(zip(new, claim.coordinates(new, "c"), strict=True))

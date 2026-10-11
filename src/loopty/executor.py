@@ -350,6 +350,45 @@ def _pad_empty_arrays(
     return out, originals
 
 
+def _check_assumptions(obj: Any, term: Any, supplied: dict[str, Any]) -> None:
+    """Refuse a call whose sizes break what its schedule assumed of them.
+
+    A schedule that assumed ``n % 4 == 0`` (:meth:`loopty.schedule.Schedule.assume`)
+    was checked, and its code generated, where that holds, so a call with
+    ``n = 10`` would run code nobody checked for it. The sizes are read off
+    the arrays as the contract reads them
+    (:func:`loopty.contract.resolve_sizes`), and a size the arrays do not
+    determine is refused too, since the assumption cannot be checked.
+    """
+    assumed = getattr(obj, "assumptions", ())
+    if not assumed:
+        return
+    from pymbolic import evaluate
+    from pymbolic.mapper.dependency import DependencyMapper
+
+    from loopty.contract import resolve_sizes
+
+    sizes = resolve_sizes(dict(term.params), supplied)
+    for expr in assumed:
+        names = {
+            dep.name
+            for dep in DependencyMapper(composite_leaves=False)(expr)
+            if hasattr(dep, "name")
+        }
+        missing = sorted(names - set(sizes))
+        if missing:
+            raise ValueError(
+                f"{obj!r} assumes {expr} of its sizes, and {', '.join(missing)} is "
+                "not read off the arguments, so the assumption cannot be checked"
+            )
+        if not evaluate(expr, sizes):
+            at = ", ".join(f"{name} = {sizes[name]}" for name in sorted(names))
+            raise ValueError(
+                f"{obj!r} assumes {expr} of its sizes, and here {at}: its casts "
+                "were checked, and its code generated, where the assumption holds"
+            )
+
+
 class LoopyExecutor:
     """The executor loopty registers under ``lanky.executors``.
 
@@ -420,6 +459,7 @@ class LoopyExecutor:
         )
         inherited_storage(term.array_types, term.temporaries_like, supplied)
         checked_storage(term, supplied)
+        _check_assumptions(obj, term, supplied)
         from loopty.refusal import naming_the_fix, refuse_where_native_does
 
         refused = refuse_where_native_does(term, supplied)

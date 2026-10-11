@@ -221,6 +221,7 @@ once, is not done.
 from __future__ import annotations
 
 import dataclasses
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -2342,7 +2343,9 @@ class Step:
     loop nest after the step. ``parent`` is the schedule the step was taken
     from, and ``substitution`` whether the step computed an array where it is
     read, which changes what the instances read and so the dependences the
-    later steps are checked against.
+    later steps are checked against. ``assumptions`` are what the schedule
+    assumed of the sizes when the step was taken (:meth:`Schedule.assume`),
+    as terms, under which isl decided it.
     """
 
     text: str
@@ -2355,6 +2358,7 @@ class Step:
     tags: Mapping[str, str]
     parent: Any = None
     substitution: bool = False
+    assumptions: tuple[Any, ...] = ()
 
 
 @dataclass(frozen=True, eq=False)
@@ -2491,6 +2495,10 @@ class Schedule:
         #: record from there (see :class:`Step`), for a cast Lean checks.
         self._origin_order = tuple(order)
         self._records: tuple[Step, ...] = ()
+        #: What :meth:`assume` was told of the sizes, as terms, and the ids
+        #: of the facts that record it, which every later cast rests on.
+        self._assumptions: tuple[Any, ...] = ()
+        self._assumption_ids: tuple[str, ...] = ()
         self._tags: dict[str, str] = {}
         # A reduction iname is not a coordinate of the instance space: a whole
         # reduction happens inside one statement instance. Splitting or tagging
@@ -4287,6 +4295,89 @@ class Schedule:
                                 )
         return (*kept, *carried), tuple(within)
 
+    def assume(self, condition: str) -> Schedule:
+        """Take ``condition`` of the sizes as given: loopy's ``assume``, checked.
+
+        ``condition`` is Python over the kernel's sizes, a comparison or
+        several joined with ``&``, each side an affine expression with ``//``
+        and ``%`` by a number: ``"n % 4 == 0"``, ``"n >= 8"``, or
+        ``"(e - s) % 4 == 0"`` for PyOP2's ``exists zz: end = 4 zz + start``.
+        It is not a cast, since no instance moves. Three things follow:
+
+        - loopy is told (``lp.assume``), so a loop split by a factor that
+          divides its extent needs no remainder, and code generation may use
+          it;
+        - every later cast is decided by isl where the sizes are as assumed,
+          and stated for Lean with the condition among its hypotheses, an
+          existential one where it is a divisibility, which ``omega`` reads
+          as it is (#20 of the demo's gaps);
+        - an ``assumption`` fact records it, ``assumed`` on the caller's
+          word, and the later casts rest on it. Where the schedule runs, the
+          sizes of the call are read off its arrays and checked against it
+          first, and a call that breaks it is refused, naming the sizes.
+
+        A condition that names what is not a size of the kernel, or that is
+        not affine, is refused with a ``ValueError``.
+        """
+        from lanky.ledger import Fact, Status
+        from pymbolic import parse
+
+        try:
+            expr = parse(condition)
+        except Exception as exc:  # noqa: BLE001 - said in the user's words
+            raise ValueError(f"assume({condition!r}) is not Python: {exc}") from exc
+        sizes = set(self._term.sizes) | set(self._params)
+        text = _assumption_text(expr, sizes, condition)
+        names = sorted(sizes & set(re.findall(r"[A-Za-z_][A-Za-z_0-9]*", text)))
+        assumed = isl.Set(f"[{', '.join(names)}] -> {{ : {text} }}")
+        other = self._clone()
+
+        def narrowed(obj: Any) -> Any:
+            if obj is None:
+                return None
+            context = assumed.align_params(obj.get_space())
+            return obj.align_params(context.get_space()).intersect_params(context)
+
+        other._instances = narrowed(self._instances)
+        other._origin = narrowed(self._origin)
+        other._reindex = narrowed(self._reindex)
+        other._before = narrowed(self._before)
+        other._deps_total = narrowed(self._deps_total)
+        other._deps = tuple(
+            dataclasses.replace(dep, relation=narrowed(dep.relation))
+            for dep in self._deps
+        )
+        other._kernel = _transformed(self._kernel, lp.assume, text)
+        other._code = _transformed(self._code, lp.assume, text)
+        recipe = ("assume", (condition,), {})
+        fact = Fact(
+            id=self._fact_id("assumption", (*self._steps, recipe)),
+            kind="assumption",
+            statement=f"{condition}, which {self._term.name} is scheduled assuming",
+            term=None,
+            status=Status.ASSUMED,
+            provenance={
+                "condition": condition,
+                "reason": (
+                    "the caller's word, checked against the sizes of every call "
+                    "the schedule runs"
+                ),
+            },
+            where=self._term.stmts[0].where if self._term.stmts else "",
+            owner=self._term.name,
+        )
+        other._assumptions = (*self._assumptions, expr)
+        other._assumption_ids = (*self._assumption_ids, fact.id)
+        other._facts = (*self._facts, fact)
+        other._steps = (*self._steps, recipe)
+        other._history = (*self._history, f"assume({condition!r})")
+        return other
+
+    @property
+    def assumptions(self) -> tuple[Any, ...]:
+        """What :meth:`assume` was told of the sizes, as terms."""
+        return self._assumptions
+
     def realize(self, var: str, tree: bool = True) -> Schedule:
         """Realize an accumulation, optionally as a reduction tree.
 
@@ -4382,6 +4473,7 @@ class Schedule:
             tags=dict(draft.tags),
             parent=self,
             substitution=recipe[0] == "substitute",
+            assumptions=self._assumptions,
         )
         records = (*self._records, record)
 
@@ -4951,6 +5043,9 @@ class Schedule:
         if status in ("refuted", "assumed"):
             provenance["reason"] = reason or detail
         suffix = f":{about}" if about else ""
+        if kind in ("bijective", "monotone"):
+            # decided where the sizes are as assumed (see assume)
+            rests_on = (*rests_on, *self._assumption_ids)
         return Fact(
             id=self._fact_id("cast", (*self._steps, step), f"{kind}{suffix}"),
             kind=kind,
@@ -4973,6 +5068,53 @@ class Schedule:
     def facts(self) -> tuple:
         """The cast facts accumulated by the transformations applied so far."""
         return self._facts
+
+
+def _assumption_text(expr: Any, sizes: set[str], condition: str) -> str:
+    """An assumption as isl text, or a ``ValueError`` saying why it cannot be one."""
+    from loopty.flow import NonAffine, expr_text
+
+    if isinstance(expr, prim.LogicalAnd):
+        return " and ".join(
+            _assumption_text(child, sizes, condition) for child in expr.children
+        )
+    if not isinstance(expr, prim.Comparison) or expr.operator == "!=":
+        raise ValueError(
+            f"assume({condition!r}): an assumption is a comparison of sizes, "
+            "==, <, <=, > or >=, or several joined with &"
+        )
+    names = {
+        node.name for side in (expr.left, expr.right) for node in _variables(side)
+    }
+    unknown = sorted(names - sizes)
+    if unknown:
+        raise ValueError(
+            f"assume({condition!r}): {', '.join(unknown)} is not a size of the "
+            "kernel, and an assumption is about its sizes"
+        )
+    try:
+        left = expr_text(expr.left, None, None)
+        right = expr_text(expr.right, None, None)
+    except NonAffine as exc:
+        raise ValueError(
+            f"assume({condition!r}): isl states affine expressions of the sizes, "
+            "with // and % by a number, and nothing else"
+        ) from exc
+    operator = "=" if expr.operator == "==" else expr.operator
+    return f"{left} {operator} {right}"
+
+
+def _variables(expr: Any) -> list[Any]:
+    """Every variable of a pymbolic expression."""
+    if isinstance(expr, prim.Variable):
+        return [expr]
+    if isinstance(expr, prim.ExpressionNode):
+        from lanky.terms import init_args
+
+        return [found for arg in init_args(expr) for found in _variables(arg)]
+    if isinstance(expr, tuple | list):
+        return [found for item in expr for found in _variables(item)]
+    return []
 
 
 def _key(name: str, target: str, steps: Sequence[tuple[str, tuple, dict]]) -> str:
