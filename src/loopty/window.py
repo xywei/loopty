@@ -695,6 +695,7 @@ def register_plan(
     producer: str,
     placement: Placement,
     skip: Sequence[str] = (),
+    names: Mapping[str, str] | None = None,
 ) -> tuple[str, int, int] | str:
     """The loop, the first offset and the count of a shift register, or why not.
 
@@ -704,8 +705,14 @@ def register_plan(
     stores the newest cell, the largest offset; the reads are at offsets no
     larger, and the register count is the span of the offsets. The
     instructions ``skip`` (the zeros the window drops) are not asked about.
+    ``names`` gives the statement each instruction is, for the reason.
     Returns ``(loop, lowest offset, count)``, or the reason in words.
     """
+    shown = dict(names or {})
+
+    def said(insn_id: str) -> str:
+        return shown.get(insn_id, insn_id)
+
     windowed = [
         (k, slot)
         for k, slot in enumerate(placement.slots)
@@ -748,7 +755,7 @@ def register_plan(
         insn.with_transformed_expressions(lambda e, f=finder: (f(e), e)[1])
     writes = [index for insn, index in found if insn.id == producer]
     if not writes:
-        return f"{producer} stores no cell of {array} the kernel can find"
+        return f"{said(producer)} stores no cell of {array} the kernel can find"
     loops = sorted(
         loop
         for loop in next(insn for insn, _ in found if insn.id == producer).within_inames
@@ -756,8 +763,8 @@ def register_plan(
     )
     if len(loops) != 1:
         return (
-            f"{producer} stores {array} at no index that is a loop plus a number, "
-            "which is what a shift register shifts along"
+            f"{said(producer)} stores {array} at no index that is a loop plus a "
+            "number, which is what a shift register shifts along"
         )
     (loop,) = loops
     offsets = []
@@ -765,17 +772,17 @@ def register_plan(
         offset = _offset(index[axis], loop) if loop in insn.within_inames else None
         if offset is None:
             return (
-                f"{insn.id} reads {array} at {', '.join(map(str, index))}, which is "
-                f"not {loop} plus a number, so its register would change from step "
-                "to step"
+                f"{said(insn.id)} reads {array}[{', '.join(map(str, index))}], which "
+                f"is not at {loop} plus a number, so its register would change "
+                "from step to step"
             )
         offsets.append((insn.id == producer, offset))
     newest = max(offset for _, offset in offsets)
     stored = {offset for written, offset in offsets if written}
     if stored != {newest}:
         return (
-            f"{producer} stores a cell older than one it reads, and a shift "
-            "register's newest register is the one stored"
+            f"{said(producer)} stores a cell older than one it reads, and a "
+            "shift register's newest register is the one stored"
         )
     lowest = min(offset for _, offset in offsets)
     count = newest - lowest + 1
@@ -797,6 +804,7 @@ def windowed_kernel(
     name: str,
     space: Any,
     register: tuple[str, int, int] | None = None,
+    outer: Sequence[str] = (),
 ) -> tuple[Any, str | None]:
     """``kernel`` with ``array`` kept in a window, or why loopy could not.
 
@@ -810,6 +818,9 @@ def windowed_kernel(
     offset from the loop, a number, and the window is shifted down by one at
     the start of every step of the loop, before anything else in the step
     touches it: ``f_window[0] = f_window[1]``, ``f_window[1] = f_window[2]``.
+    The shifts run in the loops ``outer`` the window's loop is nested in, as
+    the accesses do, so that each step of it inside each of theirs shifts
+    once.
     """
     import loopy as lp
     from loopy.symbolic import IdentityMapper
@@ -900,7 +911,7 @@ def windowed_kernel(
                         prim.Subscript(prim.Variable(name), k),
                         prim.Subscript(prim.Variable(name), k + 1),
                         id=shift_id,
-                        within_inames=frozenset({loop}),
+                        within_inames=frozenset({*outer, loop}),
                         depends_on=frozenset(cleared)
                         if previous is None
                         else frozenset({previous}),

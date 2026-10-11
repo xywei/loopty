@@ -907,6 +907,16 @@ def _refused_casts() -> list[tuple[str, IllegalCast]]:
                 "{ flux_S0[j] -> [k] : k = j; divergence_S0[j] -> [k] : k = j + 1 }"
             ),
         ),
+        (
+            "a window one cell short of the second reader",
+            lambda: Schedule(windows.two_readers, sizes=windows.SIZES)
+            .fuse("flux", "divergence_and_lag", shift=1)
+            .contract("f", lambda j: j % 3),
+        ),
+        (
+            "the loop run backwards after the window",
+            lambda: windows.windowed.affine(windows.REVERSED),
+        ),
     ]
     out = []
     for label, ask in asks:

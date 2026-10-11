@@ -12,6 +12,11 @@ its centred divergence, fused one step behind, and then:
 The ``rejected*`` functions ask for what is refused: a window of two cells,
 which a read sees overwritten, and a step after the window that runs the
 divergence a step later, past the slot it reads.
+
+And windows the review asked about: a second statement that reads further
+back (a window of four), the fused loop run backwards (the window taken
+along the reversed order), and the flux of every row of a 2-D array, the
+window's loop inside the rows' (a shift register shifted in each row).
 """
 
 from __future__ import annotations
@@ -51,6 +56,51 @@ def burgers(u, rhs):
     divergence(f, rhs)
 
 
+@kernel
+def divergence_and_lag(
+    f: Arr[Fin[n], Real], rhs: Arr[Fin[n], Real], z: Arr[Fin[n], Real]
+):
+    """The divergence, and a second statement that reads two cells back."""
+    for i in rhs.dom:
+        with when((i > 0) & (i + 1 < rhs.dom.size)):
+            rhs[i] = -(f[i + 1] - f[i - 1]) / 2
+        with when(i >= 2):
+            z[i] = f[i - 2] + 0.25 * f[i]
+
+
+@kernel
+def row_flux(u: Arr[Fin[m], Fin[n], Real], f: Arr[Fin[m], Fin[n], Real]):
+    """The flux of every row."""
+    for e in u.dom:
+        for j in u.dom[e]:
+            f[e, j] = 0.5 * u[e, j] * u[e, j]
+
+
+@kernel
+def row_divergence(f: Arr[Fin[m], Fin[n], Real], rhs: Arr[Fin[m], Fin[n], Real]):
+    """The divergence of every row, at its interior points."""
+    for e in rhs.dom:
+        for i in rhs.dom[e]:
+            with when((i > 0) & (i + 1 < rhs.dom[e].size)):
+                rhs[e, i] = -(f[e, i + 1] - f[e, i - 1]) / 2
+
+
+@program
+def two_readers(u, rhs, z):
+    """The flux, read by the divergence and by a statement two cells back."""
+    f = Arr.zeros_like(u)
+    flux(u, f)
+    divergence_and_lag(f, rhs, z)
+
+
+@program
+def rows(u, rhs):
+    """The Burgers right-hand side of every row."""
+    f = Arr.zeros_like(u)
+    row_flux(u, f)
+    row_divergence(f, rhs)
+
+
 @program
 def bumped_after(u, rhs):
     """The flux's input written after the divergence has read the flux."""
@@ -73,6 +123,24 @@ registers = fused.contract("f", registers=True)
 
 #: A split of the loop after the window, which keeps every slot's order.
 split_after = windowed.split("j", 4)
+
+#: A second reader of ``f[j - 3]`` at step ``j``: a window of four cells.
+deeper = (
+    Schedule(two_readers, sizes=SIZES)
+    .fuse("flux", "divergence_and_lag", shift=1)
+    .contract("f")
+)
+
+#: The fused loop run backwards, and the window taken along that order.
+REVERSED = "{ flux_S0[j] -> [k] : k = -j; divergence_S0[j] -> [k] : k = 2 - j }"
+reversed_window = fused.affine(REVERSED).contract("f")
+
+#: Each row's flux in a shift register, shifted at each step of each row.
+row_registers = (
+    Schedule(rows, sizes={"m": 3, "n": 8})
+    .fuse("row_flux", "row_divergence", shift=(0, 1))
+    .contract("f", registers=True)
+)
 
 #: The flux computed where it is read, before ``bump`` writes what it read.
 substituted = (

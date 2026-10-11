@@ -4417,6 +4417,24 @@ class Schedule:
         why = _not_pointwise(producer, array, term)
         if why is not None:
             raise ValueError(f"{text}: {why}")
+        # The reads of the producer move to the readers, and a window is
+        # decided over the reads where they are made (#229).
+        windowed = sorted(
+            {
+                name
+                for kind, name, _indices, _part in _accesses(producer, term)
+                if kind == "read" and name in self._windows
+            }
+        )
+        if windowed:
+            kept = windowed[0]
+            raise ValueError(
+                f"{text}: {producer.id} computes {array} from {kept}, which is kept "
+                f"in a window, {self._windows[kept].placement}, so computing "
+                f"{array} where it is read would read {kept} where its slot may "
+                f"hold another cell; keep {kept} in a window or compute {array} "
+                "where it is read, not both"
+            )
         readers = [
             stmt
             for stmt in term.stmts
@@ -4632,6 +4650,22 @@ class Schedule:
                 f"{text}: {array} is kept in a window already, "
                 f"{self._windows[array].placement}"
             )
+        # A substitution moved its producer's reads to where the array it
+        # computes is read, which the reads of the term do not show (#229).
+        for record in self._records:
+            if record.substituted is None:
+                continue
+            computed, through, _readers = record.substituted
+            if any(
+                kind == "read" and name == array
+                for kind, name, _indices, _part in _accesses(through, term)
+            ):
+                raise ValueError(
+                    f"{text}: substitute({computed!r}) computes {computed} from "
+                    f"{array} where {computed} is read, so {array} is read there "
+                    f"too, which a window is not taken over; keep {array} in a "
+                    f"window or compute {computed} where it is read, not both"
+                )
         producer, readers = win.preconditions(term, array, self._gone, text)
         statements = {producer.id, *(reader.id for reader in readers)}
         tagged = sorted(
@@ -4714,7 +4748,9 @@ class Schedule:
         before = win.earlier(schedule, self._origin)
         sizes = tuple(_plain(size) for size in arrtype.axes)
         names = _cell_names(producer, rank)
-        if given is None:
+
+        def smallest() -> Any:
+            """The window found along the order, or ``None``: none is smaller."""
             pairs = None
             for read in reads:
                 live = win.live_pairs(read, writes, before)
@@ -4723,10 +4759,16 @@ class Schedule:
                 else:
                     pairs, live = win._aligned(pairs, live)
                     pairs = pairs.union(live)
-            chosen = win.infer(pairs, rank, sizes, names)
+            found = win.infer(pairs, rank, sizes, names)
             if all(
-                isinstance(slot, prim.Variable) for slot in chosen.slots
-            ) and len(chosen.slots) == rank:
+                isinstance(slot, prim.Variable) for slot in found.slots
+            ) and len(found.slots) == rank:
+                return None
+            return found
+
+        if given is None:
+            chosen = smallest()
+            if chosen is None:
                 raise ValueError(
                     f"{text}: every cell of {array} is still to be read while the "
                     "others are stored, in the order as it stands, so no window "
@@ -4750,6 +4792,32 @@ class Schedule:
             steps=self._records,
         )
         clobbered = self._clobbered(window, found, reads, writes, before, shown)
+        if clobbered is not None and given is not None:
+            # the refusal names the fix: the window that keeps every read
+            fix = (
+                f"; no window of {array} is smaller than {array} in the order as "
+                "it stands"
+            )
+            other = smallest()
+            if other is not None and other != given:
+                safe = self._clobbered(
+                    dataclasses.replace(window, placement=other),
+                    found,
+                    reads,
+                    writes,
+                    before,
+                    shown,
+                )
+                fix = (
+                    f"; contract({array!r}) finds the smallest window that keeps "
+                    f"every read, {other}"
+                    if safe is None
+                    else ""
+                )
+            elif other is not None:
+                fix = ""
+            k, triple, message = clobbered
+            clobbered = (k, triple, message + fix)
         facts = [fact]
         no_clobber = self._no_clobber_fact(window, clobbered, shown, recipe, fact)
         facts.append(no_clobber)
@@ -4823,7 +4891,12 @@ class Schedule:
             register = None
             if registers or (registers is None and self._target == "opencl"):
                 plan = win.register_plan(
-                    draft.kernel, array, ids[producer.id], chosen, removed
+                    draft.kernel,
+                    array,
+                    ids[producer.id],
+                    chosen,
+                    removed,
+                    {insn: stmt_id for stmt_id, insn in ids.items()},
                 )
                 if not isinstance(plan, str) and plan[0] in self._strides:
                     plan = (
@@ -4835,8 +4908,25 @@ class Schedule:
                         raise ValueError(f"{shown}: registers=True: {plan}")
                 else:
                     register = plan
+            # the loops the window's loop is nested in, outermost first: its
+            # shifts run in each of their steps
+            coords = self._layout.coords[producer.id]
+            nest = [loop for loop in staged._order if loop in coords]
+            outer = (
+                nest[: nest.index(register[0])]
+                if register is not None and register[0] in nest
+                else []
+            )
             kernel, reason = win.windowed_kernel(
-                draft.kernel, array, removed, chosen, extents, name, space, register
+                draft.kernel,
+                array,
+                removed,
+                chosen,
+                extents,
+                name,
+                space,
+                register,
+                outer,
             )
             draft.kernel = kernel
             if reason is not None:
@@ -4876,7 +4966,9 @@ class Schedule:
             triple = self._triple_in(bad)
             (reader, at), (_, stored), (writer, other), params = triple
             producer = window.producer
-            cell = _cell_text(access.indices, at, params)
+            # the cell the read reads is the one the producer stored, named
+            # so where the read is in a sum, whose binders isl does not give
+            cell = _cell_text(producer.assignee.indices, stored, params)
             theirs = _cell_text(producer.assignee.indices, other, params)
             slot = "its slot"
             try:
@@ -5539,7 +5631,7 @@ class Schedule:
         witness = overall.witness if bad is None else bad[1]
         detail = overall.detail if bad is None else bad[2]
         if bad is not None:
-            message = self._render_violation(text, *bad)
+            message = self._render_violation(text, *bad, step=recipe[0])
         elif refused:
             message = f"{text} illegal: {overall.detail}"
         else:
@@ -5753,7 +5845,9 @@ class Schedule:
             for iname, value in zip(coords, point[1:], strict=False)
         }
 
-    def _render_violation(self, text: str, dep: _Dep, witness: tuple, _: str) -> str:
+    def _render_violation(
+        self, text: str, dep: _Dep, witness: tuple, _: str, step: str = ""
+    ) -> str:
         """The rejection message: which instance, which cell, which way round.
 
         The sizes are part of the message, not decoration. The verdict is
@@ -5770,8 +5864,16 @@ class Schedule:
         cell = _cell_text(dep.source_indices, source_coords, params)
         at = _sizes_text(params, self._sizes)
         if dep.window is not None:
-            pair = _slot_pair_text(dep, witness)
-            return f"{text} illegal: {pair}, scheduled earlier{at}"
+            # a window's pair, and the fix: take the window after the step,
+            # which a tag that drops the order it is kept over has none of
+            pair = _slot_pair_text(dep, witness, now=True)
+            fix = (
+                f"{dep.array} is kept in a window over the order this tag drops"
+                if step == "tag"
+                else "a window keeps the order it was taken in, so take it after "
+                "this step"
+            )
+            return f"{text} illegal: {pair}{at}; {fix}"
         return (
             f"{text} illegal: instance {_instance_text(source_id, source_coords)} "
             f"{source_verb} {dep.array}[{cell}] {sink_verb} by "
@@ -6001,18 +6103,20 @@ class Schedule:
         source_verb, sink_verb = dep.verbs()
         cell = _cell_text(dep.source_indices, source_coords, params)
         at = _sizes_text(params, self._sizes)
-        pair = (
-            f"instance {_instance_text(source_id, source_coords)} "
-            f"{source_verb} {dep.array}[{cell}] {sink_verb} by "
-            f"{_instance_text(sink_id, sink_coords)}"
-            if dep.window is None
-            else _slot_pair_text(dep, witness)
-        )
-        message = (
-            f"{text} illegal: {pair} on another work item{at}: "
-            f"{how}, and nothing in a kernel orders two work items through "
-            "global memory"
-        )
+        if dep.window is None:
+            pair = (
+                f"instance {_instance_text(source_id, source_coords)} "
+                f"{source_verb} {dep.array}[{cell}] {sink_verb} by "
+                f"{_instance_text(sink_id, sink_coords)}"
+            )
+            why = "nothing in a kernel orders two work items through global memory"
+        else:
+            pair = _slot_pair_text(dep, witness)
+            why = (
+                "a window is one for every work item, so its slots are shared "
+                "by them, which nothing orders (#214)"
+            )
+        message = f"{text} illegal: {pair} on another work item{at}: {how}, and {why}"
         detail = (
             f"a {dep.kind} dependence on {dep.array} joins two work items of {axis}"
         )
@@ -6254,28 +6358,56 @@ def _element_exactness(term: Term, name: str) -> str:
     return "approx"
 
 
-def _slot_pair_text(dep: _Dep, witness: tuple) -> str:
+def _slot_pair_text(dep: _Dep, witness: tuple, now: bool = False) -> str:
     """Two accesses to one slot of a window, in words, ``source`` first.
 
-    ``instance divergence.S0[i=1] reads f[0] from its slot of the window
-    lambda j: j % 3, which flux.S0[j=3] overwrites with f[3]``.
+    ``instance divergence.S0[i=1] reads f[0] from slot 0 of the window
+    lambda j: j % 3, which flux.S0[j=3] overwrites with f[3]``. With ``now``,
+    the second is what a step would run first: ``which flux.S0[j=3] would
+    now overwrite with f[3] first``.
     """
     (source_id, source_coords), (sink_id, sink_coords), params = witness
     mine = _cell_text(dep.source_indices, source_coords, params)
     theirs = _cell_text(dep.sink_indices, sink_coords, params)
     source = _instance_text(source_id, source_coords)
     sink = _instance_text(sink_id, sink_coords)
-    window = f"the window {dep.window}"
-    if dep.kind == "war":
-        return (
-            f"instance {source} reads {dep.array}[{mine}] from its slot of "
-            f"{window}, which {sink} overwrites with {dep.array}[{theirs}]"
+    slot = _slot_text(dep, source_coords, params)
+    window = f"{slot} of the window {dep.window}"
+    if dep.kind == "raw":
+        later = (
+            f"would now read {dep.array}[{theirs}] first"
+            if now
+            else f"reads {dep.array}[{theirs}]"
         )
-    verb, where = ("reads", "from") if dep.kind == "raw" else ("stores", "in")
-    return (
-        f"instance {source} stores {dep.array}[{mine}] in the slot of {window} "
-        f"that {sink} {verb} {dep.array}[{theirs}] {where}"
+        return (
+            f"instance {source} stores {dep.array}[{mine}] in {window}, from "
+            f"which {sink} {later}"
+        )
+    later = (
+        f"would now overwrite with {dep.array}[{theirs}] first"
+        if now
+        else f"overwrites with {dep.array}[{theirs}]"
     )
+    verb, where = ("reads", "from") if dep.kind == "war" else ("stores", "in")
+    return (
+        f"instance {source} {verb} {dep.array}[{mine}] {where} {window}, which "
+        f"{sink} {later}"
+    )
+
+
+def _slot_text(dep: _Dep, coords: dict[str, int], params: dict[str, int]) -> str:
+    """``slot 0``: the slot of the window the source of ``dep`` touches."""
+    from pymbolic import evaluate
+
+    try:
+        values = [
+            evaluate(_plain(index), {**params, **coords})
+            for index in dep.source_indices
+        ]
+        slot = [evaluate(expr, {}) for expr in dep.window.at(values)]
+    except Exception:  # noqa: BLE001 - a binder of a sum, say: no number
+        return "a slot"
+    return "slot " + ", ".join(str(value) for value in slot)
 
 
 def _cell_names(producer: Stmt, rank: int) -> tuple[str, ...]:
