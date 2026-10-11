@@ -38,11 +38,12 @@ What links the layers:
   cell of ``R`` is stored once and read only after its store
   (``loopty.dataflow``), and with Lean, proved.
 - ``@kernel(uses=[on_the_triangle])`` applies the theorem to the
-  postcondition: the copies and the recurrence are two of its hypotheses,
-  and its conclusion is the kernel's, for every ``D`` the other two say
-  something of. The ledger's row ``by on_the_triangle`` rests on the
-  theorem's proof and on the postcondition, and Lean checks that the theorem
-  applies.
+  postcondition: its copies and recurrence are two of the theorem's
+  hypotheses, so ``R[a, b] == D(a)(b)`` on the triangle for every ``D``
+  that the other two, ``pde`` and ``stored``, hold of. The row ``by
+  on_the_triangle, for every D with pde and stored`` rests on the
+  theorem's proof and on the postcondition, and Lean checks that the
+  theorem applies.
 - ``cpu`` schedules the kernel, and each step is a cast, checked; its casts
   are rows of the same ledger. Running ``b`` outside ``a`` is refused, with
   the pair of instances it would reorder: ``R[a, b]`` reads ``R[a - 2, b +
@@ -51,7 +52,6 @@ What links the layers:
 
 from __future__ import annotations
 
-import cmath
 import math
 
 from lanky import theorem
@@ -231,7 +231,7 @@ def main() -> int:
             f"{detail['tolerance']:.3g} ({detail['exactness']}) -> "
             f"{fact.status.value}"
         )
-    exact = cmath.isclose(worst, 0.0, abs_tol=1e-9)
+    exact = math.isclose(worst, 0.0, abs_tol=1e-9)
     return 0 if exact and fact.status.value == "tested" else 1
 
 

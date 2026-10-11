@@ -1193,11 +1193,15 @@ expansion to the kernel that computes it to the schedule that runs it.
   the term, each equation of reals an atom, resting on the fact that no cell
   of `R` is stored twice or read before its store.
 - `@kernel(uses=[on_the_triangle])` applies the theorem to the postcondition:
-  the copies and the recurrence are two of the theorem's hypotheses, and its
-  conclusion holds of the kernel's arrays for every `D` the other two say
-  something of. The row `by on_the_triangle` rests on the theorem's proof and
-  on the postcondition, and with Lean, Lean applies the theorem as it was
-  proved and checks that it gives the claim.
+  the copies and the recurrence are two of the theorem's hypotheses, so its
+  conclusion, `R[a, b] == D(a)(b)` on the triangle, holds of the kernel's
+  `R` for every `D` the other two hold of. The row reads `by
+  on_the_triangle, for every D with pde and stored: ...`, rests on the
+  theorem's proof and on the postcondition, and with Lean, Lean applies the
+  theorem as it was proved and checks that it gives the claim. A kernel
+  that computed something else, a recurrence off by one, would get no such
+  row: every hypothesis about what the kernel writes has to be a conjunct
+  of its postcondition.
 - `cpu`, a schedule of the kernel, splits its rows; its casts are rows of
   the same ledger. Running `b` outside `a` is refused with the pair of
   instances it would reorder.
@@ -1220,11 +1224,14 @@ interchange(b, a) -> IllegalCast: interchange(b, a) illegal: instance S0[a=1, b=
 
 ### lanky check examples/taylor_reconstruction.py
 
-Without Lean, the theorem is `assumed` (no draw can tabulate a table over
-`Nat`), the kernel's facts `decided` by `isl`, and the application `decided`
-by `theorem`, worth what the theorem is. With Lean and Mathlib
-(`LANKY_LEAN_MATHLIB`), every row but the readings and the trace's is
-`proved`.
+Without Lean, the theorem is `assumed` (lanky's tester cannot draw a table
+over all of `Nat`), the kernel's facts `decided` by `isl`, and the
+application `decided` by `theorem`, worth what the theorem is. With Lean and
+Mathlib (`LANKY_LEAN_MATHLIB`), every row but the readings and the trace's is
+`proved`: `16 facts: 14 proved, 2 tested`. That takes Lean about a minute and
+a half the first time; checked again with nothing changed, every answer is
+read from the proof cache, no Lean is started, and the check takes about two
+seconds.
 
 ```console
 $ uv run lanky check examples/taylor_reconstruction.py

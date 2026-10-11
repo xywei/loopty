@@ -462,17 +462,29 @@ release; the CHANGELOG says when one does.
 
   ```python
   @kernel(uses=[on_the_triangle])
-  def reconstruct(c: Arr[STORED, Real], R: Arr[TRIANGLE, Real]) -> (
-      all(R[a, b] == c[a, b] for a in Fin[p + 1] for b in Fin[p + 1] if a < 2 if a + b <= p)
-      & all(R[a + 2, b] == -R[a, b + 2] for a in Fin[p + 1] for b in Fin[p + 1] if a + b + 2 <= p)
-  ): ...
+  def reconstruct(
+      c: Arr[Where[a : Fin[2], b : Fin[p + 1], a + b <= p], Real],
+      R: Arr[Where[a : Fin[p + 1], b : Fin[p + 1], a + b <= p], Real],
+  ) -> all(
+      R[a, b] == c[a, b] for a in Fin[p + 1] for b in Fin[p + 1] if a < 2 if a + b <= p
+  ) & all(
+      R[a + 2, b] == -R[a, b + 2] for a in Fin[p + 1] for b in Fin[p + 1] if a + b + 2 <= p
+  ):
+      ...
   ```
 
-  reads `by on_the_triangle: forall D ... R[a, b] == D(a)(b)`: whatever
-  table `D` satisfies the PDE and has its stored entries in `c`, `R` is `D`
-  on the triangle. A theorem whose conclusion is a conjunct of the
-  postcondition decides that conjunct instead, as a program's cited theorem
-  decides a requirement.
+  reads `by on_the_triangle, for every D with pde and stored: ... R[a, b] ==
+  D(a)(b)`: whatever table `D` satisfies the PDE (`pde`) and has its stored
+  entries in `c` (`stored`), `R` is `D` on the triangle. A theorem whose
+  conclusion is a conjunct of the postcondition decides that conjunct
+  instead, as a program's cited theorem decides a requirement. The
+  application says something of what the kernel computes, or it is not
+  made: every hypothesis about an array the kernel writes has to be a
+  conjunct of the postcondition, so a kernel whose recurrence is off by one
+  gets nothing from the theorem; and a conjunct about reals is a
+  hypothesis only where nothing in it rounds (copies and sign changes),
+  since the theorem is about the reals, and `s[i] == a[i] + b[i]` holds of
+  the floats and not of them read as reals.
 - `lanky check` lists a file's schedules (#191). The casts of every schedule
   a file holds at module level are rows of the ledger beside the facts of
   the kernel or program it schedules, decided by isl as each step was taken

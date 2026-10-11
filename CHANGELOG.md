@@ -24,31 +24,41 @@ All notable changes to loopty are recorded here. The format follows
   runs still test the postcondition (`native` in its provenance), and one
   that refutes it refutes it; one the equations do not decide keeps the
   runs' status, with why (`undecided`): a cell stored twice, a read before
-  its store, a write under a guard isl cannot state, an accumulation.
+  its store (the instance that stores a cell and reads it, however its
+  index is spelled, `x[i] = 2 * x[i + 1 - 1] - 5`, reads it first), a write
+  under a guard isl cannot state, an accumulation.
 - **Theorems a kernel cites**, `@kernel(uses=[on_the_triangle])`. A theorem
   whose hypotheses are conjuncts of the postcondition, up to the names of
   their binders, with a family `R(a)(b)` matching the cell `R[a, b]`, gives
   its conclusion at the kernel's arrays: a `by-theorem` fact, `decided` by
   `theorem` and resting on the theorem and the postcondition, whose
   unbound variables stay universal and whose unmatched hypotheses are its
-  own. For `examples/taylor_reconstruction.py` it reads `by on_the_triangle:
-  forall D ... R[a, b] == D(a)(b)`. Lean checks the application, the theorem
-  as it was proved applied with the arrays loopty matched, so a wrong match
-  is no proof. A theorem whose conclusion is a conjunct of the postcondition
-  decides that conjunct instead. A family into `Nat` or a `Fin` sort stands
-  for an array the kernel does not write; the cells it writes take a
-  theorem over `Int`.
+  own, named in the row. For `examples/taylor_reconstruction.py` it reads
+  `by on_the_triangle, for every D with pde and stored: ... R[a, b] ==
+  D(a)(b)`. Lean checks the application, the theorem as it was proved
+  applied with the arrays loopty matched, so a wrong match is no proof. A
+  theorem whose conclusion is a conjunct of the postcondition decides that
+  conjunct instead. A match is made only where it says something of what
+  the kernel computes: every hypothesis about an array the kernel writes is
+  a conjunct of the postcondition (a kernel whose recurrence is off by one
+  gets nothing), and a conjunct about reals is matched only where nothing
+  in it rounds, copies and sign changes, since the theorem reads it as
+  reals. A family into `Nat` or a `Fin` sort stands for an array the kernel
+  does not write; the cells it writes take a theorem over `Int`.
 
   ```python
   @kernel(uses=[on_the_triangle])
-  def reconstruct(c: Arr[STORED, Real], R: Arr[TRIANGLE, Real]) -> copies & recurrence:
+  def reconstruct(
+      c: Arr[Where[a : Fin[2], b : Fin[p + 1], a + b <= p], Real],
+      R: Arr[Where[a : Fin[p + 1], b : Fin[p + 1], a + b <= p], Real],
+  ) -> copies & recurrence:  # the two conjuncts, written out in the example
       ...
   ```
 
   ```console
   $ lanky check examples/taylor_reconstruction.py
   ...
-  decided under on_the_triangle  assumed    theorem      taylor_reconstruction.py:116  reconstruct      by on_the_triangle: forall D in Fn[Nat, Fn[Nat, Real]] where (forall ...
+  decided under on_the_triangle  assumed    theorem      taylor_reconstruction.py:116  reconstruct      by on_the_triangle, for every D with pde and stored: forall a in Fin(...
   ...
   ```
 - **`lanky check` lists a file's schedules** (#191). The casts of every

@@ -131,7 +131,7 @@ its own, in parallel.
 | a cast is bijective | statement the step moves | every instance has an image (an existential), one only, and no two share one |
 | a cast is monotone | dependence class, a pair of accesses | two instances that touch one cell, in the source's order, keep it after every step: their time vectors compare as the source's do |
 | what a program's call may assume | requirement, or flat access | the claim at every point of its domain, under the hypotheses isl used (a callee's postcondition, a theorem the program cites, a type the contract checks) |
-| single assignment | pair of statements that store into the array; read of the array and statement that stores into it | two instances, distinct where they are of one statement, store into cells that differ; an instance that stores the cell an instance reads does not run after it, in the source order |
+| single assignment | pair of statements that store into the array; read of the array and statement that stores into it | two instances, distinct where they are of one statement, store into cells that differ; an instance that stores the cell an instance reads runs before it, in the source order, and so is not the instance that reads it |
 | a kernel's postcondition | conjunct | the conjunct at every point of its binders' domain, under what each statement stores, its value equation, with the instances isl took of the equations as hints; one about reals is stated with Mathlib's `ℝ` and closed by `linarith` |
 | a cited theorem, applied | (one part) | the theorem as it was proved, and the conjuncts of the postcondition it was matched with, imply the claim: Lean applies the theorem with the arrays and sizes loopty bound given by name, and each premise left is a hypothesis |
 | an assumption of a schedule | (a hypothesis of every later cast) | |
@@ -244,10 +244,15 @@ stays `decided`.
   and the value equation of a statement whose array is stored once per cell,
   that what it stores is what the kernel leaves, which follows from the
   source order and the `single-assignment` fact Lean proves.
-- An equation of reals is read as the reals read it, where a value equals
-  itself: a `NaN` a kernel stores, or is given, is not equal to itself in a
-  float, so a postcondition decided `R[a, b] == c[a, b]` is false natively
-  at a `NaN` of `c`.
+- An equation of reals is decided as the kernel computes it, in floats, each
+  equation an atom, and stated for Lean over `ℝ`, where the same equation at
+  the same point is the same proposition too. The two readings part where a
+  value is not equal to itself: a `NaN` a kernel stores, or is given, so a
+  postcondition decided `R[a, b] == c[a, b]` is false natively at a `NaN` of
+  `c` (#227). A theorem a kernel cites is about the reals, and is given as
+  hypotheses only the conjuncts in which nothing rounds, copies and sign
+  changes, whose two readings agree: `s[i] == a[i] + b[i]` holds of the
+  floats a kernel stores, and not of them read as reals.
 - The gap between the model and the code: lowering, loopy and the compiler,
   which the native and compiled differential covers, by sampling.
 
@@ -263,9 +268,10 @@ back: the stencil's ledger takes 2.5 s the first time on the machine the
 coverage report ran on, and 1.3 s the next, against 0.6 s without Lean; the
 slowest example, `travel.py`, 8.5 s, 4.4 s and 2.1 s.
 A check whose every answer is in the cache starts no Lean at all (lanky
-#118): the cache is keyed by the version a session would run, which lanky
-reads without starting one, so a warm check costs what a check without Lean
-does. `LANKY_LEAN_DISABLE=1` turns Lean off, and the ledger reads `decided` as
+#118), a lanky theorem's attempts and the parts about reals included: the
+cache is keyed by the version a session would run, and with Mathlib by the
+project's toolchain and Mathlib revision, which lanky reads without starting
+one, so a warm check costs what a check without Lean does. `LANKY_LEAN_DISABLE=1` turns Lean off, and the ledger reads `decided` as
 before.
 
 ## Coverage
