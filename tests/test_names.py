@@ -177,24 +177,32 @@ def test_the_index_tuples_of_a_size_named_like_a_dimension() -> None:
 def nested_totals(
     a: Arr[Fin[n], Fin[m], np.float64],  # noqa: F821
     s: Arr[Fin[n], np.float64],  # noqa: F821
+    t: Arr[Fin[1], np.float64],  # noqa: F821
 ):
     """Sums inside sums: binders as parameters of the inner domain."""
     for r in a.dom:
         s[r] = reduce_sum(reduce_sum(a[q, c] for c in a.dom[q]) for q in a.dom)
+    t[0] = reduce_sum(reduce_sum(a[q, c] for c in a.dom[q] if c <= q) for q in a.dom)
 
 
 def test_a_kernel_with_nested_sums_keeps_every_name_apart() -> None:
     # Every domain of the term, each sum's included, is checked when it is
-    # recorded, and the lowering renames the binders of a nested sum through
-    # the same rename, which checks what it returns.
-    from loopty.executor import LoopyExecutor
+    # recorded. The second statement's sums get binders of their own in the
+    # kernel, q_0 and c_0 (note 8), and the inner sum's domain, whose
+    # parameter q is the outer binder, follows it through the same rename,
+    # which checks what it returns.
+    from loopty.executor import LoopyExecutor, emit_code
 
     term = nested_totals.trace()
     for stmt in term.stmts:
         check_names(stmt.domain)
     a = np.arange(6.0).reshape(2, 3)
-    out = LoopyExecutor().run(nested_totals, a=a, s=np.zeros(2))
+    out = LoopyExecutor().run(nested_totals, a=a, s=np.zeros(2), t=np.zeros(1))
     assert list(out["s"]) == [15.0, 15.0]
+    assert list(out["t"]) == [7.0]
+    assert "c_0 <= ((-1 + m >= 0 && -1 * m + q_0 >= 0) ? -1 + m : q_0)" in (
+        emit_code(nested_totals)
+    )
 
 
 # }}}
