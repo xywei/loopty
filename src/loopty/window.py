@@ -66,8 +66,14 @@ from loopty import flow, idx
 from loopty.term import Stmt, Term
 
 __all__ = [
+    "Access",
     "Placement",
     "WindowError",
+    "accesses",
+    "clobbers",
+    "earlier",
+    "infer",
+    "live_pairs",
     "placement_of",
 ]
 
@@ -454,7 +460,7 @@ def earlier(schedule: isl.Map, instances: isl.Set) -> isl.Map:
     """``{ a -> b : a runs before b }`` under ``schedule``, over ``instances``.
 
     ``schedule`` takes the term's instances to their time, as the checker's
-    order does (:meth:`loopy.schedule.Schedule._commit`): the steps' maps,
+    order does (:meth:`loopty.schedule.Schedule._commit`): the steps' maps,
     then the time map of the order as it stands. Two instances with one
     time, which only a loop with no order gives, are neither before the
     other.
@@ -924,7 +930,7 @@ def windowed_kernel(
 # }}}
 
 
-__all__ += ["Access", "accesses", "clobbers", "earlier", "infer", "live_pairs"]
+# {{{ in words
 
 
 def describe_cells(cells: int | Any) -> str:
@@ -950,3 +956,6 @@ def statement_text(array: str, placement: Placement, extents: Sequence[Any]) -> 
         f"{array} kept in {describe_cells(cells)}, {cell} in slot "
         f"{placement.slot_text()}"
     )
+
+
+# }}}

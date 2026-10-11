@@ -1904,7 +1904,7 @@ def _cast_classes(origin: Any, steps: Sequence[Any]) -> list[_Class]:
     """Every dependence class a cast after ``steps`` is checked on.
 
     As :func:`_classes` lists them for the term, without a statement a step
-    took out (:attr:`loopy.schedule.Step.gone`); with the reads a
+    took out (:attr:`loopty.schedule.Step.gone`); with the reads a
     substitution computes again, two classes per write of what its producer
     read (the read before it, and after it); and with the pairs of accesses
     of a window, at least one a write, that touch one slot. isl checks a

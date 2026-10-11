@@ -61,7 +61,7 @@ from lanky.prelude import FinType
 
 from loopty import flow, idx
 
-__all__ = ["Layout", "SameLayout", "dim_tags", "layout"]
+__all__ = ["Layout", "LayoutError", "SameLayout", "dim_tags", "layout"]
 
 
 class LayoutError(TypeError):
