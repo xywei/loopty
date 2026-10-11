@@ -4798,7 +4798,10 @@ class Schedule:
                 f"; no window of {array} is smaller than {array} in the order as "
                 "it stands"
             )
-            other = smallest()
+            try:
+                other = smallest()
+            except (isl.Error, ValueError):  # the refusal stands without a fix
+                other = given
             if other is not None and other != given:
                 safe = self._clobbered(
                     dataclasses.replace(window, placement=other),
