@@ -26,7 +26,11 @@ All notable changes to loopty are recorded here. The format follows
   runs' status, with why (`undecided`): a cell stored twice, a read before
   its store (the instance that stores a cell and reads it, however its
   index is spelled, `x[i] = 2 * x[i + 1 - 1] - 5`, reads it first), a write
-  under a guard isl cannot state, an accumulation.
+  under a guard isl cannot state, an update (`y[i] += v`, or a scatter-add
+  through a map, `y[cell[c, k]] += v`), whose cells hold what they held on
+  entry plus every update: `S0 updates y[cell[c, k]] in place, so a cell of
+  y holds what it held on entry plus every update, not what one statement
+  stores`.
 - **Theorems a kernel cites**, `@kernel(uses=[on_the_triangle])`. A theorem
   whose hypotheses are conjuncts of the postcondition, up to the names of
   their binders, with a family `R(a)(b)` matching the cell `R[a, b]`, gives
@@ -326,7 +330,12 @@ All notable changes to loopty are recorded here. The format follows
 - A kernel's postcondition that its statements' stores decide reads
   `decided isl` where it read `tested native`, after a new `single-assignment`
   row, and the restatements of it in programs are worth `decided`; the
-  ledger of a file with schedules at module level lists their casts. The
+  ledger of a file with schedules at module level lists their casts, a
+  window's `no-clobber` and an atomic step's reassociation among them. The
+  `definedness` fact a substitution or a window asks of a schedule leads
+  with its step, `for substitute('f'), every cell of f that burgers_rhs
+  reads, flux.S0 has stored by the time it is read`, so that the two rows of
+  `examples/fusion.py`, one per step after one fusion, read apart. The
   transcripts in the documentation are regenerated.
 - `loopty.hypotheses.discharge` names a universal hypothesis's binders apart
   from the claim's own names before taking it at the claim's cells: an
@@ -350,9 +359,13 @@ All notable changes to loopty are recorded here. The format follows
   computed where it is read.
 - The coverage report in `docs/lean-checks.md` covers the four examples the
   demo kernels added (`assembly.py`, `layer_potential.py`, `quadrature.py`,
-  `sum_factorization.py`) and the windows, updates and layouts above: of 678
-  facts isl decides in 22 files, Lean proves 657 and confirms the
-  counterexample of the 21 refuted ones, and none stays decided.
+  `sum_factorization.py`), `storage_layouts.py`, `taylor_reconstruction.py`,
+  and the windows, updates, layouts, postconditions decided from what
+  kernels store and cited theorems above: of 953 facts isl decides in 24
+  files, Lean proves 919 and confirms the counterexample of the 22 refuted
+  ones. The 12 it leaves decided are claims about reals, which core Lean has
+  no words for; with Mathlib it proves them too, 931 in all, and none stays
+  decided.
 - A ledger gains a `definedness` row for each array a kernel reads only where
   it wrote it before (`scan`'s `off`, `p2p`'s `term`, `pairs`' `f`), and an
   access with mixed subscripts is decided where it was assumed; the
