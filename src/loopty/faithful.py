@@ -579,10 +579,13 @@ def collisions(
     one statement for a disjoint-writes fact, the two ends of a dependence
     a schedule reverses for a cast. The cells are those the run computed,
     which isl cannot when a subscript is read from an array, ``y[cell[c,
-    j]]``. At most ``limit`` touches of the array are looked at.
+    j]]``. The pairs come in the order the run reached the second of the
+    two, and at most ``limit`` touches of the array are looked at.
     """
     by_stmt = {stmt.id: stmt for stmt in term.stmts}
     seen: dict[tuple[Any, ...], list[Touch]] = {}
+    reads: dict[tuple[str, tuple[int, ...]], dict[tuple[str, tuple], Any]] | None
+    reads = None
     count = 0
     for touch in logged.log:
         if touch.array != array:
@@ -596,6 +599,8 @@ def collisions(
                 continue
             if not pairs(first, touch):
                 continue
+            if reads is None:
+                reads = _reads_by_instance(logged)
             yield Collision(
                 label=logged.label,
                 sizes=dict(logged.sizes),
@@ -603,7 +608,7 @@ def collisions(
                 cell=touch.cell,
                 first=(first.stmt, _coords(by_stmt, first)),
                 second=(touch.stmt, _coords(by_stmt, touch)),
-                reads=_subscript_reads(by_stmt, logged, (first, touch)),
+                reads=_subscript_reads(by_stmt, logged, (first, touch), reads),
             )
         earlier.append(touch)
 
@@ -614,13 +619,31 @@ def _coords(by_stmt: Mapping[str, Any], touch: Touch) -> dict[str, int]:
     return dict(zip(names, (int(value) for value in touch.coords), strict=False))
 
 
-def _subscript_reads(
-    by_stmt: Mapping[str, Any], logged: Logged, touches: Sequence[Touch]
-) -> tuple[str, ...]:
-    """What each instance's written cell was read through, ``cell[0, 1] = 1``.
+def _reads_by_instance(
+    logged: Logged,
+) -> dict[tuple[str, tuple[int, ...]], dict[tuple[str, tuple], Any]]:
+    """Every cell each instance read on one input, with what it held there."""
+    out: dict[tuple[str, tuple[int, ...]], dict[tuple[str, tuple], Any]] = {}
+    for entry in logged.log:
+        if entry.kind == "read":
+            cells = out.setdefault((entry.stmt, entry.coords), {})
+            cells.setdefault((entry.array, entry.cell), entry.value)
+    return out
 
-    The reads inside the subscript of the cell the statement writes, at the
-    instance's loop variables, with the value the run read there.
+
+def _subscript_reads(
+    by_stmt: Mapping[str, Any],
+    logged: Logged,
+    touches: Sequence[Touch],
+    reads: Mapping[tuple[str, tuple[int, ...]], Mapping[tuple[str, tuple], Any]],
+) -> tuple[str, ...]:
+    """What each instance's cell was reached through, ``cell[0, 1] = 1``.
+
+    The reads inside the subscript of the access that touched the cell, at
+    the instance's loop variables, with the value the run read there: the
+    cell the statement writes, for a write, and the reads of the array in
+    its right-hand side and its guard, for a read. ``reads`` is
+    :func:`_reads_by_instance` of ``logged``.
     """
     from lanky.terms import evaluate as value_of
 
@@ -631,26 +654,32 @@ def _subscript_reads(
         stmt = by_stmt.get(touch.stmt)
         if stmt is None:
             continue
+        if touch.kind == "write":
+            outer = [stmt.assignee]
+        else:
+            outer = [
+                access
+                for part in (stmt.expr, stmt.guard)
+                if part is not None
+                for access in accesses_in(part)
+                if access.array == touch.array
+            ]
         env = {**logged.sizes, **_coords(by_stmt, touch)}
-        for inner in accesses_in(tuple(stmt.assignee.indices)):
-            try:
-                cell = tuple(int(value_of(index, env)) for index in inner.indices)
-            except Exception:  # noqa: BLE001 - a subscript not read back is left out
-                continue
-            for entry in logged.log:
-                if (
-                    entry.kind == "read"
-                    and (entry.stmt, entry.coords) == (touch.stmt, touch.coords)
-                    and entry.array == inner.array
-                    and entry.cell == cell
-                ):
-                    text = (
-                        f"{inner.array}[{', '.join(str(i) for i in cell)}] = "
-                        f"{_python(entry.value)}"
-                    )
-                    if text not in out:
-                        out.append(text)
-                    break
+        held = reads.get((touch.stmt, touch.coords), {})
+        for access in outer:
+            for inner in accesses_in(tuple(access.indices)):
+                try:
+                    cell = tuple(int(value_of(index, env)) for index in inner.indices)
+                except Exception:  # noqa: BLE001 - a subscript not read back is left out
+                    continue
+                if (inner.array, cell) not in held:
+                    continue
+                text = (
+                    f"{inner.array}[{', '.join(str(i) for i in cell)}] = "
+                    f"{_python(held[inner.array, cell])}"
+                )
+                if text not in out:
+                    out.append(text)
     return tuple(out)
 
 

@@ -150,6 +150,68 @@ def zeroed_then_assembled(
         total[z] = reduce_sum(y[i] for i in y.dom)
 
 
+@kernel
+def scaled(
+    cell: Arr[Fin[nc], Fin[3], Fin[nv]],  # noqa: F821
+    yl: Arr[Fin[nc], Fin[3], Real],  # noqa: F821
+    y: Arr[Fin[nv], Real],  # noqa: F821
+):
+    """Each node multiplied by its cells' values: no sum, so no update."""
+    for c in yl.dom:
+        for k in yl.dom[c]:
+            y[cell[c, k]] = y[cell[c, k]] * yl[c, k]
+
+
+@kernel
+def reflected(
+    cell: Arr[Fin[nc], Fin[3], Fin[nv]],  # noqa: F821
+    yl: Arr[Fin[nc], Fin[3], Real],  # noqa: F821
+    y: Arr[Fin[nv], Real],  # noqa: F821
+):
+    """Each node taken from its cells' values: two in turn do not commute."""
+    for c in yl.dom:
+        for k in yl.dom[c]:
+            y[cell[c, k]] = yl[c, k] - y[cell[c, k]]
+
+
+@kernel
+def halves(
+    cell: Arr[Fin[nc], Fin[3], Fin[nv]],  # noqa: F821
+    m: Arr[Fin[nv], Int],  # noqa: F821
+):
+    """Half of each cell added into integers: every partial sum truncated."""
+    for c in cell.dom:
+        for k in cell.dom[c]:
+            m[cell[c, k]] += 0.5
+
+
+@kernel
+def read_back(
+    cell: Arr[Fin[nc], Fin[3], Fin[nv]],  # noqa: F821
+    yl: Arr[Fin[nc], Fin[3], Real],  # noqa: F821
+    y: Arr[Fin[nv], Real],  # noqa: F821
+    z: Arr[Fin[nc], Fin[3], Real],  # noqa: F821
+):
+    """An assembly that reads each node back as it goes."""
+    for c in yl.dom:
+        for k in yl.dom[c]:
+            y[cell[c, k]] += yl[c, k]
+            z[c, k] = y[cell[c, k]]
+
+
+@kernel
+def two_updates(
+    cell: Arr[Fin[nc], Fin[3], Fin[nv]],  # noqa: F821
+    a: Arr[Fin[nc], Real],  # noqa: F821
+    b: Arr[Fin[nc], Real],  # noqa: F821
+    y: Arr[Fin[nv], Real],  # noqa: F821
+):
+    """Two statements that add into one array: their updates commute too."""
+    for c in a.dom:
+        y[cell[c, 0]] += a[c]
+        y[cell[c, 1]] += b[c]
+
+
 @program
 def assembled_twice(cell, yl, y):
     """Two assemblies into one array."""
@@ -185,6 +247,17 @@ def example_inputs() -> dict:
         },
         "count": {"cell": cells, "m": Arr.from_numpy(np.zeros(4, dtype=np.int64))},
         "rowsum": {"v": Arr.from_numpy(np.ones((3, 4))), "y": Arr.zeros(3)},
+        "scaled": dict(assembly),
+        "reflected": dict(assembly),
+        "halves": {"cell": cells, "m": Arr.from_numpy(np.zeros(4, dtype=np.int64))},
+        "read_back": {**assembly, "z": Arr.zeros((2, 3))},
+        # node 3 is the second node of cell 0 and the first of cell 1
+        "two_updates": {
+            "cell": Arr.from_numpy(np.array([[0, 3, 1], [3, 2, 1]])),
+            "a": Arr.from_numpy(np.ones(2)),
+            "b": Arr.from_numpy(np.ones(2)),
+            "y": Arr.zeros(4),
+        },
     }
 
 
@@ -345,9 +418,11 @@ def test_atomic_updates_may_run_on_two_work_items() -> None:
     assert schedule.atomics == frozenset({"y"})
     statements = [fact.statement for fact in schedule.facts()]
     assert (
-        "the accumulation into y is reassociated by tag(c_outer='g.0', "
-        "c_inner='l.0'), so its result is compared at 'reassoc'"
+        "atomic updates of y run at the same time after tag(c_outer='g.0', "
+        "c_inner='l.0'), so their sum is reassociated and compared at 'reassoc'"
     ) in statements
+    # atomic moves nothing, and records no cast of its own
+    assert not any(statement.startswith("atomic(") for statement in statements)
     assert "y" in schedule.reassociated
     # The C target has no work items: the schedule is legal and not built.
     buildable, reason = schedule.buildable
@@ -414,8 +489,14 @@ def test_atomic_refuses_an_exact_accumulation_and_what_is_not_updated() -> None:
         "which reassociates it"
     )
     assert caught.value.fact.kind == "exactness"
-    with pytest.raises(ValueError, match="overwrite does not update y: S0 writes it"):
+    with pytest.raises(ValueError) as caught:
         Schedule(overwrite).atomic("y")
+    assert str(caught.value) == (
+        "atomic('y'): overwrite does not update y: S0 writes y[cell[c, k]] = "
+        "yl[c, k], which replaces the cell's value. An update adds to the cell "
+        "it writes a value that reads nothing else of y, y[...] += v, and "
+        "atomic makes two such updates safe to run at the same time"
+    )
     with pytest.raises(ValueError, match="scatter does not write yl"):
         Schedule(scatter).atomic("yl")
 
@@ -494,6 +575,132 @@ def test_every_access_to_an_atomic_array_is_atomic_on_opencl(plain_opencl) -> No
     assert "acc_i_0 = acc_i_0 + (double) (y[i_0]);" in code
 
 
+@pytest.mark.parametrize(
+    ("kern", "array", "why"),
+    [
+        (
+            scaled,
+            "y",
+            "S0 writes y[cell[c, k]] = y[cell[c, k]]*yl[c, k], which is not "
+            "y[cell[c, k]] plus a value that reads nothing else of y",
+        ),
+        (
+            reflected,
+            "y",
+            "S0 writes y[cell[c, k]] = yl[c, k] - y[cell[c, k]], which is not "
+            "y[cell[c, k]] plus a value that reads nothing else of y",
+        ),
+        (
+            halves,
+            "m",
+            "S0 writes m[cell[c, k]] = m[cell[c, k]] + 0.5, which adds a value "
+            "that is not an integer to an integer array: each partial sum is "
+            "truncated when it is stored, so the order of the updates changes "
+            "the result",
+        ),
+    ],
+)
+def test_what_does_not_commute_is_refused_atomic_and_keeps_its_order(
+    kern, array, why
+) -> None:
+    (stmt,) = kern.term.stmts
+    assert stmt.kind == "accumulate" and stmt.exactness is None
+    with pytest.raises(ValueError) as caught:
+        Schedule(kern).atomic(array)
+    assert f"{kern.__name__} does not update {array}: {why}. " in str(caught.value)
+    # On work items the two cells' writes of one node are a dependence, refused
+    # with the cells of the mesh that share it, atomic or not.
+    with pytest.raises(IllegalCast) as caught:
+        Schedule(kern).split("c", 32).tag(c_outer="g.0", c_inner="l.0")
+    assert str(caught.value).startswith(
+        "tag(c_outer='g.0', c_inner='l.0') illegal: instance S0[c=0, k=2] "
+        f"writes {array}[3] also written by S0[c=1, k=1] scheduled earlier on "
+        "example_inputs() (nc=2, nv=4), where cell[0, 2] = 3 and cell[1, 1] = 3"
+    )
+
+
+def test_a_read_beside_the_updates_is_refused_on_work_items_even_atomic() -> None:
+    # Atomic makes two updates safe together, not a read of what one of them
+    # is adding to: the pair names both subscripts the mesh read.
+    with pytest.raises(IllegalCast) as caught:
+        Schedule(read_back).atomic("y").split("c", 32).tag(
+            c_outer="g.0", c_inner="l.0"
+        )
+    assert str(caught.value).startswith(
+        "tag(c_outer='g.0', c_inner='l.0') illegal: instance S0[c=0, k=2] writes "
+        "y[3] read by S1[c=1, k=1] scheduled earlier on example_inputs() (nc=2, "
+        "nv=4), where cell[0, 2] = 3 and cell[1, 1] = 3"
+    )
+
+
+def test_updates_of_two_statements_commute_and_race_on_work_items() -> None:
+    assert dependences(two_updates.term).is_empty()
+    with pytest.raises(IllegalCast) as caught:
+        Schedule(two_updates).split("c", 32).tag(c_outer="g.0", c_inner="l.0")
+    # S0 meets no other cell's S0 on the example, and the pair is not drawn:
+    # S1 of cell 0 and S0 of cell 1 both add into node 3 there.
+    assert str(caught.value).startswith(
+        "tag(c_outer='g.0', c_inner='l.0') illegal: S1[c=0] and S0[c=1] both "
+        "update y[3] on example_inputs() (nc=2, nv=4), where cell[0, 1] = 3 and "
+        "cell[1, 0] = 3, and the loop c_inner on l.0 runs them on two work items"
+    )
+    assert caught.value.fact.decided_by == "native"
+    Schedule(two_updates).atomic("y").split("c", 32).tag(
+        c_outer="g.0", c_inner="l.0"
+    )
+
+
+def test_a_refusal_names_the_first_pair_of_a_large_example() -> None:
+    # A mesh of 1 800 triangles: the refusal reads the first two cells that
+    # share a node off it, on two work items, without asking every pair.
+    n = 30
+    cells = []
+    for i in range(n):
+        for j in range(n):
+            a, b = i * (n + 1) + j, (i + 1) * (n + 1) + j
+            cells += [[a, b, b + 1], [a, b + 1, a + 1]]
+    schedule = Schedule(scatter).example(
+        cell=Arr.from_numpy(np.array(cells)),
+        yl=Arr.zeros((len(cells), 3)),
+        y=Arr.zeros((n + 1) ** 2),
+    )
+    with pytest.raises(IllegalCast) as caught:
+        schedule.split("c", 32).tag(c_outer="g.0", c_inner="l.0")
+    assert str(caught.value).startswith(
+        "tag(c_outer='g.0', c_inner='l.0') illegal: S0[c=0, k=0] and S0[c=1, "
+        "k=0] both update y[0] on the schedule's example inputs (nc=1800, "
+        "nv=961), where cell[0, 0] = 0 and cell[1, 0] = 0, and the loop c_inner "
+        "on l.0 runs them on two work items"
+    )
+
+
+def test_an_assumption_keeps_the_pair_to_the_inputs_it_admits() -> None:
+    # The module's example has two cells; assumed a multiple of four, the
+    # pair is read off an input that is one.
+    with pytest.raises(IllegalCast) as caught:
+        Schedule(scatter).assume("nc % 4 == 0").split("c", 4).tag(c_inner="ilp")
+    message = str(caught.value)
+    assert "example_inputs() (nc=2" not in message
+    assert "both update y[" in message
+
+
+def test_atomic_twice_is_one_step() -> None:
+    once = Schedule(scatter).atomic("y")
+    assert once.atomic("y") is once
+    assert once.history == ("atomic('y')",)
+
+
+def test_atomic_then_ilp_on_c_names_the_atomic_updates() -> None:
+    schedule = Schedule(scatter).atomic("y").split("c", 4).tag(c_inner="ilp")
+    rows = [(fact.kind, fact.statement) for fact in schedule.facts()]
+    assert (
+        "exactness",
+        "atomic updates of y run at the same time after tag(c_inner='ilp'), so "
+        "their sum is reassociated and compared at 'reassoc'",
+    ) in rows
+    assert [kind for kind, _ in rows].count("bijective") == 2  # split, tag
+
+
 def test_atomic_updates_run_on_an_opencl_device() -> None:
     # Needs pyopencl and a device, which CI has neither of.
     pytest.importorskip("pyopencl")
@@ -521,6 +728,46 @@ def test_atomic_updates_run_on_an_opencl_device() -> None:
     fact = LoopyExecutor(target="opencl").differential(
         zeroed_then_assembled, zeroed, arguments
     )
+    assert fact.status is Status.TESTED, fact.provenance
+    # Two statements' updates of one array, on work items; and single precision.
+    rng = np.random.default_rng(2)
+    both = (
+        Schedule(two_updates, target="opencl")
+        .atomic("y")
+        .split("c", 32)
+        .tag(c_outer="g.0", c_inner="l.0")
+    )
+    arguments = {
+        "cell": Arr.from_numpy(big),
+        "a": Arr.from_numpy(rng.random(200)),
+        "b": Arr.from_numpy(rng.random(200)),
+        "y": Arr.zeros(9),
+    }
+    fact = LoopyExecutor(target="opencl").differential(two_updates, both, arguments)
+    assert fact.status is Status.TESTED, fact.provenance
+
+    @kernel
+    def scatter32(
+        cell: Arr[Fin[nc], Fin[3], Fin[nv]],  # noqa: F821
+        yl: Arr[Fin[nc], Fin[3], np.float32],  # noqa: F821
+        y: Arr[Fin[nv], np.float32],  # noqa: F821
+    ):
+        for c in yl.dom:
+            for k in yl.dom[c]:
+                y[cell[c, k]] += yl[c, k]
+
+    single = (
+        Schedule(scatter32, target="opencl")
+        .atomic("y")
+        .split("c", 32)
+        .tag(c_outer="g.0", c_inner="l.0")
+    )
+    arguments = {
+        "cell": Arr.from_numpy(big),
+        "yl": Arr.from_numpy(rng.random((200, 3)).astype(np.float32)),
+        "y": Arr.from_numpy(np.zeros(9, dtype=np.float32)),
+    }
+    fact = LoopyExecutor(target="opencl").differential(scatter32, single, arguments)
     assert fact.status is Status.TESTED, fact.provenance
 
 

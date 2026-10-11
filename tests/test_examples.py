@@ -974,7 +974,8 @@ def test_the_assembly_demo_names_the_node_two_cells_share() -> None:
         "cell[0, 2] = 3 and cell[1, 1] = 3"
     ) in result.stdout
     accepted = result.stdout.split("accepted: ")[1]
-    assert "the accumulation into y is reassociated by tag(" in accepted
+    assert "atomic updates of y run at the same time after tag(" in accepted
+    assert "atomic('y') renames" not in accepted
     assert "-> tested" in result.stdout
 
 

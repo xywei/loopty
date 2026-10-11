@@ -1173,13 +1173,11 @@ Schedule(mass_action).split('c', 32).tag(c_outer='g.0', c_inner='l.0') ->
   IllegalCast: tag(c_outer='g.0', c_inner='l.0') illegal: S1[c=0, k=2] and S1[c=1, k=1] both update y[3] on example_inputs() (nc=2, nv=4), where cell[0, 2] = 3 and cell[1, 1] = 3, and the loop c_inner on l.0 runs them on two work items, so one can overwrite what the other added; make the updates atomic, with atomic('y') before this step
 
 accepted: Schedule(mass_action, target='c').atomic('y').split(c, 32).tag(c_outer='g.0', c_inner='l.0')
-  decided  isl  atomic('y') renames the instances of mass_action one for one
-  decided  isl  the order after atomic('y') runs every dependence of mass_action forward
   decided  isl  split(c, 32) renames the instances of mass_action one for one
   decided  isl  the order after split(c, 32) runs every dependence of mass_action forward
   decided  isl  tag(c_outer='g.0', c_inner='l.0') renames the instances of mass_action one for one
   decided  isl  the order after tag(c_outer='g.0', c_inner='l.0') runs every dependence of mass_action forward, within one work item
-  decided  isl  the accumulation into y is reassociated by tag(c_outer='g.0', c_inner='l.0'), so its result is compared at 'reassoc'
+  decided  isl  atomic updates of y run at the same time after tag(c_outer='g.0', c_inner='l.0'), so their sum is reassociated and compared at 'reassoc'
   buildable on c: False: the tag c_outer='g.0', c_inner='l.0' puts a loop on a hardware axis, and the C target has none
 
 schedule: Schedule(mass_action, target='c').atomic('y').split(c, 4).tag(c_inner='ilp')
@@ -1231,14 +1229,12 @@ mass_action: Schedule(mass_action, target='c').atomic('y').split(c, 4).tag(c_inn
 
 STATUS   BY     WHERE           OWNER        STATEMENT
 -------  -----  --------------  -----------  ------------------------------------------------------------------------
-decided  isl    assembly.py:83  mass_action  atomic('y') renames the instances of mass_action one for one
-decided  isl    assembly.py:83  mass_action  the order after atomic('y') runs every dependence of mass_action forward
 decided  isl    assembly.py:83  mass_action  split(c, 4) renames the instances of mass_action one for one
 decided  isl    assembly.py:83  mass_action  the order after split(c, 4) runs every dependence of mass_action forward
 decided  isl    assembly.py:83  mass_action  tag(c_inner='ilp') renames the instances of mass_action one for one
 decided  isl    assembly.py:83  mass_action  the order after tag(c_inner='ilp') runs every dependence of mass_acti...
-decided  isl    assembly.py:83  mass_action  the accumulation into y is reassociated by tag(c_inner='ilp'), so its...
+decided  isl    assembly.py:83  mass_action  atomic updates of y run at the same time after tag(c_inner='ilp'), so...
 tested   loopy  assembly.py:83  mass_action  the scheduled run of mass_action agrees with the native run to the ac...
 
-8 facts: 7 decided, 1 tested
+6 facts: 5 decided, 1 tested
 ```

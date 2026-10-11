@@ -136,6 +136,7 @@ __all__ = [
     "reductions_in",
     "trace",
     "update_exactness",
+    "update_operands",
     "when",
 ]
 
@@ -4028,24 +4029,17 @@ def join_exactness(*classes: str) -> str:
     )
 
 
-def update_exactness(
-    expr: Any, assignee: Access, guard: Any, tracer: Tracer
-) -> str | None:
-    """The exactness class of an update, ``y[cell[c, j]] += v``, or ``None``.
+def update_operands(expr: Any, assignee: Access, guard: Any) -> tuple[Any, ...] | None:
+    """What an update, ``y[cell[c, j]] += v``, adds to its cell, or ``None``.
 
     An update is a sum one operand of which is the cell the statement
     writes, read once and added (``y[c] - v`` is one, ``v - y[c]`` is not),
     and none of whose other operands reads the array, any cell of it, as
-    neither do the statement's guard and the cell's own subscripts. Two
-    instances' updates of one cell then commute: each adds its own value,
-    whatever the other has left in the cell. The class is the weaker of the
-    array's element sort and the value added (:func:`_value_exactness`),
-    as a reduction's is read off what it sums: ``approx`` for ``Real``,
-    ``exact`` for an integer added to an integral array. An integral array
-    updated by a value that is not integral is no update: each partial sum
-    is truncated when it is stored, so the order of the updates changes the
-    result by more than any class allows, and ``None`` is returned, as it is
-    for any other read-modify-write (``y[i] = 2 * y[i]``).
+    neither do the statement's guard and the cell's own subscripts. Those
+    other operands are returned. ``None`` for any other statement, an
+    assignment or a read-modify-write that is no such sum
+    (``y[i] = 2 * y[i]``). Whether the sum commutes is
+    :func:`update_exactness`'s question.
     """
     if not isinstance(expr, prim.Sum):
         return None
@@ -4066,7 +4060,7 @@ def update_exactness(
     own = [k for k, operand in enumerate(expr.children) if is_cell(operand)]
     if len(own) != 1 or subtracted(expr, own[0]):
         return None
-    added = [operand for k, operand in enumerate(expr.children) if k != own[0]]
+    added = tuple(operand for k, operand in enumerate(expr.children) if k != own[0])
     cell = expr.children[own[0]]
     inside = cell.indices if isinstance(cell, Access) else cell.index
     if (
@@ -4075,7 +4069,30 @@ def update_exactness(
         or (guard is not None and reads_array(guard))
     ):
         return None
-    arrtype = tracer.array_types.get(array)
+    return added
+
+
+def update_exactness(
+    expr: Any, assignee: Access, guard: Any, tracer: Tracer
+) -> str | None:
+    """The exactness class of an update, ``y[cell[c, j]] += v``, or ``None``.
+
+    An update is what :func:`update_operands` reads: the cell plus values
+    that read nothing else of the array. Two instances' updates of one cell
+    then commute: each adds its own value, whatever the other has left in
+    the cell. The class is the weaker of the array's element sort and the
+    value added (:func:`_value_exactness`), as a reduction's is read off
+    what it sums: ``approx`` for ``Real``, ``exact`` for an integer added to
+    an integral array. An integral array updated by a value that is not
+    integral is no update: each partial sum is truncated when it is stored,
+    so the order of the updates changes the result by more than any class
+    allows, and ``None`` is returned, as it is for any other
+    read-modify-write (``y[i] = 2 * y[i]``).
+    """
+    added = update_operands(expr, assignee, guard)
+    if added is None:
+        return None
+    arrtype = tracer.array_types.get(assignee.array)
     stored = "approx" if arrtype is None else _sort_exactness(arrtype.dtype)
     value = join_exactness(*(_value_exactness(operand, tracer) for operand in added))
     if stored == "exact" and value != "exact":

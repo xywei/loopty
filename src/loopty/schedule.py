@@ -2665,6 +2665,10 @@ class _Draft:
     outside: dict[str, frozenset[str]] = field(default_factory=dict)
     #: The arrays whose updates are atomic (see :meth:`Schedule.atomic`).
     atomic: set[str] = field(default_factory=set)
+    #: The arrays two of whose updates this step runs at the same time,
+    #: atomically (see :meth:`Schedule._concurrent_updates`); not carried to
+    #: the next step.
+    concurrent: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True, eq=False)
@@ -4905,6 +4909,10 @@ class Schedule:
             dataclasses.replace(dep, relation=narrowed(dep.relation))
             for dep in self._deps
         )
+        other._updates = tuple(
+            dataclasses.replace(dep, relation=narrowed(dep.relation))
+            for dep in self._updates
+        )
         other._kernel = _transformed(self._kernel, lp.assume, text)
         other._code = _transformed(self._code, lp.assume, text)
         recipe = ("assume", (condition,), {})
@@ -4992,11 +5000,15 @@ class Schedule:
         refuted. The C target runs in one thread, where every update is
         atomic, and its code is unchanged.
 
-        Refused with a ``ValueError`` when nothing updates ``array``, and with
-        an :class:`IllegalCast` when its accumulation is ``exact``, which
-        asks for the bits of the source's order, as :meth:`realize` refuses
-        a tree.
+        Refused with a ``ValueError`` when nothing updates ``array``, naming
+        what each statement that writes it does instead, and with an
+        :class:`IllegalCast` when its accumulation is ``exact``, which asks
+        for the bits of the source's order, as :meth:`realize` refuses a
+        tree. The step moves no instance, so it records no cast of its own;
+        a second ``atomic`` of the same array changes nothing.
         """
+        if array in self._atomic:
+            return self
         updates = [
             stmt
             for stmt in self._term.stmts
@@ -5005,17 +5017,16 @@ class Schedule:
         text = f"atomic({array!r})"
         if not updates:
             writers = [
-                stmt.id for stmt in self._term.stmts if stmt.assignee.array == array
+                stmt for stmt in self._term.stmts if stmt.assignee.array == array
             ]
             if not writers:
                 raise ValueError(f"{text}: {self._term.name} does not write {array}")
-            verb = "writes" if len(writers) == 1 else "write"
             raise ValueError(
                 f"{text}: {self._term.name} does not update {array}: "
-                f"{' and '.join(writers)} {verb} it otherwise. An update adds "
-                "to the cell it writes values that read nothing else of the "
-                f"array, {array}[...] += v, and atomic makes such updates safe "
-                "to run at the same time"
+                + "; ".join(_no_update_text(stmt) for stmt in writers)
+                + f". An update adds to the cell it writes a value that reads "
+                f"nothing else of {array}, {array}[...] += v, and atomic makes "
+                "two such updates safe to run at the same time"
             )
         exact = [stmt.id for stmt in updates if not commutes(stmt)]
         if exact:
@@ -5040,7 +5051,7 @@ class Schedule:
         if draft.target not in _C_TARGETS:
             ids = {self._lowering.insn_ids[stmt.id] for stmt in updates}
             draft.kernel = _transformed(draft.kernel, _atomic_kernel, array, ids)
-        return self._commit(draft, text, ("atomic", (array,), {}))
+        return self._commit(draft, text, ("atomic", (array,), {}), cast=False)
 
     @property
     def atomics(self) -> frozenset[str]:
@@ -5083,6 +5094,7 @@ class Schedule:
         text: str,
         recipe: tuple[str, tuple, dict],
         leading: Sequence[Any] = (),
+        cast: bool = True,
     ) -> Schedule:
         """Check one transformation and return the schedule it produces.
 
@@ -5090,7 +5102,10 @@ class Schedule:
         ``(method, args, kwargs)``, kept so that :meth:`retarget` can replay it,
         and so that the facts about this step name it (see :attr:`key`).
         ``leading`` are facts the step decided before it came here, which go
-        before the ones decided here (see :meth:`substitute`).
+        before the ones decided here (see :meth:`substitute`). ``cast`` is
+        false for a step that moves no instance and changes no order
+        (:meth:`atomic`): it is checked all the same, and its ``bijective``
+        and ``monotone`` facts, which would say nothing, are not recorded.
         """
         layout = _Layout(
             stmt_ids=self._layout.stmt_ids, coords=dict(draft.coords)
@@ -5287,11 +5302,17 @@ class Schedule:
                     )
                 )
         for accumulated in sorted(set(draft.reassoc) - set(self._reassoc)):
+            statement = (
+                f"atomic updates of {accumulated} run at the same time after "
+                f"{text}, so their sum is reassociated and compared at 'reassoc'"
+                if accumulated in draft.concurrent
+                else f"the accumulation into {accumulated} is reassociated by "
+                f"{text}, so its result is compared at 'reassoc'"
+            )
             facts.append(
                 self._fact(
                     "exactness",
-                    f"the accumulation into {accumulated} is reassociated by "
-                    f"{text}, so its result is compared at 'reassoc'",
+                    statement,
                     status="decided",
                     witness=None,
                     detail=f"exactness of {accumulated} lowered to reassoc",
@@ -5299,6 +5320,10 @@ class Schedule:
                     about=accumulated,
                 )
             )
+        if not cast:
+            facts = [
+                fact for fact in facts if fact.kind not in ("bijective", "monotone")
+            ]
         other._history = (*self._history, text)
         other._steps = (*self._steps, recipe)
         other._records = records
@@ -5319,17 +5344,30 @@ class Schedule:
         which access made them dependent. A dependence through a subscript isl
         cannot read is over every cell, and its witness is a pair that touches
         one cell on an example input where there is one (:meth:`_real_pair`),
-        returned last with the cell; ``None`` there otherwise.
+        returned last with the cell; ``None`` there otherwise. Such a
+        dependence with no pair on the inputs the caller gave defers to a
+        later one that has one, or whose cells isl reads, before a drawn
+        input is asked: the refusal names the caller's data where it can.
         """
+        deferred: list[tuple[_Dep, isl.Map, str]] = []
         for dep in self._deps:
             verdict = isl_oracle.is_monotone(schedule, dep.relation)
             if verdict.ok:
                 continue
             violating = self._violating(schedule, dep)
-            real = self._real_pair(dep, violating)
+            if not _widened(dep):
+                return dep, self._pair_in(violating), verdict.detail, None
+            real = self._real_pair(dep, violating, drawn=False)
             if real is not None:
                 return dep, real[0], verdict.detail, real[1]
-            return dep, self._pair_in(violating), verdict.detail, None
+            deferred.append((dep, violating, verdict.detail))
+        for dep, violating, detail in deferred:
+            real = self._real_pair(dep, violating, drawn=True)
+            if real is not None:
+                return dep, real[0], detail, real[1]
+        if deferred:
+            dep, violating, detail = deferred[0]
+            return dep, self._pair_in(violating), detail, None
         return None
 
     def _violating(self, schedule: isl.Map, dep: _Dep) -> isl.Map:
@@ -5374,15 +5412,17 @@ class Schedule:
         on two work items, or with the same time in the new order, which a
         loop tagged ``ilp`` or ``vec`` or on a hardware axis gives them,
         unless their array's updates are atomic (:meth:`atomic`). Returns
-        the refusal of the first pair that does, as ``(message, witness,
-        detail, oracle, array)``, ``oracle`` being ``native`` when the pair
-        was read off an example input. Otherwise ``None``, and every array
-        whose updates the step runs at once or in another order than the
-        source's is added to ``draft.reassoc``: its sum is reassociated.
+        the refusal of a pair that does (:meth:`_render_concurrent`), as
+        ``(message, witness, detail, oracle, array)``, ``oracle`` being
+        ``native`` when the pair was read off an example input. Otherwise
+        ``None``, and every array whose updates the step runs at once or in
+        another order than the source's is added to ``draft.reassoc``: its
+        sum is reassociated.
         """
         if not self._updates:
             return None
         same = schedule.apply_range(schedule.reverse())
+        offending: list[tuple[_Dep, list[tuple[str | None, isl.Map]]]] = []
         for dep in self._updates:
             relation = dep.relation
             timed = relation.apply_domain(schedule).apply_range(schedule)
@@ -5399,36 +5439,61 @@ class Schedule:
                         apart.append((axis, crossing))
             concurrent = not together.is_empty() or bool(apart)
             if concurrent and dep.array not in draft.atomic:
-                return self._render_concurrent(text, dep, together, apart, draft, work)
+                ways: list[tuple[str | None, isl.Map]] = list(apart)
+                if not together.is_empty():
+                    ways.append((None, together))
+                offending.append((dep, ways))
+                continue
+            if concurrent:
+                draft.concurrent.add(dep.array)
             if concurrent or reordered:
                 draft.reassoc.add(dep.array)
+        if offending:
+            return self._render_concurrent(text, offending, draft, work)
         return None
 
     def _render_concurrent(
         self,
         text: str,
-        dep: _Dep,
-        together: isl.Map,
-        apart: Sequence[tuple[str, isl.Map]],
+        offending: Sequence[tuple[_Dep, Sequence[tuple[str | None, isl.Map]]]],
         draft: _Draft,
         work: _WorkItems | None,
     ) -> tuple[str, tuple, str, str, str]:
         """The refusal of two updates of one cell that a step runs at once.
 
-        Two work items are named before an order: a pair on two of them has
-        the same time too, since the order leaves a hardware axis out. A pair
-        read off an example input is named before one isl picks, on any axis
-        or in the order.
+        ``offending`` are the pairs of statements whose updates the step runs
+        at once, each with the ways it does: on a hardware axis, or (``None``)
+        with the same time in its order. Two work items are named before an
+        order: a pair on two of them has the same time too, since the order
+        leaves a hardware axis out. A pair read off the inputs the caller gave
+        is named before one isl picks, then one off a drawn input, as
+        :meth:`_first_violation` chooses.
         """
-        candidates: list[tuple[str | None, isl.Map]] = list(apart)
-        if not together.is_empty():
-            candidates.append((None, together))
-        axis, violating = candidates[0]
+        chosen: tuple[_Dep, Sequence[tuple[str | None, isl.Map]], Any] | None = None
+        for drawn in (False, True):
+            for dep, ways in offending:
+                if not _widened(dep):
+                    if not drawn:
+                        chosen = (dep, ways, None)
+                        break
+                    continue
+                real = self._real_pair(
+                    dep, *(relation for _, relation in ways), drawn=drawn
+                )
+                if real is not None:
+                    chosen = (dep, ways, real)
+                    break
+            if chosen is not None:
+                break
+        if chosen is None:
+            dep, ways = offending[0]
+            chosen = (dep, ways, None)
+        dep, ways, real = chosen
+        axis, violating = ways[0]
         found = None
-        real = self._real_pair(dep, *(relation for _, relation in candidates))
         if real is not None:
             witness, found = real
-            axis = candidates[found.relation][0]
+            axis = ways[found.relation][0]
         else:
             witness = self._pair_in(violating)
         (source_id, source_coords), (sink_id, sink_coords), params = witness
@@ -5470,13 +5535,19 @@ class Schedule:
         detail = f"two updates of {dep.array} run at the same time"
         return message, witness, detail, oracle, dep.array
 
-    def _real_pair(self, dep: _Dep, *violating: isl.Map) -> tuple[tuple, Any] | None:
+    def _real_pair(
+        self, dep: _Dep, *violating: isl.Map, drawn: bool | None = None
+    ) -> tuple[tuple, Any] | None:
         """A pair of ``violating`` that touches one cell on an example input.
 
         ``violating`` may be several relations, each a way the step can be
-        wrong (an axis of work items, an order): the inputs are taken in
-        turn, and on each the relations in turn, and the found collision's
-        ``relation`` is the position of the one it is in.
+        wrong (an axis of work items, an order). The inputs are taken in
+        turn, and on each the pairs that touched one cell in the order the
+        run reached them, each asked of the relations in turn; the found
+        collision's ``relation`` is the position of the one it is in. At
+        most :data:`_PAIRS_ASKED` pairs are asked of an input, which keeps a
+        refusal quick on a large one: past them the next input is tried,
+        and where none has a pair, the refusal names isl's.
 
         Only for a dependence through a subscript isl cannot read
         (:func:`_widened`), whose relation pairs every two instances: the
@@ -5484,8 +5555,9 @@ class Schedule:
         does, on an input, is the collision the refusal is about,
         ``cell[0, 1] = cell[1, 2] = 1``. The inputs are the schedule's
         example inputs, then the module's ``example_inputs()``, then the
-        drawn ones (:meth:`_example_logs`). Returns the witness, as
-        :meth:`_pair_in` gives one, and the
+        drawn ones (:meth:`_example_logs`); ``drawn`` asks the drawn ones
+        alone (``True``) or the others alone (``False``). Returns the
+        witness, as :meth:`_pair_in` gives one, and the
         :class:`~loopty.faithful.Collision`, or ``None``.
         """
         if not _widened(dep):
@@ -5505,11 +5577,12 @@ class Schedule:
                 second.kind,
             ) == kinds
 
-        for logged in self._example_logs():
-            pairs = list(collisions(self._term, logged, dep.array, wanted))
-            for position, relation in enumerate(violating):
-                for found in pairs:
-                    if self._holds(relation, found.first, found.second, logged.sizes):
+        for logged in self._example_logs(drawn):
+            fixed = [_at_sizes(relation, logged.sizes) for relation in violating]
+            found_pairs = collisions(self._term, logged, dep.array, wanted)
+            for found in itertools.islice(found_pairs, _PAIRS_ASKED):
+                for position, relation in enumerate(fixed):
+                    if self._holds(relation, found.first, found.second):
                         witness = (
                             (found.first[0], dict(found.first[1])),
                             (found.second[0], dict(found.second[1])),
@@ -5523,20 +5596,10 @@ class Schedule:
         relation: isl.Map,
         first: tuple[str, Mapping[str, int]],
         second: tuple[str, Mapping[str, int]],
-        sizes: Mapping[str, int],
     ) -> bool:
-        """Whether ``relation`` holds of two of the term's instances at ``sizes``."""
+        """Whether ``relation``, at an input's sizes, holds of two instances."""
         layout = self._origin_layout
-        fixed = relation
-        names = fixed.get_var_names(isl.dim_type.param)
-        ctx = fixed.get_ctx()
-        for name, value in sizes.items():
-            if name in names:
-                fixed = fixed.fix_val(
-                    isl.dim_type.param,
-                    names.index(name),
-                    isl.Val.int_from_si(ctx, int(value)),
-                )
+        ctx = relation.get_ctx()
 
         def point(space: Any, instance: tuple[str, Mapping[str, int]]) -> Any:
             stmt_id, coords = instance
@@ -5550,43 +5613,51 @@ class Schedule:
             return out
 
         try:
-            pairs = fixed.intersect_domain(
-                point(fixed.domain().get_space(), first)
-            ).intersect_range(point(fixed.range().get_space(), second))
+            pairs = relation.intersect_domain(
+                point(relation.domain().get_space(), first)
+            ).intersect_range(point(relation.range().get_space(), second))
             return not pairs.is_empty()
         except isl.Error:
             return False
 
-    def _example_logs(self) -> Iterator[Any]:
+    def _example_logs(self, drawn: bool | None = None) -> Iterator[Any]:
         """What the term touched on each example input, logged once.
 
         The inputs are the schedule's own (:meth:`example`), the module's
         ``example_inputs()`` and the inputs drawn from the declared types,
         as the faithfulness fact takes them (:mod:`loopty.faithful`), each
         interpreted with a log of the cells it touched
-        (:func:`loopty.interpret.interpret`). An input the term cannot be
-        interpreted on is passed over. Every schedule built from this one
-        shares the logs.
+        (:func:`loopty.interpret.interpret`). ``drawn`` keeps the drawn ones
+        alone (``True``) or the others alone (``False``). An input the term
+        cannot be interpreted on is passed over. Every schedule built from
+        this one shares the logs.
         """
         cache = self._logged
-        if "logs" in cache:
-            yield from cache["logs"]
-            return
+        if "logs" not in cache:
+            cache["logs"] = self._log_inputs()
+        for logged, sampled in cache["logs"]:
+            if drawn is None or drawn == sampled:
+                yield logged
+
+    def _log_inputs(self) -> list[tuple[Any, bool]]:
+        """Each input of :meth:`_example_logs`, logged, and whether it was drawn."""
         from loopty.faithful import MAX_INSTANCES, Logged, _copy, _inputs, _sizes_of
         from loopty.interpret import interpret
 
-        sources: list[tuple[str, Any]] = []
+        sources: list[tuple[str, Any, bool]] = []
         if self._examples is not None:
-            sources.append(("the schedule's example inputs", dict(self._examples)))
+            sources.append(
+                ("the schedule's example inputs", dict(self._examples), False)
+            )
         if hasattr(self._source, "fn"):
             try:
-                for label, arguments, _record in _inputs(self._source, self._term):
+                for label, arguments, record in _inputs(self._source, self._term):
                     if not isinstance(arguments, str):
-                        sources.append((label, arguments))
+                        sources.append((label, arguments, record is not None))
             except Exception:  # noqa: BLE001 - an input not made is passed over
                 pass
-        logs: list[Any] = []
-        for label, arguments in sources:
+        logs: list[tuple[Any, bool]] = []
+        for label, arguments, sampled in sources:
             log: list[Any] = []
             copies = {name: _copy(value) for name, value in arguments.items()}
             try:
@@ -5594,9 +5665,8 @@ class Schedule:
                     interpret(self._term, copies, limit=MAX_INSTANCES, log=log)
             except Exception:  # noqa: BLE001 - an input not interpreted is passed over
                 continue
-            logs.append(Logged(label, _sizes_of(self._term, arguments), log))
-        cache["logs"] = logs
-        yield from logs
+            logs.append((Logged(label, _sizes_of(self._term, arguments), log), sampled))
+        return logs
 
     # }}}
 
@@ -6109,6 +6179,54 @@ def _sizes_text(params: dict[str, int], hint: dict[str, int]) -> str:
     honoured = all(hint.get(name, value) == value for name, value in params.items())
     how = "as hinted" if hint and honoured else "isl's choice"
     return f" (at {inner}, {how})"
+
+
+def _no_update_text(stmt: Stmt) -> str:
+    """What a statement that writes an array does instead of updating it.
+
+    ``S0 writes y[cell[c, k]] = y[cell[c, k]] * yl[c, k], which is not
+    y[cell[c, k]] plus a value that reads nothing else of y``, for
+    :meth:`Schedule.atomic`; the sum of a value that is not an integer into
+    an integer array is named as such (see :func:`loopty.trace.update_exactness`).
+    """
+    from lanky.terms import render
+
+    from loopty.trace import update_operands
+
+    array = stmt.assignee.array
+    cell = f"{array}[{', '.join(render(i) for i in stmt.assignee.indices)}]"
+    written = f"{stmt.id} writes {cell} = {render(stmt.expr)}"
+    if stmt.kind != "accumulate":
+        return f"{written}, which replaces the cell's value"
+    if update_operands(stmt.expr, stmt.assignee, stmt.guard) is not None:
+        return (
+            f"{written}, which adds a value that is not an integer to an integer "
+            "array: each partial sum is truncated when it is stored, so the "
+            "order of the updates changes the result"
+        )
+    return (
+        f"{written}, which is not {cell} plus a value that reads nothing else "
+        f"of {array}"
+    )
+
+
+#: How many pairs that touch one cell a refusal asks of one example input
+#: before it tries the next (see :meth:`Schedule._real_pair`).
+_PAIRS_ASKED = 200
+
+
+def _at_sizes(relation: isl.Map, sizes: Mapping[str, int]) -> isl.Map:
+    """``relation`` with the sizes of one input fixed."""
+    names = relation.get_var_names(isl.dim_type.param)
+    ctx = relation.get_ctx()
+    for name, value in sizes.items():
+        if name in names:
+            relation = relation.fix_val(
+                isl.dim_type.param,
+                names.index(name),
+                isl.Val.int_from_si(ctx, int(value)),
+            )
+    return relation
 
 
 def _subscript_text(dep: _Dep) -> str:
