@@ -126,6 +126,7 @@ import pymbolic.primitives as prim
 from lanky.terms import init_args
 
 from loopty.idx import Reflections
+from loopty.names import check_names
 from loopty.term import ArrType, Stmt, Term, count_param_names
 
 __all__ = [
@@ -421,8 +422,9 @@ def domain_set(
     sized: set[str] = set(params) | set(reflected)
     for piece in bound_pieces:
         sized |= free_names(piece)
-    return isl.Set(
-        _assemble(list(names), pieces, parameters, sized - set(names))
+    return check_names(
+        isl.Set(_assemble(list(names), pieces, parameters, sized - set(names))),
+        f"the loops over {', '.join(names)}",
     )
 
 
@@ -576,7 +578,12 @@ def access_relation(
     params = sorted(free - set(names))
     head = f"[{', '.join(params)}] -> " if params else ""
     relation = isl.Map(f"{head}{{ [{source}] -> [{', '.join(texts)}] }}")
-    return relation.intersect_domain(_align(domain, relation.get_space()))
+    # The loops are named, and the cells positional (loopty.names).
+    return check_names(
+        relation.intersect_domain(_align(domain, relation.get_space())),
+        f"the access [{', '.join(texts)}] over {', '.join(names)}",
+        positional=(isl.dim_type.out,),
+    )
 
 
 #: One entry of :func:`statement_accesses`: array, indices, kind, inames, domain.

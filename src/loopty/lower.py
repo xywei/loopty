@@ -89,6 +89,7 @@ from loopty.flow import (
 )
 from loopty.idx import linearize
 from loopty.isl_reading import affine_form, declining, require_active
+from loopty.names import check_names, rename
 from loopty.operations import (
     CODE_DIGEST,
     OPERATIONS,
@@ -2585,7 +2586,7 @@ def _domain_over(domain: isl.Set, inames: Sequence[str]) -> isl.Set:
         domain = domain.move_dims(isl.dim_type.param, 0, isl.dim_type.set, 0, extra)
     for k, iname in enumerate(inames):
         domain = domain.set_dim_name(isl.dim_type.set, k, iname)
-    return domain
+    return check_names(domain, f"a domain over {', '.join(inames)}")
 
 
 def _rename_params(domain: isl.Set, renaming: Mapping[str, str]) -> isl.Set:
@@ -2593,12 +2594,14 @@ def _rename_params(domain: isl.Set, renaming: Mapping[str, str]) -> isl.Set:
 
     How a nested reduction's domain follows an enclosing binder that
     :meth:`_Builder.plan_reductions` renamed: the binder is a parameter of the
-    inner domain, and it has to name the loop the renamed binder became.
+    inner domain, and it has to name the loop the renamed binder became. All
+    at once, by :func:`loopty.names.rename`, which checks the result.
     """
-    for position, name in enumerate(_domain_params(domain)):
-        if name in renaming:
-            domain = domain.set_dim_name(isl.dim_type.param, position, renaming[name])
-    return domain
+    params = set(_domain_params(domain))
+    wanted = {old: new for old, new in renaming.items() if old in params}
+    if not wanted:
+        return domain
+    return rename(domain, wanted, what="a nested sum's domain, its binders renamed")
 
 
 def _outermost_reductions(expr: Any) -> tuple[Reduction, ...]:
