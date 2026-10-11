@@ -127,9 +127,17 @@ its own, in parallel.
 | distinct writes | statement | two instances that differ write cells that differ |
 | element sort | statement | the value written is a point of the sort |
 | definedness | read | some statement wrote the cell read, before the read: a disjunction of existentials, one per writer; a write under a guard isl cannot state is no writer, since its domain is wider than where it stores |
+| definedness of a substitution or a window | read of the array | the producer, and only it, stored the cell read before the read, in the program's order |
+| no read sees its slot overwritten (a window) | read of the array | three instances, the read, the producer's that stored the cell it reads, and another of the producer's that stored a different cell into the same slot after it: that one does not run before the read, in the order the steps leave; the slot is the placement, `j % 3` |
+| a rewritten layout, by the row starts | statement that writes the offsets | where the offsets start at 0 and step by the counts, as the contract checks on entry, the value written is the value the cell holds: the induction step, its base case the contract's check |
+| a rewritten layout, by induction | statement that writes the layout | the rows in order before the write imply them in order after it, at the cells the write reads |
+| a declared layout | piece, or pair of pieces | every cell's address is in the buffer; two cells at one address are one cell; and every address of the buffer has a cell (an existential) |
+| two layouts the same | pair of pieces | a cell of both is stored at one address by each, and a cell of one is a cell of the other |
 | the source order | pair of accesses | the source runs the pair in the order the dependence says, which is its definition |
 | a cast is bijective | statement the step moves | every instance has an image (an existential), one only, and no two share one |
 | a cast is monotone | dependence class, a pair of accesses | two instances that touch one cell, in the source's order, keep it after every step: their time vectors compare as the source's do |
+| a cast after a substitution | class of a read it computes again and a write of what it reads | the instance of the producer that stored the cell read, before or after the write in the source's order, puts the read on that side of the write after every step |
+| a cast after a window | pair of accesses to one slot | two instances that touch one slot, in the order the window was taken in, keep it after every step |
 | what a program's call may assume | requirement, or flat access | the claim at every point of its domain, under the hypotheses isl used (a callee's postcondition, a theorem the program cites, a type the contract checks) |
 | an assumption of a schedule | (a hypothesis of every later cast) | |
 
@@ -156,6 +164,10 @@ stays `decided`.
   (`loopty.hypotheses`) are given as `have` lines, with an equation between
   any cell they read and the claim's that is the same cell written otherwise
   (`off (q - 1 + 1) = off q`).
+- **The inverse of a layout,** isl's `lexmin` of it in pieces, with `//` and
+  `%` by numbers, as the witness that every address of the buffer has a
+  cell: sumpy's storage index puts `(d + 1) % 2, (d + 1) / 2 - (d + 1) % 2`
+  at an address `d >= 1`.
 - **Case splits,** for what `omega` lacks: it has no dark or grey shadows, and
   a split by the rational bounds isl knows rescues it. None of the examples
   needs one.
@@ -268,13 +280,6 @@ Every fact Lean did not prove, and why:
 Facts loopty states for isl alone, from sets isl computes, which Lean is not
 asked about; each says so with `--verbose`, and the coverage report lists them.
 
-- **A layout a kernel rewrites** (`the rows of val stay inside their buffers
-  and apart`): an induction over the run, decided by isl over the cells a
-  write reads; issue [#186](https://github.com/xywei/loopty/issues/186).
-- **A substitution's definedness, and the casts after it:** a substitution
-  changes what the instances read, and the dependences its definedness and the
-  later steps are checked against are isl's; issue
-  [#187](https://github.com/xywei/loopty/issues/187).
 - **Work items:** a cast that puts a loop on a hardware axis also claims that
   no dependence joins two work items, which is stated for isl only; the cast
   is then left `decided` as a whole; none of the examples has one; issue
@@ -283,3 +288,8 @@ asked about; each says so with `--verbose`, and the coverage report lists them.
   split by the part of the tile's map over its loop, which isl computes; a
   cast with such a step is left `decided`; none of the examples has one;
   issue [#189](https://github.com/xywei/loopty/issues/189).
+- **Some counterexamples:** a cast refused on a class a substitution carries
+  over, or a window refused at a read in a sum, is refuted by isl with
+  instances that do not give every variable of the part (the producer's
+  instance, a sum's binders), so Lean is not asked; issue
+  [#215](https://github.com/xywei/loopty/issues/215).
