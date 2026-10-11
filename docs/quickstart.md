@@ -478,6 +478,8 @@ native run.
 | polyhedral domains, their layouts | `src/loopty/domain.py` |
 | the Term IR | `src/loopty/term.py` |
 | tracing a body | `src/loopty/trace.py` |
+| elementary functions, numpy's in both runs | `src/loopty/math.py` |
+| constant tables a kernel reads | `src/loopty/table.py` |
 | a program's term, composed from its calls | `src/loopty/compose.py` |
 | facts that travel: hypotheses decided by isl | `src/loopty/hypotheses.py` |
 | footprints and dependences | `src/loopty/flow.py` |
