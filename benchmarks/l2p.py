@@ -417,12 +417,16 @@ def run_sumpy(inputs: dict, args: argparse.Namespace) -> tuple[dict, np.ndarray]
 
 
 #: The plain loopy variants: ``loop``, ``unrolled`` (the triangle's loops
-#: unrolled), and two that make loopty's choices in plain loopy, to tell its
+#: unrolled), and those that make loopty's choices in plain loopy, to tell its
 #: costs apart: ``pow`` computes ``x**a`` with the C library's ``pow``, as
-#: loopty does to round as numpy does, where loopy multiplies; ``pow_global``
-#: also keeps every box's triangle in one array of the kernel's, zeroed first,
-#: as loopty's program keeps the array it makes, where loopy keeps a box's.
-LOOPY_VARIANTS = ("loop", "unrolled", "pow", "pow_global")
+#: loopty computes ``x**a`` to round as numpy does, where loopy multiplies
+#: (loopty's ``ipow`` multiplies as loopy does); ``global``, ``unrolled_global``
+#: and ``pow_global`` keep every box's triangle in one array of the kernel's,
+#: zeroed first, as loopty's program keeps an array it makes, where loopy keeps
+#: one box's in a temporary of the box.
+LOOPY_VARIANTS = (
+    "loop", "unrolled", "global", "unrolled_global", "pow", "pow_global",
+)
 
 
 def _c_headers(preamble_info: Any) -> Any:
@@ -454,17 +458,18 @@ def plain_loopy_kernel(order: int, target: str, variant: str) -> Any:
     power = "x**(1.0*ia) * y**(1.0*ib)" if variant.startswith("pow") else (
         "x**ia * y**ib"
     )
-    keep = "R[ibox, {}]" if variant == "pow_global" else "R[{}]"
+    whole = variant.endswith("global")
+    keep = "R[ibox, {}]" if whole else "R[{}]"
     zero = (
         """
         for ibox_z, az, bz
             R[ibox_z, az, bz] = 0 {id=zero}
         end
         """
-        if variant == "pow_global"
+        if whole
         else ""
     )
-    centre = "id=centre, dep=zero" if variant == "pow_global" else "id=centre"
+    centre = "id=centre, dep=zero" if whole else "id=centre"
     knl = lp.make_kernel(
         [
             "{[ibox]: 0 <= ibox < nboxes}",
@@ -473,7 +478,7 @@ def plain_loopy_kernel(order: int, target: str, variant: str) -> Any:
             f"{{[ia, ib]: 0 <= ia and 0 <= ib and ia + ib <= {p}}}",
             *(
                 [f"{{[ibox_z, az, bz]: 0 <= ibox_z < nboxes and 0 <= az, bz <= {p}}}"]
-                if variant == "pow_global"
+                if whole
                 else []
             ),
         ],
@@ -522,10 +527,8 @@ def plain_loopy_kernel(order: int, target: str, variant: str) -> Any:
             lp.TemporaryVariable(
                 "R",
                 np.float64,
-                shape=("nboxes", p + 1, p + 1) if variant == "pow_global"
-                else (p + 1, p + 1),
-                address_space=lp.AddressSpace.GLOBAL if variant == "pow_global"
-                else lp.auto,
+                shape=("nboxes", p + 1, p + 1) if whole else (p + 1, p + 1),
+                address_space=lp.AddressSpace.GLOBAL if whole else lp.auto,
             ),
             lp.ValueArg("rscale", np.float64),
             lp.ValueArg("nboxes,ntargets", np.int32),
@@ -537,11 +540,11 @@ def plain_loopy_kernel(order: int, target: str, variant: str) -> Any:
     )
     knl = lp.prioritize_loops(knl, "a,b")
     knl = lp.prioritize_loops(knl, "ia,ib")
-    if variant == "unrolled":
+    if variant.startswith("unrolled"):
         knl = lp.tag_inames(knl, {"a": "unr", "b": "unr", "ia": "unr", "ib": "unr"})
     if target == "opencl":
         tags = {"ibox": "g.0"}
-        if variant == "pow_global":
+        if whole:
             tags["ibox_z"] = "g.0"
         knl = lp.tag_inames(knl, tags)
     else:
