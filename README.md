@@ -729,7 +729,20 @@ release; the CHANGELOG says when one does.
   `when(sqrt(x[i]) > 1.5)`, and numpy's own `np.sqrt`, Python's
   `math.sqrt` and `z[i].real` are refused when traced, naming the function
   of `loopty.math` to write. `examples/layer_potential.py` is pytential's QBX
-  single layer over complex points.
+  single layer over complex points. `ipow(x, n)` is `x` to an integer power
+  multiplied out as loopy multiplies one, by squaring, in both runs, so they
+  agree bit for bit and the compiled kernel calls loopy's own
+  `loopy_pow_float64_int32`; `x ** n` of a real `x` is numpy's power, the C
+  library's `pow`, in both. In `examples/l2p.py`'s Taylor sum that call was
+  the whole cost on the C target.
+- Agreement with the code a kernel mirrors, `@upstream(kernel)`
+  (`loopty.upstream`): a function that computes, on the file's example
+  inputs, what the upstream code computes there, and a ledger row under the
+  kernel that compares it with the native run at the accuracy the kernel's
+  types claim, `tested` by `upstream`, `refuted` with the cell, or `assumed`
+  where the function cannot run (its package or its recording is not
+  there). `examples/l2p.py` compares its program with sumpy's own
+  `E2PFromSingleBox`, recorded on its inputs.
 - Constant tables, `loopty.table`: `W = table([1 / 6, 1 / 6, 1 / 6])`
   next to the kernel, read by the body as an array is (`W[q]`, `W.dom`). A
   table is a read-only copy of its values; its reads are in bounds over its
@@ -1002,7 +1015,10 @@ release; the CHANGELOG says when one does.
   program, names its binders and sizes as lanky variables, `i, j, n =
   Var("i"), Var("j"), Var("n")` (#210). A program's array over a domain is
   not kept in a window: `contract` refuses it, naming the fix, keep it whole
-  or `substitute` it (#244).
+  or, where one statement stores it, `substitute` it (#244). So the flagship's
+  triangles, `examples/l2p.py`, are kept whole where sumpy keeps a box's
+  in registers; a window of an array its producer reads, a recurrence, or that
+  several statements store, is #213.
 - `loopty.math` has eight functions (#184), and numpy's own functions on a
   traced value are refused rather than read as them (#195). A function
   only a guard calls is refused when lowered: loopy resolves a function by

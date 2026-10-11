@@ -8,6 +8,42 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Added
 
+- **The demo's flagship, `examples/l2p.py`**: sumpy's L2P for the 2-D
+  Laplace kernel (`E2PFromSingleBox` with the compressed Taylor expansion),
+  in one file and one ledger. The claim sumpy's reconstruction rests on,
+  for every order (lanky#86), and its form box by box on the triangle `a + b
+  <= p`, both proved by Lean with Mathlib; sumpy's storage index as a
+  checked layout; `unpack`, `reconstruct`, whose postcondition is decided
+  from what it stores and is the theorem's hypotheses, so the theorem
+  applies, and `evaluate`, composed by the program `l2p` and fused box by
+  box; the interchange of the triangle's loops refused with isl's pair, and
+  the window of the triangles refused with the reason (#244, #213). The
+  program agrees with sumpy's own kernel on the file's inputs to round-off
+  (`upstream`, below), and with the charges' potential to `4e-13` at order
+  10.
+- **Agreement with the code a kernel mirrors**, `@upstream(kernel)`
+  (`loopty.upstream`). The decorated function computes, on the file's
+  example inputs, what the code the kernel is written after computes there;
+  `lanky check` runs the kernel natively on the same inputs and compares,
+  output by output, at the accuracy the kernel's types claim. The row is
+  `tested` by `upstream`, `refuted` with the cell and both values, or
+  `assumed` with why where the function cannot run: its package is not
+  installed, or its recording is not there.
+- **`loopty.math.ipow(x, n)`**, `x` to an integer power multiplied out as
+  loopy multiplies one, by squaring, rounded at every product, in both runs:
+  natively by the same loop (`loopty.math.integer_power`), compiled as
+  loopy's `loopy_pow_<base>_<exponent>`. The two runs agree bit for bit, in
+  single precision too. `x ** n` of a real `x` stays numpy's power, the C
+  library's `pow` in both runs; at the flagship's Taylor sum `ipow` is an
+  order of magnitude faster on the C target (`benchmarks/l2p.py`).
+- **`benchmarks/l2p.py`**, which times sumpy's own `E2PFromSingleBox`, the
+  same algorithm written directly in plain loopy (loopy #970's L2P
+  microkernel with the Laplace step put back, and variants that make
+  loopty's choices), and loopty's schedules of `examples/l2p.py`, on one
+  tree and one device, and compares their potentials with each other and
+  with the direct sum. It also records sumpy's potential on the example's
+  inputs, for the `upstream` row.
+
 - **A kernel's postcondition decided from what its statements store**
   (`loopty.dataflow`, #113). Where no cell of an array a kernel writes is
   stored twice, or read before its store, a `single-assignment` fact says
@@ -432,6 +468,11 @@ All notable changes to loopty are recorded here. The format follows
   cells each instance touches.
 
 ### Changed
+
+- `contract` of a program's array over a domain names `substitute` as the
+  other fix only where one statement stores the array, which is what a
+  substitution computes again; the flagship's triangles, which two
+  statements store, are refused with `keep it whole`.
 
 - A kernel's postcondition that its statements' stores decide reads
   `decided isl` where it read `tested native`, after a new `single-assignment`

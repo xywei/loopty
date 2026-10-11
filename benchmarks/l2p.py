@@ -258,15 +258,16 @@ def emit(record: dict, out: str | None) -> None:
 
 @contextlib.contextmanager
 def cold_caches(cold: bool):
-    """Fresh code caches for loopy and PoCL while the block runs, when ``cold``."""
+    """Fresh code caches, loopy's, PoCL's and CUDA's, in the block when ``cold``."""
     if not cold:
         yield
         return
-    keys = ("XDG_CACHE_HOME", "POCL_CACHE_DIR")
+    keys = ("XDG_CACHE_HOME", "POCL_CACHE_DIR", "CUDA_CACHE_DISABLE")
     saved = {key: os.environ.get(key) for key in keys}
     with tempfile.TemporaryDirectory(prefix="l2p-cache-") as fresh:
         os.environ["XDG_CACHE_HOME"] = os.path.join(fresh, "xdg")
         os.environ["POCL_CACHE_DIR"] = os.path.join(fresh, "pocl")
+        os.environ["CUDA_CACHE_DISABLE"] = "1"
         try:
             yield
         finally:

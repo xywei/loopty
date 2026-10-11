@@ -1188,6 +1188,14 @@ def test_the_l2p_demo_refuses_the_interchange_and_fuses_box_by_box() -> None:
         "of l2p forward",
     ]
     assert {fact.status.value for fact in module.fused.facts()} == {"decided"}
+    # one triangle per box is a window, not taken over an array over a domain
+    # (#244), and the substitution it would name is refused too: two
+    # statements store R
+    assert (
+        "refused: contract('R'): R is over the domain Where[i: Fin(nb), a: "
+        "Fin(11), b: Fin(11), a + b <= 10], whose cells a window does not place "
+        "yet; keep it whole\n"
+    ) in result.stdout
     assert "pot: difference 0 within" in result.stdout
 
 

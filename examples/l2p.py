@@ -27,9 +27,12 @@ L2P, read top to bottom, in three layers:
    triangles an array it makes.
 3. **The schedule.** Running ``b`` outside ``a`` is refused, with the pair of
    instances it would reorder: ``R[i, a, b]`` reads ``R[i, a - 2, b + 2]``,
-   stored in an earlier row. ``fused`` runs each box's triangle and then the
-   box's targets, as sumpy does, a cast isl decides and Lean proves; ``on_a_device``
-   puts a box on each work group, sumpy's own schedule.
+   stored in an earlier row. ``fused`` runs each box's stored coefficients,
+   its triangle and its targets before the next box's, as sumpy does, two
+   casts isl decides and Lean proves. It keeps every box's triangle; keeping
+   only the box's at hand, as sumpy's registers do, is a window
+   (``contract``), which is refused for now, with the reason: a window of an
+   array over a domain is loopty #244, and of a recurrence #213.
 
 Run it three ways.
 
@@ -451,6 +454,10 @@ def main() -> int:
     print(f"schedule: {fused!r}")
     for fact in fused.facts():
         print(f"  {fact.status.value:8} {fact.decided_by or '-':4} {fact.statement}")
+    try:
+        fused.contract("R")
+    except ValueError as exc:
+        print(f"  refused: {exc}")
     run = LoopyExecutor().differential(l2p, fused, example_inputs()["l2p"])
     for name, detail in run.provenance["outputs"].items():
         print(
