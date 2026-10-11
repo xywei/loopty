@@ -19,7 +19,7 @@ import pytest
 from lanky.prelude import Nat, Real
 
 import hand_terms as ht
-from loopty import Arr, Fin, reduce_sum, when
+from loopty import Arr, Fin, kernel, reduce_sum, when
 from loopty.executor import emit_code
 from loopty.isl_reading import declining
 from loopty.lower import reductions_of
@@ -534,6 +534,162 @@ def test_vectorizing_a_piece_of_an_exact_reduction_is_rejected() -> None:
     tagged = loose.tag(j_in="vec")
     assert tagged.reassociated == frozenset({"y"})
     assert not tagged.buildable[0]
+
+
+@kernel
+def potential(
+    z: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[m], Real],  # noqa: F821
+    w: Arr[Fin[m], Real],  # noqa: F821
+    out: Arr[Fin[n], Real],  # noqa: F821
+):
+    """Each target's sum over every source: a layer potential, in one line."""
+    for t in out.dom:
+        out[t] = reduce_sum(w[s] * (z[t] - y[s]) * (z[t] - y[s]) for s in y.dom)
+
+
+@kernel
+def running(x: Arr[Fin[m], Real], out: Arr[Fin[n], Real]):  # noqa: F821
+    """Each cell the one before it plus a sum: a dependence along ``t``."""
+    for t in out.dom:
+        with when(t > 0):
+            out[t] = out[t - 1] + reduce_sum(x[s] for s in x.dom)
+
+
+@kernel
+def total(x: Arr[Fin[m], Real], out: Arr[Fin[1], Real]):  # noqa: F821
+    """The sum of every cell."""
+    out[0] = reduce_sum(x[s] for s in x.dom)
+
+
+def potential_inputs(targets: int = 9, sources: int = 11) -> dict:
+    rng = np.random.default_rng(targets + sources)
+    return {
+        "z": rng.random(targets),
+        "y": rng.random(sources),
+        "w": rng.random(sources),
+        "out": np.zeros(targets),
+    }
+
+
+def test_a_split_sum_adds_its_terms_in_order() -> None:
+    # loopy chose the order of a split sum's two loops, and ran the inner one
+    # outside: x[0], x[2], x[1] for three terms split by 2. That is another
+    # sum in floating point, 2**53 against 2**53 + 2 here, where the native
+    # run adds 1 + 1 first. The priority now runs them outer first.
+    schedule = Schedule(total, target="c").split("s", 2)
+    code = emit_code(schedule)
+    assert code.index("for (int32_t s_outer") < code.index("for (int32_t s_inner")
+    x = np.array([1.0, 1.0, 2.0**53])
+    out = run(schedule, x=x, out=np.zeros(1))["out"]
+    native = Arr.zeros(1)
+    total(Arr.from_numpy(x), native)
+    assert native.numpy()[0] == 2.0**53 + 2
+    assert out[0] == native.numpy()[0]
+
+
+def test_a_sum_runs_outside_a_loop_of_its_statement_when_prioritized() -> None:
+    # sumpy's CPU tile of a layer potential: 256 sources at a time, for each
+    # of 16 targets. On C the target loop is ilp, so that each target keeps an
+    # accumulator of its own while the sources run outside it.
+    schedule = (
+        Schedule(potential, target="c")
+        .split("t", 4)
+        .tag(t_inner="ilp")
+        .split("s", 4)
+        .prioritize("s_outer", "t_inner")
+    )
+    assert schedule.history[-1] == "prioritize(s_outer, t_inner)"
+    assert schedule.buildable == (True, "")
+    assert [fact.status.value for fact in schedule.facts()][-2:] == [
+        "decided",
+        "decided",
+    ]
+    code = emit_code(schedule)
+    assert "acc_s_outer_s_inner[4]" in code
+    inputs = potential_inputs()
+    native = {name: Arr.from_numpy(value.copy()) for name, value in inputs.items()}
+    potential(**native)
+    out = run(schedule, **inputs)["out"]
+    assert np.array_equal(out, native["out"].numpy())
+    # In either order of the steps, and put back with the statement loop first.
+    assert (
+        Schedule(potential, target="c")
+        .split("t", 4)
+        .split("s", 4)
+        .prioritize("s_outer", "t_inner")
+        .tag(t_inner="ilp")
+        .buildable
+        == (True, "")
+    )
+    assert ("s_outer", "t_inner") in schedule.kernel.default_entrypoint.loop_priority
+    back = schedule.prioritize("t_inner", "s_outer")
+    assert ("s_outer", "t_inner") not in back.kernel.default_entrypoint.loop_priority
+
+
+def test_a_sum_outside_a_sequential_loop_is_not_buildable() -> None:
+    # loopy keeps one accumulator for the sum and drops the priority; the
+    # reason names the tag that keeps one per iteration.
+    schedule = (
+        Schedule(potential, target="c")
+        .split("t", 4)
+        .split("s", 4)
+        .prioritize("s_outer", "t_inner")
+    )
+    ok, reason = schedule.buildable
+    assert not ok
+    assert reason.startswith(
+        "the loop s_outer of the sum over s_outer, s_inner in S0 is ordered "
+        "outside t_inner, which runs in sequence"
+    )
+    assert "Tag t_inner 'ilp'" in reason
+    (fact,) = [fact for fact in schedule.facts() if fact.kind == "buildable"]
+    assert fact.status.value == "refuted"
+
+
+def test_a_loop_a_sum_runs_outside_of_orders_none_of_its_instances() -> None:
+    # running[t] reads what running[t - 1] stored: with the sum's loop
+    # outside t, every sum is computed before any cell is stored, so the
+    # dependence is refused with its pair, as an ilp tag on t refuses it.
+    schedule = Schedule(running, target="c").split("s", 2)
+    with pytest.raises(IllegalCast) as caught:
+        schedule.prioritize("s_outer", "t")
+    assert caught.value.fact.kind == "monotone"
+    (source, source_at), (sink, sink_at), _ = caught.value.witness
+    assert (source, sink) == ("S0", "S0")
+    assert sink_at["t"] == source_at["t"] + 1
+
+
+@pytest.mark.parametrize(
+    ("steps", "message"),
+    [
+        (
+            [("split", ("s", 2)), ("prioritize", ("s_inner", "s_outer"))],
+            "s_inner, s_outer are loops of one sum of S0, which adds its terms "
+            "in the order of its loops, outermost first (s_outer, s_inner); "
+            "reordering them would reassociate it",
+        ),
+        (
+            [
+                ("split", ("t", 2)),
+                ("split", ("s", 2)),
+                ("prioritize", ("s_inner", "t_inner")),
+            ],
+            "s_inner runs inside s_outer in the sum over s_outer, s_inner in "
+            "S0, so it can run outside t_inner only where s_outer does; name "
+            "s_outer first",
+        ),
+        ([("prioritize", ("q", "t"))], "not inames of potential: ['q']"),
+    ],
+)
+def test_a_sum_keeps_the_order_of_its_own_loops(steps, message: str) -> None:
+    schedule = Schedule(potential, target="c")
+    *before, (method, args) = steps
+    for name, arguments in before:
+        schedule = getattr(schedule, name)(*arguments)
+    with pytest.raises(ValueError) as caught:
+        getattr(schedule, method)(*args)
+    assert str(caught.value).endswith(message)
 
 
 def test_exactness_is_read_off_the_reduction_being_transformed() -> None:

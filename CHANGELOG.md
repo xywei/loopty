@@ -8,6 +8,83 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Added
 
+- **Constant tables** (`loopty.table`): quadrature weights, a basis
+  tabulated at the quadrature points, a differentiation matrix, declared
+  next to the kernel as the numpy array they are, `W = table([1 / 6, 1 / 6,
+  1 / 6])`, and read by the body as an array is, `W[q]`, `W.dom`. Natively a
+  table is a read-only copy of its values. Traced, it is recorded in the
+  term (`Term.tables`) under the name the body reads it by, and each read is
+  an access whose in-bounds fact isl decides over the table's shape. Lowered,
+  it is a read-only loopy temporary with the values as its initializer, which
+  loopy writes once with every digit, `static double W[3] = {
+  0.16666666666666666, ... };` on the C target and `__constant` on OpenCL, so
+  both runs read the same numbers; the interpreter reads them too. Complex,
+  single precision and integer tables are read in their own dtype. A table
+  read in a helper of the body is the kernel's, named as it is declared, a
+  program holds one table for every call that reads it, and a table named
+  like a parameter or a size of the kernel is named apart, `y_table`.
+  Writing one is a `TypeError` in both runs. Natively a table is read as an
+  array is: an index is never counted from the end, and a read out of range
+  under a false `when` answers zero. A table holds finite numbers (#193), in
+  a type the compiled kernel has (not `float16` or `longdouble`),
+  is no argument (an array of its values is,
+  `Arr.from_numpy(W.values.copy())`), and is read in a statement's values,
+  not in a loop's bound (#194); each of these is refused with the fix named.
+  A compiled run refuses a read-only array for a parameter it writes, such
+  as a table's `W.values`, which it wrote into before failing. On OpenCL a
+  complex table is an array of the kernel's own, since pyopencl writes its
+  values as calls, which a `__constant` array cannot be initialized by.
+- **`loopty.math`**: `sqrt`, `exp`, `log`, `sin`, `cos`, `real`, `imag` and
+  `conj` for kernel bodies. Each is numpy's natively and a call the
+  trace records, which the interpreter evaluates with the same numpy function
+  and the lowering writes as the target's library function, `csqrt` and
+  `creal` of a complex number on the C target and pyopencl's `cdouble_sqrt`
+  and `cdouble_real` on OpenCL, in the type numpy computes it in: `sqrt` of
+  an integer is a double (`sqrt((double) (k[i]))`), where loopy refused it on
+  the C target and took it for a `float` on OpenCL, and `real`, `imag` and
+  `conj` of a number that is not complex are the number, `0` and the number,
+  where loopy wrote `creal` of a double. A function numpy computes in half
+  precision, `sqrt` of an `int8`, is a `TraceError` naming `sqrt(1.0 *
+  k[i])`. pytential's line-Taylor single layer over complex points,
+  `real(log(c[t] - y[s]) - ...)`, runs, checks and compiles as any kernel
+  (`examples/layer_potential.py`). A postcondition may call them too, `->
+  all(y[i] == sqrt(x[i]) for i in Fin[n] if x[i] >= 0)`, and is tested after
+  each native run with numpy's, where it was left `assumed`, not evaluated.
+  `examples/p2p.py` calls `loopty.math.sqrt` where it built the call by hand.
+  A value of one compares and combines as any traced value does,
+  `when(sqrt(x[i]) > 1.5)`. numpy's own functions, Python's `math` and
+  `x[i].real` take numbers: a body that calls them on a traced value is
+  refused at its line, with the `loopty.math` function to write (#195),
+  where it failed far from the body (numpy's "loop of ufunc does not support
+  argument 0 of type Subscript", pymbolic's `UnknownVariableError`).
+- **A sum's loop ordered outside a loop of its statement**
+  (`Schedule.prioritize("s_outer", "t_inner")`). sumpy's CPU tile of
+  a layer potential splits the targets by 16 onto a group and its work
+  items, splits the sources by 256, and runs the sources' outer loop
+  outside the work items' loop; `prioritize` and `interchange` refused the
+  sum's loop as no loop of the kernel. A loop of a sum named before loops
+  of its statement now runs outside them, each sum still adding its terms
+  in its own order, so nothing is reassociated; a loop the sum runs outside
+  of orders none of the instances in it, so a dependence between two of
+  them is refused with its pair, as one across an `ilp` loop is. loopy runs
+  the order only where it keeps an accumulator per instance, on a hardware
+  axis or an `ilp` loop (`acc[16]` on the C target); on a loop that runs in
+  sequence it keeps one and drops the order, and the schedule's `buildable`
+  fact is refuted with that reason and the tag that fixes it. Two loops of
+  one sum are never reordered, and an inner one never runs outside a loop
+  its outer one does not.
+- **Fusion on chosen outer loops** (`Schedule.fuse(..., loops=1)`). A
+  fusion took every loop both sides have, so two passes over elements, the
+  second of which reads every cell of the element the first wrote (a
+  sum-factorized operator, one reference axis per pass), could not be fused
+  at all: fused on the element and the row, the second pass reads a cell of
+  the element before the first stores it. `loops` fuses only that many of
+  the outer loops and leaves the loops inside them one after the other, the
+  producer's first, checked as every fusion is. A refused fusion now names
+  each fusion it checked that is accepted: the least shift at the same
+  depth, as before, and the deepest fusion of fewer loops, `fuse('along',
+  'along@2', loops=1)`.
+
 - **isl decides, Lean checks** (`loopty.description`, `loopty.obligations`).
   Every fact isl decides about a kernel, a program or a schedule's step is
   also stated as lanky terms for lanky's Lean oracle, which proves it with
@@ -77,6 +154,26 @@ All notable changes to loopty are recorded here. The format follows
 - A cell set's dimensions are named apart from the loops of the access it is
   built for, so that a ragged row's bound written in a loop called `a0`
   reads back as that loop.
+
+### Fixed
+
+- The first run of a kernel with an array of four axes over one size, or a
+  triangle boxed over two, no longer prints loopy's `ParameterFinderWarning:
+  Unable to generate code to automatically find 'm' from 'u': nonlinear
+  expression`, a warning about an equation of the strides loopy's invoker
+  could not solve, while it found the size from the shape (note 28 in
+  `docs/loopy-notes.md`). Five constructs kernels written like sumpy's L2P
+  and grudge's sum-factorized passes need, a
+  `Where` array beside a ragged family, a `Where` of three binders, `**` with
+  a loop variable as the exponent in a sum of two binders and in a sum
+  nested in another, four dense axes and `when(a + b == 0)`, were run three
+  ways and work; `tests/test_demo_shapes.py` keeps them so.
+- A split sum adds its terms in order. `split("s", 256)` of a sum's loop
+  left loopy to choose the order of the two loops it makes, and loopy ran
+  the inner one outside, `for s_inner ... for s_outer`, adding every 256th
+  term first: another sum in floating point, `2**53` where the native run
+  adds `1 + 1 + 2**53` to `2**53 + 2`. Every schedule now gives loopy a sum's
+  loops in order, outermost first, as it gives it each statement's nest.
 
 ## [0.2.0] - 2026-10-11
 

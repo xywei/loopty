@@ -221,8 +221,9 @@ once, is not done.
 from __future__ import annotations
 
 import dataclasses
+import itertools
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -392,29 +393,39 @@ def _coefficients(
 
 
 def _nests(
-    layout: _Layout, order: Sequence[str], tags: dict[str, str]
+    layout: _Layout,
+    order: Sequence[str],
+    tags: dict[str, str],
+    unordered: Collection[str] = (),
 ) -> dict[str, tuple[str, ...]]:
     """Each statement's ordered loops, with the unordered ones left out.
 
     A loop on a hardware axis is left out as ``ilp`` and ``vec`` are, which
     is right only for two instances on one work item; that a dependence joins
-    no two work items is asked separately (see :func:`_work_items`).
+    no two work items is asked separately (see :func:`_work_items`). So are
+    the ``unordered`` loops, those a sum's loop runs outside of (see
+    :meth:`Schedule.prioritize`).
     """
     return {
         stmt_id: tuple(
             iname
             for iname in order
-            if iname in coords and not parallel_tag(tags.get(iname, ""))
+            if iname in coords
+            and not parallel_tag(tags.get(iname, ""))
+            and iname not in unordered
         )
         for stmt_id, coords in layout.coords.items()
     }
 
 
 def _time_map(
-    layout: _Layout, order: Sequence[str], tags: dict[str, str]
+    layout: _Layout,
+    order: Sequence[str],
+    tags: dict[str, str],
+    unordered: Collection[str] = (),
 ) -> isl.Map:
     """The map from statement instances to logical time."""
-    nests = _nests(layout, order, tags)
+    nests = _nests(layout, order, tags, unordered)
     coefficients = _coefficients(layout.stmt_ids, nests)
     depth = max((len(nest) for nest in nests.values()), default=0)
     length = 2 * depth + 1
@@ -1417,6 +1428,9 @@ def _unbuildable_reason(draft: _Draft) -> str | None:
       code is generated (see :func:`_unroll_reason`), and a temporary loopy
       misreads once it has given an ``ilp`` or ``vec`` loop a copy of it per
       iteration (see :func:`_privatized_reason`);
+    * a loop of a sum ordered outside a loop of its statement that runs in
+      sequence, where loopy keeps one accumulator for the sum and drops the
+      order (see :func:`_sum_place_reason`);
     * a loop ordered outside a loop loopy nests it inside, which loopy cannot
       run in that order (see :func:`_nest_reason`);
     * what the target itself cannot do: the C target has no hardware axes,
@@ -1468,6 +1482,7 @@ def _unbuildable_reason(draft: _Draft) -> str | None:
         _axis_reason,
         _unroll_reason,
         _privatized_reason,
+        _sum_place_reason,
         _nest_reason,
         _target_reason,
     ):
@@ -1777,6 +1792,97 @@ def _enclosing_loops(kernel: Any) -> dict[str, dict[str, str]]:
                 for outer in sorted(direct.get(current, ()))
             )
         out[name] = reached
+    return out
+
+
+def _privatizing(tag: Any) -> bool:
+    """Does loopy keep a sum's accumulator per iteration of a loop so tagged?
+
+    It does on a hardware axis, where each work item has its own, and on an
+    ``ilp`` loop, whose iterations it gives a copy each.
+    """
+    from loopy.kernel.data import IlpBaseTag
+
+    if not tag:
+        return False
+    return _hardware_axis(tag) or isinstance(_loopy_tag(tag), IlpBaseTag)
+
+
+def _sum_place_reason(draft: _Draft) -> str | None:
+    """A loop of a sum outside a statement loop loopy runs in sequence, or ``None``.
+
+    loopy keeps one accumulator for a sum, set before the sum's loops and
+    stored after them, inside every loop of the sum's statement. A loop of
+    the sum that :meth:`Schedule.prioritize` puts outside a loop of the
+    statement then needs an accumulator for each iteration of that loop,
+    which loopy keeps only on a hardware axis and on an ``ilp`` loop (see
+    :func:`_privatizing`); on any other loop it drops the loop priority and
+    runs the sum inside, as if it had not been asked. A loop of a sum that
+    is itself on a hardware axis, or tagged ``ilp`` or ``vec``, has no place
+    in the order either: loopy realizes it where it realizes the sum.
+    """
+    for name, placed in sorted(draft.outside.items()):
+        if not placed:
+            continue
+        key = draft.reductions.get(name)
+        if key is None:
+            continue
+        stmt_id = key.rsplit(":", 1)[0]
+        loops = ", ".join(draft.sums.get(key, (name,)))
+        tag = draft.tags.get(name)
+        if tag is not None and parallel_tag(tag):
+            return (
+                f"the loop {name} of the sum over {loops} in {stmt_id} is "
+                f"tagged {tag!r} and ordered outside {', '.join(sorted(placed))}, "
+                "and loopy realizes a concurrent loop of a sum where it realizes "
+                "the sum, inside every loop of its statement. Leave it in "
+                "sequence, or name the statement's loops before it"
+            )
+        sequential = sorted(
+            loop for loop in placed if not _privatizing(draft.tags.get(loop, ""))
+        )
+        if sequential:
+            shown = ", ".join(sequential)
+            return (
+                f"the loop {name} of the sum over {loops} in {stmt_id} is "
+                f"ordered outside {shown}, which runs in sequence: loopy keeps "
+                "one accumulator for the sum, so it would run the sum inside "
+                f"every loop of {stmt_id} anyway, in another order than the one "
+                f"this schedule's facts were checked for. Tag {sequential[0]} "
+                f"'ilp', tag({sequential[0]}='ilp'), which gives each of its "
+                "iterations an accumulator of its own, or on a device put it on "
+                f"a hardware axis, tag({sequential[0]}='l.0')"
+            )
+    return None
+
+
+def _sum_priorities(draft: _Draft) -> list[tuple[str, ...]]:
+    """The loop priorities that run each sum's loops where the schedule says.
+
+    A sum's loops in sequence, outermost first: loopy otherwise chooses
+    their order, and ran the inner loop of a split sum outside its outer
+    one, adding every 256th term first (``for s_inner ... for s_outer``),
+    which is not the order the native run adds them in. And each loop of a
+    sum before every statement loop it runs outside of (see
+    :meth:`Schedule.prioritize`), but a loop on a hardware axis: that is no
+    loop of the generated code, every work item has an accumulator of its
+    own, and loopy warns that it cannot enforce an order with one.
+    """
+    out: list[tuple[str, ...]] = []
+    for loops in draft.sums.values():
+        sequential = tuple(
+            name for name in loops if not parallel_tag(draft.tags.get(name, ""))
+        )
+        if len(sequential) > 1:
+            out.append(sequential)
+    for name, placed in sorted(draft.outside.items()):
+        if parallel_tag(draft.tags.get(name, "")):
+            continue
+        out.extend(
+            (name, loop)
+            for loop in sorted(placed)
+            if not _hardware_axis(draft.tags.get(loop) or "for")
+        )
     return out
 
 
@@ -2329,6 +2435,13 @@ class _Draft:
     #: The target the schedule is written for; what it cannot do at all is
     #: asked last (see :func:`_target_reason`).
     target: str = "c"
+    #: Reduction key -> the loops of the sum, outermost first, as the kernel
+    #: names them; a split puts the two it makes where the one it split was.
+    sums: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    #: A loop of a sum -> the loops of its statement it runs outside of (see
+    #: :meth:`Schedule.prioritize`); a sum's loops run inside every loop of
+    #: their statement otherwise.
+    outside: dict[str, frozenset[str]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, eq=False)
@@ -2517,6 +2630,10 @@ class Schedule:
         #: Which reduction each nested one sits in, by key; nesting is a fact
         #: about the term, so no step changes it.
         self._nested_in: dict[str, str] = {}
+        #: Each sum's loops, outermost first, by key (see :class:`_Draft`).
+        self._sums: dict[str, tuple[str, ...]] = {}
+        #: The loops of its statement each loop of a sum runs outside of.
+        self._outside: dict[str, frozenset[str]] = {}
         reduction_inames = self._lowering.reduction_inames
         for stmt in self._term.stmts:
             nesting = _reduction_nesting(stmt.expr)
@@ -2530,6 +2647,7 @@ class Schedule:
                     self._nested_in[key] = f"{stmt.id}:{enclosing[-1]}"
                 for iname in reduction_inames.get(key, reduction.inames):
                     self._reductions[iname] = key
+                self._sums[key] = tuple(reduction_inames.get(key, reduction.inames))
         self._reassoc: frozenset[str] = frozenset()
         self._data_dependent = data_dependent_inames(self._term, reduction_inames)
         self._history: tuple[str, ...] = ()
@@ -2615,6 +2733,8 @@ class Schedule:
             data_dependent=set(self._data_dependent),
             nested_in=dict(self._nested_in),
             target=self._target,
+            sums=dict(self._sums),
+            outside=dict(self._outside),
         )
 
     @property
@@ -3055,6 +3175,11 @@ class Schedule:
             new = _dim_names(own, isl.dim_type.out)
             draft.coords[stmt_id] = (*kept[:first], *new, *kept[first:])
             mappings[stmt_id] = own
+        for name, placed in list(draft.outside.items()):
+            # A loop a sum runs outside of is replaced by the loops that
+            # replace it, and the sum runs outside those.
+            if placed & set(inputs):
+                draft.outside[name] = (placed - set(inputs)) | set(outputs)
         dependent = draft.data_dependent & set(inputs)
         if dependent:
             inherited = {name: set() for name in outputs}
@@ -3239,6 +3364,16 @@ class Schedule:
         key = draft.reductions.pop(iname)
         draft.reductions[inner] = key
         draft.reductions[outer] = key
+        position = draft.sums[key].index(iname)
+        draft.sums[key] = (
+            *draft.sums[key][:position],
+            outer,
+            inner,
+            *draft.sums[key][position + 1 :],
+        )
+        if iname in draft.outside:
+            placed = draft.outside.pop(iname)
+            draft.outside[outer] = draft.outside[inner] = placed
         if iname in draft.data_dependent:
             draft.data_dependent.discard(iname)
             draft.data_dependent.update((inner, outer))
@@ -3265,6 +3400,28 @@ class Schedule:
         affine map it is the identity, with a new order; :meth:`affine` given
         the permutation of the loops that keeps their names makes the same
         cast, and this is the spelling that leaves the kernel alone.
+
+        A loop of a sum may be named too, before loops of its statement, and
+        then runs outside them: sumpy's CPU tile of a layer potential,
+
+            (Schedule(lpot, target="opencl")
+             .split("t", 16).tag(t_outer="g.0", t_inner="l.0")
+             .split("s", 256).prioritize("s_outer", "t_inner"))
+
+        adds 256 sources at a time to the sum of each of 16 targets. Each
+        sum still adds its terms in its own order, its loops outer first, so
+        nothing is reassociated, and two loops of one sum are never
+        reordered. What changes is that a loop the sum runs outside of no
+        longer orders the instances in it: the sum of each is computed a
+        block at a time, all of them side by side, so a dependence between
+        two of them is refused, as one between two iterations of an ``ilp``
+        loop is. loopy runs it so only where it keeps an accumulator for each
+        of those instances, on a hardware axis or an ``ilp`` loop; on a loop
+        that runs in sequence it keeps one and drops the order, and the
+        schedule's ``buildable`` fact is refuted with that reason. The loops
+        of a sum run inside every loop of its statement otherwise, and naming
+        a statement loop before a loop of a sum puts the sum's loop back
+        inside it.
         """
         return self._reorder(
             inames, f"interchange({', '.join(inames)})", "interchange"
@@ -3277,14 +3434,85 @@ class Schedule:
         )
 
     def _reorder(self, inames: Sequence[str], text: str, method: str) -> Schedule:
-        unknown = [iname for iname in inames if iname not in self._order]
+        unknown = [
+            iname
+            for iname in inames
+            if iname not in self._order and iname not in self._reductions
+        ]
         if unknown:
             raise ValueError(f"not inames of {self._term.name}: {unknown}")
+        loops = [iname for iname in inames if iname in self._order]
         draft = self._draft()
-        positions = sorted(draft.order.index(iname) for iname in inames)
-        for position, iname in zip(positions, inames, strict=True):
+        positions = sorted(draft.order.index(iname) for iname in loops)
+        for position, iname in zip(positions, loops, strict=True):
             draft.order[position] = iname
+        if len(loops) < len(inames):
+            self._place_sums(draft, inames, text)
         return self._commit(draft, text, (method, tuple(inames), {}))
+
+    def _place_sums(self, draft: _Draft, inames: Sequence[str], text: str) -> None:
+        """Record where each loop of a sum in ``inames`` runs; see :meth:`interchange`.
+
+        A sum's loop named before loops of its statement runs outside the
+        first of them in the statement's nest, and every loop of the
+        statement inside that one; one named after them all runs inside
+        every loop of its statement, where a sum's loops run unless they are
+        placed. Refused with a ``ValueError``: two loops of one sum out of
+        their order, a statement loop the sum's statement does not run in, a
+        loop of a sum nested in another, and an inner loop of a sum outside
+        a loop its outer loop is not.
+        """
+        for iname in inames:
+            if iname not in draft.reductions:
+                continue
+            key = draft.reductions[iname]
+            stmt_id = key.rsplit(":", 1)[0]
+            binders = ", ".join(draft.sums[key])
+            if key in draft.nested_in:
+                raise ValueError(
+                    f"{text}: {iname} is a loop of a sum nested in another sum "
+                    f"of {stmt_id}, which runs inside that sum's loops; only "
+                    "the loops of an outermost sum are ordered against the "
+                    "loops of their statement"
+                )
+            named = [name for name in inames if draft.reductions.get(name) == key]
+            if named != [name for name in draft.sums[key] if name in named]:
+                raise ValueError(
+                    f"{text}: {', '.join(named)} are loops of one sum of "
+                    f"{stmt_id}, which adds its terms in the order of its loops, "
+                    f"outermost first ({binders}); reordering them would "
+                    "reassociate it"
+                )
+            after = [
+                name
+                for name in inames[inames.index(iname) + 1 :]
+                if name in draft.order
+            ]
+            nest = [name for name in draft.order if name in draft.coords[stmt_id]]
+            foreign = [name for name in after if name not in nest]
+            if foreign:
+                raise ValueError(
+                    f"{text}: {iname} is a loop of the sum over {binders} in "
+                    f"{stmt_id}, which does not run in {', '.join(foreign)}"
+                )
+            if after:
+                first = min(nest.index(name) for name in after)
+                draft.outside[iname] = frozenset(nest[first:])
+            else:
+                draft.outside.pop(iname, None)
+        for key, loops in draft.sums.items():
+            for outer, inner in itertools.pairwise(loops):
+                missing = draft.outside.get(inner, frozenset()) - draft.outside.get(
+                    outer, frozenset()
+                )
+                if missing:
+                    stmt_id = key.rsplit(":", 1)[0]
+                    raise ValueError(
+                        f"{text}: {inner} runs inside {outer} in the sum over "
+                        f"{', '.join(loops)} in {stmt_id}, so it can run outside "
+                        f"{', '.join(sorted(missing))} only where {outer} does; "
+                        f"name {outer} first"
+                    )
 
     def tile(
         self,
@@ -3594,7 +3822,11 @@ class Schedule:
         return kernel.with_kernel(entry.copy(instructions=insns))
 
     def fuse(
-        self, producer: str, consumer: str, shift: int | Sequence[int] = 0
+        self,
+        producer: str,
+        consumer: str,
+        shift: int | Sequence[int] = 0,
+        loops: int | None = None,
     ) -> Schedule:
         """Run the consumer's loops inside the producer's, ``shift`` steps behind.
 
@@ -3617,6 +3849,18 @@ class Schedule:
         already there. One shift per fused loop, or one number for a single
         loop.
 
+        ``loops`` fuses only that many of the outer loops, and leaves the
+        loops inside them one after the other, the producer's first. Two
+        passes over elements, the second of which reads every cell of the
+        element the first wrote, fuse on the element loop and no deeper::
+
+            Schedule(weak_grad).fuse("along_r", "along_s", loops=1)
+
+        runs, for each element, all of ``along_r`` and then all of
+        ``along_s``; fusing both loops would read a cell of the element
+        before ``along_r`` stores it, and is refused with that pair. Without
+        ``loops``, every loop both sides have is fused.
+
         The two sides' loops have to be in sequence, not one inside the
         other. The fused loops are the outer loops of each side's nest, and a
         nest the lowering wrote as one domain is cut after them (see
@@ -3625,24 +3869,34 @@ class Schedule:
         :meth:`affine` leaves a map it cannot write. A fusion
         that runs a dependence backwards is refused with the pair of
         instances and the cell between them, as every cast is, and the
-        message names the least shift at which the fusion is accepted, when
-        there is one and a number per loop gives it.
+        message names the fusions it checked that are accepted: the least
+        shift that runs every dependence forward, when a number per loop
+        gives it, and the deepest fusion of fewer loops, with ``loops``.
         """
-        return self._fuse(producer, consumer, shift, hint=True)
+        return self._fuse(producer, consumer, shift, loops, hint=True)
 
     def _fuse(
         self,
         producer: str,
         consumer: str,
         shift: int | Sequence[int],
+        loops: int | None,
         hint: bool,
     ) -> Schedule:
-        """:meth:`fuse`, with ``hint`` saying whether a refusal names a shift."""
+        """:meth:`fuse`, with ``hint`` saying whether a refusal names a fix."""
         given = shift if isinstance(shift, int) else tuple(shift)
-        text = f"fuse({producer}, {consumer}" + (
-            f", shift={given!r})" if given else ")"
-        )
-        recipe = ("fuse", (producer, consumer), {"shift": given} if given else {})
+        options = []
+        if given:
+            options.append(f"shift={given!r}")
+        if loops is not None:
+            options.append(f"loops={loops!r}")
+        text = f"fuse({', '.join([producer, consumer, *options])})"
+        kwargs: dict[str, Any] = {}
+        if given:
+            kwargs["shift"] = given
+        if loops is not None:
+            kwargs["loops"] = loops
+        recipe = ("fuse", (producer, consumer), kwargs)
         first = self._fused_side(producer, text)
         second = self._fused_side(consumer, text)
         both = sorted(set(first) & set(second))
@@ -3658,7 +3912,9 @@ class Schedule:
             )
         mine = self._fused_loops(first, producer, text)
         theirs = self._fused_loops(second, consumer, text)
-        depth = min(len(mine), len(theirs))
+        depth = _fused_depth(
+            loops, (producer, mine), (consumer, theirs), text
+        )
         mine, theirs = mine[:depth], theirs[:depth]
         shared = [name for name in mine if name in theirs]
         if shared:
@@ -3686,21 +3942,73 @@ class Schedule:
         except IllegalCast as exc:
             if not hint or exc.fact is None or exc.fact.kind != "monotone":
                 raise
-            least = self._least_shift(first, second, mine, theirs)
-            if least is None or least == shifts:
+            accepted = self._accepted_fusions(
+                producer, consumer, (first, second), (mine, theirs), shifts, loops
+            )
+            if not accepted:
                 raise
-            suggested: int | tuple[int, ...] = least[0] if depth == 1 else least
-            try:
-                self._fuse(producer, consumer, suggested, hint=False)
-            except (IllegalCast, ValueError):
-                raise exc from None
-            message = (
-                f"{exc}; fuse({producer!r}, {consumer!r}, shift={suggested!r}) "
-                "runs every dependence between them forward"
+            message = f"{exc}; {accepted[0]} runs every dependence between them " + (
+                "forward"
+                if len(accepted) == 1
+                else f"forward, and so does {accepted[1]}"
             )
             provenance = {**exc.fact.provenance, "reason": message}
             fact = dataclasses.replace(exc.fact, provenance=provenance)
             raise IllegalCast(message, witness=exc.witness, fact=fact) from None
+
+    def _accepted_fusions(
+        self,
+        producer: str,
+        consumer: str,
+        sides: tuple[Sequence[str], Sequence[str]],
+        fused: tuple[Sequence[str], Sequence[str]],
+        shifts: tuple[int, ...],
+        loops: int | None,
+    ) -> list[str]:
+        """The fusions of a refused one that the checker accepts, as written.
+
+        First the same loops at the least shift per loop that runs the
+        dependences between the two sides forward, when there is one (see
+        :meth:`_least_shift`); then the deepest fusion of fewer loops, at no
+        shift, or at its own least shift. Each is checked before it is named.
+        """
+        first, second = sides
+        mine, theirs = fused
+        depth = len(mine)
+        out: list[str] = []
+
+        def accepted(shift: tuple[int, ...], count: int | None) -> bool:
+            value: int | tuple[int, ...] = shift[0] if len(shift) == 1 else shift
+            try:
+                self._fuse(producer, consumer, value, count, hint=False)
+            except (IllegalCast, ValueError):
+                return False
+            return True
+
+        def written(shift: tuple[int, ...], count: int | None) -> str:
+            options = [repr(producer), repr(consumer)]
+            if any(shift):
+                value = shift[0] if len(shift) == 1 else shift
+                options.append(f"shift={value!r}")
+            if count is not None:
+                options.append(f"loops={count}")
+            return f"fuse({', '.join(options)})"
+
+        least = self._least_shift(first, second, mine, theirs)
+        if least is not None and least != shifts and accepted(least, loops):
+            out.append(written(least, loops))
+        for count in range(depth - 1, 0, -1):
+            candidates = [(0,) * count]
+            fewer = self._least_shift(first, second, mine[:count], theirs[:count])
+            if fewer is not None and any(fewer):
+                candidates.append(fewer)
+            found = next(
+                (shift for shift in candidates if accepted(shift, count)), None
+            )
+            if found is not None:
+                out.append(written(found, count))
+                break
+        return out
 
     def _fused_side(self, name: str, text: str) -> list[str]:
         """The statements one side of :meth:`fuse` names, in term order.
@@ -4514,7 +4822,10 @@ class Schedule:
 
         reindex = self._reindex.apply_range(step)
         instances = step.range()
-        time = _time_map(layout, draft.order, draft.tags)
+        # A loop a sum runs outside of interleaves the sum's terms of every
+        # instance in it, so it orders none of them (see :meth:`prioritize`).
+        unordered = frozenset().union(*draft.outside.values())
+        time = _time_map(layout, draft.order, draft.tags, unordered)
         schedule = reindex.apply_range(time).intersect_domain(self._origin)
 
         total = self._deps_total
@@ -4587,7 +4898,10 @@ class Schedule:
         other._kernel = _transformed(
             draft.kernel,
             _with_priority,
-            _nests(layout, draft.order, draft.tags).values(),
+            [
+                *_nests(layout, draft.order, draft.tags).values(),
+                *_sum_priorities(draft),
+            ],
         )
         other._code, other._strides = _stepped(
             other._kernel, draft.order, draft.tags
@@ -4595,6 +4909,8 @@ class Schedule:
         other._reassoc = frozenset(draft.reassoc)
         other._reductions = dict(draft.reductions)
         other._reduction_info = dict(draft.reduction_info)
+        other._sums = dict(draft.sums)
+        other._outside = dict(draft.outside)
         other._data_dependent = frozenset(draft.data_dependent)
         # The cast is legal; whether the target can build it is a separate
         # question, about the schedule as it now stands, so it is asked again
@@ -5453,6 +5769,41 @@ def _substituted_kernel(
             f"{type(exc).__name__}: {exc}"
         )
     return kernel, None
+
+
+def _fused_depth(
+    loops: int | None,
+    producer: tuple[str, Sequence[str]],
+    consumer: tuple[str, Sequence[str]],
+    text: str,
+) -> int:
+    """How many outer loops :meth:`Schedule.fuse` fuses.
+
+    Every loop both sides have when ``loops`` is ``None``, and otherwise
+    ``loops``, which has to be a whole number from 1 to that many.
+    ``producer`` and ``consumer`` are each a side's name and the loops all
+    its statements run in, outermost first.
+    """
+    (first, mine), (second, theirs) = producer, consumer
+    most = min(len(mine), len(theirs))
+    if loops is None:
+        return most
+    if isinstance(loops, bool) or not isinstance(loops, int):
+        example = (
+            f" (loops=1 fuses {mine[0]} with {theirs[0]})" if most else ""
+        )
+        raise TypeError(
+            f"{text}: loops is how many of the outer loops to fuse, a whole "
+            f"number counted from the outermost{example}, not {loops!r}"
+        )
+    if not 1 <= loops <= most:
+        plural = "s" if most > 1 else ""
+        raise ValueError(
+            f"{text}: {first} runs in {', '.join(mine)} and {second} in "
+            f"{', '.join(theirs)}, so a fusion takes from 1 to {most} of their "
+            f"outer loop{plural}, not {loops}"
+        )
+    return loops
 
 
 def _shifts(shift: int | tuple[int, ...], depth: int, text: str) -> tuple[int, ...]:

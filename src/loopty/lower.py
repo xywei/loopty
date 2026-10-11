@@ -96,7 +96,7 @@ from loopty.operations import (
     NumpyArithmetic,
     numpy_arithmetic_preambles,
 )
-from loopty.promotion import Promotion
+from loopty.promotion import MATH_FUNCTIONS, Promotion
 from loopty.term import (
     COUNT_PARAM,
     COUNT_PARAM_REFLECTED,
@@ -1071,9 +1071,47 @@ class ExpressionLowerer(Mapper):
             and len(expr.parameters) == 1
         ):
             return self._absolute(expr, expr.parameters[0])
+        if (
+            isinstance(function, prim.Variable)
+            and function.name in MATH_FUNCTIONS
+            and len(expr.parameters) == 1
+        ):
+            return self._math(expr, function.name, expr.parameters[0])
         return prim.Call(
             self.rec(expr.function), tuple(self.rec(p) for p in expr.parameters)
         )
+
+    def _math(self, expr: Any, name: str, operand: Any) -> prim.Expression:
+        """A function of :mod:`loopty.math`, computed in the type numpy computes it in.
+
+        Of a complex operand it is the library's, which loopy writes for its
+        type: ``csqrt``, ``clog``, ``creal``, ``cimag`` and ``conj`` on the C
+        target, ``cdouble_sqrt`` and the rest on OpenCL. Of any other, numpy's
+        type is the operand's own or a floating one, and loopy's is not:
+        ``sqrt`` of an integer is a double natively, and loopy refuses an
+        integer operand on the C target and takes it for a ``float`` on
+        OpenCL, and ``real``, ``imag`` and ``conj`` of a real it writes as
+        ``creal`` of a complex one on the C target. So the operand is
+        converted into numpy's type before the call, ``sqrt((double)
+        k[i])``, and ``real`` and ``conj`` are the operand itself in that
+        type, and ``imag`` a zero of it
+        (:func:`loopty.promotion._math_compiled`).
+        """
+        promotion = self.lowering.promotion
+        lowered = self.rec(operand)
+        if promotion is None:
+            return prim.Call(prim.Variable(name), (lowered,))
+        compiled = promotion.types(operand)[1]
+        target = promotion.types(expr)[1]
+        if compiled is None or compiled.kind == "c" or target is None:
+            return prim.Call(prim.Variable(name), (lowered,))
+        if name == "imag":
+            return target.type(0)
+        if target != compiled:
+            lowered = self._convert(lowered, target)
+        if name in ("real", "conj"):
+            return lowered
+        return prim.Call(prim.Variable(name), (lowered,))
 
     def _absolute(self, expr: Any, operand: Any) -> prim.Expression:
         """``abs(operand)``: C's ``abs`` of a number, and numpy's of an integer.
@@ -1849,6 +1887,7 @@ def _refuse_reserved_names(term: Term) -> None:
     roles: dict[str, list[str]] = {
         "parameters": [name for name, _ in term.params],
         "program-local arrays": [name for name, _ in term.temporaries],
+        "constant tables": [name for name, _ in term.tables],
         "sizes": list(term.sizes),
         "loop variables": [],
         "reduction variables": [],
@@ -1877,8 +1916,8 @@ def _refuse_reserved_names(term: Term) -> None:
             "underscores, which C reserves, or name a helper function loopy or "
             "loopty defines in the generated code; rename them in the kernel (a "
             "parameter in its signature, a size in its annotations, a loop or "
-            "reduction variable where it is bound), or in the program that "
-            "makes a program-local array."
+            "reduction variable where it is bound, a table where it is "
+            "declared), or in the program that makes a program-local array."
         )
     called = _called_functions(term)
     shadowed = []
@@ -2177,6 +2216,7 @@ class _Builder:
         candidate = f"off_{counts}"
         used = set(self.term.param_names) | set(self.term.sizes)
         used |= {temporary for temporary, _ in self.term.temporaries}
+        used |= {name for name, _ in self.term.tables}
         used |= {symbol for symbol, _ in self.term.reflected}
         for stmt in self.term.stmts:
             used |= set(stmt.inames)
@@ -2375,6 +2415,7 @@ class _Builder:
         """
         taken = set(self.term.sizes) | set(dict(self.term.params))
         taken |= set(dict(self.term.temporaries))
+        taken |= set(dict(self.term.tables))
         taken |= {iname for stmt in self.term.stmts for iname in stmt.inames}
         taken |= {symbol for symbol, _ in self.term.reflected}
         for stmt in self.term.stmts:
@@ -3875,6 +3916,7 @@ def _arguments(
     # kernel and not a size the caller passes; see _Builder.plan_reductions.
     known_inames |= builder.extra_inames
     temporaries = dict(term.temporaries)
+    tables = dict(term.tables)
     sizes = [
         name
         for name in used
@@ -3883,6 +3925,7 @@ def _arguments(
         and name not in provided
         and name not in dict(term.params)
         and name not in temporaries
+        and name not in tables
     ]
     scalars = {name for name, typ in term.params if not isinstance(typ, ArrType)}
 
@@ -3973,8 +4016,41 @@ def _arguments(
             continue
         args.append(_temporary(term, name, typ, builder.target, declared | scalars))
         declared.add(name)
+    for name, values in term.tables:
+        args.append(_table(name, values, builder.target))
+        declared.add(name)
 
     return args, tuple(array_args), tuple(value_args), tuple(outputs)
+
+
+def _table(name: str, values: Any, target: str | None) -> Any:
+    """The loopy temporary for a constant table (:class:`loopty.table.Table`).
+
+    Read-only, with the table's values as its initializer, and in global
+    memory: loopy writes it once, outside the kernel's function, as a
+    ``static`` array on the C target and a ``__constant`` one on OpenCL, with
+    every digit of each value (its ``repr``), so the compiled run reads the
+    numbers the native one does. A private one would be an array on the stack
+    of every call, initialized at every call.
+
+    But for a complex table on OpenCL, which is private: pyopencl's complex
+    numbers are structs, and loopy writes each value as a call,
+    ``cfloat_new(1.0f, 2.0f)``, which is no constant expression, and an array
+    outside the kernel's function, whose initializer has to be one, did not
+    build ("initializer element is not a compile-time constant"). An array of
+    the kernel's function may be initialized by calls.
+    """
+    private = target == "opencl" and values.dtype.kind == "c"
+    return lp.TemporaryVariable(
+        name,
+        values.dtype,
+        shape=values.shape,
+        initializer=values.values,
+        read_only=True,
+        address_space=(
+            lp.AddressSpace.PRIVATE if private else lp.AddressSpace.GLOBAL
+        ),
+    )
 
 
 def _temporary(

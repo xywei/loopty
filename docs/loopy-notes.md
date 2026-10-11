@@ -51,11 +51,12 @@ callable, so the header that declares it is never requested.
 
 **Local fix.** The lowering includes `math.h` itself, in a preamble, whenever
 the term has a power loopy writes as a call (note 19), so `x ** -0.5` compiles
-now. Any other elementary function still needs its call built explicitly:
-`pymbolic.primitives.Call(Variable("sqrt"), (r2,))`, which loopy resolves
-against the target and which does pull in the header. `examples/p2p.py` has the
-dual-mode pattern (numpy on numbers, a `Call` on a term), and it is the pattern
-any elementary function needs until loopty grows a surface of its own for them.
+now. An elementary function is `loopty.math`'s (`sqrt`, `exp`, `log`, `sin`,
+`cos`, `real`, `imag`, `conj`): numpy's on numbers and a call on a term, which
+loopy resolves against the target and which does pull in the header.
+`examples/p2p.py` calls `sqrt` so. Any other function still needs its call
+built by hand, `pymbolic.primitives.Call(Variable("tanh"), (x,))` on a term and
+numpy's on numbers, and is typed only where the interpreter knows it (note 19).
 
 **Related.** The callee of a `prim.Call` must not be collected as a *used name*,
 or `sqrt` is declared as a value argument and loopy refuses the kernel with
@@ -1498,3 +1499,71 @@ mapper is the target's, so a schedule retargeted to OpenCL gets it too.
 **What it does not cover.** An ordering of complex values (`<`), which numpy
 orders lexicographically and C does not order at all, is not lowered on
 either target, and fails in the compiler (#163).
+
+## 27. loopy types an elementary function of an integer, or a complex part of a real, otherwise than numpy
+
+**Symptom.** `y[i] = sqrt(k[i])` of an integer `k`, with `loopty.math`'s
+`sqrt`, is a double natively, and loopy refuses it on the C target (`sqrt
+does not support type float32`) and computes it in single precision on
+OpenCL. `real(x[i])` of a double is `creal(x[i])` on the C target, a
+conversion to a complex number and back, and `imag(x[i])` `cimag` of one.
+
+**Cause.** loopy's math callables (`CMathCallable`, `OpenCLCallable`) take an
+integer operand for a `float32`, and the C one then finds no `float32` name
+for the real type of an integer. numpy computes a function of an integer in
+the narrowest floating type that holds it: a double for 32 and 64 bits, a
+`float32` for 16, a `float16` for 8 and for a truth value. loopy's C callable
+prefixes `c` to `real` and `imag` whatever the operand.
+
+**Local fix.** `lower.ExpressionLowerer._math` writes each function in the
+type numpy computes it in (`promotion._math_compiled`): of a complex operand
+the library's call; of any other, the operand converted into numpy's type
+first, `sqrt((double) (k[i]))`, and `real` and `conj` as the operand itself,
+`imag` as a zero, in that type. A function numpy computes in `float16`, which
+neither target has, is refused by the trace, naming `sqrt(1.0 * k[i])`.
+
+**What it does not cover.** A function of a complex number is the target
+library's (`csqrt`, `clog`, ... on C, pyopencl's `cdouble_sqrt`, ... on
+OpenCL), and numpy computes its own: the two agree to the `approx` tolerance,
+not bit for bit. On the branch cut they can disagree outright: pyopencl's
+`cdouble_sqrt` ignores the sign of a zero imaginary part, so `sqrt` of
+`complex(-4, -0.0)` is `+2j` on OpenCL and `-2j` in numpy and C's `csqrt`,
+and the differential refutes the run (#196). `sqrt`, `real`, `imag` and
+`conj` of a real agree bit for bit. loopy's plain OpenCL target has no
+complex functions at all; loopty's OpenCL target is pyopencl's.
+
+## 28. loopy's invoker warns about a size it finds another way
+
+**Symptom.** The first run of a kernel with an array of four axes over
+`Fin[m]` three times, or a triangle boxed over `Fin[q] x Fin[q]`, prints
+`ParameterFinderWarning: Unable to generate code to automatically find 'm'
+from 'u': nonlinear expression`, and then runs and agrees with the native
+run. A warm run prints nothing, since the invoker is cached.
+
+**Cause.** loopy's invoker finds each size the caller does not pass from the
+arrays, an equation per shape and stride, and warns about each equation it
+cannot solve. `u`'s strides state `m` as `m * m` and `m * m * m`, which are
+not affine, and its shape states it as `m`, which is solved.
+
+**Local fix.** `executor._quiet_parameter_finder` silences the warning while
+`LoopyExecutor` calls a kernel. A size no equation finds is an error when the
+kernel is called, which it leaves alone.
+
+## 29. loopy writes a non-finite initializer with macros it does not include, and a complex infinity as a nan
+
+**Symptom.** A constant table (`loopty.table`) of `[1.0, inf]` lowers to
+`static double S[2] = { 1.0, INFINITY };`, which does not compile on the C
+target. A complex one of `complex(1, inf)` is written `1.0 + INFINITY * I`,
+which is `nan + inf i`. A `nan` makes pytools warn about cache keys
+(`NanKeyWarning`, `CollisionWarning`).
+
+**Cause.** loopy writes a temporary's initializer value by value, with the
+macros `NAN` and `INFINITY`, which `math.h` defines, and never includes
+`math.h` (as for `pow`, note 2). It writes a complex value as `re + im * I`,
+and `inf * I` multiplies the zero real part of `I` by an infinity. A `nan`
+compares unequal to itself, so a kernel holding one is not equal to itself
+as a cache key.
+
+**Local fix.** A table's values are finite, and `table(...)` refuses a `nan`
+or an infinity when it is declared, naming the position; an array holding
+such values is passed instead (#193).

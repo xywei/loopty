@@ -46,12 +46,19 @@ a claim about one cell rather than about an average.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import warnings
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from loopty.contract import check_arguments, checked_storage, inherited_storage
+from loopty.contract import (
+    check_arguments,
+    checked_storage,
+    inherited_storage,
+    writeable_outputs,
+)
 from loopty.isl_reading import declining
 from loopty.term import Term
 from loopty.tolerance import (
@@ -310,6 +317,28 @@ def _call_arguments(
     return out
 
 
+@contextmanager
+def _quiet_parameter_finder() -> Iterator[None]:
+    """Silence loopy's ``ParameterFinderWarning`` while a kernel is called.
+
+    loopy's invoker finds each size the caller does not pass from the shapes
+    of the arrays, one equation at a time, and warns about every equation it
+    cannot solve, ``Unable to generate code to automatically find 'm' from
+    'u': nonlinear expression``, though another equation finds it: a
+    four-axis array over ``Fin[m]`` three times states ``m`` in its strides
+    as ``m * m`` and ``m * m * m``, and a triangle boxed over ``Fin[q] x
+    Fin[q]`` likewise. A size no equation finds is an error when the kernel
+    is called, which this leaves alone; the warning is about code nobody
+    wrote, and was printed by every first run of such a kernel (note 28 in
+    ``docs/loopy-notes.md``).
+    """
+    from loopy.diagnostic import ParameterFinderWarning
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=ParameterFinderWarning)
+        yield
+
+
 def _pad_empty_arrays(
     call: dict, lowering: Lowering
 ) -> tuple[dict, dict[str, np.ndarray]]:
@@ -457,6 +486,8 @@ class LoopyExecutor:
             _entry_offsets(term, lowering),
             written=lowering.results,
         )
+        # The differential runs on copies; this run writes in place.
+        writeable_outputs(dict(term.params), supplied, lowering.results)
         inherited_storage(term.array_types, term.temporaries_like, supplied)
         checked_storage(term, supplied)
         _check_assumptions(obj, term, supplied)
@@ -470,7 +501,7 @@ class LoopyExecutor:
             kernel, heap = _off_the_stack(kernel, term, supplied)
             for name, (shape, dtype) in heap.items():
                 call[name] = np.zeros(shape, dtype=dtype)
-        with naming_the_fix(lowering):
+        with naming_the_fix(lowering), _quiet_parameter_finder():
             if target_name == "opencl":
                 out = self._run_opencl(kernel, lowering, call)
             else:

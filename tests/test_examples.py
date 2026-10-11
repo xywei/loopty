@@ -44,6 +44,9 @@ NAMES = (
     "composition",
     "travel",
     "fusion",
+    "quadrature",
+    "layer_potential",
+    "sum_factorization",
 )
 
 _RESULTS: dict[tuple[str, str], tuple[Any, list[dict]]] = {}
@@ -151,6 +154,9 @@ KERNELS = {
     "pairs": {"pairs"},
     "composition": {"flux", "divergence", "burgers_rhs"},
     "fusion": {"flux", "divergence", "burgers_rhs"},
+    "quadrature": {"mass_action"},
+    "layer_potential": {"single_layer"},
+    "sum_factorization": {"along_r", "along_s", "weak_derivative"},
     "travel": {
         "number",
         "number_quiet",
