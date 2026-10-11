@@ -1522,6 +1522,7 @@ def theorem_instances(
     available: Sequence[Hypothesis],
     applicable: Callable[[str, Any, Any], str | None],
     nonnegative: Callable[[Any], bool],
+    integer: Callable[[Any], bool] | None = None,
 ) -> tuple[list[Hypothesis], list[str]]:
     """The instances of ``theorem`` that ``available`` hypotheses establish.
 
@@ -1538,8 +1539,10 @@ def theorem_instances(
     against them before it is used: ``applicable(array, domain, codomain)``
     says why an array cannot stand for a family ``Fn[domain, codomain]``
     there, or ``None`` when it can, and ``nonnegative(expr)`` whether an
-    expression a ``Nat`` variable matched is never negative. A binding that
-    fails is not used, and the reasons come back beside the instances.
+    expression a ``Nat`` variable matched is never negative, and
+    ``integer(expr)``, when given, whether one an ``Int`` variable matched is
+    an integer. A binding that fails is not used, and the reasons come back
+    beside the instances.
     """
     variables = dict(getattr(theorem, "variables", ()))
     functions = {name for name, sort in variables.items() if isinstance(sort, FnType)}
@@ -1595,7 +1598,13 @@ def theorem_instances(
                         f"{var} of {name} is a Nat, and {render(sigma[var])}, "
                         "which it matched, may be negative"
                     )
-            elif getattr(sort, "name", None) != "Int":
+            elif getattr(sort, "name", None) == "Int":
+                if integer is not None and not integer(sigma[var]):
+                    why = (
+                        f"{var} of {name} is an Int, and {render(sigma[var])}, "
+                        "which it matched, is not an integer"
+                    )
+            else:
                 why = (
                     f"{var} of {name} is of the sort {sort}, which no binding "
                     "is checked against"

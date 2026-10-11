@@ -61,7 +61,7 @@ and its postcondition stays tested.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
@@ -459,6 +459,9 @@ def decide_postcondition(
             if exact(parts[index], reals)
         ]
         found = theorem_instances(term, theorems, [*available, *entry], hypotheses)
+        # a theorem's conclusion is about the reals, and decides a conjunct
+        # the floats are claimed of only where the two readings agree
+        found = [instance for instance in found if exact(instance.claim, reals)]
         if not found:
             break
         offered = [*hypotheses, *found]
@@ -589,6 +592,15 @@ def _integral(sort: Any) -> bool:
     return integral_sort(sort)
 
 
+def _codomain(sort: Any) -> Any:
+    """The values of a family of families, ``Real`` for ``Fn[Nat, Fn[Nat, Real]]``."""
+    from lanky.prelude import FnType
+
+    while isinstance(sort, FnType):
+        sort = sort.codomain
+    return sort
+
+
 def real_names(term: Term) -> set[str]:
     """The kernel's arrays of reals and its scalars that are reals."""
     return {
@@ -598,7 +610,7 @@ def real_names(term: Term) -> set[str]:
     }
 
 
-def exact(prop: Any, reals: set[str]) -> bool:
+def exact(prop: Any, reals: set[str], families: Collection[str] = ()) -> bool:
     """Whether ``prop`` says the same of floats read as reals as it says of floats.
 
     A conjunct of a postcondition is decided as the kernel computes, in
@@ -610,9 +622,10 @@ def exact(prop: Any, reals: set[str]) -> bool:
     is not: the stored sum is rounded, so ``s[i]`` is not ``a[i] + b[i]`` as
     reals, and a theorem that concluded ``s[i] - a[i] == b[i]`` from it
     would say of the arrays what they do not hold. Comparisons of integers
-    are exact.
+    are exact. A value of one of ``families``, a theorem's table that
+    nothing bound (``D(a)(b)``), is a real as it stands, and exact too.
     """
-    from loopty.hypotheses import _names
+    from loopty.hypotheses import _call_spine, _names
 
     def value(expr: Any) -> bool:
         if isinstance(expr, bool):
@@ -623,6 +636,9 @@ def exact(prop: Any, reals: set[str]) -> bool:
             return True
         if isinstance(expr, prim.Subscript):
             return isinstance(expr.aggregate, prim.Variable)
+        if isinstance(expr, prim.Call):
+            spine = _call_spine(expr)
+            return spine is not None and spine[0] in families
         if isinstance(expr, prim.Product):
             # -x, which pymbolic writes as a product with -1
             rest = [child for child in expr.children if not isinstance(child, int)]
@@ -682,12 +698,22 @@ def theorem_instances(
             coefficient >= 0 and name in sizes for name, coefficient in names.items()
         )
 
+    integral = sizes | {
+        name
+        for name, typ in term.params
+        if not isinstance(typ, ArrType) and _integral(typ)
+    }
+
+    def integer(expr: Any) -> bool:
+        form = linear(expr)
+        return form is not None and all(name in integral for name in form[0])
+
     def fits(array: str, domain: Any, codomain: Any) -> str | None:
         return applicable(term, written, array, codomain)
 
     out: list[Hypothesis] = []
     for theorem in theorems:
-        found, _reasons = instances_of(theorem, available, fits, nonnegative)
+        found, _reasons = instances_of(theorem, available, fits, nonnegative, integer)
         out.extend(found)
     return out
 
@@ -815,7 +841,7 @@ def theorem_applications(
     """
     from lanky.prelude import FnType
 
-    from loopty.hypotheses import _Matcher, _names, linear, structural_key
+    from loopty.hypotheses import _apply, _Matcher, _names, linear, structural_key
 
     sizes = set(flow.size_names(term))
     written = {stmt.assignee.array for stmt in term.stmts}
@@ -837,6 +863,9 @@ def theorem_applications(
             continue
         families = [_names(prop) & functions for prop in hypotheses]
         concluded = _names(goal) & functions
+        reals_too = reals | {
+            name for name, sort in variables.items() if _real(_codomain(sort))
+        }
         best: list[Any] = [None]
         tried = [0]
 
@@ -854,7 +883,14 @@ def theorem_applications(
                 families[k] & outputs for k in range(len(hypotheses)) if k not in used
             ):
                 return False
-            return _fits(term, written, sizes, variables, sigma, linear)
+            if not _fits(term, written, sizes, variables, sigma, linear):
+                return False
+            # the conclusion is about the reals, and says what the floats
+            # hold only where the two readings agree
+            free = functions - set(sigma)
+            bound = {sigma[name] for name in functions if name in sigma}
+            conclusion = _apply(goal, sigma, set(sigma) & functions)
+            return exact(conclusion, reals_too | bound, free)
 
         def search(
             k: int, sigma: dict[str, Any], matched: tuple[tuple[int, int], ...]

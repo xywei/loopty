@@ -369,8 +369,8 @@ def fill(s: Real, R: Arr[Fin[n], Real]) -> all(R[i] == s for i in Fin[n]):
 @theorem
 def copied(
     n: Nat, c: Fn[Nat, Real], R: Fn[Nat, Real], h: all(R(i) == c(i) for i in Fin[n])
-) -> all(R(i) - c(i) == 0 for i in Fin[n]):
-    """A copy differs from what it copies by nothing."""
+) -> all(-R(i) == -c(i) for i in Fin[n]):
+    """A copy's sign changes as what it copies does."""
 
 
 @kernel(uses=[copied])
@@ -380,6 +380,47 @@ def copy64(c: Arr[Fin[n], np.float64], R: Arr[Fin[n], np.float64]) -> all(
     """Arrays of numpy's ``float64`` are arrays of reals to a theorem about reals."""
     for i in R.dom:
         R[i] = c[i]
+
+
+@theorem
+def plus_one(
+    n: Nat, c: Fn[Nat, Real], R: Fn[Nat, Real], h: all(R(i) == c(i) for i in Fin[n])
+) -> all((R(i) + 1) - R(i) == 1 for i in Fin[n]):
+    """As reals, adding one and taking the value away leaves one."""
+
+
+@kernel(uses=[plus_one])
+def round_trip(c: Arr[Fin[n], Real], R: Arr[Fin[n], Real]) -> all(
+    R[i] == c[i] for i in Fin[n]
+) & all((R[i] + 1) - R[i] == 1 for i in Fin[n]):
+    """Claims the theorem's conclusion, false of floats at ``c[i] = 2**53``."""
+    for i in R.dom:
+        R[i] = c[i]
+
+
+@kernel(uses=[plus_one])
+def ones(c: Arr[Fin[n], Real], R: Arr[Fin[n], Real]) -> all(
+    R[i] == c[i] for i in Fin[n]
+):
+    """The copy alone: the theorem's conclusion rounds, and is no row."""
+    for i in R.dom:
+        R[i] = c[i]
+
+
+@theorem
+def integral_half(
+    n: Nat, k: Int, R: Fn[Nat, Real], h: all(R(i) == k for i in Fin[n])
+) -> all(R(i) != 0.5 for i in Fin[n]):
+    """A table of an integer ``k`` is nowhere a half."""
+
+
+@kernel(uses=[integral_half])
+def fill_half(s: Real, R: Arr[Fin[n], Real]) -> all(R[i] == s for i in Fin[n]) & all(
+    R[i] != 0.5 for i in Fin[n]
+):
+    """Claims of a real ``s`` what the theorem gives an integer: false at 0.5."""
+    for i in R.dom:
+        R[i] = s
 
 
 # }}}

@@ -320,9 +320,28 @@ def test_a_theorems_integer_is_never_taken_at_a_real() -> None:
     assert not facts(kernels.fill, APPLIED)
 
 
+def test_a_conclusion_that_rounds_decides_no_conjunct_and_is_no_row() -> None:
+    """``(R[i] + 1) - R[i] == 1`` holds as reals and not of floats at ``2**53`` (Codex).
+
+    Given by ``plus_one`` from the exact copy, it decides no conjunct the
+    floats are claimed of, and is no ``by-theorem`` row.
+    """
+    (post,) = facts(kernels.round_trip, "postcondition")
+    assert post.status is not Status.DECIDED
+    assert (2.0**53 + 1) - 2.0**53 != 1
+    assert not facts(kernels.ones, APPLIED)
+
+
+def test_a_theorems_integer_decides_nothing_at_a_real() -> None:
+    """``integral_half``'s ``k`` at a real ``s`` would decide ``R[i] != 0.5``."""
+    (post,) = facts(kernels.fill_half, "postcondition")
+    assert post.status is not Status.DECIDED
+    assert kernels.integral_half.fact_id not in post.rests_on
+
+
 def test_numpys_floats_are_reals_to_a_theorem_about_reals() -> None:
     (applied,) = facts(kernels.copy64, APPLIED)
-    assert applied.statement == "by copied: forall i in Fin(n). R[i] - c[i] == 0"
+    assert applied.statement == "by copied: forall i in Fin(n). -R[i] == -c[i]"
 
 
 def test_a_theorem_that_does_not_apply_gives_nothing() -> None:
