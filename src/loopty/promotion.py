@@ -803,6 +803,28 @@ class Promotion:
         self.types(expr)
         return self._steps.get(id(expr), ())
 
+    def index_sum(self, expr: Any) -> bool:
+        """Whether ``expr`` is a sum the plan leaves in 32 bits as index arithmetic.
+
+        A sum of loop variables, sizes and integer literals totalling less
+        than ``2**30``, Python ints natively, which no step converts and C
+        computes in fewer than 64 bits: ``i + n``, ``n - 1 - i``. That is how
+        loopy computes a loop bound, and the lowering leaves it so but in a
+        subscript whose value it is used in as it is, where it is widened
+        (:meth:`loopty.lower.ExpressionLowerer._index`, #149).
+        """
+        if not isinstance(expr, prim.Sum):
+            return False
+        steps = self.steps(expr)
+        return bool(steps) and all(
+            not step.converts
+            and step.compiled is not None
+            and step.compiled.kind in "iu"
+            and step.compiled.itemsize < 8
+            and _weak_integers(step.native)
+            for step in steps
+        )
+
     def types(self, expr: Any) -> tuple[Native, np.dtype | None]:
         """The native type of ``expr`` and the dtype it is computed in compiled."""
         if isinstance(expr, bool | int | float | complex | np.generic):
