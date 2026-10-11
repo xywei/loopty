@@ -3441,6 +3441,26 @@ def offset_then_checked(u, v, w, y, z):
 
 
 @kernel
+def index_after(
+    c: Arr[Fin[n], Nat],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], np.int8],  # noqa: F821
+):
+    """A loop variable stored into an ``int8``, after a requirement on ``c``."""
+    for i in c.dom:
+        z[i] = 1.0 * c[i]
+        y[i] = i
+
+
+@program
+def checked_then_stored(u, z, y):
+    """A checked point, and then a store numpy refuses from ``i = 128``."""
+    c = Arr.zeros_like(u, dtype=np.int64)
+    truncated(u, c)
+    index_after(c, z, y)
+
+
+@kernel
 def stored_nowhere(y: Arr[Fin[n], np.uint8]):  # noqa: F821
     """``300`` stored into a ``uint8`` under a guard that holds nowhere."""
     for i in y.dom:
@@ -3571,6 +3591,25 @@ def test_loop_arithmetic_a_numpy_integer_does_not_hold_is_refused_compiled_too()
         offset_then_checked(**dict(both))
     with pytest.raises(RefusedNatively, match="-3 at"):
         LoopyExecutor().run(offset_then_checked, **dict(both))
+
+    # A store after a checked point is guarded by the point's flag, which isl
+    # does not read; the store is asked about all the same, and its refusal
+    # raised once the point has passed.
+    def stores(size: int) -> dict:
+        return {
+            "u": Arr.from_numpy(np.ones(size)),
+            "z": Arr.zeros(size),
+            "y": Arr.zeros(size, dtype=np.int8),
+        }
+
+    with pytest.raises(OverflowError, match="128 out of bounds for int8"):
+        checked_then_stored(**stores(129))
+    with pytest.raises(RefusedNatively, match="128 at i_0 = 128"):
+        LoopyExecutor().run(checked_then_stored, **stores(129))
+    native, compiled = stores(128), stores(128)
+    checked_then_stored(**native)
+    LoopyExecutor().run(checked_then_stored, **compiled)
+    assert np.array_equal(native["y"].numpy(), compiled["y"].numpy())
 
     # A literal stored under a guard is stored only where the guard holds,
     # and numpy converts nothing elsewhere: refused where the call's sizes

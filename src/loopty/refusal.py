@@ -34,7 +34,7 @@ compiled run starts, and raises :class:`RefusedNatively`, an
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
@@ -364,7 +364,8 @@ def refuse_where_native_does(
       false guard the native run reads such a cell as the Python int ``0``;
     * a store of such arithmetic into an array stored so natively, over the
       points the statement stores at, when its guard narrows its domain
-      whole; and of a literal the array's type does not hold under such a
+      whole, a program's checked points apart (:func:`_store`); and of a
+      literal the array's type does not hold under such a
       guard, which the trace leaves here (:func:`loopty.trace.trace`), since
       the guard may hold nowhere: ``with when(i < 0): y[i] = 300``.
 
@@ -395,7 +396,7 @@ def refuse_where_native_does(
         try:
             for part in (stmt.assignee.indices, stmt.expr, stmt.guard):
                 _operations(part, term, stmt, promotion, loops, sizes)
-            _store(term, stmt, promotion, sizes)
+            _store(term, stmt, promotion, sizes, flags)
         except RefusedNatively as refusal:
             before = _checks_before(stmt, flags)
             if not before:
@@ -551,12 +552,26 @@ def _operation(
 
 
 def _store(
-    term: Term, stmt: Stmt, promotion: Any, sizes: Mapping[str, int]
+    term: Term,
+    stmt: Stmt,
+    promotion: Any,
+    sizes: Mapping[str, int],
+    flags: Collection[str] = (),
 ) -> None:
-    """:func:`refuse_where_native_does` of the store a statement makes."""
+    """:func:`refuse_where_native_does` of the store a statement makes.
+
+    A guard isl does not read leaves points in the statement's domain at
+    which nothing is stored, and the store is not asked about; but for the
+    flags of a program's checked points (``flags``), which say whether the
+    statement runs at all, and are asked after the run
+    (:attr:`RefusedNatively.checks`).
+    """
+    from lanky.terms import Comparison, Subscript, Var, render
+
     from loopty.contract import native_storage
 
-    if stmt.unnarrowed:
+    checks = {render(Comparison(Subscript(Var(flag), 0), "==", 0)) for flag in flags}
+    if any(conjunct not in checks for conjunct, _why in stmt.unnarrowed):
         # Its domain holds points its guard masks, at which nothing is stored.
         return
     typ = dict(term.params).get(stmt.assignee.array)
