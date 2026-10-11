@@ -3995,6 +3995,7 @@ def heap_temporaries(
             or temporary is None
             or temporary.address_space != lp.AddressSpace.PRIVATE
             or not temporary.shape
+            or getattr(temporary.dtype, "numpy_dtype", None) is None
         ):
             continue
         dtype = temporary.dtype.numpy_dtype
