@@ -131,7 +131,16 @@ its own, in parallel.
 | a cast is bijective | statement the step moves | every instance has an image (an existential), one only, and no two share one |
 | a cast is monotone | dependence class, a pair of accesses | two instances that touch one cell, in the source's order, keep it after every step: their time vectors compare as the source's do |
 | what a program's call may assume | requirement, or flat access | the claim at every point of its domain, under the hypotheses isl used (a callee's postcondition, a theorem the program cites, a type the contract checks) |
+| a row passed to a kernel called in a loop is in bounds | row | the row's indices are a point of the array's leading axes, at every point of the call |
+| an integral argument of such a call is in its sort | argument | `0 ≤ v`, and `v < m` for `Fin[m]`, at every point of the call |
+| two rows of one array passed to one call are apart | pair of rows | the rows' indices differ on an axis both fix, at every point of the call |
 | an assumption of a schedule | (a hypothesis of every later cast) | |
+
+The points of a call of a kernel inside another kernel's loop
+(`loopty.calls`) are the caller's loops around it and the binders of the
+sums it is made inside, cut by the guards around it, as loopty wrote them
+for isl; the facts of the callee's body are the caller's own, inlined, and
+are stated as any statement's are.
 
 A class two statements never form, `S1` before `S0` in a program whose `S0`
 runs first, has a hypothesis that is `False` as written, and is closed by

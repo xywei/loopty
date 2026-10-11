@@ -427,6 +427,44 @@ would be out. The layout is a schedule step, `Schedule(pairs).pack("f")`, that
 changes no fact; `loopty run` compiles both layouts and compares each with the
 native run.
 
+## A kernel that calls a kernel, as a fifth file
+
+`examples/calls.py` calls a kernel inside another kernel's loop, as Python
+calls a function. `dot` declares the sort of what it returns, `-> Real`,
+which makes it a rule: it returns its value and writes nothing, and a call
+of it is that value. `A[i]` is the row of `A`, as in numpy:
+
+```python
+@kernel
+def dot(a: Arr[Fin[n], Real], b: Arr[Fin[n], Real]) -> Real:
+    return reduce_sum(a[k] * b[k] for k in a.dom)
+
+@kernel
+def matvec(A: Arr[Fin[m], Fin[n], Real], x: Arr[Fin[n], Real], y: Arr[Fin[m], Real]):
+    for i in y.dom:
+        y[i] = dot(A[i], x)
+```
+
+The call is inlined: `dot`'s loop is a sum of `matvec`'s statement at every
+`i`, and the compiled kernel is one loop nest.
+
+```console
+$ uv run python examples/calls.py
+native: matvec agrees with A @ x: True
+...
+the term of matvec, with dot inlined at calls.py:99:
+  S0 over i: y[i] = sum over k of A[i, k]*x[k]
+  dot's a is A[i]
+  dot's b is x
+...
+```
+
+What `dot`'s contract checks of each call natively, `matvec` owes at every
+`i`: `lanky check examples/calls.py` has the row `A[i], the row passed to dot
+as a, is in bounds wherever dot is called at calls.py:99`, decided by isl.
+The same file applies firedrake's quadrature rule to an integrand,
+`integrate(lambda q: PHI[q, j] * PHI[q, k])`, per element of a mesh.
+
 ## What to try next
 
 - Break something. Change the stencil's guard from `i > 0` to `i >= 0` and
@@ -483,6 +521,7 @@ native run.
 | elementary functions, numpy's in both runs | `src/loopty/math.py` |
 | constant tables a kernel reads | `src/loopty/table.py` |
 | a program's term, composed from its calls | `src/loopty/compose.py` |
+| a kernel called in a kernel's loop, inlined | `src/loopty/calls.py` |
 | facts that travel: hypotheses decided by isl | `src/loopty/hypotheses.py` |
 | footprints and dependences | `src/loopty/flow.py` |
 | typing rules, the facts | `src/loopty/typing.py` |
@@ -498,7 +537,7 @@ transcripts, are in [device-runs.md](device-runs.md) and under
 debugging time, and the local workarounds for them, are in
 [loopy-notes.md](loopy-notes.md).
 
-All nine demos, with every console block regenerated mechanically by
+All thirteen demos, with every console block regenerated mechanically by
 `scripts/refresh_example_outputs.py`, are in
 [../examples/README.md](../examples/README.md). The blocks in *this* file come
 from the same script, some of them elided where marked with `...`; run the

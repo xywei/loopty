@@ -224,6 +224,28 @@ table of row starts. Both compiled runs agree with the native one.
   false). `--show-lean` prints the Lean, and
   [docs/lean-checks.md](https://github.com/xywei/loopty/blob/main/docs/lean-checks.md)
   has the details and the coverage.
+- **A kernel is a rule with a domain of its own.** A kernel body calls a
+  kernel as Python calls a function, and the call is inlined with binders of
+  its own, which is loopy's substitution rule with a loop of its own (loopy
+  #1044) expanded where it is used. A rule returns its value:
+
+  ```python
+  @kernel
+  def dot(a: Arr[Fin[n], Real], b: Arr[Fin[n], Real]) -> Real:
+      return reduce_sum(a[k] * b[k] for k in a.dom)
+
+  @kernel
+  def matvec(A: Arr[Fin[m], Fin[n], Real], x: Arr[Fin[n], Real],
+             y: Arr[Fin[m], Real]):
+      for i in y.dom:
+          y[i] = dot(A[i], x)
+  ```
+
+  What `dot`'s contract checks at each call natively, the row `A[i]` in
+  bounds, an index argument in its sort, two rows apart, `matvec` owes at
+  every point it calls `dot`, as facts isl decides and Lean proves, and a
+  callee's postcondition holds after each call, restated of what it was
+  passed.
 - **It plugs into a proof host.** loopty registers a theory, an isl oracle, an
   executor and a `run` verb with [lanky](https://github.com/xywei/lanky), so a
   residual obligation an oracle cannot decide is an ordinary theorem a person can
@@ -262,8 +284,16 @@ release; the CHANGELOG says when one does.
   in the footprints, and it orders the instructions of the one loopy kernel
   the program lowers to. `LoopyExecutor().run(program, ...)` runs it,
   `Schedule(program)` schedules it, and `loopty run` compares every program in
-  a file with its native run, as it does a kernel. A body that does anything
-  to an argument but pass it to a kernel, or make an array like it, is refused
+  a file with its native run, as it does a kernel. A program may also make
+  an array of a declared shape, whose sizes it reads off its arguments as it
+  does natively, `Arr.zeros(TRIANGLE, n=x.dom.size)` over a domain or
+  `Arr.zeros((x.dom.size, 3))`, and a callee may take an array over a
+  `Where`, `Sigma` or union domain, whose sizes are unified across the calls
+  and whose points two calls given it have to agree on, compared as isl sets
+  (#74); an array the program makes over a domain is stored boxed, and
+  `Schedule.pack` packs an argument over one. A body that does anything to
+  an argument but pass it to a kernel, make an array like it, or read its
+  sizes, is refused
   with a `TraceError` naming the fix.
 - Facts that travel between a program's calls (`loopty.hypotheses`). A
   kernel's requirements on its inputs are its argument types, and three of
@@ -690,7 +720,10 @@ release; the CHANGELOG says when one does.
   element sort for it, and every call has to read a ragged family's rows
   through the same offsets; a loop in the body whose trip count is an
   argument (a host loop) is refused, and so are an array made like a ragged
-  one and a callee with an array over a `Where`, `Sigma` or union domain. A
+  one, an array made over a union of pieces, which is stored as one box,
+  and an array over a domain of a `Fin[m]` or `Nat` element sort that an
+  earlier call wrote and a later one is given, whose cells no checked point
+  reads yet. A
   temporary made like a parameter, `Arr.zeros_like(u)`, has `u`'s dtype
   natively, so the compiled program refuses a `u` whose dtype does not hold
   what the compiled temporary holds: `float64` for `Real`, the dtype itself
@@ -784,6 +817,20 @@ release; the CHANGELOG says when one does.
   which no frame names, is named `table`. A table holds finite numbers
   (#193), and a loop bounded by a value read from one is refused when
   traced (#194).
+- A kernel called inside another's loops (`loopty.calls`) is given whole
+  arrays, rows of dense, ragged and table arrays, the cells an index row
+  picks, scalars and functions; a row of an array over a domain is not
+  passed (a whole one is), and the cells a gather picks are a copy natively,
+  so a called kernel does not write them. Two arguments over one array
+  have to be two rows of it, decided at every call; a whole array and a
+  part of it are refused. A rule's claim about its value (`-> Real & (...)`)
+  is refused: state it as a theorem about the rule. A call made inside a
+  sum over `Fin[...]` of a size, rather than over an array's `.dom`, has
+  points the trace does not see, and its facts are `assumed`. A rule that
+  takes a function is compiled where it is called, not on its own. A domain
+  declared outside an annotation, for `Arr.zeros(TRIANGLE, ...)` in a
+  program, names its binders and sizes as lanky variables, `i, j, n =
+  Var("i"), Var("j"), Var("n")`.
 - `loopty.math` has eight functions (#184), and numpy's own functions on a
   traced value are refused rather than read as them (#195). A function
   only a guard calls is refused when lowered: loopy resolves a function by
