@@ -87,6 +87,8 @@ __all__ = [
     "mixed_in_bounds_obligation",
     "cast_obligation",
     "lexicographically_before",
+    "merged_obligation",
+    "row_starts_obligation",
     "window_obligation",
     "ordering_obligation",
     "prove",
@@ -1070,6 +1072,12 @@ def _statable(expr: Any, arrays: frozenset[str], names: frozenset[str]) -> bool:
     return plain(expr)
 
 
+#: The most instances of the hypotheses isl took that a part is given: each
+#: is a ``have`` line, and the order of the rows a write keeps, by induction
+#: over the run, takes four universals at the cells around the one written.
+_MOST_INSTANCES = 32
+
+
 def discharged_obligation(
     domain: Any,
     goal: Any,
@@ -1120,7 +1128,7 @@ def discharged_obligation(
     instances = []
     seen: set[tuple[int, tuple[str, ...]]] = set()
     for entry in record:
-        if entry[0] != "instance" or len(instances) >= 16:
+        if entry[0] != "instance" or len(instances) >= _MOST_INSTANCES:
             continue
         _kind, conjunct, values = entry
         try:
@@ -2220,6 +2228,111 @@ def _stages(
         for loop, value in current.items():
             out[named(loop, f"{tag}{k}")] = int(value)
     return out
+
+
+# }}}
+
+
+# {{{ a layout a kernel rewrites, kept by every write
+
+
+def _lean_name(text: str) -> str:
+    """``scan_flat_2_S0``: an id as a part's name, which Lean reads."""
+    import re
+
+    return re.sub(r"\W", "_", text)
+
+
+def row_starts_obligation(
+    term: Term,
+    offsets: str,
+    counts: str,
+    rows: Any,
+    stmts: Sequence[Stmt],
+    verdict: Any,
+) -> Any:
+    """A layout fact decided by the row starts, stated for Lean: the induction step.
+
+    The rows of a family read through ``offsets`` stay where the contract
+    found them while every write leaves the offsets as they were (see
+    :func:`loopty.typing.layout_facts`). One part per statement that
+    writes them: where the offsets start at 0 and step by the counts, which
+    the contract checks when the call starts (``off[0] = 0`` and ``off[q] =
+    off[q - 1] + cnt[q - 1]`` for ``1 <= q <= n``), the value each instance
+    stores is the value its cell already holds. That is the induction step
+    over the run; its base case is the contract's check, which every fact on
+    the layout rests on as the run does. The universal hypothesis is taken
+    at the cell written, a hint, with the equations between the cells it
+    reads and the claim's that lanky adds.
+    """
+    from lanky.terms import Subscript
+
+    lanky = _lanky_obligations()
+    parts = []
+    try:
+        for stmt in stmts:
+            claim = Claim(term)
+            coords = claim.coordinates(stmt.inames)
+            domain = _described(stmt.domain, f"the loops of {stmt.id}")
+            claim.hypotheses.append(domain.predicate(coords))
+            q = claim.fresh("q")
+            off, cnt = Var(offsets), Var(counts)
+            start = Comparison(Subscript(off, 0), "==", 0)
+            step = Forall(
+                ((q, Int),),
+                Comparison(
+                    Subscript(off, q),
+                    "==",
+                    Subscript(off, q - 1) + Subscript(cnt, q - 1),
+                ),
+                LogicalAnd((Comparison(1, "<=", q), Comparison(q, "<=", rows))),
+            )
+            claim.hypotheses += [start, step]
+            (cell,) = stmt.assignee.indices
+            at = _renamed(plain(cell), stmt.inames, coords)
+            value = _renamed(plain(stmt.expr), stmt.inames, coords)
+            goal = Comparison(value, "==", Subscript(off, at))
+            closed = claim.close(goal)
+            guard = [render(part) for part in conjuncts(closed.guard)]
+            hints = lanky.Hints(
+                instances=(lanky.Instance(guard.index(render(step)), (at,)),)
+            )
+            label = (
+                f"{stmt.id} stores into {offsets}[{render(cell)}] the value it "
+                f"holds, where {offsets} starts at 0 and steps by {counts}"
+            )
+            parts.append(
+                lanky.Part(f"{_lean_name(stmt.id)}_keeps", label, closed, hints)
+            )
+    except (Unstatable, ValueError) as exc:
+        return _declined(str(exc))
+    return _obligation(parts, refuted=verdict.ok is False)
+
+
+def merged_obligation(questions: Sequence[tuple[str, Any]], verdict: Any) -> Any:
+    """One obligation of several questions' parts, each named by its statement.
+
+    A layout fact decided by induction over the run is a question per
+    statement that writes the layout (:func:`loopty.typing._layout_by_induction`),
+    each stated as the claim isl decided under the order before the write
+    (:func:`discharged_obligation`); the fact is all of them.
+    """
+    lanky = _lanky_obligations()
+    parts = []
+    for name, question in questions:
+        obligation = question.lean_obligation()
+        if obligation.declined:
+            return _declined(f"{name}: {obligation.declined}")
+        for part in obligation.parts:
+            parts.append(
+                lanky.Part(
+                    f"{_lean_name(name)}_{part.name}",
+                    f"{name}: {part.label}",
+                    part.term,
+                    part.hints,
+                )
+            )
+    return _obligation(parts, refuted=verdict.ok is False)
 
 
 # }}}

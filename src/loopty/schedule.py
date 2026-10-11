@@ -5988,7 +5988,7 @@ class Schedule:
             else _slot_pair_text(dep, witness)
         )
         message = (
-            f"{text} illegal: {pair}, on another work item{at}: "
+            f"{text} illegal: {pair} on another work item{at}: "
             f"{how}, and nothing in a kernel orders two work items through "
             "global memory"
         )
