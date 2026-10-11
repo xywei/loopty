@@ -434,3 +434,38 @@ def test_a_tables_values_cannot_be_made_writeable_again() -> None:
     with pytest.raises(ValueError, match="WRITEABLE"):
         PHI.numpy().flags.writeable = True
     assert list(PHI.values[1]) == [1 / 6, 2 / 3, 1 / 6]
+
+
+#: A table named like the parameter the trace reflects a product of sizes
+#: as, which the body reads after the product is reflected.
+nl_n_m = make_table([10.0, 20.0, 30.0])
+
+
+@kernel
+def flattened(
+    x: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[n * m], Real],  # noqa: F821
+    z: Arr[Fin[3], Real],
+):
+    """A flattened array's loop, whose bound is reflected, then a table read."""
+    for a in x.dom:
+        for b in x.dom[a]:
+            x[a, b] = 2.0
+    for i in y.dom:
+        y[i] = 1.0
+    for k in z.dom:
+        z[k] = nl_n_m[k]
+
+
+def test_a_table_is_named_apart_from_a_reflected_parameter() -> None:
+    # The first loop's bound n * m is reflected as nl_n_m when its statement
+    # is recorded; the table read after it took the same name, and the two
+    # were one name in the term and in the generated code.
+    # (A loop over Fin[n * m] does not run compiled, table or none: #197.)
+    tables = dict(flattened.term.tables)
+    reflected = dict(flattened.term.reflected)
+    assert "nl_n_m" in reflected
+    assert list(tables) == ["nl_n_m_table"]
+    code = emit_code(Schedule(flattened))
+    assert "static double nl_n_m_table[3] = { 10.0, 20.0, 30.0 };" in code
+    assert "z[k] = nl_n_m_table[k];" in code

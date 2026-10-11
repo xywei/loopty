@@ -713,8 +713,9 @@ class Tracer:
         the body's or a helper's; one no frame names (``tables["W"][q]``) is
         ``table``. The name is only what the term, the ledger and the
         generated code call it, so one that is already a parameter, a size,
-        a scalar or another table of the kernel is made unique,
-        ``W_table`` for a table named like the parameter ``W``.
+        a scalar, a loop variable, a reflected parameter or another table of
+        the kernel is made unique, ``W_table`` for a table named like the
+        parameter ``W``.
         """
         for name, known in self.tables.items():
             if known is values:
@@ -723,9 +724,15 @@ class Tracer:
 
         stem = _table_name(values, frame) or "table"
         taken = set(self.params) | self.integers | set(self.tables)
-        name = stem if stem not in taken else f"{stem}_table"
+
+        def clashes(name: str) -> bool:
+            # A reflected parameter already allocated (nl_n_m for a bound n *
+            # m) is a name of the term too, and is not in the sets above.
+            return name in taken or self.reflections.taken(name)
+
+        name = stem if not clashes(stem) else f"{stem}_table"
         count = 0
-        while name in taken:
+        while clashes(name):
             count += 1
             name = f"{stem}_table_{count}"
         arrtype = table_type(values)
