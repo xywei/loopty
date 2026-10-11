@@ -1525,9 +1525,12 @@ neither target has, is refused by the trace, naming `sqrt(1.0 * k[i])`.
 **What it does not cover.** A function of a complex number is the target
 library's (`csqrt`, `clog`, ... on C, pyopencl's `cdouble_sqrt`, ... on
 OpenCL), and numpy computes its own: the two agree to the `approx` tolerance,
-not bit for bit. `sqrt`, `real`, `imag` and `conj` of a real agree bit for
-bit. loopy's plain OpenCL target has no complex functions at all; loopty's
-OpenCL target is pyopencl's.
+not bit for bit. On the branch cut they can disagree outright: pyopencl's
+`cdouble_sqrt` ignores the sign of a zero imaginary part, so `sqrt` of
+`complex(-4, -0.0)` is `+2j` on OpenCL and `-2j` in numpy and C's `csqrt`,
+and the differential refutes the run (#196). `sqrt`, `real`, `imag` and
+`conj` of a real agree bit for bit. loopy's plain OpenCL target has no
+complex functions at all; loopty's OpenCL target is pyopencl's.
 
 ## 28. loopy's invoker warns about a size it finds another way
 
