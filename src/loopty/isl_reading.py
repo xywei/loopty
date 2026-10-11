@@ -37,20 +37,24 @@ its readings were wrong for what loopty writes (note 23 in
 
 loopty's readings decline all three: a conversion, a constant whose type is
 not an integer's, and a guard that names a value argument whose dtype is not
-an integer's. Declining is the safe direction: an expression loopy does not
-read into isl is generated as written, and a guard it does not read narrows
-nothing, so its bounds check covers more points, not fewer.
+an integer's. A fourth is loopy main's: an operator isl has none of, ``i ^
+1``, raises a ``TypeError`` in the reader, which loopy 2025.2's guard caught
+and declined and loopy main's lets out of its bounds check, so the reading of
+the guard declines it again. Declining is the safe direction: an expression
+loopy does not read into isl is generated as written, and a guard it does not
+read narrows nothing, so its bounds check covers more points, not fewer.
 
 **Where they apply.** Inside :func:`declining`, and only in the thread that
 entered it. Nothing is installed when loopty, or any module of it, is
 imported, and nothing stays installed once the last :func:`declining` in the
 process exits: loopy's own ``PwAffEvaluationMapper.map_constant``, its
-``map_type_cast`` (it has none) and ``loopy.kernel.instruction.get_insn_domain``
-are put back. Another user of loopy in the process (sumpy, pytential, a
-Volumential kernel) reads its kernels with loopy's own readings before, after,
-and in another thread while loopty is inside one, so loopy checks and
-generates them as it does without loopty. loopty enters it at these
-chokepoints, which every path of its into loopy goes through:
+``map_type_cast`` (it has none), ``loopy.kernel.instruction.get_insn_domain``
+and ``loopy.symbolic.with_aff_conversion_guard`` are put back. Another user
+of loopy in the process (sumpy, pytential, a Volumential kernel) reads its
+kernels with loopy's own readings before, after, and in another thread while
+loopty is inside one, so loopy checks and generates them as it does without
+loopty. loopty enters it at these chokepoints, which every path of its into
+loopy goes through:
 
 * :func:`loopty.lower.lower_generic`, which builds every kernel loopty makes
   (``lp.make_kernel``, ``lp.assume``, ``lp.prioritize_loops``) and asks

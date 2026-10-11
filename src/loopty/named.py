@@ -35,7 +35,7 @@ object it was given is on.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from typing import Any
 
 import islpy as isl
@@ -138,8 +138,3 @@ def aff_from_expr(space: isl.Space, expr: Any) -> isl.Aff:
 
     over = to_named(isl.Set.universe(space))
     return as_isl(loopy_aff_from_expr(over.var_affs, expr))
-
-
-def names_of(obj: Any, kind: Any) -> Sequence[str]:
-    """The names of ``obj``'s dimensions of ``kind``, islpy or namedisl, in order."""
-    return as_isl(obj).get_var_names(kind)

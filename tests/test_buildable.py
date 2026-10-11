@@ -435,6 +435,7 @@ def test_buildable_says_what_loopy_does(plain_opencl, case) -> None:
     assert not ok
     assert reason in said, said
     if case in WRONG_CODE:
+        assert "loopy cannot generate working code for it" in said, said
         assert loopy is None, loopy
         code = loopy_says_code(plain_opencl, schedule)
         has, has_not = WRONG_CODE[case]

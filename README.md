@@ -228,8 +228,11 @@ ledger calls `decided` that is false: read that before you rely on a ledger.
 CI runs the suite on every change, on Python 3.12 and 3.13 and against lanky's
 `main`, and reruns every command whose output this README, the quickstart and
 the examples' README show, holding them to what it prints. It runs no OpenCL
-device. Until 1.0 an interface can change in a minor release; the CHANGELOG
-says when one does.
+device. On the branch `port/loopy-main`, which runs on loopy's main branch
+([docs/loopy-main.md](https://github.com/xywei/loopty/blob/port/loopy-main/docs/loopy-main.md)),
+CI also runs every example three ways, on 3.14 too, and against loopy main's
+current head. Until 1.0 an interface can change in a minor release; the
+CHANGELOG says when one does.
 
 **Works.**
 
@@ -876,6 +879,14 @@ The Partial and Not yet lists under Status have the rest, and the
 pip install loopty
 ```
 
+This is the `port/loopy-main` branch: loopty on loopy's main branch, whose
+domains are namedisl sets, with loopy, islpy and namedisl taken from Git and
+`islpy<2026` dropped. It merges into `main` once a loopy release carries
+namedisl. Clone it beside lanky and `uv sync --group dev`;
+[docs/loopy-main.md](https://github.com/xywei/loopty/blob/port/loopy-main/docs/loopy-main.md)
+has the install, what changes and why. What follows describes the release on
+PyPI, which runs on loopy 2025.2.
+
 loopty runs on Python 3.12 and 3.13: the islpy it is held to has no wheels for
 3.14. CI, and every run this README reports, is on Linux. In a uv project,
 `uv add loopty`, and the same for the extra below. The install pulls in:
@@ -987,6 +998,9 @@ loopty is loop + ty, for types: loops, typed. It follows `loopy`, `sumpy`, and
 - [docs/loopy-notes.md](https://github.com/xywei/loopty/blob/main/docs/loopy-notes.md): the loopy and islpy
   interactions that cost debugging time, each with its local workaround and
   why it is local.
+- [docs/loopy-main.md](https://github.com/xywei/loopty/blob/port/loopy-main/docs/loopy-main.md): running on loopy's
+  main branch, whose domains are namedisl sets: the install, where loopty
+  meets namedisl, and every difference from loopy 2025.2.
 - [CHANGELOG.md](https://github.com/xywei/loopty/blob/main/CHANGELOG.md).
 - [lanky](https://github.com/xywei/lanky): the proof host loopty plugs into, and
   where the ledger, the statuses and the oracle protocol are defined.

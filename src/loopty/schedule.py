@@ -2094,10 +2094,13 @@ def _privatized_reason(draft: _Draft) -> str | None:
       after ``int32_t nl_cnt_r[8]``), and the C run reads past the row, or
       crashes. Under ``vec`` code generation fails from inside loopy (a
       ``TypeError`` or an ``AssertionError``, in 2025.2), or writes OpenCL
-      that reads a vector as the bound and does not compile;
+      that reads a vector as the bound and does not compile, which is what
+      loopy main does;
     * the partial sums of a reduction on a local axis inside a ``vec`` loop,
-      which loopy keeps in an array in local memory (a ``TypeError``). An
-      ``ilp`` loop around one builds.
+      which loopy keeps in an array in local memory (a ``TypeError`` in
+      2025.2; loopy main writes OpenCL that reads the vectorized loop's
+      variable and never declares it, which does not compile). An ``ilp``
+      loop around one builds.
 
     Both were measured on loops over ``Fin[8]``; over ``Fin[n]`` the loop has
     no length to unroll or vectorize by, which :func:`_unroll_reason` says
@@ -2161,7 +2164,7 @@ def _privatized_reason(draft: _Draft) -> str | None:
             return (
                 f"the sum over {', '.join(local)} in {what} runs on a local "
                 f"axis inside the loop {vectorized[0]}, which is tagged vec, "
-                "and loopy cannot generate code for it: it keeps the partial "
+                "and loopy cannot generate working code for it: it keeps the partial "
                 "sums of a reduction on a local axis in an array in local "
                 "memory, and a temporary written inside a vec loop as a vector "
                 f"along it. Leave {vectorized[0]} sequential, or unroll it "
