@@ -35,7 +35,10 @@ All notable changes to loopty are recorded here. The format follows
   where loopy wrote `creal` of a double. A function numpy computes in half
   precision, `sqrt` of an `int8`, is a `TraceError` naming `sqrt(1.0 *
   k[i])`. pytential's line-Taylor single layer over complex points,
-  `real(log(c[t] - y[s]) - ...)`, runs, checks and compiles as any kernel.
+  `real(log(c[t] - y[s]) - ...)`, runs, checks and compiles as any kernel
+  (`examples/layer_potential.py`). A postcondition may call them too, `->
+  all(y[i] == sqrt(x[i]) for i in Fin[n] if x[i] >= 0)`, and is tested after
+  each native run with numpy's, where it was left `assumed`, not evaluated.
   `examples/p2p.py` calls `loopty.math.sqrt` where it built the call by hand.
 - **A sum's loop ordered outside a loop of its statement**
   (`Schedule.prioritize("s_outer", "t_inner")`, gap 13). sumpy's CPU tile of

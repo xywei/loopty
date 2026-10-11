@@ -310,6 +310,9 @@ def postcondition_fact(
     states, and its term is an :class:`~loopty.typing.AfterCall`, which no
     oracle mistakes for a closed proposition.
 
+    A call of a function of :mod:`loopty.math` in it is numpy's, as in the
+    body: ``-> all(y[i] == sqrt(x[i]) for i in Fin[n])``.
+
     It is ``tested`` only when it held after every run: one after which it
     cannot be evaluated (it reads a cell the run's arrays do not have, or a
     name nothing gives a value) leaves it ``assumed``, however many others
@@ -319,6 +322,7 @@ def postcondition_fact(
     from lanky.terms import render, truth_value
 
     from loopty.contract import resolve_sizes
+    from loopty.math import FUNCTIONS as MATH
     from loopty.typing import AfterCall, postcondition_id
 
     post = term.post
@@ -358,6 +362,9 @@ def postcondition_fact(
             sizes = {}
         for name, value in sizes.items():
             context.setdefault(name, value)
+        # A claim may call loopty.math's functions, as the body does.
+        for name, function in MATH.items():
+            context.setdefault(name, function)
         try:
             with np.errstate(all="ignore"), warnings.catch_warnings():
                 warnings.simplefilter("ignore")

@@ -117,6 +117,20 @@ def narrow(k: Arr[Fin[n], np.int8], y: Arr[Fin[n], Real]):  # noqa: F821
         y[i] = sqrt(k[i])
 
 
+@kernel
+def roots(
+    x: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+) -> all(y[i] == sqrt(x[i]) for i in Fin[n] if x[i] >= 0):  # noqa: F821
+    """A postcondition that calls loopty.math as the body does.
+
+    Where ``x[i]`` is negative both sides are ``nan``, which is equal to
+    nothing, so the claim is made where it is a number.
+    """
+    for i in y.dom:
+        y[i] = sqrt(x[i])
+
+
 # }}}
 
 
@@ -276,3 +290,12 @@ def test_on_an_opencl_device_complex_functions_agree_with_numpy() -> None:
         {"k": Arr.from_numpy(k), "y": Arr.zeros((5, 6))},
     )
     assert fact.status is Status.TESTED, fact.provenance
+
+
+def test_a_postcondition_calls_the_functions_the_body_calls() -> None:
+    # The claim is evaluated after each native run with numpy's sqrt, where
+    # it was "not evaluated: UnknownVariableError: sqrt" and stayed assumed.
+    (post,) = [fact for fact in roots.facts() if fact.kind == "postcondition"]
+    assert post.statement.endswith("y[i] == sqrt(x[i])")
+    assert post.status is Status.TESTED, post.provenance
+
