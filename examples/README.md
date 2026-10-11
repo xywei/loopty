@@ -1170,7 +1170,7 @@ native: matvec agrees with A @ x: True
 native: csr agrees with the dense product: True
 native: each cell's matrix is |detJ| (1 + delta_jk) / 24: True
 
-the term of matvec, with dot inlined at calls.py:99:
+the term of matvec, with dot inlined at calls.py:100:
   S0 over i: y[i] = sum over k of A[i, k]*x[k]
   dot's a is A[i]
   dot's b is x
@@ -1184,7 +1184,7 @@ the loop nest loopy generates for it:
     y[i] = acc_k;
   }
 
-refused: matvec_by calls dot at calls.py:211: axis 0 of its b is n long there, and z, which it is given, has p; nothing says the two agree
+refused: matvec_by calls dot at calls.py:212: axis 0 of its b is n long there, and z, which it is given, has p; nothing says the two agree
 
 schedule: Schedule(matvec, target='c').split(i, 4)
   y: difference 0 within 1.01e-06 (approx) -> tested
@@ -1196,72 +1196,72 @@ schedule: Schedule(matvec, target='c').split(i, 4)
 $ uv run lanky check examples/calls.py
 STATUS   EFFECTIVE  BY           WHERE         OWNER          STATEMENT
 -------  ---------  -----------  ------------  -------------  ------------------------------------------------------------------------
-decided  decided    isl          calls.py:92   dot            a[k] is in bounds for every instance of S0
-decided  decided    isl          calls.py:92   dot            b[k] is in bounds for every instance of S0
-decided  decided    isl          calls.py:89   dot            the source order runs every dependence forward in time
-decided  decided    type         calls.py:92   dot            the accumulation into the value dot returns over k is approx
-tested   tested     interpreter  calls.py:89   dot            the traced term computes what the body computes
-decided  decided    isl          calls.py:99   matvec         y[i] is in bounds for every instance of S0
-decided  decided    isl          calls.py:99   matvec         A[i, k] is in bounds for every instance of S0
-decided  decided    isl          calls.py:99   matvec         x[k] is in bounds for every instance of S0
-decided  decided    isl          calls.py:99   matvec         distinct instances of S0 write distinct cells of y
-decided  decided    isl          calls.py:95   matvec         the source order runs every dependence forward in time
-decided  decided    type         calls.py:99   matvec         the accumulation into y[i] over k is approx
-decided  decided    isl          calls.py:99   matvec         A[i], the row passed to dot as a, is in bounds wherever dot is called...
-tested   tested     interpreter  calls.py:95   matvec         the traced term computes what the body computes
-decided  decided    isl          calls.py:112  csr            y[r] is in bounds for every instance of S0
-decided  decided    isl          calls.py:112  csr            val[r, k] is in bounds for every instance of S0
-decided  decided    type         calls.py:112  csr            x[col[r, k]] is in bounds by type (col[r, k] : Fin(m))
-decided  decided    isl          calls.py:112  csr            col[r, k] is in bounds for every instance of S0
-decided  decided    isl          calls.py:112  csr            cnt[r], the length of row r that bounds the loop over k, is in bounds...
-decided  decided    isl          calls.py:112  csr            distinct instances of S0 write distinct cells of y
-decided  decided    isl          calls.py:102  csr            the source order runs every dependence forward in time
-decided  decided    type         calls.py:112  csr            the accumulation into y[r] over k is approx
-decided  decided    isl          calls.py:112  csr            col[r], the indices of the cells passed as b, is in bounds wherever d...
-decided  decided    isl          calls.py:112  csr            val[r], the row passed to dot as a, is in bounds wherever dot is call...
-decided  decided    type         calls.py:112  csr            the cells x[col[r]] picks, passed as b, are in bounds by type (the en...
-tested   tested     interpreter  calls.py:102  csr            the traced term computes what the body computes
-decided  decided    isl          calls.py:118  integrate      W[q] is in bounds for every instance of S0
-decided  decided    isl          calls.py:115  integrate      the source order runs every dependence forward in time
-decided  decided    type         calls.py:118  integrate      the accumulation into the value integrate returns over q is approx
-tested   tested     interpreter  calls.py:115  integrate      the traced term computes what the body computes
-decided  decided    isl          calls.py:129  element_mass   Me[j, k] is in bounds for every instance of S0
-decided  decided    isl          calls.py:129  element_mass   X[1] is in bounds for every instance of S0
-decided  decided    isl          calls.py:129  element_mass   X[0] is in bounds for every instance of S0
-decided  decided    isl          calls.py:129  element_mass   Y[2] is in bounds for every instance of S0
-decided  decided    isl          calls.py:129  element_mass   Y[0] is in bounds for every instance of S0
-decided  decided    isl          calls.py:129  element_mass   X[2] is in bounds for every instance of S0
-decided  decided    isl          calls.py:129  element_mass   Y[1] is in bounds for every instance of S0
-decided  decided    isl          calls.py:129  element_mass   W[q] is in bounds for every instance of S0
-decided  decided    isl          calls.py:129  element_mass   PHI[q, j] is in bounds for every instance of S0
-decided  decided    isl          calls.py:129  element_mass   PHI[q, k] is in bounds for every instance of S0
-decided  decided    isl          calls.py:129  element_mass   distinct instances of S0 write distinct cells of Me
-decided  decided    isl          calls.py:121  element_mass   the source order runs every dependence forward in time
-decided  decided    type         calls.py:129  element_mass   the accumulation into Me[j, k] over q is approx
-tested   tested     native       calls.py:121  element_mass   Me[0, 0] == Me[0, 0] and Me[0, 1] == Me[1, 0] and Me[0, 2] == Me[2, 0...
-tested   tested     interpreter  calls.py:121  element_mass   the traced term computes what the body computes
-decided  decided    isl          calls.py:129  mass_matrices  M[c, j, k] is in bounds for every instance of S0
-decided  decided    type         calls.py:129  mass_matrices  X[cell[c, 1]] is in bounds by type (cell[c, 1] : Fin(nv))
-decided  decided    isl          calls.py:129  mass_matrices  cell[c, 1] is in bounds for every instance of S0
-decided  decided    type         calls.py:129  mass_matrices  X[cell[c, 0]] is in bounds by type (cell[c, 0] : Fin(nv))
-decided  decided    isl          calls.py:129  mass_matrices  cell[c, 0] is in bounds for every instance of S0
-decided  decided    type         calls.py:129  mass_matrices  Y[cell[c, 2]] is in bounds by type (cell[c, 2] : Fin(nv))
-decided  decided    isl          calls.py:129  mass_matrices  cell[c, 2] is in bounds for every instance of S0
-decided  decided    type         calls.py:129  mass_matrices  Y[cell[c, 0]] is in bounds by type (cell[c, 0] : Fin(nv))
-decided  decided    type         calls.py:129  mass_matrices  X[cell[c, 2]] is in bounds by type (cell[c, 2] : Fin(nv))
-decided  decided    type         calls.py:129  mass_matrices  Y[cell[c, 1]] is in bounds by type (cell[c, 1] : Fin(nv))
-decided  decided    isl          calls.py:129  mass_matrices  W[q] is in bounds for every instance of S0
-decided  decided    isl          calls.py:129  mass_matrices  PHI[q, j] is in bounds for every instance of S0
-decided  decided    isl          calls.py:129  mass_matrices  PHI[q, k] is in bounds for every instance of S0
-decided  decided    isl          calls.py:129  mass_matrices  distinct instances of S0 write distinct cells of M
-decided  decided    isl          calls.py:132  mass_matrices  the source order runs every dependence forward in time
-decided  decided    type         calls.py:129  mass_matrices  the accumulation into M[c, j, k] over q is approx
-decided  decided    isl          calls.py:141  mass_matrices  cell[c], the indices of the cells passed as X and Y, is in bounds whe...
-decided  decided    type         calls.py:141  mass_matrices  the cells X[cell[c]] picks, passed as X, are in bounds by type (the e...
-decided  decided    type         calls.py:141  mass_matrices  the cells Y[cell[c]] picks, passed as Y, are in bounds by type (the e...
-decided  decided    isl          calls.py:141  mass_matrices  M[c], the row passed to element_mass as Me, is in bounds wherever ele...
-decided  tested     call         calls.py:141  mass_matrices  after each call element_mass(X[cell[c]], Y[cell[c]], M[c]) at calls.p...
-tested   tested     interpreter  calls.py:132  mass_matrices  the traced term computes what the body computes
+decided  decided    isl          calls.py:93   dot            a[k] is in bounds for every instance of S0
+decided  decided    isl          calls.py:93   dot            b[k] is in bounds for every instance of S0
+decided  decided    isl          calls.py:90   dot            the source order runs every dependence forward in time
+decided  decided    type         calls.py:93   dot            the accumulation into the value dot returns over k is approx
+tested   tested     interpreter  calls.py:90   dot            the traced term computes what the body computes
+decided  decided    isl          calls.py:100  matvec         y[i] is in bounds for every instance of S0
+decided  decided    isl          calls.py:100  matvec         A[i, k] is in bounds for every instance of S0
+decided  decided    isl          calls.py:100  matvec         x[k] is in bounds for every instance of S0
+decided  decided    isl          calls.py:100  matvec         distinct instances of S0 write distinct cells of y
+decided  decided    isl          calls.py:96   matvec         the source order runs every dependence forward in time
+decided  decided    type         calls.py:100  matvec         the accumulation into y[i] over k is approx
+decided  decided    isl          calls.py:100  matvec         A[i], the row passed to dot as a, is in bounds wherever dot is called...
+tested   tested     interpreter  calls.py:96   matvec         the traced term computes what the body computes
+decided  decided    isl          calls.py:113  csr            y[r] is in bounds for every instance of S0
+decided  decided    isl          calls.py:113  csr            val[r, k] is in bounds for every instance of S0
+decided  decided    type         calls.py:113  csr            x[col[r, k]] is in bounds by type (col[r, k] : Fin(m))
+decided  decided    isl          calls.py:113  csr            col[r, k] is in bounds for every instance of S0
+decided  decided    isl          calls.py:113  csr            cnt[r], the length of row r that bounds the loop over k, is in bounds...
+decided  decided    isl          calls.py:113  csr            distinct instances of S0 write distinct cells of y
+decided  decided    isl          calls.py:103  csr            the source order runs every dependence forward in time
+decided  decided    type         calls.py:113  csr            the accumulation into y[r] over k is approx
+decided  decided    isl          calls.py:113  csr            col[r], the indices of the cells passed as b, is in bounds wherever d...
+decided  decided    isl          calls.py:113  csr            val[r], the row passed to dot as a, is in bounds wherever dot is call...
+decided  decided    type         calls.py:113  csr            the cells x[col[r]] picks, passed as b, are in bounds by type (the en...
+tested   tested     interpreter  calls.py:103  csr            the traced term computes what the body computes
+decided  decided    isl          calls.py:119  integrate      W[q] is in bounds for every instance of S0
+decided  decided    isl          calls.py:116  integrate      the source order runs every dependence forward in time
+decided  decided    type         calls.py:119  integrate      the accumulation into the value integrate returns over q is approx
+tested   tested     interpreter  calls.py:116  integrate      the traced term computes what the body computes
+decided  decided    isl          calls.py:130  element_mass   Me[j, k] is in bounds for every instance of S0
+decided  decided    isl          calls.py:130  element_mass   X[1] is in bounds for every instance of S0
+decided  decided    isl          calls.py:130  element_mass   X[0] is in bounds for every instance of S0
+decided  decided    isl          calls.py:130  element_mass   Y[2] is in bounds for every instance of S0
+decided  decided    isl          calls.py:130  element_mass   Y[0] is in bounds for every instance of S0
+decided  decided    isl          calls.py:130  element_mass   X[2] is in bounds for every instance of S0
+decided  decided    isl          calls.py:130  element_mass   Y[1] is in bounds for every instance of S0
+decided  decided    isl          calls.py:130  element_mass   W[q] is in bounds for every instance of S0
+decided  decided    isl          calls.py:130  element_mass   PHI[q, j] is in bounds for every instance of S0
+decided  decided    isl          calls.py:130  element_mass   PHI[q, k] is in bounds for every instance of S0
+decided  decided    isl          calls.py:130  element_mass   distinct instances of S0 write distinct cells of Me
+decided  decided    isl          calls.py:122  element_mass   the source order runs every dependence forward in time
+decided  decided    type         calls.py:130  element_mass   the accumulation into Me[j, k] over q is approx
+tested   tested     native       calls.py:122  element_mass   Me[0, 0] == Me[0, 0] and Me[0, 1] == Me[1, 0] and Me[0, 2] == Me[2, 0...
+tested   tested     interpreter  calls.py:122  element_mass   the traced term computes what the body computes
+decided  decided    isl          calls.py:130  mass_matrices  M[c, j, k] is in bounds for every instance of S0
+decided  decided    type         calls.py:130  mass_matrices  X[cell[c, 1]] is in bounds by type (cell[c, 1] : Fin(nv))
+decided  decided    isl          calls.py:130  mass_matrices  cell[c, 1] is in bounds for every instance of S0
+decided  decided    type         calls.py:130  mass_matrices  X[cell[c, 0]] is in bounds by type (cell[c, 0] : Fin(nv))
+decided  decided    isl          calls.py:130  mass_matrices  cell[c, 0] is in bounds for every instance of S0
+decided  decided    type         calls.py:130  mass_matrices  Y[cell[c, 2]] is in bounds by type (cell[c, 2] : Fin(nv))
+decided  decided    isl          calls.py:130  mass_matrices  cell[c, 2] is in bounds for every instance of S0
+decided  decided    type         calls.py:130  mass_matrices  Y[cell[c, 0]] is in bounds by type (cell[c, 0] : Fin(nv))
+decided  decided    type         calls.py:130  mass_matrices  X[cell[c, 2]] is in bounds by type (cell[c, 2] : Fin(nv))
+decided  decided    type         calls.py:130  mass_matrices  Y[cell[c, 1]] is in bounds by type (cell[c, 1] : Fin(nv))
+decided  decided    isl          calls.py:130  mass_matrices  W[q] is in bounds for every instance of S0
+decided  decided    isl          calls.py:130  mass_matrices  PHI[q, j] is in bounds for every instance of S0
+decided  decided    isl          calls.py:130  mass_matrices  PHI[q, k] is in bounds for every instance of S0
+decided  decided    isl          calls.py:130  mass_matrices  distinct instances of S0 write distinct cells of M
+decided  decided    isl          calls.py:133  mass_matrices  the source order runs every dependence forward in time
+decided  decided    type         calls.py:130  mass_matrices  the accumulation into M[c, j, k] over q is approx
+decided  decided    isl          calls.py:142  mass_matrices  cell[c], the indices of the cells passed as X and Y, is in bounds whe...
+decided  decided    type         calls.py:142  mass_matrices  the cells X[cell[c]] picks, passed as X, are in bounds by type (the e...
+decided  decided    type         calls.py:142  mass_matrices  the cells Y[cell[c]] picks, passed as Y, are in bounds by type (the e...
+decided  decided    isl          calls.py:142  mass_matrices  M[c], the row passed to element_mass as Me, is in bounds wherever ele...
+decided  tested     call         calls.py:142  mass_matrices  after each call element_mass(X[cell[c]], Y[cell[c]], M[c]) at calls.p...
+tested   tested     interpreter  calls.py:133  mass_matrices  the traced term computes what the body computes
 
 66 facts: 59 decided, 7 tested
 ```
@@ -1287,13 +1287,13 @@ mass_matrices: Schedule(mass_matrices, target='c')
 
 STATUS   BY     WHERE         OWNER          STATEMENT
 -------  -----  ------------  -------------  ------------------------------------------------------------------------
-decided  isl    calls.py:99   matvec         split(i, 4) renames the instances of matvec one for one
-decided  isl    calls.py:99   matvec         the order after split(i, 4) runs every dependence of matvec forward
-tested   loopy  calls.py:99   matvec         the scheduled run of matvec agrees with the native run to the accurac...
-tested   loopy  calls.py:92   dot            the scheduled run of dot agrees with the native run to the accuracy i...
-tested   loopy  calls.py:112  csr            the scheduled run of csr agrees with the native run to the accuracy i...
-tested   loopy  calls.py:129  element_mass   the scheduled run of element_mass agrees with the native run to the a...
-tested   loopy  calls.py:129  mass_matrices  the scheduled run of mass_matrices agrees with the native run to the ...
+decided  isl    calls.py:100  matvec         split(i, 4) renames the instances of matvec one for one
+decided  isl    calls.py:100  matvec         the order after split(i, 4) runs every dependence of matvec forward
+tested   loopy  calls.py:100  matvec         the scheduled run of matvec agrees with the native run to the accurac...
+tested   loopy  calls.py:93   dot            the scheduled run of dot agrees with the native run to the accuracy i...
+tested   loopy  calls.py:113  csr            the scheduled run of csr agrees with the native run to the accuracy i...
+tested   loopy  calls.py:130  element_mass   the scheduled run of element_mass agrees with the native run to the a...
+tested   loopy  calls.py:130  mass_matrices  the scheduled run of mass_matrices agrees with the native run to the ...
 
 7 facts: 2 decided, 5 tested
 ```

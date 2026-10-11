@@ -146,7 +146,7 @@ are stated as any statement's are. `matvec` calls `dot(A[i], x)` at every
 ```console
 $ lanky check examples/calls.py --show-lean "the row passed to dot as a"
 ...
-LEAN matvec at calls.py:99: A[i], the row passed to dot as a, is in bounds wherever dot is called at calls.py:99
+LEAN matvec at calls.py:100: A[i], the row passed to dot as a, is in bounds wherever dot is called at calls.py:100
   proved by Lean (omega)
     set_option autoImplicit false in
     theorem Lanky.matvec_in_bounds

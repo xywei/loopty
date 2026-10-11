@@ -452,7 +452,7 @@ The call is inlined: `dot`'s loop is a sum of `matvec`'s statement at every
 $ uv run python examples/calls.py
 native: matvec agrees with A @ x: True
 ...
-the term of matvec, with dot inlined at calls.py:99:
+the term of matvec, with dot inlined at calls.py:100:
   S0 over i: y[i] = sum over k of A[i, k]*x[k]
   dot's a is A[i]
   dot's b is x
@@ -461,7 +461,7 @@ the term of matvec, with dot inlined at calls.py:99:
 
 What `dot`'s contract checks of each call natively, `matvec` owes at every
 `i`: `lanky check examples/calls.py` has the row `A[i], the row passed to dot
-as a, is in bounds wherever dot is called at calls.py:99`, decided by isl.
+as a, is in bounds wherever dot is called at calls.py:100`, decided by isl.
 The same file applies firedrake's quadrature rule to an integrand,
 `integrate(lambda q: PHI[q, j] * PHI[q, k])`, per element of a mesh.
 

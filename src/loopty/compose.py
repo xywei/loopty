@@ -1361,9 +1361,9 @@ class _Composer:
                 if _same(first, second) or self.equate(first, second):
                     continue
                 raise TraceError(
-                    f"{self.program} makes {name} at {made.where} with axis {k} "
-                    f"{_shown(second)} long, and {self.origin[name]} wants it "
-                    f"{_shown(first)} long; nothing says the two agree"
+                    f"{self.program} makes {name} at {made.where} with an axis {k} "
+                    f"of length {_shown(second)}, and {self.origin[name]} wants "
+                    f"it of length {_shown(first)}; nothing says the two agree"
                 )
             return
         theirs = ArrType(
@@ -1372,7 +1372,7 @@ class _Composer:
             ragged=(),
             domain=_rename_domain(made.declared, {}, sizes),
         )
-        self.shaped_over(name, mine, theirs, "as declared", made.where)
+        self.shaped_over(name, mine, theirs, "with Arr.zeros", made.where)
 
     def size_value(self, value: Any, made: _Made) -> Any:
         """A size given to ``Arr.zeros``, in the program's sizes.
