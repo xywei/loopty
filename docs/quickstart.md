@@ -240,7 +240,7 @@ void spmv(int32_t const n, int64_t const *__restrict__ cnt, int32_t const *__res
     acc_j_out_j_in = (double) (0.0);
     nl_cnt_r = (int32_t) (cnt[r]);
     for (int32_t j_in = 0; j_in <= ((-1 + nl_cnt_r == 0) ? 0 : 1); ++j_in)
-      if (-1 + -1 * j_in + nl_cnt_r >= 0)
+      if (-1 + nl_cnt_r + -1 * j_in >= 0)
         for (int32_t j_out = 0; j_out <= -1 + -1 * j_in + (1 + nl_cnt_r + j_in) / 2; ++j_out)
           acc_j_out_j_in = acc_j_out_j_in + val[off_cnt[r] + j_in + j_out * 2] * x[col[off_cnt[r] + j_in + j_out * 2]];
     y[r] = acc_j_out_j_in;

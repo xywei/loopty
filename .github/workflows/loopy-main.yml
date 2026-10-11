@@ -1,0 +1,128 @@
+name: loopy main
+
+# loopty on loopy's main branch, as its maintainers run it: kernel domains are
+# namedisl sets (loopy #1023), and no release of loopy carries that yet. This
+# branch (port/loopy-main) depends on loopy, islpy and namedisl from their main
+# branches through [tool.uv.sources], and uv.lock pins the commits the branch
+# was last run against; docs/loopy-main.md has the long form.
+#
+# The `locked` leg is that pinned combination, reproducible. The `head` leg
+# moves loopy, islpy and namedisl to the heads of their main branches first,
+# so that a change upstream shows here before anyone runs into it. Both run
+# the suite, the three commands of every example, and the transcripts.
+#
+# GitHub runs scheduled workflows on the default branch only, so this one runs
+# on a push, on a pull request, and by hand (workflow_dispatch).
+
+on:
+  push:
+    branches: [port/loopy-main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: loopy-main-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: loopy main (${{ matrix.loopy }}, python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # islpy 2026 builds for 3.14 too, so the interpreter is no longer held
+        # to 3.13 by main's islpy<2026 pin (note 4 of docs/loopy-notes.md).
+        # ci.yml runs the locked combination on 3.12 and 3.13 as well; one
+        # interpreter is enough to see an upstream change.
+        include:
+          - loopy: locked
+            python-version: "3.13"
+          - loopy: locked
+            python-version: "3.14"
+          - loopy: head
+            python-version: "3.13"
+    env:
+      # As in ci.yml: lanky's Lean oracle is a declared no-op here, and the
+      # ledger is the one a machine without Lean prints.
+      LANKY_LEAN_DISABLE: "1"
+    steps:
+      - name: Check out loopty
+        uses: actions/checkout@v5
+        with:
+          path: loopty
+
+      - name: Clone lanky next to it
+        env:
+          LANKY_REF: ${{ github.head_ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+          remote=https://github.com/xywei/lanky.git
+          if [ -n "${LANKY_REF}" ] \
+             && git ls-remote --exit-code --heads "${remote}" "${LANKY_REF}" >/dev/null 2>&1
+          then
+            echo "lanky has a branch named ${LANKY_REF}; using it"
+            git clone --depth 1 --branch "${LANKY_REF}" "${remote}" lanky
+          else
+            echo "no lanky branch named '${LANKY_REF:-<none>}'; using main"
+            git clone --depth 1 --branch main "${remote}" lanky
+          fi
+          git -C lanky log -1 --format='lanky at %h on %D'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Move loopy, islpy and namedisl to their heads
+        if: matrix.loopy == 'head'
+        working-directory: loopty
+        run: |
+          uv lock --upgrade-package loopy --upgrade-package islpy \
+            --upgrade-package namedisl
+
+      - name: Sync dependencies
+        working-directory: loopty
+        run: uv sync --group dev --python ${{ matrix.python-version }}
+
+      - name: Say which loopy this is
+        working-directory: loopty
+        run: |
+          uv run python - <<'PY'
+          import importlib.metadata as m
+          import json
+
+          for name in ("loopy", "islpy", "namedisl"):
+              dist = m.distribution(name)
+              url = dist.read_text("direct_url.json")
+              commit = json.loads(url).get("vcs_info", {}).get("commit_id") if url else None
+              print(f"{name} {dist.version}", f"at {commit}" if commit else "")
+          PY
+
+      - name: Ruff
+        if: matrix.loopy == 'locked'
+        working-directory: loopty
+        run: uv run ruff check .
+
+      - name: Pytest
+        working-directory: loopty
+        run: uv run pytest -q
+
+      # The three commands the project promises, on every example: a change in
+      # loopy that keeps the unit tests green but breaks a ledger or a compiled
+      # run is caught here.
+      - name: Run every example three ways
+        working-directory: loopty
+        run: |
+          set -euo pipefail
+          for file in examples/*.py; do
+            echo "::group::${file}"
+            uv run python "${file}"
+            uv run lanky check "${file}"
+            uv run loopty run "${file}"
+            echo "::endgroup::"
+          done
+
+      - name: Check the transcripts in the documentation
+        working-directory: loopty
+        run: uv run python scripts/refresh_example_outputs.py --check
