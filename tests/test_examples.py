@@ -47,6 +47,7 @@ NAMES = (
     "quadrature",
     "layer_potential",
     "sum_factorization",
+    "assembly",
 )
 
 _RESULTS: dict[tuple[str, str], tuple[Any, list[dict]]] = {}
@@ -157,6 +158,7 @@ KERNELS = {
     "quadrature": {"mass_action"},
     "layer_potential": {"single_layer"},
     "sum_factorization": {"along_r", "along_s", "weak_derivative"},
+    "assembly": {"mass_action"},
     "travel": {
         "number",
         "number_quiet",
@@ -952,6 +954,47 @@ def test_the_travel_demo_prints_the_check_it_compiles() -> None:
     result, _ = _invoke("travel", "python")
     assert "checked when it runs" in result.stdout
     assert "gather_perm_ok[0] = (int64_t) (1)" in result.stdout
+
+
+# }}}
+
+
+# {{{ assembly
+
+
+def test_the_assembly_demo_names_the_node_two_cells_share() -> None:
+    result, _ = _invoke("assembly", "python")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (
+        "PyOP2's two triangles: 2 cells, y agrees with the assembled matrix: True"
+    ) in result.stdout
+    assert (
+        "IllegalCast: tag(c_outer='g.0', c_inner='l.0') illegal: S1[c=0, k=2] and "
+        "S1[c=1, k=1] both update y[3] on example_inputs() (nc=2, nv=4), where "
+        "cell[0, 2] = 3 and cell[1, 1] = 3"
+    ) in result.stdout
+    accepted = result.stdout.split("accepted: ")[1]
+    assert "the accumulation into y is reassociated by tag(" in accepted
+    assert "-> tested" in result.stdout
+
+
+def test_the_assembly_owes_its_sum_and_not_distinct_writes_of_y() -> None:
+    _result, facts = _invoke("assembly", "check")
+    disjoint = [
+        fact["provenance"]["array"]
+        for fact in facts
+        if fact["kind"] == "disjoint-writes"
+    ]
+    assert disjoint == ["yl"]
+    (update,) = [
+        fact
+        for fact in facts
+        if fact["kind"] == "exactness" and fact["provenance"]["op"] == "update"
+    ]
+    assert update["statement"] == (
+        "the accumulation into y[cell[c, k]] over c, k is approx"
+    )
+    assert (update["status"], update["decided_by"]) == ("decided", "type")
 
 
 # }}}

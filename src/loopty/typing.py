@@ -68,7 +68,13 @@ layout, and worth no more than it.
 cells, or the loop cannot be run in parallel and the order of the writes is
 part of the result. The obligation is the emptiness of the set of pairs of
 distinct instances whose writes collide, which isl decides and, when it fails,
-witnesses with the two instances.
+witnesses with the two instances. A write through a cell read from an array,
+``y[perm[i]] = x[i]``, is a write of any cell to isl, which would refute the
+claim with two instances that write no common cell, so the kernel's native
+runs decide it instead (:func:`loopty.faithful.collision_fact`). An update,
+``y[cell[c, k]] += v``, whose instances can add to one cell owes no distinct
+writes: either order of two of its updates gives the sum, and what it owes
+is the class of the sum, as a reduction does (:func:`accumulating`).
 
 *Ordering.* The dependence relation is defined from the footprints
 (:mod:`loopty.flow`), and the source order has to run every dependence forward
@@ -76,10 +82,11 @@ in time. That is the same monotonicity question a schedule has to answer, asked
 of the order the body was written in, so the ledger records the baseline that
 every later cast is compared against.
 
-*Reduction exactness.* Every reduction states the exactness class of its
-accumulation. ``reassoc`` says the sum may be reassociated, which is what
-licenses a reduction tree or atomics, and which fixes the tolerance a
-differential test is allowed to use. The class is read off the term, so the fact
+*Reduction exactness.* Every reduction, and every update whose instances
+can add to one cell, states the exactness class of its accumulation.
+``reassoc`` says the sum may be reassociated, which is what licenses a
+reduction tree or atomics, and which fixes the tolerance a differential
+test is allowed to use. The class is read off the term, so the fact
 is ``DECIDED`` by the type rather than by an oracle.
 
 *The postcondition.* The return annotation of a kernel is a claim about its

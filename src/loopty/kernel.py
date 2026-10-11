@@ -595,7 +595,10 @@ class Kernel(_Decorated):
         (:func:`loopty.faithful.postcondition_fact`), which is what a program
         that calls the kernel counts it as. So is a ``layout`` fact no isl
         question decides, which a run that moves a row off its buffer or onto
-        another refutes (:func:`loopty.faithful.layout_fact`).
+        another refutes (:func:`loopty.faithful.layout_fact`), and a write
+        through a cell read from an array, whose distinct writes isl cannot
+        decide: refuted by two instances that write one cell on an input, or
+        ``tested`` (:func:`loopty.faithful.collision_fact`).
 
         A body that cannot be traced is itself reported as a fact rather than as
         a crash, so that ``lanky check`` on a file with one broken kernel still

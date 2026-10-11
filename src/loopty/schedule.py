@@ -1,13 +1,14 @@
 """Schedules: loop transformations as casts, checked one at a time.
 
 A transformation is untrusted. ``.split``, ``.tile``, ``.interchange``,
-``.skew``, ``.affine``, ``.tag`` and ``.realize`` apply the corresponding loopy
-transform and then hand the result to a small checker, which asks isl two
-questions: is the reindexing a bijection on statement instances, and is the new
-execution order monotone on the dependence relation? Parallel inames (``g.*``,
-``l.*``, ``ilp``, ``vec``) carry no order, so they are dropped from the order
-before the second question is asked, and a hardware axis (``g.*``, ``l.*``)
-also may not join two work items by a dependence (see "Work items" below).
+``.skew``, ``.affine``, ``.tag``, ``.realize`` and ``.atomic`` apply the
+corresponding loopy transform and then hand the result to a small checker,
+which asks isl two questions: is the reindexing a bijection on statement
+instances, and is the new execution order monotone on the dependence relation?
+Parallel inames (``g.*``, ``l.*``, ``ilp``, ``vec``) carry no order, so they
+are dropped from the order before the second question is asked, and a
+hardware axis (``g.*``, ``l.*``) also may not join two work items by a
+dependence (see "Work items" below).
 This is the de Bruijn criterion applied to scheduling: any Python
 transformation is admissible because its output is checked, not its code.
 
@@ -197,6 +198,38 @@ statement predicated on its own (:func:`_fused_plan`). The instructions'
 dependencies, which the lowering drew by array in the order of the term, are
 drawn again from the dependences in the new order
 (:meth:`Schedule._ordered_by_dependences`).
+
+Updates, and atomics
+--------------------
+
+A statement that adds to the cell it writes values that read nothing else of
+the array, ``y[cell[c, k]] += yl[c, k]``, is an update
+(:attr:`loopty.term.Stmt.exactness`). Two updates of one cell give the same
+sum in either order, to the class of the accumulation, so they are no
+dependence (:func:`_dependences`, :func:`loopty.flow.dependences`), and a
+step may reorder them, which reassociates the sum and is recorded as
+:meth:`Schedule.realize` records a tree. What a step may not do is run two of
+them at the same time, on two work items or with the same time in its order,
+which a hardware axis, ``ilp`` or ``vec`` gives them: each update reads the
+cell, adds and stores, and one can overwrite what the other added. Such a
+step is refused with the pair (:meth:`Schedule._concurrent_updates`) until
+:meth:`Schedule.atomic` makes the array's updates atomic, which on OpenCL
+is loopy's ``AtomicUpdate``. An ``exact`` update keeps its order as an
+``exact`` sum does.
+
+A witness from the example inputs
+---------------------------------
+
+A subscript read from an array, ``y[cell[c, k]]``, is no expression isl
+reads, so the dependences through it are over every cell of the array, and a
+pair isl picks out of them need not touch one cell. A refusal over such a
+dependence names, where there is one, a pair that does on an input: the
+schedule's example inputs, the module's ``example_inputs()``, then inputs
+drawn from the types, each interpreted with a log of the cells it touched
+(:meth:`Schedule._real_pair`, :func:`loopty.interpret.interpret`), with what
+the subscript read there: ``S1[c=0, k=2] and S1[c=1, k=1] both update y[3]
+on example_inputs() (nc=2, nv=4), where cell[0, 2] = 3 and cell[1, 1] = 3``.
+Where none has one, the message says the pair is isl's.
 
 Storing less
 ------------
@@ -1522,6 +1555,8 @@ def _unbuildable_reason(draft: _Draft) -> str | None:
       order (see :func:`_sum_place_reason`);
     * a loop ordered outside a loop loopy nests it inside, which loopy cannot
       run in that order (see :func:`_nest_reason`);
+    * an array made atomic whose values loopy has no atomic update for (see
+      :func:`_atomic_reason`);
     * what the target itself cannot do: the C target has no hardware axes,
       and no vector types for a temporary (see :func:`_target_reason`).
 

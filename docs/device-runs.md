@@ -208,6 +208,35 @@ bit; and pyopencl's complex `sqrt` takes the other side of the branch cut for a
 `-2j`, which the differential refutes (#196). The OpenCL tests of
 `tests/test_table.py` and `tests/test_math.py` pass there.
 
+## 2026-10-11: PyOP2's assembly loop, its updates atomic, on the PoCL CPU device
+
+`docs/device-runs/scatter_atomic.py` takes `examples/assembly.py` to PoCL 7.0's
+CPU device, with the GPU hidden from the process
+(`docs/device-runs/pocl-cpu-scatter-atomic.log`). The kernel adds each cell's
+values into its nodes, `y[cell[c, k]] += yl[c, k]`, and the driver runs two
+schedules of it, each compiled for `target="opencl"` and compared with the
+example's own body on PyOP2's two triangles and on two meshes of the unit
+square, where many work items add into one node at once:
+
+| case | schedule | mesh | `y`: difference | tolerance | verdict |
+|---|---|---|---|---|---|
+| PyOP2's GPU split | `atomic("y").split("c", 32).tag(c_outer="g.0", c_inner="l.0")` | 2 cells | 0 | 1.13e-06 (`approx`) | agrees |
+| | | 8 192 cells | 1.63e-19 | 1e-06 (`approx`) | agrees |
+| | | 131 072 cells | 1.02e-20 | 1e-06 (`approx`) | agrees |
+| Sun et al.'s split, from C | `atomic("y").split("c", 4).tag(c_inner="ilp")` | 2 cells | 0 | 1.13e-06 (`approx`) | agrees |
+| | | 8 192 cells | 1.08e-19 | 1e-06 (`approx`) | agrees |
+| | | 131 072 cells | 1.02e-20 | 1e-06 (`approx`) | agrees |
+
+Each update is loopy's compare-and-swap loop on the bits of the double,
+`atom_cmpxchg((__global long *) &(y[...]), ...)`, with `y` declared `__global
+volatile double *`. The differences are the reassociation of each node's sum,
+far inside the tolerance. Without `atomic("y")` the split is refused with the
+node PyOP2's two triangles share, and the driver compiles it anyway, with
+loopy directly, to show what the refusal is about: the updates race, and `y`
+comes out wrong by up to 43% of its largest value on the smaller square and
+47% on the larger. `loopty run examples/assembly.py --target opencl` runs the
+example's own schedule there, retargeted from C, and agrees.
+
 ## Reproducing
 
 ```bash
@@ -234,6 +263,8 @@ until a device is actually asked for.
 | `device-runs/pocl-epyc-cpu-*.log` | the same three, PoCL on the CPU |
 | `device-runs/demo_gaps.py` | the driver of 2026-10-11: three examples on a device |
 | `device-runs/pocl-cpu-demo-gaps.log` | that driver, PoCL on the CPU |
+| `device-runs/scatter_atomic.py` | the driver of the assembly loop: atomic updates on a device, and the race without them |
+| `device-runs/pocl-cpu-scatter-atomic.log` | that driver and `loopty run --target opencl`, PoCL on the CPU |
 
 The device-demos and reduction-probe logs each open with a `NoSuchEntryError`
 traceback from `pytools.persistent_dict`. That is loopy's transformation cache

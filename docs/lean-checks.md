@@ -103,7 +103,11 @@ REFUTED shift at out_of_bounds.py:24: u[i + 1] is in bounds for every instance o
 
 A refuted fact is never turned into a proof. Lean checks isl's
 counterexample, and a fact isl refuted with no counterexample Lean can check
-(a refused bijection, say) is not offered to Lean at all.
+(a refused bijection, say) is not offered to Lean at all. A write through a
+cell read from an array, `y[perm[i]] = x[i]`, is a write of any cell to isl,
+so its distinct writes are not isl's to decide: the kernel's native runs
+decide them, refuting the fact with two instances that write one cell on an
+input, and Lean is not asked.
 
 A fact isl decided and Lean did not prove keeps `decided`, and a `NOT PROVED`
 line under the table names it, the parts Lean did not close, and whether Lean
@@ -129,7 +133,7 @@ its own, in parallel.
 | definedness | read | some statement wrote the cell read, before the read: a disjunction of existentials, one per writer; a write under a guard isl cannot state is no writer, since its domain is wider than where it stores |
 | the source order | pair of accesses | the source runs the pair in the order the dependence says, which is its definition |
 | a cast is bijective | statement the step moves | every instance has an image (an existential), one only, and no two share one |
-| a cast is monotone | dependence class, a pair of accesses | two instances that touch one cell, in the source's order, keep it after every step: their time vectors compare as the source's do |
+| a cast is monotone | dependence class, a pair of accesses (two updates of one cell, `y[cell[c, k]] += v`, are none: either order gives the sum) | two instances that touch one cell, in the source's order, keep it after every step: their time vectors compare as the source's do |
 | what a program's call may assume | requirement, or flat access | the claim at every point of its domain, under the hypotheses isl used (a callee's postcondition, a theorem the program cites, a type the contract checks) |
 | an assumption of a schedule | (a hypothesis of every later cast) | |
 
@@ -210,9 +214,9 @@ and test kernel to Lean, the casts each file's `rejected*` functions refuse
 included, from an empty proof cache. Its report, with Lean v4.29.1 (a
 file's time is Lean's on all its facts, a part's on one declaration):
 
-Of 523 facts isl decides in 16 files, Lean proved 499; 9 stay decided; 15 refuted facts have their negation proved at isl's counterexample. 260 more facts are not isl's to decide (by type, tested, assumed).
+Of 583 facts isl decides in 20 files, Lean proved 558; 9 stay decided; 16 refuted facts have their negation proved at isl's counterexample. 289 more facts are not isl's to decide (by type, tested, assumed).
 
-Not all of them are equally hard. The 81 `ordering` facts, that the source
+Not all of them are equally hard. The 86 `ordering` facts, that the source
 order runs every dependence forward, hold by the definition of a dependence
 (two instances that touch one cell, which the source runs in that order), and
 Lean's proof of them checks only that the printer states the source order the
@@ -220,36 +224,40 @@ same way twice. The others are claims isl could get wrong.
 
 | file | isl facts | proved | decided, not proved | refuted, negation proved | Lean time |
 |---|---:|---:|---:|---:|---:|
-| `examples/composition.py` | 10 | 10 | 0 | 0 | 1.6 s |
-| `examples/fusion.py` | 16 | 12 | 3 | 1 | 0.7 s |
-| `examples/p2p.py` | 19 | 19 | 0 | 0 | 2.1 s |
-| `examples/pairs.py` | 14 | 14 | 0 | 0 | 0.8 s |
-| `examples/reshape_layouts.py` | 16 | 16 | 0 | 0 | 1.7 s |
-| `examples/spmv.py` | 18 | 18 | 0 | 0 | 0.9 s |
-| `examples/stencil_skew.py` | 10 | 9 | 0 | 1 | 2.5 s |
-| `examples/travel.py` | 47 | 45 | 2 | 0 | 3.4 s |
-| `examples/wavefront_acoustic.py` | 24 | 21 | 0 | 3 | 9.2 s |
-| `tests/kernels/axpy.py` | 4 | 4 | 0 | 0 | 0.1 s |
-| `tests/kernels/domains.py` | 90 | 89 | 0 | 1 | 5.8 s |
-| `tests/kernels/out_of_bounds.py` | 4 | 3 | 0 | 1 | 0.2 s |
+| `examples/assembly.py` | 19 | 19 | 0 | 0 | 2.6 s |
+| `examples/composition.py` | 10 | 10 | 0 | 0 | 0.3 s |
+| `examples/fusion.py` | 16 | 12 | 3 | 1 | 0.3 s |
+| `examples/layer_potential.py` | 15 | 15 | 0 | 0 | 0.8 s |
+| `examples/p2p.py` | 19 | 19 | 0 | 0 | 1.4 s |
+| `examples/pairs.py` | 14 | 14 | 0 | 0 | 0.4 s |
+| `examples/quadrature.py` | 12 | 12 | 0 | 0 | 0.3 s |
+| `examples/reshape_layouts.py` | 16 | 16 | 0 | 0 | 0.8 s |
+| `examples/spmv.py` | 18 | 18 | 0 | 0 | 0.4 s |
+| `examples/stencil_skew.py` | 10 | 9 | 0 | 1 | 1.4 s |
+| `examples/sum_factorization.py` | 14 | 13 | 0 | 1 | 1.0 s |
+| `examples/travel.py` | 47 | 45 | 2 | 0 | 2.0 s |
+| `examples/wavefront_acoustic.py` | 24 | 21 | 0 | 3 | 7.1 s |
+| `tests/kernels/axpy.py` | 4 | 4 | 0 | 0 | 0.0 s |
+| `tests/kernels/domains.py` | 90 | 89 | 0 | 1 | 2.4 s |
+| `tests/kernels/out_of_bounds.py` | 4 | 3 | 0 | 1 | 0.1 s |
 | `tests/kernels/spmv_min.py` | 14 | 14 | 0 | 0 | 0.0 s |
 | `tests/kernels/stencil.py` | 5 | 5 | 0 | 0 | 0.0 s |
-| `tests/kernels/travel.py` | 64 | 61 | 2 | 1 | 2.3 s |
-| `tests/kernels/travel_wrong.py` | 168 | 159 | 2 | 7 | 9.4 s |
+| `tests/kernels/travel.py` | 64 | 61 | 2 | 1 | 1.1 s |
+| `tests/kernels/travel_wrong.py` | 168 | 159 | 2 | 7 | 5.2 s |
 
 By kind:
 
 | kind | isl facts | proved | decided, not proved | refuted, negation proved | parts | median s per part | slowest part |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| bijective | 15 | 14 | 1 | 0 | 58 | 0.130 | 0.52 s |
-| definedness | 19 | 18 | 1 | 0 | 22 | 0.085 | 0.17 s |
-| disjoint-writes | 108 | 108 | 0 | 0 | 108 | 0.022 | 0.14 s |
-| element-sort | 28 | 20 | 0 | 8 | 20 | 0.058 | 0.07 s |
-| in-bounds | 230 | 228 | 0 | 2 | 245 | 0.048 | 1.14 s |
+| bijective | 24 | 23 | 1 | 0 | 81 | 0.082 | 0.45 s |
+| definedness | 21 | 20 | 1 | 0 | 24 | 0.058 | 0.08 s |
+| disjoint-writes | 113 | 113 | 0 | 0 | 113 | 0.009 | 0.06 s |
+| element-sort | 28 | 20 | 0 | 8 | 20 | 0.024 | 0.04 s |
+| in-bounds | 259 | 257 | 0 | 2 | 300 | 0.021 | 0.99 s |
 | layout | 6 | 0 | 6 | 0 | 0 | - | - |
-| monotone | 20 | 14 | 1 | 5 | 115 | 0.183 | 0.58 s |
-| ordering | 81 | 81 | 0 | 0 | 226 | 0.022 | 0.11 s |
-| requirement | 16 | 16 | 0 | 0 | 16 | 0.145 | 0.43 s |
+| monotone | 30 | 23 | 1 | 6 | 138 | 0.126 | 0.61 s |
+| ordering | 86 | 86 | 0 | 0 | 234 | 0.011 | 0.06 s |
+| requirement | 16 | 16 | 0 | 0 | 16 | 0.059 | 0.23 s |
 
 Every fact Lean did not prove, and why:
 
@@ -279,6 +287,15 @@ asked about; each says so with `--verbose`, and the coverage report lists them.
   no dependence joins two work items, which is stated for isl only; the cast
   is then left `decided` as a whole; none of the examples has one; issue
   [#188](https://github.com/xywei/loopty/issues/188).
+- **Two updates of one cell at the same time:** a step that runs two updates
+  of one cell of `y` on two work items or in no order, without
+  `atomic("y")`, is refused with a `disjoint-writes` fact of the step, which
+  is read off the step's order and its work items, as a crossing is, and is
+  stated for isl only; where the cell is read from an array the pair is read
+  off an example input, and the fact is the native run's, not isl's. The
+  casts of a schedule with updates are stated for Lean without the classes of
+  two updates of one cell, which need no order; `examples/assembly.py` has
+  them all proved.
 - **A part of a tile isl computed:** a statement in one of two tiled loops is
   split by the part of the tile's map over its loop, which isl computes; a
   cast with such a step is left `decided`; none of the examples has one;
