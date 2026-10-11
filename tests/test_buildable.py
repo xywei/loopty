@@ -387,7 +387,7 @@ CASES = {
         lower_total8, "opencl", [tag(i="l.0")], None, None
     ),
     # }}}
-    # {{{ a sum's loop outside a loop of its statement (gap 13)
+    # {{{ a sum's loop outside a loop of its statement
     "a-sum-outside-a-local-loop": (potential, "opencl", QBX_TILE, None, None),
     "a-sum-outside-an-ilp-loop": (
         potential, "c",

@@ -6,7 +6,7 @@ read-only numpy array; traced, each read is an access whose in-bounds fact
 isl decides over the table's shape; lowered, it is a read-only loopy
 temporary with the values as its initializer, which loopy writes once, with
 every digit, outside the kernel's function. TSFC's element kernels hold their
-quadrature weights and basis tables so (gap 18 of the demo kernels).
+quadrature weights and basis tables so.
 """
 
 from __future__ import annotations

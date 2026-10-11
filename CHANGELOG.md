@@ -8,7 +8,7 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Added
 
-- **Constant tables** (`loopty.table`, gap 18): quadrature weights, a basis
+- **Constant tables** (`loopty.table`): quadrature weights, a basis
   tabulated at the quadrature points, a differentiation matrix, declared
   next to the kernel as the numpy array they are, `W = table([1 / 6, 1 / 6,
   1 / 6])`, and read by the body as an array is, `W[q]`, `W.dom`. Natively a
@@ -25,7 +25,7 @@ All notable changes to loopty are recorded here. The format follows
   like a parameter or a size of the kernel is named apart, `y_table`.
   Writing one is a `TypeError` in both runs.
 - **`loopty.math`**: `sqrt`, `exp`, `log`, `sin`, `cos`, `real`, `imag` and
-  `conj` for kernel bodies (gap 12). Each is numpy's natively and a call the
+  `conj` for kernel bodies. Each is numpy's natively and a call the
   trace records, which the interpreter evaluates with the same numpy function
   and the lowering writes as the target's library function, `csqrt` and
   `creal` of a complex number on the C target and pyopencl's `cdouble_sqrt`
@@ -42,7 +42,7 @@ All notable changes to loopty are recorded here. The format follows
   each native run with numpy's, where it was left `assumed`, not evaluated.
   `examples/p2p.py` calls `loopty.math.sqrt` where it built the call by hand.
 - **A sum's loop ordered outside a loop of its statement**
-  (`Schedule.prioritize("s_outer", "t_inner")`, gap 13). sumpy's CPU tile of
+  (`Schedule.prioritize("s_outer", "t_inner")`). sumpy's CPU tile of
   a layer potential splits the targets by 16 onto a group and its work
   items, splits the sources by 256, and runs the sources' outer loop
   outside the work items' loop; `prioritize` and `interchange` refused the
@@ -117,11 +117,12 @@ All notable changes to loopty are recorded here. The format follows
   Unable to generate code to automatically find 'm' from 'u': nonlinear
   expression`, a warning about an equation of the strides loopy's invoker
   could not solve, while it found the size from the shape (note 28 in
-  `docs/loopy-notes.md`). The five constructs the demo kernels need, a
+  `docs/loopy-notes.md`). Five constructs kernels written like sumpy's L2P
+  and grudge's sum-factorized passes need, a
   `Where` array beside a ragged family, a `Where` of three binders, `**` with
   a loop variable as the exponent in a sum of two binders and in a sum
   nested in another, four dense axes and `when(a + b == 0)`, were run three
-  ways and work; `tests/test_demo_shapes.py` keeps them so (gap 3).
+  ways and work; `tests/test_demo_shapes.py` keeps them so.
 - A split sum adds its terms in order. `split("s", 256)` of a sum's loop
   left loopy to choose the order of the two loops it makes, and loopy ran
   the inner one outside, `for s_inner ... for s_outer`, adding every 256th

@@ -1,4 +1,4 @@
-"""The demo kernels' gaps on an OpenCL device (2026-10-11).
+"""Three examples of sumpy, firedrake and grudge kernels on an OpenCL device.
 
 sumpy's QBX CPU tile with complex ``log`` and ``real``
 (``examples/layer_potential.py``), the P1 mass kernel with constant tables on

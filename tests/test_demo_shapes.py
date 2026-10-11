@@ -1,10 +1,10 @@
-"""The shapes the demo kernels need, each run three ways (gap 3).
+"""Shapes sumpy's L2P and grudge's passes are written in, each run three ways.
 
-Five constructs the demo kernels lean on were believed to work and had never
+Five constructs these kernels lean on were believed to work and had never
 been run: a ``Where`` array beside a ragged family in one kernel, a ``Where``
 of three binders, ``**`` with a loop variable as the exponent inside a sum of
 two binders and inside a sum nested in another, arrays of four dense axes, and
-``when(a + b == 0)``. Each is here, in the form the flagship L2P and grudge's
+``when(a + b == 0)``. Each is here, in the form a loop-y L2P and grudge's
 sum-factorized passes write it: run natively and against numpy, every
 in-bounds fact decided by isl, the trace faithful, and the compiled run on
 the C target compared with the native one.
@@ -38,7 +38,7 @@ def reconstruct(
     coeffs: Arr[Fin[nb], Fin[2 * Q], Real],  # noqa: F821
     R: Arr[Where[i : Fin[nb], a : Fin[Q], b : Fin[Q], a + b < Q], Real],  # noqa: F821
 ):
-    """The flagship's reconstruction: three binders, and a guard ``a + b == 0``."""
+    """An L2P's reconstruction of sumpy's stored derivatives: three binders."""
     for i in R.dom:
         for a in R.dom[i]:
             for b in R.dom[i, a]:
@@ -59,7 +59,7 @@ def evaluate(
     pot: Arr[Fin[nb], Fin[cnt], Real],  # noqa: F821
     inv_fact: Arr[Fin[Q], Real],
 ):
-    """The flagship's evaluation: the triangle beside the ragged targets."""
+    """An L2P's evaluation: the triangle beside the ragged targets."""
     for i in pot.dom:
         for t in pot.dom[i]:
             x = tx[i, t]

@@ -178,10 +178,11 @@ What does work on a device for a ragged product is one row per work group,
 `tag(r="g.0")`, with the row's entries summed sequentially inside the group. That
 ran, and it agreed.
 
-## 2026-10-11: the demo kernels' gaps, on the PoCL CPU device
+## 2026-10-11: three examples of sumpy, firedrake and grudge kernels, on the PoCL CPU device
 
-`docs/device-runs/demo_gaps.py` runs three of the examples added for the demo
-kernels on PoCL 7.0's CPU device, with the GPU hidden from the process, each
+`docs/device-runs/demo_gaps.py` runs `examples/layer_potential.py`,
+`examples/quadrature.py` and `examples/sum_factorization.py` on PoCL 7.0's CPU
+device, with the GPU hidden from the process, each
 compiled for `target="opencl"` and compared with the example's own body
 (`docs/device-runs/pocl-cpu-demo-gaps.log`):
 
@@ -222,7 +223,7 @@ until a device is actually asked for.
 | `device-runs/h200-cuda-device-demos.log` | the device driver, GPU |
 | `device-runs/h200-cuda-reduction-probe.log` | the reduction investigation, GPU |
 | `device-runs/pocl-epyc-cpu-*.log` | the same three, PoCL on the CPU |
-| `device-runs/demo_gaps.py` | the driver of 2026-10-11: three demo-kernel examples on a device |
+| `device-runs/demo_gaps.py` | the driver of 2026-10-11: three examples on a device |
 | `device-runs/pocl-cpu-demo-gaps.log` | that driver, PoCL on the CPU |
 
 The device-demos and reduction-probe logs each open with a `NoSuchEntryError`
