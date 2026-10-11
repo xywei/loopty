@@ -198,8 +198,9 @@ sessions), within the fact's budget (`LANKY_LEAN_BUDGET`), and a part that
 runs out of time leaves the fact `decided`, saying so. Every answer of Lean's
 is kept, by the hash of the Lean version and the declaration
 (`LANKY_LEAN_PROOF_CACHE`, `off` for none), so a file checked again reads them
-back: the stencil's ledger takes 2.3 s the first time on the machine the
-coverage report ran on, and 1.4 s the next, against 0.6 s without Lean.
+back: the stencil's ledger takes 2.5 s the first time on the machine the
+coverage report ran on, and 1.3 s the next, against 0.6 s without Lean; the
+slowest example, `travel.py`, 8.5 s, 4.4 s and 2.1 s.
 `LANKY_LEAN_DISABLE=1` turns Lean off, and the ledger reads `decided` as before.
 
 ## Coverage
@@ -220,35 +221,35 @@ same way twice. The others are claims isl could get wrong.
 | file | isl facts | proved | decided, not proved | refuted, negation proved | Lean time |
 |---|---:|---:|---:|---:|---:|
 | `examples/composition.py` | 10 | 10 | 0 | 0 | 1.6 s |
-| `examples/fusion.py` | 16 | 12 | 3 | 1 | 0.6 s |
-| `examples/p2p.py` | 19 | 19 | 0 | 0 | 2.2 s |
-| `examples/pairs.py` | 14 | 14 | 0 | 0 | 0.9 s |
+| `examples/fusion.py` | 16 | 12 | 3 | 1 | 0.7 s |
+| `examples/p2p.py` | 19 | 19 | 0 | 0 | 2.1 s |
+| `examples/pairs.py` | 14 | 14 | 0 | 0 | 0.8 s |
 | `examples/reshape_layouts.py` | 16 | 16 | 0 | 0 | 1.7 s |
 | `examples/spmv.py` | 18 | 18 | 0 | 0 | 0.9 s |
-| `examples/stencil_skew.py` | 10 | 9 | 0 | 1 | 2.4 s |
-| `examples/travel.py` | 47 | 45 | 2 | 0 | 3.7 s |
-| `examples/wavefront_acoustic.py` | 24 | 21 | 0 | 3 | 9.8 s |
+| `examples/stencil_skew.py` | 10 | 9 | 0 | 1 | 2.5 s |
+| `examples/travel.py` | 47 | 45 | 2 | 0 | 3.4 s |
+| `examples/wavefront_acoustic.py` | 24 | 21 | 0 | 3 | 9.2 s |
 | `tests/kernels/axpy.py` | 4 | 4 | 0 | 0 | 0.1 s |
-| `tests/kernels/domains.py` | 90 | 89 | 0 | 1 | 6.0 s |
+| `tests/kernels/domains.py` | 90 | 89 | 0 | 1 | 5.8 s |
 | `tests/kernels/out_of_bounds.py` | 4 | 3 | 0 | 1 | 0.2 s |
 | `tests/kernels/spmv_min.py` | 14 | 14 | 0 | 0 | 0.0 s |
 | `tests/kernels/stencil.py` | 5 | 5 | 0 | 0 | 0.0 s |
-| `tests/kernels/travel.py` | 64 | 61 | 2 | 1 | 2.5 s |
-| `tests/kernels/travel_wrong.py` | 168 | 159 | 2 | 7 | 9.6 s |
+| `tests/kernels/travel.py` | 64 | 61 | 2 | 1 | 2.3 s |
+| `tests/kernels/travel_wrong.py` | 168 | 159 | 2 | 7 | 9.4 s |
 
 By kind:
 
 | kind | isl facts | proved | decided, not proved | refuted, negation proved | parts | median s per part | slowest part |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| bijective | 15 | 14 | 1 | 0 | 58 | 0.129 | 0.49 s |
-| definedness | 19 | 18 | 1 | 0 | 22 | 0.086 | 0.18 s |
-| disjoint-writes | 108 | 108 | 0 | 0 | 108 | 0.023 | 0.15 s |
-| element-sort | 28 | 20 | 0 | 8 | 20 | 0.058 | 0.09 s |
-| in-bounds | 230 | 228 | 0 | 2 | 245 | 0.053 | 1.12 s |
+| bijective | 15 | 14 | 1 | 0 | 58 | 0.130 | 0.52 s |
+| definedness | 19 | 18 | 1 | 0 | 22 | 0.085 | 0.17 s |
+| disjoint-writes | 108 | 108 | 0 | 0 | 108 | 0.022 | 0.14 s |
+| element-sort | 28 | 20 | 0 | 8 | 20 | 0.058 | 0.07 s |
+| in-bounds | 230 | 228 | 0 | 2 | 245 | 0.048 | 1.14 s |
 | layout | 6 | 0 | 6 | 0 | 0 | - | - |
-| monotone | 20 | 14 | 1 | 5 | 115 | 0.199 | 0.61 s |
-| ordering | 81 | 81 | 0 | 0 | 226 | 0.023 | 0.14 s |
-| requirement | 16 | 16 | 0 | 0 | 16 | 0.146 | 0.43 s |
+| monotone | 20 | 14 | 1 | 5 | 115 | 0.183 | 0.58 s |
+| ordering | 81 | 81 | 0 | 0 | 226 | 0.022 | 0.11 s |
+| requirement | 16 | 16 | 0 | 0 | 16 | 0.145 | 0.43 s |
 
 Every fact Lean did not prove, and why:
 
