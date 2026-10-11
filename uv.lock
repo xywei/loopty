@@ -72,7 +72,7 @@ source = { git = "https://github.com/inducer/islpy.git?branch=main#9a4223a387ade
 
 [[package]]
 name = "lanky"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "../lanky" }
 dependencies = [
     { name = "numpy" },
@@ -96,7 +96,7 @@ dev = [
 
 [[package]]
 name = "loopty"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "islpy" },
