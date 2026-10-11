@@ -21,7 +21,7 @@ import islpy as isl
 import numpy as np
 import pytest
 from lanky.ledger import Status
-from lanky.prelude import Bool, Int, Nat, Real
+from lanky.prelude import Bool, Fn, Int, Nat, Real
 from lanky.terms import render
 
 from loopty import (
@@ -700,6 +700,75 @@ def test_an_argument_is_read_once_when_the_call_is_made() -> None:
     A, B = RNG.standard_normal((2, 3)), RNG.uniform(1.0, 2.0, (2, 3))
     inputs = {"A": Arr.from_numpy(A), "B": Arr.from_numpy(B)}
     fact = LoopyExecutor().differential(by_first, Schedule(by_first), inputs)
+    assert fact.status is Status.TESTED
+
+
+def test_a_value_a_function_captured_is_read_once_when_it_is_made() -> None:
+    # Natively a default, or a name the function closes over, is the value it
+    # had when the function was made; inlined, x[0] would be read where use
+    # calls f, after use doubled it.
+    @kernel
+    def use(
+        f: Fn[Fin[1], Real],
+        x: Arr[Fin[n], Real],  # noqa: F821
+        y: Arr[Fin[n], Real],  # noqa: F821
+    ):
+        for i in x.dom:
+            x[i] = 2.0 * x[i]
+        for i in y.dom:
+            y[i] = f(0)
+
+    @kernel
+    def by_default(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        use(lambda q, saved=x[0]: saved, x, y)
+
+    @kernel
+    def by_closure(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        v = x[0]
+        use(lambda q: v, x, y)
+
+    for found in (by_default, by_closure):
+        with pytest.raises(TraceError) as caught:
+            found.term
+        assert (
+            "which holds x[0], a value it captured that reads x, and it writes x "
+            "through its x (x): natively the function holds the value x[0] had "
+            "when it was made"
+        ) in str(caught.value)
+        assert "Capture something that does not read x" in str(caught.value)
+
+    # the cells a gather picks are a copy natively, taken when it is made
+    @kernel
+    def zero_then(
+        f: Fn[Fin[3], Real],
+        u: Arr[Fin[nv], Real],  # noqa: F821
+        y: Arr[Fin[3], Real],
+    ):
+        for k in u.dom:
+            u[k] = 0.0
+        for k in y.dom:
+            y[k] = f(k)
+
+    @kernel
+    def by_gather(
+        cell: Arr[Fin[nc], Fin[3], Fin[nv]],  # noqa: F821
+        u: Arr[Fin[nv], Real],  # noqa: F821
+        y: Arr[Fin[nc], Fin[3], Real],  # noqa: F821
+    ):
+        for c in y.dom:
+            g = u[cell[c]]
+            zero_then(lambda q: g[q], u, y[c])
+
+    with pytest.raises(TraceError, match=r"which holds u\[cell\[c\]\], a value"):
+        by_gather.term
+
+    # read inside the function, x[0] is read where use calls it, both ways
+    @kernel
+    def by_reading(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+        use(lambda q: x[0], x, y)
+
+    inputs = {"x": Arr.from_numpy(np.arange(1.0, 4.0)), "y": Arr.zeros(3)}
+    fact = LoopyExecutor().differential(by_reading, Schedule(by_reading), inputs)
     assert fact.status is Status.TESTED
 
 

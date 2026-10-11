@@ -493,6 +493,12 @@ class LoopyExecutor:
             _entry_offsets(term, lowering),
             written=lowering.results,
         )
+        if term.temporaries:
+            # A program's own array whose length the sizes make negative,
+            # which numpy refuses natively when the program makes it.
+            from loopty.contract import made_extents, resolve_sizes
+
+            made_extents(term.temporaries, resolve_sizes(dict(term.params), supplied))
         # The differential runs on copies; this run writes in place.
         writeable_outputs(dict(term.params), supplied, lowering.results)
         inherited_storage(term.array_types, term.temporaries_like, supplied)

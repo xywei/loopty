@@ -20,7 +20,7 @@ import pytest
 from lanky.ledger import Status
 from lanky.prelude import Fin, Real
 
-from loopty import Arr, Schedule, TraceError, kernel, program
+from loopty import Arr, Schedule, TraceError, kernel, program, reduce_sum, when
 from loopty.executor import LoopyExecutor
 from loopty.faithful import KIND
 from loopty.oracle import IslOracle
@@ -146,6 +146,40 @@ def test_an_array_of_a_declared_dense_shape() -> None:
     twice(**data)
     np.testing.assert_allclose(data["e"].numpy(), 4.0 * np.arange(1.0, 6.0))
     fact = LoopyExecutor().differential(twice, Schedule(twice), _inputs())
+    assert fact.status is Status.TESTED
+
+
+def test_a_declared_length_the_sizes_make_negative_is_refused_both_ways() -> None:
+    # numpy refuses Arr.zeros((-1,)) when the program makes it, and the
+    # compiled program would declare the array with that length.
+    @kernel
+    def head(x: Arr[Fin[n], Real], y: Arr[Fin[k], Real]):  # noqa: F821
+        for p in y.dom:
+            with when(p + 3 < x.dom.size):
+                y[p] = x[p + 3]
+
+    @kernel
+    def total(y: Arr[Fin[k], Real], e: Arr[Fin[1], Real]):  # noqa: F821
+        for p in e.dom:
+            e[p] = reduce_sum(y[q] for q in y.dom)
+
+    @program
+    def tail(x, e):
+        y = Arr.zeros((x.dom.size - 3,))
+        head(x, y)
+        total(y, e)
+
+    def inputs(count: int) -> dict:
+        return {"x": Arr.from_numpy(np.arange(1.0, count + 1.0)), "e": Arr.zeros(1)}
+
+    with pytest.raises(ValueError, match="negative dimensions"):
+        tail(**inputs(2))
+    with pytest.raises(ValueError) as caught:
+        LoopyExecutor().run(tail, **inputs(2))
+    assert "with axis 0 of length" in str(caught.value)
+    assert "which is -1 at" in str(caught.value)
+    assert "natively numpy refuses a negative length" in str(caught.value)
+    fact = LoopyExecutor().differential(tail, Schedule(tail), inputs(5))
     assert fact.status is Status.TESTED
 
 
