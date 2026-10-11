@@ -2445,7 +2445,8 @@ def _atomic_kernel(kernel: Any, array: str, updates: Collection[str]) -> Any:
     array; any other that writes it initializes it atomically
     (``AtomicInit``), and one that reads it loads it atomically
     (``AtomicLoad``): loopy refuses a non-atomic access to an array
-    declared for atomics. A load is read as the array's own dtype, which
+    declared for atomics. A load, and a read by a store that is no update,
+    is read as the array's own dtype, which
     loopy would otherwise give a temporary computed from it, the accumulator
     of a sum of it, and then refuse that temporary's plain start (note 31 in
     ``docs/loopy-notes.md``).
@@ -2490,6 +2491,11 @@ def _atomic_kernel(kernel: Any, array: str, updates: Collection[str]) -> Any:
             if array in insn.assignee_var_names():
                 kind = AtomicUpdate if insn.id in updates else AtomicInit
                 insn = insn.copy(atomicity=(*others, kind(array)))
+                # A store that also reads the array, y[i] = y[i] * s, reads
+                # the dtype it holds, as a load does. (An update keeps its
+                # read as written: the compare-and-swap finds it there.)
+                if kind is AtomicInit and array in insn.read_dependency_names():
+                    insn = insn.copy(expression=Loaded()(insn.expression))
             elif array in insn.read_dependency_names():
                 insn = insn.copy(
                     atomicity=(*others, AtomicLoad(array)),

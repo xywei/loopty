@@ -151,6 +151,31 @@ def zeroed_then_assembled(
 
 
 @kernel
+def assembled_then_scaled(
+    cell: Arr[Fin[nc], Fin[3], Fin[nv]],  # noqa: F821
+    yl: Arr[Fin[nc], Fin[3], Real],  # noqa: F821
+    y: Arr[Fin[nv], Real],  # noqa: F821
+):
+    """``y`` assembled, then each node scaled by the sum of them: no update."""
+    for c in yl.dom:
+        for k in yl.dom[c]:
+            y[cell[c, k]] += yl[c, k]
+    for i in y.dom:
+        y[i] = y[i] * reduce_sum(y[j] for j in y.dom)
+
+
+@kernel
+def moved(
+    p: Arr[Fin[n], Fin[n]],  # noqa: F821
+    x: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """``x`` written into ``y`` through ``p``."""
+    for i in x.dom:
+        y[p[i]] = x[i]
+
+
+@kernel
 def scaled(
     cell: Arr[Fin[nc], Fin[3], Fin[nv]],  # noqa: F821
     yl: Arr[Fin[nc], Fin[3], Real],  # noqa: F821
@@ -251,6 +276,13 @@ def example_inputs() -> dict:
         "reflected": dict(assembly),
         "halves": {"cell": cells, "m": Arr.from_numpy(np.zeros(4, dtype=np.int64))},
         "read_back": {**assembly, "z": Arr.zeros((2, 3))},
+        "assembled_then_scaled": dict(assembly),
+        # the last of 12 000 writes is the only one to a cell written before
+        "moved": {
+            "p": Arr.from_numpy(np.append(np.arange(11_999), 0)),
+            "x": Arr.from_numpy(np.ones(12_000)),
+            "y": Arr.zeros(12_000),
+        },
         # node 3 is the second node of cell 0 and the first of cell 1
         "two_updates": {
             "cell": Arr.from_numpy(np.array([[0, 3, 1], [3, 2, 1]])),
@@ -348,6 +380,15 @@ def test_a_write_through_a_map_is_refuted_with_two_cells_of_the_mesh() -> None:
         "(nc=2, nv=4), where cell[0, 2] = 3 and cell[1, 1] = 3, so the later "
         "write overwrites the earlier one"
     )
+
+
+def test_a_write_through_a_map_is_refuted_past_ten_thousand_writes() -> None:
+    # Every write of the statement is looked at: the only collision is the
+    # last instance's, past the cap a refusal's search for a pair keeps.
+    (disjoint,) = facts_of(moved, "disjoint-writes")
+    assert disjoint.status is Status.REFUTED
+    assert disjoint.provenance["witness"] == "S0[i=0] and S0[i=11999]"
+    assert "on example_inputs() (n=12000)" in disjoint.provenance["reason"]
 
 
 def test_a_write_through_a_map_that_keeps_rows_apart_is_tested() -> None:
@@ -573,6 +614,18 @@ def test_every_access_to_an_atomic_array_is_atomic_on_opencl(plain_opencl) -> No
     assert code.count("atom_cmpxchg") == 1 + 4
     assert "loopy_new_val = (volatile double) (0.0);" in code
     assert "acc_i_0 = acc_i_0 + (double) (y[i_0]);" in code
+
+
+def test_a_writer_that_reads_an_atomic_array_reads_it_as_its_dtype(
+    plain_opencl,
+) -> None:
+    # The scaling writes y and reads it in a sum: its store initializes y
+    # atomically, and its reads are of the double y holds, so that the sum's
+    # accumulator is a plain double, as a read-only instruction's are.
+    schedule = Schedule(assembled_then_scaled, target="opencl").atomic("y")
+    assert schedule.buildable == (True, ""), schedule.buildable
+    code = emit_code(schedule)
+    assert "acc_j = acc_j + (double) (y[j]);" in code
 
 
 @pytest.mark.parametrize(

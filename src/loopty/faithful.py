@@ -570,7 +570,8 @@ def collisions(
     logged: Logged,
     array: str,
     pairs: Any,
-    limit: int = 10_000,
+    limit: int | None = 10_000,
+    only: Any = None,
 ) -> Iterator[Collision]:
     """Pairs of instances that touched one cell of ``array`` on one input.
 
@@ -580,7 +581,10 @@ def collisions(
     a schedule reverses for a cast. The cells are those the run computed,
     which isl cannot when a subscript is read from an array, ``y[cell[c,
     j]]``. The pairs come in the order the run reached the second of the
-    two, and at most ``limit`` touches of the array are looked at.
+    two, and at most ``limit`` touches of the array are looked at, every
+    one with ``None``. ``only(touch)``, when given, keeps the touches the
+    pairs are among, and the others are not counted: the writes of one
+    statement, of which a run has as many as the statement has instances.
     """
     by_stmt = {stmt.id: stmt for stmt in term.stmts}
     seen: dict[tuple[Any, ...], list[Touch]] = {}
@@ -588,10 +592,10 @@ def collisions(
     reads = None
     count = 0
     for touch in logged.log:
-        if touch.array != array:
+        if touch.array != array or (only is not None and not only(touch)):
             continue
         count += 1
-        if count > limit:
+        if limit is not None and count > limit:
             return
         earlier = seen.setdefault(touch.cell, [])
         for first in earlier:
@@ -700,15 +704,21 @@ def collision_fact(term: Term, fact: Fact, touched: Sequence[Logged]) -> Fact:
     stmt_id = fact.provenance["statement"]
     array = fact.provenance["array"]
 
+    def written(touch: Touch) -> bool:
+        return touch.kind == "write" and touch.stmt == stmt_id
+
     def writes_of_one(first: Touch, second: Touch) -> bool:
-        return (
-            first.kind == second.kind == "write"
-            and first.stmt == second.stmt == stmt_id
-        )
+        return written(first) and written(second)
 
     tried: list[str] = []
     for logged in touched:
-        found = next(collisions(term, logged, array, writes_of_one), None)
+        # Every write of the statement is looked at: a scan cut short could
+        # miss a later collision and read the input as tried. Each cell holds
+        # one write until the first collision, so the scan is one pass.
+        found = next(
+            collisions(term, logged, array, writes_of_one, limit=None, only=written),
+            None,
+        )
         if found is None:
             tried.append(logged.label)
             continue
