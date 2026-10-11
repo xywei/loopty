@@ -1822,10 +1822,13 @@ def write_disjointness_facts(
     array whose layout the term rewrites rests on that layout's fact.
 
     An update, ``y[cell[c, j]] += v`` (:attr:`loopty.term.Stmt.exactness`),
-    owes none: two of its instances may add to one cell, which is what an
+    whose instances may add to one cell owes none: that is what an
     accumulation is for, and what it owes instead is the class of the sum
     (:func:`reduction_facts`). Whether two of them may run at the same time
-    is a schedule's question (:meth:`loopty.schedule.Schedule.atomic`).
+    is a schedule's question (:meth:`loopty.schedule.Schedule.atomic`). An
+    update isl shows writes a cell of its own at every instance, ``y[i] +=
+    a * x[i]``, accumulates nothing across instances, and owes its distinct
+    writes as an assignment does (:func:`accumulating`).
 
     A write through a subscript isl cannot read, ``y[perm[i]] = x[i]``, is
     widened to every cell of the array (:func:`loopty.flow.access_relation`),
@@ -1839,12 +1842,13 @@ def write_disjointness_facts(
     sizes = flow.size_names(term)
     layouts = layout_fact_ids(term, owner, module=module, line=line)
     by_statement = {stmt.id: stmt for stmt in term.stmts}
+    sums = accumulating(term)
     facts: list[Fact] = []
     for footprint in flow.footprints(term):
         if not footprint.touches_memory:
             continue
         stmt = by_statement[footprint.stmt]
-        if footprint.kind == "acc" and stmt.exactness is not None:
+        if footprint.kind == "acc" and stmt.id in sums:
             continue
         identifier = fact_id(
             "disjoint-writes",
@@ -1924,6 +1928,45 @@ def write_disjointness_facts(
             )
         )
     return facts
+
+
+def accumulating(term: Term) -> dict[str, tuple[str, ...]]:
+    """The updates whose instances may add to one cell, and the loops they sum over.
+
+    An update (:attr:`loopty.term.Stmt.exactness`) is an accumulation when
+    two of its instances can update one cell: always, as isl reads it, when
+    the cell is read from an array, ``y[cell[c, k]]``, which isl cannot
+    follow; and where isl finds two that do, ``y[r]`` over ``r`` and ``j``.
+    The loops the sum runs over are those the cell does not name, ``j`` for
+    ``y[r]``, or all of the statement's when it names every one or is read
+    from an array. An update that writes a cell of its own at every
+    instance, ``y[i] += a * x[i]``, is not one, and is not listed.
+    """
+    sizes = flow.size_names(term)
+    by_statement = {stmt.id: stmt for stmt in term.stmts}
+    out: dict[str, tuple[str, ...]] = {}
+    for footprint in flow.footprints(term):
+        stmt = by_statement[footprint.stmt]
+        if footprint.kind != "acc" or stmt.exactness is None:
+            continue
+        indices = tuple(stmt.assignee.indices)
+        relation = footprint.relation
+        if _is_widened(relation, indices):
+            out[stmt.id] = tuple(stmt.inames)
+            continue
+        identity = isl.Map.identity(relation.get_space().domain().map_from_set())
+        collisions = flow.assume_sizes(
+            relation.apply_range(relation.reverse()).subtract(
+                identity.align_params(relation.get_space())
+            ),
+            sizes,
+        )
+        if collisions.is_empty():
+            continue
+        named = flow._names_in(indices)
+        over = tuple(name for name in stmt.inames if name not in named)
+        out[stmt.id] = over or tuple(stmt.inames)
+    return out
 
 
 def kernel_definedness_facts(
@@ -2091,16 +2134,19 @@ def reduction_facts(
 ) -> list[Fact]:
     """One fact per reduction: the exactness class its accumulation is allowed.
 
-    And one per update, ``y[cell[c, j]] += v``, whose accumulation runs over
-    the statement's own loops: its instances that add to one cell are the
-    terms of a sum, in the order the source runs them, and the class is
-    the one :func:`loopty.trace.update_exactness` reads off what they add.
+    And one per update whose instances may add to one cell, ``y[cell[c, j]]
+    += v`` (:func:`accumulating`): those instances are the terms of a sum,
+    in the order the source runs them, over the loops the cell does not
+    name, and the class is the one :func:`loopty.trace.update_exactness`
+    reads off what they add.
     """
     facts: list[Fact] = []
+    sums = accumulating(term)
     for stmt in term.stmts:
-        if stmt.exactness is not None:
+        if stmt.id in sums:
             target = _access_text(stmt.assignee.array, stmt.assignee.indices)
-            over = f" over {', '.join(stmt.inames)}" if stmt.inames else ""
+            loops = sums[stmt.id]
+            over = f" over {', '.join(loops)}" if loops else ""
             facts.append(
                 Fact(
                     id=fact_id(
@@ -2120,7 +2166,7 @@ def reduction_facts(
                     provenance={
                         "exactness": stmt.exactness,
                         "op": "update",
-                        "inames": list(stmt.inames),
+                        "inames": list(loops),
                         "commutes": commutes(stmt),
                     },
                     where=stmt.where,

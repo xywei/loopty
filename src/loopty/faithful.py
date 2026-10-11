@@ -525,7 +525,7 @@ class Collision:
     @property
     def at(self) -> str:
         """The input and its sizes, ``example_inputs() (nc=2, nv=4)``."""
-        if "(" in self.label:
+        if self.label.startswith("sample ") and self.label.endswith(")"):
             return self.label  # a drawn input's label has its sizes
         sizes = ", ".join(
             f"{name}={value}" for name, value in sorted(self.sizes.items())
