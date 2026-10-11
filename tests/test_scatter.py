@@ -18,7 +18,7 @@ import pytest
 from lanky.ledger import Status
 from lanky.prelude import Int, Real
 
-from loopty import Arr, Fin, Schedule, kernel, program, when
+from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum, when
 from loopty.executor import LoopyExecutor, emit_code
 from loopty.flow import dependences
 from loopty.interpret import interpret
@@ -131,6 +131,23 @@ def subtracted(
     for c in yl.dom:
         for k in yl.dom[c]:
             y[cell[c, k]] -= yl[c, k]
+
+
+@kernel
+def zeroed_then_assembled(
+    cell: Arr[Fin[nc], Fin[3], Fin[nv]],  # noqa: F821
+    yl: Arr[Fin[nc], Fin[3], Real],  # noqa: F821
+    y: Arr[Fin[nv], Real],  # noqa: F821
+    total: Arr[Fin[1], Real],  # noqa: F821
+):
+    """``y`` zeroed, assembled, and summed: a write, updates and a read of it."""
+    for i in y.dom:
+        y[i] = 0.0
+    for c in yl.dom:
+        for k in yl.dom[c]:
+            y[cell[c, k]] += yl[c, k]
+    for z in total.dom:
+        total[z] = reduce_sum(y[i] for i in y.dom)
 
 
 @program
@@ -452,6 +469,31 @@ def test_atomic_updates_of_a_type_loopy_has_no_atomics_for_are_unbuildable(
     )
 
 
+def test_every_access_to_an_atomic_array_is_atomic_on_opencl(plain_opencl) -> None:
+    # loopy refuses a non-atomic access to an array declared for atomics: the
+    # zeroing initializes y atomically, and the sum loads it so. (On work
+    # items the zeroing and the sum, in no loop on the axis, would run on
+    # every one of them, which is refused: a kernel has no barrier between
+    # groups.)
+    with pytest.raises(IllegalCast, match="S0 runs in no loop on g.0"):
+        Schedule(zeroed_then_assembled, target="opencl").atomic("y").split(
+            "c", 32
+        ).tag(c_outer="g.0", c_inner="l.0")
+    schedule = (
+        Schedule(zeroed_then_assembled, target="opencl")
+        .atomic("y")
+        .split("c", 4)
+        .tag(c_inner="ilp")
+    )
+    code = emit_code(schedule)
+    assert "__global volatile double *__restrict__ y" in code
+    # The zeroing, a compare-and-swap of 0; the updates, four of them unrolled
+    # by ilp; and the sum, reading y as the double it holds.
+    assert code.count("atom_cmpxchg") == 1 + 4
+    assert "loopy_new_val = (volatile double) (0.0);" in code
+    assert "acc_i_0 = acc_i_0 + (double) (y[i_0]);" in code
+
+
 def test_atomic_updates_run_on_an_opencl_device() -> None:
     # Needs pyopencl and a device, which CI has neither of.
     pytest.importorskip("pyopencl")
@@ -468,6 +510,17 @@ def test_atomic_updates_run_on_an_opencl_device() -> None:
         "y": Arr.zeros(9),
     }
     fact = LoopyExecutor(target="opencl").differential(scatter, schedule, arguments)
+    assert fact.status is Status.TESTED, fact.provenance
+    zeroed = (
+        Schedule(zeroed_then_assembled, target="opencl")
+        .atomic("y")
+        .split("c", 4)
+        .tag(c_inner="ilp")
+    )
+    arguments = {**arguments, "y": Arr.zeros(9), "total": Arr.zeros(1)}
+    fact = LoopyExecutor(target="opencl").differential(
+        zeroed_then_assembled, zeroed, arguments
+    )
     assert fact.status is Status.TESTED, fact.provenance
 
 

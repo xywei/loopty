@@ -2431,7 +2431,10 @@ def _atomic_kernel(kernel: Any, array: str, updates: Collection[str]) -> Any:
     array; any other that writes it initializes it atomically
     (``AtomicInit``), and one that reads it loads it atomically
     (``AtomicLoad``): loopy refuses a non-atomic access to an array
-    declared for atomics.
+    declared for atomics. A load is read as the array's own dtype, which
+    loopy would otherwise give a temporary computed from it, the accumulator
+    of a sum of it, and then refuse that temporary's plain start (note 30 in
+    ``docs/loopy-notes.md``).
     """
     from loopy.kernel.instruction import (
         Assignment,
@@ -2439,15 +2442,27 @@ def _atomic_kernel(kernel: Any, array: str, updates: Collection[str]) -> Any:
         AtomicLoad,
         AtomicUpdate,
     )
+    from loopy.symbolic import IdentityMapper, TypeCast
     from loopy.types import to_loopy_type
 
     entry = kernel.default_entrypoint
+    plain: list[np.dtype] = []
 
     def held(var: Any) -> Any:
         dtype = getattr(var.dtype, "numpy_dtype", None)
         if dtype is None:
             return var
+        plain.append(np.dtype(dtype))
         return var.copy(dtype=to_loopy_type(dtype, for_atomic=True))
+
+    class Loaded(IdentityMapper):
+        """Every read of the array, as the plain dtype it holds."""
+
+        def map_subscript(self, expr: Any, *args: Any, **kwargs: Any) -> Any:
+            mapped = super().map_subscript(expr, *args, **kwargs)
+            if plain and getattr(expr.aggregate, "name", None) == array:
+                return TypeCast(plain[0], mapped)
+            return mapped
 
     args = [held(arg) if arg.name == array else arg for arg in entry.args]
     temporaries = {
@@ -2462,7 +2477,10 @@ def _atomic_kernel(kernel: Any, array: str, updates: Collection[str]) -> Any:
                 kind = AtomicUpdate if insn.id in updates else AtomicInit
                 insn = insn.copy(atomicity=(*others, kind(array)))
             elif array in insn.read_dependency_names():
-                insn = insn.copy(atomicity=(*others, AtomicLoad(array)))
+                insn = insn.copy(
+                    atomicity=(*others, AtomicLoad(array)),
+                    expression=Loaded()(insn.expression),
+                )
         instructions.append(insn)
     return kernel.with_kernel(
         entry.copy(
