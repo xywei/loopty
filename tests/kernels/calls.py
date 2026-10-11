@@ -5,7 +5,8 @@ writes its parameters (``symmetric``) is called as a statement and writes
 through the row it is given. ``integrate`` takes a function, and ``p1_mass``
 passes it one. Every call owes the caller facts at the points it is made at:
 the rows it passes in bounds, its integral scalars in their sorts, two rows of
-one array apart, and the callee's postcondition restated. The kernels whose
+one array apart where the callee writes one, and the callee's postcondition
+restated. The kernels whose
 names start with ``off_`` break one of them, so that a refutation, and Lean's
 proof of its negation, are exercised too.
 """
@@ -49,11 +50,25 @@ def csr(
 
 @kernel
 def gram(A: Arr[Fin[m], Fin[n], Real], G: Arr[Fin[m], Fin[m], Real]):
-    """The upper triangle of ``A A^T``, two rows of ``A`` at a time."""
+    """``A A^T``, two rows of ``A`` at a time, one row twice on the diagonal."""
     for i in G.dom:
         for j in G.dom[i]:
-            with when(i < j):
-                G[i, j] = dot(A[i], A[j])
+            G[i, j] = dot(A[i], A[j])
+
+
+@kernel
+def add_into(a: Arr[Fin[n], Real], b: Arr[Fin[n], Real]):
+    """``a += b``: it writes ``a``, so ``b`` may not share its cells."""
+    for k in a.dom:
+        a[k] = a[k] + b[k]
+
+
+@kernel
+def running(A: Arr[Fin[m], Fin[n], Real]):
+    """Each row of ``A`` plus the one before it, in order: a running sum."""
+    for i in A.dom:
+        with when(i > 0):
+            add_into(A[i], A[i - 1])
 
 
 @kernel
@@ -143,8 +158,8 @@ def off_the_sort(
 
 
 @kernel
-def off_the_diagonal(A: Arr[Fin[m], Fin[n], Real], G: Arr[Fin[m], Fin[m], Real]):
-    """Two rows of ``A`` that are one row where ``i == j``."""
-    for i in G.dom:
-        for j in G.dom[i]:
-            G[i, j] = dot(A[i], A[j])
+def off_the_diagonal(A: Arr[Fin[m], Fin[n], Real]):
+    """Row ``j`` added into row ``i``: one row, written and read, at ``i == j``."""
+    for i in A.dom:
+        for j in A.dom:
+            add_into(A[i], A[j])

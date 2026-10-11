@@ -65,8 +65,9 @@ renamed (``k_0``).
 *The call owes what the callee's contract checks.* Natively ``dot`` is called
 ``m`` times, and its contract checks each call. Compiled there is one kernel,
 so the caller owes the same at every point of the call: the row in bounds,
-two rows of one array apart, an integral argument in its sort. isl decides
-them, and Lean states each from loopty's own description of the call.
+an integral argument in its sort, and two rows of one array apart where the
+callee writes one. isl decides them, and Lean states each from loopty's own
+description of the call.
 
 *The postcondition travels.* ``element_mass`` promises a symmetric matrix,
 tested on its native runs; after each call the caller has it of ``M[c]``, a

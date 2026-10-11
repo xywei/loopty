@@ -216,7 +216,7 @@ def test_the_postcondition_of_a_callee_is_restated_at_every_call() -> None:
     assert fact.rests_on == (post.id,)
     assert "M[c, 0, 1] == M[c, 1, 0]" in fact.statement
     assert fact.statement.startswith(
-        "after symmetric(...) at calls.py:89, wherever it is called:"
+        "after each call symmetric(u[cell[c]], M[c]) at calls.py:104:"
     )
 
 
@@ -275,13 +275,52 @@ def test_an_integral_argument_is_a_point_of_its_sort() -> None:
     assert refuted.provenance["witness"] == (0, 2)
 
 
-def test_two_rows_of_one_array_are_two_rows_wherever_they_are_passed() -> None:
-    (apart,) = _facts(calls.gram, "distinct-arguments")
+def test_two_rows_of_one_array_are_two_rows_where_one_is_written() -> None:
+    (apart,) = _facts(calls.running, "distinct-arguments")
     assert _decided(apart).status is Status.DECIDED
+    assert apart.statement.startswith(
+        "A[i] and A[i - 1], passed to add_into as a and b, share no cell of A"
+    )
+    A = RNG.standard_normal((4, 3))
+    out = Arr.from_numpy(A.copy())
+    calls.running(out)
+    np.testing.assert_allclose(out.numpy(), np.cumsum(A, axis=0))
     (together,) = _facts(calls.off_the_diagonal, "distinct-arguments")
     refuted = _decided(together)
     assert refuted.status is Status.REFUTED
     assert refuted.provenance["witness"] == (0, 0)
+
+
+def test_a_callee_that_only_reads_may_be_given_one_array_twice() -> None:
+    # The diagonal of a Gram matrix dots a row with itself: reads do not race,
+    # so neither the callee's contract nor the caller's facts ask for apart.
+    assert not _facts(calls.gram, "distinct-arguments")
+    A = RNG.standard_normal((3, 4))
+    G = Arr.zeros((3, 3))
+    calls.gram(Arr.from_numpy(A), G)
+    np.testing.assert_allclose(G.numpy(), A @ A.T)
+    inputs = {"A": Arr.from_numpy(A), "G": Arr.zeros((3, 3))}
+    fact = LoopyExecutor().differential(calls.gram, Schedule(calls.gram), inputs)
+    assert fact.status is Status.TESTED
+    assert _faithful(calls.gram).status is Status.TESTED
+    # natively, one array for both parameters of a rule; and compiled
+    x = RNG.standard_normal(5)
+    assert calls.dot(Arr.from_numpy(x), Arr.from_numpy(x)) == pytest.approx(x @ x)
+    shared = Arr.from_numpy(x.copy())
+    out = LoopyExecutor().run(calls.dot, a=shared, b=shared)
+    assert out["result"][0] == pytest.approx(x @ x)
+
+    @kernel
+    def norms(A: Arr[Fin[m], Fin[n], Real], y: Arr[Fin[m], Real]):  # noqa: F821
+        for i in y.dom:
+            y[i] = calls.dot(A[i], A[i])
+
+    y = Arr.zeros(3)
+    norms(Arr.from_numpy(A), y)
+    np.testing.assert_allclose(y.numpy(), (A * A).sum(axis=1))
+    # a callee that writes one of the two is still refused, natively too
+    with pytest.raises(ValueError, match="share storage"):
+        calls.add_into(shared, shared)
 
 
 def test_a_call_inside_a_sum_over_a_fin_says_its_points_are_unknown() -> None:
@@ -431,6 +470,49 @@ def test_a_kernel_does_not_call_itself() -> None:
     with pytest.raises(TraceError, match="a kernel does not call itself"):
         again.term
 
+    @kernel
+    def ping(x: Arr[Fin[n], Real]) -> Real:  # noqa: F821
+        return pong(x)
+
+    @kernel
+    def pong(x: Arr[Fin[n], Real]) -> Real:  # noqa: F821
+        return ping(x) + 1.0
+
+    with pytest.raises(TraceError, match="a kernel does not call itself"):
+        ping.term
+
+    def forever(q):
+        return calls.integrate(forever)
+
+    @kernel
+    def through(y: Arr[Fin[1], Real]):  # noqa: F821
+        for z in y.dom:
+            y[z] = calls.integrate(forever)
+
+    with pytest.raises(TraceError, match="with the same functions"):
+        through.term
+
+
+def test_a_rule_applied_to_a_function_that_applies_it_again() -> None:
+    # Nested quadrature: the rule inlined once per lambda, its binder named
+    # apart the second time; not a kernel calling itself.
+    @kernel
+    def double(y: Arr[Fin[1], Real]):  # noqa: F821
+        for z in y.dom:
+            y[z] = calls.integrate(
+                lambda q: calls.integrate(lambda p: calls.PHI[p, q] * calls.PHI[q, p])
+            )
+
+    assert [call.label for call in double.term.calls] == ["integrate@2", "integrate"]
+    phi, w = np.array(calls.PHI.values), np.array(calls.W.values)
+    want = w @ (phi * phi.T) @ w
+    y = Arr.zeros(1)
+    double(y)
+    assert y.numpy()[0] == pytest.approx(want)
+    fact = LoopyExecutor().differential(double, Schedule(double), {"y": Arr.zeros(1)})
+    assert fact.status is Status.TESTED
+    assert _faithful(double).status is Status.TESTED
+
 
 def test_a_program_calls_kernels_and_not_rules() -> None:
     @program
@@ -480,6 +562,58 @@ def test_a_scalar_and_a_function_are_given_what_they_are() -> None:
         given_a_number.term
 
 
+def test_an_argument_is_read_once_when_the_call_is_made() -> None:
+    # Natively s is A[i, 0] when the call is made; inlined, A[i, 0] would be
+    # read again at every k, after the callee wrote A[i, 0] / s into it.
+    @kernel
+    def scale(a: Arr[Fin[n], Real], s: Real):  # noqa: F821
+        for k in a.dom:
+            a[k] = a[k] / s
+
+    @kernel
+    def normalize(A: Arr[Fin[m], Fin[n], Real]):  # noqa: F821
+        for i in A.dom:
+            scale(A[i], A[i, 0])
+
+    with pytest.raises(TraceError, match="natively s is the value A\\[i, 0\\] has"):
+        normalize.term
+
+    # the cells a gather copies are picked by indices the callee writes
+    @kernel
+    def renumber(
+        a: Arr[Fin[3], Real],  # noqa: F821
+        idx: Arr[Fin[3], Fin[nv]],  # noqa: F821
+        out: Arr[Fin[3], Real],  # noqa: F821
+    ):
+        for k in idx.dom:
+            idx[k] = 0
+        for k in out.dom:
+            out[k] = a[k]
+
+    @kernel
+    def gathered(
+        cell: Arr[Fin[nc], Fin[3], Fin[nv]],  # noqa: F821
+        u: Arr[Fin[nv], Real],  # noqa: F821
+        o: Arr[Fin[nc], Fin[3], Real],  # noqa: F821
+    ):
+        for c in o.dom:
+            renumber(u[cell[c]], cell[c], o[c])
+
+    with pytest.raises(TraceError, match="which reads cell, and it writes cell"):
+        gathered.term
+
+    # a value the callee does not write may be passed by its expression
+    @kernel
+    def by_first(A: Arr[Fin[m], Fin[n], Real], B: Arr[Fin[m], Fin[n], Real]):  # noqa: F821
+        for i in A.dom:
+            scale(A[i], B[i, 0])
+
+    A, B = RNG.standard_normal((2, 3)), RNG.uniform(1.0, 2.0, (2, 3))
+    inputs = {"A": Arr.from_numpy(A), "B": Arr.from_numpy(B)}
+    fact = LoopyExecutor().differential(by_first, Schedule(by_first), inputs)
+    assert fact.status is Status.TESTED
+
+
 def test_a_kernel_that_writes_is_not_called_inside_a_sum() -> None:
     @kernel
     def writer(u: Arr[Fin[n], Real]):  # noqa: F821
@@ -516,6 +650,59 @@ def test_a_program_calls_a_kernel_that_calls_a_rule() -> None:
     A, x = RNG.standard_normal((3, 2)), RNG.standard_normal(2)
     inputs = {"A": Arr.from_numpy(A), "x": Arr.from_numpy(x), "y": Arr.zeros(3)}
     fact = LoopyExecutor().differential(solve, Schedule(solve), inputs)
+    assert fact.status is Status.TESTED
+
+
+def test_a_callees_names_never_capture_the_callers() -> None:
+    # The claim's binder j would capture the scalar j the row M[j] is at.
+    @kernel
+    def summed(
+        Me: Arr[Fin[p], Fin[p], Real],  # noqa: F821
+    ) -> all(Me[j, k] == Me[k, j] for j in Fin[p] for k in Fin[p]):  # noqa: F821
+        for j in Me.dom:
+            for k in Me.dom[j]:
+                Me[j, k] = 1.0 * (j + k)
+
+    @kernel
+    def at(M: Arr[Fin[q], Fin[r], Fin[r], Real], j: Fin[q]):  # noqa: F821
+        summed(M[j])
+
+    (call,) = at.term.calls
+    assert render(call.post) == (
+        "forall j_1 in Fin(r), k_0 in Fin(r). M[j, j_1, k_0] == M[j, k_0, j_1]"
+    )
+    # the callee's sum binder k, a loop k of the caller's, and a size k
+    @kernel
+    def by_k(
+        A: Arr[Fin[m], Fin[n], Real],  # noqa: F821
+        x: Arr[Fin[n], Real],  # noqa: F821
+        y: Arr[Fin[m], Real],  # noqa: F821
+    ):
+        for k in y.dom:
+            y[k] = calls.dot(A[k], x)
+
+    (stmt,) = by_k.term.stmts
+    assert render(stmt.expr.body) == "A[k, k_0]*x[k_0]"
+    A, x = RNG.standard_normal((4, 3)), RNG.standard_normal(3)
+    inputs = {"A": Arr.from_numpy(A), "x": Arr.from_numpy(x), "y": Arr.zeros(4)}
+    fact = LoopyExecutor().differential(by_k, Schedule(by_k), inputs)
+    assert fact.status is Status.TESTED
+
+    @kernel
+    def fill(a: Arr[Fin[p], Real], v: Real):  # noqa: F821
+        for n in a.dom:
+            a[n] = v
+
+    @kernel
+    def rows(M: Arr[Fin[n], Fin[q], Real]):  # noqa: F821
+        for i in M.dom:
+            fill(M[i], 1.0 * i)
+
+    assert rows.term.stmts[0].inames == ("i", "n_0")
+    with pytest.raises(ValueError, match="fill's loop n, inlined at .*, is n_0 here"):
+        Schedule(rows).split("n", 2)
+    schedule = Schedule(rows).split("n_0", 2)
+    fact = LoopyExecutor().differential(rows, schedule, {"M": Arr.zeros((3, 5))})
     assert fact.status is Status.TESTED
 
 

@@ -133,7 +133,7 @@ its own, in parallel.
 | what a program's call may assume | requirement, or flat access | the claim at every point of its domain, under the hypotheses isl used (a callee's postcondition, a theorem the program cites, a type the contract checks) |
 | a row passed to a kernel called in a loop is in bounds | row | the row's indices are a point of the array's leading axes, at every point of the call |
 | an integral argument of such a call is in its sort | argument | `0 ≤ v`, and `v < m` for `Fin[m]`, at every point of the call |
-| two rows of one array passed to one call are apart | pair of rows | the rows' indices differ on an axis both fix, at every point of the call |
+| two rows of one array passed to one call, one of them written, are apart | pair of rows | the rows' indices differ on an axis both fix, at every point of the call |
 | an assumption of a schedule | (a hypothesis of every later cast) | |
 
 The points of a call of a kernel inside another kernel's loop

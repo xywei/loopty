@@ -14,7 +14,9 @@ writing ``y[i]`` carries no dependence and may legally tag ``i`` parallel. Calle
 with ``x is y`` it is a race, and the differential test cannot see it: it copies
 each argument on its own, which destroys the alias and makes the two runs agree.
 :func:`disjoint_arguments` asks numpy whether two arguments share storage and
-refuses the call if they do.
+refuses the call if they do and the kernel writes either. Two parameters it
+only reads may share storage, ``dot(x, x)``: reads do not race, and both runs
+read the same values.
 
 *A ragged argument agrees with its counts family.* ``val: Arr[Fin[n], Fin[cnt],
 Real]`` says row ``r`` of ``val`` has ``cnt[r]`` entries. The generated loop is
@@ -83,7 +85,7 @@ never shorter than a non-negative ``n`` allows (:func:`sizes_not_negative`).
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 import numpy as np
@@ -177,7 +179,10 @@ def counts_family(typ: ArrType) -> str | None:
 # {{{ aliasing
 
 
-def disjoint_arguments(supplied: Mapping[str, Any]) -> None:
+def disjoint_arguments(
+    supplied: Mapping[str, Any],
+    written: Iterable[str] | Callable[[], Iterable[str] | None] | None = None,
+) -> None:
     """Refuse a call in which two distinct array parameters share storage.
 
     ``numpy.shares_memory`` is asked for the exact answer rather than
@@ -185,23 +190,38 @@ def disjoint_arguments(supplied: Mapping[str, Any]) -> None:
     refuses a legal call. The arrays a kernel is run on are the arrays of a
     differential test and of a demo, which are small; a size at which the exact
     decision is expensive is a size at which the run dwarfs it.
+
+    ``written`` names the parameters the term writes, or is a function that
+    names them, asked only once two arguments share storage (a native call
+    learns them by tracing the body); two that it does not name may share
+    storage, as in ``dot(x, x)``, since reads do not race. ``None``, or a
+    function that answers ``None``, refuses every pair.
     """
     buffers = [
         (name, buffer)
         for name, buffer in ((n, _buffer(v)) for n, v in supplied.items())
         if buffer is not None and buffer.size
     ]
+    known: set[str] | None = None
+    asked = False
     for position, (first, left) in enumerate(buffers):
         for second, right in buffers[position + 1 :]:
             if not np.shares_memory(left, right):
                 continue
+            if not asked:
+                asked = True
+                names = written() if callable(written) else written
+                known = None if names is None else set(names)
+            if known is not None and first not in known and second not in known:
+                continue
             raise ValueError(
                 f"the arguments {first} and {second} share storage. loopty "
                 "assumes two distinct array parameters are two distinct "
-                "buffers: dependences are computed per array name, so nothing "
-                "between them is ever reported and a schedule may run them in "
-                "parallel. Pass separate arrays, or write the kernel with one "
-                "parameter for the buffer they share"
+                "buffers where the kernel writes either: dependences are "
+                "computed per array name, so nothing between them is ever "
+                "reported and a schedule may run them in parallel. Pass "
+                "separate arrays, or write the kernel with one parameter for "
+                "the buffer they share"
             )
 
 
@@ -1654,6 +1674,7 @@ def check_arguments(
     supplied: Mapping[str, Any],
     offsets_args: Mapping[str, str] | None = None,
     written: Iterable[str] | None = None,
+    writes: Callable[[], Iterable[str] | None] | None = None,
 ) -> None:
     """Everything an argument list owes a term, in one call.
 
@@ -1664,15 +1685,18 @@ def check_arguments(
     and their storage is checked too (:func:`written_storage`); a native call
     knows them only once the body is traced, which it does only when some
     array is not stored as its sort is (see
-    :meth:`loopty.kernel.Kernel._storage_copies`). Raises :class:`ValueError`
-    naming the argument at fault.
+    :meth:`loopty.kernel.Kernel._storage_copies`). ``writes`` names them
+    when asked, for a caller that would have to trace the body to know, and
+    is asked only when two arguments share storage, which is legal where the
+    term writes neither (:func:`disjoint_arguments`). Raises
+    :class:`ValueError` naming the argument at fault.
 
     The sizes are resolved once and handed to both element checks, so that an
     array and a scalar declared over the same ``Fin[n]`` are measured against
     the same ``n``.
     """
     no_tables(supplied)
-    disjoint_arguments(supplied)
+    disjoint_arguments(supplied, written if written is not None else writes)
     ragged_arguments(types, supplied, offsets_args)
     sizes_not_negative(types, supplied)
     sizes = resolve_sizes(types, supplied)

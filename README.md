@@ -242,10 +242,11 @@ table of row starts. Both compiled runs agree with the native one.
   ```
 
   What `dot`'s contract checks at each call natively, the row `A[i]` in
-  bounds, an index argument in its sort, two rows apart, `matvec` owes at
-  every point it calls `dot`, as facts isl decides and Lean proves, and a
-  callee's postcondition holds after each call, restated of what it was
-  passed.
+  bounds, an index argument in its sort, two rows apart where it writes
+  one, `matvec` owes at every point it calls `dot`, as facts isl decides
+  and Lean proves, and a callee's postcondition holds after each call,
+  restated of what it was passed. An argument is evaluated once, when the
+  call is made, as in Python.
 - **It plugs into a proof host.** loopty registers a theory, an isl oracle, an
   executor and a `run` verb with [lanky](https://github.com/xywei/lanky), so a
   residual obligation an oracle cannot decide is an ordinary theorem a person can
@@ -606,7 +607,7 @@ release; the CHANGELOG says when one does.
   `examples/quadrature.py` is firedrake's P1 mass kernel.
 - The argument contract, enforced at every entry point that runs a kernel
   (compiled, differential and native): two distinct array parameters may not
-  share storage, a ragged argument has to agree with the counts array its type
+  share storage where the kernel writes either, a ragged argument has to agree with the counts array its type
   names and with any offsets passed alongside it, an argument over a domain has
   to have the declared domain's points at the sizes of the call, and a value
   of a refined sort such as `Fin[m]` has to be one — an array element and a
@@ -822,8 +823,10 @@ release; the CHANGELOG says when one does.
   picks, scalars and functions; a row of an array over a domain is not
   passed (a whole one is), and the cells a gather picks are a copy natively,
   so a called kernel does not write them (#205). Two arguments over one array
-  have to be two rows of it, decided at every call; a whole array and a
-  part of it are refused. A rule's claim about its value (`-> Real & (...)`)
+  the callee writes have to be two rows of it, decided at every call; a
+  whole array and a part of it are refused, and so is an argument that
+  reads an array the callee writes, since natively it is read once, when
+  the call is made. A rule's claim about its value (`-> Real & (...)`)
   is refused: state it as a theorem about the rule (#206). A call made
   inside a sum over `Fin[...]` of a size, rather than over an array's `.dom`,
   has points the trace does not see, and its facts are `assumed` (#207). A rule that

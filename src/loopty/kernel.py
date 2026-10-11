@@ -299,7 +299,8 @@ class Kernel(_Decorated):
         """Run the body on real arrays: the reference implementation.
 
         The arguments are checked against the kernel's declared types first, by
-        :mod:`loopty.contract`: two array parameters may not share storage, a
+        :mod:`loopty.contract`: two array parameters may not share storage
+        where the body writes either (``dot(x, x)`` may), a
         ragged argument has to agree with the counts array its type names and
         with the offsets the kernel declares beside it, if it declares them,
         and an element of a refined sort such as ``Fin[m]`` has to be one.
@@ -436,6 +437,7 @@ class Kernel(_Decorated):
             self.arg_types,
             bound,
             {name: offsets for name, (_, offsets) in layout.items() if offsets},
+            writes=self._written_parameters,
         )
         stored, widened = self._storage_copies(bound)
         declared = self._over_declared_domains(bound, stored)
@@ -476,6 +478,21 @@ class Kernel(_Decorated):
                 # A storage copy is of an array the body only reads.
                 if name not in stored:
                     bound[name].load(copy.storage, copy.numpy(), copy.domain)
+
+    def _written_parameters(self) -> set[str] | None:
+        """The parameters the body writes, from its term, or ``None``.
+
+        Asked by the contract only when two arguments share storage, which
+        is legal where the body writes neither, ``dot(x, x)``; a body that
+        cannot be traced answers ``None``, and the call is refused as before.
+        """
+        try:
+            term = self.term
+        except Exception:  # noqa: BLE001 - an untraceable body shares nothing
+            return None
+        written = {stmt.assignee.array for stmt in term.stmts}
+        written.discard(term.result)
+        return written
 
     def _over_declared_domains(
         self, bound: dict[str, Any], stored: dict[str, Any]

@@ -2655,9 +2655,9 @@ def call_facts(
       the indices where they are of the sort of ``u``'s axis;
     * a scalar of an integral sort is a point of it, ``j`` of ``Fin(3)``
       (kind ``argument``);
-    * two rows of one array passed share no cell, since the callee's
-      contract refuses two parameters that share storage (kind
-      ``distinct-arguments``);
+    * two rows of one array passed share no cell where the callee writes
+      either, since its contract refuses two such parameters that share
+      storage (kind ``distinct-arguments``); two it only reads may be one;
     * the callee's postcondition holds of what the call passed, after each
       call: a restatement in the caller's names, decided by the call and
       resting on the callee's own postcondition fact (kind
@@ -2813,6 +2813,10 @@ def _call_facts(
     for array, sharing in rows.items():
         for first_position, first in enumerate(sharing):
             for second in sharing[first_position + 1 :]:
+                if not (first.written or second.written):
+                    # two rows the callee only reads may be one row: reads
+                    # do not race, and its contract lets them share storage
+                    continue
                 facts.append(
                     _distinct_fact(term, call, array, first, second, owner, at,
                                    common, key)
@@ -2828,8 +2832,8 @@ def _call_facts(
                 ),
                 kind="postcondition-in-scope",
                 statement=(
-                    f"after {call.callee}(...) at {call.where}, wherever it is "
-                    f"called: {render(call.post)}"
+                    f"after each call {_call_text(call)} at {call.where}: "
+                    f"{render(call.post)}"
                 ),
                 term=AfterCall(call.callee, call.post),
                 status=Status.DECIDED,
@@ -2848,6 +2852,11 @@ def _call_facts(
             )
         )
     return facts
+
+
+def _call_text(call: Any) -> str:
+    """A call as the body wrote it, ``element(X[cell[c]], Y[cell[c]], M[c])``."""
+    return f"{call.callee}({', '.join(a.spelled for a in call.arguments)})"
 
 
 def _call_unnarrowed(call: Any) -> dict[str, Any]:
@@ -2887,9 +2896,8 @@ def _gather_fact(
     identifier = fact_id(
         "in-bounds", owner, detail=f"{call.label}:{argument.param}:{shown}", **key
     )
-    statement = (
-        f"the cells {shown} picks, passed as {argument.param}, are in bounds {at}"
-    )
+    passed = f"the cells {shown} picks, passed as {argument.param}, are in bounds"
+    statement = f"{passed} {at}"
     index_type = types.get(index.array)
     sort = index_type.dtype if isinstance(index_type, ArrType) else None
     if (
@@ -2903,7 +2911,7 @@ def _gather_fact(
         return Fact(
             id=identifier,
             kind="in-bounds",
-            statement=f"{statement} by type ({reason})",
+            statement=f"{passed} by type ({reason})",
             term=None,
             status=Status.DECIDED,
             decided_by="type",
@@ -2961,10 +2969,10 @@ def _argument_fact(
     identifier = fact_id(
         "argument", owner, detail=f"{call.label}:{argument.param}", **key
     )
-    statement = (
-        f"{shown}, passed to {call.callee} as {argument.param}, is a point of "
-        f"{base} {at}"
+    passed = (
+        f"{shown}, passed to {call.callee} as {argument.param}, is a point of {base}"
     )
+    statement = f"{passed} {at}"
     common = {**common, "param": argument.param, "value": shown, "sort": str(base)}
 
     def assumed(reason: str) -> Fact:
@@ -2991,7 +2999,7 @@ def _argument_fact(
             return Fact(
                 id=identifier,
                 kind="argument",
-                statement=f"{statement} by type ({reason})",
+                statement=f"{passed} by type ({reason})",
                 term=None,
                 status=Status.DECIDED,
                 decided_by="type",
@@ -3055,10 +3063,11 @@ def _distinct_fact(
     common: dict[str, Any],
     key: dict[str, Any],
 ) -> Fact:
-    """Two rows of one array passed to one call share no cell.
+    """Two rows of one array passed to one call, one of them written, share no cell.
 
     Natively the callee's contract refuses two array parameters that share
-    storage, so the rows' indices differ at every point the call is made at,
+    storage where it writes either, so the rows' indices differ at every
+    point the call is made at,
     on the axes both fix: isl decides the emptiness of the points where they
     agree, and refutes it with one.
     """

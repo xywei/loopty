@@ -705,7 +705,8 @@ class Tracer:
         #: (:mod:`loopty.calls`), as :class:`loopty.term.Call` records.
         self.calls: list[Any] = []
         #: The calls being inlined now, outermost first: their labels, and the
-        #: kernels, so that a kernel that calls itself is refused.
+        #: kernel with the code of each function it was passed, so that a
+        #: kernel that calls itself is refused (:mod:`loopty.calls`).
         self.inlining: list[tuple[str, Any]] = []
         #: How many calls of each kernel the body has made, for their labels.
         self._call_counts: dict[str, int] = {}

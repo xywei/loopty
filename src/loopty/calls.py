@@ -24,7 +24,7 @@ returning its value or writing into the row.
 
 *Traced, a call is inlined, with binders of its own.* The callee's body runs
 once more, inside the caller's trace, against views of the caller's arrays
-(:class:`loopy.trace._RowView`, :class:`loopty.trace._GatherView`): ``a[k]``
+(:class:`loopty.trace._RowView`, :class:`loopty.trace._GatherView`): ``a[k]``
 reads ``A[i, k]``, ``a.dom`` runs over the row, and a write lands in the
 caller's array. Its loops are loops of the caller nested inside the loops
 around the call, and its sums sums of the caller's statement, so the callee's
@@ -50,13 +50,20 @@ caller's trace too, so a quadrature rule applied to an integrand is
 *The call owes what the callee's contract checks.* Natively each call runs
 the callee's contract: the arguments have the shapes the callee declares, a
 row is a row of its array, a scalar of a ``Fin[m]`` sort a point of it, and
-two arguments do not share storage. Traced, the shapes are unified when the
-call is made, size by size, and a disagreement is refused, naming the axis.
-The rest are facts of the caller, about every point the call is made at
-(:func:`loopty.typing.call_facts`): each row in bounds, each integral scalar
-in its sort, the cells a gather picks in bounds, two rows of one array apart.
+two arguments do not share storage where the callee writes either. Traced,
+the shapes are unified when the call is made, size by size, and a
+disagreement is refused, naming the axis. The rest are facts of the caller,
+about every point the call is made at (:func:`loopty.typing.call_facts`):
+each row in bounds, each integral scalar in its sort, the cells a gather
+picks in bounds, two rows of one array apart where the callee writes one.
 isl decides them, and Lean states each from loopty's own description of the
 call (:mod:`loopty.obligations`).
+
+*An argument is evaluated once, when the call is made*, as Python does: the
+value a scalar has then, the row its indices name then, the cells a gather
+copies then. Inlined, it is read where the callee uses it, so a call whose
+callee writes an array one of its arguments reads is refused, naming both
+(:meth:`_Inlining.refuse_by_name`).
 
 *The callee's postcondition travels into the caller.* After every call the
 callee's claim holds of what the call passed it: ``all(Me[j, k] == Me[k, j]
@@ -97,6 +104,10 @@ from loopty.trace import (
 )
 
 __all__ = ["inline", "takes_a_function"]
+
+#: How deep calls inside calls are inlined before the nest is refused as one
+#: that would not end (see :meth:`_Inlining.refuse_recursion`).
+_NESTING = 64
 
 
 def takes_a_function(kernel: Any) -> str | None:
@@ -152,14 +163,9 @@ class _Inlining:
 
     def run(self, args: tuple, kwargs: dict) -> Any:
         kernel, tracer = self.kernel, self.tracer
-        if getattr(kernel, "_tracing", False) or any(
-            entry is kernel for _label, entry in tracer.inlining
-        ):
-            self.refuse(
-                f"{self.callee} is already being called there, so the call would "
-                "inline it into itself without end; a kernel does not call itself"
-            )
         bound = self.bind(args, kwargs)
+        key = self.reentry_key(bound)
+        self.refuse_recursion(key)
         try:
             term = kernel.term
         except TraceError as exc:
@@ -202,8 +208,9 @@ class _Inlining:
                     unfixed=tuple(sorted(unfixed)),
                 )
         self.refuse_shared(arguments, written)
+        self.refuse_by_name(arguments, written)
         before = len(tracer.stmts)
-        tracer.inlining.append((label, kernel))
+        tracer.inlining.append((label, key))
         try:
             value = kernel.fn(**proxies)
         finally:
@@ -256,6 +263,50 @@ class _Inlining:
         if missing:
             self.refuse(f"it is not given {', '.join(missing)}")
         return bound
+
+    def reentry_key(self, bound: Mapping[str, Any]) -> tuple[Any, tuple[int, ...]]:
+        """The callee and the code of each function it is passed, by identity.
+
+        A call made while the same kernel is being inlined is a nested use,
+        not a recursion, when it is passed other functions: the quadrature
+        rule applied to an integrand that applies it again,
+        ``integrate(lambda q: integrate(lambda p: g(p, q)))``, inlines the
+        rule twice, once per lambda. A chain of calls that never ends repeats
+        a kernel with the same code for its functions, since a program has
+        finitely many functions; that is what :meth:`refuse_recursion` looks
+        for.
+        """
+        codes = []
+        for name, sort in self.kernel.arg_types.items():
+            if _function_sort(sort):
+                value = bound.get(name)
+                code = getattr(value, "__code__", None)
+                if code is None:
+                    code = getattr(getattr(value, "fn", None), "__code__", value)
+                codes.append(id(code))
+        return self.kernel, tuple(codes)
+
+    def refuse_recursion(self, key: tuple[Any, tuple[int, ...]]) -> None:
+        """Refuse a call that would inline its kernel into itself without end."""
+        kernel, codes = key
+        repeated = any(
+            entry[0] is kernel and entry[1] == codes
+            for _label, entry in self.tracer.inlining
+        )
+        if getattr(kernel, "_tracing", False) or repeated:
+            given = " with the same functions" if codes else ""
+            self.refuse(
+                f"{self.callee} is already being called there{given}, so the call "
+                "would inline it into itself without end; a kernel does not call "
+                "itself, directly or through the functions it is passed"
+            )
+        if len(self.tracer.inlining) >= _NESTING:
+            self.refuse(
+                f"calls are nested {_NESTING} deep there, "
+                f"{' in '.join(label for label, _key in self.tracer.inlining)}; "
+                "a kernel's calls are inlined, and a nest that deep is taken for "
+                "one that does not end"
+            )
 
     def postcondition_id(self, term: Any) -> str | None:
         """The id of the callee's postcondition fact, when it has one."""
@@ -693,46 +744,80 @@ class _Inlining:
         """Refuse two arguments that share storage the way no fact can tell apart.
 
         Natively the callee's contract refuses two array parameters that share
-        storage. Two rows of one array share none where their indices differ,
-        which is a fact of the call (:func:`loopty.typing.call_facts`); a
-        whole array and any part of it always do, and are refused here. A
-        gather is a copy natively, read once when the call is made, so the
-        callee may not write the array it gathers from through another
-        parameter: the compiled call would read what the write left.
+        storage where it writes either; two it only reads may, ``dot(x, x)``.
+        Two rows of one array share none where their indices differ, which is
+        a fact of the call where one is written
+        (:func:`loopty.typing.call_facts`); a whole array and any part of it
+        always do, and are refused here when the callee writes either.
         """
         rows: dict[str, list[Argument]] = {}
         for argument in arguments.values():
-            if argument.kind == "array":
-                rows.setdefault(argument.array, []).append(argument)
-            elif argument.kind == "row":
+            if argument.kind in ("array", "row"):
                 rows.setdefault(argument.array, []).append(argument)
         for array, sharing in rows.items():
             whole = [a for a in sharing if a.kind == "array"]
-            if whole and len(sharing) > 1:
-                first, second = sharing[0], sharing[1]
-                self.refuse(
-                    f"it is given {first.spelled} for {first.param} and "
-                    f"{second.spelled} for {second.param}, which share the cells "
-                    f"of {array}, and two array parameters of a kernel may not "
-                    "share storage, which its contract checks at every call"
-                )
-        for argument in arguments.values():
-            if argument.kind != "gather":
+            writing = [a for a in sharing if a.param in written]
+            if not whole or not writing or len(sharing) < 2:
                 continue
-            for other in arguments.values():
-                if (
-                    other.array == argument.array
-                    and other.kind != "gather"
-                    and (other.param in written)
-                ):
-                    self.refuse(
-                        f"it is given {argument.spelled} for {argument.param} and "
-                        f"{other.spelled} for {other.param}, which it writes. "
-                        f"Natively {argument.spelled} is a copy, taken when the "
-                        "call is made, and compiled it is read where the callee "
-                        "reads it, after the writes; pass a copy of the cells "
-                        "in an array of the caller's"
+            first = writing[0]
+            second = next(a for a in sharing if a is not first)
+            self.refuse(
+                f"it is given {first.spelled} for {first.param}, which it writes, "
+                f"and {second.spelled} for {second.param}, which share the cells "
+                f"of {array}: two array parameters of a kernel may not share "
+                "storage where it writes either, which its contract checks at "
+                "every call"
+            )
+
+    def refuse_by_name(
+        self, arguments: Mapping[str, Argument], written: set[str]
+    ) -> None:
+        """Refuse an argument whose value reads an array the callee writes.
+
+        Natively an argument is evaluated once, when the call is made: a
+        scalar is the value ``A[i, 0]`` has then, a row ``A[p[i]]`` is the
+        row ``p[i]`` names then, and the cells a gather picks are copied
+        then. Inlined, the expression is put where the callee uses the
+        parameter and read again there, after whatever the callee wrote
+        before it. Where the callee writes an array the expression reads,
+        the two runs part, so the call is refused, naming both.
+        """
+        writes = {
+            argument.array: argument
+            for argument in arguments.values()
+            if argument.param in written and argument.kind in ("array", "row")
+        }
+        if not writes:
+            return
+        for argument in arguments.values():
+            for array in sorted(_read_when_passed(argument)):
+                other = writes.get(array)
+                if other is None:
+                    continue
+                if argument.kind == "scalar":
+                    natively = (
+                        f"natively {argument.param} is the value "
+                        f"{argument.spelled} has when the call is made"
                     )
+                elif argument.kind == "gather":
+                    natively = (
+                        f"natively {argument.spelled} is a copy of the cells, "
+                        "taken when the call is made"
+                    )
+                else:
+                    natively = (
+                        f"natively {argument.spelled} is the row its indices "
+                        "name when the call is made"
+                    )
+                self.refuse(
+                    f"it is given {argument.spelled} for {argument.param}, which "
+                    f"reads {array}, and it writes {array} through its "
+                    f"{other.param} ({other.spelled}): {natively}, and inlined "
+                    f"{argument.spelled} is read again wherever {self.callee} "
+                    f"uses {argument.param}, after its own writes into {array}. "
+                    f"For {argument.param}, pass something that does not read "
+                    f"{array}, or have {self.callee} read {array} itself"
+                )
 
     # }}}
 
@@ -765,9 +850,23 @@ class _Inlining:
             if name not in arrays and name not in functions
         }
         mapping = {**values, **scalars}
-        avoid = set(self.tracer._inames) | set(self.tracer.binders)
+        # Every name of the caller's a restated claim may mention: its loops
+        # and binders, its parameters and sizes, and the indices of the views
+        # passed, M[j] for a scalar j, which a binder j of the claim would
+        # capture.
+        tracer = self.tracer
+        avoid = (
+            set(tracer._inames)
+            | set(tracer.binders)
+            | set(tracer.params)
+            | set(tracer.integers)
+            | set(tracer.array_types)
+            | set(tracer.tables)
+        )
         for value in mapping.values():
             avoid |= set(_names_in(value))
+        for proxy in arrays.values():
+            avoid |= _view_names(proxy)
         try:
             return _restated(term.post, arrays, mapping, functions, avoid, self.where)
         except _Refused:
@@ -868,6 +967,60 @@ def _restated_domain(
             ),
         )
     return domain
+
+
+def _read_when_passed(argument: Argument) -> set[str]:
+    """The arrays a native call reads to evaluate ``argument`` as it is made.
+
+    A scalar's value, the indices of a row, and for a gather the cells it
+    copies and the indices that pick them; a whole array and a function are
+    read only where the callee reads them, as they are inlined.
+    """
+    if argument.kind == "scalar":
+        return _arrays_read(argument.value)
+    if argument.kind == "row":
+        return _arrays_read(argument.prefix)
+    if argument.kind == "gather":
+        out = {argument.array} if argument.array is not None else set()
+        index = argument.index
+        if index is not None:
+            if index.array is not None:
+                out.add(index.array)
+            out |= _read_when_passed(index)
+        return out
+    return set()
+
+
+def _arrays_read(expr: Any) -> set[str]:
+    """The arrays ``expr`` reads a cell of, ``A`` for ``A[i, 0]``, sums included."""
+    out: set[str] = set()
+
+    def walk(node: Any) -> None:
+        aggregate = getattr(node, "aggregate", None)
+        if isinstance(node, prim.Subscript) and isinstance(aggregate, prim.Variable):
+            out.add(aggregate.name)
+            walk(node.index)
+        elif hasattr(node, "binders") and isinstance(node, prim.ExpressionNode):
+            walk(node.body)
+            walk(getattr(node, "guard", None))
+        elif isinstance(node, prim.ExpressionNode):
+            for arg in init_args(node):
+                walk(arg)
+        elif isinstance(node, tuple | list):
+            for item in node:
+                walk(item)
+
+    walk(expr)
+    return out
+
+
+def _view_names(proxy: Any) -> set[str]:
+    """The caller's names the indices of a view mention: ``i`` of ``A[i]``."""
+    if isinstance(proxy, _RowView):
+        return set(_names_in(proxy.prefix)) | _view_names(proxy.base)
+    if isinstance(proxy, _GatherView):
+        return _view_names(proxy.index) | _view_names(proxy.source)
+    return set()
 
 
 def _fin_bound(sort: Any) -> Any:

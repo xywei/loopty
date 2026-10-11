@@ -45,10 +45,16 @@ All notable changes to loopty are recorded here. The format follows
   from loopty's own description of the call: each row passed in bounds
   (`A[i], the row passed to dot as a, is in bounds wherever dot is called`),
   the cells a gather picks in bounds by type, an integral scalar in its sort
-  (kind `argument`), two rows of one array apart (kind
-  `distinct-arguments`); and after each call the callee's postcondition,
-  restated of what the call passed and resting on the callee's own fact
-  (kind `postcondition-in-scope`). A rule on its own is the kernel that
+  (kind `argument`), two rows of one array apart where the callee writes
+  one (kind `distinct-arguments`); and after each call the callee's
+  postcondition, restated of what the call passed and resting on the
+  callee's own fact (kind `postcondition-in-scope`). An argument is
+  evaluated once, when the call is made, as in Python, so a call whose
+  callee writes an array an argument reads (`scale(A[i], A[i, 0])`) is
+  refused, naming both. A rule may be applied to a function that applies
+  it again, `integrate(lambda q: integrate(lambda p: ...))`; a kernel that
+  calls itself, directly or through the functions it is passed, is
+  refused. A rule on its own is the kernel that
   writes its value into a one-cell array, `result[0]`, which `loopty run`
   compiles and compares with the native call; one that takes a function is
   compiled where it is called. Natively, a call inside a `when` whose guard
@@ -238,6 +244,14 @@ All notable changes to loopty are recorded here. The format follows
 - A kernel that returns a value without declaring its sort, `-> Real`, is
   refused when traced, naming the sort to declare; its value was dropped by
   the compiled kernel.
+- Two array parameters a kernel only reads may share storage, `dot(x, x)`
+  or the diagonal of a Gram matrix: reads do not race, and both runs read
+  the same values. The contract still refuses two that share storage where
+  the kernel writes either; a native call traces the body to know which
+  it writes, only when two of its arguments share storage.
+- A schedule step that names no loop of the kernel lists its loops, and
+  names a called kernel's loop that was renamed when it was inlined:
+  `fill's loop n, inlined at ..., is n_0 here`.
 
 ### Fixed
 
