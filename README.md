@@ -734,7 +734,7 @@ says when one does.
 - A constant table's values are read in its dtype and have no sort beyond
   it: an index read from a table of integers, `x[perm[i]]` with `perm =
   table([2, 0, 1])`, is not in bounds by type, as one read from an array of
-  `Fin[m]` is, and its in-bounds fact is `assumed`. A table is a kernel's or
+  `Fin[m]` is, and its in-bounds fact is `assumed` (#182). A table is a kernel's or
   a program's own; a table the body reads through a container, which no
   frame names, is named `table`.
 - The in-bounds fact of a ragged access `val[r, j]` is decided against the
