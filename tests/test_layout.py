@@ -208,6 +208,7 @@ def _overlapping():
 
 
 def test_the_statements_lean_is_given_without_lean() -> None:
+    pytest.importorskip("lanky.obligations", reason="no statements for Lean here")
     bounds, injective, onto = EXAMPLE.storage_index.facts()
     assert [p.name for p in bounds.term.lean_obligation().parts] == [
         "in_bounds_0",

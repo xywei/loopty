@@ -329,6 +329,7 @@ def test_a_window_on_opencl_is_a_shift_register_unless_asked_otherwise() -> None
 
 
 def test_the_no_clobber_fact_is_stated_from_the_description() -> None:
+    pytest.importorskip("lanky.obligations", reason="no statements for Lean here")
     (fact,) = [f for f in WINDOWS.windowed.facts() if f.kind == "no-clobber"]
     obligation = fact.term.lean_obligation()
     assert not obligation.declined
@@ -339,6 +340,7 @@ def test_the_no_clobber_fact_is_stated_from_the_description() -> None:
 
 
 def test_the_casts_after_a_window_state_its_slots() -> None:
+    pytest.importorskip("lanky.obligations", reason="no statements for Lean here")
     from loopty.obligations import cast_obligation
 
     monotone = WINDOWS.split_after.facts()[-1]
