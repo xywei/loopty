@@ -626,7 +626,13 @@ says when one does.
   small literals in a value or a guard on the loops is still 32 bits wide,
   `y[i] = i + n` past `2**31` (#162). A subscript over a narrow numpy integer
   type is computed in it, as numpy computes it: `x[s + i]` of a `uint8` `s`
-  wraps round at 256 in both runs (#157). A `Fin[m]` array the kernel
+  wraps round at 256 in both runs (#157). One of a signed type that wraps
+  round below zero is refused natively, as any negative index is, and read
+  before the array compiled; its in-bounds fact is not decided, since isl
+  reads a narrow scalar or element as any integer, and is refuted or
+  assumed. A numpy scalar written on the left, `x[np.uint8(200) +
+  i]`, is traced as the Python int it equals, and not taken round (#167).
+  A `Fin[m]` array the kernel
   writes may be an `int32` one natively, whose entries the native run reads
   as `int64`, as the compiled run computes with them, unless a program's
   checked point reads it, which takes an `int64` one. An integer to a
