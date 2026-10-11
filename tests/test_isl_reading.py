@@ -569,6 +569,122 @@ def test_an_index_sum_loopy_reads_with_a_division_is_widened_too() -> None:
     assert "(int64_t) (63)" in code
 
 
+@kernel
+def far_pairs(
+    e: Arr[Fin[k], np.int8],  # noqa: F821
+    x: Arr[Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[p], Fin[q], Real],  # noqa: F821
+):
+    """A cell found by the remainder of two loop variables plus a size."""
+    for i in y.dom:
+        for j in y.dom[i]:
+            with when(i < e.dom.size):
+                y[i, j] = x[(i + j + e.dom.size) % x.dom.size] + e[i]
+
+
+@kernel
+def far_shifted(
+    s: Int,
+    e: Arr[Fin[k], np.int8],  # noqa: F821
+    x: Arr[Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[m], Real],  # noqa: F821
+):
+    """A cell found by the remainder of an index sum plus a 64-bit scalar."""
+    for i in y.dom:
+        with when(i < e.dom.size):
+            y[i] = x[(i + e.dom.size + s) % x.dom.size] + e[i]
+
+
+def test_an_index_sum_inside_a_wider_one_is_widened_once() -> None:
+    # (i + j) + k is two sums, and the inner one is widened; the outer one
+    # adds k to a 64-bit value and is computed in 64 bits with no second
+    # cast. (i + k) + s of an Int s is computed in 64 bits by C, of the
+    # wrapped i + k on main: x[(1 + 2**31 - 1 + 5) % 7] was x[3], not x[0].
+    def pairs() -> dict:
+        return {
+            "e": np.zeros(2**31 - 1, dtype=np.int8),
+            "x": np.arange(7.0),
+            "y": np.zeros((3, 4)),
+        }
+
+    want = [[float((i + j + 2**31 - 1) % 7) for j in range(4)] for i in range(3)]
+    native = pairs()
+    far_pairs(**native)
+    assert native["y"].tolist() == want
+    compiled = pairs()
+    LoopyExecutor().run(far_pairs, **compiled)
+    assert compiled["y"].tolist() == want
+    assert "x[loopty_mod_int64((int64_t) (i) + j + k, (int64_t) (m))]" in (
+        emit_code(far_pairs)
+    )
+
+    def shifted() -> dict:
+        return {
+            "s": 5,
+            "e": np.zeros(2**31 - 1, dtype=np.int8),
+            "x": np.arange(7.0),
+            "y": np.zeros(7),
+        }
+
+    native = shifted()
+    far_shifted(**native)
+    compiled = shifted()
+    LoopyExecutor().run(far_shifted, **compiled)
+    assert list(native["y"]) == [float((i + 2**31 - 1 + 5) % 7) for i in range(7)]
+    assert list(compiled["y"]) == list(native["y"])
+
+
+def test_an_index_sum_loopy_reads_with_a_division_runs_past_2_to_the_31(
+    tmp_path,
+) -> None:
+    # x[(i + k) // 2 - k // 2] is affine with a division, and loopy wrote it
+    # (i + k) / 2 + -1 * (k / 2) in 32 bits: at k = 2**31 - 1 the sum wrapped
+    # round and the cell was about -2**30, and the process died (SIGSEGV).
+    # Run in a process of its own for that reason.
+    script = tmp_path / "far_half.py"
+    script.write_text(
+        textwrap.dedent(
+            """
+            from __future__ import annotations
+
+            import numpy as np
+            from lanky.prelude import Real
+
+            from loopty import Arr, Fin, kernel, when
+            from loopty.executor import LoopyExecutor
+
+            @kernel
+            def half_on(
+                e: Arr[Fin[k], np.int8], x: Arr[Fin[m], Real], y: Arr[Fin[p], Real]
+            ):
+                for i in y.dom:
+                    with when(i < e.dom.size):
+                        y[i] = x[(i + e.dom.size) // 2 - e.dom.size // 2] + e[i]
+
+            def make():
+                return {
+                    "e": np.zeros(2**31 - 1, dtype=np.int8),
+                    "x": np.arange(1.0, 6.0),
+                    "y": np.zeros(4),
+                }
+
+            native = make()
+            half_on(**native)
+            compiled = make()
+            LoopyExecutor().run(half_on, **compiled)
+            assert list(native["y"]) == [1.0, 2.0, 2.0, 3.0], native["y"]
+            assert list(compiled["y"]) == list(native["y"]), compiled["y"]
+            print("ran")
+            """
+        )
+    )
+    result = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True, timeout=600
+    )
+    assert result.returncode == 0, (result.returncode, result.stderr)
+    assert result.stdout.strip() == "ran"
+
+
 # }}}
 
 
