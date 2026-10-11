@@ -336,7 +336,9 @@ _CONVERTING = (
 )
 
 
-def refuse_where_native_does(term: Term, supplied: Mapping[str, Any]) -> None:
+def refuse_where_native_does(
+    term: Term, supplied: Mapping[str, Any]
+) -> RefusedNatively | None:
     """Refuse the compiled run of ``term`` on ``supplied`` where the native run is.
 
     Arithmetic of loop variables and sizes is a Python int natively, and
@@ -367,18 +369,56 @@ def refuse_where_native_does(term: Term, supplied: Mapping[str, Any]) -> None:
     loops whose bounds the call's sizes do not fix, a ragged row's, nor a
     store under a guard isl does not read, which stores where an array's
     entries say: those are left to the native refusal (#166).
+
+    A program's statement after a checked point runs only where the point
+    passed (:meth:`loopty.compose._Builder.guarded`), and natively the call
+    after a point that fails is refused before it starts, with the point's
+    error. So its refusal is returned, not raised, for the executor to raise
+    once the run has shown that every checked point passed; a statement
+    every run reaches is refused here.
     """
     from loopty.contract import resolve_sizes
     from loopty.promotion import Promotion
 
     sizes = resolve_sizes(dict(term.params), supplied)
     promotion = Promotion(term)
+    flags = {flag for flag, _message in term.checks}
+    deferred: RefusedNatively | None = None
     for stmt in term.stmts:
         loops = stmt.loop_domain if stmt.loop_domain is not None else stmt.domain
-        parts = (stmt.assignee.indices, stmt.expr, stmt.guard)
-        for part in parts:
-            _operations(part, term, stmt, promotion, loops, sizes)
-        _store(term, stmt, promotion, sizes)
+        try:
+            for part in (stmt.assignee.indices, stmt.expr, stmt.guard):
+                _operations(part, term, stmt, promotion, loops, sizes)
+            _store(term, stmt, promotion, sizes)
+        except RefusedNatively as refusal:
+            if not _after_a_check(stmt, flags):
+                raise
+            if deferred is None:
+                deferred = RefusedNatively(
+                    str(refusal).replace(
+                        "stops before it starts",
+                        "is refused once it has run, since the program's checked "
+                        "points before the call passed, which only the run shows",
+                        1,
+                    )
+                )
+    return deferred
+
+
+def _after_a_check(stmt: Stmt, flags: set[str]) -> bool:
+    """Whether ``stmt`` runs only where a program's checked point passed."""
+    if not flags or stmt.guard is None:
+        return False
+    for node in walk(stmt.guard):
+        if isinstance(node, Access) and node.array in flags:
+            return True
+        if (
+            isinstance(node, prim.Subscript)
+            and isinstance(node.aggregate, prim.Variable)
+            and node.aggregate.name in flags
+        ):
+            return True
+    return False
 
 
 def _operations(

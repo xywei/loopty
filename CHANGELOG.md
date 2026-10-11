@@ -72,9 +72,11 @@ All notable changes to loopty are recorded here. The format follows
   or a ragged row's loop, is left to the native refusal (#166). A sum's body
   is asked about where the generator's `if` clause holds, which skips it
   natively: `reduce_sum(a[j] + j for j in a.dom if j < 100)` of an `int8`
-  `a` is computed at any size. A literal stored into an integer array that
-  does not hold it, `y[i] = 300` of a `uint8` `y`, is a `TraceError`, as
-  #141's literals are.
+  `a` is computed at any size. A program's call after a checked point is
+  refused once the run has shown that the point passed; where it failed, the
+  point's error is raised, as natively. A literal stored into an integer
+  array that does not hold it, `y[i] = 300` of a `uint8` `y`, is a
+  `TraceError`, as #141's literals are.
 - A regression test for #152, which #156 fixed: a literal beside a loop
   variable under a double power in a single-precision statement is written as
   an integer, `(double) (i + 16777216)`, where loopy wrote `1.0f` and C

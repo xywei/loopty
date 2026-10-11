@@ -933,13 +933,15 @@ integer into the integer's type and refuses one the type does not hold:
 `u[i] + (i - 3)` of a `uint32` `u` at `i = 0`. The compiled run is refused
 too where the call's sizes reach such a point, which isl finds before it
 starts (`refusal.refuse_where_native_does`, #153), a sum's body where the
-generator's `if` clause holds, which skips the body natively, and computes it
-in C's type where isl cannot read the arithmetic, the sizes do not fix its
-loop, or a guard isl does not read masks the store (#166). A value stored
-into a signed integer array that does not hold it, a `uint64` past `2**63`
-into `Int`, is refused natively and converted compiled (#159). An affine
-subscript with no division is
-computed in loopy's 32-bit index type, which `-fwrapv` makes right for its
+generator's `if` clause holds, which skips the body natively, and a
+program's call after a checked point once the run has shown the point
+passed, since natively the call after a failing point is refused with the
+point's error. It computes it in C's type where isl cannot read the
+arithmetic, the sizes do not fix its loop, or a guard isl does not read
+masks the store (#166). A value stored into a signed integer array that does
+not hold it, a `uint64` past `2**63` into `Int`, is refused natively and
+converted compiled (#159). An affine subscript with no division is computed
+in loopy's 32-bit index type, which `-fwrapv` makes right for its
 sums and products; what the plan leaves in 32 bits, a sum of loop variables
 and sizes, stays there in a division too (`x[(i + n) // 2]`, past `2**30`,
 #149), as in a loop bound (note 23). The interpreter's

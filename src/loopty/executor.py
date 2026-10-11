@@ -382,7 +382,10 @@ class LoopyExecutor:
         whose sizes reach a point where the native run is refused, loop
         arithmetic beside a numpy integer whose type does not hold it, is
         refused before anything is compiled
-        (:func:`loopty.refusal.refuse_where_native_does`, #153).
+        (:func:`loopty.refusal.refuse_where_native_does`, #153), or, for a
+        program's call after a checked point, once the run has shown the
+        point passed: where it failed, the point's error is raised, as
+        natively.
         """
         term, kernel, lowering, target_name = _resolve(obj, self.target)
         names = [name for name, _ in term.params]
@@ -397,7 +400,7 @@ class LoopyExecutor:
         checked_storage(term, supplied)
         from loopty.refusal import naming_the_fix, refuse_where_native_does
 
-        refuse_where_native_does(term, supplied)
+        refused = refuse_where_native_does(term, supplied)
         layouts = _declared_layouts(term, lowering, supplied)
         call = _call_arguments(term, lowering, args, kwargs, layouts)
         call, empty = _pad_empty_arrays(call, lowering)
@@ -430,6 +433,10 @@ class LoopyExecutor:
             # run, and what the ones before it wrote is where the caller
             # looks, as natively, where the call after it is refused.
             raise ValueError(failed[0])
+        if refused is not None:
+            # Every checked point passed, so the call after them ran, and
+            # natively it stops where its arithmetic leaves its type.
+            raise refused
         return out
 
     def _collect(

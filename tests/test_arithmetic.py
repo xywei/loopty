@@ -3397,6 +3397,32 @@ def summed_guarded(a: Arr[Fin[n], np.int8], y: Arr[Fin[n], Int]):  # noqa: F821
 
 
 @kernel
+def truncated(u: Arr[Fin[n], Real], c: Arr[Fin[n], Nat]):  # noqa: F821
+    """Every entry as a natural number; a negative one is no natural."""
+    for i in u.dom:
+        c[i] = u[i]
+
+
+@kernel
+def offset_counts(
+    c: Arr[Fin[n], Nat],  # noqa: F821
+    w: Arr[Fin[n], np.uint32],  # noqa: F821
+    y: Arr[Fin[n], Int],  # noqa: F821
+):
+    """``i - 3`` beside a ``uint32``, after a requirement on ``c``."""
+    for i in c.dom:
+        y[i] = w[i] + (i - 3) + 0 * c[i]
+
+
+@program
+def checked_then_offset(u, w, y):
+    """A checked point, that c holds naturals, and then a call numpy refuses."""
+    c = Arr.zeros_like(u, dtype=np.int64)
+    truncated(u, c)
+    offset_counts(c, w, y)
+
+
+@kernel
 def stored_literal(y: Arr[Fin[n], np.uint8]):  # noqa: F821
     """``300`` stored into a ``uint8``, which numpy refuses at every point."""
     for i in y.dom:
@@ -3476,6 +3502,30 @@ def test_loop_arithmetic_a_numpy_integer_does_not_hold_is_refused_compiled_too()
         summed_guarded(**long())
     with pytest.raises(RefusedNatively, match="128 at i = 0, j = 128"):
         LoopyExecutor().run(summed_guarded, **long())
+
+    # A call after a program's checked point runs only where the point
+    # passed: where it fails, both runs raise the point's error, and the
+    # refusal of the call after it is raised once the point has passed.
+    def checked(first: float) -> dict:
+        return {
+            "u": Arr.from_numpy(np.array([first, 2.0, 3.0])),
+            "w": Arr.from_numpy(np.full(3, 7, np.uint32)),
+            "y": Arr.zeros(3, dtype=np.int64),
+        }
+
+    assert checked_then_offset.term.checks
+    for runs in (checked_then_offset, LoopyExecutor().run):
+        args = (checked_then_offset,) if runs is not checked_then_offset else ()
+        with pytest.raises(ValueError) as failed:
+            runs(*args, **checked(-1.0))
+        assert not isinstance(failed.value, OverflowError)
+    with pytest.raises(OverflowError, match="-3 out of bounds for uint32"):
+        checked_then_offset(**checked(1.0))
+    with pytest.raises(RefusedNatively, match=r"-3 at i_0 = 0") as refused:
+        LoopyExecutor().run(checked_then_offset, **checked(1.0))
+    assert "the program's checked points before the call passed" in str(
+        refused.value
+    )
 
 
 # }}}
