@@ -1528,3 +1528,20 @@ not bit for bit. `sqrt`, `real`, `imag` and `conj` of a real agree bit for
 bit. loopy's plain OpenCL target has no complex functions at all; loopty's
 OpenCL target is pyopencl's.
 
+## 28. loopy's invoker warns about a size it finds another way
+
+**Symptom.** The first run of a kernel with an array of four axes over
+`Fin[m]` three times, or a triangle boxed over `Fin[q] x Fin[q]`, prints
+`ParameterFinderWarning: Unable to generate code to automatically find 'm'
+from 'u': nonlinear expression`, and then runs and agrees with the native
+run. A warm run prints nothing, since the invoker is cached.
+
+**Cause.** loopy's invoker finds each size the caller does not pass from the
+arrays, an equation per shape and stride, and warns about each equation it
+cannot solve. `u`'s strides state `m` as `m * m` and `m * m * m`, which are
+not affine, and its shape states it as `m`, which is solved.
+
+**Local fix.** `executor._quiet_parameter_finder` silences the warning while
+`LoopyExecutor` calls a kernel. A size no equation finds is an error when the
+kernel is called, which it leaves alone.
+

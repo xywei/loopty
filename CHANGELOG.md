@@ -108,6 +108,16 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Fixed
 
+- The first run of a kernel with an array of four axes over one size, or a
+  triangle boxed over two, no longer prints loopy's `ParameterFinderWarning:
+  Unable to generate code to automatically find 'm' from 'u': nonlinear
+  expression`, a warning about an equation of the strides loopy's invoker
+  could not solve, while it found the size from the shape (note 28 in
+  `docs/loopy-notes.md`). The five constructs the demo kernels need, a
+  `Where` array beside a ragged family, a `Where` of three binders, `**` with
+  a loop variable as the exponent in a sum of two binders and in a sum
+  nested in another, four dense axes and `when(a + b == 0)`, were run three
+  ways and work; `tests/test_demo_shapes.py` keeps them so (gap 3).
 - A split sum adds its terms in order. `split("s", 256)` of a sum's loop
   left loopy to choose the order of the two loops it makes, and loopy ran
   the inner one outside, `for s_inner ... for s_outer`, adding every 256th
