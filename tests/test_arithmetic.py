@@ -28,7 +28,6 @@ import numpy as np
 import pymbolic.primitives as prim
 import pytest
 from lanky.prelude import Bool, Int, Nat, Real
-from lanky.terms import SymbolicMixin
 
 from loopty import Arr, Fin, Schedule, TraceError, kernel, program, reduce_sum, when
 from loopty.contract import (
@@ -2914,17 +2913,14 @@ def test_a_function_only_a_guard_calls_is_refused_with_the_fix_named():
     agrees(root_in_both, make)
 
 
-@pytest.mark.skipif(
-    not hasattr(SymbolicMixin, "__abs__"),
-    reason="before lanky#94, abs() of a term is pymbolic's call, which has no order",
-)
 @pytest.mark.filterwarnings("ignore::RuntimeWarning")
 def test_abs_of_an_element_is_compared_on_either_side():
     # abs() of a term was pymbolic's Call of a variable named abs (lanky#94):
     # with it on the left, a guard when(abs(k[i]) > 2) failed to trace with
     # "expressions don't have an order", and 127 == abs(c[i]) was pymbolic's
     # structural equality, False while the body was traced, so the term held
-    # 0 where the body compares. It is lanky's Abs, which the trace lowers.
+    # 0 where the body compares. It is lanky's Abs from lanky 0.2.0, loopty's
+    # floor, and the trace lowers it.
 
     @kernel
     def absolute_first(
