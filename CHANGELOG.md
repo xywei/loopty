@@ -223,11 +223,11 @@ All notable changes to loopty are recorded here. The format follows
   up to 32 of isl's instances of them, where it was given 16.
 - `substitute` refuses an array kept in a window, and `contract` one
   computed where it is read.
-- The coverage report in `docs/lean-checks.md` is run again, now over the
-  three examples the demo kernels added (`layer_potential.py`,
-  `quadrature.py`, `sum_factorization.py`): of 564 facts isl decides in 19
-  files, Lean proves 539 and confirms the counterexample of 16 refuted ones,
-  and the 9 that stay decided are the 9 the report listed before.
+- The coverage report in `docs/lean-checks.md` covers the three examples the
+  demo kernels added (`layer_potential.py`, `quadrature.py`,
+  `sum_factorization.py`) and the windows and layouts above: of 650 facts isl
+  decides in 21 files, Lean proves 629 and confirms the counterexample of the
+  21 refuted ones, and none stays decided.
 - A ledger gains a `definedness` row for each array a kernel reads only where
   it wrote it before (`scan`'s `off`, `p2p`'s `term`, `pairs`' `f`), and an
   access with mixed subscripts is decided where it was assumed; the
