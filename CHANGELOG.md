@@ -149,6 +149,96 @@ All notable changes to loopty are recorded here. The format follows
   `dof_array stores (e=0, a=1, b=0, c=2) at 19, and dim_tags N3,N2,N1,N0 at
   11`; so are two cells at one address and an address with none. A buffer of
   several axes, and an argument that names its layout, are not done (#216).
+- **A kernel called inside another kernel's loop** (`loopty.calls`). A
+  kernel body calls a kernel as Python calls a function. A kernel whose
+  return annotation is a sort is a rule: it returns its value and writes
+  none of its parameters, and a call of it is that value; a kernel that
+  writes its parameters is called as a statement and writes through what it
+  is given:
+
+  ```python
+  @kernel
+  def dot(a: Arr[Fin[n], Real], b: Arr[Fin[n], Real]) -> Real:
+      return reduce_sum(a[k] * b[k] for k in a.dom)
+
+  @kernel
+  def matvec(A: Arr[Fin[m], Fin[n], Real], x: Arr[Fin[n], Real],
+             y: Arr[Fin[m], Real]):
+      for i in y.dom:
+          y[i] = dot(A[i], x)
+  ```
+
+  `A[i]` is the row of `A` and `x[col[r]]` the cells of `x` a row of
+  indices picks, as in numpy, so a sparse product is `y[r] = dot(val[r],
+  x[col[r]])`; a row of a ragged array, of a table, or a whole array over a
+  domain may be passed too. A parameter of a function sort, `f: Fn[Fin[3],
+  Real]`, takes a `lambda` or another rule, so that a quadrature rule is
+  applied to an integrand, `integrate(lambda q: PHI[q, j] * PHI[q, k])`.
+  Traced, the call is inlined: the callee's body runs again in the caller's
+  trace against views of the caller's arrays, its loops and sums nested in
+  the loops around the call, a binder named like a name of the caller's
+  given one of its own (`k_0`), which is loopy's substitution rule with a
+  domain of its own (loopy #1044) expanded where it is used, and every fact
+  of the caller is about the expansion. The shapes are unified at the call,
+  size by size, and a call whose sizes nothing says agree is refused, naming
+  the axis. What the callee's contract checks of each call natively, the
+  caller owes at every point it calls, as facts isl decides and Lean states
+  from loopty's own description of the call: each row passed in bounds
+  (`A[i], the row passed to dot as a, is in bounds wherever dot is called`),
+  the cells a gather picks in bounds by type, an integral scalar in its sort
+  (kind `argument`), two rows of one array apart where the callee writes
+  one (kind `distinct-arguments`); and after each call the callee's
+  postcondition, restated of what the call passed and resting on the
+  callee's own fact (kind `postcondition-in-scope`). An argument is
+  evaluated once, when the call is made, as in Python: every cell read for
+  the value of a scalar argument, or for the indices of a row (`p[i]` of
+  `A[p[i]]`), is owed in bounds at every point of the call, whether the
+  callee uses the parameter or not, and a call whose
+  callee writes an array an argument reads (`scale(A[i], A[i, 0])`) is
+  refused, naming both. A scalar argument is converted into the sort the
+  callee declares, as its contract converts it natively (#232): a double
+  given for `s: np.float32` is `np.float32(x[i])` in the caller's term,
+  which the interpreter computes as numpy does and the lowering writes as
+  C's cast, and a loop variable given for `Int` is a numpy `int64` beside a
+  `float32`, while an index or a comparison of it reads as the caller's
+  own, `A[i, i]`. What the contract refuses is refused where it is passed:
+  a real or a truth value for an integral sort, a number for `Bool`, a
+  complex value for a real sort (naming `real(z[i])`), a literal numpy
+  does not convert (`300` for `np.int8`), and, when the compiled run is
+  asked for, loop arithmetic a narrow integer does not hold where the call
+  is made. A callee's positional-only parameters are passed in order
+  (#233). A rule may be applied to a function that applies it again, `integrate(lambda q: integrate(lambda p: ...))`; a kernel that
+  calls itself, directly or through the functions it is passed, is
+  refused. A rule on its own is the kernel that
+  writes its value into a one-cell array, `result[0]`, which `loopty run`
+  compiles and compares with the native call; one that takes a function is
+  compiled where it is called. Natively, a call inside a `when` whose guard
+  is false is not made, and a rule's value there is `0`, so the value of a
+  rule called inside a `when` block is refused where it is used after the
+  block. `examples/calls.py` has `dot` in a matrix-vector
+  and a sparse product, and firedrake's P1 quadrature rule applied per
+  element.
+- **A program's arrays over a domain** (#74). A program's callee may take
+  an array over a `Where`, `Sigma` or union domain: the domain's sizes are
+  unified across the calls, binder by binder, and two calls given one array
+  have to agree on its points, compared as isl sets. A program may make an
+  array over a domain, like an argument over one, `Arr.zeros_like(L)`, or
+  of a declared shape, whose sizes it reads off its arrays as it does
+  natively:
+
+  ```python
+  @program
+  def pair_sums(x, e):
+      f = Arr.zeros(TRIANGLE, n=x.dom.size)
+      fill(x, f)
+      rowsum(f, e)
+  ```
+
+  It is a temporary of the lowered kernel, stored boxed and zeroed over its
+  points where the program makes it, its edges have definedness facts as a
+  dense temporary's do, and a schedule fuses through it; `Schedule.pack`
+  stores a program's argument over a domain packed. A declared dense shape
+  is `Arr.zeros((x.dom.size, 3))`.
 
 - **Constant tables** (`loopty.table`): quadrature weights, a basis
   tabulated at the quadrature points, a differentiation matrix, declared
@@ -379,6 +469,31 @@ All notable changes to loopty are recorded here. The format follows
   (`docs/lean-checks.md`, #201). A `monotone` cast is stated for Lean without
   the pairs of updates of one cell, which need no order; a cast with no pair
   left is one trivial part.
+- Fewer indices than an array has axes, `A[i]`, are a row of it in a kernel
+  body, and an array of indices, `u[cell[c]]`, the cells it picks: a view a
+  called kernel takes, natively the row as an `Arr` sharing the buffer and
+  the gathered cells as a read-only copy, where both were refused as an
+  operation on the whole array. Used as a value, a view is still refused,
+  with the loop nest to write. A row of the cells a gather picks,
+  `u[cell][c]`, is `u[cell[c]]`, as numpy reads it. A table's row, `PHI[q]`,
+  reads natively as a read-only array, and as zeros out of range under a
+  false guard, as a cell does.
+- In a program's body, `x.dom.size` (and `x.dom[0].size`) is the size of an
+  axis of the argument, for the arrays it makes; iterating `x.dom` is still
+  refused, as a loop whose trip count is an argument. A kernel's contract
+  reads a size of its declared domain off the bounds of an argument's
+  binders, where the argument was built over a domain of other names.
+- A kernel that returns a value without declaring its sort, `-> Real`, is
+  refused when traced, naming the sort to declare; its value was dropped by
+  the compiled kernel.
+- Two array parameters a kernel only reads may share storage, `dot(x, x)`
+  or the diagonal of a Gram matrix: reads do not race, and both runs read
+  the same values. The contract still refuses two that share storage where
+  the kernel writes either; a native call traces the body to know which
+  it writes, only when two of its arguments share storage.
+- A schedule step that names no loop of the kernel lists its loops, and
+  names a called kernel's loop that was renamed when it was inlined:
+  `fill's loop n, inlined at ..., is n_0 here`.
 
 ### Fixed
 

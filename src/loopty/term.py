@@ -29,7 +29,9 @@ __all__ = [
     "COUNT_PARAM_REFLECTED",
     "OFFSETS_CANDIDATES",
     "Access",
+    "Argument",
     "ArrType",
+    "Call",
     "Difference",
     "Expression",
     "Hypothesis",
@@ -498,6 +500,89 @@ class Scope:
     hypotheses: tuple[Hypothesis, ...] = ()
 
 
+@dataclass(frozen=True, eq=False)
+class Argument:
+    """What one argument of a call inside a kernel's body is, in the caller's names.
+
+    ``param`` is the callee's parameter and ``kind`` what the caller passed
+    for it:
+
+    * ``"array"``, a whole array of the caller's term, ``array``;
+    * ``"row"``, a part of one, ``A[i]``: ``array`` with its leading axes
+      fixed at ``prefix``, the indices as the caller wrote them;
+    * ``"gather"``, the cells of ``array`` an index array's row picks,
+      ``u[cell[c]]``: ``index`` is the argument the indices are read from
+      (a row or a whole array), and the gathered array is read only;
+    * ``"scalar"``, a value, ``value``, of the callee's ``sort``, with the
+      callee's sizes replaced by what they are in the caller;
+    * ``"function"``, a Python function or a rule, which the callee's body
+      called where it uses it.
+
+    ``spelled`` is how a message writes it, ``A[i]``, and ``written`` says
+    whether the callee writes it. ``unfixed`` names the callee's sizes a
+    scalar's sort mentions that nothing the call passed fixes, so that the
+    sort has no meaning in the caller's names.
+    """
+
+    param: str
+    kind: str
+    spelled: str
+    array: str | None = None
+    prefix: tuple[Expression, ...] = ()
+    index: Argument | None = None
+    value: Expression = None
+    sort: Any = None
+    written: bool = False
+    unfixed: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, eq=False)
+class Call:
+    """One call of a kernel inside another kernel's body, inlined.
+
+    A kernel called where its caller computes, ``y[i] = dot(A[i], x)`` inside
+    ``for i in y.dom``, is traced in place: its body runs once more against
+    views of the caller's arrays, so its loops and its sums are the caller's,
+    under names of their own, nested inside the loops around the call, and
+    instantiated at each of their points. That is the term every fact of the
+    caller is about, and what the lowering compiles; this record is what the
+    call owes on top of it.
+
+    ``callee`` and ``definition`` name the kernel called (``calls.dot@40``),
+    ``label`` the call (``dot``, ``dot@2`` for its second call in the body),
+    and ``where`` the line of the call. ``inames`` are the caller's loops
+    around the call and ``domain`` the points at which it is made, narrowed
+    by the guards around it where isl can state them (``unnarrowed`` lists
+    the others, as a statement's do); ``loop_domain`` is the nest before the
+    guards, ``None`` when there are none.
+
+    ``arguments`` say what was passed (:class:`Argument`), ``statements`` are
+    the ids of the statements the call wrote into the caller's term, and
+    ``post`` is the callee's postcondition, its parameters replaced by what
+    the call passed, a claim about the caller's arrays at each point of
+    ``domain``; ``postcondition`` is the id of the callee's own fact for it.
+    ``returns`` says whether the callee is a rule, whose call is a value.
+    ``unknown`` says why the points of the call cannot be stated, where they
+    cannot (inside a sum over a binder the trace does not bind itself), and
+    is empty otherwise; the facts of such a call are left ``assumed``.
+    """
+
+    callee: str
+    definition: str
+    label: str
+    where: str
+    inames: tuple[str, ...]
+    domain: isl.Set
+    arguments: tuple[Argument, ...] = ()
+    statements: tuple[str, ...] = ()
+    post: Expression | None = None
+    postcondition: str | None = None
+    returns: bool = False
+    loop_domain: isl.Set | None = None
+    unnarrowed: tuple[tuple[str, str], ...] = ()
+    unknown: str = ""
+
+
 @dataclass(frozen=True)
 class Term:
     """A traced kernel.
@@ -556,13 +641,23 @@ class Term:
       starts, as a native call that does not read through them does not: a
       layout requirement does, where they are first read.
 
-    And one more is any term's:
+    And three more are any term's:
 
     * ``tables`` are the constant tables the body reads
       (:class:`loopty.table.Table`), each under the name the body reads it
       by, with its values. Nothing writes one; the lowering declares each as
       a read-only temporary with its values as the initializer, and the
       interpreter reads them.
+    * ``calls`` are the kernels the body calls, each inlined where it is
+      called (:class:`Call`): its statements and its sums are in ``stmts``,
+      and the record is what the call owes besides, its arguments' facts and
+      its postcondition restated at every point it is made.
+    * ``result`` names the parameter a rule's value is written into: a
+      kernel whose body returns a value, ``-> Real``, is called as a value
+      inside other kernels, and on its own its term is the kernel that
+      writes that value into a one-cell array, ``result[0] = ...``, which
+      the lowering compiles and the native run fills in. ``None`` for a
+      kernel that writes its parameters.
     """
 
     name: str
@@ -579,6 +674,8 @@ class Term:
     scopes: tuple[Scope, ...] = ()
     deferred_offsets: tuple[str, ...] = ()
     tables: tuple[tuple[str, Any], ...] = ()
+    calls: tuple[Call, ...] = ()
+    result: str | None = None
 
     @property
     def param_names(self) -> tuple[str, ...]:

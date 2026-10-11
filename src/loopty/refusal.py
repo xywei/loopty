@@ -371,7 +371,10 @@ def refuse_where_native_does(
       whole, a program's checked points apart (:func:`_store`); and of a
       literal the array's type does not hold under such a
       guard, which the trace leaves here (:func:`loopty.trace.trace`), since
-      the guard may hold nowhere: ``with when(i < 0): y[i] = 300``.
+      the guard may hold nowhere: ``with when(i < 0): y[i] = 300``;
+    * such arithmetic a kernel called in a loop is given for a scalar of a
+      numpy integer sort, which its contract converts into that type, over
+      the points the call is made at (:func:`_converted`, #232).
 
     An integer of 64 bits that is signed is not asked about, since loop
     arithmetic leaves it only past 64 bits, which is #139's limit; nor is
@@ -395,6 +398,8 @@ def refuse_where_native_does(
     promotion = Promotion(term)
     flags = {flag for flag, _message in term.checks}
     deferred: RefusedNatively | None = None
+    for call in term.calls:
+        _converted(term, call, promotion, sizes)
     for stmt in term.stmts:
         loops = stmt.loop_domain if stmt.loop_domain is not None else stmt.domain
         try:
@@ -609,6 +614,50 @@ def _store(
         f"has none. Give {stmt.assignee.array} a type that holds it, as an "
         f"array of Int, or keep the value inside {dtype}"
     )
+
+
+def _converted(
+    term: Term, call: Any, promotion: Any, sizes: Mapping[str, int]
+) -> None:
+    """:func:`refuse_where_native_does` of the scalars a call converts.
+
+    Natively a kernel called in a loop converts each scalar it is given into
+    the numpy type its sort is stored in, and numpy refuses a Python int that
+    type does not hold: ``i - 1`` for an ``np.uint32`` parameter at ``i = 0``,
+    ``i + 120`` for an ``np.int8`` one from ``i = 8``. The compiled kernel
+    converts it as C does, and wraps round (:mod:`loopty.calls`, #232). The
+    points are the call's, narrowed by the guards around it, under which the
+    native run makes no call; a call under a guard isl does not read is left
+    to the native refusal, as a store is.
+    """
+    from loopty.contract import native_storage
+
+    if call.unknown or call.unnarrowed:
+        return
+    for argument in call.arguments:
+        if argument.kind != "scalar":
+            continue
+        stored = native_storage(argument.sort)
+        if stored is None or stored.kind not in "iu":
+            continue
+        dtype = _narrow_integer((stored.type(0),))
+        value = argument.value
+        if dtype is None or not _loop_arithmetic(value, promotion.types(value)[0]):
+            continue
+        leaves = _leaves(value, dtype, call.domain, sizes, term, ())
+        if leaves is None:
+            continue
+        raise RefusedNatively(
+            f"the compiled run of {term.name} stops before it starts: the call "
+            f"of {call.callee} at {call.where} passes {_shown(value)}, a Python "
+            f"int, for its {argument.param}, which it declares {dtype}, and a "
+            f"{dtype} does not hold it, {leaves}. Natively the contract of "
+            f"{call.callee} converts it into a {dtype}, which numpy refuses there "
+            f"('Python integer out of bounds for {dtype}'), so the native run "
+            "stops there, and the compiled kernel would convert it as C does and "
+            f"wrap round. Keep the value inside {dtype}, or declare "
+            f"{argument.param} Int"
+        )
 
 
 def _narrow_integer(native: Any) -> np.dtype | None:
