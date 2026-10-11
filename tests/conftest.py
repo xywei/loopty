@@ -53,6 +53,22 @@ def _silence_loopys_own_deprecations() -> Iterator[None]:
         yield
 
 
+@pytest.fixture(autouse=True)
+def _isl_decides_unless_lean_is_tested(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Run every test with lanky's Lean oracle off, as CI does, but Lean's own.
+
+    Where Lean is installed it proves the facts isl decides, and they read
+    ``proved lean`` where these tests read isl's ``decided``, its detail and
+    its notes (``docs/lean-checks.md``). The tests of what Lean proves, marked
+    ``lean`` (``tests/test_lean_checks.py``), see the oracle as installed, and
+    skip without it.
+    """
+    if request.node.get_closest_marker("lean") is None:
+        monkeypatch.setenv("LANKY_LEAN_DISABLE", "1")
+
+
 @pytest.fixture
 def plain_opencl(monkeypatch):
     """loopy's plain OpenCL target in place of the pyopencl one; loopy itself.

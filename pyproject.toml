@@ -150,3 +150,6 @@ filterwarnings = [
     "ignore:'GCCToolchain.copy' is deprecated:DeprecationWarning",
     "ignore:Aff.is_equal with implicit conversion:DeprecationWarning",
 ]
+markers = [
+    "lean: a test of what Lean proves, with Lean left on (tests/conftest.py)",
+]

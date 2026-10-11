@@ -132,6 +132,7 @@ decided  decided    isl            spmv.py:81   scan           off[r] is in boun
 decided  decided    isl            spmv.py:81   scan           cnt[r] is in bounds for every instance of S1
 decided  decided    isl            spmv.py:79   scan           distinct instances of S0 write distinct cells of off
 decided  decided    isl            spmv.py:81   scan           distinct instances of S1 write distinct cells of off
+decided  decided    isl            spmv.py:81   scan           every cell of off that S1 reads, S0 or S1 wrote before the read
 decided  decided    isl            spmv.py:69   scan           the source order runs every dependence forward in time
 tested   tested     native         spmv.py:69   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
 tested   tested     interpreter    spmv.py:69   scan           the traced term computes what the body computes
@@ -149,7 +150,7 @@ tested   tested     interpreter    spmv.py:102  spmv           the traced term c
 decided  tested     call           spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
 tested   tested     interpreter    spmv.py:115  solve          the traced term computes what the body computes
 
-22 facts: 16 decided, 6 tested
+23 facts: 17 decided, 6 tested
 ```
 
 Read the `BY` column.

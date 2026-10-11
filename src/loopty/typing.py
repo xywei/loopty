@@ -116,6 +116,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 import islpy as isl
@@ -125,6 +126,14 @@ from lanky.prelude import FinType
 from lanky.terms import render, structurally_equal
 
 from loopty import flow
+from loopty.obligations import (
+    Stated,
+    disjoint_writes_obligation,
+    element_sort_obligation,
+    in_bounds_obligation,
+    mixed_in_bounds_obligation,
+    ordering_obligation,
+)
 from loopty.oracle import Empty, Monotone, Subset
 from loopty.term import ArrType, Term
 from loopty.trace import reductions_in
@@ -135,6 +144,7 @@ __all__ = [
     "facts_for",
     "in_bounds_facts",
     "instance_labels",
+    "kernel_definedness_facts",
     "layout_fact_ids",
     "layout_facts",
     "ordering_facts",
@@ -395,6 +405,28 @@ def in_bounds_facts(
                     )
                 )
                 continue
+            mixed = _mixed_fact(
+                term,
+                stmt,
+                places,
+                arrtype,
+                types,
+                identifier=identifier,
+                subject=subject,
+                text=text,
+                array=array,
+                owner=owner,
+                layout=layout,
+                rests_on=(
+                    *_by_type_rests_on(
+                        [place[0] for place in places], types, sorts, layouts
+                    ),
+                    *layouts.get(array, ()),
+                ),
+            )
+            if mixed is not None:
+                facts.append(mixed)
+                continue
             try:
                 widened = False
                 reached = None
@@ -406,8 +438,8 @@ def in_bounds_facts(
                         reached, part = _align_both(reached, part)
                         part = reached.union(part).coalesce()
                     reached = part
-                cells = flow.cell_set(arrtype, indices, reflections=reflections)
-                reached, cells = _align_both(reached, cells)
+                described = flow.cell_set(arrtype, indices, reflections=reflections)
+                reached, cells = _align_both(reached, described)
                 reached = flow.assume_sizes(reached, sizes)
                 cells = flow.assume_sizes(cells, sizes)
             except Exception as exc:  # noqa: BLE001 - an unstatable rule is ASSUMED
@@ -457,6 +489,16 @@ def in_bounds_facts(
                         cells,
                         description=f"cells {text} reaches are cells {array} has",
                         labels=tuple(f"a{k}" for k in range(len(indices))),
+                        lean=Stated(
+                            partial(
+                                in_bounds_obligation,
+                                term,
+                                tuple(places),
+                                described,
+                                array,
+                                text,
+                            )
+                        ),
                     ),
                     status=Status.ASSUMED,
                     provenance={
@@ -471,6 +513,127 @@ def in_bounds_facts(
                 )
             )
     return facts
+
+
+def _mixed_axes(
+    indices: Sequence[Any], arrtype: ArrType, types: dict[str, Any]
+) -> tuple[list[tuple[int, Any, str]], list[int]] | None:
+    """The axes of an access in bounds by type, and the affine others; ``None`` else.
+
+    ``X[cell[c, i], d]``: the first axis is indexed by an element of ``cell``,
+    whose sort ``Fin[nv]`` is the axis's, and the second by an affine
+    expression isl reads. Each typed axis comes as
+    ``(axis, the index's sort bound, the reason)``. An array with a ragged
+    axis, whose bound is the row's, is left to the rules that read rows, and
+    an access with no typed axis, or one typed on every axis, to the others.
+    """
+    if any(arrtype.ragged) or arrtype.domain is not None:
+        return None
+    if len(indices) != len(arrtype.axes):
+        return None
+    typed: list[tuple[int, Any, str]] = []
+    affine: list[int] = []
+    for axis, index in enumerate(indices):
+        declared = _index_type(index, types)
+        if isinstance(declared, FinType) and structurally_equal(
+            declared.bound, arrtype.axes[axis]
+        ):
+            typed.append((axis, declared.bound, f"{render(index)} : {declared}"))
+            continue
+        try:
+            flow.expr_text(index, None, None)
+        except (flow.NonAffine, ValueError):
+            return None
+        affine.append(axis)
+    if not typed or not affine:
+        return None
+    return typed, affine
+
+
+def _mixed_fact(
+    term: Term,
+    stmt: Any,
+    places: Sequence[tuple[tuple[Any, ...], tuple[str, ...], Any]],
+    arrtype: ArrType,
+    types: dict[str, Any],
+    *,
+    identifier: str,
+    subject: str,
+    text: str,
+    array: str,
+    owner: str,
+    layout: dict[str, Any],
+    rests_on: tuple[str, ...],
+) -> Fact | None:
+    """The in-bounds fact of an access with mixed subscripts, or ``None``.
+
+    The axes indexed by a value of their own sort are in bounds by type, and
+    isl decides the affine others, over the cells the access reaches there
+    (see :func:`_mixed_axes`). The fact rests on what a fact decided by type
+    rests on, the element-sort facts of the arrays its indices are read
+    from. Lean states the whole access, with what the type says of each
+    typed index as a hypothesis (:func:`loopty.obligations.mixed_in_bounds_obligation`).
+    """
+    if len(places) != 1:
+        return None
+    (place_indices, inames, domain) = places[0]
+    found = _mixed_axes(place_indices, arrtype, types)
+    if found is None:
+        return None
+    typed, affine = found
+    sizes = flow.size_names(term)
+    kept = tuple(place_indices[axis] for axis in affine)
+    virtual = ArrType(
+        axes=tuple(arrtype.axes[axis] for axis in affine),
+        dtype=arrtype.dtype,
+        ragged=(False,) * len(affine),
+    )
+    try:
+        relation = flow.access_relation(inames, domain, kept)
+        described = flow.cell_set(virtual, kept, reflections=term.reflections)
+        reached, cells = _align_both(relation.range(), described)
+        reached = flow.assume_sizes(reached, sizes)
+        cells = flow.assume_sizes(cells, sizes)
+    except Exception:  # noqa: BLE001 - left to the rules after this one
+        return None
+    reason = ", ".join(said for _axis, _bound, said in typed)
+    return Fact(
+        id=identifier,
+        kind="in-bounds",
+        statement=(
+            f"{subject} is in bounds for every instance of {stmt.id} "
+            f"({reason}, by type)"
+        ),
+        term=Subset(
+            reached,
+            cells,
+            description=(
+                f"cells {text} reaches on its affine axes are cells {array} has"
+            ),
+            labels=tuple(f"a{axis}" for axis in affine),
+            lean=Stated(
+                partial(
+                    mixed_in_bounds_obligation,
+                    term,
+                    places[0],
+                    tuple((axis, bound) for axis, bound, _said in typed),
+                    flow.cell_set(arrtype, place_indices, reflections=term.reflections),
+                    text,
+                )
+            ),
+        ),
+        status=Status.ASSUMED,
+        provenance={
+            "access": text,
+            "statement": stmt.id,
+            "rule": "index type and isl",
+            "by_type": reason,
+            **layout,
+        },
+        where=stmt.where,
+        owner=owner,
+        rests_on=rests_on,
+    )
 
 
 def _access_text(array: str, indices: Sequence[Any]) -> str:
@@ -688,8 +851,8 @@ def element_sort_facts(
             relation = flow.access_relation(stmt.inames, stmt.domain, (value,))
             if _is_widened(relation, (value,)):
                 raise flow.NonAffine("widened")
-            points = flow.cell_set(virtual, (value,), reflections=reflections)
-            relation, points = _align_both(relation, points)
+            described = flow.cell_set(virtual, (value,), reflections=reflections)
+            relation, points = _align_both(relation, described)
             outside = relation.intersect_range(points.complement()).domain()
             outside = flow.assume_sizes(outside, sizes)
         except Exception as exc:  # noqa: BLE001 - an unstatable rule is ASSUMED
@@ -724,6 +887,9 @@ def element_sort_facts(
                         f"into {written.array}"
                     ),
                     labels=tuple(stmt.inames),
+                    lean=Stated(
+                        partial(element_sort_obligation, term, stmt, described, sort)
+                    ),
                 ),
                 status=Status.ASSUMED,
                 provenance={**common, **_unnarrowed(stmt)},
@@ -1684,6 +1850,15 @@ def write_disjointness_facts(
                     collisions,
                     description=f"pairs of {stmt.id} instances writing the same cell",
                     labels=labels,
+                    lean=Stated(
+                        partial(
+                            disjoint_writes_obligation,
+                            term,
+                            stmt,
+                            footprint.array,
+                            tuple(stmt.assignee.indices),
+                        )
+                    ),
                 ),
                 status=Status.ASSUMED,
                 provenance={
@@ -1695,6 +1870,101 @@ def write_disjointness_facts(
                 where=stmt.where,
                 owner=owner,
                 rests_on=layouts.get(footprint.array, ()),
+            )
+        )
+    return facts
+
+
+def kernel_definedness_facts(
+    term: Term, owner: str, *, module: str | None = None, line: int | None = None
+) -> list[Fact]:
+    """One fact per array a kernel reads only where it wrote it before.
+
+    A kernel may read what an array held when it was called, as ``jacobi``
+    reads its first time level, and nothing is owed about it. One that reads
+    an array only at cells an earlier instance of its own wrote (``scan``
+    reads ``off[r]`` after ``off[0] = 0`` or the row before it stored it) has
+    a property the ledger records when isl shows it: every cell read was
+    written by the kernel before the read, in the source order. That is the
+    ∀∃ fact a later step builds on, a postcondition read off the term or a
+    buffer computed where it is read, and the one whose witness, the instance
+    that wrote the cell, isl gives as ``lexmax`` and Lean checks piece by
+    piece (:func:`loopty.obligations.defined_obligation`).
+
+    So the fact appears only where isl shows it: a kernel that reads what the
+    array held before is no failure, and gets none. A read or a write isl
+    cannot list (an index that is not affine, the length of a ragged row)
+    leaves the array without one too. A program's arrays are its
+    :func:`definedness_facts`'.
+    """
+    if term.scopes or term.temporaries:
+        return []
+    from loopty.obligations import defined_obligation, stated_writers, written_before
+
+    facts: list[Fact] = []
+    arrays = list(dict.fromkeys(stmt.assignee.array for stmt in term.stmts))
+    for array in arrays:
+        # a write under a guard isl cannot state may not have stored the cell
+        # its domain says, so it witnesses nothing (stated_writers)
+        writers = stated_writers(
+            term, [stmt for stmt in term.stmts if stmt.assignee.array == array]
+        )
+        if not writers:
+            continue
+        places = [
+            (stmt, tuple(indices), inames, domain)
+            for stmt in term.stmts
+            for name, indices, kind, inames, domain in flow.statement_accesses(
+                stmt, term
+            )
+            if name == array and kind in ("read", "acc")
+        ]
+        if not places:
+            continue
+        try:
+            found = written_before(term, array, writers, places)
+        except Exception:  # noqa: BLE001 - a question isl cannot be asked owes nothing
+            found = None
+        if found is None:
+            continue
+        question, relations = found
+        readers = list(dict.fromkeys(stmt.id for stmt, *_ in places))
+        verb = "reads" if len(readers) == 1 else "read"
+        statement = (
+            f"every cell of {array} that {' and '.join(readers)} {verb}, "
+            f"{' or '.join(writer.id for writer in writers)} wrote before the read"
+        )
+        facts.append(
+            Fact(
+                id=fact_id(
+                    "definedness", owner, module=module, line=line, detail=array
+                ),
+                kind="definedness",
+                statement=statement,
+                term=Empty(
+                    question,
+                    description=(
+                        f"reads of {array} that no earlier write of it precedes"
+                    ),
+                    lean=Stated(
+                        partial(
+                            defined_obligation,
+                            term,
+                            array,
+                            tuple(writers),
+                            tuple(places),
+                            tuple(tuple(per) for per in relations),
+                        )
+                    ),
+                ),
+                status=Status.ASSUMED,
+                provenance={
+                    "array": array,
+                    "readers": readers,
+                    "writers": [writer.id for writer in writers],
+                },
+                where=places[0][0].where,
+                owner=owner,
             )
         )
     return facts
@@ -1755,6 +2025,7 @@ def ordering_facts(
                 deps,
                 description="the source schedule is monotone on the dependences",
                 labels=instance_labels(term),
+                lean=Stated(partial(ordering_obligation, term)),
             ),
             status=Status.ASSUMED,
             provenance=provenance,
@@ -2141,6 +2412,13 @@ def _definedness_fact(
                 verdict.stored,
                 description,
                 tuple(f"a{k}" for k in range(dims)),
+                lean=_program_definedness_statement(
+                    term,
+                    array,
+                    writers,
+                    reading,
+                    zeros if verdict.zeros is not None else (),
+                ),
             ),
             status=Status.ASSUMED,
             provenance=provenance,
@@ -2178,6 +2456,49 @@ def _definedness_fact(
         provenance=provenance,
         where=scope.where,
         owner=owner,
+    )
+
+
+def _program_definedness_statement(
+    term: Term,
+    array: str,
+    writers: Sequence[Any],
+    reading: Sequence[Any],
+    zeros: Sequence[Any],
+) -> Any:
+    """How Lean states a program's definedness fact, or ``None`` where it cannot.
+
+    As a kernel's (:func:`kernel_definedness_facts`): every read of the call
+    is of a cell some statement that stores it wrote before, the writers'
+    calls and, where the claim says so, the zeros the program made the array
+    with. isl's last writer is the witness; a read or a write it cannot list
+    leaves the fact to isl.
+    """
+    from loopty.obligations import defined_obligation, stated_writers, written_before
+
+    places = [
+        (stmt, tuple(indices), inames, domain)
+        for stmt in reading
+        for name, indices, kind, inames, domain in flow.statement_accesses(stmt, term)
+        if name == array and kind in ("read", "acc")
+    ]
+    # a write isl cannot list counts for nothing, as flow.definedness counts it
+    stores = tuple(stated_writers(term, (*zeros, *writers)))
+    try:
+        found = written_before(term, array, stores, places)
+    except Exception:  # noqa: BLE001 - a question isl cannot be asked is isl's
+        found = None
+    if found is None:
+        return None
+    return Stated(
+        partial(
+            defined_obligation,
+            term,
+            array,
+            tuple(stores),
+            tuple(places),
+            tuple(tuple(per) for per in found[1]),
+        )
     )
 
 
@@ -2348,6 +2669,7 @@ def facts_for(
         *element_sort_facts(term, owner, **key),
         *layout_facts(term, owner, **key),
         *write_disjointness_facts(term, owner, **key),
+        *kernel_definedness_facts(term, owner, **key),
         *ordering_facts(term, owner, where, **key),
         *reduction_facts(term, owner, **key),
         *postcondition_facts(term, owner, where, **key),
