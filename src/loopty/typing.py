@@ -123,7 +123,7 @@ import islpy as isl
 import pymbolic.primitives as prim
 from lanky.ledger import Fact, Status, fact_id
 from lanky.prelude import FinType
-from lanky.terms import render, structurally_equal
+from lanky.terms import init_args, render, structurally_equal
 
 from loopty import flow
 from loopty.obligations import (
@@ -2810,6 +2810,32 @@ def _call_facts(
                                   owner, at, common, key)
             if fact is not None:
                 facts.append(fact)
+            # Natively the value is computed when the call is made, every read
+            # of it, whether the callee uses the parameter or not; inlined, a
+            # read the callee never reaches is not in the term.
+            what = f"read for the value passed to {call.callee} as {argument.param}"
+            for array, indices, summed in _reads_of(argument.value):
+                read = Argument(argument.param, "row", "", array, indices)
+                if summed:
+                    text = _access_text(array, indices)
+                    facts.append(
+                        assumed(
+                            fact_id(
+                                "in-bounds",
+                                owner,
+                                detail=f"{call.label}:{argument.param}:{text}",
+                                **key,
+                            ),
+                            "in-bounds",
+                            f"{text}, {what}, is in bounds {at}",
+                            "it is read inside a sum the value computes, whose "
+                            "points the call's facts do not state",
+                        )
+                    )
+                    continue
+                fact = row_fact(read, what)
+                if fact is not None:
+                    facts.append(fact)
     for array, sharing in rows.items():
         for first_position, first in enumerate(sharing):
             for second in sharing[first_position + 1 :]:
@@ -2852,6 +2878,30 @@ def _call_facts(
             )
         )
     return facts
+
+
+def _reads_of(expr: Any, summed: bool = False) -> list[tuple[str, tuple, bool]]:
+    """Every array read in ``expr``: the array, the indices, and whether in a sum.
+
+    ``x[col[r, 0]]`` reads ``x`` at ``col[r, 0]`` and ``col`` at ``(r, 0)``.
+    """
+    out: list[tuple[str, tuple, bool]] = []
+    aggregate = getattr(expr, "aggregate", None)
+    if isinstance(expr, prim.Subscript) and isinstance(aggregate, prim.Variable):
+        index = expr.index if isinstance(expr.index, tuple) else (expr.index,)
+        out.append((aggregate.name, tuple(index), summed))
+        for part in index:
+            out.extend(_reads_of(part, summed))
+    elif hasattr(expr, "binders") and isinstance(expr, prim.ExpressionNode):
+        out.extend(_reads_of(expr.body, True))
+        out.extend(_reads_of(getattr(expr, "guard", None), True))
+    elif isinstance(expr, prim.ExpressionNode):
+        for arg in init_args(expr):
+            out.extend(_reads_of(arg, summed))
+    elif isinstance(expr, tuple | list):
+        for item in expr:
+            out.extend(_reads_of(item, summed))
+    return out
 
 
 def _call_text(call: Any) -> str:

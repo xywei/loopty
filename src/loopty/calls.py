@@ -555,7 +555,19 @@ class _Inlining:
                     )
                 )
         self.domains.append((param, mine, theirs, value.name))
-        if not _same_sort(typ.dtype, value.type.dtype):
+        mine_bound = _fin_bound(typ.dtype)
+        theirs_bound = _fin_bound(value.type.dtype)
+        if mine_bound is not None and theirs_bound is not None:
+            # Fin[n] against Fin[m]: equal once the domain's sizes are settled
+            pending.append(
+                (
+                    f"the sort of the elements of its {param}",
+                    mine_bound,
+                    theirs_bound,
+                    value.name,
+                )
+            )
+        elif not _same_sort(typ.dtype, value.type.dtype):
             self.refuse(
                 f"it declares the elements of its {param} {_sort_text(typ.dtype)}, "
                 f"and the elements of {value.name}, which it is given there, are "

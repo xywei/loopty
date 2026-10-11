@@ -49,7 +49,9 @@ All notable changes to loopty are recorded here. The format follows
   one (kind `distinct-arguments`); and after each call the callee's
   postcondition, restated of what the call passed and resting on the
   callee's own fact (kind `postcondition-in-scope`). An argument is
-  evaluated once, when the call is made, as in Python, so a call whose
+  evaluated once, when the call is made, as in Python: every cell read for
+  the value of a scalar argument is owed in bounds at every point of the
+  call, whether the callee uses the parameter or not, and a call whose
   callee writes an array an argument reads (`scale(A[i], A[i, 0])`) is
   refused, naming both. A rule may be applied to a function that applies
   it again, `integrate(lambda q: integrate(lambda p: ...))`; a kernel that

@@ -325,6 +325,42 @@ def test_an_integral_argument_is_a_point_of_its_sort() -> None:
     assert refuted.provenance["witness"] == (0, 2)
 
 
+def test_what_a_scalar_argument_reads_is_owed_if_the_callee_ignores_it() -> None:
+    # Natively A[i + 1] is read when the call is made, and raises at the last
+    # i; inlined, a callee that never uses s reads nothing of A.
+    @kernel
+    def total(a: Arr[Fin[n], Real], s: Real) -> Real:  # noqa: F821
+        return reduce_sum(a[k] for k in a.dom)
+
+    @kernel
+    def ahead(
+        x: Arr[Fin[n], Real],  # noqa: F821
+        A: Arr[Fin[m], Real],  # noqa: F821
+        y: Arr[Fin[m], Real],  # noqa: F821
+    ):
+        for i in y.dom:
+            y[i] = total(x, A[i + 1])
+
+    (read,) = [f for f in _facts(ahead) if "read for the value" in f.statement]
+    assert read.statement.startswith(
+        "A[i + 1], read for the value passed to total as s, is in bounds wherever"
+    )
+    assert _decided(read).status is Status.REFUTED
+
+    @kernel
+    def guarded(
+        x: Arr[Fin[n], Real],  # noqa: F821
+        A: Arr[Fin[m], Real],  # noqa: F821
+        y: Arr[Fin[m], Real],  # noqa: F821
+    ):
+        for i in y.dom:
+            with when(i + 1 < y.dom.size):
+                y[i] = total(x, A[i + 1])
+
+    (read,) = [f for f in _facts(guarded) if "read for the value" in f.statement]
+    assert _decided(read).status is Status.DECIDED
+
+
 def test_two_rows_of_one_array_are_two_rows_where_one_is_written() -> None:
     (apart,) = _facts(calls.running, "distinct-arguments")
     assert _decided(apart).status is Status.DECIDED
@@ -911,3 +947,41 @@ def test_an_array_over_a_domain_is_passed_whole() -> None:
 
     with pytest.raises(TraceError, match="nothing says the two have the same points"):
         other_points.term
+
+
+def test_an_array_over_a_domain_of_index_elements_is_passed_whole() -> None:
+    # Fin[n] elements against Fin[m]: one sort once the domain says n is m
+    @kernel
+    def row_count(
+        f: Arr[Where[i : Fin[n], j : Fin[n], j < i], Fin[n]],  # noqa: F821
+        r: Fin[n],  # noqa: F821
+    ) -> Real:
+        return reduce_sum(1.0 * f[r, q] for q in f.dom[r])
+
+    @kernel
+    def counts(
+        f: Arr[Where[a : Fin[m], b : Fin[m], b < a], Fin[m]],  # noqa: F821
+        e: Arr[Fin[m], Real],  # noqa: F821
+    ):
+        for p in e.dom:
+            e[p] = row_count(f, p)
+
+    domain = counts.arg_types["f"].domain
+    cells = np.array([0, 1, 2, 0, 1, 3])
+    e = Arr.zeros(4)
+    counts(Arr.from_cells(domain, cells, m=4), e)
+    np.testing.assert_allclose(e.numpy(), [0.0, 0.0, 3.0, 4.0])
+    inputs = {"f": Arr.from_cells(domain, cells, m=4), "e": Arr.zeros(4)}
+    fact = LoopyExecutor().differential(counts, Schedule(counts), inputs)
+    assert fact.status is Status.TESTED
+
+    @kernel
+    def other_sort(
+        f: Arr[Where[a : Fin[m], b : Fin[m], b < a], Fin[m + 1]],  # noqa: F821
+        e: Arr[Fin[m], Real],  # noqa: F821
+    ):
+        for p in e.dom:
+            e[p] = row_count(f, p)
+
+    with pytest.raises(TraceError, match="the sort of the elements of its f"):
+        other_sort.term
