@@ -4655,6 +4655,22 @@ class Schedule:
                 f"taken over an order; contract {array} before tagging, and the "
                 "tag is then checked against the window"
             )
+        # a loop a sum runs outside of orders none of its instances either
+        # (see prioritize)
+        outside = sorted(
+            {
+                loop
+                for loops in self._outside.values()
+                for loop in loops
+                if any(loop in self._layout.coords[sid] for sid in statements)
+            }
+        )
+        if outside:
+            raise ValueError(
+                f"{text}: a sum runs outside {', '.join(outside)}, which then "
+                f"orders none of its instances, and a window is taken over an "
+                f"order; contract {array} before prioritize"
+            )
 
         fact = self._definedness_fact(
             producer, readers, array, text, recipe, losing="a window would not"

@@ -21,7 +21,7 @@ import pytest
 from lanky.ledger import Status
 from lanky.prelude import Real
 
-from loopty import Arr, Fin, Schedule, kernel, program, when
+from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum, when
 from loopty.executor import LoopyExecutor, emit_code
 from loopty.schedule import IllegalCast
 from loopty.window import Placement, WindowError
@@ -257,6 +257,29 @@ def test_a_tag_before_the_window_is_refused_and_one_after_is_checked() -> None:
         "stores v[0, 0, 0] in the slot of the window lambda e, a, b: b that "
         "along_r.S0[e=1, a=0, b=0] stores v[1, 0, 0] in"
     ) in str(caught.value)
+
+
+@kernel
+def totals(f: Arr[Fin[n], Real], y: Arr[Fin[m], Real]):  # noqa: F821
+    """Every cell of y, the sum of f."""
+    for t in y.dom:
+        y[t] = reduce_sum(f[s] for s in f.dom)
+
+
+@program
+def summed(u, y):
+    """The flux, then sums of it."""
+    f = Arr.zeros_like(u)
+    WINDOWS.flux(u, f)
+    totals(f, y)
+
+
+def test_a_sum_run_outside_a_loop_refuses_the_window() -> None:
+    # prioritize runs the sum's loop outside t, which then orders none of the
+    # instances of totals, so no window is taken over it
+    schedule = Schedule(summed, sizes={"n": 4, "m": 4}).prioritize("s", "t")
+    with pytest.raises(ValueError, match="a sum runs outside t"):
+        schedule.contract("f")
 
 
 def test_a_step_after_the_window_keeps_the_order_of_every_slot() -> None:
