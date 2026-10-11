@@ -33,6 +33,8 @@ proved  lean         stencil_skew.py:54  jacobi  the source order runs every dep
 tested  interpreter  stencil_skew.py:54  jacobi  the traced term computes what the body computes
 
 6 facts: 5 proved, 1 tested
+
+LEAN proved 5 of the 5 facts isl decided that were stated for it, each from the plugin's own statement of it, isl's hints checked and not trusted; --show-lean prints the Lean
 ```
 
 and `loopty run` proves the casts of every schedule it runs:
@@ -45,6 +47,10 @@ proved  lean   stencil_skew.py:62  jacobi  the order after skew(i, by='t') runs 
 proved  lean   stencil_skew.py:62  jacobi  tile(t,i,8,8) renames the instances of jacobi one for one
 proved  lean   stencil_skew.py:62  jacobi  the order after tile(t,i,8,8) runs every dependence of jacobi forward
 tested  loopy  stencil_skew.py:62  jacobi  the scheduled run of jacobi agrees with the native run to the accurac...
+
+5 facts: 4 proved, 1 tested
+
+LEAN proved 4 of the 4 facts isl decided that were stated for it, each from the plugin's own statement of it, isl's hints checked and not trusted; --show-lean prints the Lean
 ```
 
 (These transcripts are from a machine with Lean; CI runs without it, so the
