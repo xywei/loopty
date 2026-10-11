@@ -20,9 +20,10 @@ All notable changes to loopty are recorded here. The format follows
   space. `flow`, `typing`, `hypotheses`, `oracle` and `domain` stay on islpy.
   A CI workflow, `loopy-main.yml`, runs the suite, the three commands of every
   example and the transcripts against the pinned commits, on 3.13 and 3.14,
-  and against loopy main's current head. Every example's ledger is unchanged;
-  the generated code differs in the order of an affine expression's terms, and
-  in a division of a size (below).
+  and against loopy main's current head. Every example's ledger is unchanged.
+  The generated code differs in the order of an affine expression's terms, in
+  a division of a size (below), and in the pieces of the tiled diamond's inner
+  bounds, which visit the same iterations.
 
 ### Changed
 

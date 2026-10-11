@@ -10,7 +10,7 @@ gets; the branch `port/loopy-main` runs on loopy main, and is merged into
 
 Nothing a user writes changes. Every example prints the same ledger on both,
 row for row, and the compiled runs agree with the native ones as before; the
-code loopy generates differs in the two ways listed below.
+code loopy generates differs in the three ways listed below.
 
 ## Install
 
@@ -133,9 +133,14 @@ Each takes an object already on its side as it is. A domain comes back as an
   - and, where a split or a tile divides a size, plain division in place of
     loopy's floor-division helper, `(3 + n) / 4` for
     `loopy_floor_div_pos_b_int32(3 + n, 4)`, with the helper's definition
-    gone and some conditions on the sizes dropped from the bounds: loopy
-    simplifies with `n >= 0` (item 3). With no assumption on the sizes, loopy
-    main writes the helper as 2025.2 does.
+    gone: loopy simplifies with `n >= 0` (item 3). With no assumption on the
+    sizes, loopy main writes the helper as 2025.2 does;
+  - and, in `wavefront_acoustic`'s tiled diamond only, the bounds of the two
+    inner loops in other pieces, without the conditions the loops around
+    them already imply (`-3 + nx >= 0` inside `if (-2 + nt >= 0 && -3 + nx
+    >= 0)`). This is loopy main's code generation, with or without the
+    sizes' assumption. Compiled and run, the two loop nests visit the same
+    iterations in the same order for every `nt` and `nx` up to 40.
 
 The ledgers (`lanky check --json`, `loopty run --json`) are the same, and so
 is everything `python FILE`, `lanky check FILE` and `loopty run FILE` print.
