@@ -8,6 +8,17 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Added
 
+- **Fusion on chosen outer loops** (`Schedule.fuse(..., loops=1)`). A
+  fusion took every loop both sides have, so two passes over elements, the
+  second of which reads every cell of the element the first wrote (a
+  sum-factorized operator, one reference axis per pass), could not be fused
+  at all: fused on the element and the row, the second pass reads a cell of
+  the element before the first stores it. `loops` fuses only that many of
+  the outer loops and leaves the loops inside them one after the other, the
+  producer's first, checked as every fusion is. A refused fusion now names
+  each fusion it checked that is accepted: the least shift at the same
+  depth, as before, and the deepest fusion of fewer loops, `fuse('along',
+  'along@2', loops=1)`.
 - **The names of isl dimensions** (`loopty.names`, #161). Every isl object
   loopty names the dimensions of keeps namedisl's invariants: each
   dimension has a name, no two share one, and none is named like a

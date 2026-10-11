@@ -3506,7 +3506,11 @@ class Schedule:
         return kernel.with_kernel(entry.copy(instructions=insns))
 
     def fuse(
-        self, producer: str, consumer: str, shift: int | Sequence[int] = 0
+        self,
+        producer: str,
+        consumer: str,
+        shift: int | Sequence[int] = 0,
+        loops: int | None = None,
     ) -> Schedule:
         """Run the consumer's loops inside the producer's, ``shift`` steps behind.
 
@@ -3529,6 +3533,18 @@ class Schedule:
         already there. One shift per fused loop, or one number for a single
         loop.
 
+        ``loops`` fuses only that many of the outer loops, and leaves the
+        loops inside them one after the other, the producer's first. Two
+        passes over elements, the second of which reads every cell of the
+        element the first wrote, fuse on the element loop and no deeper::
+
+            Schedule(weak_grad).fuse("along_r", "along_s", loops=1)
+
+        runs, for each element, all of ``along_r`` and then all of
+        ``along_s``; fusing both loops would read a cell of the element
+        before ``along_r`` stores it, and is refused with that pair. Without
+        ``loops``, every loop both sides have is fused.
+
         The two sides' loops have to be in sequence, not one inside the
         other. The fused loops are the outer loops of each side's nest, and a
         nest the lowering wrote as one domain is cut after them (see
@@ -3537,24 +3553,34 @@ class Schedule:
         :meth:`affine` leaves a map it cannot write. A fusion
         that runs a dependence backwards is refused with the pair of
         instances and the cell between them, as every cast is, and the
-        message names the least shift at which the fusion is accepted, when
-        there is one and a number per loop gives it.
+        message names the fusions it checked that are accepted: the least
+        shift that runs every dependence forward, when a number per loop
+        gives it, and the deepest fusion of fewer loops, with ``loops``.
         """
-        return self._fuse(producer, consumer, shift, hint=True)
+        return self._fuse(producer, consumer, shift, loops, hint=True)
 
     def _fuse(
         self,
         producer: str,
         consumer: str,
         shift: int | Sequence[int],
+        loops: int | None,
         hint: bool,
     ) -> Schedule:
-        """:meth:`fuse`, with ``hint`` saying whether a refusal names a shift."""
+        """:meth:`fuse`, with ``hint`` saying whether a refusal names a fix."""
         given = shift if isinstance(shift, int) else tuple(shift)
-        text = f"fuse({producer}, {consumer}" + (
-            f", shift={given!r})" if given else ")"
-        )
-        recipe = ("fuse", (producer, consumer), {"shift": given} if given else {})
+        options = []
+        if given:
+            options.append(f"shift={given!r}")
+        if loops is not None:
+            options.append(f"loops={loops!r}")
+        text = f"fuse({', '.join([producer, consumer, *options])})"
+        kwargs: dict[str, Any] = {}
+        if given:
+            kwargs["shift"] = given
+        if loops is not None:
+            kwargs["loops"] = loops
+        recipe = ("fuse", (producer, consumer), kwargs)
         first = self._fused_side(producer, text)
         second = self._fused_side(consumer, text)
         both = sorted(set(first) & set(second))
@@ -3570,7 +3596,9 @@ class Schedule:
             )
         mine = self._fused_loops(first, producer, text)
         theirs = self._fused_loops(second, consumer, text)
-        depth = min(len(mine), len(theirs))
+        depth = _fused_depth(
+            loops, (producer, mine), (consumer, theirs), text
+        )
         mine, theirs = mine[:depth], theirs[:depth]
         shared = [name for name in mine if name in theirs]
         if shared:
@@ -3598,21 +3626,73 @@ class Schedule:
         except IllegalCast as exc:
             if not hint or exc.fact is None or exc.fact.kind != "monotone":
                 raise
-            least = self._least_shift(first, second, mine, theirs)
-            if least is None or least == shifts:
+            accepted = self._accepted_fusions(
+                producer, consumer, (first, second), (mine, theirs), shifts, loops
+            )
+            if not accepted:
                 raise
-            suggested: int | tuple[int, ...] = least[0] if depth == 1 else least
-            try:
-                self._fuse(producer, consumer, suggested, hint=False)
-            except (IllegalCast, ValueError):
-                raise exc from None
-            message = (
-                f"{exc}; fuse({producer!r}, {consumer!r}, shift={suggested!r}) "
-                "runs every dependence between them forward"
+            message = f"{exc}; {accepted[0]} runs every dependence between them " + (
+                "forward"
+                if len(accepted) == 1
+                else f"forward, and so does {accepted[1]}"
             )
             provenance = {**exc.fact.provenance, "reason": message}
             fact = dataclasses.replace(exc.fact, provenance=provenance)
             raise IllegalCast(message, witness=exc.witness, fact=fact) from None
+
+    def _accepted_fusions(
+        self,
+        producer: str,
+        consumer: str,
+        sides: tuple[Sequence[str], Sequence[str]],
+        fused: tuple[Sequence[str], Sequence[str]],
+        shifts: tuple[int, ...],
+        loops: int | None,
+    ) -> list[str]:
+        """The fusions of a refused one that the checker accepts, as written.
+
+        First the same loops at the least shift per loop that runs the
+        dependences between the two sides forward, when there is one (see
+        :meth:`_least_shift`); then the deepest fusion of fewer loops, at no
+        shift, or at its own least shift. Each is checked before it is named.
+        """
+        first, second = sides
+        mine, theirs = fused
+        depth = len(mine)
+        out: list[str] = []
+
+        def accepted(shift: tuple[int, ...], count: int | None) -> bool:
+            value: int | tuple[int, ...] = shift[0] if len(shift) == 1 else shift
+            try:
+                self._fuse(producer, consumer, value, count, hint=False)
+            except (IllegalCast, ValueError):
+                return False
+            return True
+
+        def written(shift: tuple[int, ...], count: int | None) -> str:
+            options = [repr(producer), repr(consumer)]
+            if any(shift):
+                value = shift[0] if len(shift) == 1 else shift
+                options.append(f"shift={value!r}")
+            if count is not None:
+                options.append(f"loops={count}")
+            return f"fuse({', '.join(options)})"
+
+        least = self._least_shift(first, second, mine, theirs)
+        if least is not None and least != shifts and accepted(least, loops):
+            out.append(written(least, loops))
+        for count in range(depth - 1, 0, -1):
+            candidates = [(0,) * count]
+            fewer = self._least_shift(first, second, mine[:count], theirs[:count])
+            if fewer is not None and any(fewer):
+                candidates.append(fewer)
+            found = next(
+                (shift for shift in candidates if accepted(shift, count)), None
+            )
+            if found is not None:
+                out.append(written(found, count))
+                break
+        return out
 
     def _fused_side(self, name: str, text: str) -> list[str]:
         """The statements one side of :meth:`fuse` names, in term order.
@@ -5194,6 +5274,38 @@ def _substituted_kernel(
             f"{type(exc).__name__}: {exc}"
         )
     return kernel, None
+
+
+def _fused_depth(
+    loops: int | None,
+    producer: tuple[str, Sequence[str]],
+    consumer: tuple[str, Sequence[str]],
+    text: str,
+) -> int:
+    """How many outer loops :meth:`Schedule.fuse` fuses.
+
+    Every loop both sides have when ``loops`` is ``None``, and otherwise
+    ``loops``, which has to be a whole number from 1 to that many.
+    ``producer`` and ``consumer`` are each a side's name and the loops all
+    its statements run in, outermost first.
+    """
+    (first, mine), (second, theirs) = producer, consumer
+    most = min(len(mine), len(theirs))
+    if loops is None:
+        return most
+    if isinstance(loops, bool) or not isinstance(loops, int):
+        raise TypeError(
+            f"{text}: loops is the number of outer loops to fuse, a whole "
+            f"number, not {loops!r}"
+        )
+    if not 1 <= loops <= most:
+        plural = "s" if most > 1 else ""
+        raise ValueError(
+            f"{text}: {first} runs in {', '.join(mine)} and {second} in "
+            f"{', '.join(theirs)}, so a fusion takes from 1 to {most} of their "
+            f"outer loop{plural}, not {loops}"
+        )
+    return loops
 
 
 def _shifts(shift: int | tuple[int, ...], depth: int, text: str) -> tuple[int, ...]:
