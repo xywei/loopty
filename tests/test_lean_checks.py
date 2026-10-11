@@ -838,6 +838,8 @@ def test_lean_proves_the_windows_and_the_substitution_of_the_test_kernels(
     unproved = []
     for path, words in (
         (KERNELS / "windows.py", ""),
+        # a window over the statements of called kernels, inlined
+        (KERNELS / "calls.py", "sees its slot overwritten"),
         (KERNELS / "travel.py", "stay inside their buffers"),
         (KERNELS / "travel_wrong.py", "stay inside their buffers"),
     ):

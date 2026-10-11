@@ -373,9 +373,11 @@ All notable changes to loopty are recorded here. The format follows
   computed where it is read.
 - The coverage report in `docs/lean-checks.md` covers the four examples the
   demo kernels added (`assembly.py`, `layer_potential.py`, `quadrature.py`,
-  `sum_factorization.py`) and the windows, updates and layouts above: of 678
-  facts isl decides in 22 files, Lean proves 657 and confirms the
-  counterexample of the 21 refuted ones, and none stays decided.
+  `sum_factorization.py`), the windows, updates and layouts above, and the
+  calls in loops (`examples/calls.py`, `tests/kernels/calls.py`,
+  `tests/kernels/program_domains.py`): of 888 facts isl decides in 25 files,
+  Lean proves 860 and confirms the counterexample of the 28 refuted ones,
+  and none stays decided.
 - A ledger gains a `definedness` row for each array a kernel reads only where
   it wrote it before (`scan`'s `off`, `p2p`'s `term`, `pairs`' `f`), and an
   access with mixed subscripts is decided where it was assumed; the

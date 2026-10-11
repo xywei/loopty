@@ -253,9 +253,9 @@ and test kernel to Lean, the casts each file's `rejected*` functions refuse
 included, from an empty proof cache. Its report, with Lean v4.29.1 (a
 file's time is Lean's on all its facts, a part's on one declaration):
 
-Of 678 facts isl decides in 22 files, Lean proved 657; 0 stay decided; 21 refuted facts have their negation proved at isl's counterexample. 305 more facts are not isl's to decide (by type, tested, assumed).
+Of 888 facts isl decides in 25 files, Lean proved 860; 0 stay decided; 28 refuted facts have their negation proved at isl's counterexample. 392 more facts are not isl's to decide (by type, tested, assumed).
 
-Not all of them are equally hard. The 95 `ordering` facts, that the source
+Not all of them are equally hard. The 128 `ordering` facts, that the source
 order runs every dependence forward, hold by the definition of a dependence
 (two instances that touch one cell, which the source runs in that order), and
 Lean's proof of them checks only that the printer states the source order the
@@ -264,56 +264,66 @@ time includes starting Lean.
 
 | file | isl facts | proved | decided, not proved | refuted, negation proved | Lean time |
 |---|---:|---:|---:|---:|---:|
-| `examples/assembly.py` | 17 | 17 | 0 | 0 | 33.3 s |
-| `examples/composition.py` | 10 | 10 | 0 | 0 | 0.3 s |
-| `examples/fusion.py` | 19 | 17 | 0 | 2 | 0.7 s |
-| `examples/layer_potential.py` | 15 | 15 | 0 | 0 | 1.2 s |
-| `examples/p2p.py` | 19 | 19 | 0 | 0 | 1.9 s |
-| `examples/pairs.py` | 14 | 14 | 0 | 0 | 0.8 s |
-| `examples/quadrature.py` | 12 | 12 | 0 | 0 | 0.4 s |
-| `examples/reshape_layouts.py` | 16 | 16 | 0 | 0 | 1.0 s |
+| `examples/assembly.py` | 17 | 17 | 0 | 0 | 29.8 s |
+| `examples/calls.py` | 44 | 44 | 0 | 0 | 1.6 s |
+| `examples/composition.py` | 10 | 10 | 0 | 0 | 0.4 s |
+| `examples/fusion.py` | 19 | 17 | 0 | 2 | 0.9 s |
+| `examples/layer_potential.py` | 15 | 15 | 0 | 0 | 1.1 s |
+| `examples/p2p.py` | 19 | 19 | 0 | 0 | 1.8 s |
+| `examples/pairs.py` | 14 | 14 | 0 | 0 | 0.6 s |
+| `examples/quadrature.py` | 12 | 12 | 0 | 0 | 0.3 s |
+| `examples/reshape_layouts.py` | 16 | 16 | 0 | 0 | 1.1 s |
 | `examples/spmv.py` | 18 | 18 | 0 | 0 | 0.5 s |
 | `examples/stencil_skew.py` | 10 | 9 | 0 | 1 | 1.7 s |
-| `examples/storage_layouts.py` | 18 | 18 | 0 | 0 | 1.9 s |
-| `examples/sum_factorization.py` | 16 | 15 | 0 | 1 | 2.1 s |
-| `examples/travel.py` | 47 | 47 | 0 | 0 | 2.8 s |
-| `examples/wavefront_acoustic.py` | 24 | 21 | 0 | 3 | 10.8 s |
-| `tests/kernels/axpy.py` | 4 | 4 | 0 | 0 | 0.1 s |
-| `tests/kernels/domains.py` | 90 | 89 | 0 | 1 | 4.5 s |
+| `examples/storage_layouts.py` | 18 | 18 | 0 | 0 | 2.0 s |
+| `examples/sum_factorization.py` | 16 | 15 | 0 | 1 | 1.4 s |
+| `examples/travel.py` | 47 | 47 | 0 | 0 | 2.4 s |
+| `examples/wavefront_acoustic.py` | 24 | 21 | 0 | 3 | 7.4 s |
+| `tests/kernels/axpy.py` | 4 | 4 | 0 | 0 | 0.0 s |
+| `tests/kernels/calls.py` | 151 | 144 | 0 | 7 | 4.3 s |
+| `tests/kernels/domains.py` | 90 | 89 | 0 | 1 | 2.4 s |
 | `tests/kernels/out_of_bounds.py` | 4 | 3 | 0 | 1 | 0.1 s |
+| `tests/kernels/program_domains.py` | 15 | 15 | 0 | 0 | 0.4 s |
 | `tests/kernels/spmv_min.py` | 14 | 14 | 0 | 0 | 0.0 s |
 | `tests/kernels/stencil.py` | 5 | 5 | 0 | 0 | 0.0 s |
 | `tests/kernels/travel.py` | 64 | 63 | 0 | 1 | 1.4 s |
-| `tests/kernels/travel_wrong.py` | 168 | 161 | 0 | 7 | 16.5 s |
-| `tests/kernels/windows.py` | 74 | 70 | 0 | 4 | 5.3 s |
+| `tests/kernels/travel_wrong.py` | 168 | 161 | 0 | 7 | 19.4 s |
+| `tests/kernels/windows.py` | 74 | 70 | 0 | 4 | 6.0 s |
 
 By kind:
 
 | kind | isl facts | proved | decided, not proved | refuted, negation proved | parts | median s per part | slowest part |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| bijective | 32 | 32 | 0 | 0 | 133 | 0.069 | 0.69 s |
-| definedness | 35 | 35 | 0 | 0 | 57 | 0.000 | 0.19 s |
-| disjoint-writes | 123 | 123 | 0 | 0 | 123 | 0.009 | 0.09 s |
-| element-sort | 28 | 20 | 0 | 8 | 20 | 0.021 | 0.04 s |
-| in-bounds | 285 | 283 | 0 | 2 | 329 | 0.025 | 1.09 s |
-| layout | 6 | 6 | 0 | 0 | 12 | 0.077 | 11.41 s |
-| layout-in-bounds | 2 | 2 | 0 | 0 | 3 | 0.071 | 0.10 s |
-| layout-one-for-one | 2 | 2 | 0 | 0 | 4 | 0.107 | 0.24 s |
-| layout-onto | 2 | 2 | 0 | 0 | 2 | 0.230 | 0.27 s |
-| layout-same | 1 | 1 | 0 | 0 | 1 | 0.119 | 0.12 s |
-| monotone | 40 | 32 | 0 | 8 | 258 | 0.078 | 0.89 s |
-| no-clobber | 11 | 8 | 0 | 3 | 17 | 0.112 | 0.24 s |
-| ordering | 95 | 95 | 0 | 0 | 247 | 0.012 | 0.11 s |
-| requirement | 16 | 16 | 0 | 0 | 16 | 0.060 | 0.23 s |
+| argument | 2 | 1 | 0 | 1 | 1 | 0.025 | 0.03 s |
+| bijective | 36 | 36 | 0 | 0 | 146 | 0.071 | 0.48 s |
+| definedness | 39 | 39 | 0 | 0 | 63 | 0.000 | 0.11 s |
+| disjoint-writes | 149 | 148 | 0 | 1 | 148 | 0.011 | 0.09 s |
+| distinct-arguments | 2 | 1 | 0 | 1 | 1 | 0.016 | 0.02 s |
+| element-sort | 28 | 20 | 0 | 8 | 20 | 0.025 | 0.05 s |
+| in-bounds | 415 | 410 | 0 | 5 | 467 | 0.025 | 1.09 s |
+| layout | 6 | 6 | 0 | 0 | 12 | 0.080 | 13.31 s |
+| layout-in-bounds | 3 | 3 | 0 | 0 | 4 | 0.065 | 0.14 s |
+| layout-one-for-one | 3 | 3 | 0 | 0 | 5 | 0.081 | 0.29 s |
+| layout-onto | 3 | 3 | 0 | 0 | 3 | 0.204 | 0.26 s |
+| layout-same | 1 | 1 | 0 | 0 | 1 | 0.072 | 0.07 s |
+| monotone | 44 | 36 | 0 | 8 | 274 | 0.076 | 0.59 s |
+| no-clobber | 13 | 9 | 0 | 4 | 19 | 0.124 | 0.21 s |
+| ordering | 128 | 128 | 0 | 0 | 284 | 0.013 | 0.06 s |
+| requirement | 16 | 16 | 0 | 0 | 16 | 0.071 | 0.24 s |
 
 Lean proved every fact isl decides, a window's `no-clobber`, a substitution's
 `definedness` and the casts after it, a rewritten layout's facts and a
-declared layout's, and the casts of an assembly whose updates of one node
-need no order, among them. The 21 refuted facts are the casts and windows
-the files refuse on purpose (a window of two cells of the Burgers flux, one of
-three for a reader three cells back, a step after the window past the slot it
-reads, the loop run backwards after it) and the claims the test kernels make
-false on purpose, and Lean proved each false at isl's counterexample.
+declared layout's, the casts of an assembly whose updates of one node
+need no order, and what a kernel called inside another's loop owes there
+(its rows in bounds, its integral scalars in their sorts, two rows of one
+array apart), among them; a called kernel's statements are the caller's, so
+a window over them and the updates of a called kernel are stated as any
+statement's are (`tests/kernels/calls.py`). The 28 refuted facts are the
+casts and windows the files refuse on purpose (a window of two cells of the
+Burgers flux, inlined or not, one of three for a reader three cells back, a
+step after the window past the slot it reads, the loop run backwards after
+it) and the claims the test kernels make false on purpose, and Lean proved
+each false at isl's counterexample.
 
 ## What stays isl's
 
