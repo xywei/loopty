@@ -89,6 +89,7 @@ from loopty.flow import (
 )
 from loopty.idx import linearize
 from loopty.isl_reading import affine_form, declining, require_active
+from loopty.named import to_named, to_named_set
 from loopty.names import check_names, rename
 from loopty.operations import (
     CODE_DIGEST,
@@ -3376,14 +3377,14 @@ def lower_generic(
     contraction = allows_contraction(term)
     preambles = () if contraction else _no_contraction_preambles(target)
     kernel = lp.make_kernel(
-        merged,
+        [to_named_set(domain) for domain in merged],
         insns,
         args,
         target=target_for(target),
         lang_version=_LANG_VERSION,
         name=_kernel_name(term.name, [arg.name for arg in args]),
         preambles=(*preambles, *_power_preambles(term, target)),
-        assumptions=_no_assumptions(merged),
+        assumptions=to_named_set(_no_assumptions(merged)),
     )
     if target in ("c", None):
         flags = [WRAP_FLAG] if contraction else [WRAP_FLAG, NO_CONTRACTION_FLAG]
@@ -3392,7 +3393,7 @@ def lower_generic(
     if assumptions is not None:
         # Not ``if assumptions:``: truthiness on an isl set is ``__len__``,
         # which islpy deprecates for a BasicSet.
-        kernel = lp.assume(kernel, assumptions)
+        kernel = lp.assume(kernel, to_named_set(assumptions))
     # Pin the loop nest to the order the body was written in. loopy is free to
     # choose an order otherwise, and its choice is not checked against the term:
     # for the Jacobi stencil it puts the space loop outside the time loop, which
@@ -3548,15 +3549,17 @@ def _scalar_assumptions(term: Term, declared: set[str]) -> isl.BasicSet | None:
     ``Int`` nothing. A constraint naming something loopy does not have as a
     parameter is dropped rather than guessed at.
 
-    The sizes the kernel is passed are said to be non-negative too, whenever
-    anything is said. An assumption brings every parameter of the kernel into
-    the domain loopy checks an access over, and loopy checks an access only
-    when that domain names everything the array's shape does. So ``off[0]``
-    of ``off: Arr[Fin[n + 1], Nat]``, written outside any loop, went unchecked
-    until a ``Nat`` scalar made ``n`` a parameter of the assumption, and was
-    then refused for ``n = -1``. The contract refuses the one argument that
-    would make it so, an ``off`` of no cells
-    (:func:`loopty.contract.sizes_not_negative`).
+    The sizes the kernel is passed are said to be non-negative too, always.
+    loopy main checks an access over the domain of its instruction intersected
+    with the kernel's assumptions, aligned by name, which brings every
+    parameter of the kernel into it (loopy 2025.2 left the assumptions out
+    when they said nothing), and it checks an access only when that domain
+    names everything the array's shape does. So ``off[0]`` of ``off:
+    Arr[Fin[n + 1], Nat]``, written outside any loop, is checked, and refused
+    for ``n = -1`` unless loopy is told that sizes are not negative. The
+    contract refuses the one argument that would make it so, an ``off`` of
+    no cells (:func:`loopty.contract.sizes_not_negative`), and every fact
+    about a kernel is decided with its sizes non-negative.
     """
     from loopty.contract import sort_bound
 
@@ -3593,12 +3596,12 @@ def _scalar_assumptions(term: Term, declared: set[str]) -> isl.BasicSet | None:
             if high is not None:
                 pieces.append(f"{name} < {high}")
             names.add(name)
-    if not pieces:
-        return None
     for name in term.sizes:
         if name in declared:
             pieces.append(f"{name} >= 0")
             names.add(name)
+    if not pieces:
+        return None
     # A set rather than the text ``lp.assume`` also accepts: that path wraps the
     # constraint in the kernel's own outer parameters, and a scalar argument is
     # not one of them until this assumption introduces it.
@@ -3774,7 +3777,7 @@ def _narrowing_predicates(
         if extra.plain_is_universe():  # pragma: no cover - is_equal caught this
             continue
         try:
-            out.append(set_to_cond_expr(extra))
+            out.append(set_to_cond_expr(to_named(extra)))
         except Exception as exc:
             raise LoweringError(
                 f"the domain of {insn_id}, {domain}, is narrower than the "

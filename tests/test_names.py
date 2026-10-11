@@ -247,11 +247,16 @@ def summed_by_the_rows(
 def summed_after_a_loop(
     x: Arr[Fin[n], np.float64],  # noqa: F821
     y: Arr[Fin[n], np.float64],  # noqa: F821
+    s: Arr[Fin[1], np.float64],
 ):
-    """A sum by the name of a loop that has ended."""
+    """A sum by the name of a loop that has ended.
+
+    Into a cell of its own: ``y[0]`` is out of bounds at ``n = 0``, which
+    loopty refutes, and loopy main's bounds check refuses.
+    """
     for i in x.dom:
         y[i] = 2.0 * x[i]
-    y[0] = reduce_sum(x[i] for i in x.dom)
+    s[0] = reduce_sum(x[i] for i in x.dom)
 
 
 def test_a_sum_by_a_binder_named_like_a_size_is_refused() -> None:
@@ -269,8 +274,9 @@ def test_a_sum_by_a_binder_named_like_a_size_is_refused() -> None:
     from loopty.executor import LoopyExecutor
 
     x = np.arange(4.0)
-    out = LoopyExecutor().run(summed_after_a_loop, x=x, y=np.zeros(4))
-    assert list(out["y"]) == [6.0, 2.0, 4.0, 6.0]
+    out = LoopyExecutor().run(summed_after_a_loop, x=x, y=np.zeros(4), s=np.zeros(1))
+    assert list(out["y"]) == [0.0, 2.0, 4.0, 6.0]
+    assert list(out["s"]) == [6.0]
 
 
 # }}}

@@ -18,6 +18,7 @@ from lanky.prelude import Bool, Nat, Real
 from loopty import Arr, Fin, kernel, when
 from loopty import sum as reduce_sum
 from loopty.isl_reading import declining
+from loopty.named import domains_of
 
 pytest.importorskip("loopy")
 
@@ -161,10 +162,8 @@ def test_two_reductions_over_one_binder_keep_their_own_domains() -> None:
     assert "j" in inames, inames
     assert len(inames) == 2, inames
     extents = {
-        tuple(domain.get_var_names(isl.dim_type.set)): domain.to_set()
-        .count_val()
-        .to_python()
-        for domain in lowering.kernel.default_entrypoint.domains
+        tuple(domain.get_var_names(isl.dim_type.set)): domain.count_val().to_python()
+        for domain in domains_of(lowering.kernel.default_entrypoint)
     }
     assert extents[("j",)] == 2, extents
     assert 4 in extents.values(), extents
@@ -413,7 +412,7 @@ def test_two_statements_with_the_same_nested_binders_lower_and_run() -> None:
         tuple(domain.get_var_names(isl.dim_type.set)): set(
             domain.get_var_names(isl.dim_type.param)
         )
-        for domain in lowering.kernel.default_entrypoint.domains
+        for domain in domains_of(lowering.kernel.default_entrypoint)
     }
     assert "i_0" in params[("j_0",)] and "i" not in params[("j_0",)], params
 
@@ -495,9 +494,9 @@ def test_a_renamed_ragged_reduction_nests_under_its_own_row_loop() -> None:
     assert np.allclose(out["z"], [5.0, 0.0, 50.0])
     names = [
         tuple(domain.get_var_names(isl.dim_type.set))
-        for domain in lower_generic(
-            ragged_row_sums_twice.trace(), "c"
-        ).kernel.default_entrypoint.domains
+        for domain in domains_of(
+            lower_generic(ragged_row_sums_twice.trace(), "c").kernel.default_entrypoint
+        )
     ]
     assert names.index(("j",)) == names.index(("q",)) + 1, names
     assert names.index(("j_0",)) == names.index(("p",)) + 1, names
@@ -623,7 +622,7 @@ def test_a_ragged_domain_follows_the_loop_it_is_nested_in() -> None:
     lowered = lower_generic(ragged_total_by_cells.trace(), "c").kernel
     names = [
         tuple(domain.get_var_names(isl.dim_type.set))
-        for domain in lowered.default_entrypoint.domains
+        for domain in domains_of(lowered.default_entrypoint)
     ]
     assert names.index(("j",)) == names.index(("q",)) + 1
 
@@ -780,7 +779,9 @@ def test_statements_at_two_depths_agree_with_the_body_under_a_schedule() -> None
 def test_the_inner_loop_is_its_own_domain_nested_in_the_outer_one() -> None:
     from loopty.lower import lower_generic
 
-    domains = lower_generic(after_inner.trace(), "c").kernel.default_entrypoint.domains
+    domains = domains_of(
+        lower_generic(after_inner.trace(), "c").kernel.default_entrypoint
+    )
     shapes = {
         tuple(domain.get_var_names(isl.dim_type.set)): set(
             domain.get_var_names(isl.dim_type.param)
@@ -986,9 +987,11 @@ def test_a_fiber_beside_a_statement_in_a_loop_of_its_row_lowers_and_runs() -> No
 def test_every_statement_sharing_a_cut_loop_is_cut_alike() -> None:
     from loopty.lower import lower_generic
 
-    domains = lower_generic(
-        fiber_then_other_in_a_loop_of_the_row.trace(), "c"
-    ).kernel.default_entrypoint.domains
+    domains = domains_of(
+        lower_generic(
+            fiber_then_other_in_a_loop_of_the_row.trace(), "c"
+        ).kernel.default_entrypoint
+    )
     shapes = {
         tuple(domain.get_var_names(isl.dim_type.set)): set(
             domain.get_var_names(isl.dim_type.param)

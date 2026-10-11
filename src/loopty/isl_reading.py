@@ -6,11 +6,14 @@ bounds check (``loopy.symbolic.get_access_map``) and for code generation
 and scalars for its bounds check (``condition_to_set``, over the domain
 ``loopy.kernel.instruction.get_insn_domain`` builds). Its reader,
 ``loopy.symbolic.PwAffEvaluationMapper``, builds an affine expression, and an
-expression it declines (with a ``TypeError``, which
-``with_aff_conversion_guard`` catches) is one loopy treats as not affine: a
-subscript is then generated as it is written, and a guard is not used to
-narrow what the bounds check covers. Three of its readings were wrong for
-what loopty writes (note 23 in ``docs/loopy-notes.md``):
+expression it declines (with ``ExpressionToAffineConversionError``, as it
+declines a call) is one loopy treats as not affine: a subscript is then
+generated as it is written, and a guard is not used to narrow what the bounds
+check covers. loopy's main branch reads over namedisl objects
+(:mod:`loopty.named`), and catches only that error and isl's where loopy
+2025.2 also caught a ``TypeError``, so a reading declines with it. Three of
+its readings were wrong for what loopty writes (note 23 in
+``docs/loopy-notes.md``):
 
 * a conversion (loopy's ``TypeCast``) is no case of the reader's, so it
   raises ``UnsupportedExpressionError``, which nothing catches. A subscript
@@ -183,10 +186,17 @@ def require_active(what: str) -> None:
 # {{{ the readings
 
 
+def _declined(message: str) -> Exception:
+    """What a reading raises to decline an expression: loopy's, for a call."""
+    from loopy.diagnostic import ExpressionToAffineConversionError
+
+    return ExpressionToAffineConversionError(message)
+
+
 def _map_constant(self: Any, expr: Any) -> Any:
     """loopy's reading of a constant, which declines one not an integer inside."""
     if active() and not _integral(expr):
-        raise TypeError(
+        raise _declined(
             f"the constant {expr!r} is not an integer, and an affine "
             "expression is made of integers"
         )
@@ -200,7 +210,7 @@ def _map_type_cast(self: Any, expr: Any, *args: Any, **kwargs: Any) -> Any:
     one its dispatch falls back to.
     """
     if active():
-        raise TypeError(
+        raise _declined(
             f"the conversion in '{expr}' is not read as affine: an expression "
             "computed in another type is generated as it is written"
         )
@@ -210,14 +220,14 @@ def _map_type_cast(self: Any, expr: Any, *args: Any, **kwargs: Any) -> Any:
     return self.rec_fallback(expr, *args, **kwargs)
 
 
-def _get_insn_domain(insn: Any, kernel: Any) -> isl.Set:
+def _get_insn_domain(insn: Any, kernel: Any) -> Any:
     """loopy's ``get_insn_domain``; inside, :func:`_insn_domain`."""
     if active():
         return _insn_domain(insn, kernel)
     return _OWN["get_insn_domain"](insn, kernel)
 
 
-def _insn_domain(insn: Any, kernel: Any) -> isl.Set:
+def _insn_domain(insn: Any, kernel: Any) -> Any:
     """loopy's ``get_insn_domain``, with only an integer value argument a parameter.
 
     The domain of the loops around ``insn``, with every value argument it
@@ -227,15 +237,19 @@ def _insn_domain(insn: Any, kernel: Any) -> isl.Set:
     integer to isl whatever its dtype; here one whose dtype is not an
     integer's is left out, so a guard that names it names a variable the
     space does not have, which ``condition_to_set`` declines as it declines
-    a guard that reads an array, and which narrows nothing.
+    a guard that reads an array, and which narrows nothing. A namedisl set,
+    as loopy's is; the arguments are added in the kernel's order, where
+    loopy's own adds them in the order of a set of their names.
     """
     from loopy.kernel.data import ValueArg
     from loopy.symbolic import condition_to_set
+    from namedisl import DimType
 
     domain = kernel.get_inames_domain(insn.within_inames)
-    present = set(domain.get_var_names(isl.dim_type.param))
+    present = set(domain.space.param_names)
     written = kernel.get_written_variables()
     reads = insn.read_dependency_names()
+    added: list[str] = []
     for arg in kernel.args:
         if (
             not isinstance(arg, ValueArg)
@@ -245,31 +259,59 @@ def _insn_domain(insn: Any, kernel: Any) -> isl.Set:
             or not _integral_dtype(arg.dtype)
         ):
             continue
-        position = domain.dim(isl.dim_type.param)
-        domain = domain.add_dims(isl.dim_type.param, 1)
-        domain = domain.set_dim_name(isl.dim_type.param, position, arg.name)
+        added.append(arg.name)
         present.add(arg.name)
-    guards = isl.Set.universe(domain.space)
+    domain = domain.add_dims(DimType.param, added)
+    guards = domain.universe_like_me()
     for predicate in insn.predicates:
-        read = condition_to_set(domain.space, predicate)
+        read = condition_to_set(domain.var_pw_affs, predicate)
         if read is not None:
             guards = guards & read
     return domain & guards
+
+
+def _with_aff_conversion_guard(
+    f: Callable[..., Any], variables: Any, expr: Any, *args: Any, **kwargs: Any
+) -> Any:
+    """loopy's guard around its reader, which inside declines what it cannot compute.
+
+    The reader evaluates an expression with isl's operators, and one isl has
+    no operator for raises a ``TypeError``: ``i ^ 1``, a bitwise operator,
+    which pymbolic's evaluation applies to two of isl's affine expressions.
+    loopy 2025.2's guard caught it and declined the expression, as it
+    declines a call. loopy main's catches only isl's errors and its own, so
+    the ``TypeError`` escaped from its bounds check, and a kernel with
+    ``when(i < i ^ 1)`` failed to build there. Inside, it is declined again;
+    outside, loopy's own guard.
+    """
+    own = _OWN["with_aff_conversion_guard"]
+    if not active():
+        return own(f, variables, expr, *args, **kwargs)
+    try:
+        return own(f, variables, expr, *args, **kwargs)
+    except TypeError as exc:
+        raise _declined(
+            f"could not convert expression '{expr}' to affine representation: "
+            f"TypeError: {exc}"
+        ) from exc
 
 
 def _readings() -> tuple[tuple[Any, str, Any], ...]:
     """Each place a reading goes, as ``(owner, name, reading)``.
 
     loopy's bounds check imports ``get_insn_domain`` where it runs, so the
-    module's attribute is the one it calls.
+    module's attribute is the one it calls; and loopy's guarded readers find
+    ``with_aff_conversion_guard`` among their module's names when they run.
     """
     import loopy.kernel.instruction as instruction
+    import loopy.symbolic as symbolic
     from loopy.symbolic import PwAffEvaluationMapper
 
     return (
         (PwAffEvaluationMapper, "map_constant", _map_constant),
         (PwAffEvaluationMapper, "map_type_cast", _map_type_cast),
         (instruction, "get_insn_domain", _get_insn_domain),
+        (symbolic, "with_aff_conversion_guard", _with_aff_conversion_guard),
     )
 
 
@@ -355,19 +397,23 @@ def affine_form(expr: Any) -> isl.Aff | None:
     """The affine expression loopy reads ``expr`` as, or ``None`` if it reads none.
 
     Over a space of the names ``expr`` uses, as ``simplify_via_aff`` reads
-    one, with loopty's readings (:func:`declining`). A subscript loopy reads
-    so is simplified to the affine expression isl gives back, in loopy's
-    32-bit index type, whatever it was written as; one it does not is
-    generated as it is written.
+    one, with loopty's readings (:func:`declining`), and given back as islpy
+    (:func:`loopty.named.as_isl`). A subscript loopy reads so is simplified to
+    the affine expression isl gives back, in loopy's 32-bit index type,
+    whatever it was written as; one it does not is generated as it is
+    written.
     """
     from loopy.diagnostic import ExpressionToAffineConversionError
     from loopy.symbolic import get_dependencies, guarded_aff_from_expr
+    from namedisl import Aff, Space
+
+    from loopty.named import as_isl
 
     with declining():
         try:
             names = sorted(get_dependencies(expr))
-            space = isl.Space.create_from_names(isl.DEFAULT_CONTEXT, set=names)
-            return guarded_aff_from_expr(space, expr)
+            zero = Aff.zero_on_domain(Space.from_names(param=[], out=names))
+            return as_isl(guarded_aff_from_expr(zero.var_affs, expr))
         except ExpressionToAffineConversionError:
             return None
         except Exception:  # noqa: BLE001 - what loopy cannot read is not affine

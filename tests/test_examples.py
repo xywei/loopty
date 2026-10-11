@@ -572,14 +572,15 @@ def test_the_wave_diamond_compiles_to_loops_with_no_parity_test() -> None:
     # has no holes, the code has no parity test, and it still agrees with the
     # hand recurrence bit for bit, at sizes of both parities (the test above).
     from loopty.executor import emit_code
+    from loopty.named import domains_of
 
     module = _module("wavefront_acoustic")
     for nt, nx in [(3, 4), (5, 7), (16, 32)]:
         schedule = module.diamond_schedule(nt, nx)
         assert schedule.strides == {"b": "2*b_step - a"}
-        (domain,) = schedule.kernel.default_entrypoint.domains
+        (domain,) = domains_of(schedule.kernel.default_entrypoint)
         assert domain.get_var_names(isl.dim_type.set) == ["a", "b_step"]
-        assert domain.dim(isl.dim_type.div) == 0
+        assert all(b.dim(isl.dim_type.div) == 0 for b in domain.get_basic_sets())
         assert "== 0" not in emit_code(schedule)
 
 
@@ -602,6 +603,7 @@ def test_the_offset_diamond_tiles_the_pair_and_agrees_bit_for_bit() -> None:
     # (0, 1), (1, 0) or (1, 1) in (a, b), and the rectangles are legal. affine
     # refused a map per statement before (#46).
     from loopty.executor import LoopyExecutor
+    from loopty.named import domains_of
     from loopty.schedule import Schedule
 
     module = _module("wavefront_acoustic")
@@ -622,8 +624,8 @@ def test_the_offset_diamond_tiles_the_pair_and_agrees_bit_for_bit() -> None:
     untiled = Schedule(module.acoustic, sizes={"nt": 16, "nx": 32}).affine(
         module.OFFSET_DIAMOND
     )
-    (domain,) = untiled.kernel.default_entrypoint.domains
-    assert domain.dim(isl.dim_type.div) == 0
+    (domain,) = domains_of(untiled.kernel.default_entrypoint)
+    assert all(b.dim(isl.dim_type.div) == 0 for b in domain.get_basic_sets())
     for nt, nx in [(2, 3), (3, 4), (5, 7), (9, 33), (16, 32), (17, 9)]:
         rng = np.random.default_rng(100 * nt + nx)
         pressure = rng.standard_normal((nt, nx))

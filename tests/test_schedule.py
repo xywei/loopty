@@ -23,6 +23,7 @@ from loopty import Arr, Fin, reduce_sum, when
 from loopty.executor import emit_code
 from loopty.isl_reading import declining
 from loopty.lower import reductions_of
+from loopty.named import domains_of
 from loopty.schedule import IllegalCast, Schedule, parallel_tag
 
 pytest.importorskip("loopy")
@@ -756,9 +757,9 @@ def test_the_diamond_is_accepted_and_the_stencil_still_computes() -> None:
     # domain has none left, and the code tests no parity: loopy alone looped
     # over every b and tested (a + b) mod 2 at each, wasting half of them.
     assert schedule.strides == {"b": "2*b_step - a"}
-    (domain,) = schedule.kernel.default_entrypoint.domains
+    (domain,) = domains_of(schedule.kernel.default_entrypoint)
     assert domain.get_var_names(isl.dim_type.set) == ["a", "b_step"]
-    assert domain.dim(isl.dim_type.div) == 0
+    assert _divs(domain) == 0
     assert "== 0" not in emit_code(schedule)
 
     # loopy generates correct code for it, bit for bit, at every size.
@@ -768,35 +769,27 @@ def test_the_diamond_is_accepted_and_the_stencil_still_computes() -> None:
         assert np.array_equal(out["u"], ht.jacobi_reference(u)), (nt, nx)
 
 
-def test_loopy_itself_refuses_the_diamond() -> None:
-    # Why the rewrite is loopty's: both of loopy's own affine transforms solve
-    # for each old iname with a unit coefficient, and t = (a + b) / 2 has none.
-    # A loopy that learns to do this makes this test fail, and the rewrite can
-    # then be dropped for lp.map_domain.
-    import warnings
-
+def test_loopy_itself_maps_the_diamond_and_tests_its_parity() -> None:
+    # loopy 2025.2's two affine transforms solved for each old iname with a
+    # unit coefficient, and t = (a + b) / 2 has none, so both refused the
+    # diamond, and the rewrite is loopty's. loopy main's map_domain takes it,
+    # and loops over every b with the parity test in the innermost loop, which
+    # loopty's counted loops leave out (see the test above); and
+    # affine_map_inames is gone. The rewrite stays loopty's: its map is the
+    # one the checker decided.
     import loopy as lp
-    from loopy.diagnostic import LoopyError
+    import namedisl as nisl
 
     kernel = Schedule(ht.jacobi_term()).kernel
     kernel = kernel.with_kernel(
         kernel.default_entrypoint.copy(loop_priority=frozenset())
     )
-    with (
-        pytest.raises(LoopyError, match="No suitable equation"),
-        warnings.catch_warnings(),
-    ):
-        # map_domain asks the BasicMap whether it is bijective, which islpy
-        # 2025 answers with a deprecation warning; loopty no longer calls it,
-        # so the exemption lives here and not in the suite's filters.
-        warnings.filterwarnings(
-            "ignore",
-            message="BasicMap.is_bijective with implicit conversion",
-            category=DeprecationWarning,
-        )
-        lp.map_domain(kernel, isl.BasicMap(DIAMOND))
-    with pytest.raises(RuntimeError, match="division with remainder"):
-        lp.affine_map_inames(kernel, "t, i", "a, b", ["a = t + i", "b = t - i"])
+    with declining():
+        mapped = lp.map_domain(kernel, nisl.make_map(DIAMOND))
+        code = lp.generate_code_v2(mapped).device_code()
+    assert "if (-1 * a + -1 * b + 2 * ((a + b) / 2) == 0)" in code, code
+    assert "== 0" not in emit_code(Schedule(ht.jacobi_term()).affine(DIAMOND))
+    assert not hasattr(lp, "affine_map_inames")
 
 
 def test_tiling_the_diamond_is_legal_for_the_stencil_and_computes() -> None:
@@ -813,8 +806,8 @@ def test_tiling_the_diamond_is_legal_for_the_stencil_and_computes() -> None:
     # The tile splits the loops the checker knows, and the loop that is left
     # with the holes is the innermost one, which steps by two from a_inner.
     assert schedule.strides == {"b_inner": "2*b_inner_step - a_inner"}
-    domains = schedule.kernel.default_entrypoint.domains
-    assert all(domain.dim(isl.dim_type.div) == 0 for domain in domains)
+    domains = domains_of(schedule.kernel.default_entrypoint)
+    assert all(_divs(domain) == 0 for domain in domains)
     for nt, nx in [*STENCIL_SIZES, (17, 23), (32, 32)]:
         u = _jacobi_input(nt, nx)
         out = run(schedule, u=u.copy())
@@ -856,8 +849,8 @@ def test_skew_is_the_affine_map_that_keeps_the_loop_names(monkeypatch) -> None:
     assert [f.status.value for f in skewed.facts()] == [
         f.status.value for f in affine.facts()
     ]
-    (mine,) = skewed.kernel.default_entrypoint.domains
-    (theirs,) = affine.kernel.default_entrypoint.domains
+    (mine,) = domains_of(skewed.kernel.default_entrypoint)
+    (theirs,) = domains_of(affine.kernel.default_entrypoint)
     assert mine.is_equal(theirs)
     assert "t < i" in str(mine)
     # A unimodular map leaves no holes, so there is nothing to step over.
@@ -900,7 +893,7 @@ def test_a_map_over_a_ragged_row_loop_moves_the_fiber_with_it() -> None:
         "[n] -> { [r] -> [q] : q = n - 1 - r }"
     )
     assert [fact.status.value for fact in schedule.facts()] == ["decided"] * 2
-    domains = [str(d) for d in schedule.kernel.default_entrypoint.domains]
+    domains = [str(d) for d in domains_of(schedule.kernel.default_entrypoint)]
     assert any("[j]" in text and "q" in text.split("->")[0] for text in domains)
 
     def fresh() -> dict:
@@ -1331,7 +1324,7 @@ def test_a_loop_nested_in_its_row_by_instructions_alone_stays_inside() -> None:
     base = Schedule(term, sizes={"n": 6, "q": 3})
     (domain,) = [
         domain
-        for domain in base.kernel.default_entrypoint.domains
+        for domain in domains_of(base.kernel.default_entrypoint)
         if "k" in domain.get_var_names(isl.dim_type.set)
     ]
     assert "r" in domain.get_var_names(isl.dim_type.set)
@@ -1473,9 +1466,18 @@ def _as_loopy_had_it(schedule: Schedule) -> Schedule:
     return other
 
 
-def _points(domain: isl.BasicSet, **sizes: int) -> int:
+def _divs(domain: isl.Set) -> int:
+    """How many existential variables the pieces of a domain have.
+
+    Counted per basic set: loopy main keeps a domain as a set, and a set's
+    own count of them is zero.
+    """
+    return sum(piece.dim(isl.dim_type.div) for piece in domain.get_basic_sets())
+
+
+def _points(domain: isl.Set, **sizes: int) -> int:
     """How many points a domain has at these sizes."""
-    out = isl.Set.from_basic_set(domain)
+    out = domain
     for name, value in sizes.items():
         position = out.get_var_names(isl.dim_type.param).index(name)
         out = out.fix_val(
@@ -1494,7 +1496,7 @@ def _points(domain: isl.BasicSet, **sizes: int) -> int:
         (
             DIAMOND,
             ("tile", "a", "b", 3, 5),
-            {"b_inner": "2*b_inner_step - a_outer - a_inner - b_outer"},
+            {"b_inner": "2*b_inner_step - a_outer - b_outer - a_inner"},
         ),
         (
             "{ [t, i] -> [a, b] : a = t + i - 7 and b = t - i - 13 }",
@@ -1524,10 +1526,10 @@ def test_counted_loops_meet_each_instance_once_and_compute_the_same(
         method, *arguments = then
         schedule = getattr(schedule, method)(*arguments)
     assert schedule.strides == strides
-    (counted,) = schedule.kernel.default_entrypoint.domains
-    (tested,) = _as_loopy_had_it(schedule).kernel.default_entrypoint.domains
-    assert counted.dim(isl.dim_type.div) == 0
-    assert tested.dim(isl.dim_type.div) > 0
+    (counted,) = domains_of(schedule.kernel.default_entrypoint)
+    (tested,) = domains_of(_as_loopy_had_it(schedule).kernel.default_entrypoint)
+    assert _divs(counted) == 0
+    assert _divs(tested) > 0
     nt, nx = 7, 9
     instances = (nt - 1) * (nx - 2)
     assert _points(counted, nt=nt, nx=nx) == instances
@@ -1593,8 +1595,8 @@ def test_a_map_per_statement_moves_each_statement_by_its_own() -> None:
         ("bijective", "decided"),
         ("monotone", "decided"),
     ]
-    (domain,) = schedule.kernel.default_entrypoint.domains
-    assert domain.is_equal(isl.BasicSet("[n] -> { [k] : 0 <= k <= 2n - 3 }"))
+    (domain,) = domains_of(schedule.kernel.default_entrypoint)
+    assert domain.is_equal(isl.Set("[n] -> { [k] : 0 <= k <= 2n - 3 }"))
     insns = {insn.id: insn for insn in schedule.kernel.default_entrypoint.instructions}
     assert all(len(insns[name].predicates) == 1 for name in ("S0", "S1"))
     for n in (2, 3, 8, 13):
@@ -1639,8 +1641,8 @@ def test_maps_per_statement_that_are_one_map_build_that_map_s_kernel() -> None:
     )
     one = Schedule(ht.coupled_pair_term()).affine("{ [t] -> [k] : k = 2t }")
     assert per_statement.strides == one.strides == {"k": "2*k_step"}
-    (mine,) = per_statement.kernel.default_entrypoint.domains
-    (theirs,) = one.kernel.default_entrypoint.domains
+    (mine,) = domains_of(per_statement.kernel.default_entrypoint)
+    (theirs,) = domains_of(one.kernel.default_entrypoint)
     assert mine.is_equal(theirs)
     assert not any(
         insn.predicates for insn in per_statement.kernel.default_entrypoint.instructions
