@@ -420,3 +420,17 @@ def test_on_an_opencl_device_tables_of_every_kind_agree() -> None:
         kinds, Schedule(kinds, target="opencl"), inputs
     )
     assert fact.status is Status.TESTED, fact.provenance
+
+
+def test_a_tables_values_cannot_be_made_writeable_again() -> None:
+    # The values were an array that owned its buffer, so anyone holding it
+    # could turn the flag back on and change the numbers a compiled kernel
+    # holds as they were when it was compiled.
+    values = make_table([1.0, 2.0]).values
+    for array in (values, values.base):
+        if isinstance(array, np.ndarray):
+            with pytest.raises(ValueError, match="WRITEABLE"):
+                array.flags.writeable = True
+    with pytest.raises(ValueError, match="WRITEABLE"):
+        PHI.numpy().flags.writeable = True
+    assert list(PHI.values[1]) == [1 / 6, 2 / 3, 1 / 6]

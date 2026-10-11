@@ -72,19 +72,18 @@ class Table:
                 f"a table holds numbers, and {values!r} holds {array.dtype}"
             )
         _refuse_non_finite(array)
-        array.flags.writeable = False
-        self._values = array
-        self._array = Arr(array)
+        self._values = _frozen(array)
+        self._array = Arr(self._values)
 
     # {{{ what it holds
 
     @property
     def values(self) -> np.ndarray:
-        """The values, a read-only numpy array."""
+        """The values, a numpy array that cannot be made writeable."""
         return self._values
 
     def numpy(self) -> np.ndarray:
-        """The values, a read-only numpy array, as :meth:`loopty.Arr.numpy`."""
+        """The values, read-only, as :meth:`loopty.Arr.numpy` gives an array's."""
         return self._values
 
     @property
@@ -174,6 +173,22 @@ def table(values: Any, dtype: Any = None) -> Table:
     changed afterwards.
     """
     return Table(values, dtype)
+
+
+def _frozen(array: np.ndarray) -> np.ndarray:
+    """``array``'s values in an array no one can make writeable again.
+
+    An array that owns its buffer can be made writeable by anyone who holds
+    it (``W.values.flags.writeable = True``), and so can the base of a view.
+    This one's buffer is a ``bytes`` object, which is immutable, so numpy
+    refuses the flag ("cannot set WRITEABLE flag to True of this array") on
+    it and on every view of it: a change after a kernel was compiled would
+    make the native run read numbers the compiled one does not.
+    """
+    contiguous = np.ascontiguousarray(array)
+    return np.frombuffer(contiguous.tobytes(), dtype=contiguous.dtype).reshape(
+        contiguous.shape
+    )
 
 
 def _refuse_non_finite(array: np.ndarray) -> None:
