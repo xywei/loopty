@@ -131,6 +131,7 @@ from loopty.obligations import (
     disjoint_writes_obligation,
     element_sort_obligation,
     in_bounds_obligation,
+    ordering_obligation,
 )
 from loopty.oracle import Empty, Monotone, Subset
 from loopty.term import ArrType, Term
@@ -1784,6 +1785,7 @@ def ordering_facts(
                 deps,
                 description="the source schedule is monotone on the dependences",
                 labels=instance_labels(term),
+                lean=Stated(partial(ordering_obligation, term)),
             ),
             status=Status.ASSUMED,
             provenance=provenance,

@@ -51,7 +51,16 @@ from typing import Any
 import islpy as isl
 import pymbolic.primitives as prim
 from lanky.prelude import FnType, Int
-from lanky.terms import Comparison, Forall, LogicalAnd, LogicalNot, LogicalOr, Var
+from lanky.terms import (
+    Comparison,
+    Forall,
+    LogicalAnd,
+    LogicalNot,
+    LogicalOr,
+    Var,
+    conjuncts,
+    render,
+)
 
 from loopty import flow
 from loopty.description import (
@@ -71,6 +80,7 @@ __all__ = [
     "in_bounds_obligation",
     "cast_obligation",
     "lexicographically_before",
+    "ordering_obligation",
     "prove",
 ]
 
@@ -208,7 +218,17 @@ class Claim:
         sized = [
             Comparison(Var(name), ">=", 0) for name in scalars if name in self.sizes
         ]
-        guard = conjunction([*sized, *self.hypotheses])
+        # each hypothesis once, conjunct by conjunct, and a conjunct of the goal
+        # that is one of them left out: it is what the hypothesis says
+        seen: dict[str, Any] = {}
+        for hypothesis in (*sized, *self.hypotheses):
+            for part in conjuncts(hypothesis):
+                if part is not True:
+                    seen.setdefault(render(part), part)
+        if isinstance(goal, LogicalAnd):
+            kept = [part for part in conjuncts(goal) if render(part) not in seen]
+            goal = conjunction(kept)
+        guard = conjunction(list(seen.values()))
         return Forall(tuple(binders), goal, None if guard is True else guard)
 
 
@@ -519,6 +539,109 @@ def lexicographically_before(first: Sequence[Any], second: Sequence[Any]) -> Any
 
 # }}}
 
+
+
+# {{{ the source order runs every dependence forward
+
+
+def _source_time(stmt: Stmt, depth: int, coords: Sequence[Any]) -> list[Any]:
+    """A statement's 2d+1 time vector, as :func:`loopty.flow.schedule_of` writes it."""
+    order = stmt.order or (0,) * (len(stmt.inames) + 1)
+    out: list[Any] = []
+    for k in range(depth):
+        out.append(order[k] if k < len(order) else 0)
+        out.append(coords[k] if k < len(stmt.inames) else 0)
+    out.append(order[depth] if depth < len(order) else 0)
+    return out
+
+
+def _footprint_place(
+    claim: Claim,
+    stmt: Stmt,
+    coords: Sequence[Any],
+    inames: Sequence[str],
+    domain: Any,
+    tag: str,
+) -> list[Any]:
+    """The loops one access of ``stmt`` is made in, at an instance ``coords``.
+
+    An access inside a sum is made at the sum's binders too, which are
+    variables of their own here, in the sum's domain; one made once per row,
+    the length of a ragged row, at the outer loops of the instance. Either way
+    the access's domain is a hypothesis, as the footprint intersects with it
+    (:func:`loopty.flow.footprints`).
+    """
+    own = len(stmt.inames)
+    if len(inames) > own:
+        extra = claim.coordinates(inames[own:], tag)
+        place = [*coords, *extra]
+    else:
+        place = list(coords[: len(inames)])
+    described = _described(domain, f"the loops {', '.join(inames)} of {stmt.id}")
+    claim.hypotheses.append(described.predicate(place))
+    return place
+
+
+def ordering_obligation(term: Term, verdict: Any) -> Any:
+    """The source order runs every dependence forward, one part per pair of accesses.
+
+    A dependence is *defined* as two instances that touch one cell, one of
+    them writing it, which the source runs in that order
+    (:func:`loopty.flow.dependences`), so each part is that definition and
+    its conclusion: the claim holds by it, and Lean checks it holds of the
+    footprints and the time vectors loopty wrote, whatever isl made of them.
+    An access whose index isl does not read exactly touches every cell of
+    its array, as its footprint does.
+    """
+    lanky = _lanky_obligations()
+    depth = flow.instance_space_depth(term)
+    try:
+        accesses = [
+            (stmt, access)
+            for stmt in term.stmts
+            for access in flow.statement_accesses(stmt, term)
+        ]
+        parts = []
+        for n, ((a, first), (b, second)) in enumerate(
+            (one, other) for one in accesses for other in accesses
+        ):
+            if first[0] != second[0]:
+                continue
+            if first[2] not in ("write", "acc") and second[2] not in ("write", "acc"):
+                continue
+            if len(first[1]) != len(second[1]):
+                continue
+            claim = Claim(term)
+            x = claim.coordinates(a.inames, "a")
+            y = claim.coordinates(b.inames, "b")
+            for stmt, coords in ((a, x), (b, y)):
+                domain = _described(stmt.domain, f"the loops of {stmt.id}")
+                claim.hypotheses.append(domain.predicate(coords))
+            at_a = _footprint_place(claim, a, x, first[3], first[4], "c")
+            at_b = _footprint_place(claim, b, y, second[3], second[4], "d")
+            if all(_affine(index) for index in (*first[1], *second[1])):
+                claim.hypotheses.append(
+                    _equal(
+                        [_renamed(i, first[3], at_a) for i in first[1]],
+                        [_renamed(i, second[3], at_b) for i in second[1]],
+                    )
+                )
+            before = lexicographically_before(
+                _source_time(a, depth, x), _source_time(b, depth, y)
+            )
+            claim.hypotheses.append(before)
+            label = (
+                f"{a.id} {first[2]} {first[0]} before {b.id} {second[2]} {second[0]}"
+            )
+            parts.append(lanky.Part(f"dependence_{n}", label, claim.close(before)))
+    except Unstatable as exc:
+        return _declined(str(exc))
+    if not parts:
+        return _declined("the term has no two accesses a dependence could join")
+    return _obligation(parts)
+
+
+# }}}
 
 
 # {{{ isl's functions, as terms: the hints
