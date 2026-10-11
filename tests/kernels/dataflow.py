@@ -75,6 +75,26 @@ def from_the_right(y: Arr[Fin[n], Int]) -> all(y[i] == 0 for i in Fin[n] if i + 
 
 
 @kernel
+def in_place(x: Arr[Fin[n], Int]) -> all(x[i] != 1000003 for i in Fin[n]):
+    """Reads the cell it stores, in the instance that stores it, spelled apart.
+
+    ``x[i + 1 - 1]`` is ``x[i]`` as it was before the store, so the store says
+    nothing of what the kernel leaves. Read as an equation, ``x == 2x -
+    1000005`` would make every cell 1000005 and decide the claim, which is
+    false where ``x`` holds 1000004 on entry.
+    """
+    for i in x.dom:
+        x[i] = 2 * x[i + 1 - 1] - 1000005
+
+
+@kernel
+def halves(y: Arr[Fin[n], Int]) -> all(y[i] != 1000003 for i in Fin[n]):
+    """Reads an earlier cell, except at ``i = 0``, where it reads its own first."""
+    for i in y.dom:
+        y[i] = 2 * y[i // 2] - 1000005
+
+
+@kernel
 def lost_sign(
     c: Arr[Where[a : Fin[2], b : Fin[p + 1], a + b <= p], Real],
     R: Arr[Where[a : Fin[p + 1], b : Fin[p + 1], a + b <= p], Real],
@@ -181,6 +201,74 @@ def reconstruct(
                 R[a, b] = c[a, b]
             with when(a >= 2):
                 R[a, b] = -R[a - 2, b + 2]
+
+
+@kernel(uses=[on_the_triangle])
+def off_by_one(
+    c: Arr[Where[a : Fin[2], b : Fin[p + 1], a + b <= p], Real],
+    R: Arr[Where[a : Fin[p + 1], b : Fin[p + 1], a + b <= p], Real],
+) -> all(
+    R[a, b] == c[a, b] for a in Fin[p + 1] for b in Fin[p + 1] if a < 2 if a + b <= p
+) & all(
+    R[a + 2, b] == -R[a, b + 1]
+    for a in Fin[p + 1]
+    for b in Fin[p + 1]
+    if a + b + 2 <= p
+):
+    """A recurrence off by one in ``b``, as the postcondition says, citing the theorem.
+
+    The postcondition is what it stores, and is decided; the theorem's
+    recurrence is not it, and the theorem gives nothing.
+    """
+    for a in R.dom:
+        for b in R.dom[a]:
+            with when(a < 2):
+                R[a, b] = c[a, b]
+            with when(a >= 2):
+                R[a, b] = -R[a - 2, b + 1]
+
+
+@theorem
+def tenfold(
+    n: Nat,
+    c: Fn[Nat, Real],
+    R: Fn[Nat, Real],
+    h: all(R(i) == c(i) * 0.1 for i in Fin[n]),
+) -> all(R(i) * 10 == c(i) for i in Fin[n]):
+    """As reals, ten tenths of ``c`` are ``c``."""
+
+
+@kernel(uses=[tenfold])
+def scaled(c: Arr[Fin[n], Real], R: Arr[Fin[n], Real]) -> all(
+    R[i] == c[i] * 0.1 for i in Fin[n]
+):
+    """Stores a rounded tenth: as reals, ``R[i]`` is not ``c[i] * 0.1``.
+
+    ``R[i] * 10 == c[i]`` is false of the floats at ``c[i] = 3.0``, and the
+    theorem gives nothing.
+    """
+    for i in R.dom:
+        R[i] = c[i] * 0.1
+
+
+@theorem
+def difference(
+    n: Nat,
+    a: Fn[Nat, Real],
+    b: Fn[Nat, Real],
+    s: Fn[Nat, Real],
+    h: all(s(i) == a(i) + b(i) for i in Fin[n]),
+) -> all(s(i) - a(i) == b(i) for i in Fin[n]):
+    """As reals, ``s - a`` is ``b`` where ``s`` is ``a + b``."""
+
+
+@kernel(uses=[difference])
+def summed(a: Arr[Fin[n], Real], b: Arr[Fin[n], Real], s: Arr[Fin[n], Real]) -> all(
+    s[i] == a[i] + b[i] for i in Fin[n]
+):
+    """Stores a rounded sum: ``s[i] - a[i] == b[i]`` is false of the floats."""
+    for i in s.dom:
+        s[i] = a[i] + b[i]
 
 
 @theorem

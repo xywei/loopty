@@ -1070,7 +1070,8 @@ def single_assignment_obligation(
     with itself among them: two instances, distinct where they are of one
     statement, store into cells that differ. And one part per read of the
     array and statement that stores into it: an instance that stores the
-    cell an instance reads does not run after it, in the source order. A
+    cell an instance reads runs before it, in the source order, and so is
+    not the instance that reads, which reads before it stores. A
     read whose index isl does not read exactly is about every cell, as its
     footprint is, so no instance may store into the array after it. A read
     made at a statement's outer loops alone, the length of a ragged row, is
@@ -1132,16 +1133,18 @@ def single_assignment_obligation(
                         )
                     )
                 at = [*x, *inner][: len(stmt.inames)]
-                after = lexicographically_before(
-                    _source_time(stmt, depth, at), _source_time(writer, depth, y)
+                # strictly before: the instance that reads a cell and stores
+                # it reads it first, as isl's lex_le counts it
+                # (loopty.dataflow); the positions both times hold as numbers
+                # may settle it
+                goal = lexicographically_before(
+                    _source_time(writer, depth, y), _source_time(stmt, depth, at)
                 )
-                # the positions both times hold as numbers may settle it
-                goal = (not after) if isinstance(after, bool) else LogicalNot(after)
                 cell = f"{array}[{', '.join(render(i) for i in indices)}]"
                 parts.append(
                     lanky.Part(
                         f"read_{len(parts)}",
-                        f"{writer.id} storing the {cell} {stmt.id} reads, after it",
+                        f"{writer.id} storing the {cell} {stmt.id} reads, before it",
                         claim.close(goal),
                     )
                 )

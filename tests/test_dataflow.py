@@ -142,6 +142,28 @@ def test_a_read_before_its_store_leaves_the_postcondition_tested() -> None:
     )
 
 
+@pytest.mark.parametrize("name", ["in_place", "halves"])
+def test_a_cell_the_storing_instance_reads_first_is_read_before_its_store(
+    name: str,
+) -> None:
+    """The instance that reads a cell and stores it reads the value from before.
+
+    So its store is no equation about what the kernel leaves: ``x == 2x -
+    1000005`` would decide a claim that is false where ``x`` holds 1000004 on
+    entry. ``halves`` reads its own cell at ``i = 0`` only.
+    """
+    k = getattr(kernels, name)
+    (post,) = facts(k, "postcondition")
+    assert post.status is Status.TESTED
+    array = "x" if name == "in_place" else "y"
+    assert (
+        f"S0 stores a cell of {array} that S0 reads before it"
+        in post.provenance["undecided"]
+    )
+    assert not facts(k, KIND)
+    assert not stores(k.term, name).equations
+
+
 def test_a_recurrence_with_its_sign_lost_is_no_atom_it_stores() -> None:
     """Refuted by the native runs, never decided: another equation than the stored."""
     (post,) = facts(kernels.lost_sign, "postcondition")
@@ -208,6 +230,50 @@ def test_the_flagships_theorem_gives_r_is_d_for_every_d_c_holds() -> None:
     assert applied.provenance["matched"] == [
         render(part) for part in kernels.reconstruct.term.post.children
     ]
+
+
+def test_a_kernel_off_by_one_gets_nothing_from_the_theorem() -> None:
+    """Its postcondition is what it stores; the theorem's recurrence is not that.
+
+    Matched alone, the copies would bind the theorem's ``D`` to ``c`` and its
+    ``R`` to every table at all, under a recurrence the kernel does not
+    compute: every hypothesis about an array the kernel writes has to be a
+    conjunct of its postcondition.
+    """
+    (post,) = facts(kernels.off_by_one, "postcondition")
+    assert (post.status, post.decided_by) == (Status.DECIDED, "isl")
+    assert not facts(kernels.off_by_one, APPLIED)
+
+
+@pytest.mark.parametrize("name", ["scaled", "summed"])
+def test_a_conjunct_that_rounds_is_no_hypothesis_of_a_theorem_about_reals(
+    name: str,
+) -> None:
+    """``R[i] == c[i] * 0.1`` holds of the floats and not of them as reals.
+
+    Decided as the kernel computes, it stays decided; a theorem about the
+    reals concludes ``R[i] * 10 == c[i]`` from it, which is false at ``c[i] =
+    3.0``, and is not applied.
+    """
+    k = getattr(kernels, name)
+    (post,) = facts(k, "postcondition")
+    assert (post.status, post.decided_by) == (Status.DECIDED, "isl")
+    assert not facts(k, APPLIED)
+    assert 3.0 * 0.1 * 10 != 3.0
+
+
+def test_a_conjunct_reads_the_same_as_reals_where_nothing_in_it_rounds() -> None:
+    from lanky.terms import conjuncts
+
+    from loopty.dataflow import exact
+
+    assert all(
+        exact(part, {"c", "R"}) for part in conjuncts(kernels.triangle.term.post)
+    )
+    assert not exact(kernels.scaled.term.post, {"c", "R"})
+    assert not exact(kernels.summed.term.post, {"a", "b", "s"})
+    # over the integers, every comparison is exact
+    assert all(exact(part, set()) for part in conjuncts(kernels.scan.term.post))
 
 
 def test_a_theorem_that_does_not_apply_gives_nothing() -> None:
@@ -317,6 +383,52 @@ def test_lean_proves_a_statement_without_loops_stores_its_cell_once(lean: Any) -
 
 
 @pytest.mark.lean
+def test_lean_does_not_prove_a_read_by_the_storing_instance_is_after_its_store(
+    lean: Any,
+) -> None:
+    """Stated for Lean as isl was asked: the store has to run before the read.
+
+    ``in_place``'s instance reads ``x[i + 1 - 1]``, its own cell, before it
+    stores it; isl finds that and states no fact. Asked of Lean regardless,
+    as a printer that read "not after" for "before" would ask it, the part
+    for that read is false at the instance itself, and is not proved.
+    """
+    from functools import partial
+
+    import islpy as isl
+    from lanky.ledger import Fact
+
+    from loopty import flow
+    from loopty.obligations import Stated, single_assignment_obligation
+    from loopty.oracle import Empty
+
+    term = kernels.in_place.term
+    writers = tuple(stmt for stmt in term.stmts if stmt.assignee.array == "x")
+    places = tuple(
+        (stmt, tuple(indices), tuple(inames), domain)
+        for stmt in term.stmts
+        for name, indices, kind, inames, domain in flow.statement_accesses(stmt, term)
+        if name == "x" and kind == "read"
+    )
+    question = Empty(
+        isl.UnionSet("{ }"),
+        description="a single-assignment fact isl did not decide",
+        lean=Stated(partial(single_assignment_obligation, term, "x", writers, places)),
+    )
+    fact = Fact(
+        id=f"{KIND}:in_place:x",
+        kind=KIND,
+        statement="no cell of x is stored twice, or read before its store",
+        term=question,
+        status=Status.DECIDED,
+        decided_by="isl",
+    )
+    result = lean.establish(fact)
+    assert result.status is not Status.PROVED
+    assert result.decided_by != "lean"
+
+
+@pytest.mark.lean
 def test_lean_checks_that_the_cited_theorem_applies(lean: Any) -> None:
     (applied,) = facts(kernels.scan_cited, APPLIED)
     proved = lean.establish(applied)
@@ -384,4 +496,7 @@ def test_the_example_reads_top_to_bottom_and_refuses_the_interchange() -> None:
     with pytest.raises(IllegalCast, match="interchange"):
         example.rejected_interchange()
     (applied,) = facts(example.reconstruct, APPLIED)
-    assert applied.statement.startswith("by on_the_triangle: forall D in ")
+    assert applied.statement == (
+        "by on_the_triangle, for every D with pde and stored: forall a in "
+        "Fin(p + 1), b in Fin(p + 1) where a + b <= p. R[a, b] == D(a)(b)"
+    )
