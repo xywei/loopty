@@ -16,14 +16,16 @@ import pytest
 from lanky.ledger import Status
 
 import loopty
+from loopty import tested
 from loopty.tested import Tested
 
-# ``loopty.tested`` rather than ``from loopty import tested``: pytest would
-# collect a module-level function whose name starts with ``test``.
+# ``from loopty import tested`` puts a function whose name starts with
+# ``test`` in this module, and the class ``Tested`` a class named ``Test...``:
+# pytest collects neither, and this module importing both is the check.
 
 
 def test_a_claim_that_holds_is_a_tested_row_with_what_it_measured() -> None:
-    @loopty.tested
+    @tested
     def converges():
         """The error falls at order 4."""
         return True, "errors 1e-4, 6e-6: order 4.01"
@@ -42,7 +44,7 @@ def test_a_claim_that_holds_is_a_tested_row_with_what_it_measured() -> None:
 
 
 def test_a_bare_true_is_a_verdict_with_nothing_measured() -> None:
-    @loopty.tested
+    @tested
     def holds():
         """It holds."""
         return True
@@ -53,7 +55,7 @@ def test_a_bare_true_is_a_verdict_with_nothing_measured() -> None:
 
 
 def test_a_claim_that_fails_is_refuted_with_what_it_measured() -> None:
-    @loopty.tested
+    @tested
     def too_slow():
         """The error falls at order 4."""
         return False, "order 2.10"
@@ -65,7 +67,7 @@ def test_a_claim_that_fails_is_refuted_with_what_it_measured() -> None:
 
 
 def test_a_bare_false_is_refuted_and_says_so() -> None:
-    @loopty.tested
+    @tested
     def fails():
         """It holds."""
         return False
@@ -76,7 +78,7 @@ def test_a_bare_false_is_refuted_and_says_so() -> None:
 
 
 def test_a_claim_that_raises_is_refuted_with_the_error() -> None:
-    @loopty.tested
+    @tested
     def broken():
         """It holds."""
         raise ZeroDivisionError("division by zero")
@@ -113,7 +115,7 @@ def test_a_numpy_truth_value_is_a_verdict() -> None:
 def test_the_claim_runs_once_for_its_row_and_again_when_called() -> None:
     runs = []
 
-    @loopty.tested
+    @tested
     def counted():
         """It holds."""
         runs.append(1)
@@ -131,7 +133,7 @@ def test_a_claim_needs_a_docstring_and_a_function() -> None:
         return True
 
     with pytest.raises(TypeError, match="its first line is the claim"):
-        loopty.tested(bare)
+        tested(bare)
     with pytest.raises(TypeError, match="decorates a function"):
         loopty.tested(3)
 
@@ -162,3 +164,28 @@ def test_lanky_check_lists_the_claims_of_a_file(tmp_path: Path) -> None:
     assert rows["converges"].where == "claims.py:4"
     assert rows["diverges"].status is Status.REFUTED
     assert rows["diverges"].provenance["reason"] == "order 4.01"
+
+
+def test_pytest_collects_neither_the_decorator_nor_the_class(tmp_path: Path) -> None:
+    # A downstream test module importing the API as documented.
+    import subprocess
+    import sys
+
+    module = tmp_path / "test_downstream.py"
+    module.write_text(
+        "from loopty import tested\n"
+        "from loopty.tested import Tested\n"
+        "\n"
+        "\n"
+        "def test_nothing():\n"
+        "    assert tested and Tested\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", str(module)],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "1 passed" in result.stdout
+    assert "cannot collect" not in result.stdout + result.stderr, result.stdout

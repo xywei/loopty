@@ -716,6 +716,12 @@ def main(argv: list[str] | None = None) -> int:
     agree.add_argument("--tolerance", type=float, default=1e-12)
     verbs.add_parser("write-race")
     options = parser.parse_args(argv)
+    if options.verb == "time" and options.tile not in GROUP and options.impl != "sumpy":
+        parser.error(
+            f"--tile {options.tile} is sumpy's own schedule for a device that is no "
+            f"CPU, which only --impl sumpy has; for {options.impl}, the tiles are "
+            f"{', '.join(GROUP)}"
+        )
     run = {
         "inputs": run_inputs,
         "time": run_time,

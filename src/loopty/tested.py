@@ -44,11 +44,16 @@ KIND = "tested"
 class Tested:
     """A claim checked by running a function: ``tested``, or ``refuted``.
 
+    Not a test class, whatever its name: pytest, which collects a class
+    called ``Test...`` from a module that imports it, leaves it alone.
+
     Attributes:
         fn: The function, which takes no arguments and returns a ``bool``, or
             a ``bool`` and a string saying what it measured.
         statement: The claim, the first line of the docstring.
     """
+
+    __test__ = False
 
     def __init__(self, fn: Any) -> None:
         if not callable(fn) or getattr(fn, "__code__", None) is None:
@@ -138,3 +143,9 @@ def tested(fn: Any) -> Tested:
 
     ensure_registered()
     return registry.register_object(Tested(fn))
+
+
+# A test module that writes ``from loopty import tested`` holds a function
+# whose name starts with ``test``, which pytest would collect, reading ``fn``
+# as a fixture it cannot find.
+tested.__test__ = False
