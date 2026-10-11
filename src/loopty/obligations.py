@@ -86,6 +86,10 @@ __all__ = [
     "in_bounds_obligation",
     "mixed_in_bounds_obligation",
     "cast_obligation",
+    "layout_bounds_obligation",
+    "layout_injective_obligation",
+    "layout_onto_obligation",
+    "layout_same_obligation",
     "lexicographically_before",
     "merged_obligation",
     "row_starts_obligation",
@@ -2336,6 +2340,247 @@ def merged_obligation(questions: Sequence[tuple[str, Any]], verdict: Any) -> Any
                 )
             )
     return _obligation(parts, refuted=verdict.ok is False)
+
+
+# }}}
+
+
+# {{{ a declared layout: in bounds, one for one, onto, the same as another
+
+
+def _layout_claim(layout: Any, *others: Any) -> Claim:
+    """A claim over a layout's cells: its sizes are not negative."""
+    sizes: set[str] = set()
+    for one in (layout, *others):
+        for piece in one.pieces:
+            sizes |= set(piece.cells.get_var_names(isl.dim_type.param))
+        sizes |= set(one.addresses().get_var_names(isl.dim_type.param))
+    return Claim(None, sizes=frozenset(sizes))
+
+
+def _piece_place(claim: Claim, piece: Any, tag: str = "") -> list[Any]:
+    """Coordinates for a cell of ``piece``, in its cells: a hypothesis."""
+    coords = claim.coordinates(piece.names, tag)
+    cells = _described(piece.cells, f"the cells of {piece.label}")
+    claim.hypotheses.append(cells.predicate(coords))
+    return coords
+
+
+def _address(piece: Any, coords: Sequence[Any]) -> Any:
+    """The address ``piece`` stores the cell ``coords`` at."""
+    return _renamed(plain(piece.address), piece.names, coords)
+
+
+def layout_bounds_obligation(layout: Any, verdict: Any) -> Any:
+    """Every cell of a layout is at an address of its buffer: a part per piece."""
+    lanky = _lanky_obligations()
+    parts = []
+    try:
+        buffer = _described(layout.addresses(), "the addresses of the buffer")
+        for k, piece in enumerate(layout.pieces):
+            claim = _layout_claim(layout)
+            coords = _piece_place(claim, piece)
+            goal = buffer.predicate([_address(piece, coords)])
+            parts.append(
+                lanky.Part(
+                    f"in_bounds_{k}",
+                    f"the address of a cell of {piece.label}",
+                    claim.close(goal),
+                )
+            )
+    except Unstatable as exc:
+        return _declined(str(exc))
+    return _obligation(parts, refuted=verdict.ok is False)
+
+
+def layout_injective_obligation(layout: Any, verdict: Any) -> Any:
+    """No two cells of a layout at one address: a part per pair of pieces.
+
+    Two cells, one of each piece (a piece with itself too), stored at one
+    address, are one cell. A refuted one is stated with isl's pair, when
+    the layout has one piece.
+    """
+    lanky = _lanky_obligations()
+    parts = []
+    try:
+        pieces = layout.pieces
+        for i, first in enumerate(pieces):
+            for j in range(i, len(pieces)):
+                second = pieces[j]
+                claim = _layout_claim(layout)
+                one = _piece_place(claim, first, "c")
+                other = _piece_place(claim, second, "d")
+                claim.hypotheses.append(
+                    Comparison(_address(first, one), "==", _address(second, other))
+                )
+                parts.append(
+                    lanky.Part(
+                        f"one_for_one_{i}_{j}",
+                        f"a cell of {first.label} and one of {second.label} at one "
+                        "address",
+                        claim.close(_equal(one, other)),
+                    )
+                )
+    except Unstatable as exc:
+        return _declined(str(exc))
+    counterexample = None
+    if not verdict.ok and verdict.witness and len(layout.pieces) == 1:
+        rank = layout.rank
+        part = parts[0]
+        names = [var.name for var, _ in part.term.binders]
+        coords = [name for name in names if name.endswith(("_c", "_d"))]
+        values = dict(verdict.parameters or {})
+        values |= _point(coords, list(verdict.witness[: 2 * rank]))
+        counterexample = _counterexample(
+            part, values, ", ".join(f"{k}={v}" for k, v in values.items())
+        )
+    return _obligation(parts, counterexample, refuted=verdict.ok is False)
+
+
+def layout_onto_obligation(layout: Any, verdict: Any) -> Any:
+    """Every address of a layout's buffer stores a cell: a ∀∃, witnessed.
+
+    One part: at every address, some piece has a cell stored there, a
+    disjunction of existentials, one per piece. The witness is isl's
+    inverse of the layout, piece by piece, as ``lexmin`` gives it: the
+    region of addresses each piece stores at, after the ones before it, and
+    the cell there, with ``//`` and ``%`` by numbers.
+    """
+    from lanky.terms import Exists
+
+    lanky = _lanky_obligations()
+    try:
+        buffer = layout.addresses()
+        described = _described(buffer, "the addresses of the buffer")
+        claim = _layout_claim(layout)
+        (x,) = claim.coordinates(("address",))
+        claim.hypotheses.append(described.predicate([x]))
+        options = []
+        for piece in layout.pieces:
+            ys = claim.fresh_all(piece.names, "cell")
+            values = [ys[name] for name in piece.names]
+            cells = _described(piece.cells, f"the cells of {piece.label}")
+            body = conjunction(
+                [
+                    cells.predicate(values),
+                    Comparison(_address(piece, values), "==", x),
+                ]
+            )
+            options.append(
+                Exists(tuple((ys[name], Int) for name in piece.names), body)
+            )
+        goal = disjunction(options) if len(options) > 1 else options[0]
+        pieces: list[Any] = []
+        taken = None
+        multiple = len(layout.pieces) > 1
+        for index, piece in enumerate(layout.pieces):
+            inverse = piece.relation().reverse()
+            inverse, space = inverse.align_params(buffer.get_space()), buffer
+            space = space.align_params(inverse.get_space())
+            inverse = inverse.intersect_domain(space)
+            region = inverse.domain()
+            if taken is not None:
+                region, earlier = _both(region, taken)
+                region = region.subtract(earlier)
+            if region.is_empty():
+                continue
+            params = {
+                name: Var(name) for name in inverse.get_var_names(isl.dim_type.param)
+            }
+            best = isl.PwMultiAff.from_map(inverse.intersect_domain(region).lexmin())
+            found: list[tuple[Any, Any]] = []
+            best.foreach_piece(lambda where, value: found.append((where, value)))
+            for where, value in found:
+                pieces.append(
+                    lanky.Piece(
+                        tuple(
+                            _aff_term(value.get_at(k), [x], params)
+                            for k in range(value.dim(isl.dim_type.out))
+                        ),
+                        _set_term(where, [x], params),
+                        index if multiple else None,
+                    )
+                )
+            taken = region if taken is None else _both(taken, region)[0].union(
+                _both(region, taken)[0]
+            )
+        if pieces:
+            last = pieces[-1]
+            pieces[-1] = lanky.Piece(last.values, None, last.disjunct)
+        hints = lanky.Hints(witness=tuple(pieces)) if pieces else lanky.Hints()
+        part = lanky.Part(
+            "onto",
+            f"a cell at every address of Fin({layout.buffer})",
+            claim.close(goal),
+            hints,
+        )
+    except (Unstatable, isl.Error) as exc:
+        return _declined(str(exc))
+    return _obligation([part], refuted=verdict.ok is False)
+
+
+def layout_same_obligation(first: Any, second: Any, verdict: Any) -> Any:
+    """Two layouts store every cell at one address: a part per pair of pieces.
+
+    A cell of a piece of each is stored at one address by both; and every
+    cell of each is a cell of the other, a part per piece, when their pieces
+    are not the same cells. A refuted one is stated with isl's cell when both
+    have one piece.
+    """
+    lanky = _lanky_obligations()
+    parts = []
+    try:
+        for i, one in enumerate(first.pieces):
+            for j, other in enumerate(second.pieces):
+                claim = _layout_claim(first, second)
+                coords = _piece_place(claim, one)
+                cells = _described(other.cells, f"the cells of {other.label}")
+                claim.hypotheses.append(cells.predicate(coords))
+                goal = Comparison(
+                    _address(one, coords), "==", _address(other, coords)
+                )
+                parts.append(
+                    lanky.Part(
+                        f"same_{i}_{j}",
+                        f"a cell of {one.label} and of {other.label}",
+                        claim.close(goal),
+                    )
+                )
+        for mine, theirs, which in ((first, second, "a"), (second, first, "b")):
+            for k, piece in enumerate(mine.pieces):
+                if all(p.cells is piece.cells for p in theirs.pieces):
+                    continue
+                claim = _layout_claim(first, second)
+                coords = _piece_place(claim, piece)
+                goal = disjunction(
+                    [
+                        _described(p.cells, f"the cells of {p.label}").predicate(coords)
+                        for p in theirs.pieces
+                    ]
+                )
+                parts.append(
+                    lanky.Part(
+                        f"cells_{which}_{k}",
+                        f"a cell of {piece.label} is a cell of {theirs.name}",
+                        claim.close(goal),
+                    )
+                )
+    except Unstatable as exc:
+        return _declined(str(exc))
+    counterexample = None
+    if (
+        not verdict.ok
+        and verdict.witness
+        and len(first.pieces) == 1
+        and len(second.pieces) == 1
+    ):
+        part = parts[0]
+        values = dict(verdict.parameters or {})
+        values |= _point(first.pieces[0].names, list(verdict.witness[: first.rank]))
+        counterexample = _counterexample(
+            part, values, ", ".join(f"{k}={v}" for k, v in values.items())
+        )
+    return _obligation(parts, counterexample, refuted=verdict.ok is False)
 
 
 # }}}
