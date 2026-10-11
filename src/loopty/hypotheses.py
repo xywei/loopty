@@ -69,6 +69,7 @@ import dataclasses
 import re
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from functools import partial
 from itertools import product
 from typing import Any
 
@@ -679,13 +680,19 @@ def cells_in_pattern(universal: Forall, binders: set[str]) -> list[prim.Subscrip
     return out
 
 
-def _instances(claim: Any, cells: Sequence[Subscript]) -> Iterator[Any]:
+def _instances(
+    claim: Any, cells: Sequence[Subscript], record: list | None = None
+) -> Iterator[Any]:
     """Ground instances of ``claim`` at ``cells``: its conjuncts, instantiated.
 
     A conjunct with no quantifier is its own instance. A universal one is
     instantiated at the values :func:`_candidates` gives its binders, each
     instance holding where the binders' domains and the guard do. Any other
     conjunct is used as it is, which :func:`_encode` reads as far as it can.
+
+    ``record``, when given, collects ``(conjunct, values)`` for each instance
+    of a universal, which a fact Lean checks takes as its hints
+    (:func:`loopty.obligations.discharged_obligation`).
     """
     for conjunct in conjuncts(claim):
         if not isinstance(conjunct, Forall) or not conjunct.binders:
@@ -712,6 +719,8 @@ def _instances(claim: Any, cells: Sequence[Subscript]) -> Iterator[Any]:
                 # A binder of a sort no instance can be taken in, at any value.
                 break
             mapping, conditions = bound
+            if record is not None:
+                record.append((conjunct, tuple(choice)))
             if conjunct.guard is not None:
                 conditions.append(substitute(conjunct.guard, mapping))
             body = substitute(conjunct.body, mapping)
@@ -845,6 +854,7 @@ def _run(
     *,
     negated: bool = True,
     unstated: list[str] | None = None,
+    record: list | None = None,
 ) -> tuple[isl.Set, _Cells]:
     """The bad set of ``goal`` over ``domain`` under ``hypotheses``.
 
@@ -853,7 +863,10 @@ def _run(
     bad set, whether ``goal`` holds there or not: that set is empty when the
     hypotheses contradict each other at every point. ``unstated``, when
     given, collects what isl cannot state, each part with where it comes
-    from.
+    from. ``record``, when given, collects the hypotheses' claims as they
+    are used, renamed apart from the claim's binders, as ``("claim",
+    hypothesis, claim)``, and each instance of a universal one as
+    ``("instance", conjunct, values)``.
     """
     dims = list(domain.get_var_names(isl.dim_type.set))
     params = list(domain.get_var_names(isl.dim_type.param))
@@ -872,6 +885,8 @@ def _run(
             reserved.add(fresh)
             apart[name] = Var(fresh)
         claims.append(substitute(hypothesis.claim, apart))
+        if record is not None:
+            record.append(("claim", hypothesis, claims[-1]))
     cells = _Cells(reserved, integral)
     for name, expr in reflected.items():
         if isinstance(expr, prim.Subscript) and isinstance(
@@ -904,7 +919,10 @@ def _run(
         known_cells = cells.known()
         grew = False
         for hypothesis, claim in pending:
-            for instance in _instances(claim, known_cells):
+            chosen: list = []
+            for instance in _instances(claim, known_cells, chosen):
+                if record is not None and chosen:
+                    record.append(("instance", *chosen.pop()))
                 key = structural_key(instance)
                 if key in seen:
                     continue
@@ -1007,8 +1025,31 @@ def discharge(
                     contradicting=tuple(used),
                     unstated=tuple(unstated),
                 )
-    final, _ = _run(domain, goal, used, integral, known, nonneg, reflected)
-    question = Empty(final, description=description, labels=dims)
+    record: list = []
+    final, _ = _run(
+        domain, goal, used, integral, known, nonneg, reflected, record=record
+    )
+    from loopty.obligations import Stated, discharged_obligation
+
+    question = Empty(
+        final,
+        description=description,
+        labels=dims,
+        # Lean's statement of what isl decided: the claim at every point of
+        # the domain under the hypotheses used, with the instances isl took
+        # of the universal ones as hints (loopty.obligations)
+        lean=Stated(
+            partial(
+                discharged_obligation,
+                domain,
+                goal,
+                tuple(record),
+                frozenset(integral),
+                frozenset(known),
+                frozenset(nonneg),
+            )
+        ),
+    )
     return Discharge(True, question, tuple(used), "")
 
 

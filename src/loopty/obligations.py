@@ -75,6 +75,7 @@ from loopty.term import Stmt, Term
 __all__ = [
     "Claim",
     "Stated",
+    "discharged_obligation",
     "disjoint_writes_obligation",
     "element_sort_obligation",
     "in_bounds_obligation",
@@ -168,13 +169,22 @@ class Claim:
     told of every size, and the claim says so.
     """
 
-    def __init__(self, term: Term) -> None:
+    def __init__(
+        self,
+        term: Term | None,
+        sizes: frozenset[str] | None = None,
+        taken: frozenset[str] = frozenset(),
+    ) -> None:
         self.term = term
-        self.sizes = flow.size_names(term)
-        self.taken: set[str] = {name for name, _ in (*term.params, *term.temporaries)}
-        self.taken |= set(term.sizes) | {name for name, _ in term.reflected}
-        for stmt in term.stmts:
-            self.taken |= set(stmt.inames)
+        self.taken: set[str] = set(taken)
+        if term is not None:
+            self.sizes = flow.size_names(term) if sizes is None else sizes
+            self.taken |= {name for name, _ in (*term.params, *term.temporaries)}
+            self.taken |= set(term.sizes) | {name for name, _ in term.reflected}
+            for stmt in term.stmts:
+                self.taken |= set(stmt.inames)
+        else:
+            self.sizes = frozenset() if sizes is None else sizes
         self.coords: list[Var] = []
         self.hypotheses: list[Any] = []
 
@@ -639,6 +649,118 @@ def ordering_obligation(term: Term, verdict: Any) -> Any:
     if not parts:
         return _declined("the term has no two accesses a dependence could join")
     return _obligation(parts)
+
+
+# }}}
+
+
+# {{{ a program's facts, under what held where a call is made
+
+
+#: The term classes core Lean has no form for: a sum, an absolute value, an
+#: elementary function and true division are Mathlib's.
+_UNPRINTABLE = ("Sum", "Abs", "Elementary", "Quotient")
+
+
+def _statable(expr: Any, arrays: frozenset[str], names: frozenset[str]) -> bool:
+    """Whether ``expr`` is integer arithmetic over ``names`` and cells of ``arrays``.
+
+    A hypothesis about a real cell, read over the integers, would be another
+    hypothesis, one that may give Lean what the reals do not; it is left
+    out, which can only make the claim harder.
+    """
+    found: dict[str, int] = {}
+    try:
+        _names(expr, found)
+    except Unstatable:
+        return False
+    for name, arity in found.items():
+        if arity and name not in arrays:
+            return False
+        if not arity and name not in names:
+            return False
+
+    def plain(node: Any) -> bool:
+        if isinstance(node, float | complex) or type(node).__name__ in _UNPRINTABLE:
+            return False
+        if isinstance(node, tuple | list):
+            return all(plain(item) for item in node)
+        if isinstance(node, Forall) or type(node).__name__ == "Exists":
+            return plain(node.body) and (node.guard is None or plain(node.guard))
+        if isinstance(node, prim.ExpressionNode):
+            from lanky.terms import init_args
+
+            return all(plain(child) for child in init_args(node))
+        return True
+
+    return plain(expr)
+
+
+def discharged_obligation(
+    domain: Any,
+    goal: Any,
+    record: Sequence[tuple],
+    integral: frozenset[str],
+    known: frozenset[str],
+    nonneg: frozenset[str],
+    verdict: Any,
+) -> Any:
+    """A claim isl decided under hypotheses (:func:`loopty.hypotheses.discharge`).
+
+    One part: at every point of the claim's domain, the hypotheses isl used
+    imply the claim. A hypothesis is a claim about the program's arrays (a
+    callee's postcondition, a theorem it cites, a type its contract checks),
+    and an array is a function of its indices here, so the part holds of
+    every array the hypotheses hold of. A universal hypothesis is what
+    ``omega`` does not instantiate, and the instances isl took of it, at the
+    cells the claim reads, are the part's hints. A hypothesis or a part of
+    one that is not integer arithmetic over integer arrays is left out, as
+    isl leaves it out (:func:`_statable`).
+    """
+    lanky = _lanky_obligations()
+    try:
+        described = _described(domain, "the claim's domain")
+        dims = tuple(domain.get_var_names(isl.dim_type.set))
+        claims = [entry[2] for entry in record if entry[0] == "claim"]
+        names = frozenset(known) | frozenset(dims)
+        if not _statable(goal, integral, names):
+            return _declined(
+                "the claim reads what is not integer arithmetic over integer "
+                "arrays, which is stated for isl only"
+            )
+        claim = Claim(None, sizes=frozenset(nonneg), taken=names)
+        coords = claim.coordinates(dims)
+        claim.hypotheses.append(described.predicate(coords))
+        for hypothesis in claims:
+            for part in conjuncts(hypothesis):
+                if _statable(part, integral, names):
+                    claim.hypotheses.append(part)
+        term = claim.close(goal)
+    except Unstatable as exc:
+        return _declined(str(exc))
+    guard = (
+        [render(part) for part in conjuncts(term.guard)]
+        if term.guard is not None
+        else []
+    )
+    instances = []
+    seen: set[tuple[int, tuple[str, ...]]] = set()
+    for entry in record:
+        if entry[0] != "instance" or len(instances) >= 16:
+            continue
+        _kind, conjunct, values = entry
+        try:
+            position = guard.index(render(conjunct))
+        except ValueError:
+            continue
+        # by their text: a term's == builds a proposition
+        key = (position, tuple(render(value) for value in values))
+        if key not in seen:
+            seen.add(key)
+            instances.append(lanky.Instance(position, tuple(values)))
+    hints = lanky.Hints(instances=tuple(instances))
+    part = lanky.Part("claim", "the claim where the hypotheses hold", term, hints)
+    return _obligation([part])
 
 
 # }}}

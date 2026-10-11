@@ -699,7 +699,7 @@ class RunVerb:
 
 
 def _lean_reports() -> tuple[Any, Any]:
-    """lanky's reports of what Lean did not prove, and of the Lean, where it has them."""
+    """lanky's report of what Lean did not prove, and of the Lean, if it has them."""
     try:
         from lanky.cli import report_lean, report_unproved
     except ImportError:  # a lanky from before them
