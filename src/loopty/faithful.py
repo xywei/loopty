@@ -67,7 +67,7 @@ from typing import Any
 
 import numpy as np
 from lanky.ledger import Fact, Status, fact_id
-from lanky.prelude import FinType, Refined
+from lanky.prelude import FinType, FnType, Refined
 from lanky.terms import evaluate, free_variables
 
 from loopty.arr import Arr, LayoutError
@@ -93,6 +93,7 @@ __all__ = [
     "no_term_fact",
     "postcondition_fact",
     "sample_arguments",
+    "with_result",
 ]
 
 #: The kind of the fact, as the ledger and its JSON name it.
@@ -831,7 +832,7 @@ def _inputs(
             else:
                 chosen = select_inputs(everything, kernel.__name__)
                 if chosen is not None:
-                    yield label, chosen, None
+                    yield label, with_result(term, chosen), None
     for index in range(SAMPLES):
         try:
             arguments, sizes = sample_arguments(term, (SEED, index))
@@ -854,6 +855,8 @@ def _record(arguments: Mapping[str, Any]) -> dict[str, Any]:
             out[name] = value.numpy().tolist()
             if value.is_ragged:
                 out[f"{name} offsets"] = value.offsets.tolist()
+        elif isinstance(value, DrawnFunction):
+            out[name] = value.values.tolist()
         else:
             out[name] = value
     return out
@@ -899,6 +902,8 @@ def sample_arguments(
             arguments[name] = Arr.from_numpy(_draw(typ.dtype, shape, sizes, rng))
         elif name in sizes:
             arguments[name] = sizes[name]
+        elif isinstance(typ.base if isinstance(typ, Refined) else typ, FnType):
+            arguments[name] = _drawn_function(typ, sizes, rng)
         else:
             arguments[name] = _draw(typ, (), sizes, rng).item()
     for name, typ in ragged:
@@ -926,6 +931,51 @@ def sample_arguments(
             )
     ordered = {name: arguments[name] for name, _typ in term.params}
     return ordered, sizes
+
+
+class DrawnFunction:
+    """A function drawn for a parameter of a function sort: a table of values.
+
+    ``Fn[Fin[m], B]`` is drawn as ``m`` values of ``B``, and the function
+    returns the one at its argument, as lanky's property tester draws a
+    family (:class:`lanky.prelude.FnType`). It is printed as its values.
+    """
+
+    def __init__(self, values: np.ndarray) -> None:
+        self.values = values
+
+    def __call__(self, point: Any) -> Any:
+        return self.values[int(point)]
+
+    def __repr__(self) -> str:
+        return f"<function of the table {self.values.tolist()}>"
+
+
+def _drawn_function(sort: Any, sizes: Mapping[str, int], rng: Any) -> DrawnFunction:
+    """A function of ``sort``, ``Fn[Fin[m], B]``, drawn as a table of ``m`` values."""
+    base = sort.base if isinstance(sort, Refined) else sort
+    domain = base.domain
+    if not isinstance(domain, FinType):
+        raise _NoSample(f"no way to draw a function over {domain}")
+    shape = (_extent(domain.bound, sizes),)
+    return DrawnFunction(_draw(base.codomain, shape, sizes, rng))
+
+
+def with_result(term: Term, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """``arguments`` with a one-cell array for a rule's value, when it has none.
+
+    A rule's term writes the value it returns into its result array
+    (:attr:`loopty.term.Term.result`), which no caller of the rule passes:
+    it is the term's, and a run of the term is given one of zeros.
+    """
+    out = dict(arguments)
+    if term.result is not None and term.result not in out:
+        from loopty.contract import native_storage
+
+        typ = dict(term.params)[term.result]
+        dtype = native_storage(typ.dtype) or np.dtype(np.float64)
+        out[term.result] = Arr.from_numpy(np.zeros(1, dtype=dtype))
+    return out
 
 
 def _size_names(term: Term) -> set[str]:

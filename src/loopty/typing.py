@@ -130,23 +130,26 @@ import islpy as isl
 import pymbolic.primitives as prim
 from lanky.ledger import Fact, Status, fact_id
 from lanky.prelude import FinType
-from lanky.terms import render, structurally_equal
+from lanky.terms import init_args, render, structurally_equal
 
 from loopty import flow
 from loopty.obligations import (
     Stated,
+    argument_obligation,
     disjoint_writes_obligation,
+    distinct_arguments_obligation,
     element_sort_obligation,
     in_bounds_obligation,
     mixed_in_bounds_obligation,
     ordering_obligation,
 )
 from loopty.oracle import Empty, Monotone, Subset
-from loopty.term import ArrType, Term, commutes
+from loopty.term import Argument, ArrType, Term, commutes
 from loopty.trace import reductions_in
 
 __all__ = [
     "AfterCall",
+    "call_facts",
     "element_sort_facts",
     "facts_for",
     "in_bounds_facts",
@@ -348,7 +351,9 @@ def in_bounds_facts(
         for array, indices, kind, inames, domain in flow.statement_accesses(
             stmt, term
         ):
-            if not isinstance(types.get(array), ArrType):
+            if not isinstance(types.get(array), ArrType) or array == term.result:
+                # A rule's result is the one cell its value is written into,
+                # which the rule's body never names.
                 continue
             text = _access_text(array, indices)
             listed.setdefault((array, kind, text), []).append(
@@ -835,6 +840,8 @@ def element_sort_facts(
         identifier = _element_sort_id(stmt, owner, module=module, line=line)
         statement = (
             f"the value {stmt.id} writes into {cell}, {shown}, is a point of {sort}"
+            if written.array != term.result
+            else f"the value {term.name} returns, {shown}, is a point of {sort}"
         )
         common = {
             "statement": stmt.id,
@@ -1878,7 +1885,7 @@ def write_disjointness_facts(
     sums = accumulating(term)
     facts: list[Fact] = []
     for footprint in flow.footprints(term):
-        if not footprint.touches_memory:
+        if not footprint.touches_memory or footprint.array == term.result:
             continue
         stmt = by_statement[footprint.stmt]
         if footprint.kind == "acc" and stmt.id in sums:
@@ -2210,6 +2217,8 @@ def reduction_facts(
             written = stmt.assignee
             indices = ", ".join(render(i) for i in written.indices)
             target = f"{written.array}[{indices}]"
+            if written.array == term.result:
+                target = f"the value {term.name} returns"
             facts.append(
                 Fact(
                     id=fact_id(
@@ -2786,6 +2795,582 @@ def scoped_in_bounds_facts(
     return facts
 
 
+# {{{ calls of other kernels
+
+
+def call_facts(
+    term: Term, owner: str, *, module: str | None = None, line: int | None = None
+) -> list[Fact]:
+    """What each call of another kernel in the body owes, at every point it is made.
+
+    A call inside the body is inlined (:mod:`loopty.calls`), so the callee's
+    reads and writes are the caller's statements, with facts of their own.
+    What is left is what the callee's contract checks of a call natively,
+    which the inlined term relies on, and what the call leaves behind:
+
+    * a row passed, ``A[i]``, is in bounds: its indices are a point of the
+      leading axes of ``A``, wherever the call is made (kind ``in-bounds``);
+    * every cell read to compute an argument when the call is made, of a
+      scalar's value or of a row's indices (``p[i]`` of ``A[p[i]]``), is in
+      bounds, whether the callee uses the parameter or not;
+    * the cells a gather picks, ``u[cell[c]]``, are in bounds, by the type of
+      the indices where they are of the sort of ``u``'s axis;
+    * a scalar of an integral sort is a point of it, ``j`` of ``Fin(3)``
+      (kind ``argument``);
+    * two rows of one array passed share no cell where the callee writes
+      either, since its contract refuses two such parameters that share
+      storage (kind ``distinct-arguments``); two it only reads may be one;
+    * the callee's postcondition holds of what the call passed, after each
+      call: a restatement in the caller's names, decided by the call and
+      resting on the callee's own postcondition fact (kind
+      ``postcondition-in-scope``), as a program restates its callees'.
+
+    isl decides the first four where the indices and values are quasi-affine,
+    over the points of the call (:attr:`loopty.term.Call.domain`); each is
+    stated for Lean from loopty's own description of the call
+    (:mod:`loopty.obligations`). A call made where those points cannot be
+    stated leaves them ``assumed``, with the reason.
+    """
+    facts: list[Fact] = []
+    for call in term.calls:
+        facts.extend(_call_facts(term, call, owner, module=module, line=line))
+    return facts
+
+
+def _call_facts(
+    term: Term, call: Any, owner: str, *, module: str | None, line: int | None
+) -> list[Fact]:
+    """The facts of one call; see :func:`call_facts`."""
+    from loopty.table import table_type
+
+    types = dict(term.params)
+    types.update(term.temporaries)
+    types.update((name, table_type(values)) for name, values in term.tables)
+    sorts = _element_sort_ids(term, owner, module=module, line=line)
+    layouts = layout_fact_ids(term, owner, module=module, line=line)
+    key = {"module": module, "line": line}
+    at = f"wherever {call.label} is called at {call.where}"
+    common = {"call": call.label, "callee": call.callee, **_call_unnarrowed(call)}
+    facts: list[Fact] = []
+
+    def assumed(identifier: str, kind: str, statement: str, reason: str) -> Fact:
+        return Fact(
+            id=identifier,
+            kind=kind,
+            statement=statement,
+            term=None,
+            status=Status.ASSUMED,
+            provenance={**common, "reason": reason},
+            where=call.where,
+            owner=owner,
+        )
+
+    def row_fact(argument: Any, what: str) -> Fact | None:
+        array = argument.array
+        arrtype = types.get(array)
+        if not isinstance(arrtype, ArrType) or arrtype.domain is not None:
+            return None
+        prefix = tuple(argument.prefix)
+        text = _access_text(array, prefix)
+        identifier = fact_id(
+            "in-bounds", owner, detail=f"{call.label}:{argument.param}:{text}", **key
+        )
+        statement = f"{text}, {what}, is in bounds {at}"
+        if call.unknown:
+            return assumed(identifier, "in-bounds", statement, call.unknown)
+        virtual = ArrType(
+            axes=tuple(arrtype.axes[: len(prefix)]),
+            dtype=arrtype.dtype,
+            ragged=tuple(arrtype.ragged[: len(prefix)]),
+        )
+        reason = _justified_by_type(prefix, virtual, types)
+        if reason is not None:
+            return Fact(
+                id=identifier,
+                kind="in-bounds",
+                statement=f"{text}, {what}, is in bounds by type ({reason})",
+                term=None,
+                status=Status.DECIDED,
+                decided_by="type",
+                provenance={**common, "rule": "index type", "reason": reason},
+                where=call.where,
+                owner=owner,
+                rests_on=_by_type_rests_on([prefix], types, sorts, layouts),
+            )
+        try:
+            relation = flow.access_relation(call.inames, call.domain, prefix)
+            if _is_widened(relation, prefix):
+                raise flow.NonAffine("widened")
+            described = flow.cell_set(virtual, prefix, reflections=term.reflections)
+            reached, cells = _align_both(relation.range(), described)
+            sizes = flow.size_names(term)
+            reached = flow.assume_sizes(reached, sizes)
+            cells = flow.assume_sizes(cells, sizes)
+        except Exception as exc:  # noqa: BLE001 - an unstatable rule is ASSUMED
+            why = (
+                "the index is not quasi-affine and its type does not bound it, "
+                "so isl is not asked"
+                if isinstance(exc, flow.NonAffine)
+                else f"no isl form: {exc}"
+            )
+            return assumed(identifier, "in-bounds", statement, why)
+        return Fact(
+            id=identifier,
+            kind="in-bounds",
+            statement=statement,
+            term=Subset(
+                reached,
+                cells,
+                description=f"rows {text} reaches are rows {array} has",
+                labels=tuple(f"a{k}" for k in range(len(prefix))),
+                lean=Stated(
+                    partial(
+                        in_bounds_obligation,
+                        term,
+                        ((prefix, tuple(call.inames), call.domain),),
+                        described,
+                        array,
+                        text,
+                    )
+                ),
+            ),
+            status=Status.ASSUMED,
+            provenance={**common, "access": text},
+            where=call.where,
+            owner=owner,
+        )
+
+    rows: dict[str, list[Any]] = {}
+    # One fact for an index row however many gathers read through it, which
+    # names them all: X[cell[c]] and Y[cell[c]] read cell[c] once each.
+    indices: dict[str, tuple[Any, list[str]]] = {}
+    for argument in call.arguments:
+        index = argument.index
+        if argument.kind == "gather" and index.kind == "row":
+            text = _access_text(index.array, index.prefix)
+            indices.setdefault(text, (index, []))[1].append(argument.param)
+    def read_facts(param: str, expr: Any, what: str) -> None:
+        """Every cell read to compute ``expr`` when the call is made, in bounds.
+
+        Natively an argument is computed when the call is made, every read
+        of it, whether the callee uses the parameter or not; inlined, a read
+        the callee never reaches is not in the term. So each is a fact of
+        the call: of a scalar's value, and of the indices of a row, ``p[i]``
+        of ``A[p[i]]``, whose row is in bounds by ``p``'s type wherever
+        ``p[i]`` is.
+        """
+        for array, indices, summed in _reads_of(expr):
+            read = Argument(param, "row", "", array, indices)
+            if summed:
+                text = _access_text(array, indices)
+                facts.append(
+                    assumed(
+                        fact_id(
+                            "in-bounds",
+                            owner,
+                            detail=f"{call.label}:{param}:{text}",
+                            **key,
+                        ),
+                        "in-bounds",
+                        f"{text}, {what}, is in bounds {at}",
+                        "it is read inside a sum the value computes, whose "
+                        "points the call's facts do not state",
+                    )
+                )
+                continue
+            fact = row_fact(read, what)
+            if fact is not None:
+                facts.append(fact)
+
+    for index, params in indices.values():
+        what = f"the indices of the cells passed as {_listed(params)}"
+        fact = row_fact(
+            Argument(params[0], "row", index.spelled, index.array, index.prefix),
+            what,
+        )
+        if fact is not None:
+            facts.append(fact)
+        read_facts(params[0], index.prefix, f"read for {what}")
+    for argument in call.arguments:
+        if argument.kind == "row":
+            what = f"the row passed to {call.callee} as {argument.param}"
+            fact = row_fact(argument, what)
+            if fact is not None:
+                facts.append(fact)
+            read_facts(argument.param, argument.prefix, f"read for {what}")
+            rows.setdefault(argument.array, []).append(argument)
+        elif argument.kind == "gather":
+            facts.append(_gather_fact(term, call, argument, types, sorts, layouts,
+                                      owner, at, common, key))
+        elif argument.kind == "scalar":
+            fact = _argument_fact(term, call, argument, types, sorts, layouts,
+                                  owner, at, common, key)
+            if fact is not None:
+                facts.append(fact)
+            read_facts(
+                argument.param,
+                argument.value,
+                f"read for the value passed to {call.callee} as {argument.param}",
+            )
+    for array, sharing in rows.items():
+        for first_position, first in enumerate(sharing):
+            for second in sharing[first_position + 1 :]:
+                if not (first.written or second.written):
+                    # two rows the callee only reads may be one row: reads
+                    # do not race, and its contract lets them share storage
+                    continue
+                facts.append(
+                    _distinct_fact(term, call, array, first, second, owner, at,
+                                   common, key)
+                )
+    if call.post is not None:
+        facts.append(
+            Fact(
+                id=fact_id(
+                    "postcondition-in-scope",
+                    owner,
+                    detail=f"{call.label}:{call.definition}",
+                    **key,
+                ),
+                kind="postcondition-in-scope",
+                statement=(
+                    f"after each call {_call_text(call)} at {call.where}: "
+                    f"{render(call.post)}"
+                ),
+                term=AfterCall(call.callee, call.post),
+                status=Status.DECIDED,
+                decided_by="call",
+                provenance={
+                    **common,
+                    "rule": (
+                        f"every call of {call.callee} leaves its postcondition "
+                        "true of what it was passed, so it holds after each "
+                        f"call {owner} makes, at every point it makes it"
+                    ),
+                },
+                where=call.where,
+                owner=owner,
+                rests_on=(call.postcondition,) if call.postcondition else (),
+            )
+        )
+    return facts
+
+
+def _reads_of(expr: Any, summed: bool = False) -> list[tuple[str, tuple, bool]]:
+    """Every array read in ``expr``: the array, the indices, and whether in a sum.
+
+    ``x[col[r, 0]]`` reads ``x`` at ``col[r, 0]`` and ``col`` at ``(r, 0)``.
+    """
+    out: list[tuple[str, tuple, bool]] = []
+    aggregate = getattr(expr, "aggregate", None)
+    if isinstance(expr, prim.Subscript) and isinstance(aggregate, prim.Variable):
+        index = expr.index if isinstance(expr.index, tuple) else (expr.index,)
+        out.append((aggregate.name, tuple(index), summed))
+        for part in index:
+            out.extend(_reads_of(part, summed))
+    elif hasattr(expr, "binders") and isinstance(expr, prim.ExpressionNode):
+        out.extend(_reads_of(expr.body, True))
+        out.extend(_reads_of(getattr(expr, "guard", None), True))
+    elif isinstance(expr, prim.ExpressionNode):
+        for arg in init_args(expr):
+            out.extend(_reads_of(arg, summed))
+    elif isinstance(expr, tuple | list):
+        for item in expr:
+            out.extend(_reads_of(item, summed))
+    return out
+
+
+def _call_text(call: Any) -> str:
+    """A call as the body wrote it, ``element(X[cell[c]], Y[cell[c]], M[c])``."""
+    return f"{call.callee}({', '.join(a.spelled for a in call.arguments)})"
+
+
+def _call_unnarrowed(call: Any) -> dict[str, Any]:
+    """The provenance of a call's facts whose guard isl could not state whole."""
+    if not call.unnarrowed:
+        return {}
+    return {
+        "unnarrowed": [
+            {"conjunct": conjunct, "why": why} for conjunct, why in call.unnarrowed
+        ]
+    }
+
+
+def _gather_fact(
+    term: Term,
+    call: Any,
+    argument: Any,
+    types: dict[str, Any],
+    sorts: Mapping[str, tuple[str, ...]],
+    layouts: Mapping[str, tuple[str, ...]],
+    owner: str,
+    at: str,
+    common: dict[str, Any],
+    key: dict[str, Any],
+) -> Fact:
+    """The cells a gather picks are cells of its array: by the indices' type.
+
+    Natively ``u[cell[c]]`` reads every cell the row ``cell[c]`` names when
+    the call is made, so each of them is owed, whether the callee reads it
+    or not. An index of the sort of ``u``'s first axis is a point of it,
+    which the contract and the element-sort facts of the writes into the
+    index array keep; another is left ``assumed``.
+    """
+    index = argument.index
+    source = types.get(argument.array)
+    shown = argument.spelled
+    identifier = fact_id(
+        "in-bounds", owner, detail=f"{call.label}:{argument.param}:{shown}", **key
+    )
+    passed = f"the cells {shown} picks, passed as {argument.param}, are in bounds"
+    statement = f"{passed} {at}"
+    index_type = types.get(index.array)
+    sort = index_type.dtype if isinstance(index_type, ArrType) else None
+    if (
+        isinstance(source, ArrType)
+        and isinstance(sort, FinType)
+        and source.axes
+        and not source.ragged[0]
+        and structurally_equal(sort.bound, source.axes[0])
+    ):
+        reason = f"the entries of {index.array} : {sort}"
+        return Fact(
+            id=identifier,
+            kind="in-bounds",
+            statement=f"{passed} by type ({reason})",
+            term=None,
+            status=Status.DECIDED,
+            decided_by="type",
+            provenance={**common, "rule": "index type", "reason": reason},
+            where=call.where,
+            owner=owner,
+            rests_on=(*sorts.get(index.array, ()), *layouts.get(index.array, ())),
+        )
+    return Fact(
+        id=identifier,
+        kind="in-bounds",
+        statement=statement,
+        term=None,
+        status=Status.ASSUMED,
+        provenance={
+            **common,
+            "reason": (
+                f"the entries of {index.array} are {sort}, and not points of the "
+                f"first axis of {argument.array}, so nothing bounds them"
+            ),
+        },
+        where=call.where,
+        owner=owner,
+    )
+
+
+def _argument_fact(
+    term: Term,
+    call: Any,
+    argument: Any,
+    types: dict[str, Any],
+    sorts: Mapping[str, tuple[str, ...]],
+    layouts: Mapping[str, tuple[str, ...]],
+    owner: str,
+    at: str,
+    common: dict[str, Any],
+    key: dict[str, Any],
+) -> Fact | None:
+    """A scalar of an integral sort is a point of it, wherever the call is made.
+
+    ``Fin[m]`` asks ``0 <= v < m`` and ``Nat`` asks ``0 <= v``, in the
+    caller's names; ``Int``, and a sort that is not integral, ask nothing the
+    trace has not checked. A value read from an array of the sort, or a
+    scalar of it, is one by type.
+    """
+    from lanky.prelude import Refined
+
+    sort = argument.sort
+    base = sort.base if isinstance(sort, Refined) else sort
+    natural = getattr(base, "name", None) == "Nat"
+    if not (isinstance(base, FinType) or natural):
+        return None
+    value = argument.value
+    shown = render(value) if isinstance(value, prim.ExpressionNode) else repr(value)
+    identifier = fact_id(
+        "argument", owner, detail=f"{call.label}:{argument.param}", **key
+    )
+    passed = (
+        f"{shown}, passed to {call.callee} as {argument.param}, is a point of {base}"
+    )
+    statement = f"{passed} {at}"
+    common = {**common, "param": argument.param, "value": shown, "sort": str(base)}
+
+    def assumed(reason: str) -> Fact:
+        return Fact(
+            id=identifier,
+            kind="argument",
+            statement=statement,
+            term=None,
+            status=Status.ASSUMED,
+            provenance={**common, "reason": reason},
+            where=call.where,
+            owner=owner,
+        )
+
+    if argument.unfixed:
+        return assumed(
+            f"the sort names {', '.join(argument.unfixed)}, which nothing the "
+            "call passes fixes"
+        )
+    if isinstance(base, FinType):
+        virtual = ArrType(axes=(base.bound,), dtype=base, ragged=(False,))
+        reason = _justified_by_type((value,), virtual, types)
+        if reason is not None:
+            return Fact(
+                id=identifier,
+                kind="argument",
+                statement=f"{passed} by type ({reason})",
+                term=None,
+                status=Status.DECIDED,
+                decided_by="type",
+                provenance={**common, "rule": "index type", "reason": reason},
+                where=call.where,
+                owner=owner,
+                rests_on=_by_type_rests_on([(value,)], types, sorts, layouts),
+            )
+    if call.unknown:
+        return assumed(call.unknown)
+    try:
+        relation = flow.access_relation(call.inames, call.domain, (value,))
+        if _is_widened(relation, (value,)):
+            raise flow.NonAffine("widened")
+        if isinstance(base, FinType):
+            points = flow.cell_set(
+                ArrType(axes=(base.bound,), dtype=base, ragged=(False,)),
+                (value,),
+                reflections=term.reflections,
+            )
+        else:
+            points = isl.Set("{ [a0] : a0 >= 0 }")
+        relation, points = _align_both(relation, points)
+        outside = relation.intersect_range(points.complement()).domain()
+        outside = flow.assume_sizes(outside, flow.size_names(term))
+    except Exception as exc:  # noqa: BLE001 - an unstatable rule is ASSUMED
+        return assumed(
+            f"the value is not quasi-affine and its type does not say it is a "
+            f"point of {base}, so isl is not asked"
+            if isinstance(exc, flow.NonAffine)
+            else f"no isl form: {exc}"
+        )
+    return Fact(
+        id=identifier,
+        kind="argument",
+        statement=statement,
+        term=Empty(
+            outside,
+            description=(
+                f"points at which {call.label} is given a {argument.param} outside "
+                f"{base}"
+            ),
+            labels=tuple(call.inames),
+            lean=Stated(partial(argument_obligation, term, call, value, base)),
+        ),
+        status=Status.ASSUMED,
+        provenance=common,
+        where=call.where,
+        owner=owner,
+    )
+
+
+def _distinct_fact(
+    term: Term,
+    call: Any,
+    array: str,
+    first: Any,
+    second: Any,
+    owner: str,
+    at: str,
+    common: dict[str, Any],
+    key: dict[str, Any],
+) -> Fact:
+    """Two rows of one array passed to one call, one of them written, share no cell.
+
+    Natively the callee's contract refuses two array parameters that share
+    storage where it writes either, so the rows' indices differ at every
+    point the call is made at,
+    on the axes both fix: isl decides the emptiness of the points where they
+    agree, and refutes it with one.
+    """
+    shared = min(len(first.prefix), len(second.prefix))
+    identifier = fact_id(
+        "distinct-arguments",
+        owner,
+        detail=f"{call.label}:{first.param}:{second.param}",
+        **key,
+    )
+    statement = (
+        f"{first.spelled} and {second.spelled}, passed to {call.callee} as "
+        f"{first.param} and {second.param}, share no cell of {array} {at}"
+    )
+    provenance = {**common, "array": array}
+    if call.unknown:
+        return Fact(
+            id=identifier,
+            kind="distinct-arguments",
+            statement=statement,
+            term=None,
+            status=Status.ASSUMED,
+            provenance={**provenance, "reason": call.unknown},
+            where=call.where,
+            owner=owner,
+        )
+    pairs = list(zip(first.prefix[:shared], second.prefix[:shared], strict=True))
+    try:
+        left = flow.access_relation(call.inames, call.domain, [p for p, _ in pairs])
+        right = flow.access_relation(call.inames, call.domain, [q for _, q in pairs])
+        if _is_widened(left, pairs) or _is_widened(right, pairs):
+            raise flow.NonAffine("widened")
+        left, right = _align_both(left, right)
+        agree = left.intersect(right).domain()
+        agree = flow.assume_sizes(agree, flow.size_names(term))
+    except Exception as exc:  # noqa: BLE001 - an unstatable rule is ASSUMED
+        return Fact(
+            id=identifier,
+            kind="distinct-arguments",
+            statement=statement,
+            term=None,
+            status=Status.ASSUMED,
+            provenance={
+                **provenance,
+                "reason": (
+                    "an index of the rows is not quasi-affine, so isl is not asked"
+                    if isinstance(exc, flow.NonAffine)
+                    else f"no isl form: {exc}"
+                ),
+            },
+            where=call.where,
+            owner=owner,
+        )
+    return Fact(
+        id=identifier,
+        kind="distinct-arguments",
+        statement=statement,
+        term=Empty(
+            agree,
+            description=(
+                f"points at which {first.spelled} and {second.spelled} are one row"
+            ),
+            labels=tuple(call.inames),
+            lean=Stated(
+                partial(distinct_arguments_obligation, term, call, tuple(pairs))
+            ),
+        ),
+        status=Status.ASSUMED,
+        provenance=provenance,
+        where=call.where,
+        owner=owner,
+    )
+
+
+# }}}
+
+
 def _integral(sort: Any) -> bool:
     """Whether the points of ``sort`` are integers, which isl can compare."""
     from loopty.contract import integral_sort
@@ -2838,4 +3423,5 @@ def facts_for(
         *ordering_facts(term, owner, where, **key),
         *reduction_facts(term, owner, **key),
         *postcondition_facts(term, owner, where, **key),
+        *call_facts(term, owner, **key),
     ]

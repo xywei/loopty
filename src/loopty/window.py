@@ -375,8 +375,8 @@ def preconditions(
 ) -> tuple[Stmt, list[Stmt]]:
     """The producer and the readers of ``array``, or why it cannot be contracted.
 
-    The array is one the program made (``Arr.zeros_like``), which no caller
-    sees; one statement stores it besides its zeros, once per cell
+    The array is one the program made (``Arr.zeros_like``, ``Arr.zeros``),
+    which no caller sees; one statement stores it besides its zeros, once per cell
     (``assign``, at indices isl reads exactly, under no guard isl cannot
     state), and reads none of it: not an update, ``f[j] += v``, which adds
     to the zeros a window drops; and every other statement that reads it
@@ -395,7 +395,7 @@ def preconditions(
         )
         raise WindowError(
             f"{text}: {array} is {what}, and only an array the program makes "
-            "with Arr.zeros_like is its own to keep in a window"
+            "with Arr.zeros_like or Arr.zeros is its own to keep in a window"
         )
     zeros = f"{array}.zeros"
     writers = [

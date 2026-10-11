@@ -723,7 +723,9 @@ def test_calls_reading_one_family_through_two_offsets_are_refused() -> None:
     ("body", "said"),
     [
         (lambda u, rhs: u[0], "reads a cell of its parameter u"),
-        (lambda u, rhs: rhs.dom, "asks for .dom of its parameter rhs"),
+        (lambda u, rhs: rhs.sum, "asks for .sum of its parameter rhs"),
+        # .dom gives its sizes, for an array the body makes, and no more
+        (lambda u, rhs: list(rhs.dom), "iterates over the domain of its parameter"),
         (lambda u, rhs: u * 2.0, "computes with its parameter u"),
         (lambda u, rhs: bool(u), "branches on its parameter u"),
         (lambda u, rhs: list(range(u)), "uses as an integer"),
@@ -1432,16 +1434,16 @@ def test_the_interpreter_stores_a_temporary_of_any_sort_as_natively() -> None:
             assert np.array_equal(interpreted[name].numpy(), value.numpy()), name
 
 
-def test_a_callee_with_an_array_over_a_domain_is_refused() -> None:
-    # The domain's sizes are not unified across calls, so the term would not
-    # know f's cells. Natively the program runs, and zeros_like keeps f's
-    # domain and storage.
+def test_a_callee_with_an_array_over_a_domain_composes() -> None:
+    # The domain's sizes are the program's (#74), so the term knows f's
+    # cells. Natively the program runs, and zeros_like keeps f's domain and
+    # storage.
     @program
     def pairs_of(x, f):
         triangle(x, f)
 
-    with pytest.raises(TraceError, match="is an array over Where"):
-        pairs_of.trace()
+    (_, typ) = pairs_of.term.params[1]
+    assert str(typ.domain) == "Where[i: Fin(n), j: Fin(n), j < i]"
     domain = triangle.arg_types["f"].domain
     x = Arr.from_numpy(np.array([1.0, 2.0, 3.0]))
     for storage in ("box", "packed"):
