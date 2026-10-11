@@ -62,6 +62,7 @@ from lanky.terms import (
     conjuncts,
     render,
 )
+from lanky.terms import Sum as LankySum
 
 from loopty import flow
 from loopty.description import (
@@ -71,7 +72,7 @@ from loopty.description import (
     description_of,
     disjunction,
 )
-from loopty.hypotheses import substitute
+from loopty.hypotheses import _sort_terms, substitute
 from loopty.term import Stmt, Term
 
 __all__ = [
@@ -130,9 +131,10 @@ def _names(expr: Any, out: dict[str, int], bound: frozenset[str] = frozenset()) 
         for item in expr:
             _names(item, out, bound)
         return
-    if isinstance(expr, Forall) or type(expr).__name__ == "Exists":
-        # a binder's sort may name what is free, a size in Fin[n + 1], read
-        # with the binders before it bound
+    if isinstance(expr, Forall | LankySum) or type(expr).__name__ == "Exists":
+        # a binder's sort may name what is free, a size in Fin[n + 1] or in
+        # Fn[Fin[n], Real], read with the binders before it bound; a sum
+        # binds as a quantifier does
         inner = set(bound)
         for var, sort in expr.binders:
             _names(_sort_terms(sort), out, frozenset(inner))
@@ -164,17 +166,6 @@ def _names(expr: Any, out: dict[str, int], bound: frozenset[str] = frozenset()) 
 
         for child in init_args(expr):
             _names(child, out, bound)
-
-
-def _sort_terms(sort: Any) -> tuple[Any, ...]:
-    """The terms a binder's sort mentions: a ``Fin``'s bound, a refinement's props."""
-    from lanky.prelude import FinType, Refined
-
-    if isinstance(sort, FinType):
-        return (sort.bound,)
-    if isinstance(sort, Refined):
-        return (*_sort_terms(sort.base), *sort.props)
-    return ()
 
 
 def _array_sort(rank: int, element: Any = Int) -> Any:

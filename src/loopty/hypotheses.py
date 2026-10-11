@@ -90,7 +90,7 @@ from typing import Any
 import islpy as isl
 import numpy as np
 import pymbolic.primitives as prim
-from lanky.prelude import FinType, FnType, Refined
+from lanky.prelude import FinType, FnType, Refined, SumType
 from lanky.terms import (
     Add,
     Comparison,
@@ -107,6 +107,7 @@ from lanky.terms import (
     render,
     structurally_equal,
 )
+from lanky.terms import Sum as LankySum
 
 from loopty.flow import assume_sizes, free_names
 from loopty.oracle import Empty, sample_parameters, sample_point
@@ -141,6 +142,11 @@ _FLIPPED = {"==": "!=", "!=": "==", "<": ">=", "<=": ">", ">": "<=", ">=": "<"}
 
 #: The comparisons that say the same with their sides swapped.
 _MIRRORED = {"==": "==", "!=": "!=", "<": ">", ">": "<", "<=": ">=", ">=": "<="}
+
+#: The nodes that bind names, each over a sort: the quantifiers, and the sum
+#: ``lanky.sum(c(i) for i in Fin[n])``, whose ``Fin[n]`` is a sort as much as a
+#: quantifier's is.
+_BINDING = (Forall, Exists, LankySum)
 
 
 # {{{ linear forms and substitution
@@ -254,7 +260,7 @@ def _names(expr: Any) -> set[str]:
     def visit(node: Any) -> None:
         if isinstance(node, prim.Variable):
             out.add(node.name)
-        elif isinstance(node, Forall | Exists):
+        elif isinstance(node, _BINDING):
             for var, domain in node.binders:
                 out.add(var.name)
                 visit(_sort_terms(domain))
@@ -283,7 +289,7 @@ def free_in(expr: Any) -> set[str]:
         if isinstance(node, prim.Variable):
             if node.name not in bound:
                 out.add(node.name)
-        elif isinstance(node, Forall | Exists):
+        elif isinstance(node, _BINDING):
             inner = set(bound)
             for var, domain in node.binders:
                 visit(_sort_terms(domain), frozenset(inner))
@@ -313,25 +319,47 @@ def mentioned(expr: Any) -> set[str]:
 
 
 def _sort_terms(sort: Any) -> tuple[Any, ...]:
-    """The terms a binder's sort mentions: a ``Fin``'s bound, a refinement's props."""
+    """The terms a binder's sort mentions: a ``Fin``'s bound, a refinement's props.
+
+    And those of the sorts it is made of: a family's domain and values,
+    ``n`` in ``Fn[Fin[n], Real]``, and a sum's pieces.
+    """
     if isinstance(sort, FinType):
         return (sort.bound,)
     if isinstance(sort, Refined):
         return (*_sort_terms(sort.base), *sort.props)
+    if isinstance(sort, FnType):
+        return (*_sort_terms(sort.domain), *_sort_terms(sort.codomain))
+    if isinstance(sort, SumType):
+        return tuple(term for piece in sort.pieces for term in _sort_terms(piece))
     return ()
+
+
+def _map_sort(sort: Any, terms: Callable[[Any], Any]) -> Any:
+    """``sort`` with ``terms`` applied to every term it mentions (:func:`_sort_terms`).
+
+    Into the sorts it is made of, as deep as they go: ``n`` in ``Fn[Fin[n],
+    Real]`` is a size as much as in ``Fin[n]``, and a family nothing bound
+    ranges over the domain at the size the rest of the claim is about.
+    """
+    if isinstance(sort, FinType):
+        return dataclasses.replace(sort, bound=terms(sort.bound))
+    if isinstance(sort, Refined) and dataclasses.is_dataclass(sort):
+        return dataclasses.replace(
+            sort,
+            base=_map_sort(sort.base, terms),
+            props=tuple(terms(prop) for prop in sort.props),
+        )
+    if isinstance(sort, FnType):
+        return FnType(_map_sort(sort.domain, terms), _map_sort(sort.codomain, terms))
+    if isinstance(sort, SumType):
+        return SumType(tuple(_map_sort(piece, terms) for piece in sort.pieces))
+    return sort
 
 
 def _substitute_sort(sort: Any, mapping: Mapping[str, Any]) -> Any:
     """A binder's sort with ``mapping`` applied to the terms it mentions."""
-    if isinstance(sort, FinType):
-        return dataclasses.replace(sort, bound=substitute(sort.bound, mapping))
-    if isinstance(sort, Refined) and dataclasses.is_dataclass(sort):
-        return dataclasses.replace(
-            sort,
-            base=_substitute_sort(sort.base, mapping),
-            props=tuple(substitute(prop, mapping) for prop in sort.props),
-        )
-    return sort
+    return _map_sort(sort, partial(substitute, mapping=mapping))
 
 
 def substitute(expr: Any, mapping: Mapping[str, Any]) -> Any:
@@ -347,7 +375,7 @@ def substitute(expr: Any, mapping: Mapping[str, Any]) -> Any:
         return expr
     if isinstance(expr, prim.Variable):
         return mapping.get(expr.name, expr)
-    if isinstance(expr, Forall | Exists):
+    if isinstance(expr, _BINDING):
         inner = dict(mapping)
         captured = set()
         for value in mapping.values():
@@ -1279,7 +1307,13 @@ class _Matcher:
     The theorem's families (``off: Fn[...]``, applied as ``off(r)``) match
     the program's arrays (read as ``off[r]``), its scalar variables match
     expressions of the program's sizes, and its binders match the program's
-    binders one for one.
+    binders one for one, a sum's as a quantifier's.
+
+    A variable of the theorem is matched wherever it is, in a binder's sort
+    (``Fin[n]``, a family's ``Fn[Fin[n], Real]``) and inside any node
+    (``m**2``) as much as in a comparison: never read as the program's name
+    of the same spelling, which a theorem whose ``m`` matched the kernel's
+    ``k`` elsewhere does not mean.
     """
 
     def __init__(self, functions: Collection[str], scalars: Collection[str]) -> None:
@@ -1318,10 +1352,11 @@ class _Matcher:
                 sigma[name] = target.name
                 return True
             return isinstance(target, prim.Variable) and target.name == name
-        if isinstance(pattern, prim.Call):
+        if isinstance(pattern, prim.Call | prim.Subscript):
+            # a family applied, off(r) or off[r], matches a cell of an array
             spine = _call_spine(pattern)
             if spine is None or spine[0] not in self.functions:
-                return structurally_equal(pattern, target)
+                return self._match_parts(pattern, target, sigma, bound)
             function, parameters = spine
             if not (
                 isinstance(target, prim.Subscript)
@@ -1357,7 +1392,7 @@ class _Matcher:
                     sigma.update(trial)
                     return True
             return False
-        if isinstance(pattern, Forall | Exists):
+        if isinstance(pattern, _BINDING):
             if type(pattern) is not type(target) or len(pattern.binders) != len(
                 target.binders
             ):
@@ -1366,7 +1401,10 @@ class _Matcher:
             for (pvar, psort), (tvar, tsort) in zip(
                 pattern.binders, target.binders, strict=True
             ):
-                if not self._match_sort(psort, tsort, sigma, inner):
+                # a refinement is about the binder it refines, the target's here
+                if not self._match_sort(
+                    psort, tsort, sigma, inner, {**inner, pvar.name: tvar.name}
+                ):
                     return False
                 inner[pvar.name] = tvar.name
             if (pattern.guard is None) != (target.guard is None):
@@ -1401,15 +1439,83 @@ class _Matcher:
             return isinstance(target, prim.LogicalNot) and self.match(
                 pattern.child, target.child, sigma, bound
             )
+        return self._match_parts(pattern, target, sigma, bound)
+
+    def _match_parts(
+        self, pattern: Any, target: Any, sigma: dict[str, Any], bound: dict[str, str]
+    ) -> bool:
+        """Any other node: one of the same kind, its parts matched in order.
+
+        ``m**2`` matches ``k**2`` binding ``m`` to ``k``, and the program's
+        ``m**2`` only where ``m`` is the program's ``m``. A leaf, a number or
+        an operator's name, is itself.
+        """
+        if isinstance(pattern, prim.ExpressionNode):
+            if (
+                not isinstance(target, prim.ExpressionNode)
+                or pattern.mapper_method != target.mapper_method
+            ):
+                return False
+            pattern, target = init_args(pattern), init_args(target)
+        if isinstance(pattern, tuple):
+            return (
+                isinstance(target, tuple)
+                and len(pattern) == len(target)
+                and all(
+                    self.match(p, t, sigma, bound)
+                    for p, t in zip(pattern, target, strict=True)
+                )
+            )
         return structurally_equal(pattern, target)
 
     def _match_sort(
-        self, pattern: Any, target: Any, sigma: dict[str, Any], bound: dict[str, str]
+        self,
+        pattern: Any,
+        target: Any,
+        sigma: dict[str, Any],
+        bound: dict[str, str],
+        refined: dict[str, str] | None = None,
     ) -> bool:
+        """A binder's sort against the program's, every term in it matched.
+
+        A ``Fin``'s bound, a refinement's props (read with the binder
+        ``refined`` adds), a family's domain and values, and a sum's pieces:
+        the theorem's ``Fn[Fin[n], Real]`` is the program's ``Fn[Fin[p],
+        Real]`` binding ``n`` to ``p``, and never its ``Fn[Fin[n], Real]``
+        where ``n`` is bound to another size. A sort that mentions no term,
+        ``Nat`` or ``Real``, is compared as it prints.
+        """
         if isinstance(pattern, FinType):
             return isinstance(target, FinType) and self.match(
                 pattern.bound, target.bound, sigma, bound
             )
+        if isinstance(pattern, Refined):
+            return (
+                isinstance(target, Refined)
+                and len(pattern.props) == len(target.props)
+                and self._match_sort(pattern.base, target.base, sigma, bound)
+                and all(
+                    self.match(p, t, sigma, bound if refined is None else refined)
+                    for p, t in zip(pattern.props, target.props, strict=True)
+                )
+            )
+        if isinstance(pattern, FnType):
+            return (
+                isinstance(target, FnType)
+                and self._match_sort(pattern.domain, target.domain, sigma, bound)
+                and self._match_sort(pattern.codomain, target.codomain, sigma, bound)
+            )
+        if isinstance(pattern, SumType):
+            return (
+                isinstance(target, SumType)
+                and len(pattern.pieces) == len(target.pieces)
+                and all(
+                    self._match_sort(p, t, sigma, bound)
+                    for p, t in zip(pattern.pieces, target.pieces, strict=True)
+                )
+            )
+        if _sort_terms(pattern) or _sort_terms(target):
+            return False
         return str(pattern) == str(target)
 
 
@@ -1417,13 +1523,18 @@ def _call_spine(expr: Any) -> tuple[str, tuple[Any, ...]] | None:
     """A family applied an argument at a time: ``R(a)(b)`` is ``R`` at ``(a, b)``.
 
     A theorem's family of families is applied one index at a time, and the
-    array it stands for is indexed by all of them at once, ``R[a, b]``.
-    ``None`` for a call of anything but a name.
+    array it stands for is indexed by all of them at once, ``R[a, b]``. lanky
+    reads ``R(a, b)`` and ``R[a, b]`` as the same application, so those are
+    ``R`` at ``(a, b)`` too. ``None`` for a call of anything but a name.
     """
     arguments: tuple[Any, ...] = ()
-    while isinstance(expr, prim.Call):
-        arguments = (*expr.parameters, *arguments)
-        expr = expr.function
+    while isinstance(expr, prim.Call | prim.Subscript):
+        if isinstance(expr, prim.Call):
+            arguments = (*expr.parameters, *arguments)
+            expr = expr.function
+        else:
+            arguments = (*_indices(expr), *arguments)
+            expr = expr.aggregate
     if isinstance(expr, prim.Variable):
         return expr.name, arguments
     return None
@@ -1448,8 +1559,8 @@ def _same(left: Any, right: Any) -> bool:
 def _apply(expr: Any, sigma: Mapping[str, Any], functions: Collection[str]) -> Any:
     """A theorem's proposition with its variables replaced by what they matched.
 
-    A family applied, ``off(r)``, becomes the cell ``off[r]`` of the array it
-    matched; a scalar variable becomes the expression it matched.
+    A family applied, ``off(r)`` or ``off[r]``, becomes the cell ``off[r]`` of
+    the array it matched; a scalar variable becomes the expression it matched.
 
     Capture-avoiding, as :func:`substitute` is: a quantifier of the theorem
     whose binder is spelled like a name of what the variables matched is
@@ -1457,7 +1568,7 @@ def _apply(expr: Any, sigma: Mapping[str, Any], functions: Collection[str]) -> A
     program size called ``a`` is about that size, and would otherwise say
     ``perm[a] <= a`` of the binder, which no theorem said.
     """
-    if isinstance(expr, prim.Call):
+    if isinstance(expr, prim.Call | prim.Subscript):
         spine = _call_spine(expr)
         if spine is not None and spine[0] in functions:
             name, parameters = spine
@@ -1467,7 +1578,7 @@ def _apply(expr: Any, sigma: Mapping[str, Any], functions: Collection[str]) -> A
         if expr.name in sigma and expr.name not in functions:
             return sigma[expr.name]
         return expr
-    if isinstance(expr, Forall | Exists):
+    if isinstance(expr, _BINDING):
         captured: set[str] = set()
         for name, value in sigma.items():
             # A family becomes the array it matched, whose name a binder of
@@ -1506,15 +1617,13 @@ def _apply(expr: Any, sigma: Mapping[str, Any], functions: Collection[str]) -> A
 
 
 def _apply_sort(sort: Any, sigma: Mapping[str, Any], functions: Collection[str]) -> Any:
-    if isinstance(sort, FinType):
-        return dataclasses.replace(sort, bound=_apply(sort.bound, sigma, functions))
-    if isinstance(sort, Refined) and dataclasses.is_dataclass(sort):
-        return dataclasses.replace(
-            sort,
-            base=_apply_sort(sort.base, sigma, functions),
-            props=tuple(_apply(prop, sigma, functions) for prop in sort.props),
-        )
-    return sort
+    """A theorem's sort in the program's names: every size it mentions, at any depth.
+
+    ``D: Fn[Fin[n], Real]`` with ``n`` matched to a kernel's ``p`` is a family
+    over ``Fin[p]``. Left at ``Fin[n]``, a claim about it would name a size
+    the kernel does not have, or one it has and that is not ``p``.
+    """
+    return _map_sort(sort, lambda term: _apply(term, sigma, functions))
 
 
 def theorem_instances(

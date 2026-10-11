@@ -1238,7 +1238,7 @@ attempt the cold one ran out of time for (lanky#134).
 $ uv run lanky check examples/taylor_reconstruction.py
 STATUS                         EFFECTIVE  BY           WHERE                         OWNER            STATEMENT
 -----------------------------  ---------  -----------  ----------------------------  ---------------  ------------------------------------------------------------------------
-assumed                        assumed    -            taylor_reconstruction.py:73   on_the_triangle  p : Nat, c : Fn[Nat, Fn[Nat, Real]], D : Fn[Nat, Fn[Nat, Real]], R : ...
+assumed                        assumed    -            taylor_reconstruction.py:73   on_the_triangle  p : Nat, c : Fn[Nat, Nat, Real], D : Fn[Nat, Nat, Real], R : Fn[Nat, ...
 tested                         tested     python       taylor_reconstruction.py:73   on_the_triangle  the term computes what the annotations compute
 decided                        decided    isl          taylor_reconstruction.py:136  reconstruct      R[a, b] is in bounds for every instance of S0
 decided                        decided    isl          taylor_reconstruction.py:136  reconstruct      c[a, b] is in bounds for every instance of S0

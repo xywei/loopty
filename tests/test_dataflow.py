@@ -16,10 +16,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from lanky import theorem
 from lanky.ledger import Ledger, Status
 from lanky.plugins import registry
+from lanky.prelude import Fn, Int, Nat, Real
 from lanky.terms import render
 
+from loopty import Arr, Fin, kernel
 from loopty.dataflow import APPLIED, KIND, stores
 from loopty.schedule import IllegalCast
 
@@ -368,6 +371,203 @@ def test_the_ledger_counts_the_theorem_in_what_the_application_is_worth() -> Non
     assert ledger.support(applied).under == (kernels.offsets_increase.fact_id,)
 
 
+class Sized:
+    """Kernels of a size ``p`` citing theorems over an ``n`` (#239).
+
+    Made here, rather than in ``kernels/dataflow.py``, so that the coverage
+    report over the test kernels (``docs/lean-checks.md``) stays as it is.
+    """
+
+    def __init__(self) -> None:
+        @theorem
+        def sized(
+            n: Nat,
+            c: Fn[Nat, Real],
+            D: Fn[Fin[n], Real],  # noqa: F821
+            R: Fn[Nat, Real],
+            copies: all(R(i) == c(i) for i in Fin[n]),  # noqa: F821
+            stored: all(c(i) == D(i) for i in Fin[n]),  # noqa: F821
+        ) -> all(R(i) == D(i) for i in Fin[n]):  # noqa: F821
+            """A copy of what holds ``D``'s entries is ``D``."""
+
+        @kernel(uses=[sized])
+        def copy_p(
+            c: Arr[Fin[p], Real],  # noqa: F821
+            R: Arr[Fin[p], Real],  # noqa: F821
+        ) -> all(R[i] == c[i] for i in Fin[p]):  # noqa: F821
+            """The issue's kernel: its size is ``p``, and it has no ``n``."""
+            for i in R.dom:
+                R[i] = c[i]
+
+        @kernel(uses=[sized])
+        def copy_pn(
+            c: Arr[Fin[p], Real],  # noqa: F821
+            R: Arr[Fin[p], Real],  # noqa: F821
+            s: Arr[Fin[n], Real],  # noqa: F821
+        ) -> all(R[i] == c[i] for i in Fin[p]):  # noqa: F821
+            """Has an ``n`` of its own, ``s``'s length, which is not ``p``."""
+            for i in R.dom:
+                R[i] = c[i]
+            for j in s.dom:
+                s[j] = 0.0
+
+        @theorem
+        def sized_late(
+            n: Nat,
+            D: Fn[Fin[m], Real],  # noqa: F821
+            m: Nat,
+            c: Fn[Nat, Real],
+            R: Fn[Nat, Real],
+            copies: all(R(i) == c(i) for i in Fin[n]),  # noqa: F821
+            stored: all(c(i) == D(i) for i in Fin[n]),  # noqa: F821
+            wide: n <= m,  # noqa: F821
+        ) -> all(R(i) == D(i) for i in Fin[n]):  # noqa: F821
+            """``sized`` with ``D`` over a size of its own, named after ``D``."""
+
+        @kernel(uses=[sized_late])
+        def copy_m(
+            c: Arr[Fin[p], Real],  # noqa: F821
+            R: Arr[Fin[p], Real],  # noqa: F821
+            s: Arr[Fin[m], Real],  # noqa: F821
+        ) -> all(R[i] == c[i] for i in Fin[p]):  # noqa: F821
+            """Has an ``m`` of its own, which the theorem's ``m`` is not."""
+            for i in R.dom:
+                R[i] = c[i]
+            for j in s.dom:
+                s[j] = 0.0
+
+        @theorem
+        def negated(
+            n: Nat,
+            c: Fn[Nat, Real],
+            R: Fn[Nat, Real],
+            h: all(R[i] == c[i] for i in Fin[n]),  # noqa: F821
+        ) -> all(-R[i] == -c[i] for i in Fin[n]):  # noqa: F821
+            """A copy's sign changes as what it copies does; families subscripted."""
+
+        @kernel(uses=[negated])
+        def copy_ab(
+            a: Arr[Fin[p], Real],  # noqa: F821
+            b: Arr[Fin[p], Real],  # noqa: F821
+        ) -> all(b[i] == a[i] for i in Fin[p]):  # noqa: F821
+            """Copies ``a`` into ``b``, names the theorem's families are not."""
+            for i in b.dom:
+                b[i] = a[i]
+
+        @theorem
+        def squared(
+            n: Nat,
+            m: Int,
+            c: Fn[Nat, Int],
+            R: Fn[Nat, Int],
+            h1: all(c(i) == m for i in Fin[n]),  # noqa: F821
+            h2: all(R(i) == m**2 for i in Fin[n]),  # noqa: F821
+        ) -> all(R(i) >= c(i) for i in Fin[n]):  # noqa: F821
+            """An integer's square is at least the integer."""
+
+        @kernel(uses=[squared])
+        def square_of_m(
+            k: Int,
+            m: Int,
+            c: Arr[Fin[p], Int],  # noqa: F821
+            R: Arr[Fin[p], Int],  # noqa: F821
+        ) -> all(c[i] == k for i in Fin[p]) & all(  # noqa: F821
+            R[i] == m**2 for i in Fin[p]  # noqa: F821
+        ):
+            """``c`` holds ``k`` and ``R`` the square of another integer, ``m``."""
+            for i in R.dom:
+                c[i] = k
+                R[i] = m**2
+
+        @kernel(uses=[squared])
+        def square_of_k(
+            k: Int,
+            c: Arr[Fin[p], Int],  # noqa: F821
+            R: Arr[Fin[p], Int],  # noqa: F821
+        ) -> all(c[i] == k for i in Fin[p]) & all(  # noqa: F821
+            R[i] == k**2 for i in Fin[p]  # noqa: F821
+        ):
+            """``R`` holds the square of what ``c`` holds."""
+            for i in R.dom:
+                c[i] = k
+                R[i] = k**2
+
+        self.sized, self.copy_p, self.copy_pn = sized, copy_p, copy_pn
+        self.sized_late, self.copy_m = sized_late, copy_m
+        self.copy_ab = copy_ab
+        self.square_of_m, self.square_of_k = square_of_m, square_of_k
+
+
+@pytest.fixture(scope="module")
+def sized() -> Sized:
+    with registry.collecting():
+        return Sized()
+
+
+def test_a_family_nothing_bound_ranges_over_the_kernels_size(sized: Sized) -> None:
+    """``sized``'s ``D`` ranges over ``Fin[n]``, and its ``n`` is the kernel's ``p``.
+
+    So the claim is for every ``D`` over ``Fin(p)``. At ``Fin(n)`` it named a
+    size ``copy_p`` does not have, and in ``copy_pn``, whose ``n`` is the
+    length of another array, a size that is not ``p`` (#239).
+    """
+    for k in (sized.copy_p, sized.copy_pn):
+        (applied,) = facts(k, APPLIED)
+        assert (applied.status, applied.decided_by) == (Status.DECIDED, "theorem")
+        claim = applied.term.application.claim
+        assert [(var.name, str(sort)) for var, sort in claim.binders] == [
+            ("D", "Fn[Fin(p), Real]")
+        ]
+        assert render(claim) == (
+            "forall D in Fn[Fin(p), Real] where forall i in Fin(p). c[i] == D(i). "
+            "forall i in Fin(p). R[i] == D(i)"
+        )
+        assert applied.provenance["bindings"] == "n = p, c = c, R = R"
+
+
+def test_a_family_sized_by_a_variable_nothing_bound_comes_after_it(
+    sized: Sized,
+) -> None:
+    """``sized_late``'s ``D`` ranges over ``Fin[m]``, and nothing binds its ``m``.
+
+    ``m`` is a binder of the claim, named apart from ``copy_m``'s own ``m``,
+    and bound before ``D``, whose sort names it: before, ``D`` ranged over
+    ``Fin(m)`` of the kernel's ``m``, the length of ``s`` (#239).
+    """
+    (applied,) = facts(sized.copy_m, APPLIED)
+    claim = applied.term.application.claim
+    assert [(var.name, str(sort)) for var, sort in claim.binders] == [
+        ("m_0", "Nat"),
+        ("D", "Fn[Fin(m_0), Real]"),
+    ]
+    assert render(claim.guard).endswith("p <= m_0")
+    assert applied.statement.startswith("by sized_late, for every m_0, D with ")
+
+
+def test_a_family_applied_by_subscript_is_the_array_it_matched(sized: Sized) -> None:
+    """A theorem's ``R[i]`` is ``R`` applied, as ``R(i)`` is: ``copy_ab``'s ``b[i]``."""
+    (applied,) = facts(sized.copy_ab, APPLIED)
+    assert applied.statement == "by negated: forall i in Fin(p). -b[i] == -a[i]"
+    assert applied.provenance["bindings"] == "n = p, c = a, R = b"
+
+
+def test_a_theorems_variable_in_a_power_is_never_the_kernels_of_its_spelling(
+    sized: Sized,
+) -> None:
+    """``squared``'s ``m`` is the ``k`` that ``c`` holds, so ``h2`` is about ``k**2``.
+
+    ``square_of_m``'s ``R`` holds its own ``m**2``, which is not that: read as
+    the kernel's ``m``, the theorem gave ``R[i] >= c[i]``, false at ``k = 5``
+    and ``m = 0`` (#239). Where ``R`` holds ``k**2``, it is given.
+    """
+    assert all(
+        not fact.statement.endswith("R[i] >= c[i]")
+        for fact in facts(sized.square_of_m, APPLIED)
+    )
+    (applied,) = facts(sized.square_of_k, APPLIED)
+    assert applied.statement == "by squared: forall i in Fin(p). R[i] >= c[i]"
+
+
 # }}}
 
 
@@ -533,6 +733,21 @@ def test_with_mathlib_the_reconstruction_and_the_theorem_it_cites_are_proved(
     assert proved.status is Status.PROVED, proved.provenance.get("lean_reason")
     assert "apply h" in proved.provenance["lean_source"]
     assert kernels.on_the_triangle.fact_id in proved.rests_on
+
+
+@pytest.mark.lean
+def test_with_mathlib_a_family_over_the_kernels_size_is_proved(
+    lean: Any, sized: Sized
+) -> None:
+    """``sized`` applied at ``n = p``, with ``D`` over ``Fin(p)`` (#239)."""
+    if not lean._mathlib():
+        pytest.skip("Mathlib is not imported here (LANKY_LEAN_MATHLIB)")
+    for k in (sized.copy_p, sized.copy_pn):
+        (applied,) = facts(k, APPLIED)
+        proved = lean.establish(applied)
+        assert proved.status is Status.PROVED, proved.provenance.get("lean_reason")
+        assert "apply h" in proved.provenance["lean_source"]
+        assert sized.sized.fact_id in proved.rests_on
 
 
 @pytest.mark.lean

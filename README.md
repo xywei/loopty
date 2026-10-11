@@ -484,7 +484,9 @@ release; the CHANGELOG says when one does.
   gets nothing from the theorem; and a conjunct about reals is a
   hypothesis only where nothing in it rounds (copies and sign changes),
   since the theorem is about the reals, and `s[i] == a[i] + b[i]` holds of
-  the floats and not of them read as reals.
+  the floats and not of them read as reals. The theorem is taken at the
+  kernel's sizes in every sort as well: a table `D: Fn[Fin[n], Real]` that
+  nothing binds, with `n` matched to the kernel's `p`, ranges over `Fin[p]`.
 - `lanky check` lists a file's schedules (#191). The casts of every schedule
   a file holds at module level are rows of the ledger beside the facts of
   the kernel or program it schedules, decided by isl as each step was taken

@@ -833,7 +833,13 @@ def theorem_applications(
       for one: the copies ``R(a)(b) == c(a)(b)`` read backwards would
       otherwise match the stored entries ``c(a)(b) == D(a)(b)``, with ``D``
       and ``R`` both ``c``, and give a claim about ``c`` and itself;
-    - each binding is one an array or a size can stand for (:func:`_fits`).
+    - each binding is one an array or a size can stand for (:func:`_fits`);
+    - the claim names nothing but the kernel's names and its own binders.
+      The theorem's sizes are put in wherever they are, the sort of a family
+      nothing bound included (``D: Fn[Fin[n], Real]`` with ``n`` bound to
+      ``p`` ranges over ``Fin[p]``), so a name of the theorem's left in the
+      claim would make it about a size the kernel does not have, or about
+      one of its own that is not the size the theorem was taken at.
 
     Of the matches that pass, the one that matches the most hypotheses is
     taken. A theorem with none, or whose conclusion is a conjunct of the
@@ -841,7 +847,14 @@ def theorem_applications(
     """
     from lanky.prelude import FnType
 
-    from loopty.hypotheses import _apply, _Matcher, _names, linear, structural_key
+    from loopty.hypotheses import (
+        _apply,
+        _Matcher,
+        _names,
+        free_in,
+        linear,
+        structural_key,
+    )
 
     sizes = set(flow.size_names(term))
     written = {stmt.assignee.array for stmt in term.stmts}
@@ -849,6 +862,12 @@ def theorem_applications(
     reals = real_names(term)
     usable = [exact(part, reals) for part in given]
     have = {structural_key(part) for part in given}
+    known = (
+        {name for name, _ in term.params}
+        | sizes
+        | {name for name, _ in term.reflected}
+        | (free_in(term.post) if term.post is not None else set())
+    )
     out: list[Application] = []
     for theorem in theorems:
         variables = dict(getattr(theorem, "variables", ()))
@@ -890,7 +909,15 @@ def theorem_applications(
             free = functions - set(sigma)
             bound = {sigma[name] for name in functions if name in sigma}
             conclusion = _apply(goal, sigma, set(sigma) & functions)
-            return exact(conclusion, reals_too | bound, free)
+            if not exact(conclusion, reals_too | bound, free):
+                return False
+            made = _applied_claim(
+                term, theorem, variables, sigma, matched, set(sigma) & functions
+            )
+            if made is None:
+                return False
+            claim, _conclusion, names = made
+            return not (free_in(claim) - set(names) - known)
 
         def search(
             k: int, sigma: dict[str, Any], matched: tuple[tuple[int, int], ...]
@@ -919,9 +946,9 @@ def theorem_applications(
             continue
         sigma, matched = best[0]
         bound = {name for name in functions if name in sigma}
-        claim, conclusion, free = _applied_claim(
-            term, theorem, variables, sigma, matched, bound
-        )
+        made = _applied_claim(term, theorem, variables, sigma, matched, bound)
+        assert made is not None
+        claim, conclusion, free = made
         if structural_key(claim) in have:
             continue
         used = {k for k, _ in matched}
@@ -1001,23 +1028,41 @@ def _applied_claim(
     sigma: Mapping[str, Any],
     matched: Sequence[tuple[int, int]],
     bound: set[str],
-) -> tuple[Any, Any, tuple[str, ...]]:
+) -> tuple[Any, Any, tuple[str, ...]] | None:
     """The theorem's conclusion at the kernel's arrays, under what nothing matched.
 
     A variable nothing bound is a binder of the claim, named apart from the
-    kernel's names, and a hypothesis nothing matched its guard. Returns the
-    claim, the conclusion alone, and the names of the claim's binders.
+    kernel's names, and a hypothesis nothing matched its guard. Every sort is
+    put in the kernel's names with the rest (:func:`loopty.hypotheses._apply_sort`),
+    and a binder whose sort names another variable nothing bound
+    (``D: Fn[Fin[m], Real]``) comes after it. Returns the claim, the
+    conclusion alone, and the names of the claim's binders; ``None`` when no
+    order of the binders has each sort name only those before it.
     """
-    from loopty.hypotheses import _apply, _apply_sort, _fresh
+    from loopty.hypotheses import _apply, _apply_sort, _fresh, _names, _sort_terms
 
     taken = {name for name, _ in term.params} | set(term.sizes)
     for stmt in term.stmts:
         taken |= set(stmt.inames)
+    left = [name for name in variables if name not in sigma]
+    order: list[str] = []
+    while left:
+        ready = next(
+            (
+                name
+                for name in left
+                if not (_names(_sort_terms(variables[name])) - {name}) & set(left)
+            ),
+            None,
+        )
+        if ready is None:
+            return None
+        order.append(ready)
+        left.remove(ready)
     renames: dict[str, Any] = {}
     binders = []
-    for name, sort in variables.items():
-        if name in sigma:
-            continue
+    for name in order:
+        sort = variables[name]
         fresh = name if name not in taken else _fresh(name, taken)
         taken.add(fresh)
         if fresh != name:

@@ -44,7 +44,12 @@ All notable changes to loopty are recorded here. The format follows
   gets nothing), and a conjunct about reals is matched only where nothing
   in it rounds, copies and sign changes, since the theorem reads it as
   reals. A family into `Nat` or a `Fin` sort stands for an array the kernel
-  does not write; the cells it writes take a theorem over `Int`.
+  does not write; the cells it writes take a theorem over `Int`. The
+  theorem's variables are put in wherever they are, every sort included: a
+  `D: Fn[Fin[n], Real]` nothing binds, with `n` matched to the kernel's `p`,
+  ranges over `Fin[p]` (#239), and `m` in `m**2` is the `m` the match bound,
+  never a kernel name of the same spelling. A family is applied as `R(a)(b)`,
+  `R(a, b)` or `R[a, b]`, as lanky reads them.
 
   ```python
   @kernel(uses=[on_the_triangle])
