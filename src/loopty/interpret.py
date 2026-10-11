@@ -304,6 +304,19 @@ class _Run:
         """
         if any(typ.ragged):
             raise InterpretError(f"the temporary {name} is ragged")
+        dtype = native_storage(typ.dtype) or np.dtype(np.float64)
+        if typ.domain is not None:
+            # Over the domain at the arguments' sizes, boxed, as the lowering
+            # stores it; its cells are read and written at its points.
+            needed = typ.domain.size_names()
+            missing = sorted(needed - set(self.sizes))
+            if missing:
+                raise InterpretError(
+                    f"the temporary {name} is over {typ.domain}, and the arguments "
+                    f"fix no {', '.join(missing)}"
+                )
+            sizes = {size: int(self.sizes[size]) for size in needed}
+            return Arr.zeros(typ.domain, dtype=dtype, **sizes)
         try:
             shape = tuple(int(evaluate(axis, dict(self.sizes))) for axis in typ.axes)
         except Exception as exc:  # noqa: BLE001 - said as the reason
@@ -311,7 +324,6 @@ class _Run:
                 f"the temporary {name} has no shape at the sizes "
                 f"{dict(self.sizes)}: {exc}"
             ) from exc
-        dtype = native_storage(typ.dtype) or np.dtype(np.float64)
         return Arr(np.zeros(shape, dtype=dtype))
 
     # {{{ running

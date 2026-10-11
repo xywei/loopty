@@ -2560,7 +2560,17 @@ def _storage_plan(
     """
     arrays = {name: typ for name, typ in term.params if isinstance(typ, ArrType)}
     plan = {name: "box" for name, typ in arrays.items() if typ.domain is not None}
+    # A program's own array over a domain is a temporary, stored boxed: its
+    # box is its shape, and nothing would give a packed one its table.
+    made = {name for name, typ in term.temporaries if typ.domain is not None}
+    plan.update((name, "box") for name in made)
     for name, storage in (layouts or {}).items():
+        if name in made:
+            raise LoweringError(
+                f"{name} is an array {term.name} makes for itself over a domain, "
+                "and it is stored boxed: a packed one would need its table of "
+                "row starts, which nothing computes for a temporary"
+            )
         if name not in plan:
             raise LoweringError(
                 f"{name} is not an array over a Where, Sigma or union domain of "
@@ -4080,7 +4090,15 @@ def _temporary(
             "a temporary has no offsets for its rows to be found by, so make "
             "it a parameter of the program instead"
         )
-    shape = tuple(_plain(size) for size in typ.axes)
+    if typ.domain is not None and not box_is_shape(typ.domain):
+        raise LoweringError(
+            f"{name} is an array {term.name} makes for itself over {typ.domain}, "
+            "whose box has an extent that is negative at some size, or which is "
+            "a union of pieces, so it has no box of its shape to be stored in; "
+            "make it a parameter of the program instead"
+        )
+    axes = typ.axes if typ.domain is None else typ.domain.box()
+    shape = tuple(_plain(size) for size in axes)
     missing = sorted(
         {found for size in shape for found in _names_in(size)} - declared
     )
