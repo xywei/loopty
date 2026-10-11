@@ -701,6 +701,49 @@ def test_atomic_then_ilp_on_c_names_the_atomic_updates() -> None:
     assert [kind for kind, _ in rows].count("bijective") == 2  # split, tag
 
 
+@kernel
+def twice_into(y: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):  # noqa: F821
+    """Twice each cell of y."""
+    for i in y.dom:
+        f[i] = 2.0 * y[i]
+
+
+@kernel
+def added_back(
+    f: Arr[Fin[n], Real],  # noqa: F821
+    node: Arr[Fin[n], Fin[n]],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """f added back into y, at the cells node names."""
+    for i in f.dom:
+        y[node[i]] += f[i]
+
+
+@program
+def twice_and_added_back(y, node):
+    """y doubled into f, then f added back into y: updates of what f read."""
+    f = Arr.zeros_like(y)
+    twice_into(y, f)
+    added_back(f, node, y)
+
+
+def test_a_substitution_read_before_the_updates_names_isls_pair_as_isls() -> None:
+    # Computed where it is read, 2 * y[i] would read y after the updates of
+    # the instances before it. That read is one no run of an input makes,
+    # so no input's pair is one of its pairs (a pair of the updates' own
+    # reads would not be): the pair is isl's, and the message names the
+    # subscript isl cannot follow, the update's.
+    with pytest.raises(IllegalCast) as caught:
+        Schedule(twice_and_added_back, sizes={"n": 8}).substitute("f")
+    assert str(caught.value) == (
+        "substitute('f') illegal: instance added_back.S0[i_0=1] reads y[1] "
+        "overwritten by added_back.S0[i_0=0] scheduled earlier (at n=8, as "
+        "hinted). The pair is isl's: the cell y[node[i_0]] is read from an "
+        "array, which isl cannot follow, and substitute('f') reads y where f "
+        "was read, which no run of an input shows"
+    )
+
+
 def test_atomic_updates_run_on_an_opencl_device() -> None:
     # Needs pyopencl and a device, which CI has neither of.
     pytest.importorskip("pyopencl")

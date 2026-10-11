@@ -782,6 +782,11 @@ class _Dep:
     #: dependence a contraction added (see :meth:`Schedule.contract`): they
     #: touch one slot, not one cell.
     window: Any = None
+    #: The array a substitution computes where it is read, for a dependence
+    #: it carried over (see :meth:`Schedule._carried_over`): one end is the
+    #: producer's read, made again at the reader, which no run of the term
+    #: makes, so no pair of an input's run is one of its pairs.
+    through: str = ""
 
     def verbs(self) -> tuple[str, str]:
         """How to say, in the rejection message, what each end did."""
@@ -1038,9 +1043,14 @@ def _widened(dep: _Dep) -> bool:
     not touch one cell at all; a refusal looks for a pair that does on the
     example inputs (:meth:`Schedule._real_pair`).
     """
+    return _unread(dep.source_indices) or _unread(dep.sink_indices)
+
+
+def _unread(indices: Sequence[Any]) -> bool:
+    """Whether a subscript of ``indices`` is one isl cannot read, ``cell[c, j]``."""
     from loopty.flow import NonAffine, expr_text
 
-    for index in (*dep.source_indices, *dep.sink_indices):
+    for index in indices:
         try:
             expr_text(_plain(index), None, None)
         except (NonAffine, ValueError):
@@ -5611,6 +5621,7 @@ class Schedule:
                                     relation=after,
                                     source_part=part,
                                     sink_part=writer_part,
+                                    through=array,
                                 )
                             )
                         before = same.intersect(earlier).subtract(identity).coalesce()
@@ -5626,6 +5637,7 @@ class Schedule:
                                     relation=before.reverse(),
                                     source_part=writer_part,
                                     sink_part=part,
+                                    through=array,
                                 )
                             )
                         if writer is reader and part == "sum" and writer_part == "":
@@ -5642,6 +5654,7 @@ class Schedule:
                                         relation=mine.coalesce(),
                                         source_part="sum",
                                         sink_part="",
+                                        through=array,
                                     )
                                 )
         return (*kept, *carried), tuple(within)
@@ -6361,14 +6374,17 @@ class Schedule:
         (:func:`_widened`), whose relation pairs every two instances: the
         pair isl picks out of it need not touch one cell, and one that
         does, on an input, is the collision the refusal is about,
-        ``cell[0, 1] = cell[1, 2] = 1``. The inputs are the schedule's
-        example inputs, then the module's ``example_inputs()``, then the
-        drawn ones (:meth:`_example_logs`); ``drawn`` asks the drawn ones
-        alone (``True``) or the others alone (``False``). Returns the
-        witness, as :meth:`_pair_in` gives one, and the
-        :class:`~loopty.faithful.Collision`, or ``None``.
+        ``cell[0, 1] = cell[1, 2] = 1``. Not for one a substitution carried
+        over (:attr:`_Dep.through`): its read is the producer's, made again
+        at the reader, which no run of the term makes, and a pair of the
+        reader's own reads would not be one of its pairs. The inputs are
+        the schedule's example inputs, then the module's
+        ``example_inputs()``, then the drawn ones (:meth:`_example_logs`);
+        ``drawn`` asks the drawn ones alone (``True``) or the others alone
+        (``False``). Returns the witness, as :meth:`_pair_in` gives one, and
+        the :class:`~loopty.faithful.Collision`, or ``None``.
         """
-        if not _widened(dep):
+        if not _widened(dep) or dep.through:
             return None
         from loopty.faithful import collisions
 
@@ -6571,10 +6587,15 @@ class Schedule:
         at = _sizes_text(params, self._sizes)
         note = ""
         if _widened(dep):
+            why = (
+                f"substitute({dep.through!r}) reads {dep.array} where "
+                f"{dep.through} was read, which no run of an input shows"
+                if dep.through
+                else "no example input has two such instances on one cell"
+            )
             note = (
                 f". The pair is isl's: the cell {_subscript_text(dep)} is read "
-                "from an array, which isl cannot follow, and no example input "
-                "has two such instances on one cell"
+                f"from an array, which isl cannot follow, and {why}"
             )
         return cell, at, note
 
@@ -7065,10 +7086,19 @@ def _at_sizes(relation: isl.Map, sizes: Mapping[str, int]) -> isl.Map:
 
 
 def _subscript_text(dep: _Dep) -> str:
-    """``y[cell[c, j]]``: the cell the source end of ``dep`` names, as written."""
+    """``y[cell[c, j]]``: the cell an end of ``dep`` reads from an array, as written.
+
+    The source's, unless only the sink's subscript is one isl cannot read
+    (:func:`_widened`): ``y[i]`` written and ``y[p[j]]`` read names the read.
+    """
     from lanky.terms import render
 
-    return f"{dep.array}[{', '.join(render(i) for i in dep.source_indices)}]"
+    indices = (
+        dep.sink_indices
+        if _unread(dep.sink_indices) and not _unread(dep.source_indices)
+        else dep.source_indices
+    )
+    return f"{dep.array}[{', '.join(render(i) for i in indices)}]"
 
 
 #: Why a step's claim that it runs no two updates of one cell at the same

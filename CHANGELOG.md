@@ -246,8 +246,11 @@ All notable changes to loopty are recorded here. The format follows
   instances that touch one cell on an input, with what the subscripts read
   there. The inputs are tried in turn: the schedule's own example inputs,
   the module's `example_inputs()`, then drawn ones. Where none has such a
-  pair, the message says the pair is isl's. `loopty.interpret.interpret(...,
-  log=...)` records the cells each instance touches.
+  pair, the message says the pair is isl's, naming the subscript isl cannot
+  follow; so it does for a read a substitution moves (`substitute('f')
+  reads y where f was read, which no run of an input shows`), which no
+  input's run makes. `loopty.interpret.interpret(..., log=...)` records the
+  cells each instance touches.
 
 ### Changed
 
@@ -267,11 +270,11 @@ All notable changes to loopty are recorded here. The format follows
   up to 32 of isl's instances of them, where it was given 16.
 - `substitute` refuses an array kept in a window, and `contract` one
   computed where it is read.
-- The coverage report in `docs/lean-checks.md` covers the three examples the
-  demo kernels added (`layer_potential.py`, `quadrature.py`,
-  `sum_factorization.py`) and the windows and layouts above: of 650 facts isl
-  decides in 21 files, Lean proves 629 and confirms the counterexample of the
-  21 refuted ones, and none stays decided.
+- The coverage report in `docs/lean-checks.md` covers the four examples the
+  demo kernels added (`assembly.py`, `layer_potential.py`, `quadrature.py`,
+  `sum_factorization.py`) and the windows, updates and layouts above: of 678
+  facts isl decides in 22 files, Lean proves 657 and confirms the
+  counterexample of the 21 refuted ones, and none stays decided.
 - A ledger gains a `definedness` row for each array a kernel reads only where
   it wrote it before (`scan`'s `off`, `p2p`'s `term`, `pairs`' `f`), and an
   access with mixed subscripts is decided where it was assumed; the
