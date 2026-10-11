@@ -31,22 +31,20 @@ All notable changes to loopty are recorded here. The format follows
 - `loopty run` asks Lean about each cast it reports, names what Lean did not
   prove under the table, and prints the Lean with `--show-lean [TEXT]`;
   `loopty check --show-lean` passes it to `lanky check`.
-- **Definedness inside one kernel** (#4 of the demo's gaps). An array a
-  kernel reads only at cells an earlier instance of its own wrote, as `scan`
-  reads `off[r]`, gets a `definedness` fact where isl shows it, stated for
-  Lean as a ∀∃ with isl's last writer as the witness. A kernel that reads
-  what an array held when it was called gets none. A program's definedness
-  of an edge is stated the same way.
-- **Mixed subscripts** (#17 of the demo's gaps). An access whose indirect
-  axes are indexed by a value of their own sort and whose other axes are
-  affine, `X[cell[c, k], d]`, is in bounds by type on the first and decided by
-  isl on the rest, where it was `assumed`; Lean states the whole access with
-  the type as a hypothesis.
-- **`Schedule.assume(condition)`** (#20 of the demo's gaps): a condition of
-  the sizes, `"n % 4 == 0"`, taken as given, as loopy's `assume`. loopy is
-  told, every later cast is decided and stated where it holds and rests on an
-  `assumption` fact, and a call whose sizes break it is refused before
-  anything is compiled.
+- **Definedness inside one kernel.** An array a kernel reads only at cells
+  an earlier instance of its own wrote, as `scan` reads `off[r]`, gets a
+  `definedness` fact where isl shows it, stated for Lean as a ∀∃ with isl's
+  last writer as the witness. A kernel that reads what an array held when it
+  was called gets none. A program's definedness of an edge is stated the same
+  way.
+- **Mixed subscripts.** An access whose indirect axes are indexed by a value
+  of their own sort and whose other axes are affine, `X[cell[c, k], d]`, is in
+  bounds by type on the first and decided by isl on the rest, where it was
+  `assumed`; Lean states the whole access with the type as a hypothesis.
+- **`Schedule.assume(condition)`**: a condition of the sizes, `"n % 4 == 0"`,
+  taken as given, as loopy's `assume`. loopy is told, every later cast is
+  decided and stated where it holds and rests on an `assumption` fact, and a
+  call whose sizes break it is refused before anything is compiled.
 
 ### Changed
 

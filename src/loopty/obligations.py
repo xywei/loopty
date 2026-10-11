@@ -492,7 +492,7 @@ def mixed_in_bounds_obligation(
     text: str,
     verdict: Any,
 ) -> Any:
-    """An access with mixed subscripts in bounds, every axis of it (#17 of the gaps).
+    """An access with mixed subscripts in bounds, every axis of it.
 
     One part: at every point of the domain, if each index read from an array
     of a ``Fin`` sort is a point of that sort, which is what the type says
@@ -845,8 +845,7 @@ def defined_obligation(
     an instance in its domain that writes the cell read, earlier in the
     source order. The goal is a disjunction, one existential per writer, and
     its witness is isl's ``lexmax`` of the writing instances, in pieces: the
-    region each writer is the witness in, a writer after the ones before it
-    (#4 of the demo's gaps).
+    region each writer is the witness in, a writer after the ones before it.
     """
     lanky = _lanky_obligations()
     depth = flow.instance_space_depth(term)

@@ -522,7 +522,7 @@ def _mixed_axes(
 
     ``X[cell[c, i], d]``: the first axis is indexed by an element of ``cell``,
     whose sort ``Fin[nv]`` is the axis's, and the second by an affine
-    expression isl reads (#17 of the demo's gaps). Each typed axis comes as
+    expression isl reads. Each typed axis comes as
     ``(axis, the index's sort bound, the reason)``. An array with a ragged
     axis, whose bound is the row's, is left to the rules that read rows, and
     an access with no typed axis, or one typed on every axis, to the others.

@@ -4312,7 +4312,7 @@ class Schedule:
         - every later cast is decided by isl where the sizes are as assumed,
           and stated for Lean with the condition among its hypotheses, an
           existential one where it is a divisibility, which ``omega`` reads
-          as it is (#20 of the demo's gaps);
+          as it is;
         - an ``assumption`` fact records it, ``assumed`` on the caller's
           word, and the later casts rest on it. Where the schedule runs, the
           sizes of the call are read off its arrays and checked against it
