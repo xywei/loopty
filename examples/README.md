@@ -1546,62 +1546,62 @@ schedule: Schedule(mass_action, target='c').assume('nc % 4 == 0').atomic('y').sp
 $ uv run lanky check examples/assembly.py
 STATUS                               EFFECTIVE  BY             WHERE            OWNER                STATEMENT
 -----------------------------------  ---------  -------------  ---------------  -------------------  ------------------------------------------------------------------------
-tested                               tested     property-test  assembly.py:139  exact_to_degree_two  a : Real, b : Real, c : Real, d : Real, e : Real, f : Real |- (a + b*...
-tested                               tested     python         assembly.py:139  exact_to_degree_two  the term computes what the annotations compute
-tested                               tested     property-test  assembly.py:152  element_mass         J : Real, u : Fn[Fin(3), Real] |- abs(J)*((2/3*(u[0]*(2/3) + u[1]*(1/...
-tested                               tested     python         assembly.py:152  element_mass         the term computes what the annotations compute
-tested                               tested     property-test  assembly.py:166  conservation         nc : Nat, nv : Nat, d : Nat, cell : Fn[Fin(nc), Fin(d), Fin(nv)], yl ...
-tested                               tested     python         assembly.py:166  conservation         the term computes what the annotations compute
-decided                              decided    isl            assembly.py:216  mass_ffc             A[j, k] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:216  mass_ffc             FE0[ip, j] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:216  mass_ffc             FE0[ip, k] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:216  mass_ffc             W3[ip] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:216  mass_ffc             x[1, 0] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:216  mass_ffc             x[0, 0] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:216  mass_ffc             x[2, 1] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:216  mass_ffc             x[0, 1] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:216  mass_ffc             x[2, 0] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:216  mass_ffc             x[1, 1] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:216  mass_ffc             distinct instances of S0 write distinct cells of A
-decided                              decided    isl            assembly.py:204  mass_ffc             the source order runs every dependence forward in time
-decided                              decided    type           assembly.py:216  mass_ffc             the accumulation into A[j, k] over ip is approx
-tested                               tested     native         assembly.py:204  mass_ffc             A[0, 0] == A[0, 0] and A[0, 1] == A[1, 0] and A[0, 2] == A[2, 0] and ...
-tested                               tested     interpreter    assembly.py:204  mass_ffc             the traced term computes what the body computes
-decided                              decided    isl            assembly.py:216  mass_action          Ae[c, j, k] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:216  mass_action          FE0[ip, j] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:216  mass_action          FE0[ip, k] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:216  mass_action          W3[ip] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:216  mass_action          coords[cell[c, 1], 0] is in bounds for every instance of S0 (cell[c, ...
-decided                              decided    isl            assembly.py:216  mass_action          cell[c, 1] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:216  mass_action          coords[cell[c, 0], 0] is in bounds for every instance of S0 (cell[c, ...
-decided                              decided    isl            assembly.py:216  mass_action          cell[c, 0] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:216  mass_action          coords[cell[c, 2], 1] is in bounds for every instance of S0 (cell[c, ...
-decided                              decided    isl            assembly.py:216  mass_action          cell[c, 2] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:216  mass_action          coords[cell[c, 0], 1] is in bounds for every instance of S0 (cell[c, ...
-decided                              decided    isl            assembly.py:216  mass_action          coords[cell[c, 2], 0] is in bounds for every instance of S0 (cell[c, ...
-decided                              decided    isl            assembly.py:216  mass_action          coords[cell[c, 1], 1] is in bounds for every instance of S0 (cell[c, ...
-decided                              decided    type           assembly.py:233  mass_action          y[cell[c, a]] is in bounds by type (cell[c, a] : Fin(nv))
-decided                              decided    isl            assembly.py:233  mass_action          cell[c, a] is in bounds for every instance of S1
-decided                              decided    isl            assembly.py:233  mass_action          Ae[c, a, b] is in bounds for every instance of S1
-decided                              decided    type           assembly.py:233  mass_action          u[cell[c, b]] is in bounds by type (cell[c, b] : Fin(nv))
-decided                              decided    isl            assembly.py:233  mass_action          cell[c, b] is in bounds for every instance of S1
-decided                              decided    isl            assembly.py:216  mass_action          distinct instances of S0 write distinct cells of Ae
-decided                              decided    isl            assembly.py:233  mass_action          every cell of Ae that S1 reads, S0 wrote before the read
-decided                              decided    isl            assembly.py:221  mass_action          the source order runs every dependence forward in time
-decided                              decided    type           assembly.py:216  mass_action          the accumulation into Ae[c, j, k] over ip is approx
-decided                              decided    type           assembly.py:233  mass_action          the accumulation into y[cell[c, a]] over c, a is approx
-decided                              decided    type           assembly.py:233  mass_action          the accumulation into y[cell[c, a]] over b is approx
-decided                              decided    isl            assembly.py:231  mass_action          cell[c], the indices of the cells passed as x, is in bounds wherever ...
-decided                              decided    type           assembly.py:231  mass_action          the cells coords[cell[c]] picks, passed as x, are in bounds by type (...
-decided                              decided    isl            assembly.py:231  mass_action          Ae[c], the row passed to mass_ffc as A, is in bounds wherever mass_ff...
-decided                              tested     call           assembly.py:231  mass_action          after each call mass_ffc(coords[cell[c]], Ae[c]) at assembly.py:231: ...
-tested                               tested     interpreter    assembly.py:221  mass_action          the traced term computes what the body computes
-assumed                              assumed    -              assembly.py:216  mass_action          nc % 4 == 0, which mass_action is scheduled assuming
-decided under assume('nc % 4 == 0')  assumed    isl            assembly.py:216  mass_action          split(c, 4) renames the instances of mass_action one for one
-decided under assume('nc % 4 == 0')  assumed    isl            assembly.py:216  mass_action          the order after split(c, 4) runs every dependence of mass_action forward
-decided under assume('nc % 4 == 0')  assumed    isl            assembly.py:216  mass_action          tag(c_inner='ilp') renames the instances of mass_action one for one
-decided under assume('nc % 4 == 0')  assumed    isl            assembly.py:216  mass_action          the order after tag(c_inner='ilp') runs every dependence of mass_acti...
-decided                              decided    isl            assembly.py:216  mass_action          atomic updates of y run at the same time after tag(c_inner='ilp'), so...
+tested                               tested     property-test  assembly.py:147  exact_to_degree_two  a : Real, b : Real, c : Real, d : Real, e : Real, f : Real |- (a + b*...
+tested                               tested     python         assembly.py:147  exact_to_degree_two  the term computes what the annotations compute
+tested                               tested     property-test  assembly.py:160  element_mass         J : Real, u : Fn[Fin(3), Real] |- abs(J)*((2/3*(u[0]*(2/3) + u[1]*(1/...
+tested                               tested     python         assembly.py:160  element_mass         the term computes what the annotations compute
+tested                               tested     property-test  assembly.py:174  conservation         nc : Nat, nv : Nat, d : Nat, cell : Fn[Fin(nc), Fin(d), Fin(nv)], yl ...
+tested                               tested     python         assembly.py:174  conservation         the term computes what the annotations compute
+decided                              decided    isl            assembly.py:224  mass_ffc             A[j, k] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:224  mass_ffc             FE0[ip, j] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:224  mass_ffc             FE0[ip, k] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:224  mass_ffc             W3[ip] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:224  mass_ffc             x[1, 0] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:224  mass_ffc             x[0, 0] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:224  mass_ffc             x[2, 1] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:224  mass_ffc             x[0, 1] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:224  mass_ffc             x[2, 0] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:224  mass_ffc             x[1, 1] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:224  mass_ffc             distinct instances of S0 write distinct cells of A
+decided                              decided    isl            assembly.py:212  mass_ffc             the source order runs every dependence forward in time
+decided                              decided    type           assembly.py:224  mass_ffc             the accumulation into A[j, k] over ip is approx
+tested                               tested     native         assembly.py:212  mass_ffc             A[0, 0] == A[0, 0] and A[0, 1] == A[1, 0] and A[0, 2] == A[2, 0] and ...
+tested                               tested     interpreter    assembly.py:212  mass_ffc             the traced term computes what the body computes
+decided                              decided    isl            assembly.py:224  mass_action          Ae[c, j, k] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:224  mass_action          FE0[ip, j] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:224  mass_action          FE0[ip, k] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:224  mass_action          W3[ip] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:224  mass_action          coords[cell[c, 1], 0] is in bounds for every instance of S0 (cell[c, ...
+decided                              decided    isl            assembly.py:224  mass_action          cell[c, 1] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:224  mass_action          coords[cell[c, 0], 0] is in bounds for every instance of S0 (cell[c, ...
+decided                              decided    isl            assembly.py:224  mass_action          cell[c, 0] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:224  mass_action          coords[cell[c, 2], 1] is in bounds for every instance of S0 (cell[c, ...
+decided                              decided    isl            assembly.py:224  mass_action          cell[c, 2] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:224  mass_action          coords[cell[c, 0], 1] is in bounds for every instance of S0 (cell[c, ...
+decided                              decided    isl            assembly.py:224  mass_action          coords[cell[c, 2], 0] is in bounds for every instance of S0 (cell[c, ...
+decided                              decided    isl            assembly.py:224  mass_action          coords[cell[c, 1], 1] is in bounds for every instance of S0 (cell[c, ...
+decided                              decided    type           assembly.py:241  mass_action          y[cell[c, a]] is in bounds by type (cell[c, a] : Fin(nv))
+decided                              decided    isl            assembly.py:241  mass_action          cell[c, a] is in bounds for every instance of S1
+decided                              decided    isl            assembly.py:241  mass_action          Ae[c, a, b] is in bounds for every instance of S1
+decided                              decided    type           assembly.py:241  mass_action          u[cell[c, b]] is in bounds by type (cell[c, b] : Fin(nv))
+decided                              decided    isl            assembly.py:241  mass_action          cell[c, b] is in bounds for every instance of S1
+decided                              decided    isl            assembly.py:224  mass_action          distinct instances of S0 write distinct cells of Ae
+decided                              decided    isl            assembly.py:241  mass_action          every cell of Ae that S1 reads, S0 wrote before the read
+decided                              decided    isl            assembly.py:229  mass_action          the source order runs every dependence forward in time
+decided                              decided    type           assembly.py:224  mass_action          the accumulation into Ae[c, j, k] over ip is approx
+decided                              decided    type           assembly.py:241  mass_action          the accumulation into y[cell[c, a]] over c, a is approx
+decided                              decided    type           assembly.py:241  mass_action          the accumulation into y[cell[c, a]] over b is approx
+decided                              decided    isl            assembly.py:239  mass_action          cell[c], the indices of the cells passed as x, is in bounds wherever ...
+decided                              decided    type           assembly.py:239  mass_action          the cells coords[cell[c]] picks, passed as x, are in bounds by type (...
+decided                              decided    isl            assembly.py:239  mass_action          Ae[c], the row passed to mass_ffc as A, is in bounds wherever mass_ff...
+decided                              tested     call           assembly.py:239  mass_action          after each call mass_ffc(coords[cell[c]], Ae[c]) at assembly.py:239: ...
+tested                               tested     interpreter    assembly.py:229  mass_action          the traced term computes what the body computes
+assumed                              assumed    -              assembly.py:224  mass_action          nc % 4 == 0, which mass_action is scheduled assuming
+decided under assume('nc % 4 == 0')  assumed    isl            assembly.py:224  mass_action          split(c, 4) renames the instances of mass_action one for one
+decided under assume('nc % 4 == 0')  assumed    isl            assembly.py:224  mass_action          the order after split(c, 4) runs every dependence of mass_action forward
+decided under assume('nc % 4 == 0')  assumed    isl            assembly.py:224  mass_action          tag(c_inner='ilp') renames the instances of mass_action one for one
+decided under assume('nc % 4 == 0')  assumed    isl            assembly.py:224  mass_action          the order after tag(c_inner='ilp') runs every dependence of mass_acti...
+decided                              decided    isl            assembly.py:224  mass_action          atomic updates of y run at the same time after tag(c_inner='ilp'), so...
 
 56 facts: 1 assumed, 46 decided, 9 tested
 ```
@@ -1618,14 +1618,14 @@ mass_ffc: Schedule(mass_ffc, target='c')
 
 STATUS                               EFFECTIVE  BY     WHERE            OWNER        STATEMENT
 -----------------------------------  ---------  -----  ---------------  -----------  ------------------------------------------------------------------------
-assumed                              assumed    -      assembly.py:216  mass_action  nc % 4 == 0, which mass_action is scheduled assuming
-decided under assume('nc % 4 == 0')  assumed    isl    assembly.py:216  mass_action  split(c, 4) renames the instances of mass_action one for one
-decided under assume('nc % 4 == 0')  assumed    isl    assembly.py:216  mass_action  the order after split(c, 4) runs every dependence of mass_action forward
-decided under assume('nc % 4 == 0')  assumed    isl    assembly.py:216  mass_action  tag(c_inner='ilp') renames the instances of mass_action one for one
-decided under assume('nc % 4 == 0')  assumed    isl    assembly.py:216  mass_action  the order after tag(c_inner='ilp') runs every dependence of mass_acti...
-decided                              decided    isl    assembly.py:216  mass_action  atomic updates of y run at the same time after tag(c_inner='ilp'), so...
-tested                               tested     loopy  assembly.py:216  mass_action  the scheduled run of mass_action agrees with the native run to the ac...
-tested                               tested     loopy  assembly.py:216  mass_ffc     the scheduled run of mass_ffc agrees with the native run to the accur...
+assumed                              assumed    -      assembly.py:224  mass_action  nc % 4 == 0, which mass_action is scheduled assuming
+decided under assume('nc % 4 == 0')  assumed    isl    assembly.py:224  mass_action  split(c, 4) renames the instances of mass_action one for one
+decided under assume('nc % 4 == 0')  assumed    isl    assembly.py:224  mass_action  the order after split(c, 4) runs every dependence of mass_action forward
+decided under assume('nc % 4 == 0')  assumed    isl    assembly.py:224  mass_action  tag(c_inner='ilp') renames the instances of mass_action one for one
+decided under assume('nc % 4 == 0')  assumed    isl    assembly.py:224  mass_action  the order after tag(c_inner='ilp') runs every dependence of mass_acti...
+decided                              decided    isl    assembly.py:224  mass_action  atomic updates of y run at the same time after tag(c_inner='ilp'), so...
+tested                               tested     loopy  assembly.py:224  mass_action  the scheduled run of mass_action agrees with the native run to the ac...
+tested                               tested     loopy  assembly.py:224  mass_ffc     the scheduled run of mass_ffc agrees with the native run to the accur...
 
 8 facts: 1 assumed, 5 decided, 2 tested
 ```

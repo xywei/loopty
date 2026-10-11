@@ -22,7 +22,11 @@ All notable changes to loopty are recorded here. The format follows
   assumptions their transforms make (`assume("nc >= 1")`, `assume("nc % 4
   == 0")`). `benchmarks/assembly.py` times loopty's schedules against a
   plain-loopy transcription of PyOP2's wrapper with Kulkarni's and Sun et
-  al.'s transforms applied, and `benchmarks/assembly_agreement.py` compares
+  al.'s transforms applied, and with `--nested` against the transcription
+  given loopty's nesting of a cell's loops under the cell loop, which is
+  what decides where loopy puts the `ilp` loop of Sun et al.'s split
+  (interleaving the four cells, or running each whole); and
+  `benchmarks/assembly_agreement.py` compares
   the example with firedrake's own assembly and PyOP2's own `par_loop`.
 
 - **A kernel's postcondition decided from what its statements store**
@@ -544,6 +548,11 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Fixed
 
+- A schedule's `ilp` or `vec` tag no longer has loopy warn, on every build,
+  that it falls back to its first scheduler, which it does for every kernel
+  with such a loop: the tag silences `v1_scheduler_fallback` on the kernel
+  it makes. The warning opened `python examples/assembly.py` and
+  `python examples/layer_potential.py` on a fresh checkout.
 - An array of several axes read only through an index array,
   `coords[cell[c, k], d]` with `nv` in no loop bound, is declared with its
   strides, `stride:2,stride:1`, so that loopy indexes its rows; it was

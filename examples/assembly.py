@@ -94,6 +94,14 @@ inputs make of one node, the node PyOP2's two triangles share. PyOP2 makes
 every update atomic on a device, and silences loopy's ``write_race`` where it
 vectorizes; here ``atomic("y")`` is a step, which makes the split legal.
 
+*In bounds by type, and the type is checked.* ``cell`` is declared
+``Arr[Fin[nc], Fin[3], Fin[nv]]``: every entry is a node. So ``y[cell[c, a]]``
+is in bounds by type, with no check in the generated code, and a cell map
+with an entry that is not a node is refused when the kernel is called,
+natively or compiled: ``cell[1, 1] is 7, which is not a value of Fin(nv)``.
+Sun et al.'s assumption is checked at the call the same way: their schedule
+run on PyOP2's two triangles is refused, ``nc = 2``.
+
 *The tables are the rule, to their 15 digits.* ``FE0`` and ``W3`` are
 ``mass_ffc``'s tables as the test writes them. The theorems are about the
 rule they round, in exact rationals, and ``python`` checks that the tables
@@ -341,7 +349,10 @@ def rejected_split() -> tuple[str, tuple]:
 #: Sun et al.'s schedule: the cells four at a time, under their assumption
 #: that the cells are a multiple of four, ``exists zz: end = 4 zz + start``.
 #: ``ilp`` leaves the four in no order, so the updates of ``y`` are atomic
-#: first. What ``loopty run`` compiles and compares.
+#: first. Their branch tags the four ``c_vec``, a tag of their loopy fork
+#: for C vector types; ``ilp`` is loopy's, and on the C target loopy writes
+#: the four out one after another, which is not SIMD code. What ``loopty
+#: run`` compiles and compares.
 vectorized = (
     Schedule(mass_action, target="c")
     .assume("nc % 4 == 0")
