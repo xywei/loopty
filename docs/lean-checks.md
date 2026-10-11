@@ -140,7 +140,24 @@ The points of a call of a kernel inside another kernel's loop
 (`loopty.calls`) are the caller's loops around it and the binders of the
 sums it is made inside, cut by the guards around it, as loopty wrote them
 for isl; the facts of the callee's body are the caller's own, inlined, and
-are stated as any statement's are.
+are stated as any statement's are. `matvec` calls `dot(A[i], x)` at every
+`i`, and owes the row it passes:
+
+```console
+$ lanky check examples/calls.py --show-lean "the row passed to dot as a"
+...
+LEAN matvec at calls.py:99: A[i], the row passed to dot as a, is in bounds wherever dot is called at calls.py:99
+  proved by Lean (omega)
+    set_option autoImplicit false in
+    theorem Lanky.matvec_in_bounds
+        (m : Int)
+        (i : Int)
+        (h0 : m ≥ 0)
+        (h1 : 0 ≤ i)
+        (h2 : i < m)
+        : 0 ≤ i ∧ i < m := by
+      omega
+```
 
 A class two statements never form, `S1` before `S0` in a program whose `S0`
 runs first, has a hypothesis that is `False` as written, and is closed by
