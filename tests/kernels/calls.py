@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from lanky.prelude import Fn, Nat, Real
 
-from loopty import Arr, Fin, kernel, reduce_sum, table, when
+from loopty import Arr, Fin, Schedule, kernel, layout, program, reduce_sum, table, when
 
 #: The 3-point rule on the reference triangle, and the P1 basis at its points.
 W = table([1 / 6, 1 / 6, 1 / 6])
@@ -163,3 +163,113 @@ def off_the_diagonal(A: Arr[Fin[m], Fin[n], Real]):
     for i in A.dom:
         for j in A.dom:
             add_into(A[i], A[j])
+
+
+# {{{ with updates, a window and a layout
+
+# A callee whose statement is an update, y[cell[k]] += yl[k], whose updates
+# the caller's schedule makes atomic; a program whose kernels call a kernel per
+# row, its intermediate kept in a window over the inlined statements; and a
+# callee that reads through a declared layout.
+
+
+@kernel
+def add_local(cell: Arr[Fin[3], Fin[nv]], yl: Arr[Fin[3], Real], y: Arr[Fin[nv], Real]):
+    """A cell's three values added into its nodes: an update, ``y[...] += v``."""
+    for k in yl.dom:
+        y[cell[k]] += yl[k]
+
+
+@kernel
+def assemble(
+    cell: Arr[Fin[nc], Fin[3], Fin[nv]],
+    yl: Arr[Fin[nc], Fin[3], Real],
+    y: Arr[Fin[nv], Real],
+):
+    """PyOP2's assembly loop, whose updates are a called kernel's."""
+    for c in yl.dom:
+        add_local(cell[c], yl[c], y)
+
+
+@kernel
+def half_square(u: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):
+    """The Burgers flux of one row."""
+    for j in u.dom:
+        f[j] = 0.5 * u[j] * u[j]
+
+
+@kernel
+def centred(f: Arr[Fin[n], Real], rhs: Arr[Fin[n], Real]):
+    """The centred divergence of one row, at its interior points."""
+    for i in rhs.dom:
+        with when((i > 0) & (i + 1 < rhs.dom.size)):
+            rhs[i] = -(f[i + 1] - f[i - 1]) / 2
+
+
+@kernel
+def row_fluxes(u: Arr[Fin[m], Fin[n], Real], f: Arr[Fin[m], Fin[n], Real]):
+    """The flux of every row, a call per row."""
+    for e in u.dom:
+        half_square(u[e], f[e])
+
+
+@kernel
+def row_divergences(f: Arr[Fin[m], Fin[n], Real], rhs: Arr[Fin[m], Fin[n], Real]):
+    """The divergence of every row, a call per row."""
+    for e in rhs.dom:
+        centred(f[e], rhs[e])
+
+
+@program
+def burgers_rows(u, rhs):
+    """The flux of every row into an array of the program's own, then its divergence."""
+    f = Arr.zeros_like(u)
+    row_fluxes(u, f)
+    row_divergences(f, rhs)
+
+
+@layout
+def by_columns(a: Fin[3], b: Fin[3]) -> Fin[9]:
+    """A 3 x 3 block stored a column at a time."""
+    return a + 3 * b
+
+
+@kernel
+def unflatten_block(flat: Arr[Fin[9], Real], u: Arr[Fin[3], Fin[3], Real]):
+    """One block's cells, read through its layout."""
+    for a in u.dom:
+        for b in u.dom[a]:
+            u[a, b] = flat[by_columns(a, b)]
+
+
+@kernel
+def unflatten(flat: Arr[Fin[ne], Fin[9], Real], u: Arr[Fin[ne], Fin[3], Fin[3], Real]):
+    """Every element's block, a call per element."""
+    for e in u.dom:
+        unflatten_block(flat[e], u[e])
+
+
+#: The called kernel's updates atomic, so that ``ilp`` may leave two in no order.
+assembled_in_no_order = Schedule(assemble).atomic("y").split("c", 2).tag(c_inner="ilp")
+
+#: Each row's divergence one step behind its flux, both inlined calls.
+fused_rows = Schedule(burgers_rows, sizes={"m": 3, "n": 8}).fuse(
+    "row_fluxes", "row_divergences", shift=(0, 1)
+)
+
+#: ``f`` in the three cells of a row live at once, ``f[e, j]`` in slot ``j % 3``.
+windowed_rows = fused_rows.contract("f")
+
+
+def rejected_window_of_two_rows() -> str:
+    """A window of two cells, whose slot the inlined flux overwrites first."""
+    from loopty.schedule import IllegalCast
+
+    try:
+        fused_rows.contract("f", lambda e, j: j % 2)
+    except IllegalCast as refused:
+        return str(refused)
+    raise AssertionError("a window of two cells is too small")
+
+
+# }}}

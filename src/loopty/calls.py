@@ -95,6 +95,7 @@ from loopty.trace import (
     Tracer,
     _binder_bound,
     _conjuncts,
+    _conversion_dtype,
     _domain_texts,
     _GatherView,
     _location,
@@ -1201,15 +1202,8 @@ _INT64 = np.dtype(np.int64)
 
 def _conversion(node: Any, name: str | None = None) -> bool:
     """Whether ``node`` is a scalar's conversion into its sort, ``np.int64(j)``."""
-    from loopty.contract import CONVERSIONS
-
-    function = getattr(node, "function", None)
-    return (
-        isinstance(node, prim.Call)
-        and isinstance(function, prim.Variable)
-        and function.name in CONVERSIONS
-        and len(node.parameters) == 1
-        and (name is None or function.name == name)
+    return _conversion_dtype(node) is not None and (
+        name is None or node.function.name == name
     )
 
 

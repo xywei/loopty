@@ -24,10 +24,12 @@ transform (:func:`kulkarni_transform`) is applied to it as his branch applies
 it. Both sides run on the same mesh and arrays, through loopy's own invoker,
 and are compiled with the same flags.
 
-Each case is run once to compile and warm up, checked against the closed form
-of ``y``, and then timed ``--repeat`` times; the median, the minimum and the
-maximum are printed, and written as CSV with ``--csv``, with the versions,
-the flags and the device. Run it on an otherwise quiet machine::
+Each case is built, run once and checked against the closed form of ``y``,
+and run once more to warm up; then the cases are timed in turn, ``--repeat``
+rounds of one call each, so that a change in the machine's load falls on all
+of them. The median, the minimum and the maximum are printed, and written as
+CSV with ``--csv``, with the versions, the flags and the device. Run it on an
+otherwise quiet machine::
 
     python benchmarks/assembly.py c --n 708 --flags native
     PYOPENCL_CTX=0:0 python benchmarks/assembly.py opencl --n 708
@@ -323,34 +325,33 @@ def readings(side: str):
     return declining()
 
 
-def timed(call, repeat: int) -> list[float]:
-    """Seconds per call, ``repeat`` calls after one to warm up."""
-    call()
-    times = []
-    for _ in range(repeat):
-        start = time.perf_counter()
-        call()
-        times.append(time.perf_counter() - start)
-    return times
+def prepare_c(t_unit, flags: str, data: dict):
+    """Compile ``t_unit`` for the C target; one checked run, and a timed call.
 
-
-def run_c(t_unit, flags: str, data: dict, repeat: int) -> tuple[list[float], dict]:
-    """Time ``t_unit`` on the C target; return the times and one run's outputs."""
+    The call returns the seconds it took. The C target writes the arrays it
+    is passed, so the checked run gets copies and the timed calls another.
+    """
     import loopy as lp
 
     t_unit = lp.set_options(t_unit, build_options=FLAGS[flags])
     executor = t_unit.executor()
     first = {name: value.copy() for name, value in data.items()}
-    executor(**first)  # the C target writes the arrays it is passed
+    executor(**first)
     outputs = {"Ae": first["Ae"], "y": first["y"]}
     work = {name: value.copy() for name, value in data.items()}
-    return timed(lambda: executor(**work), repeat), outputs
+
+    def call() -> tuple[float, float | None]:
+        start = time.perf_counter()
+        executor(**work)
+        return time.perf_counter() - start, None
+
+    return call, outputs, "C target, one thread"
 
 
-def run_opencl(t_unit, data: dict, repeat: int) -> tuple:
-    """Time ``t_unit`` on the ``PYOPENCL_CTX`` device, the arrays on the device.
+def prepare_opencl(t_unit, data: dict):
+    """Build ``t_unit`` for the ``PYOPENCL_CTX`` device, the arrays on the device.
 
-    The wall time of each call, from Python to the queue's end, and the
+    The call returns the wall time, from Python to the queue's end, and the
     kernel's own time from its event.
     """
     import pyopencl as cl
@@ -375,15 +376,15 @@ def run_opencl(t_unit, data: dict, repeat: int) -> tuple:
     queue.finish()
     outputs = {"Ae": first["Ae"].get(), "y": first["y"].get()}
     work = on_device()
-    device_seconds: list[float] = []
 
-    def call():
+    def call() -> tuple[float, float | None]:
+        start = time.perf_counter()
         event, _out = executor(queue, **work)
         queue.finish()
-        device_seconds.append(1e-9 * (event.profile.end - event.profile.start))
+        wall = time.perf_counter() - start
+        return wall, 1e-9 * (event.profile.end - event.profile.start)
 
-    wall = timed(call, repeat)
-    return wall, outputs, described, device_seconds[1:]
+    return call, outputs, described
 
 
 # }}}
@@ -425,48 +426,61 @@ def main() -> int:
     if not args.baseline_only:
         sides["loopty"] = loopty_kernels(args.target)
 
-    rows = []
+    prepared = {}
     device = "-"
     for side, kernels in sides.items():
         for schedule, t_unit in kernels.items():
             # loopty's kernels are checked and generated inside its readings
             # of loopy's subscripts (loopty.isl_reading), the baseline's not
             with readings(side):
-                kernel_times: list[float] = []
                 if args.target == "c":
-                    times, outputs = run_c(t_unit, args.flags, data, args.repeat)
-                    device = "C target, one thread"
+                    call, outputs, device = prepare_c(t_unit, args.flags, data)
                 else:
-                    times, outputs, device, kernel_times = run_opencl(
-                        t_unit, data, args.repeat
-                    )
+                    call, outputs, device = prepare_opencl(t_unit, data)
+                call()  # warm up
             error = float(np.abs(outputs["y"] - want).max() / np.abs(want).max())
-            rows.append(
-                {
-                    "side": side,
-                    "schedule": schedule,
-                    "cells": len(cells),
-                    "repeat": args.repeat,
-                    "median_ms": 1e3 * statistics.median(times),
-                    "min_ms": 1e3 * min(times),
-                    "max_ms": 1e3 * max(times),
-                    "kernel_median_ms": (
-                        1e3 * statistics.median(kernel_times) if kernel_times else ""
-                    ),
-                    "y_rel_error": error,
-                }
-            )
-            row = rows[-1]
-            on_device = (
-                f", kernel {row['kernel_median_ms']:.3f} ms" if kernel_times else ""
-            )
-            print(
-                f"{side:7} {schedule:9} {row['cells']} cells: median "
-                f"{row['median_ms']:.3f} ms (min {row['min_ms']:.3f}, max "
-                f"{row['max_ms']:.3f}){on_device}, y within {error:.1e} of the "
-                "closed form",
-                flush=True,
-            )
+            prepared[side, schedule] = (call, error)
+
+    # the cases take turns, so that a change in the machine's load falls on all
+    times: dict = {key: ([], []) for key in prepared}
+    for _ in range(args.repeat):
+        for key, (call, _error) in prepared.items():
+            side = key[0]
+            with readings(side):
+                wall, kernel = call()
+            times[key][0].append(wall)
+            if kernel is not None:
+                times[key][1].append(kernel)
+
+    rows = []
+    for (side, schedule), (call, error) in prepared.items():
+        wall, kernel_times = times[side, schedule]
+        rows.append(
+            {
+                "side": side,
+                "schedule": schedule,
+                "cells": len(cells),
+                "repeat": args.repeat,
+                "median_ms": 1e3 * statistics.median(wall),
+                "min_ms": 1e3 * min(wall),
+                "max_ms": 1e3 * max(wall),
+                "kernel_median_ms": (
+                    1e3 * statistics.median(kernel_times) if kernel_times else ""
+                ),
+                "y_rel_error": error,
+            }
+        )
+        row = rows[-1]
+        on_device = (
+            f", kernel {row['kernel_median_ms']:.3f} ms" if kernel_times else ""
+        )
+        print(
+            f"{side:7} {schedule:9} {row['cells']} cells: median "
+            f"{row['median_ms']:.3f} ms (min {row['min_ms']:.3f}, max "
+            f"{row['max_ms']:.3f}){on_device}, y within {error:.1e} of the "
+            "closed form",
+            flush=True,
+        )
     context = environment(args.target, args.flags, device)
     for key, value in context.items():
         print(f"  {key}: {value}")
