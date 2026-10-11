@@ -928,7 +928,15 @@ operation is planned as numpy computes it.
 and natively wraps or is refused, as numpy does, but for arithmetic of loop
 variables, sizes and literals alone, which is Python's natively and exact:
 `1.0 * i ** 5` past `i = 6208` is a wider number natively, which the
-differential fact reports (#139). An affine subscript with no division is
+differential fact reports (#139). numpy converts a Python int beside a numpy
+integer into the integer's type and refuses one the type does not hold:
+`u[i] + (i - 3)` of a `uint32` `u` at `i = 0`. The compiled run is refused
+too where the call's sizes reach such a point, which isl finds before it
+starts (`refusal.refuse_where_native_does`, #153), and computes it in C's
+type where isl cannot read the arithmetic or the sizes do not fix its loop
+(#166). A value stored into a signed integer array that does not hold it, a
+`uint64` past `2**63` into `Int`, is refused natively and converted compiled
+(#159). An affine subscript with no division is
 computed in loopy's 32-bit index type, which `-fwrapv` makes right for its
 sums and products; what the plan leaves in 32 bits, a sum of loop variables
 and sizes, stays there in a division too (`x[(i + n) // 2]`, past `2**30`,
@@ -994,7 +1002,9 @@ A function given to loopy as a callable (`lp.register_callable`) would
 define the operations, but not in a guard: loopy's type inference visits an
 instruction's expression and never its predicates, so a callable called only
 in a guard is dropped from the translation unit, and
-`infer_arg_descr` fails with `KeyError: 'loopty_mod'`.
+`infer_arg_descr` fails with `KeyError: 'loopty_mod'`. The same holds of any
+function a guard calls and no statement's value does: `when(x[i] + abs(z[i])
+> 1)` of a real `z` failed with `KeyError: 'abs'` (#154).
 
 **Local fix.** `loopty.operations` defines each operation as a C function of
 two operands of one type, as numpy's loops define it (`floor_div`,
@@ -1053,12 +1063,22 @@ Signed overflow is undefined in C as well, where numpy wraps round: GCC at
 target builds gets `-fwrapv` in its build options (`lower.WRAP_FLAG`), which
 GCC and clang take, so the compiled run wraps round as numpy does.
 
+`abs` of a real in a guard is written without a call,
+`x < 0 ? -1.0 * x : (x == 0 ? 0.0 : x)` in the real's type
+(`lower._real_absolute`): the negation of a negative `x`, `0.0` for `-0.0`,
+as numpy's `abs` makes it and `1 / abs(x)` tells, and `x` elsewhere, a NaN
+with its sign, which nothing a guard computes reads. Any other function only
+a guard calls is refused where loopy raises, with a `LoweringError` that
+names the statement and the fix, a statement that computes the value into
+an array the guard reads (`refusal.naming_the_fix`).
+
 **What it does not cover.** loopty's targets are needed for numpy's
 arithmetic: a kernel lowered by `lower.lower` for another loopy target gets
 loopy's. The source `loopty run --emit-code` prints wraps round only when it
 is compiled with `-fwrapv` too, and OpenCL C has no build option for it. The OpenCL definitions are generated and not run from a development
 machine. A function given to loopy as a callable inside a guard is still
-dropped by loopy's type inference.
+dropped by loopy's type inference, and so is any function only a guard
+calls but `abs` of a real.
 
 ## 21. `assignment_to_subst` wants one writer, and leaves the zeros' loop behind
 
@@ -1251,7 +1271,13 @@ tests and `wavefront_acoustic.py --bench` do. With the readings:
   entry. It refuses an access it cannot show in bounds there, one the guard
   keeps in bounds included (`when(i * 2.0 < n)` over `x[2 * i]`, which the
   same guard in integers lets through), as it refused `when(i * 0.5 < 2)`
-  before, from the wrong reading (#148).
+  before, from the wrong reading. loopy's `LoopyIndexError` names its own
+  instruction, `'x[i + 4]' in instruction 'S0'`, and no fix, so loopty's
+  executor and `emit_code` raise in its place `refusal.GuardNotRead`, a
+  `LoopyIndexError` too, which names the statement, where the body wrote
+  it, the guard, and the guard over integers isl finds that keeps every
+  access loopy refused in bounds, `when(i <= n - 5)` (#148). A statement
+  whose guard is stated whole is left loopy's message.
 
 ## 24. loopy's assumptions of a kernel given none follow the hash seed
 
@@ -1367,20 +1393,36 @@ computes the same 32-bit values.
 
 pymbolic builds `a - b` as `a + -1 * b`, and the term then negates `b` in its
 own type before adding, where numpy subtracts in the type of the two: `-1 *
-b[i]` of an `int8` `-128` is itself, and of a `uint32` it is taken round. A
-sum plans a negation it adds as the difference it stands for
-(`Promotion._subtracted`), negating `b` in the difference's type, and the
-interpreter subtracts it (`interpret._Run.sum`).
+b[i]` of an `int8` `-128` is itself, and of a `uint32` it is taken round.
+And it builds `a + -b` the same way, and `u - 1` and `u + -1` as one node,
+which numpy computes otherwise (#151). So the trace builds every `-` the
+body writes as a `term.Difference`, a subclass of lanky's sum whose last term
+is subtracted: while a body is traced, in the thread tracing it, lanky's
+`SymbolicMixin.__sub__` and `__rsub__` are wrapped to mark the sum they
+build, and put back when the last trace is done (`trace._writing_differences`,
+as `isl_reading.declining` installs readings in loopy). A difference plans
+the negation it subtracts as the difference it stands for
+(`Promotion._subtracted`), negating `b` in the difference's type, a literal
+as its negation, and the interpreter subtracts it (`interpret._Run.sum`);
+any other sum adds a negation as numpy's negation of its operand in the
+operand's own type, `(int8_t) (-1 * a[i])`, and a literal as it is, which
+numpy refuses where the operand's type does not hold it (`u[i] + -1`), and
+the trace with it. A numpy scalar subtracted is kept as written, as `-1 *
+np.uint8(3)`, since pymbolic's `-` negates it in its own type, to
+`np.uint8(253)`. C has no literal of the smallest `int32`: `-2147483648` is
+the negation of `2147483648`, a `long`, so `k[i] + -2147483648` of an
+`int32` `k` was computed in 64 bits; loopty's targets write it as
+`(-2147483647 - 1)`, and the smallest `int64` as `(-9223372036854775807l -
+1)` (`operations.NumpyArithmetic.map_constant`).
 
 **What it does not cover.** A subscript's arithmetic is left in the type loopy
-computes it in, neither widened nor converted back (#129, #157). `u[i] - 1`
-and `u[i] + -1` of an unsigned `u` are one term, so the second, which numpy
-refuses at every point, is computed as the first (#151); a literal a numpy
-integer's type does not hold is refused elsewhere (#141). An `If`, whose
-branches C converts to one type, is not planned: a body cannot write one,
-and `abs` lowers without one. `c[i] + -u[i]` of an `Int` `c` and an
-unsigned `u` is read as `c[i] - u[i]` too, where numpy adds the negation it
-takes round, `2**8 - u[i]` of a `uint8`, so the two runs differ at every
-`u[i]` but zero (#151). A comparison of `abs` of an element does not trace
-(`abs(k[i]) > 2`, xywei/lanky#94): lanky's terms leave `abs` to pymbolic,
-whose call has no order.
+computes it in, neither widened nor converted back (#129, #157). An `If`,
+whose branches C converts to one type, is not planned: a body cannot write
+one, and `abs` of an integer lowers without one; `abs` of a real in a guard
+is one whose branches are of the real's type (note 20). The written `-1 *
+u[i]` of an unsigned `u`, which numpy refuses at every point, is one node
+with `-u[i]`, which it computes, and is read as the second. A term built
+outside a trace, by hand, has no differences, and its sums are read as
+written. A comparison of `abs` of an element does not trace (`abs(k[i]) >
+2`, xywei/lanky#94): lanky's terms leave `abs` to pymbolic, whose call has
+no order.

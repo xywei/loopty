@@ -315,7 +315,10 @@ says when one does.
   loop variables, a float literal or a `Real` scalar (`when(i * 0.5 < 2)`,
   `when(i * 2.0 < n)`), it checks an access at every point of the loop, and
   refuses one it cannot show in bounds there, one the guard keeps in bounds
-  included (#148; note 23 in `docs/loopy-notes.md`). A guard has to be a truth value, and one whose
+  included. The refusal (`loopty.refusal.GuardNotRead`, a `LoopyIndexError`)
+  names the statement, the guard, and a guard over integers that keeps the
+  access in bounds, `when(i <= n - 5)` for `x[i + 4]` (#148; note 23 in
+  `docs/loopy-notes.md`). A guard has to be a truth value, and one whose
   value is an integer is a `TraceError`, on a native run and under tracing
   alike. Natively
   that is what `~(i > 0)` is (`~` on a Python bool is bitwise), while the trace
@@ -451,8 +454,20 @@ says when one does.
   back into it, and an unsigned integer beside a signed one is computed in
   the signed type numpy computes in (`int64` for a `uint32` and an `int32`),
   where C's would be unsigned; integers compare exactly, as numpy's do, a
-  negative one with an unsigned one included. `abs` of an integer is numpy's,
-  the smallest value of its type included; a comparison of one does not
+  negative one with an unsigned one included. A sum is computed as the body
+  wrote it: `c[i] - a[i]` as the difference, and `c[i] + -a[i]` as the sum of
+  `a[i]` negated in its own type, which differ for an `int8` `a` at `-128` and
+  an unsigned one at every value but zero; `u[i] + -1` of an unsigned `u` and
+  `k[i] - 2**31` of an `int32` `k`, which numpy refuses at every point, are
+  refused by the trace (#151). Loop arithmetic beside a numpy integer whose
+  type does not hold it at some point, `u[i] + (i - 3)` of a `uint32` `u` at
+  `i = 0`, is refused by numpy natively there, and the compiled run is refused
+  before it starts where the call's sizes reach such a point, naming it
+  (`loopty.refusal.RefusedNatively`, #153). `abs` of an integer is numpy's,
+  the smallest value of its type included, and `abs` of a real in a guard is
+  written without a call, since loopy resolves no function only a guard calls
+  (#154); another function only a guard calls is refused, naming the fix. A
+  comparison of `abs` does not
   trace yet (`abs(k[i]) > 2`, xywei/lanky#94). An integer literal past 64 bits
   is written as a real where numpy computes in one (`x[i] * 2**70`), or as a
   `uint64` beside one (`u[i] + 2**63`), and refused elsewhere. A kernel named
@@ -628,16 +643,16 @@ says when one does.
   as `int64`, as the compiled run computes with them, unless a program's
   checked point reads it, which takes an `int64` one. An integer to a
   negative power whose exponent is not a literal is left to numpy's refusal
-  natively, and computed as an integer compiled. pymbolic builds `u[i] - 1`
-  and `u[i] + -1` as one term, read as the difference: of an unsigned `u`
-  numpy refuses the second at every point, and the compiled run computes it
-  as the first; `a - b` and `a + -b` of an `int8` `b` likewise differ
-  natively at `b = -128` alone, and of an `Int` `a` and an unsigned `b` at
-  every `b` but zero (#151). A loop variable's arithmetic beside
-  a numpy integer whose type does not hold its value at some point,
-  `u[i] + (i - 3)` of a `uint32` `u`, is refused natively there and
-  computed compiled (#153), and `abs` of a real in a guard fails inside
-  loopy (#154). See notes 19, 20 and 23 in `docs/loopy-notes.md`.
+  natively, and computed as an integer compiled. Loop arithmetic beside a
+  numpy integer that does not hold it is refused compiled where isl reads it
+  and the call's sizes fix its loops (#153); a product of loop variables, or
+  a ragged row's loop, is left to the native refusal and computed compiled
+  (#166). So is a value stored into a signed integer array that does not hold
+  it, a `uint64` past `2**63` into `Int`, an `Int` into an `np.int8` array, or
+  a real past `2**63`, or a NaN, into `Int`, whose value only the compiled
+  kernel knows (#159). The written `-1 * u[i]` of an unsigned `u`, which numpy
+  refuses, is read as `-u[i]`, which it computes. See notes 19, 20, 23 and 25
+  in `docs/loopy-notes.md`.
 - A polyhedral domain is an array's whole index set, so it cannot sit beside
   a dense axis (`Arr[Fin[k], Where[...], Real]` is refused; write the axis as
   a binder of the domain). The pieces of a union have the same number of axes,
@@ -795,15 +810,20 @@ the runs make of it, since that is what decides whether it can go unnoticed.
   `x[(i + n) // 2]` wraps round past `2**30` (#149). A subscript over a
   narrow numpy integer type, such as `int8` or `uint16`, is computed in C's
   `int` compiled, and wraps round natively (#157).
-- **A guard loopy's bounds check cannot read**
-  ([#148](https://github.com/xywei/loopty/issues/148)). An access that only a floating-point guard keeps in
-  bounds, `x[2 * i]` under `when(i * 2.0 < n)`, is refused by loopy's bounds
-  check, with a message that names no fix. Write the guard over integers.
-- **Integers past 64 bits** ([#139](https://github.com/xywei/loopty/issues/139), [#159](https://github.com/xywei/loopty/issues/159)). Arithmetic of
+- **Integers past 64 bits** ([#139](https://github.com/xywei/loopty/issues/139)). Arithmetic of
   loop variables, sizes and literals alone is exact natively and 64 bits wide
   compiled: `1.0 * i ** 5` wraps round compiled past `i = 6208`, and the
-  differential fact is refuted. A `uint64` value past `2**63` stored into an
-  `Int` array is refused natively and wraps round compiled.
+  differential fact is refuted.
+- **A value numpy refuses only at run time is computed compiled**
+  ([#159](https://github.com/xywei/loopty/issues/159), [#166](https://github.com/xywei/loopty/issues/166)). numpy refuses a value stored
+  into a signed integer array that does not hold it, a `uint64` past `2**63`
+  into `Int`, an `Int` into an `np.int8` array, a real past `2**63` or a NaN
+  into `Int`, and the compiled run converts it as C does. The value is the
+  kernel's, known only inside the compiled run, which does not check it. Loop
+  arithmetic beside a numpy integer that does not hold it is refused compiled
+  where the call's sizes reach such a point, unless isl cannot read it (a
+  product of loop variables) or the call's sizes do not fix its loop (a
+  ragged row's). The differential fact raises the native run's error.
 - **What passes between calls is stored in full or not at all**
   ([#132](https://github.com/xywei/loopty/issues/132), [#133](https://github.com/xywei/loopty/issues/133)). `Schedule.substitute` computes an
   intermediate again at every read; keeping only the cells live at once, a

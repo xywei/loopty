@@ -11,6 +11,59 @@ All notable changes to loopty are recorded here. The format follows
 - CI also tests loopty as `pip install loopty` gets it: a second job installs
   it without `[tool.uv.sources]`, so with lanky from PyPI, and runs the suite
   and the worked example's `lanky check` and `loopty run` (#147).
+- loopy's refusal of an access under a guard its bounds check does not read,
+  a product of loop variables, a guard computed in floating point or an
+  array's entry, names the statement, where the body wrote it, the guard,
+  and a guard over integers that keeps the access in bounds, which loopy
+  reads: `with when(i <= n - 5):` for `x[i + 4]` under `when(i * 0.5 < 2)`
+  (#148). It is `loopty.refusal.GuardNotRead`, a `LoopyIndexError` still,
+  with loopy's message at its end. A guard that calls a function no
+  statement's value calls, which loopy never resolves, is refused with a
+  `LoweringError` naming the fix, where loopy failed with `KeyError` and the
+  function's name.
+
+### Fixed
+
+- A sum is computed as the body wrote it (#151). pymbolic builds `a - b` as
+  `a + -1 * b` and `u - 1` as `u + -1`, the same nodes `a + -b` and `u + -1`
+  build, and the trace, the plan and the interpreter read every such sum as
+  the difference, which numpy computes otherwise: `c[i] + -a[i]` of an `int8`
+  `a` is `c[i] + -128` at `a[i] = -128` natively and was `c[i] + 128`
+  compiled, and `c[i] + -u[i]` of a `uint8` `u` adds `256 - u[i]` natively
+  and subtracted `u[i]`, at every `u[i]` but zero. The trace builds every `-`
+  the body writes as a `loopty.term.Difference`, a sum whose last term is
+  subtracted, and any other sum is read as written. So `u[i] + -1` of an
+  unsigned `u`, `k[i] - 2**31` and `k[i] + 2**31` of an `int32` `k`, `u[i] -
+  -7`, `c[i] + -b[i]` and `b[i] - True` of a truth value `b`, which numpy
+  refuses at every point and the compiled run computed as the other
+  spelling, are `TraceError`s naming the fix, and `k[i] + -(2**31)` and `c[i]
+  - -32768` of an `int16` `c` are computed in the type numpy computes them
+  in. A numpy scalar subtracted is kept as written, where pymbolic negates it
+  in its own type: `k[i] - np.uint8(3)` was `k[i] + 253` compiled. The
+  smallest `int32` and `int64` are written as C writes `INT_MIN`,
+  `(-2147483647 - 1)`: `-2147483648` is the negation of a `long` in C, and
+  `k[i] + -2147483648` of an `int32` `k` was computed in 64 bits, never
+  wrapping round as numpy does.
+- `abs` of a real in a guard lowers (#154): loopy's type inference visits a
+  statement's value and never its guard, so `abs`, which only the guard
+  called, was never resolved, and loopy failed with `KeyError: 'abs'`. In a
+  guard it is written `x < 0 ? -x : (x == 0 ? 0 : x)`, which is numpy's
+  `abs(-0.0)` too, `0.0`.
+- Loop arithmetic beside a numpy integer whose type does not hold it at a
+  point of the loops, `u[i] + (i - 3)` of a `uint32` `u` at `i = 0`, `a[i] *
+  (i * 100)` of an `int8` `a` from `i = 2`, and a loop variable stored into an
+  `int8` array from `i = 128`, is refused by numpy natively there, and the
+  compiled run computed it in C's type (#153). Where the call's sizes reach
+  such a point, isl finds it, and the compiled run is refused before it
+  starts (`loopty.refusal.RefusedNatively`, an `OverflowError`), naming the
+  point and `(i - 3) * np.int64(1)` as the fix. Arithmetic isl cannot read,
+  or a ragged row's loop, is left to the native refusal (#166). A literal
+  stored into an integer array that does not hold it, `y[i] = 300` of a
+  `uint8` `y`, is a `TraceError`, as #141's literals are.
+- A regression test for #152, which #156 fixed: a literal beside a loop
+  variable under a double power in a single-precision statement is written as
+  an integer, `(double) (i + 16777216)`, where loopy wrote `1.0f` and C
+  rounded the loop variable past `2**24`.
 
 ## [0.1.0] - 2026-10-09
 
