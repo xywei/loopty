@@ -300,6 +300,10 @@ def test_a_call_inside_a_sum_over_a_fin_says_its_points_are_unknown() -> None:
 
 
 def test_the_argument_facts_are_stated_for_lean_from_the_call() -> None:
+    # lanky's obligations are newer than its 0.2.0 release, which CI tests too
+    pytest.importorskip(
+        "lanky.obligations", reason="the released lanky states no Lean obligations"
+    )
     from lanky.lean import statement_of
 
     (fact,) = _facts(calls.mass_action, "argument")
