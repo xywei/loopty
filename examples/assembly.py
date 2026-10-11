@@ -167,17 +167,19 @@ def conservation(
     nc: Nat,
     nv: Nat,
     d: Nat,
-    cell: Fn[Fin[nc], Fin[d], Fin[nv]],
-    yl: Fn[Fin[nc], Fin[d], Real],
+    cell: Fn[Fin[nc], Fn[Fin[d], Fin[nv]]],
+    yl: Fn[Fin[nc], Fn[Fin[d], Real]],
     y: Fn[Fin[nv], Real],
     scatter: all(
-        y[i] == sum(yl[c, k] for c in Fin[nc] for k in Fin[d] if cell[c, k] == i)
+        y[i] == sum(yl[c][k] for c in Fin[nc] for k in Fin[d] if cell[c][k] == i)
         for i in Fin[nv]
     ),
-) -> sum(y[i] for i in Fin[nv]) == sum(yl[c, k] for c in Fin[nc] for k in Fin[d]):
+) -> sum(y[i] for i in Fin[nv]) == sum(yl[c][k] for c in Fin[nc] for k in Fin[d]):
     """Adding each cell's values into its nodes keeps their total, on every mesh.
 
-    ``y[i]`` is what the cells add into node ``i``, from zero.
+    ``cell[c][k]`` is the node of corner ``k`` of cell ``c``, ``yl[c][k]``
+    the value the cell adds there, and ``y[i]`` what the cells add into node
+    ``i``, from zero.
     """
 
 
@@ -313,11 +315,12 @@ def matrix(cells: np.ndarray, Ae: np.ndarray, nv: int) -> np.ndarray:
 def kulkarni(atomic: bool, target: str = "c") -> Schedule:
     """PyOP2's GPU schedule (Kulkarni): the cells split by 32 onto ``g.0``/``l.0``.
 
+    Kulkarni's transform assumes ``start < end``, a loop of one cell or more.
     Without ``atomic`` the split's tag is refused; with it, accepted. On the C
     target, which has no groups or work items, the accepted schedule cannot
     be built (its ``buildable`` fact says so); ``target="opencl"`` runs it.
     """
-    schedule = Schedule(mass_action, target=target)
+    schedule = Schedule(mass_action, target=target).assume("nc >= 1")
     if atomic:
         schedule = schedule.atomic("y")
     return schedule.split("c", 32).tag(c_outer="g.0", c_inner="l.0")
@@ -334,11 +337,13 @@ def rejected_split() -> tuple[str, tuple]:
     raise AssertionError("the cells of a mesh sharing a node race without atomics")
 
 
-#: Sun et al.'s schedule: the cells four at a time, which ``ilp`` leaves in no
-#: order, so the updates of ``y`` are atomic first. What ``loopty run``
-#: compiles and compares.
+#: Sun et al.'s schedule: the cells four at a time, under their assumption
+#: that the cells are a multiple of four, ``exists zz: end = 4 zz + start``.
+#: ``ilp`` leaves the four in no order, so the updates of ``y`` are atomic
+#: first. What ``loopty run`` compiles and compares.
 vectorized = (
     Schedule(mass_action, target="c")
+    .assume("nc % 4 == 0")
     .atomic("y")
     .split("c", 4)
     .tag(c_inner="ilp")
