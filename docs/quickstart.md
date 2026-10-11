@@ -124,33 +124,39 @@ row per work group, is the schedule for this shape that does build and did run.
 
 ```console
 $ uv run lanky check examples/spmv.py
-STATUS   EFFECTIVE  BY             WHERE        OWNER          STATEMENT
--------  ---------  -------------  -----------  -------------  ------------------------------------------------------------------------
-decided  decided    isl            spmv.py:79   scan           off[0] is in bounds for every instance of S0
-decided  decided    isl            spmv.py:81   scan           off[r + 1] is in bounds for every instance of S1
-decided  decided    isl            spmv.py:81   scan           off[r] is in bounds for every instance of S1
-decided  decided    isl            spmv.py:81   scan           cnt[r] is in bounds for every instance of S1
-decided  decided    isl            spmv.py:79   scan           distinct instances of S0 write distinct cells of off
-decided  decided    isl            spmv.py:81   scan           distinct instances of S1 write distinct cells of off
-decided  decided    isl            spmv.py:81   scan           every cell of off that S1 reads, S0 or S1 wrote before the read
-decided  decided    isl            spmv.py:69   scan           the source order runs every dependence forward in time
-tested   tested     native         spmv.py:69   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
-tested   tested     interpreter    spmv.py:69   scan           the traced term computes what the body computes
-tested   tested     property-test  spmv.py:84   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat] | off(0) ==...
-tested   tested     python         spmv.py:84   scan_monotone  the term computes what the annotations compute
-decided  decided    isl            spmv.py:112  spmv           y[r] is in bounds for every instance of S0
-decided  decided    isl            spmv.py:112  spmv           val[r, j] is in bounds for every instance of S0
-decided  decided    type           spmv.py:112  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
-decided  decided    isl            spmv.py:112  spmv           col[r, j] is in bounds for every instance of S0
-decided  decided    isl            spmv.py:112  spmv           cnt[r], the length of row r that bounds the loop over j, is in bounds...
-decided  decided    isl            spmv.py:112  spmv           distinct instances of S0 write distinct cells of y
-decided  decided    isl            spmv.py:102  spmv           the source order runs every dependence forward in time
-decided  decided    type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
-tested   tested     interpreter    spmv.py:102  spmv           the traced term computes what the body computes
-decided  tested     call           spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
-tested   tested     interpreter    spmv.py:115  solve          the traced term computes what the body computes
+STATUS   BY             WHERE        OWNER          STATEMENT
+-------  -------------  -----------  -------------  ------------------------------------------------------------------------
+decided  isl            spmv.py:79   scan           off[0] is in bounds for every instance of S0
+decided  isl            spmv.py:81   scan           off[r + 1] is in bounds for every instance of S1
+decided  isl            spmv.py:81   scan           off[r] is in bounds for every instance of S1
+decided  isl            spmv.py:81   scan           cnt[r] is in bounds for every instance of S1
+decided  isl            spmv.py:79   scan           distinct instances of S0 write distinct cells of off
+decided  isl            spmv.py:81   scan           distinct instances of S1 write distinct cells of off
+decided  isl            spmv.py:81   scan           every cell of off that S1 reads, S0 or S1 wrote before the read
+decided  isl            spmv.py:69   scan           the source order runs every dependence forward in time
+decided  isl            spmv.py:79   scan           no cell of off is stored twice, or read before its store
+decided  isl            spmv.py:69   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+tested   interpreter    spmv.py:69   scan           the traced term computes what the body computes
+tested   property-test  spmv.py:84   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat] | off(0) ==...
+tested   python         spmv.py:84   scan_monotone  the term computes what the annotations compute
+decided  isl            spmv.py:112  spmv           y[r] is in bounds for every instance of S0
+decided  isl            spmv.py:112  spmv           val[r, j] is in bounds for every instance of S0
+decided  type           spmv.py:112  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
+decided  isl            spmv.py:112  spmv           col[r, j] is in bounds for every instance of S0
+decided  isl            spmv.py:112  spmv           cnt[r], the length of row r that bounds the loop over j, is in bounds...
+decided  isl            spmv.py:112  spmv           distinct instances of S0 write distinct cells of y
+decided  isl            spmv.py:102  spmv           the source order runs every dependence forward in time
+decided  type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
+tested   interpreter    spmv.py:102  spmv           the traced term computes what the body computes
+decided  isl            spmv.py:112  spmv           split(j, 2) renames the instances of spmv one for one
+decided  isl            spmv.py:112  spmv           the order after split(j, 2) runs every dependence of spmv forward
+decided  isl            spmv.py:112  spmv           realize('y', tree=True) renames the instances of spmv one for one
+decided  isl            spmv.py:112  spmv           the order after realize('y', tree=True) runs every dependence of spmv...
+decided  isl            spmv.py:112  spmv           the accumulation into y is reassociated by realize('y', tree=True), s...
+decided  call           spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
+tested   interpreter    spmv.py:115  solve          the traced term computes what the body computes
 
-23 facts: 17 decided, 6 tested
+29 facts: 24 decided, 5 tested
 ```
 
 Read the `BY` column.
@@ -178,16 +184,21 @@ Read the `BY` column.
   the program the term is the two calls composed. `--json` lists the inputs; a
   body that kept state where tracing does not look would make this row
   `refuted`, with the input and the first cell that differs.
-- `native` tested `scan`'s postcondition. A postcondition is a claim about
-  the arguments once the kernel has run, so it is evaluated at what each of
-  those native runs left in them, and it held after every one. Deciding it
-  from the term instead, by which statement last writes each cell, is not
-  done yet.
+- `isl` decided `scan`'s postcondition too, from the term. A postcondition is
+  a claim about the arguments once the kernel has run, and the row before it
+  says that no cell of `off` is stored twice, or read before its store: so
+  what each statement stores is what `off` holds when `scan` returns, `S0`'s
+  `off[0] == 0` and `S1`'s `off[r + 1] == off[r] + cnt[r]` at every `r`, and
+  the claim is those two equations. The native runs test it as well, at
+  what each of them left in the arguments, and it held after every one,
+  which its provenance keeps (`native`).
+- `isl` decided the casts of `rows_split`, the schedule the file holds: `lanky
+  check` lists a file's schedules under the kernel they schedule, each cast
+  decided as its step was taken.
 - `call` decided the restatement of that postcondition inside `solve`: every
   call of `scan` leaves it true of what the call passed, so it holds after
   the call `solve` makes. It rests on `scan`'s own fact,
-  `postcondition:spmv.scan@69`, and the `EFFECTIVE` column says what that
-  makes it worth: `tested`, the weakest of what it rests on. The id names
+  `postcondition:spmv.scan@69`, and is worth what that is worth. The id names
   `scan`'s definition, the module `spmv` that the file's path gives it, and
   line 69, as lanky names a theorem's, so a program that calls a `scan` of
   another file rests on that file's fact, whatever it imported it as, and
@@ -345,15 +356,19 @@ Checking and running the file behave the same way as the sparse product:
 ```console
 $ uv run lanky check examples/stencil_skew.py
 STATUS   BY           WHERE               OWNER   STATEMENT
--------  -----------  ------------------  ------  ------------------------------------------------------
+-------  -----------  ------------------  ------  -----------------------------------------------------------------------
 decided  isl          stencil_skew.py:62  jacobi  u[t + 1, i] is in bounds for every instance of S0
 decided  isl          stencil_skew.py:62  jacobi  u[t, i - 1] is in bounds for every instance of S0
 decided  isl          stencil_skew.py:62  jacobi  u[t, i + 1] is in bounds for every instance of S0
 decided  isl          stencil_skew.py:62  jacobi  distinct instances of S0 write distinct cells of u
 decided  isl          stencil_skew.py:54  jacobi  the source order runs every dependence forward in time
 tested   interpreter  stencil_skew.py:54  jacobi  the traced term computes what the body computes
+decided  isl          stencil_skew.py:62  jacobi  skew(i, by='t') renames the instances of jacobi one for one
+decided  isl          stencil_skew.py:62  jacobi  the order after skew(i, by='t') runs every dependence of jacobi forward
+decided  isl          stencil_skew.py:62  jacobi  tile(t,i,8,8) renames the instances of jacobi one for one
+decided  isl          stencil_skew.py:62  jacobi  the order after tile(t,i,8,8) runs every dependence of jacobi forward
 
-6 facts: 5 decided, 1 tested
+10 facts: 9 decided, 1 tested
 ```
 
 ```console

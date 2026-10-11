@@ -184,12 +184,13 @@ def test_a_programs_restatement_rests_on_the_callees_own_fact() -> None:
     assert restated.rests_on == (post.id,)
     assert restated.provenance["callee"] == scan.qualname
 
-    # scan's postcondition is tested against its native runs, and the
-    # restatement is worth that.
-    assert post.status is Status.TESTED
+    # scan's postcondition is decided from its term (#113), and tested on its
+    # native runs too; the restatement is worth what the facts it rests on are.
+    assert post.status is Status.DECIDED
+    assert post.provenance["native"] == "tested"
     ledger = Ledger([*scan.facts(), restated])
     assert ledger.support(restated).under == ()
-    assert ledger.support(restated).effective is Status.TESTED
+    assert ledger.support(restated).effective is Status.DECIDED
 
     # Where the callee's claim is only assumed, the restatement says so: the
     # kernel owns several facts, so the one meant is named by its id.
@@ -212,16 +213,17 @@ def test_the_ledger_of_a_file_says_what_its_program_rests_on() -> None:
     (restated,) = [fact for fact in ledger if fact.kind == "postcondition-in-scope"]
     (post,) = [fact for fact in ledger if fact.kind == "postcondition"]
     assert restated.rests_on == (post.id,)
-    # The scan's postcondition is tested, so it is no assumption of the
-    # restatement's, and the restatement is worth a test.
-    assert post.status is Status.TESTED
+    # The scan's postcondition is decided from its term (#113), so it is no
+    # assumption of the restatement's; the restatement is worth a test, the
+    # trace-faithful fact's, which it rests on too.
+    assert post.status is Status.DECIDED
     assert ledger.support(restated).under == ()
     data = json.loads(ledger.to_json())
     (row,) = [row for row in data if row["kind"] == "postcondition-in-scope"]
     assert row["rests_on"] == [post.id]
     assert row["under"] == []
     assert row["status"] == "decided"
-    assert row["effective"] == "tested"
+    assert row["effective"] == "decided"
 
 
 CALLEE = '''
