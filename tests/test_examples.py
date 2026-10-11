@@ -157,7 +157,7 @@ KERNELS = {
     "composition": {"flux", "divergence", "burgers_rhs"},
     "fusion": {"flux", "divergence", "burgers_rhs"},
     "quadrature": {"mass_action"},
-    "layer_potential": {"single_layer"},
+    "layer_potential": {"single_layer", "double_layer"},
     "sum_factorization": {"along_r", "along_s", "weak_derivative"},
     "assembly": {"mass_action"},
     "storage_layouts": {"stored_table", "unflatten"},
@@ -1043,6 +1043,99 @@ def test_the_assembly_owes_its_sum_and_not_distinct_writes_of_y() -> None:
         "the accumulation into y[cell[c, k]] over c, k is approx"
     )
     assert (update["status"], update["decided_by"]) == ("decided", "type")
+
+
+# }}}
+
+
+# {{{ the QBX layer potential
+
+
+def test_the_qbx_demo_states_the_fact_sumpy_silences_for_both_layers() -> None:
+    # sumpy silences loopy's write_race(write_lpot*) on its LayerPotential;
+    # the fact in its place is that each target's cell is written once.
+    _result, facts = _invoke("layer_potential", "check")
+    for owner in ("single_layer", "double_layer"):
+        (writes,) = [
+            fact
+            for fact in facts
+            if fact["owner"] == owner and fact["kind"] == "disjoint-writes"
+        ]
+        assert writes["statement"] == (
+            "distinct instances of S0 write distinct cells of out"
+        )
+        assert writes["status"] in ("decided", "proved"), writes
+        assert writes["decided_by"] in ("isl", "lean"), writes
+
+
+def test_the_qbx_demo_measures_pytentials_identity_and_the_jumps() -> None:
+    _result, facts = _invoke("layer_potential", "check")
+    rows = {fact["owner"]: fact for fact in facts if fact["kind"] == "tested"}
+    assert set(rows) == {"green_identity", "jump_S", "jump_D"}
+    for fact in rows.values():
+        assert (fact["status"], fact["decided_by"]) == ("tested", "run"), fact
+        order = float(fact["provenance"]["measured"].rsplit("order ", 1)[1])
+        # pytential's test asks for the QBX order less 1.6
+        assert order > 5 - 1.6, fact
+
+
+def test_the_line_taylor_theorem_is_in_the_qbx_ledger_and_not_refuted() -> None:
+    _result, facts = _invoke("layer_potential", "check")
+    statuses = {
+        fact["status"] for fact in facts if fact["owner"] == "line_taylor"
+    }
+    assert statuses and "refuted" not in statuses
+    # without Mathlib the tester draws no table over Nat, and says so
+    assert statuses <= {"assumed", "tested", "proved"}
+
+
+def test_the_kernels_ratio_is_the_theorems() -> None:
+    # The kernels add coefficient(ratio, k) with the ratio multiplied out by
+    # the conjugate; the theorem's is -beta / alpha. They agree to rounding,
+    # and the series is log|alpha + beta| to the order's truncation.
+    module = _module("layer_potential")
+    rng = np.random.default_rng(5)
+    for alpha, beta in zip(
+        rng.normal(size=20) + 1j * rng.normal(size=20),
+        0.3 * (rng.normal(size=20) + 1j * rng.normal(size=20)),
+        strict=True,
+    ):
+        r2 = (alpha * np.conj(alpha)).real
+        ratio = -beta * np.conj(alpha) * (1 / r2)
+        assert abs(ratio - (-beta / alpha)) <= 1e-15 * abs(beta / alpha) * 4
+        closed = sum(
+            module.coefficient(-beta / alpha, k) for k in range(1, module.ORDER + 1)
+        )
+        series = module.single(alpha, beta)
+        assert abs(series - (np.log(abs(alpha)) + closed.real)) <= 1e-14
+        truncation = abs(beta / alpha) ** (module.ORDER + 1) / (1 - abs(beta / alpha))
+        if abs(beta / alpha) < 0.5:
+            assert abs(series - np.log(abs(alpha + beta))) <= truncation
+
+
+def test_sumpys_tile_is_legal_and_c_cannot_build_its_axes() -> None:
+    module = _module("layer_potential")
+    tile = module.sumpy_tile("c")
+    casts = [fact for fact in tile.facts() if fact.kind != "buildable"]
+    assert len(casts) == 8
+    assert all(fact.status.value == "decided" for fact in casts)
+    buildable, reason = tile.buildable
+    assert not buildable
+    assert "puts a loop on a hardware axis, and the C target has none" in reason
+
+
+def test_the_qbx_demo_prints_the_tile_the_fact_and_the_rows() -> None:
+    result, _ = _invoke("layer_potential", "python")
+    assert result.returncode == 0, result.stdout + result.stderr
+    out = result.stdout
+    assert (
+        "decided  isl  prioritize(s_outer, t_inner) renames the instances of "
+        "single_layer one for one"
+    ) in out
+    assert "decided  isl  distinct instances of S0 write distinct cells of out" in out
+    for name in ("green_identity", "jump_S", "jump_D"):
+        (line,) = [line for line in out.splitlines() if line.strip().startswith(name)]
+        assert line.endswith("-> tested"), line
 
 
 # }}}

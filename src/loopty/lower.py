@@ -492,6 +492,57 @@ class _OpenCLExpressions(NumpyArithmetic, ExpressionToPyOpenCLCExpressionMapper)
             return prim.LogicalAnd(compared)
         return prim.LogicalOr(compared)
 
+    def map_power(self, expr: Any, type_context: Any) -> Any:
+        """A complex number to a small natural power, as numpy multiplies it.
+
+        loopy writes a complex power by 2, 3 or 4 as products, and by any
+        other exponent, 1 and 5 included, as pyopencl's ``cdouble_powr``,
+        which is ``exp(n log z)``: a logarithm and an exponential where numpy
+        multiplies, and not exact even for ``z**1``. A line-Taylor series
+        written ``(-beta / alpha) ** k``, whose terms a constant sum writes
+        out, paid that for its first and fifth terms on every pair. A power by
+        an integer ``n`` with ``0 < n < 100`` is numpy's products here
+        (:func:`_natural_power`); any other is loopy's.
+        """
+        exponent = expr.exponent
+        if (
+            isinstance(exponent, int | np.integer)
+            and not isinstance(exponent, bool)
+            and 0 < exponent < _PRODUCT_POWERS
+            and self.infer_type(expr.base).is_complex()
+        ):
+            return self.rec(_natural_power(expr.base, int(exponent)), type_context)
+        return super().map_power(expr, type_context)
+
+
+#: The exponents below which a complex power is written as products, as numpy
+#: computes one (``npy_cpow``), which multiplies for ``|n| < 100``.
+_PRODUCT_POWERS = 100
+
+
+def _natural_power(base: Any, n: int) -> Any:
+    """``base ** n`` as the products numpy's complex power by an integer takes.
+
+    ``z`` for 1, ``z * z``, and ``z * (z * z)`` for 3; from 4 on, by squaring,
+    multiplying in the square for each bit of ``n`` from the lowest, so that
+    ``z**5`` is ``z * ((z * z) * (z * z))``. Each product is one multiply of
+    the target, so the rounding is numpy's wherever a complex product is.
+    """
+    if n == 1:
+        return base
+    if n == 2:
+        return prim.Product((base, base))
+    if n == 3:
+        return prim.Product((base, prim.Product((base, base))))
+    result, square, mask = None, base, 1
+    while True:
+        if n & mask:
+            result = square if result is None else prim.Product((result, square))
+        mask <<= 1
+        if n < mask:
+            return result
+        square = prim.Product((square, square))
+
 
 class _OpenCLCode(PyOpenCLCASTBuilder):
     """The kernel code of :class:`InKernelOpenCLTarget`; see :class:`_CCode`."""

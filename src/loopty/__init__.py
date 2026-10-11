@@ -71,6 +71,7 @@ _EXPORTS = {
     "program": "loopty.kernel",
     "reduce_sum": "loopty.reduction",
     "table": "loopty.table",
+    "tested": "loopty.tested",
     "trace": "loopty.trace",
     "when": "loopty.trace",
 }
@@ -107,6 +108,7 @@ __all__ = [
     "program",
     "reduce_sum",
     "table",
+    "tested",
     "trace",
     "when",
 ]
@@ -162,6 +164,7 @@ if TYPE_CHECKING:
     from loopty.schedule import IllegalCast, Schedule, UnbuildableSchedule
     from loopty.table import Table, table
     from loopty.term import Access, ArrType, Reduction, Stmt, Term
+    from loopty.tested import tested
     from loopty.trace import TraceError, trace, when
     from loopty.typing import facts_for
 

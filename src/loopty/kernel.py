@@ -946,8 +946,9 @@ class KernelTheory:
         if isinstance(obj, Kernel | Program):
             return obj.facts()
         from loopty.layout import Layout, SameLayout
+        from loopty.tested import Tested
 
-        if isinstance(obj, Layout | SameLayout):
+        if isinstance(obj, Layout | SameLayout | Tested):
             return obj.facts()
         return ()
 
