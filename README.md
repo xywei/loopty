@@ -879,10 +879,10 @@ release; the CHANGELOG says when one does.
   two updates through it at the same time is refused even where no input can
   make them collide (`y[perm[i]] += x[i]` of a permutation `perm`), with a pair
   from the example inputs where they have one and isl's otherwise, which the
-  message says: make the updates atomic. An `exact` update, `m[cell[c, k]] +=
-  1` of integers, keeps the order of its updates and is refused `atomic`, as
-  an `exact` sum is refused a tree, although integer addition gives the same
-  bits in any order (#ISSUE_EXACT).
+  message says: make the updates atomic (#202). An `exact` update,
+  `m[cell[c, k]] += 1` of integers, keeps the order of its updates and is
+  refused `atomic`, as an `exact` sum is refused a tree, although integer
+  addition gives the same bits in any order (#200).
 - The target-capability check knows the limits of loopy 2025.2 listed in notes
   6, 11 and 14 of `docs/loopy-notes.md` and no others, so it is a list rather
   than a model of what the backend can do. A schedule it passes can still fail

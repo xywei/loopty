@@ -506,7 +506,9 @@ class Collision:
     ``first`` and ``second`` are ``(statement id, coordinates)``, the
     coordinates by loop name, ``first`` the one the run reached first;
     ``reads`` are the cells the subscript of each read on the way to the
-    cell, with what they held, ``cell[0, 1] = 1``.
+    cell, with what they held, ``cell[0, 1] = 1``. ``relation`` is for a
+    caller that asked about several relations, which of them the pair is in
+    (:meth:`loopty.schedule.Schedule._real_pair`).
     """
 
     label: str
@@ -516,6 +518,7 @@ class Collision:
     first: tuple[str, dict[str, int]]
     second: tuple[str, dict[str, int]]
     reads: tuple[str, ...] = ()
+    relation: int = 0
 
     @property
     def instances(self) -> str:

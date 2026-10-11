@@ -3089,9 +3089,14 @@ class Schedule:
         return out
 
     def example(self, **arrays: Any) -> Schedule:
-        """Record example inputs for ``loopty run``; returns a new schedule."""
+        """Record example inputs for ``loopty run``; returns a new schedule.
+
+        They are the first inputs a refusal reads a pair off, too (see
+        :meth:`_example_logs`), so the new schedule logs them afresh.
+        """
         other = self._clone()
         other._examples = dict(arrays)
+        other._logged = {}
         return other
 
     @property
@@ -5402,12 +5407,11 @@ class Schedule:
             candidates.append((None, together))
         axis, violating = candidates[0]
         found = None
-        for where, relation in candidates:
-            real = self._real_pair(dep, relation)
-            if real is not None:
-                axis, (witness, found) = where, real
-                break
-        if found is None:
+        real = self._real_pair(dep, *(relation for _, relation in candidates))
+        if real is not None:
+            witness, found = real
+            axis = candidates[found.relation][0]
+        else:
             witness = self._pair_in(violating)
         (source_id, source_coords), (sink_id, sink_coords), params = witness
         cell, at, note = self._cell_and_sizes(dep, source_coords, params, found)
@@ -5448,8 +5452,13 @@ class Schedule:
         detail = f"two updates of {dep.array} run at the same time"
         return message, witness, detail, oracle, dep.array
 
-    def _real_pair(self, dep: _Dep, violating: isl.Map) -> tuple[tuple, Any] | None:
+    def _real_pair(self, dep: _Dep, *violating: isl.Map) -> tuple[tuple, Any] | None:
         """A pair of ``violating`` that touches one cell on an example input.
+
+        ``violating`` may be several relations, each a way the step can be
+        wrong (an axis of work items, an order): the inputs are taken in
+        turn, and on each the relations in turn, and the found collision's
+        ``relation`` is the position of the one it is in.
 
         Only for a dependence through a subscript isl cannot read
         (:func:`_widened`), whose relation pairs every two instances: the
@@ -5479,14 +5488,16 @@ class Schedule:
             ) == kinds
 
         for logged in self._example_logs():
-            for found in collisions(self._term, logged, dep.array, wanted):
-                if self._holds(violating, found.first, found.second, logged.sizes):
-                    witness = (
-                        (found.first[0], dict(found.first[1])),
-                        (found.second[0], dict(found.second[1])),
-                        dict(logged.sizes),
-                    )
-                    return witness, found
+            pairs = list(collisions(self._term, logged, dep.array, wanted))
+            for position, relation in enumerate(violating):
+                for found in pairs:
+                    if self._holds(relation, found.first, found.second, logged.sizes):
+                        witness = (
+                            (found.first[0], dict(found.first[1])),
+                            (found.second[0], dict(found.second[1])),
+                            dict(logged.sizes),
+                        )
+                        return witness, dataclasses.replace(found, relation=position)
         return None
 
     def _holds(
@@ -5550,9 +5561,12 @@ class Schedule:
         if self._examples is not None:
             sources.append(("the schedule's example inputs", dict(self._examples)))
         if hasattr(self._source, "fn"):
-            for label, arguments, _record in _inputs(self._source, self._term):
-                if not isinstance(arguments, str):
-                    sources.append((label, arguments))
+            try:
+                for label, arguments, _record in _inputs(self._source, self._term):
+                    if not isinstance(arguments, str):
+                        sources.append((label, arguments))
+            except Exception:  # noqa: BLE001 - an input not made is passed over
+                pass
         logs: list[Any] = []
         for label, arguments in sources:
             log: list[Any] = []

@@ -292,10 +292,10 @@ asked about; each says so with `--verbose`, and the coverage report lists them.
   `atomic("y")`, is refused with a `disjoint-writes` fact of the step, which
   is read off the step's order and its work items, as a crossing is, and is
   stated for isl only; where the cell is read from an array the pair is read
-  off an example input, and the fact is the native run's, not isl's. The
-  casts of a schedule with updates are stated for Lean without the classes of
-  two updates of one cell, which need no order; `examples/assembly.py` has
-  them all proved.
+  off an example input, and the fact is the native run's, not isl's; issue
+  [#201](https://github.com/xywei/loopty/issues/201). The casts of a schedule
+  with updates are stated for Lean without the classes of two updates of one
+  cell, which need no order; `examples/assembly.py` has them all proved.
 - **A part of a tile isl computed:** a statement in one of two tiled loops is
   split by the part of the tile's map over its loop, which isl computes; a
   cast with such a step is left `decided`; none of the examples has one;

@@ -304,6 +304,23 @@ def test_the_cells_split_onto_work_items_are_refused_with_a_shared_node() -> Non
     assert first == second == "S0" and sizes == {"nc": 2, "nv": 4}
 
 
+def test_a_schedules_own_example_inputs_are_read_first() -> None:
+    # Two triangles that share node 0, given to the schedule: its refusal is
+    # read off them, before the module's example_inputs().
+    cells = Arr.from_numpy(np.array([[0, 1, 2], [3, 4, 0]]))
+    schedule = (
+        Schedule(scatter)
+        .example(cell=cells, yl=Arr.zeros((2, 3)), y=Arr.zeros(5))
+        .split("c", 32)
+    )
+    with pytest.raises(IllegalCast) as caught:
+        schedule.tag(c_outer="g.0", c_inner="l.0")
+    assert (
+        "S0[c=0, k=0] and S0[c=1, k=2] both update y[0] on the schedule's "
+        "example inputs (nc=2, nv=5), where cell[0, 0] = 0 and cell[1, 2] = 0"
+    ) in str(caught.value)
+
+
 def test_atomic_updates_may_run_on_two_work_items() -> None:
     schedule = (
         Schedule(scatter).atomic("y").split("c", 32).tag(c_outer="g.0", c_inner="l.0")
