@@ -2156,6 +2156,29 @@ def test_a_sum_of_a_negation_is_computed_as_the_body_wrote_it():
     # C has no literal of the smallest int32: -2147483648 is the negation of
     # a long, and k[i] + -2147483648 was computed in 64 bits, never wrapping.
     assert "k[i] + (-2147483647 - 1)" in emit_code(plus_negations)
+
+
+@kernel
+def above_the_smallest(k: Arr[Fin[n], Int], b: Arr[Fin[n], Bool]):  # noqa: F821
+    """A comparison with the smallest int64, which C has no literal of."""
+    for i in k.dom:
+        b[i] = k[i] > -(2**63)
+
+
+def test_the_smallest_int64_is_written_as_c_writes_it():
+    # -9223372036854775808 is the negation of 9223372036854775808, which no
+    # signed type of C holds: GCC reads it in 128 bits and warns that it is
+    # so large that it is unsigned, and clang reads it as an unsigned long,
+    # which compares k[i] as an unsigned value, false at 0. Written as C
+    # writes the smallest int64, it is one, whatever the compiler.
+    def make() -> dict:
+        return {"k": np.array([-1, 0, 5, -(2**63)]), "b": np.zeros(4, bool)}
+
+    native = make()
+    above_the_smallest(**native)
+    assert list(native["b"]) == [True, True, True, False]
+    agrees(above_the_smallest, make)
+    assert "(-9223372036854775807l - 1)" in emit_code(above_the_smallest)
     term = plus_negations.term
     assert not any(isinstance(stmt.expr, Difference) for stmt in term.stmts)
     assert isinstance(differences.term.stmts[0].expr, Difference)

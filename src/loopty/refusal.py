@@ -140,9 +140,7 @@ def _unread_guard(error: LoopyIndexError, lowering: Lowering) -> GuardNotRead | 
         f"{stmt.where}: it reads into isl only a guard that is an affine "
         f"comparison of integers, so under the guard{plural} {guard} it checks "
         "the access at every point of the loops around it, and cannot show it "
-        "in bounds there. loopty's in-bounds fact of the access asks the same "
-        "of the same points, and 'lanky check' reports it refuted, with the "
-        f"guard left out. {fix}. loopy said: {text}"
+        f"in bounds there. {fix}. loopy said: {text}"
     )
 
 

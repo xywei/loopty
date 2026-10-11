@@ -43,7 +43,9 @@ All notable changes to loopty are recorded here. The format follows
   smallest `int32` and `int64` are written as C writes `INT_MIN`,
   `(-2147483647 - 1)`: `-2147483648` is the negation of a `long` in C, and
   `k[i] + -2147483648` of an `int32` `k` was computed in 64 bits, never
-  wrapping round as numpy does.
+  wrapping round as numpy does; `-9223372036854775808` is the negation of a
+  constant no signed type holds, which GCC reads in 128 bits with a warning
+  and clang as an `unsigned long`.
 - `abs` of a real in a guard lowers (#154): loopy's type inference visits a
   statement's value and never its guard, so `abs`, which only the guard
   called, was never resolved, and loopy failed with `KeyError: 'abs'`. In a

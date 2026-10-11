@@ -406,7 +406,8 @@ class NumpyArithmetic:
         is the negation of ``2147483648``, a ``long``, so ``k[i] +
         -2147483648`` of an ``int32`` ``k`` was computed in 64 bits, where
         numpy wraps round in ``int32`` (#151), and ``9223372036854775808`` fits
-        no signed type at all. Each is written as C writes ``INT_MIN``,
+        no signed type at all, which GCC reads in 128 bits with a warning and
+        clang as an ``unsigned long``. Each is written as C writes ``INT_MIN``,
         ``(-2147483647 - 1)``, and ``(-9223372036854775807l - 1)``, in the type
         loopy gives it (:func:`_smallest`).
         """
