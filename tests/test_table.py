@@ -383,3 +383,40 @@ def test_a_compiled_run_writes_no_read_only_array() -> None:
         LoopyExecutor().run(times, t=np.ones(3), y=STEPS.values)
     assert list(STEPS.values) == [1.0, 2.0, 3.0]
     assert list(STEPS.numpy()) == [1.0, 2.0, 3.0]
+
+
+def test_a_complex_table_on_opencl_is_the_kernels_own() -> None:
+    # pyopencl writes each complex value as a call, cdouble_new(1.0, 2.0),
+    # which no __constant array outside the kernel may be initialized by: it
+    # did not build ("initializer element is not a compile-time constant").
+    # Generating the code needs pyopencl and no device.
+    pytest.importorskip("pyopencl")
+    import loopy as lp
+
+    from loopty.isl_reading import declining
+
+    with lp.CacheMode(False), declining():
+        code = lp.generate_code_v2(
+            Schedule(kinds, target="opencl").kernel
+        ).device_code()
+    assert "__constant cdouble_t" not in code
+    assert "  cdouble_t Z[3] = { cdouble_new(1.0, 2.0), " in code
+    assert "__constant float SINGLE[3]" in code
+
+
+def test_on_an_opencl_device_tables_of_every_kind_agree() -> None:
+    # Run by hand on a device (docs/device-runs.md); CI has none.
+    cl = pytest.importorskip("pyopencl")
+    try:
+        cl.create_some_context(interactive=False)
+    except Exception as exc:  # noqa: BLE001 - no platform, no device
+        pytest.skip(f"no OpenCL device: {exc}")
+    inputs = {
+        "z": Arr.from_numpy(np.arange(5) + 1j),
+        "f": Arr.from_numpy(np.ones(5, np.float32)),
+        "k": Arr.from_numpy(np.arange(5)),
+    }
+    fact = LoopyExecutor(target="opencl").differential(
+        kinds, Schedule(kinds, target="opencl"), inputs
+    )
+    assert fact.status is Status.TESTED, fact.provenance

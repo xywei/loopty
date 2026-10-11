@@ -4017,13 +4017,13 @@ def _arguments(
         args.append(_temporary(term, name, typ, builder.target, declared | scalars))
         declared.add(name)
     for name, values in term.tables:
-        args.append(_table(name, values))
+        args.append(_table(name, values, builder.target))
         declared.add(name)
 
     return args, tuple(array_args), tuple(value_args), tuple(outputs)
 
 
-def _table(name: str, values: Any) -> Any:
+def _table(name: str, values: Any, target: str | None) -> Any:
     """The loopy temporary for a constant table (:class:`loopty.table.Table`).
 
     Read-only, with the table's values as its initializer, and in global
@@ -4032,14 +4032,24 @@ def _table(name: str, values: Any) -> Any:
     every digit of each value (its ``repr``), so the compiled run reads the
     numbers the native one does. A private one would be an array on the stack
     of every call, initialized at every call.
+
+    But for a complex table on OpenCL, which is private: pyopencl's complex
+    numbers are structs, and loopy writes each value as a call,
+    ``cfloat_new(1.0f, 2.0f)``, which is no constant expression, and an array
+    outside the kernel's function, whose initializer has to be one, did not
+    build ("initializer element is not a compile-time constant"). An array of
+    the kernel's function may be initialized by calls.
     """
+    private = target == "opencl" and values.dtype.kind == "c"
     return lp.TemporaryVariable(
         name,
         values.dtype,
         shape=values.shape,
         initializer=values.values,
         read_only=True,
-        address_space=lp.AddressSpace.GLOBAL,
+        address_space=(
+            lp.AddressSpace.PRIVATE if private else lp.AddressSpace.GLOBAL
+        ),
     )
 
 
