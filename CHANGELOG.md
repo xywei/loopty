@@ -70,8 +70,9 @@ All notable changes to loopty are recorded here. The format follows
   loopy's `dim_tags`, stores it; isl decides each and Lean proves it, the
   third with isl's inverse of the layout, in pieces with `//` and `%`, as
   its witness. A layout of one piece is called as its function, so a kernel
-  reads through it, and a call after a number the function computes with
-  has changed since its facts were stated is refused, naming the number.
+  reads through it; a call whose address is not the one the facts are about
+  (a constant or a helper the function computes with changed since it was
+  declared) is refused, with both addresses.
   `examples/storage_layouts.py` checks sumpy's
   compressed-Taylor storage index in two pieces, and grudge #418's
   `N3,N0,N1,N2` against modepy's F-order reshape of the DOFArray; the

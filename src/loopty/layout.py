@@ -77,9 +77,8 @@ class Piece:
     ``names`` name the cell's indices as the function names them, ``cells``
     is the isl set of them, described (:mod:`loopty.description`), and
     ``address`` the term the function returns. ``buffer`` is the bound of the
-    return annotation's ``Fin``. ``numbers`` are the module constants (and
-    the closure's) the function read, a number each, as they were when the
-    address was computed, which is the address the facts are about.
+    return annotation's ``Fin``. ``packed`` says the function takes the cell
+    as one tuple, ``cell: Where[...]``.
     """
 
     fn: Any
@@ -87,23 +86,40 @@ class Piece:
     cells: isl.Set
     address: Any
     buffer: Any
-    numbers: tuple[tuple[str, Any], ...] = ()
+    packed: bool = False
 
-    def changed(self) -> tuple[str, Any, Any] | None:
-        """A number the function reads that is no longer what it was, or ``None``."""
-        if not self.numbers:
+    def stated(self, indices: Sequence[Any], got: Any) -> str | None:
+        """Why ``got``, the function's address at ``indices``, is not the stated one.
+
+        The facts are about :attr:`address`, the term the function returned
+        when the layout was declared, and a call runs the function again, so
+        anything it computes with besides the indices (a module constant, a
+        helper) may have changed since. At a cell of numbers the address is
+        compared with the term's value there; at symbolic indices, in a
+        traced kernel, the function's term is computed again and compared
+        with the stated one. ``None`` when they agree.
+        """
+        import numbers
+
+        from lanky.terms import Var, render, structurally_equal
+        from pymbolic import evaluate
+
+        from loopty.lower import _plain
+
+        values = tuple(indices[0]) if self.packed else tuple(indices)
+        if len(values) == len(self.names) and all(
+            isinstance(value, numbers.Integral) for value in values
+        ):
+            stated = evaluate(_plain(self.address), dict(zip(self.names, values)))
+            if got == stated:
+                return None
+            cell = ", ".join(f"{n}={v}" for n, v in zip(self.names, values))
+            return f"{got} for ({cell}), where its facts say {stated}"
+        fresh = tuple(Var(name) for name in self.names)
+        now = self.fn(fresh) if self.packed else self.fn(*fresh)
+        if structurally_equal(_plain(now), _plain(self.address)):
             return None
-        fn = self.fn
-        free = dict(zip(fn.__code__.co_freevars, fn.__closure__ or (), strict=False))
-        scope = getattr(fn, "__globals__", {})
-        for name, then in self.numbers:
-            try:
-                now = free[name].cell_contents if name in free else scope[name]
-            except (KeyError, ValueError):
-                now = None
-            if now is not then and now != then:
-                return name, then, now
-        return None
+        return f"{render(now)}, where its facts say {render(self.address)}"
 
     @property
     def label(self) -> str:
@@ -202,39 +218,8 @@ def _piece(fn: Any) -> Piece:
             f"{name}: the address {address} is not a sum of the indices times "
             "numbers, with // and % by numbers, which isl and Lean can state"
         )
-    return Piece(fn, names, cells, address, buffer.bound, _numbers(fn))
-
-
-def _numbers(fn: Any) -> tuple[tuple[str, Any], ...]:
-    """The numbers ``fn`` reads by name, a module constant or a closure's.
-
-    The names of its code and the code nested in it (a comprehension),
-    looked up in its module and its closure, those whose value is a number:
-    what the address a layout's facts are about depends on besides the
-    indices.
-    """
-    import numbers
-
-    codes = [fn.__code__]
-    names: list[str] = []
-    while codes:
-        code = codes.pop()
-        names.extend(code.co_names)
-        codes.extend(c for c in code.co_consts if hasattr(c, "co_names"))
-    scope = dict(getattr(fn, "__globals__", {}))
-    cells = getattr(fn, "__closure__", None) or ()
-    for name, cell in zip(fn.__code__.co_freevars, cells, strict=False):
-        try:
-            scope[name] = cell.cell_contents
-        except ValueError:  # an empty cell
-            continue
-        names.append(name)
-    out = {}
-    for name in names:
-        value = scope.get(name)
-        if isinstance(value, numbers.Number):
-            out[name] = value
-    return tuple(sorted(out.items()))
+    packed = len(params) == 1 and index_domain(annotations.get(params[0])) is not None
+    return Piece(fn, names, cells, address, buffer.bound, packed)
 
 
 def _owner(obj: Any, fn: Any) -> str:
@@ -320,17 +305,18 @@ class Layout:
                 "one whose cells you are at"
             )
         (piece,) = self.pieces
-        changed = piece.changed()
-        if changed is not None:
+        got = piece.fn(*indices)
+        differs = piece.stated(indices, got)
+        if differs is not None:
             # the facts are about the address as it was computed when the
-            # layout was declared
-            name, then, now = changed
+            # layout was declared, and something it computes with changed
             raise LayoutError(
-                f"{self.name} computes with {name}, which was {then} when its "
-                f"facts were stated and is {now} now; declare the layout after "
-                f"{name} is set, and do not change it"
+                f"{self.name} now computes the address {differs}: something it "
+                "computes with besides the indices changed after it was "
+                "declared; declare the layout after the numbers it reads are set, "
+                "and do not change them"
             )
-        return piece.fn(*indices)
+        return got
 
     def relation(self) -> isl.Map:
         """The layout as one isl map, ``{ [c0, ...] -> [address] }``."""

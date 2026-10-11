@@ -191,29 +191,48 @@ def test_a_size_in_a_layouts_body_is_said_to_be_one() -> None:
     )
 
 
-#: A module constant a layout computes with.
+#: Module constants a layout computes with, directly and through a helper.
 SHIFT = 1
+SCALE = 1
 
 
-def test_a_layout_called_after_a_number_it_reads_changed_is_refused(
+def scaled(i):
+    """A helper a layout calls."""
+    return SCALE * i
+
+
+def test_a_layout_called_after_what_it_computes_with_changed_is_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The facts are about the address as it was when the layout was
-    # declared; a kernel that read through it after SHIFT changed would read
-    # cells the facts say nothing about.
+    # declared; a kernel that read through it after SHIFT changed, or a
+    # helper's SCALE, would read cells the facts say nothing about.
     def shifted(i: Fin[4]) -> Fin[4]:  # noqa: F821
         return (i + SHIFT) % 4
 
-    checked = layout(shifted)
-    assert checked(2) == 3
+    def through(i: Fin[4]) -> Fin[4]:  # noqa: F821
+        return scaled(i)
+
+    checked, helped = layout(shifted), layout(through)
+    assert (checked(2), helped(2)) == (3, 2)
     assert [status for status, _ in reasons(checked)] == ["decided"] * 3
     monkeypatch.setitem(globals(), "SHIFT", 2)
+    monkeypatch.setitem(globals(), "SCALE", 2)
     with pytest.raises(LayoutError) as caught:
         checked(2)
     assert str(caught.value) == (
-        "shifted computes with SHIFT, which was 1 when its facts were stated and "
-        "is 2 now; declare the layout after SHIFT is set, and do not change it"
+        "shifted now computes the address 0 for (i=2), where its facts say 3: "
+        "something it computes with besides the indices changed after it was "
+        "declared; declare the layout after the numbers it reads are set, and do "
+        "not change them"
     )
+    with pytest.raises(LayoutError, match="through now computes the address 4"):
+        helped(2)
+    # traced, at symbolic indices, the function's term is compared
+    from lanky.terms import Var
+
+    with pytest.raises(LayoutError, match=r"2\*i, where its facts say 1\*i"):
+        helped(Var("i"))
 
 
 def test_a_kernel_reads_through_the_layout_it_declares() -> None:
