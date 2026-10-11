@@ -600,7 +600,10 @@ class Kernel(_Decorated):
         (:func:`loopty.faithful.postcondition_fact`), which is what a program
         that calls the kernel counts it as. So is a ``layout`` fact no isl
         question decides, which a run that moves a row off its buffer or onto
-        another refutes (:func:`loopty.faithful.layout_fact`).
+        another refutes (:func:`loopty.faithful.layout_fact`), and a write
+        through a cell read from an array, whose distinct writes isl cannot
+        decide: refuted by two instances that write one cell on an input, or
+        ``tested`` (:func:`loopty.faithful.collision_fact`).
 
         A body that cannot be traced is itself reported as a fact rather than as
         a crash, so that ``lanky check`` on a file with one broken kernel still
@@ -636,14 +639,32 @@ class Kernel(_Decorated):
                 ),
             )
             return self._facts
-        from loopty.faithful import faithfulness_fact, layout_fact, postcondition_fact
+        from loopty.faithful import (
+            collision_fact,
+            faithfulness_fact,
+            layout_fact,
+            postcondition_fact,
+        )
 
         key = {"module": self.module, "line": self.line}
-        observed: list[Any] = []
-        faithful = faithfulness_fact(
-            self, term, owner=self.qualname, where=self.where, observed=observed, **key
-        )
         stated = rules.facts_for(term, owner=self.qualname, where=self.where, **key)
+        # A write through a subscript read from an array is decided on the
+        # runs, from the cells the interpreted term wrote (collision_fact).
+        native = any(
+            fact.kind == "disjoint-writes" and fact.provenance.get("native")
+            for fact in stated
+        )
+        observed: list[Any] = []
+        touched: list[Any] | None = [] if native else None
+        faithful = faithfulness_fact(
+            self,
+            term,
+            owner=self.qualname,
+            where=self.where,
+            observed=observed,
+            touched=touched,
+            **key,
+        )
         tested = [
             postcondition_fact(
                 self, term, observed, owner=self.qualname, where=self.where, **key
@@ -651,6 +672,8 @@ class Kernel(_Decorated):
             if fact.kind == "postcondition"
             else layout_fact(term, fact, observed)
             if fact.kind == "layout"
+            else collision_fact(term, fact, touched or ())
+            if fact.kind == "disjoint-writes" and fact.provenance.get("native")
             else fact
             for fact in stated
         ]
@@ -1007,10 +1030,11 @@ class KernelTheory:
     each reduction, and the postcondition; then the ``trace-faithful`` fact,
     that the term computes what the body computes (:mod:`loopty.faithful`). A
     program's are its callees' postconditions restated, and its own
-    ``trace-faithful`` fact. An object this theory does not own gives an empty
-    tuple, which is how several theories share one ledger.
+    ``trace-faithful`` fact. A layout's are its own (:mod:`loopty.layout`). An
+    object this theory does not own gives an empty tuple, which is how several
+    theories share one ledger.
 
-    After them come the casts of the schedules of the kernel or the program
+    After a kernel's or a program's facts come the casts of its schedules
     that its file holds at module level, as ``loopty run`` finds them
     (:func:`loopty.cli.collect`): each step's facts, decided by isl as the
     step was taken (:func:`schedule_facts`), so that ``lanky check`` has
@@ -1032,10 +1056,14 @@ class KernelTheory:
         return registry.register_object(Kernel(obj))
 
     def facts(self, obj: Any, /) -> tuple:
-        """Return the facts of a decorated kernel or program, its schedules' last."""
+        """Return the facts of a kernel, a program or a layout; schedules' last."""
         if isinstance(obj, Kernel | Program):
             own = obj.facts()
             return (*own, *schedule_facts(obj, {fact.id for fact in own}))
+        from loopty.layout import Layout, SameLayout
+
+        if isinstance(obj, Layout | SameLayout):
+            return obj.facts()
         return ()
 
 

@@ -84,7 +84,7 @@ from loopty.term import (
 )
 from loopty.trace import accesses_in, reductions_in
 
-__all__ = ["CheckFailed", "InterpretError", "TooLarge", "interpret"]
+__all__ = ["CheckFailed", "InterpretError", "TooLarge", "Touch", "interpret"]
 
 
 class InterpretError(RuntimeError):
@@ -160,7 +160,11 @@ _BINARY = (
 
 
 def interpret(
-    term: Term, arguments: Mapping[str, Any], limit: int | None = None
+    term: Term,
+    arguments: Mapping[str, Any],
+    limit: int | None = None,
+    *,
+    log: list[Touch] | None = None,
 ) -> dict[str, np.ndarray]:
     """Run ``term`` on ``arguments``, in place, and return what it wrote.
 
@@ -184,8 +188,33 @@ def interpret(
     ``float64``, and a scalar is read in that dtype whatever the term does
     (:func:`loopty.contract.native_scalar`). That is what the native run does
     (see :meth:`loopty.kernel.Kernel.__call__`).
+
+    ``log``, when given, collects every cell a statement instance touches,
+    in the order the run touches them, as :class:`Touch` entries: each read
+    of its right-hand side, its sums, its guard and its subscripts, and its
+    write. That is where two instances that touch one cell are found when
+    the cell is read from an array, which isl cannot follow
+    (:func:`loopty.faithful.collisions`).
     """
-    return _Run(term, arguments).run(limit)
+    return _Run(term, arguments, log).run(limit)
+
+
+@dataclass(frozen=True)
+class Touch:
+    """One cell one statement instance touched, as :func:`interpret` logs it.
+
+    ``coords`` are the values of the statement's loop variables, in the
+    order of :attr:`loopty.term.Stmt.inames`; ``cell`` the indices of the
+    cell, as the run computed them; ``kind`` ``"read"`` or ``"write"``; and
+    ``value`` what was read or written there.
+    """
+
+    stmt: str
+    coords: tuple[int, ...]
+    array: str
+    cell: tuple[Any, ...]
+    kind: str
+    value: Any = None
 
 
 def _storage(value: Any, typ: ArrType, written: bool) -> Arr:
@@ -248,8 +277,17 @@ class _Member:
 class _Run:
     """One interpretation: the arguments, the sizes, and the values of names."""
 
-    def __init__(self, term: Term, arguments: Mapping[str, Any]) -> None:
+    def __init__(
+        self,
+        term: Term,
+        arguments: Mapping[str, Any],
+        log: list[Touch] | None = None,
+    ) -> None:
         self.term = term
+        #: Where the cells touched are logged (see :func:`interpret`), and
+        #: the instance running now, ``(statement id, coordinates)``.
+        self.log = log
+        self.current: tuple[str, tuple[int, ...]] | None = None
         written = {stmt.assignee.array for stmt in term.stmts}
         self.arrays: dict[str, Arr] = {}
         self.scalars: dict[str, Any] = {}
@@ -723,11 +761,29 @@ class _Run:
                 return
         self.spend()
         stmt, point = member.stmt, {**member.read, **member.env}
-        if stmt.guard is not None and not self.truth(stmt.guard, point):
-            return
-        value = self.value(stmt.expr, point)
-        indices = [self.index(i, point) for i in stmt.assignee.indices]
-        self.arrays[stmt.assignee.array][_key(indices)] = value
+        if self.log is not None:
+            self.current = (stmt.id, tuple(int(point[name]) for name in stmt.inames))
+        try:
+            if stmt.guard is not None and not self.truth(stmt.guard, point):
+                return
+            value = self.value(stmt.expr, point)
+            indices = [self.index(i, point) for i in stmt.assignee.indices]
+            self.arrays[stmt.assignee.array][_key(indices)] = value
+            if self.current is not None:
+                self._touched(stmt.assignee.array, indices, "write", value)
+        finally:
+            self.current = None
+
+    def _touched(
+        self, array: str, indices: Sequence[Any], kind: str, value: Any
+    ) -> None:
+        """Log one cell the running instance touched (see :func:`interpret`)."""
+        assert self.log is not None and self.current is not None
+        cell = tuple(
+            int(index) if isinstance(index, int | np.integer) else index
+            for index in indices
+        )
+        self.log.append(Touch(*self.current, array, cell, kind, value))
 
     def _known(self) -> dict[str, Any]:
         """The sizes and the numeric scalars, which a domain may name.
@@ -860,8 +916,11 @@ class _Run:
         """One array element, read the way the native run reads it."""
         if array not in self.arrays:
             raise InterpretError(f"{array} is subscripted and is not an array")
-        key = _key([self.index(i, env) for i in indices])
+        computed = [self.index(i, env) for i in indices]
+        key = _key(computed)
         value = self.arrays[array][key]
+        if self.current is not None:
+            self._touched(array, computed, "read", value)
         read_in = self.read_as.get(array)
         if read_in is not None and isinstance(value, np.generic):
             return read_in.type(value)

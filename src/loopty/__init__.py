@@ -67,6 +67,7 @@ _EXPORTS = {
     "Where": "loopty.domain",
     "facts_for": "loopty.typing",
     "kernel": "loopty.kernel",
+    "layout": "loopty.layout",
     "program": "loopty.kernel",
     "reduce_sum": "loopty.reduction",
     "table": "loopty.table",
@@ -102,6 +103,7 @@ __all__ = [
     "__version__",
     "facts_for",
     "kernel",
+    "layout",
     "program",
     "reduce_sum",
     "table",
@@ -154,6 +156,7 @@ if TYPE_CHECKING:
     from loopty.domain import Sigma, Where
     from loopty.idx import Fin
     from loopty.kernel import Kernel, Program, kernel, program
+    from loopty.layout import layout
     from loopty.oracle import IslOracle
     from loopty.reduction import reduce_sum
     from loopty.schedule import IllegalCast, Schedule, UnbuildableSchedule
