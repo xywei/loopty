@@ -1196,11 +1196,16 @@ def mode_report(options: argparse.Namespace) -> None:
                 r = found[0]
                 seconds = float(r["median_s"])
                 ndofs = int(r["ndofs"])
-                text = f"{ndofs / seconds / 1e9:.2f}"
+                rate = ndofs / seconds / 1e9
+                text = f"{rate:.2f}" if rate >= 0.1 else f"{rate:.2g}"
                 bandwidth = copies.get((name, order))
                 if bandwidth:
                     roof = required_bytes(op, ndofs) / (bandwidth * seconds)
-                    text += f" ({100 * roof:.0f}%)"
+                    text += (
+                        f" ({100 * roof:.0f}%)"
+                        if roof >= 0.01
+                        else f" ({100 * roof:.1g}%)"
+                    )
                 cells.append(text)
             print(f"| {variant} | " + " | ".join(cells) + " |")
 
