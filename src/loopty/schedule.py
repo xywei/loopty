@@ -222,6 +222,7 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
+import re
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -234,6 +235,7 @@ from pymbolic.mapper.substitutor import substitute
 
 from loopty import idx
 from loopty import oracle as isl_oracle
+from loopty.description import MapText, Unstatable, describe, map_text, map_text_of
 from loopty.flow import bounds_dimension
 from loopty.isl_reading import declining_methods
 from loopty.lower import (
@@ -245,6 +247,7 @@ from loopty.lower import (
     lower_generic,
     reductions_of,
 )
+from loopty.obligations import IslOnly
 from loopty.term import Stmt, Term
 from loopty.typing import layout_fact_ids
 
@@ -636,7 +639,8 @@ def _reindexing(
         out = out.set_dim_name(isl.dim_type.in_, k, name)
     for k, name in enumerate(outputs):
         out = out.set_dim_name(isl.dim_type.out, k, name)
-    return out
+    # the text the map was written as, for a cast Lean checks (loopty.description)
+    return describe(out, MapText(tuple(inputs), tuple(outputs), tuple(constraints)))
 
 
 def _as_maps(mapping: Any) -> tuple[Any, dict[str, isl.Map] | None]:
@@ -650,7 +654,14 @@ def _as_maps(mapping: Any) -> tuple[Any, dict[str, isl.Map] | None]:
     with its tuple name taken off, since the checker and the kernel rewrite
     match loops by name and not by tuple; ``None`` for one map.
     """
+    written: dict[str | None, MapText] = {}
     if isinstance(mapping, str):
+        try:
+            written = map_text(mapping)
+        except Unstatable:
+            # isl's reader takes more than loopty's; such a map is checked by
+            # isl alone, and a cast after it is not stated for Lean
+            written = {}
         try:
             mapping = isl.UnionMap(mapping)
         except isl.Error as exc:
@@ -683,6 +694,8 @@ def _as_maps(mapping: Any) -> tuple[Any, dict[str, isl.Map] | None]:
                 "loops, and one map moves every statement in its loops; give "
                 "one map, or name the statement of each"
             )
+        if None in written and len(written) == 1:
+            describe(maps[0], written[None])
         return maps[0], None
     if not all(named):
         raise ValueError(
@@ -700,6 +713,8 @@ def _as_maps(mapping: Any) -> tuple[Any, dict[str, isl.Map] | None]:
                 "moves by one"
             )
         pieces[stmt_id] = piece.reset_tuple_id(isl.dim_type.in_)
+        if stmt_id in written:
+            describe(pieces[stmt_id], written[stmt_id])
     return mapping, pieces
 
 
@@ -2429,6 +2444,70 @@ class _Draft:
     outside: dict[str, frozenset[str]] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, eq=False)
+class Step:
+    """One step of a schedule as its checker saw it, kept for a cast Lean checks.
+
+    ``old`` and ``new`` are each statement's coordinates before and after the
+    step (the layouts, by statement id), ``maps`` the map of each statement
+    the step moves as it was written (:class:`loopty.description.MapText`),
+    or ``None`` where isl computed it (the part of a tile over one of its
+    loops), and ``isl_maps`` the maps themselves, whose functional form isl
+    gives as the witness that a step is total. ``order`` and ``tags`` are the
+    loop nest after the step. ``parent`` is the schedule the step was taken
+    from, and ``substitution`` whether the step computed an array where it is
+    read, which changes what the instances read and so the dependences the
+    later steps are checked against. ``assumptions`` are what the schedule
+    assumed of the sizes when the step was taken (:meth:`Schedule.assume`),
+    as terms, under which isl decided it.
+    """
+
+    text: str
+    recipe: tuple[str, tuple, dict]
+    old: Mapping[str, tuple[str, ...]]
+    new: Mapping[str, tuple[str, ...]]
+    maps: Mapping[str, MapText | None]
+    isl_maps: Mapping[str, Any]
+    order: tuple[str, ...]
+    tags: Mapping[str, str]
+    parent: Any = None
+    substitution: bool = False
+    assumptions: tuple[Any, ...] = ()
+
+
+@dataclass(frozen=True, eq=False)
+class Cast:
+    """The claim of a cast fact, for Lean: the schedule's steps up to this one.
+
+    ``kind`` is ``bijective`` (the step renames the instances one for one) or
+    ``monotone`` (the order after the step runs every dependence forward).
+    ``schedule`` is the schedule the steps start from, which holds the
+    kernel's term, its source order and its first layout, and ``steps`` are
+    every step from there to this one. ``refuted`` says that isl refused the
+    cast, and a refused ``monotone`` cast carries the dependence it reverses
+    and isl's pair as ``refusal``, at which Lean proves it false; a refused
+    cast with no such pair is not offered to Lean. Lean states it from those
+    (:func:`loopty.obligations.cast_obligation`); isl decided it when the
+    step was taken, so the question is not asked again.
+    """
+
+    schedule: Any
+    steps: tuple[Step, ...]
+    kind: str
+    refusal: Any = None
+    refuted: bool = False
+
+    def lean_obligation(self) -> Any:
+        """How Lean is to check this cast (see :mod:`lanky.obligations`)."""
+        from loopty.obligations import cast_obligation
+
+        return cast_obligation(self)
+
+    def __str__(self) -> str:
+        steps = ".".join(step.text for step in self.steps)
+        return f"{self.kind} cast of {self.schedule._term.name}.{steps}"
+
+
 def _transformed(kernel: Any, transform: Any, *args: Any, **kwargs: Any) -> Any:
     """``transform(kernel, ...)``, or ``None`` when there is no kernel left.
 
@@ -2528,6 +2607,15 @@ class Schedule:
                 if iname not in order:
                     order.append(iname)
         self._order = order
+        #: The loop order the term was written in, which the source order of
+        #: its instances is read in (:func:`_time_map`), and every step's
+        #: record from there (see :class:`Step`), for a cast Lean checks.
+        self._origin_order = tuple(order)
+        self._records: tuple[Step, ...] = ()
+        #: What :meth:`assume` was told of the sizes, as terms, and the ids
+        #: of the facts that record it, which every later cast rests on.
+        self._assumptions: tuple[Any, ...] = ()
+        self._assumption_ids: tuple[str, ...] = ()
         self._tags: dict[str, str] = {}
         # A reduction iname is not a coordinate of the instance space: a whole
         # reduction happens inside one statement instance. Splitting or tagging
@@ -4402,6 +4490,7 @@ class Schedule:
             step=recipe,
             reason=message,
             about=array,
+            term=None if verdict.ok is None else IslOnly(),
         )
 
     def _carried_over(
@@ -4519,6 +4608,89 @@ class Schedule:
                                 )
         return (*kept, *carried), tuple(within)
 
+    def assume(self, condition: str) -> Schedule:
+        """Take ``condition`` of the sizes as given: loopy's ``assume``, checked.
+
+        ``condition`` is Python over the kernel's sizes, a comparison or
+        several joined with ``&``, each side an affine expression with ``//``
+        and ``%`` by a number: ``"n % 4 == 0"``, ``"n >= 8"``, or
+        ``"(e - s) % 4 == 0"`` for PyOP2's ``exists zz: end = 4 zz + start``.
+        It is not a cast, since no instance moves. Three things follow:
+
+        - loopy is told (``lp.assume``), so a loop split by a factor that
+          divides its extent needs no remainder, and code generation may use
+          it;
+        - every later cast is decided by isl where the sizes are as assumed,
+          and stated for Lean with the condition among its hypotheses as it
+          is written: a divisibility is the remainder ``n % 4 = 0``, which is
+          ``∃ z, n = 4 * z`` and which ``omega`` reads as it is;
+        - an ``assumption`` fact records it, ``assumed`` on the caller's
+          word, and the later casts rest on it. Where the schedule runs, the
+          sizes of the call are read off its arrays and checked against it
+          first, and a call that breaks it is refused, naming the sizes.
+
+        A condition that names what is not a size of the kernel, or that is
+        not affine, is refused with a ``ValueError``.
+        """
+        from lanky.ledger import Fact, Status
+        from pymbolic import parse
+
+        try:
+            expr = parse(condition)
+        except Exception as exc:  # noqa: BLE001 - said in the user's words
+            raise ValueError(f"assume({condition!r}) is not Python: {exc}") from exc
+        sizes = set(self._term.sizes) | set(self._params)
+        text = _assumption_text(expr, sizes, condition)
+        names = sorted(sizes & set(re.findall(r"[A-Za-z_][A-Za-z_0-9]*", text)))
+        assumed = isl.Set(f"[{', '.join(names)}] -> {{ : {text} }}")
+        other = self._clone()
+
+        def narrowed(obj: Any) -> Any:
+            if obj is None:
+                return None
+            context = assumed.align_params(obj.get_space())
+            return obj.align_params(context.get_space()).intersect_params(context)
+
+        other._instances = narrowed(self._instances)
+        other._origin = narrowed(self._origin)
+        other._reindex = narrowed(self._reindex)
+        other._before = narrowed(self._before)
+        other._deps_total = narrowed(self._deps_total)
+        other._deps = tuple(
+            dataclasses.replace(dep, relation=narrowed(dep.relation))
+            for dep in self._deps
+        )
+        other._kernel = _transformed(self._kernel, lp.assume, text)
+        other._code = _transformed(self._code, lp.assume, text)
+        recipe = ("assume", (condition,), {})
+        fact = Fact(
+            id=self._fact_id("assumption", (*self._steps, recipe)),
+            kind="assumption",
+            statement=f"{condition}, which {self._term.name} is scheduled assuming",
+            term=None,
+            status=Status.ASSUMED,
+            provenance={
+                "condition": condition,
+                "reason": (
+                    "the caller's word, checked against the sizes of every call "
+                    "the schedule runs"
+                ),
+            },
+            where=self._term.stmts[0].where if self._term.stmts else "",
+            owner=self._term.name,
+        )
+        other._assumptions = (*self._assumptions, expr)
+        other._assumption_ids = (*self._assumption_ids, fact.id)
+        other._facts = (*self._facts, fact)
+        other._steps = (*self._steps, recipe)
+        other._history = (*self._history, f"assume({condition!r})")
+        return other
+
+    @property
+    def assumptions(self) -> tuple[Any, ...]:
+        """What :meth:`assume` was told of the sizes, as terms."""
+        return self._assumptions
+
     def realize(self, var: str, tree: bool = True) -> Schedule:
         """Realize an accumulation, optionally as a reduction tree.
 
@@ -4600,6 +4772,23 @@ class Schedule:
             stmt_ids=self._layout.stmt_ids, coords=dict(draft.coords)
         )
         step = _step_map(self._layout, layout, draft.mappings)
+        record = Step(
+            text=text,
+            recipe=recipe,
+            old=dict(self._layout.coords),
+            new=dict(draft.coords),
+            maps={
+                stmt_id: map_text_of(mapping)
+                for stmt_id, mapping in draft.mappings.items()
+            },
+            isl_maps=dict(draft.mappings),
+            order=tuple(draft.order),
+            tags=dict(draft.tags),
+            parent=self,
+            substitution=recipe[0] == "substitute",
+            assumptions=self._assumptions,
+        )
+        records = (*self._records, record)
 
         facts: list[Any] = list(leading)
 
@@ -4623,6 +4812,9 @@ class Schedule:
                 detail=verdict.detail,
                 step=recipe,
                 reason=message,
+                term=Cast(
+                    self._first(), records, "bijective", refuted=verdict.ok is False
+                ),
             )
         )
         if not verdict.ok:
@@ -4685,6 +4877,13 @@ class Schedule:
                 step=recipe,
                 reason=message,
                 rests_on=self._layout_ids,
+                term=Cast(
+                    self._first(),
+                    records,
+                    "monotone",
+                    refusal=None if bad is None else (bad[0], bad[1]),
+                    refuted=refused,
+                ),
             )
         )
         if refused:
@@ -4758,8 +4957,13 @@ class Schedule:
             )
         other._history = (*self._history, text)
         other._steps = (*self._steps, recipe)
+        other._records = records
         other._facts = (*earlier, *facts)
         return other
+
+    def _first(self) -> Schedule:
+        """The schedule the steps start from: this one, before any step."""
+        return self._records[0].parent if self._records else self
 
     def _first_violation(
         self, schedule: isl.Map
@@ -5107,6 +5311,7 @@ class Schedule:
         reason: str = "",
         about: str = "",
         rests_on: tuple[str, ...] = (),
+        term: Any = None,
     ) -> Any:
         """One ledger entry for one question about one step.
 
@@ -5144,6 +5349,10 @@ class Schedule:
         ``rests_on`` names the facts the answer takes for granted, which for a
         ``monotone`` cast of a kernel that rewrites its layout are the layout's
         facts (see :attr:`_layout_ids`).
+
+        ``term`` is the claim for Lean, a :class:`Cast` for the two questions
+        about meaning, which Lean states from the steps' records and proves
+        when it is asked (see :func:`prove`).
         """
         from lanky.ledger import Fact, Status
 
@@ -5158,11 +5367,14 @@ class Schedule:
         if status in ("refuted", "assumed"):
             provenance["reason"] = reason or detail
         suffix = f":{about}" if about else ""
+        if kind in ("bijective", "monotone"):
+            # decided where the sizes are as assumed (see assume)
+            rests_on = (*rests_on, *self._assumption_ids)
         return Fact(
             id=self._fact_id("cast", (*self._steps, step), f"{kind}{suffix}"),
             kind=kind,
             statement=statement,
-            term=None,
+            term=term,
             status=(
                 Status.REFUTED
                 if status == "refuted"
@@ -5180,6 +5392,53 @@ class Schedule:
     def facts(self) -> tuple:
         """The cast facts accumulated by the transformations applied so far."""
         return self._facts
+
+
+def _assumption_text(expr: Any, sizes: set[str], condition: str) -> str:
+    """An assumption as isl text, or a ``ValueError`` saying why it cannot be one."""
+    from loopty.flow import NonAffine, expr_text
+
+    if isinstance(expr, prim.LogicalAnd):
+        return " and ".join(
+            _assumption_text(child, sizes, condition) for child in expr.children
+        )
+    if not isinstance(expr, prim.Comparison) or expr.operator == "!=":
+        raise ValueError(
+            f"assume({condition!r}): an assumption is a comparison of sizes, "
+            "==, <, <=, > or >=, or several joined with &"
+        )
+    names = {
+        node.name for side in (expr.left, expr.right) for node in _variables(side)
+    }
+    unknown = sorted(names - sizes)
+    if unknown:
+        raise ValueError(
+            f"assume({condition!r}): {', '.join(unknown)} is not a size of the "
+            "kernel, and an assumption is about its sizes"
+        )
+    try:
+        left = expr_text(expr.left, None, None)
+        right = expr_text(expr.right, None, None)
+    except NonAffine as exc:
+        raise ValueError(
+            f"assume({condition!r}): isl states affine expressions of the sizes, "
+            "with // and % by a number, and nothing else"
+        ) from exc
+    operator = "=" if expr.operator == "==" else expr.operator
+    return f"{left} {operator} {right}"
+
+
+def _variables(expr: Any) -> list[Any]:
+    """Every variable of a pymbolic expression."""
+    if isinstance(expr, prim.Variable):
+        return [expr]
+    if isinstance(expr, prim.ExpressionNode):
+        from lanky.terms import init_args
+
+        return [found for arg in init_args(expr) for found in _variables(arg)]
+    if isinstance(expr, tuple | list):
+        return [found for item in expr for found in _variables(item)]
+    return []
 
 
 def _key(name: str, target: str, steps: Sequence[tuple[str, tuple, dict]]) -> str:

@@ -163,6 +163,7 @@ from loopty.contract import (
     sort_bound,
     storage_wanted,
 )
+from loopty.description import describe, description_of
 from loopty.flow import NonAffine, domain_set, expr_text, free_names
 from loopty.hypotheses import (
     discharge,
@@ -254,7 +255,13 @@ def rename_set(obj: Any, names: Mapping[str, str], exprs: Mapping[str, Any]) -> 
     the set already has as a parameter, and checks the names of what it
     returns.
     """
-    return rename(obj, names, exprs, what="a callee's domain in its caller's names")
+    out = rename(obj, names, exprs, what="a callee's domain in its caller's names")
+    described = description_of(obj)
+    if described is not None:
+        # the text the callee's set was written in, read in the caller's names
+        # (loopty.description)
+        describe(out, described.renamed(names, exprs))
+    return out
 
 
 def _isl_text(value: Any) -> str:
