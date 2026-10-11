@@ -809,3 +809,105 @@ def test_a_guard_computed_in_floating_point_is_not_read() -> None:
 
 
 # }}}
+
+
+# {{{ loopy's refusal under a guard it does not read, with the fix named (#148)
+
+
+@kernel
+def squared_guard(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """The cells four on, for the first four, by a product of the loop variable."""
+    for i in y.dom:
+        with when(i * i < 16):
+            y[i] = x[i + 4]
+
+
+@kernel
+def entry_guard(
+    m: Arr[Fin[n], Real],  # noqa: F821
+    x: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The cells four on, where an array's entry says so."""
+    for i in y.dom:
+        with when(m[i] > 0.5):
+            y[i] = x[i + 4]
+
+
+@kernel
+def corner_guard(m: Arr[Fin[n], Fin[k], Real], y: Arr[Fin[n], Fin[k], Real]):  # noqa: F821
+    """The cell one row down and one column left, where an entry says so."""
+    for i in y.dom:
+        for j in y.dom[i]:
+            with when(m[i, j] > 0.5):
+                y[i, j] = m[i + 1, j - 1]
+
+
+@kernel
+def corner_guard_fixed(m: Arr[Fin[n], Fin[k], Real], y: Arr[Fin[n], Fin[k], Real]):  # noqa: F821
+    """corner_guard with the integer guard its refusal names, as it names it."""
+    for i in y.dom:
+        for j in y.dom[i]:
+            with when(m[i, j] > 0.5):
+                with when((j >= 1) & (i <= y.dom.size - 2)):
+                    y[i, j] = m[i + 1, j - 1]
+
+
+@kernel
+def half_guard_fixed(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """half_guard with the integer guard its refusal names."""
+    for i in y.dom:
+        with when((i * 0.5 < 2) & (i <= y.dom.size - 5)):
+            y[i] = x[i + 4]
+
+
+@kernel
+def past_on_the_loops(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """The cells four on, from the second on: past the end, under a read guard."""
+    for i in y.dom:
+        with when(i >= 1):
+            y[i] = x[i + 4]
+
+
+def test_loopys_refusal_under_a_guard_it_does_not_read_names_the_fix() -> None:
+    # loopy's bounds check reads no guard computed in floating point, nor a
+    # product of loop variables, nor an array's entry, so it checked x[i + 4]
+    # at every point of the loop and refused it, in its own words, about its
+    # instruction 'S0', with neither the guard nor a fix named. The refusal
+    # names both, and the guard over integers that keeps the access in
+    # bounds, which loopy reads; it is loopy's LoopyIndexError still.
+    from loopty.refusal import GuardNotRead
+
+    for kern, guard, fix in (
+        (half_guard, "'i*0.5 < 2'", "'with when(i <= y.dom.size - 5):'"),
+        (twice_under, "'i*2.0 < n'", "'with when(2 * i <= y.dom.size - 1):'"),
+        (squared_guard, "'i*i < 16'", "'with when(i <= y.dom.size - 5):'"),
+    ):
+        with pytest.raises(GuardNotRead) as refused:
+            LoopyExecutor().run(kern, **inputs(9)())
+        message = str(refused.value)
+        assert isinstance(refused.value, LoopyIndexError)
+        assert f"under the guard {guard} it checks the access" in message
+        assert fix in message
+        assert "could not establish" in message
+    with pytest.raises(GuardNotRead) as refused:
+        emit_code(half_guard)
+    assert "S0 of half_guard at test_isl_reading.py:" in str(refused.value)
+    assert "'with when(i <= y.dom.size - 5):'" in str(refused.value)
+    with pytest.raises(GuardNotRead, match=r"under the guard 'm\[i\] > 0.5'"):
+        LoopyExecutor().run(entry_guard, m=np.zeros(9), **inputs(9)())
+    with pytest.raises(GuardNotRead) as refused:
+        emit_code(corner_guard)
+    # A size is named as the body reads it, from an array's domain: the body
+    # has no name n, and 'when(i <= n - 5)' was a NameError there.
+    assert "'with when((j >= 1) & (i <= y.dom.size - 2)):'" in str(refused.value)
+    # The guard it names keeps the access in bounds, and loopy reads it.
+    agrees(half_guard_fixed, inputs(9))
+    agrees(corner_guard_fixed, lambda: {"m": np.ones((4, 5)), "y": np.zeros((4, 5))})
+    # Under a guard loopy reads, the refusal is loopy's own, as it was.
+    with pytest.raises(LoopyIndexError) as refused:
+        LoopyExecutor().run(past_on_the_loops, **inputs(9)())
+    assert not isinstance(refused.value, GuardNotRead)
+
+
+# }}}

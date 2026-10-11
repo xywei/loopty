@@ -38,8 +38,8 @@ from loopty.contract import (
     integral_range,
 )
 from loopty.executor import LoopyExecutor, emit_code
-from loopty.lower import numpy_dtype
-from loopty.term import ArrType
+from loopty.lower import LoweringError, numpy_dtype
+from loopty.term import ArrType, Difference
 
 
 def agrees(kern, make) -> None:
@@ -2007,6 +2007,28 @@ def test_an_integer_literal_in_integer_arithmetic_is_an_integer():
 
 
 @kernel
+def reciprocal_single(a: np.float32, y: Arr[Fin[n], np.float32]):  # noqa: F821
+    """A sum of a loop variable and a literal under a double power, into a float32."""
+    for i in y.dom:
+        y[i] = a + (i + 2**24) ** -1
+
+
+def test_an_integer_literal_beside_a_loop_variable_stays_an_integer():
+    # loopy wrote the literal of i + 1 in the single-precision context of
+    # the statement, (double) (i + 1.0f), and C rounded i past 2**24 where
+    # numpy adds the integers exactly (#152); i + 2**24 shows it from i = 1.
+    def make() -> dict:
+        return {"a": np.float32(0), "y": np.zeros(8, np.float32)}
+
+    native = make()
+    reciprocal_single(**native)
+    assert native["y"][1] == np.float32(1 / (2**24 + 1))
+    assert native["y"][1] != np.float32(2.0**-24)
+    assert "(double) (i + 16777216)" in emit_code(reciprocal_single)
+    agrees(reciprocal_single, make)
+
+
+@kernel
 def nested_right(
     k: Arr[Fin[n], Int],  # noqa: F821
     j: Arr[Fin[n], Int],  # noqa: F821
@@ -2082,6 +2104,387 @@ def test_a_difference_is_computed_in_the_type_of_the_two():
     assert native["y"][0] == 133
     assert native["z"][0] == -1 - (2**32 - 1)
     agrees(differences, make)
+
+
+# }}}
+
+
+# {{{ a negation or a literal a sum adds, as the body wrote it (#151)
+
+
+@kernel
+def plus_negations(
+    c: Arr[Fin[n], Int],  # noqa: F821
+    a: Arr[Fin[n], np.int8],  # noqa: F821
+    u: Arr[Fin[n], np.uint8],  # noqa: F821
+    k: Arr[Fin[n], np.int32],  # noqa: F821
+    y: Arr[Fin[n], Int],  # noqa: F821
+    z: Arr[Fin[n], Int],  # noqa: F821
+    w: Arr[Fin[n], Int],  # noqa: F821
+):
+    """Sums of a negation and of a negative literal, which pymbolic builds as
+    it builds the differences."""
+    for i in c.dom:
+        y[i] = c[i] + -a[i]
+        z[i] = c[i] + -u[i]
+        w[i] = k[i] + -(2**31)
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_a_sum_of_a_negation_is_computed_as_the_body_wrote_it():
+    # pymbolic builds a - b as a + -1 * b, and the trace and the plan read
+    # every such sum as the difference: c + -a of an int8 a was c - a, which
+    # numpy computes otherwise at a = -128, and c + -u of a uint8 u was c - u,
+    # where numpy takes -u round, at every u but 0. The differential fact was
+    # refuted on such a draw.
+    def make() -> dict:
+        return {
+            "c": np.array([5, 1, 1, -3]),
+            "a": np.array([-128, 3, 0, 127], np.int8),
+            "u": np.array([255, 0, 1, 7], np.uint8),
+            "k": np.array([5, 1, -1, 2**31 - 1], np.int32),
+            "y": np.zeros(4, np.int64),
+            "z": np.zeros(4, np.int64),
+            "w": np.zeros(4, np.int64),
+        }
+
+    native = make()
+    plus_negations(**native)
+    assert list(native["y"]) == [-123, -2, 1, -130]
+    assert list(native["z"]) == [6, 1, 256, 246]
+    assert list(native["w"]) == [5 - 2**31, 1 - 2**31, 2**31 - 1, -1]
+    agrees(plus_negations, make)
+    # Each is a sum as written, and a '-' the body writes is a Difference.
+    term = plus_negations.term
+    assert not any(isinstance(stmt.expr, Difference) for stmt in term.stmts)
+    assert isinstance(differences.term.stmts[0].expr, Difference)
+    # C has no literal of the smallest int32: -2147483648 is the negation of
+    # a long, and k[i] + -2147483648 was computed in 64 bits, never wrapping.
+    assert "k[i] + (-2147483647 - 1)" in emit_code(plus_negations)
+
+
+@kernel
+def above_the_smallest(k: Arr[Fin[n], Int], b: Arr[Fin[n], Bool]):  # noqa: F821
+    """A comparison with the smallest int64, which C has no literal of."""
+    for i in k.dom:
+        b[i] = k[i] > -(2**63)
+
+
+def test_the_smallest_int64_is_written_as_c_writes_it():
+    # -9223372036854775808 is the negation of 9223372036854775808, which no
+    # signed type of C holds: GCC reads it in 128 bits and warns that it is
+    # so large that it is unsigned, and clang reads it as an unsigned long,
+    # which compares k[i] as an unsigned value, false at 0. Written as C
+    # writes the smallest int64, it is one, whatever the compiler.
+    def make() -> dict:
+        return {"k": np.array([-1, 0, 5, -(2**63)]), "b": np.zeros(4, bool)}
+
+    native = make()
+    above_the_smallest(**native)
+    assert list(native["b"]) == [True, True, True, False]
+    agrees(above_the_smallest, make)
+    assert "(-9223372036854775807l - 1)" in emit_code(above_the_smallest)
+
+
+def test_the_smallest_int32_is_left_to_loopy_on_opencl():
+    # OpenCL C has no -fwrapv, and its compilers (PoCL's, for one) fold k[i]
+    # + (-2147483647 - 1) of an int32 k into k[i] | (-2147483647 - 1), which
+    # a sum that cannot overflow is: -1 at k[i] = -1, where numpy wraps round
+    # to 2**31 - 1. loopy's literal, a long, computes that sum without
+    # overflow, which a store into an int32 array takes round as numpy does.
+    from loopty.lower import _CExpressions, _OpenCLExpressions
+
+    assert _CExpressions.wraps and not _OpenCLExpressions.wraps
+    pytest.importorskip("pyopencl")
+    code = emit_code(plus_negations, target="opencl")
+    assert "k[i] + -2147483648" in code and "2147483647 - 1" not in code
+
+
+@kernel
+def plus_minus_one(u: Arr[Fin[n], np.uint64], y: Arr[Fin[n], np.uint64]):  # noqa: F821
+    """``u[i] + -1`` of a ``uint64``, which numpy refuses."""
+    for i in u.dom:
+        y[i] = u[i] + -1
+
+
+@kernel
+def plus_negated_truth(
+    c: Arr[Fin[n], Int],  # noqa: F821
+    b: Arr[Fin[n], Bool],  # noqa: F821
+    y: Arr[Fin[n], Int],  # noqa: F821
+):
+    """``c[i] + -b[i]``, which numpy refuses."""
+    for i in c.dom:
+        y[i] = c[i] + -b[i]
+
+
+@kernel
+def minus_wide(k: Arr[Fin[n], np.int32], y: Arr[Fin[n], Int]):  # noqa: F821
+    """``k[i] - 2**31`` of an ``int32``, which numpy refuses."""
+    for i in k.dom:
+        y[i] = k[i] - 2**31
+
+
+@kernel
+def minus_negative(u: Arr[Fin[n], np.uint16], y: Arr[Fin[n], Int]):  # noqa: F821
+    """``u[i] - -7`` of a ``uint16``, which numpy refuses."""
+    for i in u.dom:
+        y[i] = u[i] - -7
+
+
+@kernel
+def minus_truth(b: Arr[Fin[n], Bool], y: Arr[Fin[n], Int]):  # noqa: F821
+    """``b[i] - True``, which numpy refuses."""
+    for i in b.dom:
+        y[i] = b[i] - True
+
+
+def test_a_spelling_numpy_refuses_at_every_point_is_refused_by_the_trace():
+    # Each of these is refused natively at every point, and was computed
+    # compiled as the other spelling: u[i] + -1 as u[i] - 1, k[i] - 2**31 as
+    # k[i] + -2**31, u[i] - -7 as u[i] + 7, c[i] + -b[i] as c[i] - b[i], and
+    # b[i] - True as b[i] + -1.
+    u64 = {"u": np.array([5], np.uint64), "y": np.zeros(1, np.uint64)}
+    with pytest.raises(OverflowError, match="-1 out of bounds for uint64"):
+        plus_minus_one(**u64)
+    with pytest.raises(TraceError, match=r"u\[i\] \+ -1 at .* a uint64") as refused:
+        plus_minus_one.trace()
+    assert "or subtract it, 'u[i] - 1', which numpy computes in uint64" in str(
+        refused.value
+    )
+    with pytest.raises(TypeError, match="boolean negative"):
+        plus_negated_truth(
+            c=np.array([5]), b=np.array([True]), y=np.zeros(1, np.int64)
+        )
+    with pytest.raises(TraceError, match=r"-b\[i\] at .* negates a truth value"):
+        plus_negated_truth.trace()
+    with pytest.raises(OverflowError, match="2147483648 out of bounds for int32"):
+        minus_wide(k=np.array([5], np.int32), y=np.zeros(1, np.int64))
+    with pytest.raises(
+        TraceError, match=r"k\[i\] - 2147483648 at .* with an int32 value"
+    ) as refused:
+        minus_wide.trace()
+    assert "np.int64(2147483648)" in str(refused.value)
+    with pytest.raises(OverflowError, match="-7 out of bounds for uint16"):
+        minus_negative(u=np.array([5], np.uint16), y=np.zeros(1, np.int64))
+    with pytest.raises(TraceError, match=r"u\[i\] - -7 at .* the integer -7"):
+        minus_negative.trace()
+    with pytest.raises(TypeError, match="boolean subtract"):
+        minus_truth(b=np.array([True]), y=np.zeros(1, np.int64))
+    with pytest.raises(TraceError, match="subtracts truth values"):
+        minus_truth.trace()
+
+
+@kernel
+def numpy_subtrahends(
+    k: Arr[Fin[n], Int],  # noqa: F821
+    y: Arr[Fin[n], Int],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+):
+    """numpy scalars subtracted, which pymbolic negates in their own type."""
+    for i in k.dom:
+        y[i] = k[i] - np.uint8(3) + (k[i] - np.int8(-128))
+        z[i] = k[i] - np.uint64(1)
+
+
+@kernel
+def unsigned_subtrahend(
+    u: Arr[Fin[n], np.uint64],  # noqa: F821
+    w: Arr[Fin[n], np.uint64],  # noqa: F821
+):
+    """A ``uint64`` scalar subtracted from a ``uint64``.
+
+    A kernel of its own: in one with ``numpy_subtrahends``'s ``z``, loopy maps
+    ``-1 * np.uint64(1)`` to the ``-1 * np.float64(1.0)`` it met first, which
+    pymbolic finds equal (#170).
+    """
+    for i in u.dom:
+        w[i] = u[i] - np.uint64(1)
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_a_numpy_scalar_subtracted_is_subtracted_as_written():
+    # pymbolic negates what is subtracted: -np.uint8(3) is np.uint8(253),
+    # -np.int8(-128) is itself, and -np.uint64(1) is 2**64 - 1, and the
+    # compiled run added those, k[i] + 253, where numpy computes k[i] - 3.
+    def make() -> dict:
+        return {
+            "k": np.array([10, -(2**40), 0]),
+            "y": np.zeros(3, np.int64),
+            "z": np.zeros(3),
+        }
+
+    native = make()
+    numpy_subtrahends(**native)
+    assert list(native["y"]) == [10 - 3 + 10 + 128, -(2**41) + 125, 125]
+    assert list(native["z"]) == [9.0, -(2.0**40) - 1, -1.0]
+    agrees(numpy_subtrahends, make)
+
+    def unsigned() -> dict:
+        return {
+            "u": np.array([0, 2**64 - 1, 5], np.uint64),
+            "w": np.zeros(3, np.uint64),
+        }
+
+    native = unsigned()
+    unsigned_subtrahend(**native)
+    assert list(native["w"]) == [2**64 - 1, 2**64 - 2, 4]
+    agrees(unsigned_subtrahend, unsigned)
+    assert "u[i] + (uint64_t) (-1 * 1ul)" in emit_code(unsigned_subtrahend)
+
+
+@kernel
+def broken_off(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """A difference, and then a body that raises."""
+    for j in x.dom:
+        y[j] = x[j] - 1.0
+        raise RuntimeError("the body broke off")
+
+
+def test_a_difference_is_marked_only_in_a_body_being_traced():
+    # The trace wraps lanky's '-' while a body runs, and only there: a '-'
+    # lanky evaluates anywhere else is lanky's own, before and after a trace,
+    # after a body that raised, and in another thread meanwhile.
+    import threading
+
+    from lanky.terms import Add, SymbolicMixin, Var
+
+    from loopty.trace import _writing_differences
+
+    def wrapped() -> tuple:
+        return vars(SymbolicMixin)["__sub__"], vars(SymbolicMixin)["__rsub__"]
+
+    own = wrapped()
+    i = Var("i")
+    assert type(i - 1) is Add and type(1 - i) is Add
+    assert isinstance(differences.trace().stmts[0].expr, Difference)
+    assert wrapped() == own
+    with _writing_differences():
+        assert type(i - 1) is Difference and type(1 - i) is Difference
+        assert type(i + -1) is Add
+        seen: list[type] = []
+        thread = threading.Thread(target=lambda: seen.append(type(i - 1)))
+        thread.start()
+        thread.join()
+        assert seen == [Add]
+    assert wrapped() == own
+    with pytest.raises(RuntimeError, match="broke off"):
+        broken_off.trace()
+    assert wrapped() == own
+    assert type(i - 1) is Add
+
+
+@kernel
+def minus_truths(
+    k: Arr[Fin[n], Int],  # noqa: F821
+    x: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Int],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A truth value subtracted from an integer and from a real."""
+    for i in k.dom:
+        y[i] = k[i] - True
+        z[i] = x[i] - np.False_
+
+
+def test_a_truth_value_subtracted_is_refused_naming_the_integer():
+    # numpy subtracts the integer a truth value is, and pymbolic takes no
+    # truth value as an operand: the trace kept k[i] - True as written, as
+    # -1 * True, and loopy failed on it with a bare AssertionError.
+    native = {
+        "k": np.array([5, -3]),
+        "x": np.array([-0.0, 1.5]),
+        "y": np.zeros(2, np.int64),
+        "z": np.zeros(2),
+    }
+    minus_truths(**native)
+    assert list(native["y"]) == [4, -4]
+    with pytest.raises(
+        TraceError, match=r"k\[i\] - True at .* the truth value True"
+    ) as refused:
+        minus_truths.trace()
+    assert "Write the integer, 'k[i] - 1'" in str(refused.value)
+
+
+@kernel
+def minus_zeros(
+    x: Arr[Fin[n], Real],  # noqa: F821
+    f: Arr[Fin[n], np.float32],  # noqa: F821
+    c: Arr[Fin[n], np.complex128],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    g: Arr[Fin[n], np.float32],  # noqa: F821
+    w: Arr[Fin[n], np.complex128],  # noqa: F821
+    v: Arr[Fin[n], Real],  # noqa: F821
+    u: Arr[Fin[n], np.float32],  # noqa: F821
+):
+    """A real less the integer zero, a loop variable, and arithmetic of both."""
+    for i in x.dom:
+        y[i] = x[i] - 0
+        g[i] = f[i] - i
+        w[i] = c[i] - i
+        v[i] = x[i] - (i - i)
+        u[i] = f[i] - (f[i] - 0)
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_a_real_less_an_integer_zero_keeps_the_sign_of_zero():
+    # numpy converts the integer into the real's type and subtracts, and
+    # -0.0 - 0 is -0.0. pymbolic builds x - 0 as x + 0 and x - i as x + -1 *
+    # i, the integer 0 at i = 0, and C's -0.0 + 0 is 0.0 (#151).
+    def make() -> dict:
+        return {
+            "x": np.array([-0.0, 0.0, -1.5]),
+            "f": np.array([-0.0, 0.5, np.inf], np.float32),
+            "c": np.array([complex(-0.0, -0.0), complex(0.0, -0.0), 1 - 2j]),
+            "y": np.zeros(3),
+            "g": np.zeros(3, np.float32),
+            "w": np.zeros(3, np.complex128),
+            "v": np.zeros(3),
+            "u": np.zeros(3, np.float32),
+        }
+
+    native = make()
+    minus_zeros(**native)
+    assert np.signbit(native["y"][0]) and np.signbit(native["g"][0])
+    assert np.signbit(native["w"][0].real) and np.signbit(native["w"][0].imag)
+    agrees(minus_zeros, make)
+    code = emit_code(minus_zeros)
+    assert "x[i] + -0.0;" in code and "-1.0f * (float) (i)" in code
+
+
+@kernel
+def past_int64_less(
+    k: Arr[Fin[n], Int],  # noqa: F821
+    y: Arr[Fin[n], Int],  # noqa: F821
+):
+    """``k[i] - 2**63``, which no int64 holds."""
+    for i in k.dom:
+        y[i] = k[i] - 2**63
+
+
+@kernel
+def truth_past_int64(
+    b: Arr[Fin[n], Bool],  # noqa: F821
+    y: Arr[Fin[n], Int],  # noqa: F821
+):
+    """``b[i] - 2**63`` of a truth value, computed in int64 natively."""
+    for i in b.dom:
+        y[i] = b[i] - 2**63
+
+
+def test_a_literal_past_int64_is_refused_naming_a_real():
+    # numpy computes a truth value beside a Python int in int64, and refuses
+    # 2**63 there ('Python int too large to convert to C long'), where the
+    # compiled run computed it; np.int64(2**63), which the refusal of k[i] -
+    # 2**63 named, is refused by numpy itself.
+    with pytest.raises(OverflowError, match="too large to convert to C long"):
+        truth_past_int64(b=np.array([True]), y=np.zeros(1, np.int64))
+    for kern in (past_int64_less, truth_past_int64):
+        with pytest.raises(TraceError, match="9223372036854775808") as refused:
+            kern.trace()
+        message = str(refused.value)
+        assert "Write the literal as a real, 2.0 ** 63" in message
+        assert "np.int64(" not in message
 
 
 # }}}
@@ -2405,6 +2808,110 @@ def test_abs_of_arithmetic_on_the_loops_lowers():
     agrees(absolute_on_the_loops, make)
     code = emit_code(absolute_on_the_loops)
     assert "?" not in code[code.index("void absolute_on_the_loops(") :]
+
+
+@kernel
+def absolute_in_guards(
+    x: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+    f: Arr[Fin[n], np.float32],  # noqa: F821
+    g: Arr[Fin[n], np.float32],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    w: Arr[Fin[n], Real],  # noqa: F821
+    v: Arr[Fin[n], Real],  # noqa: F821
+    u: Arr[Fin[n], Real],  # noqa: F821
+):
+    """``abs`` of a real in a guard, in double and single precision."""
+    for i in x.dom:
+        with when(x[i] + abs(z[i]) > 1):
+            y[i] = 1.0
+        with when(x[i] * 0.0 + 1 / abs(z[i]) > 0):
+            w[i] = 1.0
+        with when(f[i] + abs(g[i]) > 1):
+            v[i] = 1.0
+        with when(i * 0.0 + abs(i * 0.5 - 2) < 1):
+            u[i] = 1.0
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_abs_of_a_real_in_a_guard_lowers():
+    # loopy's type inference visits a statement's value and never its guard,
+    # so abs, which only the guard called, was never resolved, and loopy
+    # failed with KeyError: 'abs' (#154). It is written without a call there,
+    # and abs(-0.0) is 0.0, which 1 / abs(z[i]) tells from -0.0.
+    def make() -> dict:
+        return {
+            "x": np.array([0.5, 0.1, 0.5, 1.5, 0.0, 2.0, 0.0, 0.0]),
+            "z": np.array([-0.7, 0.2, -0.0, np.nan, 0.0, -np.inf, -3.0, 1.0]),
+            "f": np.array([0.5, 0.1, 0.0, 0.5, 0.5, 0, 0, 0], np.float32),
+            "g": np.array([-0.6, 0.2, -0.0, -0.4, 0.6, 0, 0, 0], np.float32),
+            "y": np.zeros(8),
+            "w": np.zeros(8),
+            "v": np.zeros(8),
+            "u": np.zeros(8),
+        }
+
+    native = make()
+    absolute_in_guards(**native)
+    assert list(native["y"]) == [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0]
+    assert list(native["w"]) == [1.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0]
+    assert list(native["v"]) == [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+    assert list(native["u"]) == [0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0]
+    agrees(absolute_in_guards, make)
+    code = emit_code(absolute_in_guards)
+    assert "fabs" not in code
+    assert "(g[i] < 0.0f) ? -1.0f * g[i] : ((g[i] == 0.0f) ? 0.0f : g[i])" in code
+
+
+def _root(value):
+    """``sqrt``, of a number natively and as a call in a term, as p2p.py writes it."""
+    if isinstance(value, float | np.floating):
+        return np.sqrt(value)
+    return prim.Call(prim.Variable("sqrt"), (value,))
+
+
+@kernel
+def root_in_a_guard(
+    x: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A function only a guard calls."""
+    for i in x.dom:
+        with when(x[i] + _root(z[i]) > 1):
+            y[i] = 1.0
+
+
+@kernel
+def root_in_both(
+    x: Arr[Fin[n], Real],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """The same function, called in the guard and in the value."""
+    for i in x.dom:
+        with when(x[i] + _root(z[i]) > 1):
+            y[i] = _root(z[i])
+
+
+def test_a_function_only_a_guard_calls_is_refused_with_the_fix_named():
+    # Any other function only a guard calls is never resolved either, and
+    # loopy failed with KeyError: 'sqrt', which named nothing of the kernel.
+    def make() -> dict:
+        return {"x": np.array([0.5, 0.1]), "z": np.array([0.7, 0.2]), "y": np.zeros(2)}
+
+    native = make()
+    root_in_a_guard(**native)
+    assert list(native["y"]) == [1.0, 0.0]
+    with pytest.raises(LoweringError, match="calls sqrt, which loopy") as refused:
+        LoopyExecutor().run(root_in_a_guard, **make())
+    message = str(refused.value)
+    assert "S0 of root_in_a_guard at test_arithmetic.py:" in message
+    assert "into an array the guard then reads" in message
+    with pytest.raises(LoweringError, match="calls sqrt"):
+        emit_code(root_in_a_guard)
+    # Called in the value too, it is resolved there, and the guard's call with it.
+    agrees(root_in_both, make)
 
 
 @pytest.mark.skipif(
@@ -2992,7 +3499,7 @@ def test_a_literal_a_numpy_integer_does_not_hold_is_refused():
     with pytest.raises(TraceError, match="the integer -1 with a uint64") as refused:
         unsigned_negative.trace()
     assert "np.int64(-1)" in str(refused.value)
-    with pytest.raises(TraceError, match="the integer 200 with a int8"):
+    with pytest.raises(TraceError, match="the integer 200 with an int8"):
         truths_scaled.trace()
     for kern in (unsigned_times, unsigned_mod, unsigned_xor, unsigned_shift):
         with pytest.raises(TraceError, match="the integer -[123] with a uint"):
@@ -3003,7 +3510,7 @@ def test_a_literal_a_numpy_integer_does_not_hold_is_refused():
         literal_first(u=np.array([5], np.uint16), y=np.zeros(1, np.int64))
     with pytest.raises(TraceError, match="the integer -7 with a uint16"):
         literal_first.trace()
-    with pytest.raises(TraceError, match="the integer 2147483648 with a int32"):
+    with pytest.raises(TraceError, match="the integer 2147483648 with an int32"):
         wide_literal_first.trace()
 
     def make() -> dict:
@@ -3037,6 +3544,320 @@ def test_a_bitwise_operation_of_a_uint64_and_a_signed_integer_is_refused():
         )
     with pytest.raises(TraceError, match="of a uint64 and a signed integer"):
         xor_signs.trace()
+
+
+# }}}
+
+
+# {{{ loop arithmetic beside a numpy integer that does not hold it (#153)
+
+
+@kernel
+def runtime_negative(u: Arr[Fin[n], np.uint32], y: Arr[Fin[n], Int]):  # noqa: F821
+    """``i - 3`` beside a ``uint32``, which numpy refuses at ``i = 0``."""
+    for i in u.dom:
+        y[i] = u[i] + (i - 3)
+
+
+@kernel
+def runtime_negative_fixed(
+    u: Arr[Fin[n], np.uint32],  # noqa: F821
+    y: Arr[Fin[n], Int],  # noqa: F821
+):
+    """The fix its refusal names: the loop arithmetic in int64."""
+    for i in u.dom:
+        y[i] = u[i] + (i - 3) * np.int64(1)
+
+
+@kernel
+def runtime_wide(a: Arr[Fin[n], np.int8], y: Arr[Fin[n], Int]):  # noqa: F821
+    """``i * 100`` beside an ``int8``, which numpy refuses from ``i = 2``."""
+    for i in a.dom:
+        y[i] = a[i] * (i * 100)
+
+
+@kernel
+def guarded_negative(u: Arr[Fin[n], np.uint32], y: Arr[Fin[n], Int]):  # noqa: F821
+    """``i - 3`` under a guard that masks the write and not the arithmetic."""
+    for i in u.dom:
+        with when(i >= 3):
+            y[i] = u[i] + (i - 3)
+
+
+@kernel
+def summed_negative(a: Arr[Fin[n], np.uint16], y: Arr[Fin[n], Int]):  # noqa: F821
+    """``j - i`` beside a ``uint16`` in a sum, which numpy refuses at ``j < i``."""
+    for i in a.dom:
+        y[i] = reduce_sum(a[j] * (j - i) for j in a.dom)
+
+
+@kernel
+def stored_index(y: Arr[Fin[n], np.int8]):  # noqa: F821
+    """A loop variable stored into an ``int8``, which numpy refuses from 128."""
+    for i in y.dom:
+        y[i] = i
+
+
+@kernel
+def within_the_type(
+    u: Arr[Fin[n], np.uint32],  # noqa: F821
+    a: Arr[Fin[n], np.int8],  # noqa: F821
+    y: Arr[Fin[n], Int],  # noqa: F821
+):
+    """Loop arithmetic the types hold at every point a loop of 32 bits reaches."""
+    for i in u.dom:
+        y[i] = (u[i] + i) + a[i] * (i % 7)
+
+
+@kernel
+def summed_with_a_clause(a: Arr[Fin[n], np.int8], y: Arr[Fin[n], Int]):  # noqa: F821
+    """``a[j] + j`` only where the generator's clause holds, ``j < 100``."""
+    for i in a.dom:
+        y[i] = reduce_sum(a[j] + j for j in a.dom if j < 100)
+
+
+@kernel
+def summed_with_a_clause_guarded(
+    a: Arr[Fin[n], np.int8],  # noqa: F821
+    y: Arr[Fin[n], Int],  # noqa: F821
+):
+    """The same sum under a guard, which masks the write and not the sum."""
+    for i in a.dom:
+        with when(i < 3):
+            y[i] = reduce_sum(a[j] + j for j in a.dom if j < 100)
+
+
+@kernel
+def summed_guarded(a: Arr[Fin[n], np.int8], y: Arr[Fin[n], Int]):  # noqa: F821
+    """A sum with no clause under a guard: computed at every j."""
+    for i in a.dom:
+        with when(i < 3):
+            y[i] = reduce_sum(a[j] + j for j in a.dom)
+
+
+@kernel
+def truncated(u: Arr[Fin[n], Real], c: Arr[Fin[n], Nat]):  # noqa: F821
+    """Every entry as a natural number; a negative one is no natural."""
+    for i in u.dom:
+        c[i] = u[i]
+
+
+@kernel
+def offset_counts(
+    c: Arr[Fin[n], Nat],  # noqa: F821
+    w: Arr[Fin[n], np.uint32],  # noqa: F821
+    y: Arr[Fin[n], Int],  # noqa: F821
+):
+    """``i - 3`` beside a ``uint32``, after a requirement on ``c``."""
+    for i in c.dom:
+        y[i] = w[i] + (i - 3) + 0 * c[i]
+
+
+@program
+def checked_then_offset(u, w, y):
+    """A checked point, that c holds naturals, and then a call numpy refuses."""
+    c = Arr.zeros_like(u, dtype=np.int64)
+    truncated(u, c)
+    offset_counts(c, w, y)
+
+
+@kernel
+def as_reals(d: Arr[Fin[n], Nat], z: Arr[Fin[n], Real]):  # noqa: F821
+    """Every count, as a real: a requirement that d holds naturals."""
+    for i in d.dom:
+        z[i] = 1.0 * d[i]
+
+
+@program
+def offset_then_checked(u, v, w, y, z):
+    """The refused call between two checked points, the second of which fails."""
+    c = Arr.zeros_like(u, dtype=np.int64)
+    truncated(u, c)
+    offset_counts(c, w, y)
+    d = Arr.zeros_like(v, dtype=np.int64)
+    truncated(v, d)
+    as_reals(d, z)
+
+
+@kernel
+def index_after(
+    c: Arr[Fin[n], Nat],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], np.int8],  # noqa: F821
+):
+    """A loop variable stored into an ``int8``, after a requirement on ``c``."""
+    for i in c.dom:
+        z[i] = 1.0 * c[i]
+        y[i] = i
+
+
+@program
+def checked_then_stored(u, z, y):
+    """A checked point, and then a store numpy refuses from ``i = 128``."""
+    c = Arr.zeros_like(u, dtype=np.int64)
+    truncated(u, c)
+    index_after(c, z, y)
+
+
+@kernel
+def stored_nowhere(y: Arr[Fin[n], np.uint8]):  # noqa: F821
+    """``300`` stored into a ``uint8`` under a guard that holds nowhere."""
+    for i in y.dom:
+        with when(i < 0):
+            y[i] = 300
+
+
+@kernel
+def stored_once(y: Arr[Fin[n], np.uint8]):  # noqa: F821
+    """``300`` stored into a ``uint8`` under a guard that holds at ``i = 0``."""
+    for i in y.dom:
+        with when(i < 1):
+            y[i] = 300
+
+
+@kernel
+def stored_literal(y: Arr[Fin[n], np.uint8]):  # noqa: F821
+    """``300`` stored into a ``uint8``, which numpy refuses at every point."""
+    for i in y.dom:
+        y[i] = 300
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_loop_arithmetic_a_numpy_integer_does_not_hold_is_refused_compiled_too():
+    # numpy converts a Python int beside a numpy integer into its type, and
+    # refuses one the type does not hold: the native run stops there, and the
+    # compiled run computed u[i] + (i - 3) at i = 0, and a[i] * (i * 100)
+    # wrapped round in int8 from i = 2. The point is known once the sizes
+    # are, and the compiled run is refused there, before it starts.
+    from loopty.refusal import RefusedNatively
+
+    def unsigned(size: int) -> dict:
+        return {"u": np.arange(size, dtype=np.uint32), "y": np.zeros(size, np.int64)}
+
+    with pytest.raises(OverflowError, match="-3 out of bounds for uint32"):
+        runtime_negative(**unsigned(4))
+    with pytest.raises(RefusedNatively, match="-3 at i = 0") as refused:
+        LoopyExecutor().run(runtime_negative, **unsigned(4))
+    assert isinstance(refused.value, OverflowError)
+    message = str(refused.value)
+    assert "u[i] + (i - 3) at test_arithmetic.py:" in message
+    assert "'(i - 3) * np.int64(1)'" in message
+    agrees(runtime_negative_fixed, lambda: unsigned(5))
+    # Under a guard as well: the body computes at every point of its loop.
+    with pytest.raises(OverflowError, match="-3 out of bounds"):
+        guarded_negative(**unsigned(4))
+    with pytest.raises(RefusedNatively, match="-3 at i = 0"):
+        LoopyExecutor().run(guarded_negative, **unsigned(4))
+    # In a sum, over the sum's own loop too.
+    summed = {"a": np.ones(3, np.uint16), "y": np.zeros(3, np.int64)}
+    with pytest.raises(OverflowError, match="-1 out of bounds for uint16"):
+        summed_negative(**dict(summed))
+    with pytest.raises(RefusedNatively, match="-1 at i = 1, j = 0"):
+        LoopyExecutor().run(summed_negative, **summed)
+
+    # Where the sizes do not reach such a point, the two runs agree.
+    def narrow(size: int) -> dict:
+        return {"a": np.full(size, 3, np.int8), "y": np.zeros(size, np.int64)}
+
+    agrees(runtime_wide, lambda: narrow(2))
+    with pytest.raises(OverflowError, match="200 out of bounds for int8"):
+        runtime_wide(**narrow(3))
+    with pytest.raises(RefusedNatively, match="200 at i = 2"):
+        LoopyExecutor().run(runtime_wide, **narrow(3))
+    agrees(stored_index, lambda: {"y": np.zeros(128, np.int8)})
+    with pytest.raises(OverflowError, match="128 out of bounds for int8"):
+        stored_index(y=np.zeros(129, np.int8))
+    with pytest.raises(RefusedNatively, match="128 at i = 128"):
+        LoopyExecutor().run(stored_index, y=np.zeros(129, np.int8))
+    agrees(
+        within_the_type,
+        lambda: {
+            "u": np.full(300, 2**32 - 1, np.uint32),
+            "a": np.full(300, -128, np.int8),
+            "y": np.zeros(300, np.int64),
+        },
+    )
+    # A literal no point holds is refused by the trace, as #141's are.
+    with pytest.raises(OverflowError, match="300 out of bounds for uint8"):
+        stored_literal(y=np.zeros(2, np.uint8))
+    with pytest.raises(TraceError, match="the store of 300 into y"):
+        stored_literal.trace()
+
+    # A generator's clause skips the sum's body, and a guard does not: a[j] +
+    # j is computed natively for j < 100 alone, and the compiled run was
+    # refused at j = 128 all the same.
+    def long(size: int = 200) -> dict:
+        return {"a": np.ones(size, np.int8), "y": np.zeros(size, np.int64)}
+
+    agrees(summed_with_a_clause, long)
+    agrees(summed_with_a_clause_guarded, long)
+    with pytest.raises(OverflowError, match="128 out of bounds for int8"):
+        summed_guarded(**long())
+    with pytest.raises(RefusedNatively, match="128 at i = 0, j = 128"):
+        LoopyExecutor().run(summed_guarded, **long())
+
+    # A call after a program's checked point runs only where the point
+    # passed: where it fails, both runs raise the point's error, and the
+    # refusal of the call after it is raised once the point has passed.
+    def checked(first: float) -> dict:
+        return {
+            "u": Arr.from_numpy(np.array([first, 2.0, 3.0])),
+            "w": Arr.from_numpy(np.full(3, 7, np.uint32)),
+            "y": Arr.zeros(3, dtype=np.int64),
+        }
+
+    assert checked_then_offset.term.checks
+    for runs in (checked_then_offset, LoopyExecutor().run):
+        args = (checked_then_offset,) if runs is not checked_then_offset else ()
+        with pytest.raises(ValueError) as failed:
+            runs(*args, **checked(-1.0))
+        assert not isinstance(failed.value, OverflowError)
+    with pytest.raises(OverflowError, match="-3 out of bounds for uint32"):
+        checked_then_offset(**checked(1.0))
+    with pytest.raises(RefusedNatively, match=r"-3 at i_0 = 0") as refused:
+        LoopyExecutor().run(checked_then_offset, **checked(1.0))
+    assert "the program's checked points before the call passed" in str(
+        refused.value
+    )
+    # A checked point after the refused call is not reached natively: the
+    # refusal is raised, and not that point's error.
+    both = {
+        **checked(1.0),
+        "v": Arr.from_numpy(np.array([-1.0, 2.0, 3.0])),
+        "z": Arr.zeros(3),
+    }
+    with pytest.raises(OverflowError, match="-3 out of bounds for uint32"):
+        offset_then_checked(**dict(both))
+    with pytest.raises(RefusedNatively, match="-3 at"):
+        LoopyExecutor().run(offset_then_checked, **dict(both))
+
+    # A store after a checked point is guarded by the point's flag, which isl
+    # does not read; the store is asked about all the same, and its refusal
+    # raised once the point has passed.
+    def stores(size: int) -> dict:
+        return {
+            "u": Arr.from_numpy(np.ones(size)),
+            "z": Arr.zeros(size),
+            "y": Arr.zeros(size, dtype=np.int8),
+        }
+
+    with pytest.raises(OverflowError, match="128 out of bounds for int8"):
+        checked_then_stored(**stores(129))
+    with pytest.raises(RefusedNatively, match="128 at i_0 = 128"):
+        LoopyExecutor().run(checked_then_stored, **stores(129))
+    native, compiled = stores(128), stores(128)
+    checked_then_stored(**native)
+    LoopyExecutor().run(checked_then_stored, **compiled)
+    assert np.array_equal(native["y"].numpy(), compiled["y"].numpy())
+
+    # A literal stored under a guard is stored only where the guard holds,
+    # and numpy converts nothing elsewhere: refused where the call's sizes
+    # reach a point of the guard, and computed where they reach none.
+    agrees(stored_nowhere, lambda: {"y": np.zeros(3, np.uint8)})
+    with pytest.raises(OverflowError, match="300 out of bounds for uint8"):
+        stored_once(y=np.zeros(3, np.uint8))
+    with pytest.raises(RefusedNatively, match="the store of 300 into y"):
+        LoopyExecutor().run(stored_once, y=np.zeros(3, np.uint8))
 
 
 # }}}

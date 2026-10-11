@@ -296,6 +296,10 @@ class NumpyArithmetic:
     and a size are far from the ends of the range.
     """
 
+    #: Whether the target's signed arithmetic wraps round, as C's does under
+    #: ``-fwrapv`` (``lower.WRAP_FLAG``); OpenCL C has no such option.
+    wraps = True
+
     def map_sum(self, expr: Any, type_context: Any) -> Any:
         return super().map_sum(expr, self._literal_context(expr, type_context))
 
@@ -401,12 +405,28 @@ class NumpyArithmetic:
         + np.uint16(3)`` of an ``int8`` ``a`` was ``4294967294`` compiled at
         ``a[i] = -5``, and ``a[i] < np.uint8(3)`` false, where numpy computes
         ``-2`` and true. Such a literal is written as that ``int``, ``3``.
-        """
-        if isinstance(expr, np.uint8 | np.uint16 | np.uint32):
-            from loopy.symbolic import Literal
 
+        The smallest ``int32`` and ``int64`` have no literal in C: ``-2147483648``
+        is the negation of ``2147483648``, a ``long``, so ``k[i] +
+        -2147483648`` of an ``int32`` ``k`` was computed in 64 bits, where
+        numpy wraps round in ``int32`` (#151), and ``9223372036854775808`` fits
+        no signed type at all, which GCC reads in 128 bits with a warning and
+        clang as an ``unsigned long``. Each is written as C writes ``INT_MIN``,
+        ``(-2147483647 - 1)``, and ``(-9223372036854775807l - 1)``, in the type
+        loopy gives it (:func:`_smallest`), where the target wraps round a
+        signed sum (:attr:`wraps`). OpenCL C does not, and its compilers fold
+        ``k[i] + (-2147483647 - 1)`` into ``k[i] | (-2147483647 - 1)``, which
+        a sum that cannot overflow is: the literal is left to loopy there,
+        whose wider type computes the sum without overflow.
+        """
+        from loopy.symbolic import Literal
+
+        if isinstance(expr, np.uint8 | np.uint16 | np.uint32):
             suffix = "u" if isinstance(expr, np.uint32) else ""
             return Literal(f"{int(expr)}{suffix}")
+        smallest = _smallest(expr, type_context) if self.wraps else None
+        if smallest is not None:
+            return Literal(smallest)
         return super().map_constant(expr, type_context)
 
     def map_type_cast(self, expr: Any, type_context: Any) -> Any:
@@ -493,6 +513,25 @@ class NumpyArithmetic:
             if temporary.shape
         }
         return not (get_dependencies(numerator) & arrays)
+
+
+def _smallest(expr: Any, type_context: Any) -> str | None:
+    """How C writes the smallest ``int32`` or ``int64``, where ``expr`` is one.
+
+    loopy types a Python int by its value, as an ``int32`` where one holds it
+    and an ``int64`` otherwise, and writes it as an integer in an integer
+    context or none; in a real one it writes a real, which this leaves to it.
+    """
+    if isinstance(expr, bool | np.bool_) or not isinstance(expr, int | np.integer):
+        return None
+    if not isinstance(expr, np.integer) and type_context in ("f", "d"):
+        return None
+    value = int(expr)
+    if value == -(2**31) and not isinstance(expr, np.int64):
+        return "(-2147483647 - 1)"
+    if value == -(2**63):
+        return "(-9223372036854775807l - 1)"
+    return None
 
 
 #: The method of loopy's code generator for an operation it writes itself,

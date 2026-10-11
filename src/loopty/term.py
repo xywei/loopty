@@ -22,6 +22,7 @@ from typing import Any
 
 import islpy as isl
 import pymbolic.primitives as prim
+from lanky.terms import Add
 
 __all__ = [
     "COUNT_PARAM",
@@ -29,6 +30,7 @@ __all__ = [
     "OFFSETS_CANDIDATES",
     "Access",
     "ArrType",
+    "Difference",
     "Expression",
     "Hypothesis",
     "Reduction",
@@ -41,6 +43,7 @@ __all__ = [
     "declared_offsets",
     "free_name_sorts",
     "free_name_sorts_message",
+    "subtracted",
 ]
 
 #: A pymbolic expression. Kept loose on purpose: lanky's term classes (``Sum``,
@@ -144,6 +147,43 @@ def declared_layout(
             continue
         out[name] = (counts, offsets)
     return out
+
+
+class Difference(Add):
+    """``a - b`` as a kernel's body wrote it: a sum whose last term is subtracted.
+
+    pymbolic builds ``a - b`` as ``a + -1 * b`` and ``u - 1`` as ``u + -1``,
+    which are the nodes ``a + -b`` and ``u + -1`` build too, and numpy
+    computes the two spellings otherwise (#151): it subtracts ``b`` in the
+    type of the two, where ``-b`` negates ``b`` in its own type first, so
+    ``c[i] + -a[i]`` of an ``int8`` ``a`` adds ``-128`` at ``a[i] = -128`` and
+    ``c[i] - a[i]`` subtracts it; and it refuses ``u[i] + -1`` of an unsigned
+    ``u`` at every point (``Python integer -1 out of bounds``), where it
+    computes ``u[i] - 1``. So the trace builds every ``-`` the body writes as
+    this node (:func:`loopty.trace.trace`), and its last term is what the
+    body subtracted: the ``b`` of ``-1 * b``, or the negation of a literal.
+    Any other sum is read as written, a negation it adds being numpy's
+    negation of its operand in the operand's type, and a literal added as it
+    is (:func:`subtracted`).
+
+    The children are pymbolic's, so anything that reads a sum as the number
+    it stands for (isl, lanky's oracles and its printer, loopy) reads this one
+    as it reads any other, and a rebuild by ``type(node)(children)`` keeps it.
+    """
+
+
+def subtracted(expr: Any, position: int) -> bool:
+    """Whether the operand at ``position`` of the sum ``expr`` is subtracted.
+
+    Only the last operand of a :class:`Difference` is. Every other operand of
+    a sum, a negation ``-1 * b`` or a negative literal included, is added as
+    the body wrote it.
+    """
+    return (
+        isinstance(expr, Difference)
+        and position > 0
+        and position == len(expr.children) - 1
+    )
 
 
 @dataclass(frozen=True)

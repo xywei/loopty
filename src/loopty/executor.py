@@ -398,7 +398,16 @@ class LoopyExecutor:
         loopy preprocesses the kernel, checks its bounds, generates its code,
         compiles it and runs it inside :func:`loopty.isl_reading.declining`,
         with the readings it was lowered with; :meth:`differential` runs the
-        kernel through here.
+        kernel through here. Where loopy refuses an access under a guard it
+        does not read, or a function only a guard calls, the error names the
+        statement and the fix (:func:`loopty.refusal.naming_the_fix`). A call
+        whose sizes reach a point where the native run is refused, loop
+        arithmetic beside a numpy integer whose type does not hold it, is
+        refused before anything is compiled
+        (:func:`loopty.refusal.refuse_where_native_does`, #153), or, for a
+        program's call after a checked point, once the run has shown the
+        point passed: where it failed, the point's error is raised, as
+        natively.
         """
         term, kernel, lowering, target_name = _resolve(obj, self.target)
         names = [name for name, _ in term.params]
@@ -411,6 +420,9 @@ class LoopyExecutor:
         )
         inherited_storage(term.array_types, term.temporaries_like, supplied)
         checked_storage(term, supplied)
+        from loopty.refusal import naming_the_fix, refuse_where_native_does
+
+        refused = refuse_where_native_does(term, supplied)
         layouts = _declared_layouts(term, lowering, supplied)
         call = _call_arguments(term, lowering, args, kwargs, layouts)
         call, empty = _pad_empty_arrays(call, lowering)
@@ -418,20 +430,22 @@ class LoopyExecutor:
             kernel, heap = _off_the_stack(kernel, term, supplied)
             for name, (shape, dtype) in heap.items():
                 call[name] = np.zeros(shape, dtype=dtype)
-        if target_name == "opencl":
-            out = self._run_opencl(kernel, lowering, call)
-        else:
-            # The executor object is where loopy keeps its compiled-code cache;
-            # calling the translation unit directly recompiles, and says so.
-            _event, results = kernel.executor()(**call)
-            out = self._collect(lowering, call, results)
+        with naming_the_fix(lowering):
+            if target_name == "opencl":
+                out = self._run_opencl(kernel, lowering, call)
+            else:
+                # The executor object is where loopy keeps its compiled-code
+                # cache; calling the translation unit directly recompiles, and
+                # says so.
+                _event, results = kernel.executor()(**call)
+                out = self._collect(lowering, call, results)
         for name, original in empty.items():
             # The pad is not a result: an empty output stays empty, so that a
             # caller comparing outputs sees the array it passed in.
             if name in out:
                 out[name] = original
         failed = [
-            message
+            (flag, message)
             for flag, message in lowering.checks.items()
             if np.asarray(out.pop(flag)).reshape(-1)[0]
         ]
@@ -440,11 +454,18 @@ class LoopyExecutor:
             # An output over a domain is its cells, whatever layout it ran in.
             if name in lowering.storage:
                 out[name] = supplied[name].cells()
+        if refused is not None and not any(
+            flag in refused.checks for flag, _message in failed
+        ):
+            # The checked points before the refused call passed, so natively
+            # it ran, and stopped where its arithmetic leaves its type, before
+            # any point after it.
+            raise refused
         if failed:
             # A checked point of a program: the statements after it did not
             # run, and what the ones before it wrote is where the caller
             # looks, as natively, where the call after it is refused.
-            raise ValueError(failed[0])
+            raise ValueError(failed[0][1])
         return out
 
     def _collect(
@@ -848,13 +869,18 @@ def _agreement_fact(
 def emit_code(obj: Any, target: str | None = None) -> str:
     """The code loopy generates for a kernel or a schedule, as a string.
 
-    Generated inside :func:`loopty.isl_reading.declining`, as a run's is, and,
-    on a C target, with a program's arrays as the arguments a run allocates
+    Generated inside :func:`loopty.isl_reading.declining`, as a run's is, a
+    refusal of loopy's named as a run's is
+    (:func:`loopty.refusal.naming_the_fix`), and, on a C target, with a
+    program's arrays as the arguments a run allocates
     (:func:`loopty.lower.heap_temporaries`).
     """
     import loopy as lp
 
-    term, kernel, _lowering, target = _resolve(obj, target)
+    from loopty.refusal import naming_the_fix
+
+    term, kernel, lowering, target = _resolve(obj, target)
     if target != "opencl":
         kernel, _heap = _off_the_stack(kernel, term)
-    return lp.generate_code_v2(kernel).device_code()
+    with naming_the_fix(lowering):
+        return lp.generate_code_v2(kernel).device_code()
