@@ -160,15 +160,17 @@ def test_the_run_verb_is_shaped_the_way_lanky_asks(tmp_path) -> None:
     assert verb.__call__ == verb.run
 
 
-def test_run_and_check_take_show_lean() -> None:
+def test_run_and_check_take_show_lean_and_run_verbose() -> None:
     # --show-lean prints the Lean of every row that has some, or with a text
     # of the rows whose owner, id or statement contains it; loopty check
-    # passes it on to lanky check.
+    # passes it on to lanky check. --verbose names a cast Lean was not asked
+    # about.
     parser = build_parser()
     assert parser.parse_args(["run", "f.py"]).show_lean is None
     assert parser.parse_args(["run", "f.py", "--show-lean"]).show_lean == ""
     assert parser.parse_args(["run", "f.py", "--show-lean", "tile"]).show_lean == "tile"
     assert parser.parse_args(["check", "f.py", "--show-lean", "u"]).show_lean == "u"
+    assert parser.parse_args(["run", "f.py", "--verbose"]).verbose
 
 
 def test_check_is_an_alias_of_lanky_check(tmp_path, capsys) -> None:

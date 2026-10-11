@@ -210,8 +210,8 @@ def report(records: list[dict[str, Any]]) -> str:
     lines.append(
         f"Of {len(isl)} facts isl decides in {len({r['file'] for r in records})} "
         f"files, Lean proved {proved}; {counts['decided, not proved']} stay "
-        f"decided; {counts['refuted, negation proved']} refuted casts and "
-        "accesses have their negation proved at isl's counterexample"
+        f"decided; {counts['refuted, negation proved']} refuted facts have "
+        "their negation proved at isl's counterexample"
         + (
             f", and {counts['refuted, negation not proved']} do not"
             if counts["refuted, negation not proved"]

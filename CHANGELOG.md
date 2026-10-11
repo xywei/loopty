@@ -28,9 +28,11 @@ All notable changes to loopty are recorded here. The format follows
   the casts after a substitution, a cast with a hardware axis) say so.
   `docs/lean-checks.md` explains it, and `scripts/lean_coverage.py` reports
   what Lean proves of every example and test kernel.
-- `loopty run` asks Lean about each cast it reports, names what Lean did not
-  prove under the table, and prints the Lean with `--show-lean [TEXT]`;
-  `loopty check --show-lean` passes it to `lanky check`.
+- `loopty run` asks Lean about each fact isl decided that it reports (the
+  casts, a layout's facts), names what Lean did not prove under the table
+  (with `--verbose`, also what Lean was not asked about, and why), and prints
+  the Lean with `--show-lean [TEXT]`; `loopty check --show-lean` passes it to
+  `lanky check`.
 - **Definedness inside one kernel.** An array a kernel reads only at cells
   an earlier instance of its own wrote, as `scan` reads `off[r]`, gets a
   `definedness` fact where isl shows it, stated for Lean as a ∀∃ with isl's

@@ -97,7 +97,8 @@ REFUTED shift at out_of_bounds.py:24: u[i + 1] is in bounds for every instance o
 
 A fact isl decided and Lean did not prove keeps `decided`, and a `NOT PROVED`
 line under the table names it, the part Lean did not close, and why. With
-`--verbose`, so does a fact loopty states for isl alone.
+`--verbose` (`lanky check`'s or `loopty run`'s), so does a fact loopty states
+for isl alone.
 
 ## What each fact is, for Lean
 
@@ -186,10 +187,55 @@ coverage report ran on, and 1.4 s the next, against 0.6 s without Lean.
 
 `scripts/lean_coverage.py` offers every fact isl decides about every example
 and test kernel to Lean, the casts each file's `rejected*` functions refuse
-included, from an empty proof cache. Its report, run on loopty's branch of
-this change with Lean v4.29.1:
+included, from an empty proof cache. Its report, with Lean v4.29.1 (a
+file's time is Lean's on all its facts, a part's on one declaration):
 
-COVERAGE
+Of 523 facts isl decides in 16 files, Lean proved 499; 9 stay decided; 15 refuted facts have their negation proved at isl's counterexample. 260 more facts are not isl's to decide (by type, tested, assumed).
+
+| file | isl facts | proved | decided, not proved | refuted, negation proved | Lean time |
+|---|---:|---:|---:|---:|---:|
+| `examples/composition.py` | 10 | 10 | 0 | 0 | 1.6 s |
+| `examples/fusion.py` | 16 | 12 | 3 | 1 | 0.6 s |
+| `examples/p2p.py` | 19 | 19 | 0 | 0 | 2.2 s |
+| `examples/pairs.py` | 14 | 14 | 0 | 0 | 0.9 s |
+| `examples/reshape_layouts.py` | 16 | 16 | 0 | 0 | 1.7 s |
+| `examples/spmv.py` | 18 | 18 | 0 | 0 | 0.9 s |
+| `examples/stencil_skew.py` | 10 | 9 | 0 | 1 | 2.4 s |
+| `examples/travel.py` | 47 | 45 | 2 | 0 | 3.7 s |
+| `examples/wavefront_acoustic.py` | 24 | 21 | 0 | 3 | 9.8 s |
+| `tests/kernels/axpy.py` | 4 | 4 | 0 | 0 | 0.1 s |
+| `tests/kernels/domains.py` | 90 | 89 | 0 | 1 | 6.0 s |
+| `tests/kernels/out_of_bounds.py` | 4 | 3 | 0 | 1 | 0.2 s |
+| `tests/kernels/spmv_min.py` | 14 | 14 | 0 | 0 | 0.0 s |
+| `tests/kernels/stencil.py` | 5 | 5 | 0 | 0 | 0.0 s |
+| `tests/kernels/travel.py` | 64 | 61 | 2 | 1 | 2.5 s |
+| `tests/kernels/travel_wrong.py` | 168 | 159 | 2 | 7 | 9.6 s |
+
+By kind:
+
+| kind | isl facts | proved | decided, not proved | refuted, negation proved | parts | median s per part | slowest part |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| bijective | 15 | 14 | 1 | 0 | 58 | 0.129 | 0.49 s |
+| definedness | 19 | 18 | 1 | 0 | 22 | 0.086 | 0.18 s |
+| disjoint-writes | 108 | 108 | 0 | 0 | 108 | 0.023 | 0.15 s |
+| element-sort | 28 | 20 | 0 | 8 | 20 | 0.058 | 0.09 s |
+| in-bounds | 230 | 228 | 0 | 2 | 245 | 0.053 | 1.12 s |
+| layout | 6 | 0 | 6 | 0 | 0 | - | - |
+| monotone | 20 | 14 | 1 | 5 | 115 | 0.199 | 0.61 s |
+| ordering | 81 | 81 | 0 | 0 | 226 | 0.023 | 0.14 s |
+| requirement | 16 | 16 | 0 | 0 | 16 | 0.146 | 0.43 s |
+
+Every fact Lean did not prove, and why:
+
+- `examples/fusion.py`, burgers_rhs: every cell of f that burgers_rhs reads, flux.S0 has stored by the time it is read. loopty states this kind of fact for isl only, from sets isl computed, and not yet from its own description of the kernel
+- `examples/fusion.py`, burgers_rhs: substitute('f') renames the instances of burgers_rhs one for one. a substitution before this step changed what the instances read, and the dependences the step is checked against are isl's, not loopty's description
+- `examples/fusion.py`, burgers_rhs: the order after substitute('f') runs every dependence of burgers_rhs forward. a substitution before this step changed what the instances read, and the dependences the step is checked against are isl's, not loopty's description
+- `examples/travel.py`, through: the rows of val stay inside their buffers and apart while scan.S0 and scan.S1 write off. loopty states this kind of fact for isl only, from sets isl computed, and not yet from its own description of the kernel
+- `examples/travel.py`, flat: the rows of wt stay inside their buffers and apart while scan_flat.S0 and scan_flat.S1 write off. loopty states this kind of fact for isl only, from sets isl computed, and not yet from its own description of the kernel
+- `tests/kernels/travel.py`, through: the rows of val stay inside their buffers and apart while scan.S0 and scan.S1 write off. loopty states this kind of fact for isl only, from sets isl computed, and not yet from its own description of the kernel
+- `tests/kernels/travel.py`, flat: the rows of wt stay inside their buffers and apart while scan_csr.S0 and scan_csr.S1 write off. loopty states this kind of fact for isl only, from sets isl computed, and not yet from its own description of the kernel
+- `tests/kernels/travel_wrong.py`, two_buffers: the rows of wt stay inside their buffers and apart while scan_flat.S0 and scan_flat.S1 write off. loopty states this kind of fact for isl only, from sets isl computed, and not yet from its own description of the kernel
+- `tests/kernels/travel_wrong.py`, two_buffers: the rows of wt2 stay inside their buffers and apart while scan_flat@2.S0 and scan_flat@2.S1 write off2. loopty states this kind of fact for isl only, from sets isl computed, and not yet from its own description of the kernel
 
 ## What stays isl's
 
@@ -205,7 +251,9 @@ asked about; each says so with `--verbose`, and the coverage report lists them.
   [#187](https://github.com/xywei/loopty/issues/187).
 - **Work items:** a cast that puts a loop on a hardware axis also claims that
   no dependence joins two work items, which is stated for isl only; the cast
-  is then left `decided` as a whole; issue [#188](https://github.com/xywei/loopty/issues/188).
+  is then left `decided` as a whole; none of the examples has one; issue
+  [#188](https://github.com/xywei/loopty/issues/188).
 - **A part of a tile isl computed:** a statement in one of two tiled loops is
   split by the part of the tile's map over its loop, which isl computes; a
-  cast with such a step is left `decided`; issue [#189](https://github.com/xywei/loopty/issues/189).
+  cast with such a step is left `decided`; none of the examples has one;
+  issue [#189](https://github.com/xywei/loopty/issues/189).

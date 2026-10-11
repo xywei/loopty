@@ -659,6 +659,28 @@ def test_run_proves_the_casts_and_shows_their_lean(
     assert "theorem Lanky." in out
 
 
+def test_run_names_a_cast_lean_was_not_asked_about_when_verbose(
+    lean: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    # The casts after fusion's substitution are isl's alone: decided, and
+    # with --verbose a NOT PROVED line says so, and why.
+    from lanky.oracles.lean import LeanOracle, ProofCache
+    from lanky.plugins import registry
+
+    from loopty.cli import main
+
+    for oracle in registry.sorted_oracles():
+        if isinstance(oracle, LeanOracle):
+            monkeypatch.setattr(oracle, "proofs", ProofCache(str(tmp_path)))
+    path = EXAMPLES / "fusion.py"
+    assert main(["run", str(path)]) == 0
+    assert "Lean was not asked" not in capsys.readouterr().out
+    assert main(["run", str(path), "--verbose"]) == 0
+    out = capsys.readouterr().out
+    assert "NOT PROVED burgers_rhs" in out
+    assert "isl decided it; Lean was not asked: a substitution before this step" in out
+
+
 def test_every_refused_cast_is_proved_false_at_isls_pair(lean: Any) -> None:
     for label, exc in _refused_casts():
         fact = lean.establish(exc.fact)

@@ -544,6 +544,11 @@ class RunVerb:
                 "owner, id or statement contains TEXT"
             ),
         )
+        parser.add_argument(
+            "--verbose",
+            action="store_true",
+            help="also name each cast Lean was not asked about, and why",
+        )
 
     def run(self, args: Any, /) -> int:
         """Run the verb; returns the process exit code."""
@@ -658,13 +663,15 @@ class RunVerb:
                     f"({detail['exactness']}) -> {fact.status.value}"
                 )
 
-        # The casts were decided by isl as each step was taken; where Lean is
-        # installed it checks each once, from the steps' records, and a cast
-        # it proves reads proved (loopty.obligations).
+        # The casts were decided by isl as each step was taken, and a layout's
+        # facts above; where Lean is installed it checks each once, a cast
+        # from the steps' records, and a fact it proves reads proved; one
+        # loopty states for isl only says why under --verbose
+        # (loopty.obligations).
         from loopty.obligations import prove
 
         for fact in list(ledger):
-            if fact.kind in ("bijective", "monotone") and callable(
+            if fact.decided_by == "isl" and callable(
                 getattr(fact.term, "lean_obligation", None)
             ):
                 ledger.add(prove(fact))
@@ -675,7 +682,7 @@ class RunVerb:
         report_proved, report_unproved, report_lean = _lean_reports()
         if report_proved is not None:
             report_proved(ledger)
-            report_unproved(ledger)
+            report_unproved(ledger, verbose=getattr(args, "verbose", False))
         show_lean = getattr(args, "show_lean", None)
         if show_lean is not None and report_lean is not None:
             report_lean(ledger, show_lean)

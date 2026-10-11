@@ -416,9 +416,9 @@ release; the CHANGELOG says when one does.
   its `lexmax` pieces as the writer of each cell a read reads, the instances
   it took of a program's universal hypotheses, and its counterexample to a
   refuted fact, which Lean proves false. `loopty run` asks Lean about the
-  casts it reports, and `--show-lean` prints the Lean. On the examples and
-  the test kernels Lean proves every fact isl decides but those listed under
-  Known limits; `scripts/lean_coverage.py` reports it.
+  casts and layout facts it reports, and `--show-lean` prints the Lean. On
+  the examples and the test kernels Lean proves every fact isl decides but
+  those listed under Known limits; `scripts/lean_coverage.py` reports it.
 - Definedness inside one kernel. An array a kernel reads only at cells an
   earlier instance of its own wrote (`scan` reads `off[r]` where `off[0] =
   0` or the row before stored it) gets a `definedness` fact where isl shows
@@ -936,7 +936,7 @@ on the inputs it runs.
   Where Lean is installed, a rewritten layout's fact, the casts after a
   substitution, a cast that puts a loop on a hardware axis, and a cast through
   the part of a tile isl computes stay `decided isl`: loopty states them for
-  isl only, and `lanky check --verbose` says so.
+  isl only, and `lanky check --verbose` or `loopty run --verbose` says so.
 - **The OpenCL target is not run in CI**
   ([#174](https://github.com/xywei/loopty/issues/174)). `--target opencl`,
   with the `opencl` extra, generates OpenCL and runs it through pyopencl, and
