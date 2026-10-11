@@ -1,6 +1,6 @@
 # Notes on loopy and islpy
 
-Twenty-five interactions with loopty's dependencies that cost real debugging
+Twenty-six interactions with loopty's dependencies that cost real debugging
 time, each with the local workaround and the reason it is local. No upstream
 issues were filed: these are notes so that the next person meets the answer
 instead of the symptom.
@@ -746,13 +746,23 @@ which the C target declares as a variable-length array on the stack of the
 call (`double f[n];`), and global on OpenCL. An address space left to loopy
 (`lp.auto`) comes out private too, since nothing in the kernel is parallel,
 which on OpenCL would be a variable-length private array that OpenCL C does
-not have.
+not have. A schedule transforms the private temporary as loopy's
+(`Schedule.substitute` computes one away with `assignment_to_subst`, which
+takes a temporary). Then, on C, the executor takes it off the stack, where
+its size was bounded by the thread's and one larger crashed the compiled run
+with no diagnostic, eight megabytes on a thread with four (#62):
+`lower.heap_temporaries` makes each of the program's arrays still a private
+temporary of the kernel, and touched by it, an argument after the others
+(`double *__restrict__ f`, the temporary's shape and dimension tags), and
+`LoopyExecutor.run` allocates it on the heap, zeroed, at the call's sizes,
+and passes it. `emit_code` prints the kernel so. One empty at the call's
+sizes stays on the stack, where it takes no room: loopy's C invoker cannot
+pass an empty array (note 3).
 
-**What that costs.** On C the stack bounds how big a temporary can be: a
-program whose intermediate is larger than the thread's stack crashes the same
-way, and nothing checks the size first. The demos' intermediates are a few
-hundred bytes. The OpenCL path is generated, not run: nothing on a development
-machine imports pyopencl.
+**What that costs.** Nothing on the OpenCL path, which is unchanged: loopy's
+PyOpenCL host code allocates the global temporary for each call. A caller
+who runs `schedule.kernel` with loopy itself, rather than through the
+executor, has the variable-length array.
 
 ## 17. A bare Python number takes the type of where it stands
 
@@ -930,9 +940,10 @@ variables, sizes and literals alone, which is Python's natively and exact:
 `1.0 * i ** 5` past `i = 6208` is a wider number natively, which the
 differential fact reports (#139). An affine subscript with no division is
 computed in loopy's 32-bit index type, which `-fwrapv` makes right for its
-sums and products; what the plan leaves in 32 bits, a sum of loop variables
-and sizes, stays there in a division too (`x[(i + n) // 2]`, past `2**30`,
-#149), as in a loop bound (note 23). The interpreter's
+sums and products; any other subscript is widened, a sum of loop variables
+and sizes in it included (`x[(i + n) // 2]`, #149, note 23). What the plan
+leaves in 32 bits, such a sum, stays there in a value and in a guard on the
+loops, as in a loop bound (`y[i] = i + n` past `2**31`, #162). The interpreter's
 functions (`sqrt`, `exp`, ...) are typed as numpy types them,
 and a call of anything else is not typed, nor is anything around it. On the
 OpenCL target a `float32` kernel that numpy computes partly in double is
@@ -1234,8 +1245,15 @@ tests and `wavefront_acoustic.py --bench` do. With the readings:
   was `x[(499999 * i) / 1000000]`, a negative cell from `i = 4295`, and is
   `x[loopty_floor_div_int64((int64_t) (i) * 499999, (int64_t) (1000000))]`.
   What the plan leaves in 32 bits, a sum of loop variables, sizes and small
-  literals, stays in 32 bits in a division too (`x[(i + n) // 2]`, past
-  `2**30`, #149);
+  literals (`Promotion.index_sum`), counts as a widening left out, and in a
+  subscript widened it has its first operand converted:
+  `x[loopty_mod_int64((int64_t) (i) + k, (int64_t) (m))]`, where `i + k`
+  wrapped round past `2**31`, and `x[(i + n) // 2]`, which loopy wrote
+  `x[(i + n) / 2]` (#149). A conversion of a result back into a narrower
+  type numpy computes in is kept in a subscript, as everywhere else, and
+  makes loopy decline it: `x[(uint8_t) (s + i)]` of a `uint8` `s`, which
+  loopy wrote `x[i + s]`, cell 256 where numpy takes `250 + 6` round to 0
+  (#157);
 - a substituted read keeps the value's conversions, the store's included, and
   loopy generates the subscript with them (`y[(int16_t) (t[i])]`); a store's
   widening keeps the value and is the last thing done to it, so a read in a
@@ -1372,8 +1390,9 @@ sum plans a negation it adds as the difference it stands for
 (`Promotion._subtracted`), negating `b` in the difference's type, and the
 interpreter subtracts it (`interpret._Run.sum`).
 
-**What it does not cover.** A subscript's arithmetic is left in the type loopy
-computes it in, neither widened nor converted back (#129, #157). `u[i] - 1`
+**What it does not cover.** A subscript loopy reads as affine with no
+division is left in loopy's 32-bit index type, unwidened (note 23); one in a
+narrow type keeps its conversion back into it, and is not read (#157). `u[i] - 1`
 and `u[i] + -1` of an unsigned `u` are one term, so the second, which numpy
 refuses at every point, is computed as the first (#151); a literal a numpy
 integer's type does not hold is refused elsewhere (#141). An `If`, whose
@@ -1384,3 +1403,32 @@ takes round, `2**8 - u[i]` of a `uint8`, so the two runs differ at every
 `u[i]` but zero (#151). A comparison of `abs` of an element does not trace
 (`abs(k[i]) > 2`, xywei/lanky#94): lanky's terms leave `abs` to pymbolic,
 whose call has no order.
+
+## 26. Complex values are structs on the OpenCL target, which `==` does not compare
+
+**Symptom.** `b[i] = (z[i] == w[i]) | (z[i] != 3.0)` of two `np.complex128`
+arrays compiles and agrees with numpy on the C target, and does not build on
+the OpenCL target: `invalid operands to binary expression ('const __global
+cdouble_t' and 'const __global cdouble_t')`. `np.complex64` fails the same
+way, with `cfloat_t` (#158).
+
+**Cause.** pyopencl's complex types (`pyopencl-complex.h`) are structs of two
+reals, and OpenCL C has no `==` or `!=` for a struct. loopy's PyOpenCL
+expression mapper writes complex sums, products, quotients and powers as
+calls of the header's functions (`cdouble_add`, `cdouble_mul`, ...), and a
+comparison as C's operator, as its C mapper does. C99's complex types have
+`==` and `!=`, so only the device target fails.
+
+**Local fix.** `lower._OpenCLExpressions.map_comparison` writes `==` and `!=`
+of complex operands part by part, as numpy compares: `cdouble_real(z[i]) ==
+cdouble_real(w[i]) && cdouble_imag(z[i]) == cdouble_imag(w[i])`, with `||`
+and `!=` for `!=`, so a NaN part makes `==` false and `!=` true. Each
+operand is converted first into the complex type numpy compares in, which is
+the one loopy infers for the difference (`cdouble_cast(z[i])` of a
+`complex64` beside a double); a real operand is compared with the real part
+and `0` with the imaginary part, and a complex literal by its parts. The
+mapper is the target's, so a schedule retargeted to OpenCL gets it too.
+
+**What it does not cover.** An ordering of complex values (`<`), which numpy
+orders lexicographically and C does not order at all, is not lowered on
+either target, and fails in the compiler (#163).

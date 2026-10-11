@@ -1380,9 +1380,10 @@ def test_a_temporary_of_naturals_is_an_integer_natively() -> None:
 
     # count's contract checks that c holds naturals, and truncate wrote it,
     # so a checked point reads c between the calls (#119), and the compiled
-    # program stores it in 64 bits for that (#128), as it stores a Nat.
+    # program stores it in 64 bits for that (#128), as it stores a Nat; the
+    # executor allocates it (#62).
     assert counted_given.term.checked_arrays == frozenset({"c"})
-    assert "int64_t c[" in emit_code(counted_given)
+    assert "int64_t *__restrict__ c)" in emit_code(counted_given)
 
     # A 32-bit c would narrow u[i] = 3e9 natively, negative, where the
     # compiled store keeps it: refused as a Nat's storage (#101) before the

@@ -601,11 +601,12 @@ says when one does.
   what the compiled temporary holds: `float64` for `Real`, the dtype itself
   for a numpy one such as `np.complex128`, `bool` for `Bool`, `int64` for
   `Nat` and `Int`, and a signed integer of 32 bits or more for `Fin[m]`
-  (`int64` for an array a checked point reads). On the C target a
-  temporary is a variable-length array on the stack of the call, which bounds
-  its size (note 16 in `docs/loopy-notes.md`); on OpenCL it is a global
-  temporary, which is generated but, like every device path, not run from a
-  development machine.
+  (`int64` for an array a checked point reads). On the C target the executor
+  allocates a program's array on the heap and passes it after the program's
+  own arguments, `double *__restrict__ f`, where loopy would declare it on
+  the stack of the call, whose size bounded it (#62; note 16 in
+  `docs/loopy-notes.md`); on OpenCL it is a global temporary, which the
+  PyOpenCL host code allocates.
 - Only a two-axis (row, fiber) ragged array, its rows counted by an array of
   one axis, is built and lowered; tracing refuses any other ragged type, a
   fiber after two dense axes, a dense axis after the fiber, or counts of two
@@ -616,14 +617,22 @@ says when one does.
   which is exact: `1.0 * i ** 5` past `i = 6208` is a wider number natively
   and wraps compiled, which the differential fact reports (#139).
   A loop bound, and a subscript loopy reads as affine with no division, are
-  loopy's index arithmetic, 32 bits wide, and so is a sum of loop variables,
-  sizes and small literals elsewhere; under `-fwrapv` such a subscript's
+  loopy's index arithmetic, 32 bits wide; under `-fwrapv` such a subscript's
   sums and products give the cell it names. Any other subscript is computed
-  in 64 bits, as the rest is: `x[(i * i) % n]` (#129), and `x[(i * 499999)
-  // 1000000]`, which loopy wrote with a division of the wrapped `499999 *
-  i`. A sum the plan leaves in 32 bits stays so in a division too, `x[(i +
-  n) // 2]` past `2**30` (#149). A subscript over a narrow numpy integer
-  type is not converted back into it (#157). A `Fin[m]` array the kernel
+  in 64 bits, as the rest is, its sums of loop variables and sizes included:
+  `x[(i * i) % n]` (#129), `x[(i * 499999) // 1000000]`, which loopy wrote
+  with a division of the wrapped `499999 * i`, and `x[(i + n) // 2]`, whose
+  sum wrapped round past `2**30` (#149). A sum of loop variables, sizes and
+  small literals in a value or a guard on the loops is still 32 bits wide,
+  `y[i] = i + n` past `2**31` (#162). A subscript over a narrow numpy integer
+  type is computed in it, as numpy computes it: `x[s + i]` of a `uint8` `s`
+  wraps round at 256 in both runs (#157). One of a signed type that wraps
+  round below zero is refused natively, as any negative index is, and read
+  before the array compiled; its in-bounds fact is not decided, since isl
+  reads a narrow scalar or element as any integer, and is refuted or
+  assumed. A numpy scalar written on the left, `x[np.uint8(200) +
+  i]`, is traced as the Python int it equals, and not taken round (#167).
+  A `Fin[m]` array the kernel
   writes may be an `int32` one natively, whose entries the native run reads
   as `int64`, as the compiled run computes with them, unless a program's
   checked point reads it, which takes an `int64` one. An integer to a
@@ -788,13 +797,13 @@ The open issues a user is most likely to meet. Each says what the ledger and
 the runs make of it, since that is what decides whether it can go unnoticed.
 
 - **Some index arithmetic is 32 bits wide compiled**
-  ([#149](https://github.com/xywei/loopty/issues/149), [#157](https://github.com/xywei/loopty/issues/157)). A loop bound, and a subscript loopy
-  reads as affine with no division, are loopy's index arithmetic, 32 bits
-  wide. Every other subscript is computed in 64 bits, as natively. A sum of
-  loop variables and sizes inside a dividing subscript stays in 32 bits, so
-  `x[(i + n) // 2]` wraps round past `2**30` (#149). A subscript over a
-  narrow numpy integer type, such as `int8` or `uint16`, is computed in C's
-  `int` compiled, and wraps round natively (#157).
+  ([#162](https://github.com/xywei/loopty/issues/162)). A loop bound, a guard
+  on the loops, and a subscript loopy reads as affine with no division are
+  loopy's index arithmetic, 32 bits wide, and so is a sum of loop variables,
+  sizes and small literals in a value: `y[i] = i + n` into an `Int` array,
+  or `(i + n) // 2`, wraps round compiled once `i + n` passes `2**31`, for
+  `n` past `2**30`, and the differential fact is refuted. Every other
+  subscript is computed in 64 bits, as natively.
 - **A guard loopy's bounds check cannot read**
   ([#148](https://github.com/xywei/loopty/issues/148)). An access that only a floating-point guard keeps in
   bounds, `x[2 * i]` under `when(i * 2.0 < n)`, is refused by loopy's bounds
@@ -809,18 +818,13 @@ the runs make of it, since that is what decides whether it can go unnoticed.
   intermediate again at every read; keeping only the cells live at once, a
   window of three cells of `f` after the Burgers fusion, is not done. Nor is
   a substitution through two intermediates, one computed from the other.
-- **A program's intermediates live on the C stack**
-  ([#62](https://github.com/xywei/loopty/issues/62)). An array a program makes
-  with `Arr.zeros_like` is a variable-length array on the stack of the compiled
-  call, so one larger than the stack crashes the compiled run, and nothing
-  checks the size first.
 - **The OpenCL target is not run in CI.** `--target opencl`, with the `opencl`
-  extra, generates OpenCL and runs it through pyopencl, and nothing in CI or in
-  the test suite runs a device. The demos were run on two device classes by
+  extra, generates OpenCL and runs it through pyopencl, and nothing in CI runs
+  a device: the one test that does, of complex comparisons, is skipped
+  without pyopencl and a device. The demos were run on two device classes by
   hand, and
   [docs/device-runs.md](https://github.com/xywei/loopty/blob/main/docs/device-runs.md)
-  has the commands and the transcripts. A comparison of complex values does
-  not build on it ([#158](https://github.com/xywei/loopty/issues/158)).
+  has the commands and the transcripts.
 - **A theorem's or a postcondition's statement is lanky's reading of it.**
   loopty traces a kernel's body itself, and the `trace-faithful` fact checks
   that trace. A theorem, and the claim after a kernel's `->`, are annotations
