@@ -182,7 +182,8 @@ table of row starts. Both compiled runs agree with the native one.
   before any code is generated. Fusing two kernels a program calls is one of
   them, a map per statement that runs both in one loop, and so the storage of
   what passes between them is a question of the schedule and not of the
-  kernels: computed where it is read, or kept.
+  kernels: computed where it is read, kept in full, or kept in the cells live
+  at once, with a checked fact that no read sees its slot overwritten.
 - **Reassociation is visible in the type.** Splitting an accumulation and summing
   the pieces is not free on floating point. A trace reads the accumulation's
   class off what it sums, `realize("y", tree=True)` is what lowers it to
@@ -194,6 +195,21 @@ table of row starts. Both compiled runs agree with the native one.
   the output. Over an `exact` accumulation the same cast is refused, and a
   kernel with an `exact` output is compiled with floating-point contraction
   off, so a fused multiply-add cannot change its last bit.
+- **An assembly's race is named by the mesh.** PyOP2 adds each cell's values
+  into the cell's nodes, `y[cell[c, k]] += yl[c, k]`, and two cells that share
+  a node add into one cell of `y`. That is an update: either order gives the
+  sum, so the kernel owes the class of the sum and not distinct writes, and a
+  schedule may run two updates of one cell in another order but not at the
+  same time. A split of the cells onto work items is refused with the two
+  updates that collide on the example inputs, the node PyOP2's two triangles
+  share, not with a pair isl picked out of every cell the map could reach,
+  and accepted once the updates are atomic:
+
+  ```python
+  Schedule(mass_action, target="opencl").atomic("y").split("c", 32).tag(
+      c_outer="g.0", c_inner="l.0"
+  )
+  ```
 - **Legal and buildable are different questions, and both are answered.** A
   transformation can preserve the meaning of a program and still be one the
   backend cannot generate. Every accepted step is asked whether the target can
@@ -212,6 +228,14 @@ table of row starts. Both compiled runs agree with the native one.
   in-bounds obligations are decided over the set itself, so a cell of the
   bounding box outside it is refused. Where the cells are kept is a layout,
   boxed or packed, chosen by a schedule step, and changes no fact.
+- **A layout is a checked map.** Where an array's cells are stored is a Python
+  function from a cell's indices to its address, and that it stores every
+  cell inside its buffer, no two at one address and a cell at every address
+  is a fact isl decides and Lean proves, as is that two layouts store every
+  cell alike: sumpy's compressed-Taylor storage index, and grudge's
+  `dim_tags` `N3,N0,N1,N2` against modepy's reshape of the DOFArray
+  (`examples/storage_layouts.py`). loopy's shaped arrays (loopy #1053) take a
+  layout's injectivity on trust.
 - **What isl decides, Lean proves.** isl decides a fact in milliseconds and
   gives no proof. Where Lean is installed, every fact isl decides, an access in
   bounds, two writes apart, a definedness, a cast's legality one dependence
@@ -345,9 +369,56 @@ release; the CHANGELOG says when one does.
   the read, since no zeros are left to read, and nothing writes what it
   read in between, and every later step is checked against the
   dependences of the program as it then runs.
+  `.contract("f")` keeps `f` in the cells live at once instead: fused one
+  step behind, the divergence reads `f[j]` and `f[j - 2]` at step `j`, so a
+  window of three cells is found, each flux computed once:
+
+  ```python
+  fused = Schedule(burgers_rhs).fuse("flux", "divergence", shift=1)
+  windowed = fused.contract("f")              # lambda j: j % 3
+  fused.contract("f", lambda j: j % 2)        # refused: a read sees its slot overwritten
+  ```
+
+  A placement is a Python function from a cell's indices to its slot, given
+  or found axis by axis along the order as it stands (one row of the
+  sum-factorized passes' `v`, `lambda e, a, b: b`). The step is legal when
+  every read is of a cell the producer stored before it, the `definedness`
+  fact, and no read sees its slot overwritten between that store and the
+  read, the `no-clobber` fact, decided by isl over the schedule's order and
+  proved by Lean, and refuted with the read, the cell and the instance that
+  overwrote its slot. From then on every pair of accesses to one slot is a
+  dependence of the schedule, so a later step that breaks the window, or
+  puts its slots on two work items, is refused with its pair. It lowers to
+  `double f_window[3]` with modulo addressing, or, with `registers=True`
+  (the default on OpenCL), to a shift register whose every access has a
+  constant index, `f_window[0] = f_window[1]` at each step.
   `examples/fusion.py` is the Burgers flux and divergence of
-  `examples/composition.py`, fused, then substituted, each compiled run
-  compared with the native one.
+  `examples/composition.py`, fused, then substituted, or kept in a window,
+  each compiled run compared with the native one.
+- Declared layouts, checked (`loopty.layout`). A layout is a function from a
+  cell's indices to its address, its cells and its buffer in its
+  annotations, and a layout of pieces is `layout(first, second)`:
+
+  ```python
+  def centre(a: Fin[1], b: Fin[1]) -> Fin[2 * P + 1]:
+      return 0
+
+  def derivatives(
+      cell: Where[a: Fin[2], b: Fin[Q], (a + b >= 1) & (a + b < Q)],
+  ) -> Fin[2 * P + 1]:
+      a, b = cell
+      return 2 * (a + b) - 1 + a
+
+  storage_index = layout(centre, derivatives)        # sumpy's get_storage_index
+  as_dim_tags = dof_array.same_as("N3,N0,N1,N2")     # grudge's output layout
+  ```
+
+  `lanky check` asks three facts of each, every cell at an address of the
+  buffer, no two at one address, a cell at every address (whose witness for
+  Lean is isl's inverse, with `//` and `%`), and `same_as` one more, and a
+  kernel reads through the layout's own function. A wrong nesting,
+  `N3,N2,N1,N0`, is refuted with the cell it moves
+  (`examples/storage_layouts.py`).
 - Tracing a body to a typed term: accesses, statements, reductions, ragged
   fibers, `when` guards, source locations, and a `TraceError` that names the fix
   when a Python `if` is used on a computed value, when a Python name, a
@@ -473,7 +544,7 @@ release; the CHANGELOG says when one does.
   on an `assumption` fact, and a call whose sizes break it is refused.
 - `Schedule`: `tag`, `split`, `interchange`, `prioritize`, `tile`, `skew`,
   `affine`, `fuse`, `realize`, each checked as a cast, each emitting its fact,
-  and `substitute`, checked as a storage decision;
+  and `substitute` and `contract`, checked as storage decisions;
   `retarget`, which replays every step against another loopy target and
   re-checks it. `prioritize` and `interchange` also take the loop of a sum,
   named before loops of its statement, which it then runs outside, as
@@ -609,6 +680,24 @@ release; the CHANGELOG says when one does.
   a table is read as an array is, and it is no argument: an array of its
   values is passed instead, `Arr.from_numpy(W.values.copy())`.
   `examples/quadrature.py` is firedrake's P1 mass kernel.
+- Updates and atomics. A statement that adds to the cell it writes a value
+  that reads nothing else of the array, `y[cell[c, k]] += yl[c, k]` or `y[r]
+  += v[r, j]`, is an update. Its sum has the class of what it adds, as a
+  reduction's has (`approx` for `Real`). An update whose instances can add to
+  one cell owes that class, `the accumulation into y[cell[c, k]] over c, k is
+  approx`, and no distinct writes; one that updates a cell of its own at
+  every instance, `y[i] += a * x[i]`, owes its distinct writes. Two updates
+  of one cell are no dependence, so a schedule may reorder them, which it
+  records as a reassociation. A step that runs two of them at the same time,
+  on two work items or in no order (`ilp`, `vec`), is refused with the pair
+  and the fix until `Schedule.atomic("y")`. Then each update is loopy's
+  `AtomicUpdate` on OpenCL, a compare-and-swap, and the C target, which runs
+  in one thread, keeps its code. A refused cast through a cell read from an
+  array names two instances that touch one cell on the example inputs, with
+  what the subscripts read, `where cell[0, 2] = 3 and cell[1, 1] = 3`. A
+  write of that kind, `y[perm[i]] = x[i]`, has its distinct writes decided
+  on the native runs. `examples/assembly.py` is PyOP2's P1 mass action,
+  assembled.
 - The argument contract, enforced at every entry point that runs a kernel
   (compiled, differential and native): two distinct array parameters may not
   share storage where the kernel writes either, a ragged argument has to
@@ -698,8 +787,9 @@ release; the CHANGELOG says when one does.
   takes that are not the outer loops of their domain leave the casts
   decided and the kernel unbuildable. Only a pointwise
   producer is substituted (one cell per instance, at its loop variables, no
-  sum, no guard isl cannot state), and the array is either stored in full
-  or not at all: contracting it to the cells live at once is not done.
+  sum, no guard isl cannot state). A window is taken of an array one
+  statement stores, once per cell, and reads none of, which the others read
+  in values, before any of their loops is tagged (#213, #214).
   Every read gets the value as the store converted it, a read in a
   subscript included (`y[(int16_t) (t[i])]`), and a conversion inside the
   value stays (`(t[j] + 1) % n` of a 32-bit `Fin[m]` entry, computed in 64
@@ -904,9 +994,14 @@ release; the CHANGELOG says when one does.
 - `realize(var, tree=True)` checks and marks the reassociation; the reduction
   tree itself comes from splitting and tagging the reduction iname, which is
   checked separately and not verified on the C target.
-- The accumulation convention: a traced `y[r] += ...` under a parallel iname is
-  reported as a disjointness refutation, which is the conservative reading. The
-  `reassoc` fact is what should license it and nothing consumes that yet.
+- An update's cell read from an array is any cell to isl, so a step that runs
+  two updates through it at the same time is refused even where no input can
+  make them collide (`y[perm[i]] += x[i]` of a permutation `perm`), with a pair
+  from the example inputs where they have one and isl's otherwise, which the
+  message says: make the updates atomic (#202). An `exact` update,
+  `m[cell[c, k]] += 1` of integers, keeps the order of its updates and is
+  refused `atomic`, as an `exact` sum is refused a tree, although integer
+  addition gives the same bits in any order (#200).
 - The target-capability check knows the limits of loopy 2025.2 listed in notes
   6, 11 and 14 of `docs/loopy-notes.md` and no others, so it is a list rather
   than a model of what the backend can do. A schedule it passes can still fail
@@ -1034,18 +1129,36 @@ on the inputs it runs.
   after it have written their outputs, where natively the program stopped
   inside that call. After the error, do not trust the arrays, and pass copies
   if you need them as they were.
-- **What passes between calls is stored in full or not at all**
-  ([#132](https://github.com/xywei/loopty/issues/132),
-  [#133](https://github.com/xywei/loopty/issues/133)). `Schedule.substitute`
-  computes an intermediate again at every read; storing only the cells live at
-  once, a window of three cells of `f` after the Burgers fusion, is not done.
-  A substitution through two intermediates, one computed from the other, is
-  refused: substitute one of them.
+- **A window is an edge's, between one writer and its readers**
+  ([#213](https://github.com/xywei/loopty/issues/213),
+  [#214](https://github.com/xywei/loopty/issues/214),
+  [#229](https://github.com/xywei/loopty/issues/229),
+  [#133](https://github.com/xywei/loopty/issues/133)). `Schedule.contract`
+  refuses an array its producer reads (a recurrence) or updates (`f[j] +=
+  v` adds to the zeros a window drops: store each cell once, or keep the
+  array whole), or that two statements store, and a loop tagged with no
+  order before it; an update of another array may read a window, and
+  `atomic` does not lift the order of its slots. A window that drops a
+  loop is shared by its every value, so putting that loop on a hardware axis
+  after it is refused, where one window per work item would do. An array
+  kept in a window, and another computed from it where it is read, are
+  refused together, in either order: `substitute` moves the reads of the
+  window to where the other is read. A substitution through two
+  intermediates, one computed from the other, is refused: substitute one of
+  them.
 - **Some facts are isl's alone** ([docs/lean-checks.md](https://github.com/xywei/loopty/blob/main/docs/lean-checks.md#what-stays-isls)).
-  Where Lean is installed, a rewritten layout's fact, the casts after a
-  substitution, a cast that puts a loop on a hardware axis, and a cast through
-  the part of a tile isl computes stay `decided isl`: loopty states them for
-  isl only, and `lanky check --verbose` or `loopty run --verbose` says so.
+  Where Lean is installed, a cast that puts a loop on a hardware axis and a
+  cast through the part of a tile isl computes stay `decided isl`: loopty
+  states them for isl only, and `lanky check --verbose` or `loopty run
+  --verbose` says so. A cast refused through a substitution's carried read,
+  or a window refused at a read in a sum, is refuted by isl with no
+  counterexample stated for Lean
+  ([#215](https://github.com/xywei/loopty/issues/215)).
+- **A declared layout stands on its own**
+  ([#216](https://github.com/xywei/loopty/issues/216)). Its buffer is one
+  axis, `-> Fin[k]`, and an argument of a kernel does not name the layout it
+  is stored through: a kernel reads through the layout's function, and its
+  facts do not rest on the layout's.
 - **The OpenCL target is not run in CI**
   ([#174](https://github.com/xywei/loopty/issues/174)). `--target opencl`,
   with the `opencl` extra, generates OpenCL and runs it through pyopencl, and

@@ -8,6 +8,78 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Added
 
+- **Window contraction** (`Schedule.contract`,
+  [#132](https://github.com/xywei/loopty/issues/132)): an array a program
+  makes, kept in the cells live at once. Fused one step behind, the Burgers
+  divergence reads `f[j]` and `f[j - 2]` at step `j`, so
+
+  ```python
+  fused = Schedule(burgers_rhs).fuse("flux", "divergence", shift=1)
+  fused.contract("f")                  # lambda j: j % 3, double f_window[3]
+  ```
+
+  keeps three cells and computes each flux once, where `substitute("f")`
+  computes it twice. A placement is a Python function from a cell's indices
+  to its slot, quasi-affine, given (`contract("f", lambda j: j % 3)`) or
+  found, axis by axis, outermost first, along the order as it stands (one
+  row of the sum-factorized passes' `v`, `lambda e, a, b: b`). The step is
+  legal when every read is of a cell the producer stored before it (the
+  strict `definedness` fact a substitution asks) and no read sees its slot
+  overwritten (a new `no-clobber` fact, decided by isl over the schedule's
+  order, refuted with the read, the cell it reads and the instance that
+  overwrote its slot, `contract('f', lambda j: j % 2) illegal: instance
+  divergence.S0[i=14] reads f[13], which flux.S0[j=13] stored in slot 1,
+  after flux.S0[j=15] stored f[15] there`). From then on every pair of
+  accesses to one slot is a dependence of the schedule, in the order they
+  ran, so a later step that breaks the window, or puts its slots on two work
+  items, is refused with its pair. Two lowerings: modulo addressing,
+  `f_window[j % 3]`, and a shift register (`registers=True`, the default on
+  OpenCL) whose every access has a constant index, the window shifted down
+  by one at each step of its loop, which a device keeps in registers. The
+  zeros the program made the array with are dropped, as a substitution
+  drops them. Lean states `no-clobber` from loopty's description: three
+  instances through every step's map, the placement with `%` by a number,
+  and the time vectors of the order. `examples/fusion.py` and
+  `examples/sum_factorization.py` show it; an array its producer reads, or
+  that two statements store, and a window per work item are not done (#213,
+  #214). A refused window names the fix, `contract('f') finds the smallest
+  window that keeps every read, lambda j: j % 3`, and a step that breaks one
+  the instance that would now overwrite a slot first. A window and a
+  substitution of an array computed from it are refused together, in either
+  order (#229): the substitution moves the window's reads. Every window of the
+  tests computes the bits the array stored in full does, on C and on an
+  OpenCL device, and a shift register inside an outer loop shifts in each of
+  its steps.
+- **Checked layout maps** (`loopty.layout`): a layout is a Python function
+  from a cell's indices to its address, whose annotations say which cells
+  (one `Fin` per axis, or one parameter over a `Where`) and which buffer
+  (the return annotation), and `layout(first, second)` is a layout of
+  pieces:
+
+  ```python
+  @layout
+  def dof_array(e: Fin[ne], a: Fin[N], b: Fin[N], c: Fin[N]) -> Fin[ne * N**3]:
+      return N**3 * e + (a + N * b + N**2 * c)
+
+  as_dim_tags = dof_array.same_as("N3,N0,N1,N2")   # loopy's dim_tags
+  ```
+
+  `lanky check` asks three facts of each layout, every cell at an address of
+  its buffer, no two cells at one address, and a cell at every address, and
+  one of a `same_as` claim, every cell stored where the other layout, or
+  loopy's `dim_tags`, stores it; isl decides each and Lean proves it, the
+  third with isl's inverse of the layout, in pieces with `//` and `%`, as
+  its witness. A layout of one piece is called as its function, so a kernel
+  reads through it; a call whose address is not the one the facts are about
+  (a constant or a helper the function computes with changed since it was
+  declared) is refused, with both addresses.
+  `examples/storage_layouts.py` checks sumpy's
+  compressed-Taylor storage index in two pieces, and grudge #418's
+  `N3,N0,N1,N2` against modepy's F-order reshape of the DOFArray; the
+  reshape in C order, `N3,N2,N1,N0`, is refuted with a cell, in words:
+  `dof_array stores (e=0, a=1, b=0, c=2) at 19, and dim_tags N3,N2,N1,N0 at
+  11`; so are two cells at one address and an address with none. A buffer of
+  several axes, and an argument that names its layout, are not done (#216).
 - **A kernel called inside another kernel's loop** (`loopty.calls`). A
   kernel body calls a kernel as Python calls a function. A kernel whose
   return annotation is a sort is a rule: it returns its value and writes
@@ -222,9 +294,77 @@ All notable changes to loopty are recorded here. The format follows
   taken as given, as loopy's `assume`. loopy is told, every later cast is
   decided and stated where it holds and rests on an `assumption` fact, and a
   call whose sizes break it is refused before anything is compiled.
+- **Updates, a scatter-add: `y[cell[c, k]] += yl[c, k]`.** A statement
+  that adds to the cell it writes a value that reads nothing else of the
+  array is an update (`Stmt.exactness`). Its sum has the class of what it
+  adds, as a reduction's has: `approx` for `Real`, `exact` for integers. Two
+  updates of one cell give the same sum in either order, so they are no
+  dependence of each other (`loopty.flow.dependences`), and a schedule may
+  reorder them, which it records as a reassociation, as `realize` does. An
+  update whose instances can add to one cell owes the class of its sum, `the
+  accumulation into y[cell[c, k]] over c, k is approx`, instead of distinct
+  writes, which were refuted before: a correct assembly loop or row sum
+  written with `+=` now checks clean. An update of a cell of its own at
+  every instance, `y[i] += a * x[i]`, still owes distinct writes.
+- **`Schedule.atomic("y")`.** Two updates of one cell that a step runs at
+  the same time, on two work items or under `ilp` or `vec`, can lose one of
+  the two values. Such a step is refused with the pair and the fix:
+  `tag(c_outer='g.0', c_inner='l.0') illegal: S1[c=0, k=2] and S1[c=1, k=1]
+  both update y[3] on example_inputs() (nc=2, nv=4), where cell[0, 2] = 3
+  and cell[1, 1] = 3, ...; make the updates atomic, with atomic('y') before
+  this step`. After `atomic("y")` the step is accepted, it records `atomic
+  updates of y run at the same time after tag(...)`, and `y` is compared at
+  `reassoc`. On OpenCL each update is loopy's `AtomicUpdate`, a
+  compare-and-swap loop, and every other access to `y` is atomic too, as
+  loopy requires. loopy has atomic updates of `int32`, `int64`, `float32`
+  and `float64` only; any other dtype is a `buildable` fact refuted. On the
+  C target, which runs in one thread, the code is unchanged. `atomic`
+  refuses an `exact` accumulation, as `realize` refuses a tree of one
+  (#200), and an array nothing updates, naming what each statement that
+  writes it does instead. `examples/assembly.py` is PyOP2's P1 mass action:
+  its GPU split refused with the node PyOP2's two triangles share, accepted
+  with atomics, and run on the PoCL CPU device (`docs/device-runs.md`).
+  An update may read a window (`Schedule.contract`), `y[node[i]] += f[i +
+  1] - f[i - 1]`, and `atomic` does not lift the order of the window's
+  slots; a window of an array that is updated is refused, since the
+  updates add to the zeros a window drops, with the fix: `contract('f'):
+  added_flux.S0 updates f[j] in place, ...; store each cell once, f[j] =
+  ... (a reduce_sum where the updates run over a loop), or keep f whole`.
+- **Refusals name a pair from the data.** isl cannot follow a cell read
+  from an array, `y[cell[c, k]]`: it takes it to be any cell, so the pair it
+  picks need not share one. A refused cast through such a cell now names two
+  instances that touch one cell on an input, with what the subscripts read
+  there. The inputs are tried in turn: the schedule's own example inputs,
+  the module's `example_inputs()`, then drawn ones. Where none has such a
+  pair, the message says the pair is isl's, naming the subscript isl cannot
+  follow; so it does for a read a substitution moves (`substitute('f')
+  reads y where f was read, which no run of an input shows`), which no
+  input's run makes. `loopty.interpret.interpret(..., log=...)` records the
+  cells each instance touches.
 
 ### Changed
 
+- Where Lean is installed, a rewritten layout's facts are proved
+  ([#186](https://github.com/xywei/loopty/issues/186)): one decided by the
+  row starts is stated as the induction step, each write of the offsets
+  storing the value its cell holds where they start at 0 and step by the
+  counts, as the contract checks on entry; one decided by induction over the
+  run, as each write's question under the order before it. And a
+  substitution's `definedness` fact and the casts after a substitution are
+  proved ([#187](https://github.com/xywei/loopty/issues/187)): the reads a
+  substitution computes again are stated as reads of what the producer read,
+  at the instance that stored the cell, ordered against every write of it,
+  and the statements it took out are in no class. So every fact isl decides
+  about the examples is now stated for Lean, and the coverage report in
+  `docs/lean-checks.md` is rerun. A claim decided under hypotheses is given
+  up to 32 of isl's instances of them, where it was given 16.
+- `substitute` refuses an array kept in a window, and `contract` one
+  computed where it is read.
+- The coverage report in `docs/lean-checks.md` covers the four examples the
+  demo kernels added (`assembly.py`, `layer_potential.py`, `quadrature.py`,
+  `sum_factorization.py`) and the windows, updates and layouts above: of 678
+  facts isl decides in 22 files, Lean proves 657 and confirms the
+  counterexample of the 21 refuted ones, and none stays decided.
 - A ledger gains a `definedness` row for each array a kernel reads only where
   it wrote it before (`scan`'s `off`, `p2p`'s `term`, `pairs`' `f`), and an
   access with mixed subscripts is decided where it was assumed; the
@@ -245,6 +385,12 @@ All notable changes to loopty are recorded here. The format follows
 - A cell set's dimensions are named apart from the loops of the access it is
   built for, so that a ragged row's bound written in a loop called `a0`
   reads back as that loop.
+- A step that runs two updates of one cell at the same time is refused with
+  a `disjoint-writes` fact of the step, where a `monotone` fact named the
+  pair before. That fact is stated for isl only, with the reason
+  (`docs/lean-checks.md`, #201). A `monotone` cast is stated for Lean without
+  the pairs of updates of one cell, which need no order; a cast with no pair
+  left is one trivial part.
 - Fewer indices than an array has axes, `A[i]`, are a row of it in a kernel
   body, and an array of indices, `u[cell[c]]`, the cells it picks: a view a
   called kernel takes, natively the row as an `Arr` sharing the buffer and
@@ -273,6 +419,13 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Fixed
 
+- A write through a cell read from an array, `y[perm[i]] = x[i]`, no longer
+  has its distinct writes refuted by isl with two instances that write no
+  common cell. The fact is decided on the kernel's native runs instead. It is
+  refuted with two instances that write one cell on an input, the example
+  inputs first: `S0[c=0, k=2] and S0[c=1, k=1] both write y[3] on
+  example_inputs() (nc=2, nv=4), where cell[0, 2] = 3 and cell[1, 1] = 3`.
+  Where no input has such a pair, as for `y[i, p[i]]`, it is `tested`.
 - The first run of a kernel with an array of four axes over one size, or a
   triangle boxed over two, no longer prints loopy's `ParameterFinderWarning:
   Unable to generate code to automatically find 'm' from 'u': nonlinear
@@ -290,6 +443,13 @@ All notable changes to loopty are recorded here. The format follows
   term first: another sum in floating point, `2**53` where the native run
   adds `1 + 1 + 2**53` to `2**53 + 2`. Every schedule now gives loopy a sum's
   loops in order, outermost first, as it gives it each statement's nest.
+- `fuse` after a `split` or a `tile` of the producer's outer loop is no
+  longer refused as unbuildable. The producer's domain is cut after the fused
+  loops by name, not by position: loopy 2025.2 puts a split loop's two after
+  the others, `[j, i_outer, i_inner]`, so
+  `Schedule(squared_rows).split(i, 2).fuse("square2", "row_total")` read
+  `buildable` refuted though both casts were decided
+  ([#192](https://github.com/xywei/loopty/issues/192)).
 
 ## [0.2.0] - 2026-10-11
 

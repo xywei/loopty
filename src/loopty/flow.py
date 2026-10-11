@@ -128,7 +128,7 @@ from lanky.terms import init_args
 from loopty.description import Description, Disjunct, describe, description_of
 from loopty.idx import Reflections
 from loopty.names import check_names
-from loopty.term import ArrType, Stmt, Term, count_param_names
+from loopty.term import ArrType, Stmt, Term, commutes, count_param_names
 
 __all__ = [
     "Footprint",
@@ -1721,15 +1721,28 @@ def dependences(term: Term) -> isl.Map:
     be disjoint storage, which is an assumption about how the kernel is called;
     :mod:`loopty.contract` enforces it at every executor and native entry point,
     and the module docstring says why it cannot be left implicit.
+
+    Two updates of one cell, ``y[cell[c, j]] += v`` and another, are no
+    dependence when both commute (:func:`loopty.term.commutes`): either
+    order gives the sum, to the class of the accumulation. That two of them
+    do not run at the same time, unless they are atomic, is a separate
+    question, which a schedule asks (:meth:`loopty.schedule.Schedule.atomic`).
     """
     prints = footprints(term)
     before = program_order(term)
+    updates = {stmt.id for stmt in term.stmts if commutes(stmt)}
     deps: isl.Map | None = None
     for first in prints:
         for second in prints:
             if first.array != second.array:
                 continue
             if not (first.touches_memory or second.touches_memory):
+                continue
+            if (
+                first.kind == second.kind == "acc"
+                and first.stmt in updates
+                and second.stmt in updates
+            ):
                 continue
             shared = first.relation.apply_range(second.relation.reverse())
             pairs = shared.intersect(_align(before, shared.get_space()))

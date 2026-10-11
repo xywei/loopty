@@ -96,11 +96,12 @@ def _facts(path: Path) -> list[Any]:
     """Every fact of a file: its kernels', programs', schedules', and refused casts."""
     from loopty.cli import collect
     from loopty.kernel import Kernel, Program
+    from loopty.layout import Layout, SameLayout
 
     module = _load(path)
     facts: list[Any] = []
     for value in list(vars(module).values()):
-        if isinstance(value, Kernel | Program):
+        if isinstance(value, Kernel | Program | Layout | SameLayout):
             facts.extend(value.facts())
     schedules, _ = collect(module, [])
     for schedule in schedules:

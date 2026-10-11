@@ -40,6 +40,7 @@ __all__ = [
     "Scope",
     "Stmt",
     "Term",
+    "commutes",
     "count_param_names",
     "declared_layout",
     "declared_offsets",
@@ -283,6 +284,21 @@ class Stmt:
     over the domain is then about instances that write nothing, and says so
     (see :func:`loopty.typing.in_bounds_facts`). Empty for a statement whose
     guard is stated whole, and for a term written by hand.
+
+    ``exactness`` is set on an accumulation that is an update, a
+    scatter-add such as ``y[cell[c, j]] += v``: its right-hand side adds to
+    the cell it writes (or takes from it, ``-=``) values that read nothing
+    of the array, and its guard and its subscripts read nothing of it
+    either. Two updates of one cell then commute, applied in either order,
+    to the class named here, which is read off what the update adds as a
+    reduction's is (:func:`loopty.trace.update_exactness`): ``approx`` for
+    a ``Real`` array, ``exact`` for an integral one. The kernel owes no
+    disjoint writes for such a statement, and a schedule may reorder its
+    updates of one cell, or run two of them at the same time once they are
+    atomic (:meth:`loopty.schedule.Schedule.atomic`). ``None`` for an
+    assignment, for any other read-modify-write (``y[i] = 2 * y[i]``), and
+    for an update that does not commute: an integral array updated by a
+    value that is not, whose every partial sum is truncated when stored.
     """
 
     id: str
@@ -296,9 +312,23 @@ class Stmt:
     order: tuple[int, ...] = ()
     loop_domain: isl.Set | None = None
     unnarrowed: tuple[tuple[str, str], ...] = ()
+    exactness: str | None = None
 
     def __post_init__(self) -> None:
         _check_domains(self.domain, self.loop_domain, f"statement {self.id}")
+
+
+def commutes(stmt: Stmt) -> bool:
+    """Whether two of ``stmt``'s updates of one cell may be reordered.
+
+    An update (:attr:`Stmt.exactness`) whose class allows a reassociation:
+    ``reassoc`` or ``approx``. Two such updates of one cell are no
+    dependence of each other (:func:`loopty.flow.dependences`), since either
+    order gives the sum to that class. An ``exact`` update keeps its order,
+    as an ``exact`` reduction keeps its own: ``exact`` asks for the bits of
+    the order the source wrote.
+    """
+    return stmt.exactness in ("reassoc", "approx")
 
 
 def _check_domains(domain: Any, loop_domain: Any, what: str) -> None:

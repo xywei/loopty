@@ -68,7 +68,13 @@ layout, and worth no more than it.
 cells, or the loop cannot be run in parallel and the order of the writes is
 part of the result. The obligation is the emptiness of the set of pairs of
 distinct instances whose writes collide, which isl decides and, when it fails,
-witnesses with the two instances.
+witnesses with the two instances. A write through a cell read from an array,
+``y[perm[i]] = x[i]``, is a write of any cell to isl, which would refute the
+claim with two instances that write no common cell, so the kernel's native
+runs decide it instead (:func:`loopty.faithful.collision_fact`). An update,
+``y[cell[c, k]] += v``, whose instances can add to one cell owes no distinct
+writes: either order of two of its updates gives the sum, and what it owes
+is the class of the sum, as a reduction does (:func:`accumulating`).
 
 *Ordering.* The dependence relation is defined from the footprints
 (:mod:`loopty.flow`), and the source order has to run every dependence forward
@@ -76,10 +82,11 @@ in time. That is the same monotonicity question a schedule has to answer, asked
 of the order the body was written in, so the ledger records the baseline that
 every later cast is compared against.
 
-*Reduction exactness.* Every reduction states the exactness class of its
-accumulation. ``reassoc`` says the sum may be reassociated, which is what
-licenses a reduction tree or atomics, and which fixes the tolerance a
-differential test is allowed to use. The class is read off the term, so the fact
+*Reduction exactness.* Every reduction, and every update whose instances
+can add to one cell, states the exactness class of its accumulation.
+``reassoc`` says the sum may be reassociated, which is what licenses a
+reduction tree or atomics, and which fixes the tolerance a differential
+test is allowed to use. The class is read off the term, so the fact
 is ``DECIDED`` by the type rather than by an oracle.
 
 *The postcondition.* The return annotation of a kernel is a claim about its
@@ -137,7 +144,7 @@ from loopty.obligations import (
     ordering_obligation,
 )
 from loopty.oracle import Empty, Monotone, Subset
-from loopty.term import Argument, ArrType, Term
+from loopty.term import Argument, ArrType, Term, commutes
 from loopty.trace import reductions_in
 
 __all__ = [
@@ -1208,6 +1215,8 @@ def _row_starts_question(
             found, piece = _align_both(found, piece)
             found = found.union(piece)
     ids = [stmt.id for _index, stmt, _instances in fixed]
+    from loopty.obligations import Stated, row_starts_obligation
+
     question = Empty(
         flow.assume_sizes(found, sizes),
         description=(
@@ -1217,6 +1226,22 @@ def _row_starts_question(
             "it, and only row 0 starts at 0 whatever they are)"
         ),
         labels=labels,
+        # Lean's statement: every write stores the value its cell holds where
+        # the contract's invariant holds, the induction step (#186)
+        lean=Stated(
+            partial(
+                row_starts_obligation,
+                term,
+                offsets,
+                counts,
+                counts_type.axes[0],
+                tuple(
+                    stmt
+                    for stmt in term.stmts
+                    if any(stmt is writer for writer in family["statements"])
+                ),
+            )
+        ),
     )
     return question, restated, ids
 
@@ -1706,6 +1731,8 @@ def _layout_by_induction(
         return lambda claim: LogicalOr((*conditions, claim))
 
     questions: list[tuple[int, Any, Any]] = []
+    #: Each statement's question as discharge stated it, for Lean.
+    stated: list[tuple[str, Any]] = []
     writers: list[str] = []
     for index, stmt in enumerate(term.stmts):
         if not any(stmt is writer for writer in family["statements"]):
@@ -1784,6 +1811,7 @@ def _layout_by_induction(
                 f"write out of order: {reason}"
             )
         questions.append((index, stmt, outcome.question.obj))
+        stated.append((stmt.id, outcome.question))
     if len(questions) == 1 and questions[0][1].inames:
         ((_index, stmt, found),) = questions
         labels: tuple[str, ...] = tuple(stmt.inames)
@@ -1799,6 +1827,8 @@ def _layout_by_induction(
             else:
                 found, piece = _align_both(found, piece)
                 found = found.union(piece)
+    from loopty.obligations import Stated, merged_obligation
+
     question = Empty(
         flow.assume_sizes(found, {*sizes, buffer.name}),
         description=(
@@ -1806,6 +1836,9 @@ def _layout_by_induction(
             f"rows of {_listed(arrays)} where it held"
         ),
         labels=labels,
+        # Lean's statement: each write keeps the order where it held, as isl
+        # decided it under that order, the induction step (#186)
+        lean=Stated(partial(merged_obligation, tuple(stated))),
     )
     rule = _INDUCTION_RULE.format(
         arrays=_listed(arrays), laid=laid, writers=_listed(writers)
@@ -1827,16 +1860,74 @@ def write_disjointness_facts(
     The cells of a ragged array are ``[r, j]``, which are distinct cells of
     its buffer while its layout keeps the rows apart; the fact of a ragged
     array whose layout the term rewrites rests on that layout's fact.
+
+    An update, ``y[cell[c, j]] += v`` (:attr:`loopty.term.Stmt.exactness`),
+    whose instances may add to one cell owes none: that is what an
+    accumulation is for, and what it owes instead is the class of the sum
+    (:func:`reduction_facts`). Whether two of them may run at the same time
+    is a schedule's question (:meth:`loopty.schedule.Schedule.atomic`). An
+    update isl shows writes a cell of its own at every instance, ``y[i] +=
+    a * x[i]``, accumulates nothing across instances, and owes its distinct
+    writes as an assignment does (:func:`accumulating`).
+
+    A write through a subscript isl cannot read, ``y[perm[i]] = x[i]``, is
+    widened to every cell of the array (:func:`loopty.flow.access_relation`),
+    over which isl would refute the claim with two instances that write no
+    common cell. Its fact is not isl's: it is left ``assumed`` here, with
+    ``native`` in its provenance, and the kernel's native runs decide it
+    (:func:`loopty.faithful.collision_fact`), refuting it with two instances
+    that write one cell on an input, the example inputs first.
     """
     labels = instance_labels(term)
     sizes = flow.size_names(term)
     layouts = layout_fact_ids(term, owner, module=module, line=line)
     by_statement = {stmt.id: stmt for stmt in term.stmts}
+    sums = accumulating(term)
     facts: list[Fact] = []
     for footprint in flow.footprints(term):
         if not footprint.touches_memory or footprint.array == term.result:
             continue
         stmt = by_statement[footprint.stmt]
+        if footprint.kind == "acc" and stmt.id in sums:
+            continue
+        identifier = fact_id(
+            "disjoint-writes",
+            owner,
+            module=module,
+            line=line,
+            detail=f"{stmt.id}:{footprint.array}",
+        )
+        statement = (
+            f"distinct instances of {stmt.id} write distinct cells of "
+            f"{footprint.array}"
+        )
+        if _is_widened(footprint.relation, stmt.assignee.indices):
+            subscript = _access_text(footprint.array, stmt.assignee.indices)
+            facts.append(
+                Fact(
+                    id=identifier,
+                    kind="disjoint-writes",
+                    statement=statement,
+                    term=None,
+                    status=Status.ASSUMED,
+                    provenance={
+                        "statement": stmt.id,
+                        "array": footprint.array,
+                        "kind": footprint.kind,
+                        "native": True,
+                        "reason": (
+                            f"the cell {subscript} is read from an array, which "
+                            "isl cannot follow, so the kernel's native runs "
+                            "decide it"
+                        ),
+                        **_unnarrowed(stmt),
+                    },
+                    where=stmt.where,
+                    owner=owner,
+                    rests_on=layouts.get(footprint.array, ()),
+                )
+            )
+            continue
         relation = footprint.relation
         identity = isl.Map.identity(relation.get_space().domain().map_from_set())
         collisions = flow.assume_sizes(
@@ -1847,18 +1938,9 @@ def write_disjointness_facts(
         )
         facts.append(
             Fact(
-                id=fact_id(
-                    "disjoint-writes",
-                    owner,
-                    module=module,
-                    line=line,
-                    detail=f"{stmt.id}:{footprint.array}",
-                ),
+                id=identifier,
                 kind="disjoint-writes",
-                statement=(
-                    f"distinct instances of {stmt.id} write distinct cells of "
-                    f"{footprint.array}"
-                ),
+                statement=statement,
                 term=Empty(
                     collisions,
                     description=f"pairs of {stmt.id} instances writing the same cell",
@@ -1886,6 +1968,45 @@ def write_disjointness_facts(
             )
         )
     return facts
+
+
+def accumulating(term: Term) -> dict[str, tuple[str, ...]]:
+    """The updates whose instances may add to one cell, and the loops they sum over.
+
+    An update (:attr:`loopty.term.Stmt.exactness`) is an accumulation when
+    two of its instances can update one cell: always, as isl reads it, when
+    the cell is read from an array, ``y[cell[c, k]]``, which isl cannot
+    follow; and where isl finds two that do, ``y[r]`` over ``r`` and ``j``.
+    The loops the sum runs over are those the cell does not name, ``j`` for
+    ``y[r]``, or all of the statement's when it names every one or is read
+    from an array. An update that writes a cell of its own at every
+    instance, ``y[i] += a * x[i]``, is not one, and is not listed.
+    """
+    sizes = flow.size_names(term)
+    by_statement = {stmt.id: stmt for stmt in term.stmts}
+    out: dict[str, tuple[str, ...]] = {}
+    for footprint in flow.footprints(term):
+        stmt = by_statement[footprint.stmt]
+        if footprint.kind != "acc" or stmt.exactness is None:
+            continue
+        indices = tuple(stmt.assignee.indices)
+        relation = footprint.relation
+        if _is_widened(relation, indices):
+            out[stmt.id] = tuple(stmt.inames)
+            continue
+        identity = isl.Map.identity(relation.get_space().domain().map_from_set())
+        collisions = flow.assume_sizes(
+            relation.apply_range(relation.reverse()).subtract(
+                identity.align_params(relation.get_space())
+            ),
+            sizes,
+        )
+        if collisions.is_empty():
+            continue
+        named = flow._names_in(indices)
+        over = tuple(name for name in stmt.inames if name not in named)
+        out[stmt.id] = over or tuple(stmt.inames)
+    return out
 
 
 def kernel_definedness_facts(
@@ -2051,9 +2172,47 @@ def ordering_facts(
 def reduction_facts(
     term: Term, owner: str, *, module: str | None = None, line: int | None = None
 ) -> list[Fact]:
-    """One fact per reduction: the exactness class its accumulation is allowed."""
+    """One fact per reduction: the exactness class its accumulation is allowed.
+
+    And one per update whose instances may add to one cell, ``y[cell[c, j]]
+    += v`` (:func:`accumulating`): those instances are the terms of a sum,
+    in the order the source runs them, over the loops the cell does not
+    name, and the class is the one :func:`loopty.trace.update_exactness`
+    reads off what they add.
+    """
     facts: list[Fact] = []
+    sums = accumulating(term)
     for stmt in term.stmts:
+        if stmt.id in sums:
+            target = _access_text(stmt.assignee.array, stmt.assignee.indices)
+            loops = sums[stmt.id]
+            over = f" over {', '.join(loops)}" if loops else ""
+            facts.append(
+                Fact(
+                    id=fact_id(
+                        "exactness",
+                        owner,
+                        module=module,
+                        line=line,
+                        detail=f"{stmt.id}:update",
+                    ),
+                    kind="exactness",
+                    statement=(
+                        f"the accumulation into {target}{over} is {stmt.exactness}"
+                    ),
+                    term=None,
+                    status=Status.DECIDED,
+                    decided_by="type",
+                    provenance={
+                        "exactness": stmt.exactness,
+                        "op": "update",
+                        "inames": list(loops),
+                        "commutes": commutes(stmt),
+                    },
+                    where=stmt.where,
+                    owner=owner,
+                )
+            )
         for position, reduction in enumerate(reductions_in(stmt.expr)):
             written = stmt.assignee
             indices = ", ".join(render(i) for i in written.indices)

@@ -2347,7 +2347,9 @@ def test_a_schedule_of_an_access_indexed_by_a_size_is_built() -> None:
 
 
 def test_a_dependence_through_a_cell_a_size_names_is_found() -> None:
-    # Every instance writes y[n - 1]: run in parallel, the sums race.
+    # Every instance adds into y[n - 1]: run in parallel, the sums race. The
+    # additions are updates, which need no order, so the refusal is of two of
+    # them on two work items, with the fix.
     from lanky.terms import evaluate_annotations
 
     from loopty.trace import trace
@@ -2357,9 +2359,10 @@ def test_a_dependence_through_a_cell_a_size_names_is_found() -> None:
     with pytest.raises(IllegalCast) as caught:
         schedule.tag(i="g.0")
     message = str(caught.value)
-    assert message.startswith("tag(i='g.0') illegal: instance S0[i=")
-    assert "y[3]" in message
-    assert caught.value.fact.kind == "monotone"
+    assert message.startswith("tag(i='g.0') illegal: S0[i=")
+    assert "both update y[3]" in message
+    assert message.endswith("with atomic('y') before this step")
+    assert caught.value.fact.kind == "disjoint-writes"
     assert caught.value.fact.status.value == "refuted"
 
 
@@ -2393,10 +2396,29 @@ def into_the_last_of_x0(x: Arr[Fin[x0], Real], y: Arr[Fin[x0], Real]):  # noqa: 
 
 
 @pytest.mark.parametrize(
-    ("fn", "size", "cell"),
-    [(chain_over_s, "s", "x[2]"), (into_the_last_of_x0, "x0", "y[3]")],
+    ("fn", "size", "cell", "start", "end"),
+    [
+        (
+            chain_over_s,
+            "s",
+            "x[2]",
+            "instance S0[i=",
+            "scheduled earlier (at s=4, as hinted)",
+        ),
+        (
+            into_the_last_of_x0,
+            "x0",
+            "y[3]",
+            "S0[i=",
+            "(at x0=4, as hinted), and the loop i on g.0 runs them on two work "
+            "items, so one can overwrite what the other added; make the updates "
+            "atomic, with atomic('y') before this step",
+        ),
+    ],
 )
-def test_a_size_named_like_a_dimension_keeps_its_dependences(fn, size, cell) -> None:
+def test_a_size_named_like_a_dimension_keeps_its_dependences(
+    fn, size, cell, start, end
+) -> None:
     # The map of the pairs that touch one cell declares the sizes, and isl
     # reads a dimension named like one as that parameter: the statement's
     # index ``s = 0`` became a constraint on the size, and every dependence of
@@ -2412,9 +2434,9 @@ def test_a_size_named_like_a_dimension_keeps_its_dependences(fn, size, cell) -> 
     with pytest.raises(IllegalCast) as caught:
         schedule.tag(i="g.0")
     message = str(caught.value)
-    assert message.startswith("tag(i='g.0') illegal: instance S0[i=")
+    assert message.startswith(f"tag(i='g.0') illegal: {start}")
     assert cell in message
-    assert message.endswith(f"scheduled earlier (at {size}=4, as hinted)")
+    assert message.endswith(end)
     (source_id, _source), (sink_id, _sink), params = caught.value.witness
     assert source_id == sink_id == "S0"
     assert params == {size: 4}
