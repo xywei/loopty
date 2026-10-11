@@ -221,7 +221,7 @@ square, where many work items add into one node at once:
 | case | schedule | mesh | `y`: difference | tolerance | verdict |
 |---|---|---|---|---|---|
 | PyOP2's GPU split | `atomic("y").split("c", 32).tag(c_outer="g.0", c_inner="l.0")` | 2 cells | 0 | 1.13e-06 (`approx`) | agrees |
-| | | 8 192 cells | 1.63e-19 | 1e-06 (`approx`) | agrees |
+| | | 8 192 cells | 1.08e-19 | 1e-06 (`approx`) | agrees |
 | | | 131 072 cells | 1.02e-20 | 1e-06 (`approx`) | agrees |
 | Sun et al.'s split, from C | `atomic("y").split("c", 4).tag(c_inner="ilp")` | 2 cells | 0 | 1.13e-06 (`approx`) | agrees |
 | | | 8 192 cells | 1.08e-19 | 1e-06 (`approx`) | agrees |
@@ -233,8 +233,8 @@ volatile double *`. The differences are the reassociation of each node's sum,
 far inside the tolerance. Without `atomic("y")` the split is refused with the
 node PyOP2's two triangles share, and the driver compiles it anyway, with
 loopy directly, to show what the refusal is about: the updates race, and `y`
-comes out wrong by up to 43% of its largest value on the smaller square and
-47% on the larger. `loopty run examples/assembly.py --target opencl` runs the
+comes out wrong by up to 44% of its largest value on both squares (the
+numbers change from run to run, as a race does). `loopty run examples/assembly.py --target opencl` runs the
 example's own schedule there, retargeted from C, and agrees.
 
 ## Reproducing

@@ -1593,11 +1593,12 @@ declared for atomics to declare its atomicity. And loopy types an
 expression of an atomic array as atomic: a sum's accumulator, typed by its
 body, is declared for atomics, and its start is a plain assignment.
 
-**Local fix.** `Schedule.atomic("y")` changes the kernel on OpenCL only: `y`
-is declared for atomics, each update becomes `AtomicUpdate`, any other write
-`AtomicInit` and any read `AtomicLoad`, the read cast to the array's own
-dtype, `(double) (y[i_0])`, so that nothing computed from it is typed as
-atomic; the lowering writes an update's right-hand side with the cell's read
-as the assignee, which the trace records it as (`loopty.term.Stmt`). On the C target the step changes the checks and
-not the code, since one thread makes every update atomic. An array of any
-other dtype is a `buildable` fact refuted on OpenCL, naming the four.
+**Local fix.** `Schedule.atomic("y")` changes the kernel on OpenCL only.
+`y` is declared for atomics; each update becomes `AtomicUpdate`, any other
+write `AtomicInit` and any read `AtomicLoad`; and a read is cast to the
+array's own dtype, `(double) (y[i_0])`, so that nothing computed from it is
+typed as atomic. The lowering writes an update's right-hand side with the
+cell's read as the assignee, which is how the trace records it
+(`loopty.term.Stmt`). On the C target the step changes the checks and not the
+code, since one thread makes every update atomic. An array of any other
+dtype is a `buildable` fact refuted on OpenCL, naming the four.

@@ -7,7 +7,7 @@ $ python docs/device-runs/scatter_atomic.py
   Schedule(mass_action, target='opencl').atomic('y').split(c, 32).tag(c_outer='g.0', c_inner='l.0')
   buildable: (True, '')
   PyOP2's two triangles: y differs by 0 within 1.13e-06 (approx) -> tested
-  a square of 2 x 64 x 64 cells: y differs by 1.63e-19 within 1e-06 (approx) -> tested
+  a square of 2 x 64 x 64 cells: y differs by 1.08e-19 within 1e-06 (approx) -> tested
   a square of 2 x 256 x 256 cells: y differs by 1.02e-20 within 1e-06 (approx) -> tested
 --- Sun et al.'s split, retargeted from C
   Schedule(mass_action, target='opencl').atomic('y').split(c, 4).tag(c_inner='ilp')
@@ -18,8 +18,8 @@ $ python docs/device-runs/scatter_atomic.py
   __kernel void __attribute__ ((reqd_work_group_size(32, 1, 1))) mass_action(int const nc, __global int const *__restrict__ cell, __global double const *__restrict__ X, __global double const *__restrict__ Y, __global double const *__restrict__ u, __global double *__restrict__ yl, __global volatile double *__restrict__ y)
   while (atom_cmpxchg((__global long *) &(y[cell[3 * (32 * gid(0) + lid(0)) + k]]), *(long *) &loopy_old_val, *(long *) &loopy_new_val) != *(long *) &loopy_old_val);
 --- PyOP2's split compiled past the refusal, the updates racing
-  a square of 2 x 64 x 64 cells: largest error of y 0.000206, y at most 0.000481
-  a square of 2 x 256 x 256 cells: largest error of y 1.44e-05, y at most 3.04e-05
+  a square of 2 x 64 x 64 cells: largest error of y 0.000211, y at most 0.000481
+  a square of 2 x 256 x 256 cells: largest error of y 1.33e-05, y at most 3.04e-05
 ALL OK
 exit=0
 $ loopty run examples/assembly.py --target opencl
@@ -27,16 +27,14 @@ mass_action: Schedule(mass_action, target='opencl').atomic('y').split(c, 4).tag(
   yl: difference 3.47e-18 within 1.01e-06 (approx) -> tested
   y: difference 1.39e-17 within 1.07e-06 (approx) -> tested
 
-STATUS   BY     WHERE           OWNER        STATEMENT
+STATUS   BY     WHERE           OWNER        STATEMENT                                                               
 -------  -----  --------------  -----------  ------------------------------------------------------------------------
-decided  isl    assembly.py:83  mass_action  atomic('y') renames the instances of mass_action one for one
-decided  isl    assembly.py:83  mass_action  the order after atomic('y') runs every dependence of mass_action forward
 decided  isl    assembly.py:83  mass_action  split(c, 4) renames the instances of mass_action one for one
 decided  isl    assembly.py:83  mass_action  the order after split(c, 4) runs every dependence of mass_action forward
 decided  isl    assembly.py:83  mass_action  tag(c_inner='ilp') renames the instances of mass_action one for one
 decided  isl    assembly.py:83  mass_action  the order after tag(c_inner='ilp') runs every dependence of mass_acti...
-decided  isl    assembly.py:83  mass_action  the accumulation into y is reassociated by tag(c_inner='ilp'), so its...
+decided  isl    assembly.py:83  mass_action  atomic updates of y run at the same time after tag(c_inner='ilp'), so...
 tested   loopy  assembly.py:83  mass_action  the scheduled run of mass_action agrees with the native run to the ac...
 
-8 facts: 7 decided, 1 tested
+6 facts: 5 decided, 1 tested
 exit=0

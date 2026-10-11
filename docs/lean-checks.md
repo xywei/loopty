@@ -214,7 +214,7 @@ and test kernel to Lean, the casts each file's `rejected*` functions refuse
 included, from an empty proof cache. Its report, with Lean v4.29.1 (a
 file's time is Lean's on all its facts, a part's on one declaration):
 
-Of 583 facts isl decides in 20 files, Lean proved 558; 9 stay decided; 16 refuted facts have their negation proved at isl's counterexample. 289 more facts are not isl's to decide (by type, tested, assumed).
+Of 581 facts isl decides in 20 files, Lean proved 556; 9 stay decided; 16 refuted facts have their negation proved at isl's counterexample. 289 more facts are not isl's to decide (by type, tested, assumed).
 
 Not all of them are equally hard. The 86 `ordering` facts, that the source
 order runs every dependence forward, hold by the definition of a dependence
@@ -224,40 +224,40 @@ same way twice. The others are claims isl could get wrong.
 
 | file | isl facts | proved | decided, not proved | refuted, negation proved | Lean time |
 |---|---:|---:|---:|---:|---:|
-| `examples/assembly.py` | 19 | 19 | 0 | 0 | 2.6 s |
+| `examples/assembly.py` | 17 | 17 | 0 | 0 | 2.9 s |
 | `examples/composition.py` | 10 | 10 | 0 | 0 | 0.3 s |
 | `examples/fusion.py` | 16 | 12 | 3 | 1 | 0.3 s |
-| `examples/layer_potential.py` | 15 | 15 | 0 | 0 | 0.8 s |
-| `examples/p2p.py` | 19 | 19 | 0 | 0 | 1.4 s |
-| `examples/pairs.py` | 14 | 14 | 0 | 0 | 0.4 s |
+| `examples/layer_potential.py` | 15 | 15 | 0 | 0 | 0.9 s |
+| `examples/p2p.py` | 19 | 19 | 0 | 0 | 1.6 s |
+| `examples/pairs.py` | 14 | 14 | 0 | 0 | 0.5 s |
 | `examples/quadrature.py` | 12 | 12 | 0 | 0 | 0.3 s |
-| `examples/reshape_layouts.py` | 16 | 16 | 0 | 0 | 0.8 s |
-| `examples/spmv.py` | 18 | 18 | 0 | 0 | 0.4 s |
-| `examples/stencil_skew.py` | 10 | 9 | 0 | 1 | 1.4 s |
-| `examples/sum_factorization.py` | 14 | 13 | 0 | 1 | 1.0 s |
-| `examples/travel.py` | 47 | 45 | 2 | 0 | 2.0 s |
-| `examples/wavefront_acoustic.py` | 24 | 21 | 0 | 3 | 7.1 s |
-| `tests/kernels/axpy.py` | 4 | 4 | 0 | 0 | 0.0 s |
-| `tests/kernels/domains.py` | 90 | 89 | 0 | 1 | 2.4 s |
+| `examples/reshape_layouts.py` | 16 | 16 | 0 | 0 | 0.9 s |
+| `examples/spmv.py` | 18 | 18 | 0 | 0 | 0.5 s |
+| `examples/stencil_skew.py` | 10 | 9 | 0 | 1 | 1.6 s |
+| `examples/sum_factorization.py` | 14 | 13 | 0 | 1 | 1.2 s |
+| `examples/travel.py` | 47 | 45 | 2 | 0 | 2.3 s |
+| `examples/wavefront_acoustic.py` | 24 | 21 | 0 | 3 | 7.5 s |
+| `tests/kernels/axpy.py` | 4 | 4 | 0 | 0 | 0.1 s |
+| `tests/kernels/domains.py` | 90 | 89 | 0 | 1 | 2.5 s |
 | `tests/kernels/out_of_bounds.py` | 4 | 3 | 0 | 1 | 0.1 s |
 | `tests/kernels/spmv_min.py` | 14 | 14 | 0 | 0 | 0.0 s |
 | `tests/kernels/stencil.py` | 5 | 5 | 0 | 0 | 0.0 s |
-| `tests/kernels/travel.py` | 64 | 61 | 2 | 1 | 1.1 s |
-| `tests/kernels/travel_wrong.py` | 168 | 159 | 2 | 7 | 5.2 s |
+| `tests/kernels/travel.py` | 64 | 61 | 2 | 1 | 1.4 s |
+| `tests/kernels/travel_wrong.py` | 168 | 159 | 2 | 7 | 6.5 s |
 
 By kind:
 
 | kind | isl facts | proved | decided, not proved | refuted, negation proved | parts | median s per part | slowest part |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| bijective | 24 | 23 | 1 | 0 | 81 | 0.082 | 0.45 s |
-| definedness | 21 | 20 | 1 | 0 | 24 | 0.058 | 0.08 s |
-| disjoint-writes | 113 | 113 | 0 | 0 | 113 | 0.009 | 0.06 s |
-| element-sort | 28 | 20 | 0 | 8 | 20 | 0.024 | 0.04 s |
-| in-bounds | 259 | 257 | 0 | 2 | 300 | 0.021 | 0.99 s |
+| bijective | 23 | 22 | 1 | 0 | 80 | 0.088 | 0.46 s |
+| definedness | 21 | 20 | 1 | 0 | 24 | 0.056 | 0.10 s |
+| disjoint-writes | 113 | 113 | 0 | 0 | 113 | 0.011 | 0.06 s |
+| element-sort | 28 | 20 | 0 | 8 | 20 | 0.027 | 0.05 s |
+| in-bounds | 259 | 257 | 0 | 2 | 300 | 0.026 | 1.21 s |
 | layout | 6 | 0 | 6 | 0 | 0 | - | - |
-| monotone | 30 | 23 | 1 | 6 | 138 | 0.126 | 0.61 s |
-| ordering | 86 | 86 | 0 | 0 | 234 | 0.011 | 0.06 s |
-| requirement | 16 | 16 | 0 | 0 | 16 | 0.059 | 0.23 s |
+| monotone | 29 | 22 | 1 | 6 | 135 | 0.135 | 0.63 s |
+| ordering | 86 | 86 | 0 | 0 | 234 | 0.013 | 0.06 s |
+| requirement | 16 | 16 | 0 | 0 | 16 | 0.084 | 0.29 s |
 
 Every fact Lean did not prove, and why:
 

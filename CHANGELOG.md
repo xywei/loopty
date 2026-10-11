@@ -131,45 +131,44 @@ All notable changes to loopty are recorded here. The format follows
   taken as given, as loopy's `assume`. loopy is told, every later cast is
   decided and stated where it holds and rests on an `assumption` fact, and a
   call whose sizes break it is refused before anything is compiled.
-- **Updates, a scatter-add: `y[cell[c, k]] += yl[c, k]`.** A statement that
-  adds to the cell it writes values that read nothing else of the array is
-  an update (`Stmt.exactness`), and the class of its sum is read off what it
-  adds, as a reduction's is: `approx` for `Real`, `exact` for an integral
-  array. Two updates of one cell give the same sum in either order, so they
-  are no dependence of each other (`loopty.flow.dependences`), and an update
-  whose instances can add to one cell owes the class of its sum, `the
-  accumulation into y[cell[c, k]] over c, k is approx`, where it owed
-  distinct writes and had them refuted, so a correct assembly loop or row
-  sum written with `+=` comes out clean. One that writes a cell of its own
-  at every instance, `y[i] += a * x[i]`, still owes distinct writes. A
-  schedule may reorder the updates of one cell, which reassociates the sum,
-  and records it as `realize` does.
-- **`Schedule.atomic("y")`.** Two updates of one cell that a step runs at the
-  same time, on two work items or in no order (`ilp`, `vec`), can lose one of
-  the two values, and the step is refused, with the pair and the fix:
+- **Updates, a scatter-add: `y[cell[c, k]] += yl[c, k]`.** A statement
+  that adds to the cell it writes a value that reads nothing else of the
+  array is an update (`Stmt.exactness`). Its sum has the class of what it
+  adds, as a reduction's has: `approx` for `Real`, `exact` for integers. Two
+  updates of one cell give the same sum in either order, so they are no
+  dependence of each other (`loopty.flow.dependences`), and a schedule may
+  reorder them, which it records as a reassociation, as `realize` does. An
+  update whose instances can add to one cell owes the class of its sum, `the
+  accumulation into y[cell[c, k]] over c, k is approx`, instead of distinct
+  writes, which were refuted before: a correct assembly loop or row sum
+  written with `+=` now checks clean. An update of a cell of its own at
+  every instance, `y[i] += a * x[i]`, still owes distinct writes.
+- **`Schedule.atomic("y")`.** Two updates of one cell that a step runs at
+  the same time, on two work items or under `ilp` or `vec`, can lose one of
+  the two values. Such a step is refused with the pair and the fix:
   `tag(c_outer='g.0', c_inner='l.0') illegal: S1[c=0, k=2] and S1[c=1, k=1]
-  both update y[3] on example_inputs() (nc=2, nv=4), where cell[0, 2] = 3 and
-  cell[1, 1] = 3, and the loop c_inner on l.0 runs them on two work items,
-  ...; make the updates atomic, with atomic('y') before this step`. After
-  `atomic("y")` the step is accepted, and the sum is compared at `reassoc` or
-  weaker. On OpenCL each update is loopy's `AtomicUpdate`, a compare-and-swap
-  loop, `y` is declared for atomics, and the other accesses to it are atomic
-  too, as loopy asks; loopy has atomic updates of `int32`, `int64`,
-  `float32` and `float64` only, and any other is a `buildable` fact refuted.
-  The C target runs in one thread, and its code is unchanged. An `exact`
-  accumulation is refused, as `realize` refuses a tree of one, and so is an
-  array nothing updates. `examples/assembly.py` is PyOP2's P1 mass action
-  assembled into the nodes: its GPU split refused with the node PyOP2's two
-  triangles share, accepted with atomics, and run on the PoCL CPU device
-  (`docs/device-runs.md`).
-- **Witnesses read off the example inputs.** A refused cast whose dependence
-  goes through a cell read from an array, which isl takes to be any cell,
-  names two instances that touch one cell on an input, the schedule's own
-  example inputs, then the module's `example_inputs()`, then drawn ones,
-  with what the subscript read there, where it named isl's pair, which need
-  not share a cell (`loopty.interpret.interpret(..., log=...)` records the
-  cells each instance touches). Where no input has such a pair, the message
-  says the pair is isl's, and why.
+  both update y[3] on example_inputs() (nc=2, nv=4), where cell[0, 2] = 3
+  and cell[1, 1] = 3, ...; make the updates atomic, with atomic('y') before
+  this step`. After `atomic("y")` the step is accepted, it records `atomic
+  updates of y run at the same time after tag(...)`, and `y` is compared at
+  `reassoc`. On OpenCL each update is loopy's `AtomicUpdate`, a
+  compare-and-swap loop, and every other access to `y` is atomic too, as
+  loopy requires. loopy has atomic updates of `int32`, `int64`, `float32`
+  and `float64` only; any other dtype is a `buildable` fact refuted. On the
+  C target, which runs in one thread, the code is unchanged. `atomic`
+  refuses an `exact` accumulation, as `realize` refuses a tree of one
+  (#200), and an array nothing updates, naming what each statement that
+  writes it does instead. `examples/assembly.py` is PyOP2's P1 mass action:
+  its GPU split refused with the node PyOP2's two triangles share, accepted
+  with atomics, and run on the PoCL CPU device (`docs/device-runs.md`).
+- **Refusals name a pair from the data.** isl cannot follow a cell read
+  from an array, `y[cell[c, k]]`: it takes it to be any cell, so the pair it
+  picks need not share one. A refused cast through such a cell now names two
+  instances that touch one cell on an input, with what the subscripts read
+  there. The inputs are tried in turn: the schedule's own example inputs,
+  the module's `example_inputs()`, then drawn ones. Where none has such a
+  pair, the message says the pair is isl's. `loopty.interpret.interpret(...,
+  log=...)` records the cells each instance touches.
 
 ### Changed
 
@@ -194,22 +193,21 @@ All notable changes to loopty are recorded here. The format follows
   built for, so that a ragged row's bound written in a loop called `a0`
   reads back as that loop.
 - A step that runs two updates of one cell at the same time is refused with
-  a `disjoint-writes` fact of the step, stated for isl only, with the reason
-  (`docs/lean-checks.md`), where a `monotone` fact named the pair; a
-  `monotone` cast is stated for Lean without the classes of two updates of
-  one cell, which need no order, and a cast with no class left is one
-  trivial part.
+  a `disjoint-writes` fact of the step, where a `monotone` fact named the
+  pair before. That fact is stated for isl only, with the reason
+  (`docs/lean-checks.md`, #201). A `monotone` cast is stated for Lean without
+  the pairs of updates of one cell, which need no order; a cast with no pair
+  left is one trivial part.
 
 ### Fixed
 
 - A write through a cell read from an array, `y[perm[i]] = x[i]`, no longer
-  has its distinct writes refuted with two instances of isl's that write no
-  common cell: isl took the cell to be any cell. The fact is decided on the
-  kernel's native runs, refuted with two instances that write one cell on an
-  input, the example inputs first, `S0[c=0, k=2] and S0[c=1, k=1] both write
-  y[3] on example_inputs() (nc=2, nv=4), where cell[0, 2] = 3 and cell[1, 1]
-  = 3`, and `tested` by `native` where no input has two, as for a write that
-  keeps rows apart, `y[i, p[i]]`.
+  has its distinct writes refuted by isl with two instances that write no
+  common cell. The fact is decided on the kernel's native runs instead. It is
+  refuted with two instances that write one cell on an input, the example
+  inputs first: `S0[c=0, k=2] and S0[c=1, k=1] both write y[3] on
+  example_inputs() (nc=2, nv=4), where cell[0, 2] = 3 and cell[1, 1] = 3`.
+  Where no input has such a pair, as for `y[i, p[i]]`, it is `tested`.
 - The first run of a kernel with an array of four axes over one size, or a
   triangle boxed over two, no longer prints loopy's `ParameterFinderWarning:
   Unable to generate code to automatically find 'm' from 'u': nonlinear

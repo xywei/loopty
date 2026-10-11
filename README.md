@@ -589,23 +589,24 @@ release; the CHANGELOG says when one does.
   a table is read as an array is, and it is no argument: an array of its
   values is passed instead, `Arr.from_numpy(W.values.copy())`.
   `examples/quadrature.py` is firedrake's P1 mass kernel.
-- Updates and atomics. A statement that adds to the cell it writes values
-  that read nothing else of the array, `y[cell[c, k]] += yl[c, k]` or `y[r]
-  += v[r, j]`, is an update, whose sum has the class of what it adds, as a
-  reduction's has (`approx` for `Real`). Its instances that can add to one
-  cell owe that class, `the accumulation into y[cell[c, k]] over c, k is
-  approx`, and no distinct writes; an update of a cell of its own at every
-  instance, `y[i] += a * x[i]`, owes its distinct writes. Two updates of one
-  cell are no dependence, so a schedule may reorder them, which it records as
-  a reassociation, but a step that runs two of them at the same time, on two
-  work items or in no order (`ilp`, `vec`), is refused with the pair and the
-  fix, until `Schedule.atomic("y")`: then each update is loopy's
+- Updates and atomics. A statement that adds to the cell it writes a value
+  that reads nothing else of the array, `y[cell[c, k]] += yl[c, k]` or `y[r]
+  += v[r, j]`, is an update. Its sum has the class of what it adds, as a
+  reduction's has (`approx` for `Real`). An update whose instances can add to
+  one cell owes that class, `the accumulation into y[cell[c, k]] over c, k is
+  approx`, and no distinct writes; one that updates a cell of its own at
+  every instance, `y[i] += a * x[i]`, owes its distinct writes. Two updates
+  of one cell are no dependence, so a schedule may reorder them, which it
+  records as a reassociation. A step that runs two of them at the same time,
+  on two work items or in no order (`ilp`, `vec`), is refused with the pair
+  and the fix until `Schedule.atomic("y")`. Then each update is loopy's
   `AtomicUpdate` on OpenCL, a compare-and-swap, and the C target, which runs
   in one thread, keeps its code. A refused cast through a cell read from an
   array names two instances that touch one cell on the example inputs, with
-  what the subscript read, `where cell[0, 2] = 3 and cell[1, 1] = 3`; a write
-  of that kind, `y[perm[i]] = x[i]`, has its distinct writes decided on the
-  native runs. `examples/assembly.py` is PyOP2's P1 mass action, assembled.
+  what the subscripts read, `where cell[0, 2] = 3 and cell[1, 1] = 3`. A
+  write of that kind, `y[perm[i]] = x[i]`, has its distinct writes decided
+  on the native runs. `examples/assembly.py` is PyOP2's P1 mass action,
+  assembled.
 - The argument contract, enforced at every entry point that runs a kernel
   (compiled, differential and native): two distinct array parameters may not
   share storage, a ragged argument has to agree with the counts array its type
