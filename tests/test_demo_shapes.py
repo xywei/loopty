@@ -96,7 +96,9 @@ def along_r(
         for a in out.dom[e]:
             for j in out.dom[e, a]:
                 for k in out.dom[e, a, j]:
-                    out[e, a, j, k] = reduce_sum(F[a, s] * u[e, s, j, k] for s in F.dom[a])
+                    out[e, a, j, k] = reduce_sum(
+                        F[a, s] * u[e, s, j, k] for s in F.dom[a]
+                    )
 
 
 # }}}
@@ -106,7 +108,9 @@ TRIANGLE = reconstruct.arg_types["R"].domain
 
 
 def triangle_cells() -> list[tuple[int, int, int]]:
-    return [(i, a, b) for i in range(NB) for a in range(Q) for b in range(Q) if a + b < Q]
+    return [
+        (i, a, b) for i in range(NB) for a in range(Q) for b in range(Q) if a + b < Q
+    ]
 
 
 def decided(kern) -> None:

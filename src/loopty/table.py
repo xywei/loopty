@@ -121,8 +121,10 @@ class Table:
         proxy = _traced(self)
         if proxy is not None:
             return proxy[key]
-        if isinstance(key, tuple) and len(key) == self.ndim or (
-            not isinstance(key, tuple) and self.ndim == 1
+        if (
+            isinstance(key, tuple)
+            and len(key) == self.ndim
+            or (not isinstance(key, tuple) and self.ndim == 1)
         ):
             return self._values[key]
         raise IndexError(

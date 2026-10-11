@@ -391,7 +391,12 @@ CASES = {
     "a-sum-outside-a-local-loop": (potential, "opencl", QBX_TILE, None, None),
     "a-sum-outside-an-ilp-loop": (
         potential, "c",
-        [split("t", 4), tag(t_inner="ilp"), split("s", 4), prioritize("s_outer", "t_inner")],
+        [
+            split("t", 4),
+            tag(t_inner="ilp"),
+            split("s", 4),
+            prioritize("s_outer", "t_inner"),
+        ],
         None, None,
     ),
     # }}}

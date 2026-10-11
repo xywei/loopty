@@ -232,10 +232,14 @@ def _one_dtype(native: Native) -> np.dtype | None:
 
 #: The functions of :mod:`loopty.math`, which the lowering writes in the type
 #: numpy computes each in (:meth:`loopty.lower.ExpressionLowerer._math`).
-MATH_FUNCTIONS = frozenset({"sqrt", "exp", "log", "sin", "cos", "real", "imag", "conj"})
+MATH_FUNCTIONS = frozenset(
+    {"sqrt", "exp", "log", "sin", "cos", "real", "imag", "conj"}
+)
 
 
-def _math_compiled(name: str, native: Native, operand: np.dtype | None) -> np.dtype | None:
+def _math_compiled(
+    name: str, native: Native, operand: np.dtype | None
+) -> np.dtype | None:
     """The type the lowering computes a function of :mod:`loopty.math` in.
 
     Of a complex operand the library's: complex, and the real type of its

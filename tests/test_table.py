@@ -26,9 +26,7 @@ pytest.importorskip("loopy")
 
 #: The 3-point rule on the reference triangle, and the P1 basis at its points.
 W = make_table([1 / 6, 1 / 6, 1 / 6])
-PHI = make_table(
-    [[2 / 3, 1 / 6, 1 / 6], [1 / 6, 2 / 3, 1 / 6], [1 / 6, 1 / 6, 2 / 3]]
-)
+PHI = make_table([[2 / 3, 1 / 6, 1 / 6], [1 / 6, 2 / 3, 1 / 6], [1 / 6, 1 / 6, 2 / 3]])
 Z = make_table([1 + 2j, -0.5j, 3.0])
 SINGLE = make_table([0.1, 0.2, 0.3], dtype=np.float32)
 SHIFT = make_table([2, 0, 1])
@@ -206,7 +204,9 @@ def test_tables_of_other_dtypes_are_read_in_their_own() -> None:
         "f": Arr.from_numpy(np.ones(5, np.float32)),
         "k": Arr.from_numpy(np.arange(5)),
     }
-    native = {name: Arr.from_numpy(value.numpy().copy()) for name, value in inputs.items()}
+    native = {
+        name: Arr.from_numpy(value.numpy().copy()) for name, value in inputs.items()
+    }
     kinds(**native)
     out = LoopyExecutor().run(
         kinds, **{name: value.numpy().copy() for name, value in inputs.items()}

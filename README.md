@@ -284,6 +284,12 @@ says when one does.
   divergence_S0[i] -> [j] : j = i + 1 }`, checked on the dependences between
   the calls; without the shift it is refused with the pair of instances,
   and the message names the shift that is accepted.
+  `fuse(producer, consumer, loops=1)` fuses only the outermost loop, or as
+  many as `loops` says, and leaves the loops inside one after the other:
+  two passes over elements, the second of which reads every cell of the
+  element's row the first stores, fuse on the element and the row and no
+  deeper, and the refusal of the deeper fusion names the shallower one
+  (`examples/sum_factorization.py`).
   `.substitute("f")` then stores none of `f`: the one statement that writes
   it becomes a substitution rule (loopy's `assignment_to_subst`) computed
   again at every read, legal when every read is of a cell it stored before
@@ -394,7 +400,15 @@ says when one does.
   `affine`, `fuse`, `realize`, each checked as a cast, each emitting its fact,
   and `substitute`, checked as a storage decision;
   `retarget`, which replays every step against another loopy target and
-  re-checks it. A tag belongs to a loop, so `split`, `tile` and `affine`
+  re-checks it. `prioritize` and `interchange` also take the loop of a sum,
+  named before loops of its statement, which it then runs outside, as
+  sumpy's CPU tile of a layer potential runs 256 sources at a time outside
+  16 targets (`.split("s", 256).prioritize("s_outer", "t_inner")`): each
+  sum still adds its terms in order, the loops it runs outside of order
+  none of their instances, and loopy keeps the order where it keeps an
+  accumulator per instance, on a hardware axis or an `ilp` loop, which the
+  `buildable` fact asks (`examples/layer_potential.py`). A split sum adds
+  its terms in order, outer loop first. A tag belongs to a loop, so `split`, `tile` and `affine`
   refuse a loop that carries one, and the loops they make are tagged after
   them. `affine(map)` takes an isl map from loops to the loops that
   replace them, refuses one that misses or merges an instance or runs a
@@ -498,6 +512,23 @@ says when one does.
   executor computes from the domain and passes. `Arr.zeros(domain, n=...,
   storage=...)` and `Arr.from_cells` build such an array, and `Arr.cells()`
   reads it in one order whatever its layout. `examples/pairs.py` is the demo.
+- Elementary functions and complex parts, `loopty.math`: `sqrt`, `exp`,
+  `log`, `sin`, `cos`, `real`, `imag` and `conj`, numpy's natively and the
+  target library's compiled (`csqrt`, `clog`, `creal` on the C target,
+  pyopencl's `cdouble_log` on OpenCL), each computed in the type numpy
+  computes it in: `sqrt(k[i])` of an integer is a double, and `real`,
+  `imag` and `conj` of a real are the number, `0` and the number. One numpy
+  computes in half precision, `sqrt` of an `int8`, is a `TraceError` naming
+  `sqrt(1.0 * k[i])`. `examples/layer_potential.py` is pytential's QBX
+  single layer over complex points.
+- Constant tables, `loopty.table`: `W = table([1 / 6, 1 / 6, 1 / 6])`
+  next to the kernel, read by the body as an array is (`W[q]`, `W.dom`). A
+  table is a read-only copy of its values; its reads are in bounds over its
+  shape, decided by isl, and the lowering writes it into the kernel as a
+  read-only loopy temporary with the values as its initializer, `static
+  double W[3] = {...}` on the C target and `__constant` on OpenCL, with every
+  digit. A program holds one table for every call that reads it.
+  `examples/quadrature.py` is firedrake's P1 mass kernel.
 - The argument contract, enforced at every entry point that runs a kernel
   (compiled, differential and native): two distinct array parameters may not
   share storage, a ragged argument has to agree with the counts array its type
@@ -581,8 +612,8 @@ says when one does.
   less, never more.
 - A program lowers sequentially: its calls' loops run one after another, as
   the program runs them, until a schedule fuses them. A fusion moves the
-  outer loops of each side, as many as both have, and a nest the lowering
-  wrote as one domain is cut after them; loops a map takes that are not the
+  outer loops of each side, as many as both have or as `loops` says, and a
+  nest the lowering wrote as one domain is cut after them; loops a map takes that are not the
   outer loops of their domain leave the casts decided and the kernel
   unbuildable. Only a pointwise
   producer is substituted (one cell per instance, at its loop variables, no
@@ -700,6 +731,12 @@ says when one does.
   is.
 - An index expression isl cannot express widens the footprint to the whole
   array. That is sound, but it can reject a legal schedule.
+- A constant table's values are read in its dtype and have no sort beyond
+  it: an index read from a table of integers, `x[perm[i]]` with `perm =
+  table([2, 0, 1])`, is not in bounds by type, as one read from an array of
+  `Fin[m]` is, and its in-bounds fact is `assumed`. A table is a kernel's or
+  a program's own; a table the body reads through a container, which no
+  frame names, is named `table`.
 - The in-bounds fact of a ragged access `val[r, j]` is decided against the
   row's length, and the dependences and disjoint writes of `val` are decided
   over `[r, j]`. Both assume the offsets lay the rows out inside the flat
@@ -979,7 +1016,7 @@ loopty is loop + ty, for types: loops, typed. It follows `loopy`, `sumpy`, and
 
 - [docs/quickstart.md](https://github.com/xywei/loopty/blob/main/docs/quickstart.md): the two demos end to end,
   with the output the commands actually print.
-- [examples/README.md](https://github.com/xywei/loopty/blob/main/examples/README.md): all nine demos, with every
+- [examples/README.md](https://github.com/xywei/loopty/blob/main/examples/README.md): all twelve demos, with every
   console block regenerated by `scripts/refresh_example_outputs.py`.
 - [docs/device-runs.md](https://github.com/xywei/loopty/blob/main/docs/device-runs.md) and
   [docs/device-runs/](https://github.com/xywei/loopty/tree/main/docs/device-runs): the demos run on real OpenCL

@@ -80,7 +80,7 @@ def exp(x: Any) -> Any:
 
 
 def log(x: Any) -> Any:
-    """The natural logarithm, ``numpy.log``: of a complex number, its principal value."""
+    """The natural logarithm, ``numpy.log``; of a complex number, the principal one."""
     return _applied("log", x)
 
 
@@ -105,5 +105,5 @@ def imag(x: Any) -> Any:
 
 
 def conj(x: Any) -> Any:
-    """The complex conjugate, ``numpy.conj``: of a number that is not complex, itself."""
+    """The complex conjugate, ``numpy.conj``: of a real number, itself."""
     return _applied("conj", x)

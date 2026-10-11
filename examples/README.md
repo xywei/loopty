@@ -1,6 +1,6 @@
 # The loopty demos
 
-Nine files, each of which runs three ways. Every console block below is a
+Twelve files, each of which runs three ways. Every console block below is a
 snapshot of real output, not prose about it, and it is produced mechanically:
 
 ```console
@@ -27,6 +27,9 @@ marked with `...` is an excerpt and the lines it keeps are checked verbatim.
 | `composition.py` | two kernels composed by a program and lowered as one loopy kernel, with the intermediate a temporary of it and the edge between the kernels found in the footprints |
 | `travel.py` | facts that travel between a program's calls: a requirement decided under the postcondition of the call before, one checked by the compiled program between the calls, and a flat access in bounds where it follows the scan |
 | `fusion.py` | the program of `composition.py` with its two loops fused into one, a fusion one step too early refused with its pair, and the intermediate computed where it is read instead of stored |
+| `quadrature.py` | firedrake's P1 mass kernel cell by cell, its quadrature rule and basis held in constant tables, read-only arrays written into the compiled code, and its gathers through the cell map in bounds by type |
+| `layer_potential.py` | pytential's QBX single layer over complex points with `real` and `log` from `loopty.math`, scheduled as sumpy's CPU tile, the sources' loop outside the targets', and the same order on a loop loopy cannot keep it on |
+| `sum_factorization.py` | grudge's two passes of a sum-factorized operator, fused on the element and the row and no deeper: the deeper fusion refused with its pair, and the fusion of fewer loops it names |
 
 Run them with `uv run` from the repository root:
 
@@ -914,6 +917,220 @@ tested   loopy  fusion.py:71  flux         the scheduled run of flux agrees with
 tested   loopy  fusion.py:79  divergence   the scheduled run of divergence agrees with the native run to the acc...
 
 9 facts: 5 decided, 4 tested
+```
+
+## quadrature.py
+
+The element kernel FFC and TSFC generate for the P1 mass matrix, `mass_ffc` of
+firedrake's PyOP2 tests, applied to a field on every cell of a mesh. Its
+3-point rule and the basis at the rule's points are constant tables, declared
+next to the kernel as the numpy arrays they are, `W = table([1 / 6, 1 / 6, 1 /
+6])`, and read by the body as arrays are. Each read is in bounds over the
+table's shape, decided by isl, and the compiled kernel holds the values with
+every digit, `static double W[3]`, so both runs read the same numbers. The
+gathers through the cell map, `u[cell[c, k]]`, are in bounds by type, since
+the map's entries are points of `Fin[nv]`.
+
+### python examples/quadrature.py
+
+Both meshes against the element mass matrix in closed form, then the tables
+as the compiled code holds them, and the compiled run of PyOP2's split of the
+cells against the native one.
+
+```console
+$ uv run python examples/quadrature.py
+PyOP2's two triangles: 2 cells, agrees with the closed form: True
+a square: 32 cells, agrees with the closed form: True
+
+static double PHI[3 * 3] = { 0.6666666666666666, 0.16666666666666666, 0.16666666666666666, 0.16666666666666666, 0.6666666666666666, 0.16666666666666666, 0.16666666666666666, 0.16666666666666666, 0.6666666666666666 };
+static double W[3] = { 0.16666666666666666, 0.16666666666666666, 0.16666666666666666 };
+
+schedule: Schedule(mass_action, target='c').split(c, 32)
+  yl: difference 0 within 1.01e-06 (approx) -> tested
+```
+
+### lanky check examples/quadrature.py
+
+```console
+$ uv run lanky check examples/quadrature.py
+STATUS   BY           WHERE             OWNER        STATEMENT
+-------  -----------  ----------------  -----------  ---------------------------------------------------------
+decided  isl          quadrature.py:78  mass_action  yl[c, j] is in bounds for every instance of S0
+decided  type         quadrature.py:78  mass_action  X[cell[c, 1]] is in bounds by type (cell[c, 1] : Fin(nv))
+decided  isl          quadrature.py:78  mass_action  cell[c, 1] is in bounds for every instance of S0
+decided  type         quadrature.py:78  mass_action  X[cell[c, 0]] is in bounds by type (cell[c, 0] : Fin(nv))
+decided  isl          quadrature.py:78  mass_action  cell[c, 0] is in bounds for every instance of S0
+decided  type         quadrature.py:78  mass_action  Y[cell[c, 2]] is in bounds by type (cell[c, 2] : Fin(nv))
+decided  isl          quadrature.py:78  mass_action  cell[c, 2] is in bounds for every instance of S0
+decided  type         quadrature.py:78  mass_action  Y[cell[c, 0]] is in bounds by type (cell[c, 0] : Fin(nv))
+decided  type         quadrature.py:78  mass_action  X[cell[c, 2]] is in bounds by type (cell[c, 2] : Fin(nv))
+decided  type         quadrature.py:78  mass_action  Y[cell[c, 1]] is in bounds by type (cell[c, 1] : Fin(nv))
+decided  isl          quadrature.py:78  mass_action  W[q] is in bounds for every instance of S0
+decided  isl          quadrature.py:78  mass_action  PHI[q, j] is in bounds for every instance of S0
+decided  isl          quadrature.py:78  mass_action  PHI[q, k] is in bounds for every instance of S0
+decided  type         quadrature.py:78  mass_action  u[cell[c, k]] is in bounds by type (cell[c, k] : Fin(nv))
+decided  isl          quadrature.py:78  mass_action  cell[c, k] is in bounds for every instance of S0
+decided  isl          quadrature.py:78  mass_action  distinct instances of S0 write distinct cells of yl
+decided  isl          quadrature.py:63  mass_action  the source order runs every dependence forward in time
+decided  type         quadrature.py:78  mass_action  the accumulation into yl[c, j] over q, k is approx
+tested   interpreter  quadrature.py:63  mass_action  the traced term computes what the body computes
+
+19 facts: 18 decided, 1 tested
+```
+
+### loopty run examples/quadrature.py
+
+```console
+$ uv run loopty run examples/quadrature.py
+mass_action: Schedule(mass_action, target='c').split(c, 32)
+  yl: difference 0 within 1.01e-06 (approx) -> tested
+
+STATUS   BY     WHERE             OWNER        STATEMENT
+-------  -----  ----------------  -----------  ------------------------------------------------------------------------
+decided  isl    quadrature.py:78  mass_action  split(c, 32) renames the instances of mass_action one for one
+decided  isl    quadrature.py:78  mass_action  the order after split(c, 32) runs every dependence of mass_action for...
+tested   loopy  quadrature.py:78  mass_action  the scheduled run of mass_action agrees with the native run to the ac...
+
+3 facts: 2 decided, 1 tested
+```
+
+## layer_potential.py
+
+The QBX single layer pytential evaluates at a target on a curve, through the
+line-Taylor expansion of `log` about a center just off the curve, written over
+complex points with `real` and `log` from `loopty.math`. On the unit circle,
+for the density `cos(theta)`, the answer is `cos(theta) / 2`.
+
+The schedule is sumpy's CPU tile, `LayerPotential.get_optimized_kernel`: the
+targets split by 16, the sources by 256, and the sources' outer loop outside
+the targets' inner loop, `.prioritize("s_outer", "t_inner")`. Each target's
+sum still adds its sources in order. On the C target the 16 targets are an
+`ilp` loop, which gives each an accumulator of its own; the same order on a
+target loop in sequence is one loopy cannot keep, and the schedule's
+`buildable` fact says so with the tag that fixes it.
+
+### python examples/layer_potential.py
+
+```console
+$ uv run python examples/layer_potential.py
+32 targets, 512 sources, order 4
+largest error against cos(theta) / 2: 3.0e-10
+
+schedule: Schedule(single_layer, target='c').split(t, 16).tag(t_inner='ilp').split(s, 256).prioritize(s_outer, t_inner)
+  decided  isl  split(t, 16) renames the instances of single_layer one for one
+  decided  isl  the order after split(t, 16) runs every dependence of single_layer forward
+  decided  isl  tag(t_inner='ilp') renames the instances of single_layer one for one
+  decided  isl  the order after tag(t_inner='ilp') runs every dependence of single_layer forward
+  decided  isl  split(s, 256) renames the instances of single_layer one for one
+  decided  isl  the order after split(s, 256) runs every dependence of single_layer forward
+  decided  isl  prioritize(s_outer, t_inner) renames the instances of single_layer one for one
+  decided  isl  the order after prioritize(s_outer, t_inner) runs every dependence of single_layer forward
+  out: the compiled run agrees with the native run to the approx tolerance: True -> tested
+
+schedule: Schedule(single_layer, target='c').split(t, 16).split(s, 256).prioritize(s_outer, t_inner)
+  buildable: False
+  reason: the loop s_outer of the sum over s_outer, s_inner in S0 is ordered outside t_inner, which runs in sequence: loopy keeps one accumulator for the sum, and so runs the sum's loops inside every loop of S0, and would drop the loop priority and run a nest the cast facts say nothing about. Tag t_inner 'ilp', which gives each of its iterations an accumulator of its own, or put it on a hardware axis on a device, as tag(t_inner='l.0') does
+```
+
+### lanky check examples/layer_potential.py
+
+```console
+$ uv run lanky check examples/layer_potential.py
+STATUS   BY           WHERE                  OWNER         STATEMENT
+-------  -----------  ---------------------  ------------  ------------------------------------------------------
+decided  isl          layer_potential.py:88  single_layer  out[t] is in bounds for every instance of S0
+decided  isl          layer_potential.py:88  single_layer  w[s] is in bounds for every instance of S0
+decided  isl          layer_potential.py:88  single_layer  c[t] is in bounds for every instance of S0
+decided  isl          layer_potential.py:88  single_layer  y[s] is in bounds for every instance of S0
+decided  isl          layer_potential.py:88  single_layer  z[t] is in bounds for every instance of S0
+decided  isl          layer_potential.py:88  single_layer  distinct instances of S0 write distinct cells of out
+decided  isl          layer_potential.py:78  single_layer  the source order runs every dependence forward in time
+decided  type         layer_potential.py:88  single_layer  the accumulation into out[t] over s is approx
+tested   interpreter  layer_potential.py:78  single_layer  the traced term computes what the body computes
+
+9 facts: 8 decided, 1 tested
+```
+
+### loopty run examples/layer_potential.py
+
+`uv run loopty run examples/layer_potential.py` compiles the tile on the C
+target and compares it with the native run, as for every demo. Its transcript
+is not kept here: the difference it prints is one of `log`'s last bits,
+numpy's against the C library's, which can differ from machine to machine.
+
+## sum_factorization.py
+
+The weak derivative along `r` on quadrilaterals, as grudge applies it, a pass
+per reference axis: the differentiation matrix along `r`, then the quadrature
+weights along `s`, each pass a kernel over the elements and a program running
+one after the other. Fused on every loop, the second pass would read a cell of
+the row before the first stores it, and the refusal names that pair and the
+fusion of fewer loops it checked, `fuse("along_r", "along_s", loops=2)`, which
+fuses the element and the row and leaves the inner loops one after the other.
+Each element's result is the Kronecker product of the two matrices applied to
+it.
+
+### python examples/sum_factorization.py
+
+```console
+$ uv run python examples/sum_factorization.py
+native: each element is kron(D, M) applied to it: True
+
+refused: fuse(along_r, along_s) illegal: instance along_r.S0[e=0, a=1, b=1] writes v[0, 1, 1] read by along_s.S0[e_0=0, a_0=1, b_0=0] scheduled earlier (at n=2, ne=1, isl's choice); fuse('along_r', 'along_s', loops=2) runs every dependence between them forward
+
+accepted: Schedule(weak_derivative, target='c').fuse(along_r, along_s, loops=2)
+  the passes' loops, outermost first: e, a, b, b_0
+  decided  isl  fuse(along_r, along_s, loops=2) renames the instances of weak_derivative one for one
+  decided  isl  the order after fuse(along_r, along_s, loops=2) runs every dependence of weak_derivative forward
+  w: difference 0 within 1e-06 (approx) -> tested
+```
+
+### lanky check examples/sum_factorization.py
+
+```console
+$ uv run lanky check examples/sum_factorization.py
+STATUS   BY           WHERE                    OWNER            STATEMENT
+-------  -----------  -----------------------  ---------------  ------------------------------------------------------------
+decided  isl          sum_factorization.py:74  along_r          v[e, a, b] is in bounds for every instance of S0
+decided  isl          sum_factorization.py:74  along_r          F[a, m] is in bounds for every instance of S0
+decided  isl          sum_factorization.py:74  along_r          u[e, m, b] is in bounds for every instance of S0
+decided  isl          sum_factorization.py:74  along_r          distinct instances of S0 write distinct cells of v
+decided  isl          sum_factorization.py:64  along_r          the source order runs every dependence forward in time
+decided  type         sum_factorization.py:74  along_r          the accumulation into v[e, a, b] over m is approx
+tested   interpreter  sum_factorization.py:64  along_r          the traced term computes what the body computes
+decided  isl          sum_factorization.py:87  along_s          w[e, a, b] is in bounds for every instance of S0
+decided  isl          sum_factorization.py:87  along_s          G[b, m] is in bounds for every instance of S0
+decided  isl          sum_factorization.py:87  along_s          v[e, a, m] is in bounds for every instance of S0
+decided  isl          sum_factorization.py:87  along_s          distinct instances of S0 write distinct cells of w
+decided  isl          sum_factorization.py:77  along_s          the source order runs every dependence forward in time
+decided  type         sum_factorization.py:87  along_s          the accumulation into w[e, a, b] over m is approx
+tested   interpreter  sum_factorization.py:77  along_s          the traced term computes what the body computes
+decided  isl          sum_factorization.py:95  weak_derivative  every cell of v that along_s reads, along_r stored before it
+tested   interpreter  sum_factorization.py:90  weak_derivative  the traced term computes what the body computes
+
+16 facts: 13 decided, 3 tested
+```
+
+### loopty run examples/sum_factorization.py
+
+```console
+$ uv run loopty run examples/sum_factorization.py
+weak_derivative: Schedule(weak_derivative, target='c').fuse(along_r, along_s, loops=2)
+  w: difference 0 within 1e-06 (approx) -> tested
+along_r: Schedule(along_r, target='c')
+  v: difference 0 within 1.02e-06 (approx) -> tested
+along_s: Schedule(along_s, target='c')
+  w: difference 0 within 1e-06 (approx) -> tested
+
+STATUS   BY     WHERE                    OWNER            STATEMENT
+-------  -----  -----------------------  ---------------  ------------------------------------------------------------------------
+decided  isl    sum_factorization.py:93  weak_derivative  fuse(along_r, along_s, loops=2) renames the instances of weak_derivat...
+decided  isl    sum_factorization.py:93  weak_derivative  the order after fuse(along_r, along_s, loops=2) runs every dependence...
+tested   loopy  sum_factorization.py:90  weak_derivative  the scheduled run of weak_derivative agrees with the native run to th...
+tested   loopy  sum_factorization.py:74  along_r          the scheduled run of along_r agrees with the native run to the accura...
+tested   loopy  sum_factorization.py:87  along_s          the scheduled run of along_s agrees with the native run to the accura...
+
+5 facts: 2 decided, 3 tested
 ```
 
 ## reshape_layouts.py and p2p.py
