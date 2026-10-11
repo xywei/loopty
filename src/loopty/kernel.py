@@ -79,6 +79,7 @@ __all__ = [
     "kernel",
     "opens_a_guard",
     "program",
+    "schedule_facts",
 ]
 
 
@@ -249,11 +250,15 @@ class Kernel(_Decorated):
         fn: The original function, which is the reference implementation.
     """
 
-    def __init__(self, fn: Any) -> None:
+    def __init__(self, fn: Any, *, uses: Any = ()) -> None:
         super().__init__(fn)
         self._term: Term | None = None
         self._facts: tuple[Fact, ...] | None = None
         self._arg_types: dict[str, Any] | None = None
+        #: The theorems the kernel cites (``@kernel(uses=[...])``), offered as
+        #: hypotheses where its postcondition is decided, and applied to it
+        #: (:mod:`loopty.dataflow`).
+        self.uses = _theorems(uses, self.qualname)
         #: Whether a ``when`` block is visible from the body, following the
         #: helpers it calls. Reported, not relied on: :meth:`__call__` masks
         #: every run. See :func:`opens_a_guard`.
@@ -672,8 +677,110 @@ class Kernel(_Decorated):
             else fact
             for fact in stated
         ]
-        self._facts = (*tested, faithful)
+        self._facts = (*self._applied(term, self._decided(term, tested)), faithful)
         return self._facts
+
+    def _applied(self, term: Term, facts: list[Fact]) -> list[Fact]:
+        """``facts`` with what each cited theorem gives, after the postcondition.
+
+        A theorem the kernel cites whose hypotheses are conjuncts of the
+        postcondition gives its conclusion at the kernel's arrays, a fact of
+        kind ``by-theorem`` resting on the theorem and the postcondition
+        (:func:`loopty.dataflow.application_facts`). A refuted postcondition
+        gives nothing.
+        """
+        from lanky.ledger import Status
+
+        from loopty.dataflow import application_facts
+
+        if not self.uses:
+            return facts
+        at = next(
+            (k for k, fact in enumerate(facts) if fact.kind == "postcondition"), None
+        )
+        if at is None or facts[at].status is Status.REFUTED:
+            return facts
+        try:
+            applied = application_facts(
+                term,
+                self.uses,
+                facts[at],
+                self.qualname,
+                module=self.module,
+                line=self.line,
+            )
+        except Exception:  # noqa: BLE001 - a theorem that does not apply gives nothing
+            applied = []
+        return [*facts[: at + 1], *applied, *facts[at + 1 :]]
+
+    def _decided(self, term: Term, facts: list[Fact]) -> list[Fact]:
+        """``facts`` with the postcondition decided from the term, where it can be.
+
+        Under what the kernel's statements store (:mod:`loopty.dataflow`):
+        where every cell of an array it writes is stored once at most and
+        read after its store, each statement is an equation about what the
+        kernel leaves, and isl decides the postcondition under them, with
+        the theorems the kernel cites. The decided fact keeps what the native
+        runs found in its provenance (``native``), and is preceded by the
+        ``single-assignment`` facts it rests on. A postcondition a native run
+        refuted stays refuted, and one the equations do not decide stays as
+        the runs left it, with the reason (``undecided``).
+        """
+        from lanky.ledger import Status
+
+        from loopty.dataflow import decide_postcondition, stores
+
+        at = next(
+            (k for k, fact in enumerate(facts) if fact.kind == "postcondition"), None
+        )
+        if at is None:
+            return facts
+        post = facts[at]
+        if post.status is Status.REFUTED:
+            return facts
+        key = {"module": self.module, "line": self.line}
+        stored = None
+        try:
+            stored = stores(term, self.qualname, **key)
+            decision = decide_postcondition(term, stored.equations, theorems=self.uses)
+        except Exception as exc:  # noqa: BLE001 - the runs' verdict stands, with why
+            decision = f"{type(exc).__name__}: {exc}"
+        if isinstance(decision, str):
+            reason = decision
+            if stored is not None and stored.why:
+                reason += "; " + "; ".join(
+                    f"{array}: {why}" for array, why in stored.why.items()
+                )
+            facts[at] = post.with_status(post.status, undecided=reason)
+            return facts
+        assert stored is not None
+        needed = [
+            fact for fact in stored.facts.values() if fact.id in decision.rests_on
+        ]
+        decided = Fact(
+            id=post.id,
+            kind=post.kind,
+            statement=post.statement,
+            term=decision.question,
+            status=Status.DECIDED,
+            decided_by="isl",
+            provenance={
+                **post.provenance,
+                "native": post.status.value,
+                "used": [hypothesis.source for hypothesis in decision.used],
+                "rule": (
+                    "decided under what the statements store: no cell of "
+                    + ", ".join(fact.provenance["array"] for fact in needed)
+                    + " is stored twice, or read before its store"
+                    if needed
+                    else "decided under what the statements store"
+                ),
+            },
+            where=post.where,
+            owner=post.owner,
+            rests_on=decision.rests_on,
+        )
+        return [*facts[:at], *needed, decided, *facts[at + 1 :]]
 
     def __repr__(self) -> str:
         return f"<kernel {self.__name__} at {self.where}>"
@@ -923,8 +1030,15 @@ class KernelTheory:
     each reduction, and the postcondition; then the ``trace-faithful`` fact,
     that the term computes what the body computes (:mod:`loopty.faithful`). A
     program's are its callees' postconditions restated, and its own
-    ``trace-faithful`` fact. An object this theory does not own gives an empty
-    tuple, which is how several theories share one ledger.
+    ``trace-faithful`` fact. A layout's are its own (:mod:`loopty.layout`). An
+    object this theory does not own gives an empty tuple, which is how several
+    theories share one ledger.
+
+    After a kernel's or a program's facts come the casts of its schedules
+    that its file holds at module level, as ``loopty run`` finds them
+    (:func:`loopty.cli.collect`): each step's facts, decided by isl as the
+    step was taken (:func:`schedule_facts`), so that ``lanky check`` has
+    Lean prove a schedule's legality as ``loopty run`` does (#191).
     """
 
     name = "kernel"
@@ -942,14 +1056,48 @@ class KernelTheory:
         return registry.register_object(Kernel(obj))
 
     def facts(self, obj: Any, /) -> tuple:
-        """Return the facts claimed by a decorated kernel or program."""
+        """Return the facts of a kernel, a program or a layout; schedules' last."""
         if isinstance(obj, Kernel | Program):
-            return obj.facts()
+            own = obj.facts()
+            return (*own, *schedule_facts(obj, {fact.id for fact in own}))
         from loopty.layout import Layout, SameLayout
 
         if isinstance(obj, Layout | SameLayout):
             return obj.facts()
         return ()
+
+
+def schedule_facts(obj: Kernel | Program, taken: set[str] = frozenset()) -> tuple:
+    """The casts of every schedule of ``obj`` its file holds at module level, each once.
+
+    A schedule is found where ``loopty run`` finds it, among the names the
+    module binds (:func:`loopty.cli.collect`), and is of ``obj`` when its
+    source is, through any schedule of a schedule. Its facts are the ones its
+    steps made, decided by isl as each was taken, and a buildable fact a
+    target refused; the runs are ``loopty run``'s. Two schedules that share
+    their first steps share the facts about them, which name the same claim
+    by the same id (:meth:`loopty.schedule.Schedule.fact_id`), and each id
+    is given once, after the ids in ``taken``, the object's own.
+    """
+    from loopty.schedule import Schedule
+
+    globals_ = getattr(obj.fn, "__globals__", None) or {}
+    seen = set(taken)
+    out: list[Fact] = []
+    for name, value in list(globals_.items()):
+        if name.startswith("_") or not isinstance(value, Schedule):
+            continue
+        source = value.source
+        while isinstance(source, Schedule):
+            source = source.source
+        if source is not obj:
+            continue
+        for fact in value.facts():
+            if fact.id in seen:
+                continue
+            seen.add(fact.id)
+            out.append(fact)
+    return tuple(out)
 
 
 #: The theory itself, also usable as the ``@kernel`` decorator. There is exactly
@@ -976,9 +1124,28 @@ def ensure_registered() -> KernelTheory:
     return kernel_theory
 
 
-def kernel(fn: Any) -> Kernel:
-    """Decorate ``fn`` as a loopty kernel and register it with lanky."""
-    return ensure_registered()(fn)
+def kernel(fn: Any = None, /, *, uses: Any = ()) -> Any:
+    """Decorate ``fn`` as a loopty kernel and register it with lanky.
+
+    ``@kernel`` alone, or ``@kernel(uses=[scan_monotone])`` to cite
+    theorems: each is offered as a hypothesis where the kernel's
+    postcondition is decided from its term, and applied to the postcondition
+    where its hypotheses are conjuncts of it (:mod:`loopty.dataflow`).
+    """
+    ensure_registered()
+    if fn is None:
+        theorems = _theorems(uses, "the kernel")
+
+        def decorate(function: Any) -> Kernel:
+            return registry.register_object(Kernel(function, uses=theorems))
+
+        return decorate
+    if not callable(fn) or getattr(fn, "__code__", None) is None:
+        raise TypeError(
+            f"@kernel decorates a function, and was given {fn!r}; the theorems a "
+            "kernel cites go in uses=[...]"
+        )
+    return registry.register_object(Kernel(fn, uses=uses))
 
 
 def program(fn: Any = None, /, *, uses: Any = ()) -> Any:
