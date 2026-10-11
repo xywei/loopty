@@ -410,9 +410,9 @@ release; the CHANGELOG says when one does.
   none of their instances, and loopy keeps the order where it keeps an
   accumulator per instance, on a hardware axis or an `ilp` loop, which the
   `buildable` fact asks (`examples/layer_potential.py`). A split sum adds
-  its terms in order, outer loop first. A tag belongs to a loop, so `split`, `tile` and `affine`
-  refuse a loop that carries one, and the loops they make are tagged after
-  them. `affine(map)` takes an isl map from loops to the loops that
+  its terms in order, outer loop first. A tag belongs to a loop, so
+  `split`, `tile` and `affine` refuse a loop that carries one, and the loops
+  they make are tagged after them. `affine(map)` takes an isl map from loops to the loops that
   replace them, refuses one that misses or merges an instance or runs a
   dependence backwards, and rewrites the kernel over the map's image; `skew` is
   that method with a particular map. A union map whose tuples name statements,
@@ -521,7 +521,10 @@ release; the CHANGELOG says when one does.
   computes it in: `sqrt(k[i])` of an integer is a double, and `real`,
   `imag` and `conj` of a real are the number, `0` and the number. One numpy
   computes in half precision, `sqrt` of an `int8`, is a `TraceError` naming
-  `sqrt(1.0 * k[i])`. `examples/layer_potential.py` is pytential's QBX
+  `sqrt(1.0 * k[i])`. A value of one compares as any value does,
+  `when(sqrt(x[i]) > 1.5)`, and numpy's own `np.sqrt`, Python's
+  `math.sqrt` and `z[i].real` are refused when traced, naming the function
+  of `loopty.math` to write. `examples/layer_potential.py` is pytential's QBX
   single layer over complex points.
 - Constant tables, `loopty.table`: `W = table([1 / 6, 1 / 6, 1 / 6])`
   next to the kernel, read by the body as an array is (`W[q]`, `W.dom`). A
@@ -529,7 +532,9 @@ release; the CHANGELOG says when one does.
   shape, decided by isl, and the lowering writes it into the kernel as a
   read-only loopy temporary with the values as its initializer, `static
   double W[3] = {...}` on the C target and `__constant` on OpenCL, with every
-  digit. A program holds one table for every call that reads it.
+  digit. A program holds one table for every call that reads it. Natively
+  a table is read as an array is, and it is no argument: an array of its
+  values is passed instead, `Arr.from_numpy(W.values.copy())`.
   `examples/quadrature.py` is firedrake's P1 mass kernel.
 - The argument contract, enforced at every entry point that runs a kernel
   (compiled, differential and native): two distinct array parameters may not
@@ -615,9 +620,9 @@ release; the CHANGELOG says when one does.
 - A program lowers sequentially: its calls' loops run one after another, as
   the program runs them, until a schedule fuses them. A fusion moves the
   outer loops of each side, as many as both have or as `loops` says, and a
-  nest the lowering wrote as one domain is cut after them; loops a map takes that are not the
-  outer loops of their domain leave the casts decided and the kernel
-  unbuildable. Only a pointwise
+  nest the lowering wrote as one domain is cut after them; loops a map
+  takes that are not the outer loops of their domain leave the casts
+  decided and the kernel unbuildable. Only a pointwise
   producer is substituted (one cell per instance, at its loop variables, no
   sum, no guard isl cannot state), and the array is either stored in full
   or not at all: contracting it to the cells live at once is not done.
@@ -736,9 +741,15 @@ release; the CHANGELOG says when one does.
 - A constant table's values are read in its dtype and have no sort beyond
   it: an index read from a table of integers, `x[perm[i]]` with `perm =
   table([2, 0, 1])`, is not in bounds by type, as one read from an array of
-  `Fin[m]` is, and its in-bounds fact is `assumed` (#182). A table is a kernel's or
-  a program's own; a table the body reads through a container, which no
-  frame names, is named `table`.
+  `Fin[m]` is, and its in-bounds fact is `assumed` (#182). A table is a
+  kernel's or a program's own; a table the body reads through a container,
+  which no frame names, is named `table`. A table holds finite numbers
+  (#193), and a loop bounded by a value read from one is refused when
+  traced (#194).
+- `loopty.math` has eight functions (#184), and numpy's own functions on a
+  traced value are refused rather than read as them (#195). A function
+  only a guard calls is refused when lowered: loopy resolves a function by
+  the values that call it (note 20 in `docs/loopy-notes.md`).
 - The in-bounds fact of a ragged access `val[r, j]` is decided against the
   row's length, and the dependences and disjoint writes of `val` are decided
   over `[r, j]`. Both assume the offsets lay the rows out inside the flat

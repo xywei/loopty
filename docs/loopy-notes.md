@@ -1546,3 +1546,21 @@ not affine, and its shape states it as `m`, which is solved.
 `LoopyExecutor` calls a kernel. A size no equation finds is an error when the
 kernel is called, which it leaves alone.
 
+## 29. loopy writes a non-finite initializer with macros it does not include, and a complex infinity as a nan
+
+**Symptom.** A constant table (`loopty.table`) of `[1.0, inf]` lowers to
+`static double S[2] = { 1.0, INFINITY };`, which does not compile on the C
+target. A complex one of `complex(1, inf)` is written `1.0 + INFINITY * I`,
+which is `nan + inf i`. A `nan` makes pytools warn about cache keys
+(`NanKeyWarning`, `CollisionWarning`).
+
+**Cause.** loopy writes a temporary's initializer value by value, with the
+macros `NAN` and `INFINITY`, which `math.h` defines, and never includes
+`math.h` (as for `pow`, note 2). It writes a complex value as `re + im * I`,
+and `inf * I` multiplies the zero real part of `I` by an infinity. A `nan`
+compares unequal to itself, so a kernel holding one is not equal to itself
+as a cache key.
+
+**Local fix.** A table's values are finite, and `table(...)` refuses a `nan`
+or an infinity when it is declared, naming the position; an array holding
+such values is passed instead (#193).

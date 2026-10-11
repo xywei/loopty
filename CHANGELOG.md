@@ -23,7 +23,12 @@ All notable changes to loopty are recorded here. The format follows
   read in a helper of the body is the kernel's, named as it is declared, a
   program holds one table for every call that reads it, and a table named
   like a parameter or a size of the kernel is named apart, `y_table`.
-  Writing one is a `TypeError` in both runs.
+  Writing one is a `TypeError` in both runs. Natively a table is read as an
+  array is: an index is never counted from the end, and a read out of range
+  under a false `when` answers zero. A table holds finite numbers (#193),
+  is no argument (an array of its values is,
+  `Arr.from_numpy(W.values.copy())`), and is read in a statement's values,
+  not in a loop's bound (#194); each of these is refused with the fix named.
 - **`loopty.math`**: `sqrt`, `exp`, `log`, `sin`, `cos`, `real`, `imag` and
   `conj` for kernel bodies. Each is numpy's natively and a call the
   trace records, which the interpreter evaluates with the same numpy function
@@ -41,6 +46,12 @@ All notable changes to loopty are recorded here. The format follows
   all(y[i] == sqrt(x[i]) for i in Fin[n] if x[i] >= 0)`, and is tested after
   each native run with numpy's, where it was left `assumed`, not evaluated.
   `examples/p2p.py` calls `loopty.math.sqrt` where it built the call by hand.
+  A value of one compares and combines as any traced value does,
+  `when(sqrt(x[i]) > 1.5)`. numpy's own functions, Python's `math` and
+  `x[i].real` take numbers: a body that calls them on a traced value is
+  refused at its line, with the `loopty.math` function to write (#195),
+  where it failed far from the body (numpy's "loop of ufunc does not support
+  argument 0 of type Subscript", pymbolic's `UnknownVariableError`).
 - **A sum's loop ordered outside a loop of its statement**
   (`Schedule.prioritize("s_outer", "t_inner")`). sumpy's CPU tile of
   a layer potential splits the targets by 16 onto a group and its work

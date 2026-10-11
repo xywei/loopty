@@ -250,14 +250,15 @@ void spmv(int32_t const n, int64_t const *__restrict__ cnt, int32_t const *__res
 `nl_cnt_r` is the row's count, read once per row; `off_cnt` is the offsets
 argument lowering added; `j_out` and `j_in` are the two halves of the split,
 the outer one outside, so each row is summed in the order the native run sums
-it. The kernel never mentioned any of them. `cnt` is an array of `Nat`, which is 64 bits
-wide as numpy's integers are, and `col` one of `Fin[m]`, which its bound keeps
-to 32.
+it. The kernel never mentioned any of them. `cnt` is an array of `Nat`, which
+is 64 bits wide as numpy's integers are, and `col` one of `Fin[m]`, which its
+bound keeps to 32.
 
 `scan` agrees exactly, because its output is `Nat` and integer arithmetic is
 exact. `spmv` agrees to the last bit as well: the split sums each row in
-order, and the tree that `realize` allows for is not built on the C target. The `loopy` rows are facts like any other: an executor is an oracle
-of trust class `test`.
+order, and the tree that `realize` allows for is not built on the C target.
+The `loopy` rows are facts like any other: an executor is an oracle of trust
+class `test`.
 
 `solve`, the program, is compiled as well, as one kernel. Its term is what its
 body does run against placeholders: `scan`'s statements, then `spmv`'s, in the
