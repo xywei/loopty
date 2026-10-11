@@ -1646,7 +1646,13 @@ Without Lean, the two theorems are `assumed` and the application is
 `decided` by `theorem`, worth what the theorem is. With Lean and Mathlib
 (`LANKY_LEAN_MATHLIB`, and lanky's `cas` extra, whose sympy finds the
 induction's steps), every row isl decided is `proved` by Lean, and so are
-both theorems and the application.
+both theorems and the application: `49 facts: 2 decided, 40 proved, 7
+tested`, the two left decided being the class of the Taylor sum, by type,
+and the postcondition restated after the call, by the call. That takes Lean
+about two minutes from an empty proof cache. `lanky check examples/l2p.py
+--show-lean compressed_taylor` prints the induction Lean checked: on
+`a`, two at a time, each step a `linear_combination` of the recurrence, the
+PDE and the hypothesis at `(a, b + 2)`, whose multipliers Python found.
 
 ```console
 $ uv run lanky check examples/l2p.py

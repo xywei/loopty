@@ -44,8 +44,11 @@ three can run where their dependencies are:
 
 Every run records the device (platform, device, driver), the versions of the
 packages that compiled it, the compiler flags of the C target, the time of
-the first call (code generation and compilation, in a fresh cache when
-``--cold``), and the median, minimum and maximum of ``--repeat`` timed calls
+the first call, in fresh code caches when ``--cold``, in two parts:
+``prepare``, building the kernel (sumpy's symbolic code generation; loopy's
+``make_kernel``; loopty's trace, its every fact and cast checked, and its
+lowering), and ``compile``, loopy's code generation, the compiler and the
+first run; and the median, minimum and maximum of ``--repeat`` timed calls
 after ``--warmup`` untimed ones; on a device the times are the kernel's
 events, on C the call's wall time. Results are one JSON object per line.
 
@@ -355,8 +358,7 @@ def run_sumpy(inputs: dict, args: argparse.Namespace) -> tuple[dict, np.ndarray]
     with cold_caches(args.cold):
         start = time.perf_counter()
         program = E2PFromSingleBox(expansion, [kernel]).get_optimized_kernel()
-        executor = program.executor(queue.context)
-        generated = time.perf_counter() - start
+        prepared = time.perf_counter() - start
         device_args = {
             "src_expansions": cla.to_device(queue, coeffs),
             "src_base_ibox": np.int32(0),
@@ -379,14 +381,16 @@ def run_sumpy(inputs: dict, args: argparse.Namespace) -> tuple[dict, np.ndarray]
             "result": [cla.zeros(queue, ntargets, np.float64)],
         }
 
+        start = time.perf_counter()
+        executor = program.executor(queue.context)
+
         def call() -> Any:
             event, _out = executor(queue, **device_args)
             return event
 
-        start = time.perf_counter()
         call()
         queue.finish()
-        first = time.perf_counter() - start
+        compiled = time.perf_counter() - start
     times = time_opencl(call, queue, args.warmup, args.repeat)
     pot = device_args["result"][0].get()
     record = {
@@ -396,8 +400,9 @@ def run_sumpy(inputs: dict, args: argparse.Namespace) -> tuple[dict, np.ndarray]
         "order": order,
         "nboxes": nboxes,
         "ntargets": ntargets,
-        "first_call": generated + first,
-        "codegen": generated,
+        "prepare": prepared,
+        "compile": compiled,
+        "first_call": prepared + compiled,
         "cold": args.cold,
         "time": summary(times),
         "times": times,
@@ -524,7 +529,13 @@ def plain_loopy_kernel(order: int, target: str, variant: str) -> Any:
                 read_only=True,
                 address_space=lp.AddressSpace.GLOBAL,
             ),
-            lp.TemporaryVariable(
+            # loopy's C executor allocates no global temporary (the kernel
+            # writes through an unset pointer), so on C every box's triangle
+            # is an argument, allocated by the caller, as loopty's executor
+            # allocates the arrays a program makes (#62)
+            lp.GlobalArg("R", np.float64, shape=("nboxes", p + 1, p + 1))
+            if whole and target == "c"
+            else lp.TemporaryVariable(
                 "R",
                 np.float64,
                 shape=("nboxes", p + 1, p + 1) if whole else (p + 1, p + 1),
@@ -568,6 +579,8 @@ def run_loopy(inputs: dict, args: argparse.Namespace) -> tuple[dict, np.ndarray]
         "nboxes": np.int32(nboxes),
         "ntargets": np.int32(ntargets),
     }
+    if args.variant.endswith("global") and args.target == "c":
+        call_args["R"] = np.zeros((nboxes, order + 1, order + 1))
     record = {
         "implementation": "loopy",
         "variant": args.variant,
@@ -579,30 +592,35 @@ def run_loopy(inputs: dict, args: argparse.Namespace) -> tuple[dict, np.ndarray]
         "versions": versions("loopy", "islpy", "namedisl", "pymbolic", "pytools",
                              "pyopencl", "numpy", "codepy"),
     }
+    import loopy  # noqa: F401 - imported before anything is timed
+
+    queue = opencl_queue() if args.target == "opencl" else None
     with cold_caches(args.cold):
         start = time.perf_counter()
         knl = plain_loopy_kernel(order, args.target, args.variant)
-        if args.target == "c":
+        record["prepare"] = time.perf_counter() - start
+        if queue is None:
+            start = time.perf_counter()
             executor = knl.executor()
 
             def call() -> Any:
                 return executor(**call_args)
 
             call()
-            record["first_call"] = time.perf_counter() - start
+            record["compile"] = time.perf_counter() - start
             times = time_c(call, args.warmup, args.repeat)
             record["toolchain"] = c_toolchain()
             pot = call_args["result"]
         else:
             import pyopencl.array as cla
 
-            queue = opencl_queue()
-            executor = knl.executor(queue.context)
             device_args = {
                 key: cla.to_device(queue, value) if isinstance(value, np.ndarray)
                 else value
                 for key, value in call_args.items()
             }
+            start = time.perf_counter()
+            executor = knl.executor(queue.context)
 
             def call() -> Any:
                 event, _out = executor(queue, **device_args)
@@ -610,10 +628,11 @@ def run_loopy(inputs: dict, args: argparse.Namespace) -> tuple[dict, np.ndarray]
 
             call()
             queue.finish()
-            record["first_call"] = time.perf_counter() - start
+            record["compile"] = time.perf_counter() - start
             times = time_opencl(call, queue, args.warmup, args.repeat)
             record["device"] = opencl_device(queue)
             pot = device_args["result"].get()
+    record["first_call"] = record["prepare"] + record["compile"]
     record["time"] = summary(times)
     record["times"] = times
     return record, pot
@@ -766,6 +785,11 @@ def run_loopty(inputs: dict, args: argparse.Namespace) -> tuple[dict, np.ndarray
         "versions": versions("loopty", "lanky", "loopy", "islpy", "pymbolic",
                              "pytools", "pyopencl", "numpy", "codepy"),
     }
+    import loopy  # noqa: F401 - imported before anything is timed
+
+    import loopty.kernel  # noqa: F401 - and loopty's tracer
+
+    queue = opencl_queue() if args.target == "opencl" else None
     # loopy reads loopty's kernels with loopty's readings of their subscripts
     # and guards, which it has inside declining() (docs/loopy-notes.md, note 23)
     with cold_caches(args.cold), declining():
@@ -780,31 +804,30 @@ def run_loopty(inputs: dict, args: argparse.Namespace) -> tuple[dict, np.ndarray
             kernel, heap = ex._off_the_stack(kernel, term, supplied)
             for name, (shape, dtype) in heap.items():
                 call[name] = np.zeros(shape, dtype=dtype)
-        record["checked"] = time.perf_counter() - start
-        record["code"] = {
-            "fp_contract_off": "FP_CONTRACT OFF" in ex.emit_code(schedule),
-        }
+        # tracing, checking every fact and cast of the file, and lowering
+        record["prepare"] = time.perf_counter() - start
         if target_name == "c":
+            start = time.perf_counter()
             executor = kernel.executor()
 
             def run() -> Any:
                 return executor(**call)
 
             run()
-            record["first_call"] = time.perf_counter() - start
+            record["compile"] = time.perf_counter() - start
             times = time_c(run, args.warmup, args.repeat)
             record["toolchain"] = c_toolchain()
             pot = call["pot"]
         else:
             import pyopencl.array as cla
 
-            queue = opencl_queue()
-            executor = kernel.executor(queue.context)
             device_call = {
                 key: cla.to_device(queue, value) if isinstance(value, np.ndarray)
                 and value.ndim else value
                 for key, value in call.items()
             }
+            start = time.perf_counter()
+            executor = kernel.executor(queue.context)
 
             def run() -> Any:
                 event, _out = executor(queue, **device_call)
@@ -812,10 +835,14 @@ def run_loopty(inputs: dict, args: argparse.Namespace) -> tuple[dict, np.ndarray
 
             run()
             queue.finish()
-            record["first_call"] = time.perf_counter() - start
+            record["compile"] = time.perf_counter() - start
             times = time_opencl(run, queue, args.warmup, args.repeat)
             record["device"] = opencl_device(queue)
             pot = device_call["pot"].get()
+        record["code"] = {
+            "fp_contract_off": "FP_CONTRACT OFF" in ex.emit_code(schedule),
+        }
+    record["first_call"] = record["prepare"] + record["compile"]
     record["time"] = summary(times)
     record["times"] = times
     return record, np.asarray(pot).reshape(-1)
