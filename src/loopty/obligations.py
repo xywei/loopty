@@ -51,7 +51,7 @@ from typing import Any
 
 import islpy as isl
 import pymbolic.primitives as prim
-from lanky.prelude import FnType, Int
+from lanky.prelude import FinType, FnType, Int
 from lanky.terms import (
     Comparison,
     Forall,
@@ -79,9 +79,11 @@ __all__ = [
     "Claim",
     "IslOnly",
     "Stated",
+    "argument_obligation",
     "defined_obligation",
     "discharged_obligation",
     "disjoint_writes_obligation",
+    "distinct_arguments_obligation",
     "element_sort_obligation",
     "in_bounds_obligation",
     "mixed_in_bounds_obligation",
@@ -623,6 +625,77 @@ def element_sort_obligation(
     if not verdict.ok and verdict.witness is not None:
         values = dict(verdict.parameters or {})
         values |= _point(stmt.inames, verdict.witness)
+        counterexample = _counterexample(
+            part, values, ", ".join(f"{k}={v}" for k, v in values.items())
+        )
+    return _obligation([part], counterexample, refuted=verdict.ok is False)
+
+
+# }}}
+
+
+# {{{ what a call of another kernel owes
+
+
+def argument_obligation(
+    term: Term, call: Any, value: Any, sort: Any, verdict: Any
+) -> Any:
+    """A scalar a call passes is a point of its sort, at every point of the call.
+
+    One part: at every point of the call's domain (the caller's loops and the
+    binders of the sums around the call, as loopty described them), ``0 <=
+    v`` and, for ``Fin[m]``, ``v < m``, the value and the bound in the
+    caller's names (:func:`loopty.typing.call_facts`).
+    """
+    try:
+        domain = _described(call.domain, f"the points of the call {call.label}")
+        claim = Claim(term, taken=frozenset(call.inames))
+        coords = claim.coordinates(call.inames)
+        claim.hypotheses.append(domain.predicate(coords))
+        at = _renamed(value, call.inames, coords)
+        parts = [Comparison(0, "<=", at)]
+        if isinstance(sort, FinType):
+            parts.append(Comparison(at, "<", _renamed(sort.bound, call.inames, coords)))
+        label = f"the value {call.label} is given"
+        part = _lanky_obligations().Part(
+            "argument", label, claim.close(conjunction(parts))
+        )
+    except Unstatable as exc:
+        return _declined(str(exc))
+    counterexample = None
+    if not verdict.ok and verdict.witness is not None:
+        values = dict(verdict.parameters or {})
+        values |= _point(call.inames, verdict.witness)
+        counterexample = _counterexample(
+            part, values, ", ".join(f"{k}={v}" for k, v in values.items())
+        )
+    return _obligation([part], counterexample, refuted=verdict.ok is False)
+
+
+def distinct_arguments_obligation(
+    term: Term, call: Any, pairs: Sequence[tuple[Any, Any]], verdict: Any
+) -> Any:
+    """Two rows of one array a call passes are two rows, at every point of it.
+
+    One part: at every point of the call's domain, the indices the two rows
+    fix differ on one of the axes both fix.
+    """
+    try:
+        domain = _described(call.domain, f"the points of the call {call.label}")
+        claim = Claim(term, taken=frozenset(call.inames))
+        coords = claim.coordinates(call.inames)
+        claim.hypotheses.append(domain.predicate(coords))
+        first = [_renamed(p, call.inames, coords) for p, _ in pairs]
+        second = [_renamed(q, call.inames, coords) for _, q in pairs]
+        goal = LogicalNot(_equal(first, second))
+        label = f"the rows {call.label} is given"
+        part = _lanky_obligations().Part("distinct", label, claim.close(goal))
+    except Unstatable as exc:
+        return _declined(str(exc))
+    counterexample = None
+    if not verdict.ok and verdict.witness is not None:
+        values = dict(verdict.parameters or {})
+        values |= _point(call.inames, verdict.witness)
         counterexample = _counterexample(
             part, values, ", ".join(f"{k}={v}" for k, v in values.items())
         )

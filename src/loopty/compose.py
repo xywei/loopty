@@ -1177,6 +1177,15 @@ class _Composer:
                 f"{self.program} calls {kernel.__name__} at {call.where}, whose "
                 f"body cannot be traced: {type(exc).__name__}: {exc}"
             ) from exc
+        if term.result is not None:
+            self.refuse(
+                call,
+                f"{kernel.__name__} is a rule, which returns its value "
+                f"({term.result} of its term) and writes none of its "
+                "arguments, and a program's term is what its kernels write into "
+                "the arrays it passes them. Call it inside a kernel, where its "
+                f"call is a value: y[i] = {kernel.__name__}(...)",
+            )
         for param, typ in term.params:
             if isinstance(typ, ArrType) and typ.domain is not None:
                 self.refuse(

@@ -65,10 +65,16 @@ from loopty.term import (
 from loopty.trace import (
     TraceError,
     array_type,
+    current_tracer,
     mask_writes,
     read_elements_as,
+    result_name,
+    returned_sort,
     trace,
     when,
+)
+from loopty.trace import (
+    _writes_are_masked as writes_are_masked,
 )
 
 __all__ = [
@@ -371,10 +377,59 @@ class Kernel(_Decorated):
         *Inside a program whose term is being built, nothing runs.* The call is
         recorded, with what it was given, and the program's term is composed
         from the calls afterwards; see :mod:`loopty.compose`.
+
+        *Inside a kernel whose body is being traced, the call is inlined*: the
+        body runs in place, against views of what it was given, and a rule's
+        call is the value it returns, in the caller's names; see
+        :mod:`loopty.calls`.
+
+        *Inside a ``when`` block whose guard is false, nothing runs.* A kernel
+        called there natively writes nothing that is kept, and a rule's value
+        is used by nothing that is, so the call is skipped, its contract
+        included, as the compiled kernel skips the instances the guard masks:
+        ``0`` stands for a rule's value. A call the guard keeps in bounds,
+        ``dot(A[i + 1], x)`` under ``when(i + 1 < n)``, is not refused there.
+
+        *A rule fills a result array when it is given one.* Called natively
+        it returns its value; given its term's result array by name too
+        (:attr:`loopty.term.Term.result`), as a run that compares the compiled
+        rule with it gives it, it also writes the value into its one cell.
         """
         recorder = current_recorder()
         if recorder is not None:
             return recorder.call(self, args, kwargs, sys._getframe(1))
+        tracer = current_tracer()
+        if tracer is not None:
+            from loopty.calls import inline
+
+            return inline(self, tracer, args, kwargs, sys._getframe(1))
+        if writes_are_masked():
+            return 0 if self.returns is not None else None
+        filled = None
+        if self.returns is not None:
+            name = result_name(self.arg_types)
+            if name in kwargs:
+                kwargs = dict(kwargs)
+                filled = kwargs.pop(name)
+        value = self._native(args, kwargs)
+        if filled is not None:
+            buffer = filled.numpy() if isinstance(filled, Arr) else filled
+            buffer.reshape(-1)[0] = value
+        return value
+
+    @property
+    def returns(self) -> Any:
+        """The sort a rule returns (``-> Real``), or ``None`` for a kernel.
+
+        A rule returns its value and writes none of its parameters, so a call
+        of it inside another kernel is a value (:mod:`loopty.calls`).
+        """
+        if not hasattr(self, "_returns"):
+            self._returns = returned_sort(self.annotations.get("return"))
+        return self._returns
+
+    def _native(self, args: tuple, kwargs: dict) -> Any:
+        """The native run of the body: the contract, the copies, the call."""
         bound = self._bound(args, kwargs)
         layout = declared_layout(tuple(self.arg_types.items()))
         check_arguments(
@@ -724,8 +779,19 @@ class Program(_Decorated):
 
         Inside another program whose term is being built, the body runs
         against that program's placeholders, so its calls are recorded there,
-        in place.
+        in place. Inside a kernel's body being traced it is refused: a kernel
+        calls kernels, whose calls are inlined (:mod:`loopty.calls`), and a
+        program is a sequence of kernels with arrays of its own, which a
+        kernel's loops have no place for.
         """
+        tracer = current_tracer()
+        if tracer is not None and current_recorder() is None:
+            raise TraceError(
+                f"the kernel {tracer.name} calls the program {self.__name__} at "
+                f"{_where_of(sys._getframe(1))}. A kernel calls kernels, each "
+                "inlined where it is called; call the kernels of "
+                f"{self.__name__} instead, or call {self.__name__} from a program"
+            )
         return self.fn(*args, **kwargs)
 
     def trace(self) -> Term:
@@ -1013,3 +1079,8 @@ def _is_statement(entry: Any) -> bool:
         and hasattr(entry, "goal")
         and isinstance(getattr(entry, "fact_id", None), str)
     )
+
+
+def _where_of(frame: Any) -> str:
+    """``file:line`` of a frame."""
+    return f"{os.path.basename(frame.f_code.co_filename)}:{frame.f_lineno}"

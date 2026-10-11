@@ -980,9 +980,17 @@ class _Run:
         raise _Unknown(name)
 
     def call(self, node: prim.Call, env: Mapping[str, Any]) -> Any:
-        """A call of a library function, by the name the term gives it."""
+        """A call of a library function, by the name the term gives it.
+
+        A parameter of a function sort (``f: Fn[Fin[3], Real]`` of a rule that
+        takes a rule, :mod:`loopty.calls`) is called as the function it was
+        given, as the native run calls it.
+        """
         function = node.function
         name = function.name if isinstance(function, prim.Variable) else None
+        given = self.scalars.get(name) if name is not None else None
+        if callable(given) and not isinstance(given, np.generic):
+            return given(*(self.value(arg, env) for arg in node.parameters))
         numpy_function = _FUNCTIONS.get(name) if name is not None else None
         if numpy_function is None:
             raise InterpretError(

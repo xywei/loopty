@@ -142,6 +142,21 @@ class Table:
         proxy = _traced(self)
         if proxy is not None:
             return proxy[key]
+        parts = key if isinstance(key, tuple) else (key,)
+        if 0 < len(parts) < self.ndim and all(
+            isinstance(part, int | np.integer) and not isinstance(part, bool | np.bool_)
+            for part in parts
+        ):
+            # A row, PHI[q], which a kernel the body calls takes as an array
+            # (loopty.calls): a view of the values, which nothing can write.
+            from loopty.arr import Arr
+
+            if any(part < 0 for part in parts):
+                raise IndexError(
+                    f"index {key!r} of a table is negative: an index is a point "
+                    "of the table's axis, and is never counted from the end"
+                )
+            return Arr(self._values[key])
         if not (
             isinstance(key, tuple)
             and len(key) == self.ndim
@@ -149,8 +164,9 @@ class Table:
         ):
             raise IndexError(
                 f"a table of {self.ndim} axes is read one value at a time, with "
-                f"{self.ndim} indices, such as W[q] or PHI[q, j]: a kernel "
-                "computes cell by cell"
+                f"{self.ndim} indices, such as W[q] or PHI[q, j], or a row at a "
+                "time, PHI[q], which a kernel it calls takes as an array: a "
+                "kernel computes cell by cell"
             )
         from loopty.trace import _writes_are_masked
 
