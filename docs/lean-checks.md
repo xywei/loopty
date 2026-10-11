@@ -34,7 +34,7 @@ tested  interpreter  stencil_skew.py:54  jacobi  the traced term computes what t
 
 6 facts: 5 proved, 1 tested
 
-LEAN proved 5 of the 5 facts isl decided that were stated for it, each from the plugin's own statement of it, isl's hints checked and not trusted; --show-lean prints the Lean
+LEAN proved all 5 facts isl decided. Lean's statements are loopty's, from its own description, not isl's results, and isl's hints were checked, not trusted. --show-lean prints the Lean.
 ```
 
 and `loopty run` proves the casts of every schedule it runs:
@@ -50,7 +50,7 @@ tested  loopy  stencil_skew.py:62  jacobi  the scheduled run of jacobi agrees wi
 
 5 facts: 4 proved, 1 tested
 
-LEAN proved 4 of the 4 facts isl decided that were stated for it, each from the plugin's own statement of it, isl's hints checked and not trusted; --show-lean prints the Lean
+LEAN proved all 4 facts isl decided. Lean's statements are loopty's, from its own description, not isl's results, and isl's hints were checked, not trusted. --show-lean prints the Lean.
 ```
 
 (These transcripts are from a machine with Lean; CI runs without it, so the
@@ -98,13 +98,19 @@ $ lanky check tests/kernels/out_of_bounds.py
 REFUTED shift at out_of_bounds.py:24: u[i + 1] is in bounds for every instance of S0
   witness: (1,)
   cells u[i + 1] reaches are cells u has, except [a0=1] at [n=1]
-  Lean proved the claim false at u[i + 1] at n=1, i=0, by decide
+  Lean confirmed the counterexample: the claim is false at n=1, i=0
 ```
 
+A refuted fact is never turned into a proof. Lean checks isl's
+counterexample, and a fact isl refuted with no counterexample Lean can check
+(a refused bijection, say) is not offered to Lean at all.
+
 A fact isl decided and Lean did not prove keeps `decided`, and a `NOT PROVED`
-line under the table names it, the part Lean did not close, and why. With
+line under the table names it, the parts Lean did not close, and whether Lean
+ran out of time or found no proof; `--show-lean` shows what Lean said. With
 `--verbose` (`lanky check`'s or `loopty run`'s), so does a fact loopty states
-for isl alone.
+for isl alone. Lean's own words (`omega`, `decide`, its messages) appear only
+under `--show-lean`.
 
 ## What each fact is, for Lean
 
@@ -120,7 +126,7 @@ its own, in parallel.
 | in bounds, mixed subscripts | access | as above, with each index read from an array of a `Fin` sort assumed in that sort, which the type says |
 | distinct writes | statement | two instances that differ write cells that differ |
 | element sort | statement | the value written is a point of the sort |
-| definedness | read | some statement wrote the cell read, before the read: a disjunction of existentials, one per writer |
+| definedness | read | some statement wrote the cell read, before the read: a disjunction of existentials, one per writer; a write under a guard isl cannot state is no writer, since its domain is wider than where it stores |
 | the source order | pair of accesses | the source runs the pair in the order the dependence says, which is its definition |
 | a cast is bijective | statement the step moves | every instance has an image (an existential), one only, and no two share one |
 | a cast is monotone | dependence class, a pair of accesses | two instances that touch one cell, in the source's order, keep it after every step: their time vectors compare as the source's do |
@@ -162,16 +168,23 @@ stays `decided`.
 - The printer: loopty's description read back as lanky terms, and lanky's
   terms printed as Lean. A bug there could weaken a statement, so it is tested
   against three safeguards (`tests/test_lean_checks.py`):
-  - *non-vacuity*: at a point isl samples, Lean proves every hypothesis of a
-    part, so the hypotheses as Lean reads them hold somewhere;
-  - *mutations*: every cast the examples refuse, stated as if isl had found it
-    legal, fails in Lean on the class isl's pair is in and no other, and a
-    kernel's subscripts perturbed, its guard dropped or an index moved, are
-    proved where isl decides them and not where isl refutes them;
-  - *a differential*: every domain of every example and test kernel, read
-    back from loopty's text, holds at exactly the points of a box where isl's
-    set does, and Lean's `decide` of the printed predicate agrees with isl at
-    points in and out of it.
+  - *non-vacuity*: for every part of every fact of every example and test
+    kernel, at a point isl samples, Lean proves every hypothesis of the part,
+    an array given as the table of the values isl sampled, so the hypotheses
+    as Lean reads them hold somewhere;
+  - *mutations*: six variants of the stencil (subscripts moved, a guard
+    changed, a write in place) under seven schedules (tiles, a skew, an
+    interchange, a split, reversals, a wavefront), each cast stated as if isl
+    had found it legal: Lean fails on exactly the dependence classes isl finds
+    reversed, and on none of a legal one. Every cast the examples refuse fails
+    in Lean on the class isl's pair is in, and a kernel's subscripts
+    perturbed, its guard dropped or an index moved, are proved where isl
+    decides them and not where isl refutes them;
+  - *a differential*: every domain of every example and test kernel, and the
+    cells every in-bounds fact's goal is stated over, read back from loopty's
+    text, hold at exactly the points of a box where isl's set does, and
+    Lean's `decide` of the printed predicate agrees with isl at points in and
+    out of it.
 - loopty's collectors, which isl and Lean share: the accesses a statement
   makes, the trace (the `trace-faithful` fact checks it), the source order.
 - The gap between the model and the code: lowering, loopy and the compiler,
@@ -197,6 +210,12 @@ included, from an empty proof cache. Its report, with Lean v4.29.1 (a
 file's time is Lean's on all its facts, a part's on one declaration):
 
 Of 523 facts isl decides in 16 files, Lean proved 499; 9 stay decided; 15 refuted facts have their negation proved at isl's counterexample. 260 more facts are not isl's to decide (by type, tested, assumed).
+
+Not all of them are equally hard. The 81 `ordering` facts, that the source
+order runs every dependence forward, hold by the definition of a dependence
+(two instances that touch one cell, which the source runs in that order), and
+Lean's proof of them checks only that the printer states the source order the
+same way twice. The others are claims isl could get wrong.
 
 | file | isl facts | proved | decided, not proved | refuted, negation proved | Lean time |
 |---|---:|---:|---:|---:|---:|

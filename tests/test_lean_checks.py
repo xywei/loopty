@@ -39,7 +39,7 @@ pytestmark = pytest.mark.lean
 
 from lanky.lean import statement_of  # noqa: E402
 from lanky.ledger import Status  # noqa: E402
-from lanky.prelude import Real  # noqa: E402
+from lanky.prelude import Int, Real  # noqa: E402
 from lanky.terms import Var, evaluate, render  # noqa: E402
 
 from loopty import Arr, Fin, Schedule, kernel  # noqa: E402
@@ -1104,30 +1104,68 @@ def test_isls_split_closes_what_omega_cannot(lean: Any) -> None:
     assert fact.provenance["lean_parts"][0]["how"] == "omega, with a case split"
 
 
-def _sample(part: Any) -> dict[str, int] | None:
+def _atomized(expr: Any, atoms: dict[str, Any]) -> Any:
+    """``expr`` with each application of an array an integer of its own.
+
+    The same application, by its text, is the same integer; ``atoms`` maps
+    each integer's name to the application, its arguments atomized too.
+    """
+    import pymbolic.primitives as prim
+    from lanky.terms import init_args
+
+    if isinstance(expr, prim.Subscript) and isinstance(expr.aggregate, prim.Variable):
+        index = expr.index if isinstance(expr.index, tuple) else (expr.index,)
+        inner = prim.Subscript(
+            expr.aggregate, tuple(_atomized(item, atoms) for item in index)
+        )
+        for name, cell in atoms.items():
+            if render(cell) == render(inner):
+                return Var(name)
+        name = f"__cell{len(atoms)}"
+        atoms[name] = inner
+        return Var(name)
+    if isinstance(expr, tuple | list):
+        return type(expr)(_atomized(item, atoms) for item in expr)
+    if isinstance(expr, prim.ExpressionNode):
+        return type(expr)(*(_atomized(arg, atoms) for arg in init_args(expr)))
+    return expr
+
+
+def _sample(part: Any) -> tuple[dict[str, int], dict[str, dict]] | None:
     """A point where every hypothesis of a part holds, from isl: a non-vacuity witness.
 
     The hypotheses are stated to isl as text again, each application of an
-    array an integer of its own, and isl's sample gives every variable a
-    value. ``None`` for a part whose hypotheses isl finds empty, which a
-    dependence class two statements never form is.
+    array an integer of its own, with one value for one array at equal
+    arguments (two applications of ``cnt`` at equal arguments are equal), and
+    isl's sample gives every variable a value, and every array a table of
+    the values it takes there. ``None`` for a part whose hypotheses isl
+    finds empty, which a dependence class two statements never form is, or
+    cannot read.
     """
+    import pymbolic.primitives as prim
     from lanky.terms import conjuncts
 
-    from loopty.obligations import _names
-
     term = part.term
-    names = [var.name for var, _ in term.binders]
-    found: dict[str, int] = {}
-    _names(term.guard, found)
-    if any(arity for arity in found.values()):
-        return None
+    scalars = [var.name for var, sort in term.binders if sort is Int]
+    atoms: dict[str, Any] = {}
     pieces = []
     for hypothesis in conjuncts(term.guard):
-        text = _isl_text(hypothesis)
+        text = _isl_text(_atomized(hypothesis, atoms))
         if text is None:
             return None
         pieces.append(text)
+    cells = list(atoms.items())
+    for (one, first), (other, second) in itertools.combinations(cells, 2):
+        if first.aggregate.name != second.aggregate.name:
+            continue
+        apart = [
+            _isl_text(prim.Comparison(a, "!=", b))
+            for a, b in zip(first.index, second.index, strict=True)
+        ]
+        if None in apart:
+            return None
+        pieces.append("(" + " or ".join([*apart, f"{one} = {other}"]) + ")")
+    names = [*scalars, *atoms]
     body = " and ".join(pieces) or "1 = 1"
     try:
         points = isl.Set(f"{{ [{', '.join(names)}] : {body} }}")
@@ -1136,10 +1174,33 @@ def _sample(part: Any) -> dict[str, int] | None:
     if points.is_empty():
         return None
     point = points.sample_point()
-    return {
+    values = {
         name: point.get_coordinate_val(isl.dim_type.set, k).to_python()
         for k, name in enumerate(names)
     }
+    tables: dict[str, dict] = {}
+    for name, cell in cells:
+        at = tuple(int(evaluate(item, values)) for item in cell.index)
+        tables.setdefault(cell.aggregate.name, {})[at] = values[name]
+    return {name: values[name] for name in scalars}, tables
+
+
+def _lean_value(name: str, kind: str, scalars: dict, tables: dict) -> str:
+    """A binder's value as Lean source: a number, or an array as a finite table."""
+    if kind == "Int":
+        value = scalars[name]
+        return str(value) if value >= 0 else f"({value})"
+    table = tables.get(name, {})
+    rank = kind.count("→")
+    params = " ".join(f"x{k}" for k in range(rank))
+    out = "0"
+    for at, value in table.items():
+        test = " ∧ ".join(
+            f"x{k} = {v}" if v >= 0 else f"x{k} = ({v})" for k, v in enumerate(at)
+        )
+        shown = str(value) if value >= 0 else f"({value})"
+        out = f"if {test} then {shown} else {out}"
+    return f"(fun {params} => {out} : {kind})"
 
 
 def _isl_text(prop: Any) -> str | None:
@@ -1178,34 +1239,59 @@ def test_every_hypothesis_set_isl_can_sample_is_not_vacuous_in_lean(lean: Any) -
     """Non-vacuity: at isl's sample, Lean proves every hypothesis of each part.
 
     A printer bug that empties a domain makes its theorem hold vacuously.
-    For every part of the stencil's and the wavefront's facts and casts
-    whose hypotheses isl finds a point of, Lean proves ``∃ variables,
-    hypotheses`` at that point by ``decide``: the hypotheses as Lean reads
-    them hold somewhere.
+    For every part of every fact and cast of the examples and the test
+    kernels whose hypotheses isl finds a point of, Lean proves ``∃
+    variables, hypotheses`` there by ``decide``, an array given as the table
+    of the values isl sampled: the hypotheses as Lean reads them hold
+    somewhere. The parts that read arrays (a ragged row's length, a flat
+    layout's offsets) are among them.
     """
     from lanky.obligations import part_statement
 
     checked = 0
-    for path in (EXAMPLES / "stencil_skew.py", EXAMPLES / "wavefront_acoustic.py"):
+    arrays = 0
+    for path in [*sorted(EXAMPLES.glob("*.py")), *sorted(KERNELS.glob("*.py"))]:
+        # one Lean command per file, each theorem again alone to name a failure
+        sources: list[tuple[str, str]] = []
         for fact in _isl_facts(path):
             obligation = fact.term.lean_obligation()
             for part in obligation.parts:
-                point = _sample(part)
-                if point is None:
+                found = _sample(part)
+                if found is None:
                     continue
+                scalars, tables = found
                 statement = part_statement(part, f"nonvacuous_{checked}")
+                if not statement.binders:
+                    # a part with no variable, a step that moves nothing
+                    continue
+                kinds = dict(statement.binders)
                 hypotheses = " ∧ ".join(f"({text})" for _, text in statement.hypotheses)
-                binders = " ".join(f"({name} : Int)" for name, _ in statement.binders)
-                values = ", ".join(str(point[name]) for name, _ in statement.binders)
+                binders = " ".join(
+                    f"({name} : {kind})" for name, kind in statement.binders
+                )
+                values = ", ".join(
+                    _lean_value(variable, kinds[name], scalars, tables)
+                    for (name, _), variable in zip(
+                        statement.binders, statement.variables, strict=True
+                    )
+                )
                 source = (
                     "set_option synthInstance.maxSize 4096 in\n"
                     f"theorem Lanky.nonvacuous_{checked} : ∃ {binders}, "
                     f"{hypotheses or 'True'} := ⟨{values}, by decide⟩\n"
                 )
-                closed, detail = lean.session.run(source)
-                assert closed, (fact.statement, part.name, detail)
+                sources.append((f"{fact.statement}: {part.name}", source))
                 checked += 1
-    assert checked > 10
+                arrays += bool(tables)
+        if not sources:
+            continue
+        closed, _detail = lean.session.run("\n".join(source for _, source in sources))
+        if closed:
+            continue
+        for label, source in sources:
+            closed, detail = lean.session.run(source)
+            assert closed, (path.name, label, source, detail)
+    assert checked > 300 and arrays > 20, (checked, arrays)
 
 
 def test_the_printed_predicates_hold_where_isl_says_in_lean(lean: Any) -> None:

@@ -4313,9 +4313,9 @@ class Schedule:
           divides its extent needs no remainder, and code generation may use
           it;
         - every later cast is decided by isl where the sizes are as assumed,
-          and stated for Lean with the condition among its hypotheses, an
-          existential one where it is a divisibility, which ``omega`` reads
-          as it is;
+          and stated for Lean with the condition among its hypotheses as it
+          is written: a divisibility is the remainder ``n % 4 = 0``, which is
+          ``∃ z, n = 4 * z`` and which ``omega`` reads as it is;
         - an ``assumption`` fact records it, ``assumed`` on the caller's
           word, and the later casts rest on it. Where the schedule runs, the
           sizes of the call are read off its arrays and checked against it

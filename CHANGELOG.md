@@ -24,10 +24,15 @@ All notable changes to loopty are recorded here. The format follows
   its functional form of a step's map as the witness that the step is total,
   its `lexmax` pieces as the witness of a definedness, the instances it took
   of a universal hypothesis, and its counterexample to a refuted fact, which
-  Lean proves false. Facts loopty states for isl alone (a rewritten layout,
-  the casts after a substitution, a cast with a hardware axis) say so.
-  `docs/lean-checks.md` explains it, and `scripts/lean_coverage.py` reports
-  what Lean proves of every example and test kernel.
+  Lean proves false. A refuted fact is offered to Lean only as that
+  counterexample, and one with none Lean can check (a refused bijection, say)
+  is not offered at all, so that a proof never reads `proved` where isl
+  refused. A map given to `Schedule.affine` as isl writes it (`2 t + i`,
+  `floor(i / 4)`) is read back too. Facts loopty states for isl alone (a
+  rewritten layout, the casts after a substitution, a cast with a hardware
+  axis) say so. `docs/lean-checks.md` explains it, and
+  `scripts/lean_coverage.py` reports what Lean proves of every example and
+  test kernel.
 - `loopty run` asks Lean about each fact isl decided that it reports (the
   casts, a layout's facts), names what Lean did not prove under the table
   (with `--verbose`, also what Lean was not asked about, and why), and prints
@@ -37,7 +42,9 @@ All notable changes to loopty are recorded here. The format follows
   an earlier instance of its own wrote, as `scan` reads `off[r]`, gets a
   `definedness` fact where isl shows it, stated for Lean as a ∀∃ with isl's
   last writer as the witness. A kernel that reads what an array held when it
-  was called gets none. A program's definedness of an edge is stated the same
+  was called gets none, and a write under a guard isl cannot state
+  (`with when(x[i] > 0)`) counts for nothing, since its domain is wider than
+  where it stores. A program's definedness of an edge is stated the same
   way.
 - **Mixed subscripts.** An access whose indirect axes are indexed by a value
   of their own sort and whose other axes are affine, `X[cell[c, k], d]`, is in
@@ -62,6 +69,14 @@ All notable changes to loopty are recorded here. The format follows
 - The tests run with lanky's Lean oracle off, as CI runs them, but the ones
   marked `lean` (`tests/test_lean_checks.py`), so that the suite passes where
   Lean is installed and proves what the other tests read as `decided isl`.
+  Those hold the printer to its safeguards: non-vacuity of every part of
+  every example and test kernel, arrays given as tables; a mutation matrix of
+  the stencil's subscripts, guard and schedules, where Lean has to fail on
+  exactly the dependence classes isl finds reversed; and a differential of
+  every domain and every in-bounds goal's cells against isl's membership.
+- A cell set's dimensions are named apart from the loops of the access it is
+  built for, so that a ragged row's bound written in a loop called `a0`
+  reads back as that loop.
 
 ## [0.2.0] - 2026-10-11
 
