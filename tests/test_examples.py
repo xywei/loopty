@@ -49,6 +49,7 @@ NAMES = (
     "sum_factorization",
     "assembly",
     "storage_layouts",
+    "hexahedra",
 )
 
 _RESULTS: dict[tuple[str, str], tuple[Any, list[dict]]] = {}
@@ -161,6 +162,18 @@ KERNELS = {
     "sum_factorization": {"along_r", "along_s", "weak_derivative"},
     "assembly": {"mass_action"},
     "storage_layouts": {"stored_table", "unflatten"},
+    "hexahedra": {
+        "metric",
+        "contravariant",
+        "along_r",
+        "along_s",
+        "gradient_along_t",
+        "divergence_along_t",
+        "weak_grad",
+        "weak_div",
+        "metric_along_r",
+        "contravariant_along_r",
+    },
     "travel": {
         "number",
         "number_quiet",
@@ -923,6 +936,104 @@ def test_the_storage_layouts_demo_refutes_the_wrong_nesting() -> None:
     assert (
         "refuted: dof_array stores every cell where dim_tags N3,N2,N1,N0 does"
     ) in result.stdout
+
+
+# }}}
+
+
+# {{{ hexahedra
+
+
+def test_the_hexahedra_demo_decides_its_layouts_and_its_programs() -> None:
+    result, facts = _invoke("hexahedra", "check")
+    assert result.returncode == 0, result.stdout + result.stderr
+    layouts = [
+        (fact["owner"], fact["kind"], fact["status"])
+        for fact in facts
+        if fact["kind"].startswith("layout")
+    ]
+    assert layouts == [
+        ("dof_array", "layout-in-bounds", "decided"),
+        ("dof_array", "layout-one-for-one", "decided"),
+        ("dof_array", "layout-onto", "decided"),
+        ("as_dim_tags", "layout-same", "decided"),
+        ("row_major", "layout-in-bounds", "decided"),
+        ("row_major", "layout-one-for-one", "decided"),
+        ("row_major", "layout-onto", "decided"),
+        ("as_row_major", "layout-same", "decided"),
+    ]
+    # every intermediate a program makes is read where its producer stored it
+    defined = [fact for fact in facts if fact["kind"] == "definedness"]
+    assert {fact["owner"] for fact in defined} == {
+        "weak_grad",
+        "weak_div",
+        "metric_along_r",
+        "contravariant_along_r",
+    }
+    assert all(fact["status"] == "decided" for fact in defined), defined
+    # nothing in the file is left to an assumption
+    assert "assumed" not in {fact["status"] for fact in facts}
+
+
+def test_the_hexahedra_theorem_holds_at_exact_matrices() -> None:
+    from fractions import Fraction
+
+    module = _module("hexahedra")
+    rng = np.random.default_rng(0)
+    n = 3
+
+    def exact(*shape: int) -> Any:
+        return np.vectorize(Fraction)(rng.integers(-4, 5, size=shape)).tolist()
+
+    Fr, Fs, Ft, u = exact(n, n), exact(n, n), exact(n, n), exact(n, n, n)
+    for k in range(n):
+        for j in range(n):
+            for i in range(n):
+                claim = module.sum_factorization(
+                    n=n, Fr=Fr, Fs=Fs, Ft=Ft, u=u, k=k, j=j, i=i
+                )
+                assert claim.holds, (k, j, i)
+
+
+@pytest.mark.parametrize("order", [1, 2, 3, 4, 5, 6])
+def test_the_hexahedra_factors_are_the_stiffness_and_the_mass(order: int) -> None:
+    # sum_j S^T[i, j] is the integral of the i-th basis function's derivative,
+    # its value at 1 minus its value at -1; the mass integrates 1 to 2
+    module = _module("hexahedra")
+    stiffness_t, mass = module.factors(order)
+    ends = np.zeros(order + 1)
+    ends[0], ends[-1] = -1.0, 1.0
+    assert np.allclose(stiffness_t.sum(axis=1), ends, atol=1e-12)
+    assert np.isclose(mass.sum(), 2.0)
+    assert np.allclose(mass, mass.T)
+    assert np.all(np.linalg.eigvalsh(mass) > 0)
+
+
+def test_the_hexahedra_demo_refuses_the_deeper_fusion_and_keeps_the_windows() -> None:
+    result, _ = _invoke("hexahedra", "python")
+    assert result.returncode == 0, result.stdout + result.stderr
+    out = result.stdout
+    assert "the passes are the dense Kronecker operators: True" in out
+    assert "refused: fuse(along_r, along_s) illegal: instance along_r.S0" in out
+    assert "fuse('along_r', 'along_s', loops=3) runs every dependence" in out
+    assert "w kept in n cells" in out
+    assert "v kept in n*n cells" in out
+    assert "grad: difference" in out and "-> tested" in out
+    assert out.count("all decided by isl") == 3
+
+
+def test_the_hexahedra_launches_are_legal_and_build_on_opencl(plain_opencl) -> None:
+    module = _module("hexahedra")
+    for operator in ("grad", "div"):
+        launches = module.passes_on_a_device(operator)
+        assert len(launches) == 3
+        for schedule in launches:
+            on_device = schedule.retarget("opencl")
+            assert on_device.buildable == (True, ""), on_device.buildable
+            statuses = {fact.status.value for fact in on_device.facts()}
+            assert statuses == {"decided"}, [
+                (fact.statement, fact.status.value) for fact in on_device.facts()
+            ]
 
 
 # }}}

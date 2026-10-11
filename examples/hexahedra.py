@@ -1,0 +1,555 @@
+"""grudge's weak gradient and divergence on hexahedra: three one-axis passes, checked.
+
+A discontinuous Galerkin code spends much of its time in two operators on each
+element: the weak gradient of a field and the weak divergence of a flux.
+grudge PR #418 (Alvey-Blanco, "Operator construction, application rewrite",
+as of a-alveyblanc/grudge 4d103bb) applies them on hexahedra by sum
+factorization, which this file mirrors:
+
+* each weak derivative is ``weak_local_d_dx``
+  (`op.py#L711-L821
+  <https://github.com/a-alveyblanc/grudge/blob/4d103bbbb31bfdb175f8997ae53a76a6cb8c14dc/grudge/op.py#L711-L821>`__):
+  the field times the metric terms ``J dr_d/dx_x``, one einsum
+  ``"rej,ej->rej"``, then, for each reference direction ``d``, a tensor-product
+  operator applied by ``_apply_operator_to_group``
+  (`op.py#L185-L267
+  <https://github.com/a-alveyblanc/grudge/blob/4d103bbbb31bfdb175f8997ae53a76a6cb8c14dc/grudge/op.py#L185-L267>`__),
+  one einsum per reference axis, and the three directions summed;
+* the operator of direction ``d`` has a factor per axis, the weak stiffness
+  ``S^T`` on axis ``d`` and the mass ``M`` on the other two, which
+  ``make_stiffness_t_operator`` builds
+  (`bilinear_forms.py#L809
+  <https://github.com/a-alveyblanc/grudge/blob/4d103bbbb31bfdb175f8997ae53a76a6cb8c14dc/grudge/bilinear_forms.py#L809>`__);
+  :func:`factors` computes the same matrices with numpy;
+* the weak gradient is ``weak_local_d_dx`` along ``x``, ``y`` and ``z``, and
+  the weak divergence their sum over the flux's components
+  (`op.py#L592-L636
+  <https://github.com/a-alveyblanc/grudge/blob/4d103bbbb31bfdb175f8997ae53a76a6cb8c14dc/grudge/op.py#L592-L636>`__).
+  Here the divergence sums the metric terms first, ``w_d = sum_x J dr_d/dx_x
+  f_x``, and then applies each direction's operator once, which by linearity
+  is the same sum in three passes where grudge makes nine;
+  ``benchmarks/hexahedra.py`` compares both operators with grudge's own.
+
+Where a node is stored. grudge keeps a field as a DOFArray, one row of
+``N**3`` nodes per element, each row reshaped by modepy in Fortran order
+(`tools.py#L427-L489
+<https://github.com/inducer/modepy/blob/01ac7955d30e248e460ccd751d40da4b0ff3e3e6/modepy/tools.py#L427-L489>`__),
+so node ``(i, j, k)``, ``i`` along ``r``, sits at ``i + N j + N**2 k``; #418
+tags its passes' outputs with loopy's ``dim_tags`` ``N3,N0,N1,N2`` to say so
+(`array_context.py#L129-L151
+<https://github.com/a-alveyblanc/grudge/blob/4d103bbbb31bfdb175f8997ae53a76a6cb8c14dc/grudge/array_context.py#L129-L151>`__).
+loopty's arrays are row-major, so the kernels below read node ``(i, j, k)``
+of element ``e`` as ``u[e, k, j, i]``: the same buffer, the reference axes
+written slowest first. That the three are one layout is a fact, decided and
+proved (``dof_array``).
+
+Run this file three ways.
+
+``python examples/hexahedra.py``
+    Applies both operators natively and compares them with the dense
+    Kronecker operators grudge's escape hatch builds. Then fuses the passes
+    as deep as each pair allows, refuses one step deeper with its pair, keeps
+    what passes between them in the cells live at once, and compares the
+    compiled run with the native one; and asks for the device schedule that
+    runs every node on a work item of its own, which is refused.
+
+``lanky check examples/hexahedra.py``
+    The theorem, every kernel's facts, the programs', and the layout's.
+
+``loopty run examples/hexahedra.py``
+    Each kernel, both programs and the fused schedule, compiled and compared.
+
+What is worth reading here
+--------------------------
+
+*Every order at once.* The kernels are written for ``n`` nodes per axis, so
+each fact below is decided for every order, and the theorem that three
+passes are the Kronecker operator is proved for every ``n``.
+
+*How deep each fusion goes.* ``along_s`` reads a whole column of what
+``along_r`` stored in the same ``k``-slab, so the two fuse on ``(q, e, k)``
+and no deeper; the metric product fuses with ``along_r`` on every loop but
+the row's. The refusal of the deeper fusion names the pair it would run
+backwards.
+
+*What passes between the passes.* Fused so, ``w`` is read one row at a time
+and ``v`` one slab at a time, so ``contract`` keeps them in ``n`` and
+``n * n`` cells, with the no-clobber fact for each.
+
+*On a device.* Every pass needs the column another work item stored, so a
+schedule with a node per work item is refused with the pair (no barrier
+orders two work items), and the timing driver runs each pass as a launch of
+its own, every node on a work item: ``passes_on_a_device``.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+from lanky import theorem
+from lanky.prelude import Fn, Nat, Real
+
+from loopty import Arr, Fin, IllegalCast, Schedule, kernel, layout, program, reduce_sum
+
+#: The order of the demo: four Gauss-Lobatto-Legendre nodes per axis.
+ORDER = 3
+N = ORDER + 1
+
+#: Two hexahedra; the timings take 48**3.
+ELEMENTS = 2
+
+
+# {{{ the theorem: three passes are the Kronecker operator, at every order
+
+
+@theorem
+def sum_factorization(
+    n: Nat,
+    Fr: Fn[Fin[n], Fin[n], Real],
+    Fs: Fn[Fin[n], Fin[n], Real],
+    Ft: Fn[Fin[n], Fin[n], Real],
+    u: Fn[Fin[n], Fin[n], Fin[n], Real],
+    k: Fin[n],
+    j: Fin[n],
+    i: Fin[n],
+) -> sum(
+    Ft[k, c] * Fs[j, b] * Fr[i, a] * u[c, b, a]
+    for c in Fin[n]
+    for b in Fin[n]
+    for a in Fin[n]
+) == sum(
+    Ft[k, c]
+    * sum(Fs[j, b] * sum(Fr[i, a] * u[c, b, a] for a in Fin[n]) for b in Fin[n])
+    for c in Fin[n]
+):
+    """The Kronecker operator ``Ft (x) Fs (x) Fr`` at a node is three passes.
+
+    The left side is the dense operator at the row ``(k, j, i)``, a sum over
+    all ``n**3`` columns; the right side applies ``Fr`` along ``r``, then
+    ``Fs`` along ``s``, then ``Ft`` along ``t``, ``n`` terms at a time, which
+    is what ``along_r``, ``along_s`` and the last pass compute.
+    """
+
+
+# }}}
+
+
+# {{{ where a node is stored
+
+
+@layout
+def dof_array(e: Fin[ne], i: Fin[N], j: Fin[N], k: Fin[N]) -> Fin[ne * N**3]:
+    """grudge's DOFArray: a row per element, its nodes reshaped by modepy in F order."""
+    return N**3 * e + (i + N * j + N**2 * k)
+
+
+#: grudge #418 writes the same layout as loopy's dim_tags on (e, i, j, k).
+as_dim_tags = dof_array.same_as("N3,N0,N1,N2")
+
+
+@layout
+def row_major(e: Fin[ne], i: Fin[N], j: Fin[N], k: Fin[N]) -> Fin[ne * N**3]:
+    """loopty's ``u[e, k, j, i]``: row-major, the reference axes slowest first."""
+    return ((e * N + k) * N + j) * N + i
+
+
+#: The kernels' arrays are grudge's DOFArray.
+as_row_major = dof_array.same_as(row_major)
+
+
+# }}}
+
+
+# {{{ the kernels: the metric, a pass per reference axis, and the sum
+
+
+@kernel
+def metric(
+    G: Arr[Fin[9], Fin[ne], Fin[n], Fin[n], Fin[n], Real],
+    u: Arr[Fin[ne], Fin[n], Fin[n], Fin[n], Real],
+    w: Arr[Fin[9], Fin[ne], Fin[n], Fin[n], Fin[n], Real],
+):
+    """The field times each metric term ``J dr_d/dx_x``, field ``q = 3 x + d``."""
+    for q in w.dom:
+        for e in w.dom[q]:
+            for k in w.dom[q, e]:
+                for j in w.dom[q, e, k]:
+                    for i in w.dom[q, e, k, j]:
+                        w[q, e, k, j, i] = G[q, e, k, j, i] * u[e, k, j, i]
+
+
+@kernel
+def contravariant(
+    G: Arr[Fin[9], Fin[ne], Fin[n], Fin[n], Fin[n], Real],
+    f: Arr[Fin[3], Fin[ne], Fin[n], Fin[n], Fin[n], Real],
+    w: Arr[Fin[3], Fin[ne], Fin[n], Fin[n], Fin[n], Real],
+):
+    """The flux along each reference direction ``d``: ``sum_x J dr_d/dx_x f_x``."""
+    for d in w.dom:
+        for e in w.dom[d]:
+            for k in w.dom[d, e]:
+                for j in w.dom[d, e, k]:
+                    for i in w.dom[d, e, k, j]:
+                        w[d, e, k, j, i] = reduce_sum(
+                            G[3 * x + d, e, k, j, i] * f[x, e, k, j, i] for x in Fin[3]
+                        )
+
+
+@kernel
+def along_r(
+    Fr: Arr[Fin[nq], Fin[n], Fin[n], Real],
+    w: Arr[Fin[nq], Fin[ne], Fin[n], Fin[n], Fin[n], Real],
+    v: Arr[Fin[nq], Fin[ne], Fin[n], Fin[n], Fin[n], Real],
+):
+    """Each field's own matrix applied along ``r``, the first reference axis."""
+    for q in v.dom:
+        for e in v.dom[q]:
+            for k in v.dom[q, e]:
+                for j in v.dom[q, e, k]:
+                    for i in v.dom[q, e, k, j]:
+                        v[q, e, k, j, i] = reduce_sum(
+                            Fr[q, i, a] * w[q, e, k, j, a] for a in Fr.dom[q, i]
+                        )
+
+
+@kernel
+def along_s(
+    Fs: Arr[Fin[nq], Fin[n], Fin[n], Real],
+    v: Arr[Fin[nq], Fin[ne], Fin[n], Fin[n], Fin[n], Real],
+    vs: Arr[Fin[nq], Fin[ne], Fin[n], Fin[n], Fin[n], Real],
+):
+    """Each field's own matrix applied along ``s``, the second reference axis."""
+    for q in vs.dom:
+        for e in vs.dom[q]:
+            for k in vs.dom[q, e]:
+                for j in vs.dom[q, e, k]:
+                    for i in vs.dom[q, e, k, j]:
+                        vs[q, e, k, j, i] = reduce_sum(
+                            Fs[q, j, b] * v[q, e, k, b, i] for b in Fs.dom[q, j]
+                        )
+
+
+@kernel
+def gradient_along_t(
+    Ft: Arr[Fin[9], Fin[n], Fin[n], Real],
+    vs: Arr[Fin[9], Fin[ne], Fin[n], Fin[n], Fin[n], Real],
+    grad: Arr[Fin[3], Fin[ne], Fin[n], Fin[n], Fin[n], Real],
+):
+    """Along ``t``, the three directions of each component ``x`` summed."""
+    for x in grad.dom:
+        for e in grad.dom[x]:
+            for k in grad.dom[x, e]:
+                for j in grad.dom[x, e, k]:
+                    for i in grad.dom[x, e, k, j]:
+                        grad[x, e, k, j, i] = reduce_sum(
+                            reduce_sum(
+                                Ft[3 * x + d, k, c] * vs[3 * x + d, e, c, j, i]
+                                for c in Ft.dom[3 * x + d, k]
+                            )
+                            for d in Fin[3]
+                        )
+
+
+@kernel
+def divergence_along_t(
+    Ft: Arr[Fin[3], Fin[n], Fin[n], Real],
+    vs: Arr[Fin[3], Fin[ne], Fin[n], Fin[n], Fin[n], Real],
+    div: Arr[Fin[ne], Fin[n], Fin[n], Fin[n], Real],
+):
+    """Along ``t``, the three directions summed."""
+    for e in div.dom:
+        for k in div.dom[e]:
+            for j in div.dom[e, k]:
+                for i in div.dom[e, k, j]:
+                    div[e, k, j, i] = reduce_sum(
+                        reduce_sum(
+                            Ft[d, k, c] * vs[d, e, c, j, i] for c in Ft.dom[d, k]
+                        )
+                        for d in Fin[3]
+                    )
+
+
+@program
+def weak_grad(G, u, Fr, Fs, Ft, grad):
+    """grudge's ``weak_local_grad``: the metric, then a pass per reference axis."""
+    w = Arr.zeros_like(G)
+    v = Arr.zeros_like(G)
+    vs = Arr.zeros_like(G)
+    metric(G, u, w)
+    along_r(Fr, w, v)
+    along_s(Fs, v, vs)
+    gradient_along_t(Ft, vs, grad)
+
+
+@program
+def weak_div(G, f, Fr, Fs, Ft, div):
+    """grudge's ``weak_local_div``, the metric terms summed first."""
+    w = Arr.zeros_like(f)
+    v = Arr.zeros_like(f)
+    vs = Arr.zeros_like(f)
+    contravariant(G, f, w)
+    along_r(Fr, w, v)
+    along_s(Fs, v, vs)
+    divergence_along_t(Ft, vs, div)
+
+
+# }}}
+
+
+# {{{ the schedules
+
+#: The metric with the pass along r, on every loop but the row's; then the two
+#: passes on (q, e, k), a slab at a time.
+fused = (
+    Schedule(weak_grad)
+    .fuse("metric", "along_r", loops=4)
+    .fuse("along_r", "along_s", loops=3)
+)
+
+#: The same, with w kept one row at a time and v one slab at a time.
+contracted = fused.contract("w").contract("v")
+
+
+@program
+def metric_along_r(G, u, Fr, v):
+    """The first launch on a device: the metric product, then the pass along r."""
+    w = Arr.zeros_like(G)
+    metric(G, u, w)
+    along_r(Fr, w, v)
+
+
+@program
+def contravariant_along_r(G, f, Fr, v):
+    """The divergence's first launch: the flux along each direction, then along r."""
+    w = Arr.zeros_like(v)
+    contravariant(G, f, w)
+    along_r(Fr, w, v)
+
+
+def passes_on_a_device(operator: str = "grad", target: str = "c") -> list[Schedule]:
+    """An operator as three launches, every node of an element on a work item.
+
+    The element is the work group, ``e`` on ``g.0``, and its nodes the work
+    items, ``k, j, i`` on ``l.2, l.1, l.0``; the fields run in sequence on
+    each. The metric is computed where the pass along ``r`` reads it,
+    ``substitute("w")``, so nothing is stored between them (the program names
+    ``along_r``'s loops ``q_0, e_0, ...``, as it names each call's). Each
+    launch finishes before the next starts, so a pass may read what another
+    work item of the last one stored. ``benchmarks/hexahedra.py`` times them,
+    and other shapes of them, retargeted onto OpenCL.
+    """
+    first, last = {
+        "grad": (metric_along_r, gradient_along_t),
+        "div": (contravariant_along_r, divergence_along_t),
+    }[operator]
+    nodes = {"e": "g.0", "k": "l.2", "j": "l.1", "i": "l.0"}
+    return [
+        Schedule(first, target=target)
+        .substitute("w")
+        .tag(**{f"{loop}_0": axis for loop, axis in nodes.items()}),
+        Schedule(along_s, target=target).tag(**nodes),
+        Schedule(last, target=target).tag(**nodes),
+    ]
+
+
+# }}}
+
+
+# {{{ the operators' matrices, the inputs, and the dense operators
+
+
+def factors(order: int = ORDER) -> tuple[np.ndarray, np.ndarray]:
+    """The weak stiffness ``S^T`` and the mass ``M`` on ``order + 1`` GLL nodes.
+
+    ``M[i, j]`` is the integral of the Lagrange polynomials of nodes ``i`` and
+    ``j`` on ``[-1, 1]``, exactly, and ``S^T[i, j]`` that of the derivative of
+    the ``i``-th times the ``j``-th, as ``make_stiffness_t_operator`` builds
+    them with modepy.
+    """
+    n = order + 1
+    legendre = np.polynomial.legendre.Legendre
+    interior = legendre.basis(n - 1).deriv().roots().real if n > 2 else []
+    nodes = np.concatenate([[-1.0], np.sort(interior), [1.0]])
+    # orthonormal Legendre polynomials and their derivatives at the nodes
+    scale = np.sqrt((2 * np.arange(n) + 1) / 2)
+    V = np.stack([legendre.basis(m)(nodes) for m in range(n)], axis=1) * scale
+    Vr = np.stack([legendre.basis(m).deriv()(nodes) for m in range(n)], axis=1) * scale
+    inverse = np.linalg.inv(V)
+    mass = inverse.T @ inverse
+    D = Vr @ inverse
+    return D.T @ mass, mass
+
+
+def tables(directions: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Each field's matrix along ``r``, ``s`` and ``t``: ``S^T`` on its direction.
+
+    Field ``q`` is of direction ``q % 3``, as ``3 x + d`` is of ``d``, so the
+    gradient takes nine fields and the divergence three.
+    """
+    stiffness_t, mass = factors()
+    along = [
+        np.stack([stiffness_t if q % 3 == axis else mass for q in range(directions)])
+        for axis in range(3)
+    ]
+    return along[0], along[1], along[2]
+
+
+def inputs(elements: int = ELEMENTS, seed: int = 0) -> dict:
+    """Random metric terms and fields on ``elements`` hexahedra, and the tables."""
+    rng = np.random.default_rng(seed)
+    nodes = (elements, N, N, N)
+    Fr, Fs, Ft = tables(9)
+    Dr, Ds, Dt = tables(3)
+    G = rng.normal(size=(9, *nodes))
+    return {
+        "weak_grad": {
+            "G": Arr.from_numpy(G),
+            "u": Arr.from_numpy(rng.normal(size=nodes)),
+            "Fr": Arr.from_numpy(Fr),
+            "Fs": Arr.from_numpy(Fs),
+            "Ft": Arr.from_numpy(Ft),
+            "grad": Arr.zeros((3, *nodes)),
+        },
+        "weak_div": {
+            "G": Arr.from_numpy(G),
+            "f": Arr.from_numpy(rng.normal(size=(3, *nodes))),
+            "Fr": Arr.from_numpy(Dr),
+            "Fs": Arr.from_numpy(Ds),
+            "Ft": Arr.from_numpy(Dt),
+            "div": Arr.zeros(nodes),
+        },
+    }
+
+
+def dense(data: dict) -> tuple[np.ndarray, np.ndarray]:
+    """Both operators as grudge's escape hatch applies them: ``"ij,ej->ei"``.
+
+    The operator of direction ``d`` is ``kron(Ft, kron(Fs, Fr))`` with ``S^T``
+    on axis ``d``, applied to each element's nodes in modepy's order, which
+    is ``u[e, k, j, i]`` flattened row by row.
+    """
+    stiffness_t, mass = factors()
+
+    def along(axis: int, d: int) -> np.ndarray:
+        return stiffness_t if axis == d else mass
+
+    ops = [np.kron(along(2, d), np.kron(along(1, d), along(0, d))) for d in range(3)]
+    shape = data["weak_grad"]["u"].numpy().shape
+    G = data["weak_grad"]["G"].numpy().reshape(3, 3, shape[0], -1)
+    u = data["weak_grad"]["u"].numpy().reshape(shape[0], -1)
+    f = data["weak_div"]["f"].numpy().reshape(3, shape[0], -1)
+    grad = np.stack([sum((G[x, d] * u) @ ops[d].T for d in range(3)) for x in range(3)])
+    div = sum((G[x, d] * f[x]) @ ops[d].T for x in range(3) for d in range(3))
+    return grad.reshape(3, *shape), div.reshape(shape)
+
+
+def example_inputs() -> dict:
+    """The inputs ``loopty run`` gives each kernel, and the programs."""
+    data = inputs()
+    grad_in, div_in = data["weak_grad"], data["weak_div"]
+    nodes = grad_in["u"].numpy().shape
+    nine = np.random.default_rng(1).normal(size=(9, *nodes))
+    three = np.random.default_rng(2).normal(size=(3, *nodes))
+    return {
+        "metric": {"G": grad_in["G"], "u": grad_in["u"], "w": Arr.zeros((9, *nodes))},
+        "contravariant": {
+            "G": div_in["G"],
+            "f": div_in["f"],
+            "w": Arr.zeros((3, *nodes)),
+        },
+        "along_r": {
+            "Fr": grad_in["Fr"],
+            "w": Arr.from_numpy(nine),
+            "v": Arr.zeros((9, *nodes)),
+        },
+        "along_s": {
+            "Fs": grad_in["Fs"],
+            "v": Arr.from_numpy(nine),
+            "vs": Arr.zeros((9, *nodes)),
+        },
+        "gradient_along_t": {
+            "Ft": grad_in["Ft"],
+            "vs": Arr.from_numpy(nine),
+            "grad": Arr.zeros((3, *nodes)),
+        },
+        "divergence_along_t": {
+            "Ft": div_in["Ft"],
+            "vs": Arr.from_numpy(three),
+            "div": Arr.zeros(nodes),
+        },
+        "weak_grad": inputs()["weak_grad"],
+        "weak_div": inputs()["weak_div"],
+        "metric_along_r": {
+            "G": grad_in["G"],
+            "u": grad_in["u"],
+            "Fr": grad_in["Fr"],
+            "v": Arr.zeros((9, *nodes)),
+        },
+        "contravariant_along_r": {
+            "G": div_in["G"],
+            "f": div_in["f"],
+            "Fr": div_in["Fr"],
+            "v": Arr.zeros((3, *nodes)),
+        },
+    }
+
+
+# }}}
+
+
+def main() -> int:
+    """Natively against the dense operators, the fusions and windows, and the device."""
+    from loopty.executor import LoopyExecutor
+
+    data = inputs()
+    weak_grad(**data["weak_grad"])
+    weak_div(**data["weak_div"])
+    grad, div = dense(data)
+    scale = max(np.abs(grad).max(), np.abs(div).max())
+    gap = max(
+        np.abs(data["weak_grad"]["grad"].numpy() - grad).max(),
+        np.abs(data["weak_div"]["div"].numpy() - div).max(),
+    )
+    native = bool(gap <= 1e-13 * scale)
+    print(
+        f"order {ORDER}, {ELEMENTS} hexahedra: the passes are the dense Kronecker "
+        f"operators: {native} (largest difference {gap / scale:.0e} of the largest)"
+    )
+    print()
+
+    try:
+        Schedule(weak_grad).fuse("along_r", "along_s")
+    except IllegalCast as exc:
+        print(f"refused: {exc}")
+    print()
+
+    print(f"accepted: {contracted!r}")
+    for name, window in contracted.windows.items():
+        print(f"  {name} kept in {window.placement}")
+    for fact in contracted.facts():
+        print(f"  {fact.status.value:8} {fact.decided_by:4} {fact.statement}")
+    kept = LoopyExecutor().differential(weak_grad, contracted, inputs()["weak_grad"])
+    for name, detail in kept.provenance["outputs"].items():
+        print(
+            f"  {name}: difference {detail['difference']:.3g} within "
+            f"{detail['tolerance']:.3g} ({detail['exactness']}) -> {kept.status.value}"
+        )
+    print()
+
+    print(
+        "on a device, the weak gradient as three launches, every node on a work item:"
+    )
+    legal = True
+    for schedule in passes_on_a_device():
+        # built for C here, which has no work items; the timing driver
+        # retargets them onto OpenCL, where they build
+        cast = [fact for fact in schedule.facts() if fact.kind != "buildable"]
+        legal = legal and all(fact.status.value == "decided" for fact in cast)
+        print(
+            f"  {schedule.term.name}: {'.'.join(schedule.history)}: "
+            f"{len(cast)} facts, all {cast[0].status.value} by {cast[0].decided_by}"
+        )
+    return 0 if native and kept.status.value == "tested" and legal else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
