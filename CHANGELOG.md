@@ -28,6 +28,79 @@ All notable changes to loopty are recorded here. The format follows
   loop over a product of sizes, `Fin[n * m]`, which does not run compiled on
   loopy 2025.2 either (#197), stops earlier on loopy main, in loopy's bounds
   check, which cannot read the shape `n * m` (#245).
+- **A kernel's postcondition decided from what its statements store**
+  (`loopty.dataflow`, #113). Where no cell of an array a kernel writes is
+  stored twice, or read before its store, a `single-assignment` fact says
+  so, decided by isl, and what each statement stores is what the kernel
+  leaves: its value equation, `off[r + 1] == off[r] + cnt[r]` at every `r`
+  of `S1`'s loop. isl decides the postcondition under the equations, each
+  taken at the cells the claim reads, so `scan`'s reads `decided isl`,
+  resting on the `single-assignment` fact of `off`, and with Lean `proved
+  lean`, where it read `tested native`. An equation of reals isl cannot read
+  is an atom, one per equation as written, its cells canonical and its sides
+  in either order (`discharge(..., atoms=True)`), so `R[a + 2, b] == -R[a, b
+  + 2]` is decided as what the recurrence stores at `(a + 2, b)`; Lean
+  states it with Mathlib's reals and proves it by `linarith`. The native
+  runs still test the postcondition (`native` in its provenance), and one
+  that refutes it refutes it; one the equations do not decide keeps the
+  runs' status, with why (`undecided`): a cell stored twice, a read before
+  its store (the instance that stores a cell and reads it, however its
+  index is spelled, `x[i] = 2 * x[i + 1 - 1] - 5`, reads it first), a write
+  under a guard isl cannot state, an update (`y[i] += v`, or a scatter-add
+  through a map, `y[cell[c, k]] += v`), whose cells hold what they held on
+  entry plus every update: `S0 updates y[cell[c, k]] in place, so a cell of
+  y holds what it held on entry plus every update, not what one statement
+  stores`.
+- **Theorems a kernel cites**, `@kernel(uses=[on_the_triangle])`. A theorem
+  whose hypotheses are conjuncts of the postcondition, up to the names of
+  their binders, with a family `R(a)(b)` matching the cell `R[a, b]`, gives
+  its conclusion at the kernel's arrays: a `by-theorem` fact, `decided` by
+  `theorem` and resting on the theorem and the postcondition, whose
+  unbound variables stay universal and whose unmatched hypotheses are its
+  own, named in the row. For `examples/taylor_reconstruction.py` it reads
+  `by on_the_triangle, for every D with pde and stored: ... R[a, b] ==
+  D(a)(b)`. Lean checks the application, the theorem as it was proved
+  applied with the arrays loopty matched, so a wrong match is no proof. A
+  theorem whose conclusion is a conjunct of the postcondition decides that
+  conjunct instead. A match is made only where it says something of what
+  the kernel computes: every hypothesis about an array the kernel writes is
+  a conjunct of the postcondition (a kernel whose recurrence is off by one
+  gets nothing), and a conjunct about reals is matched only where nothing
+  in it rounds, copies and sign changes, since the theorem reads it as
+  reals. A family into `Nat` or a `Fin` sort stands for an array the kernel
+  does not write; the cells it writes take a theorem over `Int`. The
+  theorem's variables are put in wherever they are, every sort included: a
+  `D: Fn[Fin[n], Real]` nothing binds, with `n` matched to the kernel's `p`,
+  ranges over `Fin[p]` (#239), and `m` in `m**2` is the `m` the match bound,
+  never a kernel name of the same spelling. A family is applied as `R(a)(b)`,
+  `R(a, b)` or `R[a, b]`, as lanky reads them.
+
+  ```python
+  @kernel(uses=[on_the_triangle])
+  def reconstruct(
+      c: Arr[Where[a : Fin[2], b : Fin[p + 1], a + b <= p], Real],
+      R: Arr[Where[a : Fin[p + 1], b : Fin[p + 1], a + b <= p], Real],
+  ) -> copies & recurrence:  # the two conjuncts, written out in the example
+      ...
+  ```
+
+  ```console
+  $ lanky check examples/taylor_reconstruction.py
+  ...
+  decided under on_the_triangle  assumed    theorem      taylor_reconstruction.py:116  reconstruct      by on_the_triangle, for every D with pde and stored: forall a in Fin(...
+  ...
+  ```
+- **`lanky check` lists a file's schedules** (#191). The casts of every
+  schedule a file holds at module level are rows of its ledger, under the
+  kernel or program they schedule, decided by isl as each step was taken
+  and proved by Lean where it is installed; two schedules that share their
+  first steps share those facts, which are listed once.
+- `examples/taylor_reconstruction.py`: sumpy's compressed Taylor
+  reconstruction from the theorem to the kernel to the schedule, in one
+  file and one ledger, the seed of the demo's flagship.
+- A matched theorem's family of families applied one index at a time,
+  `R(a)(b)`, stands for an array indexed at once, `R[a, b]`, for a program's
+  cited theorems too.
 - **Window contraction** (`Schedule.contract`,
   [#132](https://github.com/xywei/loopty/issues/132)): an array a program
   makes, kept in the cells live at once. Fused one step behind, the Burgers
@@ -100,6 +173,112 @@ All notable changes to loopty are recorded here. The format follows
   `dof_array stores (e=0, a=1, b=0, c=2) at 19, and dim_tags N3,N2,N1,N0 at
   11`; so are two cells at one address and an address with none. A buffer of
   several axes, and an argument that names its layout, are not done (#216).
+- **A kernel called inside another kernel's loop** (`loopty.calls`). A
+  kernel body calls a kernel as Python calls a function. A kernel whose
+  return annotation is a sort is a rule: it returns its value and writes
+  none of its parameters, and a call of it is that value; a kernel that
+  writes its parameters is called as a statement and writes through what it
+  is given:
+
+  ```python
+  @kernel
+  def dot(a: Arr[Fin[n], Real], b: Arr[Fin[n], Real]) -> Real:
+      return reduce_sum(a[k] * b[k] for k in a.dom)
+
+  @kernel
+  def matvec(A: Arr[Fin[m], Fin[n], Real], x: Arr[Fin[n], Real],
+             y: Arr[Fin[m], Real]):
+      for i in y.dom:
+          y[i] = dot(A[i], x)
+  ```
+
+  `A[i]` is the row of `A` and `x[col[r]]` the cells of `x` a row of
+  indices picks, as in numpy, so a sparse product is `y[r] = dot(val[r],
+  x[col[r]])`; a row of a ragged array, of a table, or a whole array over a
+  domain may be passed too. A parameter of a function sort, `f: Fn[Fin[3],
+  Real]`, takes a `lambda` or another rule, so that a quadrature rule is
+  applied to an integrand, `integrate(lambda q: PHI[q, j] * PHI[q, k])`.
+  Traced, the call is inlined: the callee's body runs again in the caller's
+  trace against views of the caller's arrays, its loops and sums nested in
+  the loops around the call, a binder named like a name of the caller's
+  given one of its own (`k_0`), which is loopy's substitution rule with a
+  domain of its own (loopy #1044) expanded where it is used, and every fact
+  of the caller is about the expansion. The shapes are unified at the call,
+  size by size, and a call whose sizes nothing says agree is refused, naming
+  the axis. What the callee's contract checks of each call natively, the
+  caller owes at every point it calls, as facts isl decides and Lean states
+  from loopty's own description of the call: each row passed in bounds
+  (`A[i], the row passed to dot as a, is in bounds wherever dot is called`),
+  the cells a gather picks in bounds by type, an integral scalar in its sort
+  (kind `argument`), two rows of one array apart where the callee writes
+  one (kind `distinct-arguments`); and after each call the callee's
+  postcondition, restated of what the call passed and resting on the
+  callee's own fact (kind `postcondition-in-scope`). An argument is
+  evaluated once, when the call is made, as in Python: every cell read for
+  the value of a scalar argument, or for the indices of a row (`p[i]` of
+  `A[p[i]]`), is owed in bounds at every point of the call, whether the
+  callee uses the parameter or not, and a call whose
+  callee writes an array an argument reads (`scale(A[i], A[i, 0])`) is
+  refused, naming both; so is a function given whose default or captured
+  name holds a value read from such an array (`lambda q, saved=x[0]:
+  saved`), which natively is the value when the function was made. A
+  scalar argument is converted into the sort the callee declares, as its
+  contract converts it natively (#232): a double given for `s:
+  np.float32` is `np.float32(x[i])` in the caller's term, which the
+  interpreter computes as numpy does and the lowering writes as C's cast,
+  and a loop variable given for `Int` is a numpy `int64` beside a
+  `float32`, while an index or a comparison of it reads as the caller's
+  own, `A[i, i]`. What the contract refuses is refused where it is passed:
+  a real or a truth value for an integral sort, a number for `Bool`, a
+  complex value for a real sort (naming `real(z[i])`), a literal numpy
+  does not convert (`300` for `np.int8`), and, when the compiled run is
+  asked for, loop arithmetic a narrow integer does not hold where the call
+  is made. A callee's positional-only parameters are passed in order
+  (#233). A rule may be applied to a function that applies it again, `integrate(lambda q: integrate(lambda p: ...))`; a kernel that
+  calls itself, directly or through the functions it is passed, is
+  refused. A rule on its own is the kernel that
+  writes its value into a one-cell array, `result[0]`, which `loopty run`
+  compiles and compares with the native call; one that takes a function is
+  compiled where it is called. Natively, a call inside a `when` whose guard
+  is false is not made, and a rule's value there is `0`, so the value of a
+  rule called inside a `when` block is refused where it is used after the
+  block. `examples/calls.py` has `dot` in a matrix-vector
+  and a sparse product, and firedrake's P1 quadrature rule applied per
+  element. A callee's update, `y[cell[k]] += yl[k]`, is an update of the
+  caller, of the class of its sum and owing no distinct writes, as written
+  inline: a step that runs two at once is refused with a pair of the
+  caller's loop and the callee's read off the example inputs (`S0[c=0, k=2]
+  and S0[c=1, k=1] both update y[3]`), and `atomic('y')` on the caller
+  lifts it. An integer a callee is given for an `Int`, `np.int64(c)`,
+  keeps such an update exact. A window (`Schedule.contract`) is taken over
+  the statements of the kernels a program's kernels call, and its
+  `no-clobber` fact is about them; a callee reads through a declared
+  layout, which is checked against its facts where it is called.
+- **A program's arrays over a domain** (#74). A program's callee may take
+  an array over a `Where`, `Sigma` or union domain: the domain's sizes are
+  unified across the calls, binder by binder, and two calls given one array
+  have to agree on its points, compared as isl sets. A program may make an
+  array over a domain, like an argument over one, `Arr.zeros_like(L)`, or
+  of a declared shape, whose sizes it reads off its arrays as it does
+  natively:
+
+  ```python
+  @program
+  def pair_sums(x, e):
+      f = Arr.zeros(TRIANGLE, n=x.dom.size)
+      fill(x, f)
+      rowsum(f, e)
+  ```
+
+  It is a temporary of the lowered kernel, stored boxed and zeroed over its
+  points where the program makes it, its edges have definedness facts as a
+  dense temporary's do, and a schedule fuses through it; `Schedule.pack`
+  stores a program's argument over a domain packed. A declared dense shape
+  is `Arr.zeros((x.dom.size, 3))`, and a run whose sizes make one of its
+  lengths negative is refused compiled, as numpy refuses it natively.
+  `Schedule.contract` may keep a dense one in a window; one over a domain is
+  refused there, naming the fix, keep it whole or `substitute` it
+  ([#244](https://github.com/xywei/loopty/issues/244)).
 
 - **Constant tables** (`loopty.table`): quadrature weights, a basis
   tabulated at the quadrature points, a differentiation matrix, declared
@@ -295,6 +474,20 @@ All notable changes to loopty are recorded here. The format follows
   outermost first, `2*b_inner_step - a_outer - b_outer - a_inner` for the
   tiled diamond, rather than in the order of the domain's dimensions, which
   loopy main keeps in namedisl's order.
+- A kernel's postcondition that its statements' stores decide reads
+  `decided isl` where it read `tested native`, after a new `single-assignment`
+  row, and the restatements of it in programs are worth `decided`; the
+  ledger of a file with schedules at module level lists their casts, a
+  window's `no-clobber` and an atomic step's reassociation among them. The
+  `definedness` fact a substitution or a window asks of a schedule leads
+  with its step, `for substitute('f'), every cell of f that burgers_rhs
+  reads, flux.S0 has stored by the time it is read`, so that the two rows of
+  `examples/fusion.py`, one per step after one fusion, read apart. The
+  transcripts in the documentation are regenerated.
+- `loopty.hypotheses.discharge` names a universal hypothesis's binders apart
+  from the claim's own names before taking it at the claim's cells: an
+  instance at the claim's `r` of a hypothesis over `r` was left out, which
+  lost a verdict.
 - Where Lean is installed, a rewritten layout's facts are proved
   ([#186](https://github.com/xywei/loopty/issues/186)): one decided by the
   row starts is stated as the induction step, each write of the offsets
@@ -313,9 +506,14 @@ All notable changes to loopty are recorded here. The format follows
   computed where it is read.
 - The coverage report in `docs/lean-checks.md` covers the four examples the
   demo kernels added (`assembly.py`, `layer_potential.py`, `quadrature.py`,
-  `sum_factorization.py`) and the windows, updates and layouts above: of 678
-  facts isl decides in 22 files, Lean proves 657 and confirms the
-  counterexample of the 21 refuted ones, and none stays decided.
+  `sum_factorization.py`), `storage_layouts.py`, `taylor_reconstruction.py`,
+  the calls in loops (`examples/calls.py`, `tests/kernels/calls.py`,
+  `tests/kernels/program_domains.py`), and the windows, updates, layouts,
+  postconditions decided from what kernels store and cited theorems above:
+  of 1163 facts isl decides in 27 files, Lean proves 1122 and confirms the
+  counterexample of the 29 refuted ones. The 12 it leaves decided are claims
+  about reals, which core Lean has no words for; with Mathlib it proves them
+  too, 1134 in all, and none stays decided.
 - A ledger gains a `definedness` row for each array a kernel reads only where
   it wrote it before (`scan`'s `off`, `p2p`'s `term`, `pairs`' `f`), and an
   access with mixed subscripts is decided where it was assumed; the
@@ -342,6 +540,31 @@ All notable changes to loopty are recorded here. The format follows
   (`docs/lean-checks.md`, #201). A `monotone` cast is stated for Lean without
   the pairs of updates of one cell, which need no order; a cast with no pair
   left is one trivial part.
+- Fewer indices than an array has axes, `A[i]`, are a row of it in a kernel
+  body, and an array of indices, `u[cell[c]]`, the cells it picks: a view a
+  called kernel takes, natively the row as an `Arr` sharing the buffer and
+  the gathered cells as a read-only copy, where both were refused as an
+  operation on the whole array. Used as a value, a view is still refused,
+  with the loop nest to write. A row of the cells a gather picks,
+  `u[cell][c]`, is `u[cell[c]]`, as numpy reads it. A table's row, `PHI[q]`,
+  reads natively as a read-only array, and as zeros out of range under a
+  false guard, as a cell does.
+- In a program's body, `x.dom.size` (and `x.dom[0].size`) is the size of an
+  axis of the argument, for the arrays it makes; iterating `x.dom` is still
+  refused, as a loop whose trip count is an argument. A kernel's contract
+  reads a size of its declared domain off the bounds of an argument's
+  binders, where the argument was built over a domain of other names.
+- A kernel that returns a value without declaring its sort, `-> Real`, is
+  refused when traced, naming the sort to declare; its value was dropped by
+  the compiled kernel.
+- Two array parameters a kernel only reads may share storage, `dot(x, x)`
+  or the diagonal of a Gram matrix: reads do not race, and both runs read
+  the same values. The contract still refuses two that share storage where
+  the kernel writes either; a native call traces the body to know which
+  it writes, only when two of its arguments share storage.
+- A schedule step that names no loop of the kernel lists its loops, and
+  names a called kernel's loop that was renamed when it was inlined:
+  `fill's loop n, inlined at ..., is n_0 here`.
 
 ### Fixed
 

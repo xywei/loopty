@@ -195,8 +195,14 @@ def test_a_table_is_a_read_only_copy_of_its_values() -> None:
         weights.numpy()[0] = 2.0
     with pytest.raises(TypeError, match="is a constant table"):
         weights[0] = 2.0
+    # A row is read as an array a called kernel takes (loopty.calls), and
+    # nothing writes it; a slice is still refused.
+    row = PHI[0]
+    assert isinstance(row, Arr) and row.numpy().tolist() == [2 / 3, 1 / 6, 1 / 6]
+    with pytest.raises(ValueError, match="read-only"):
+        row.numpy()[0] = 2.0
     with pytest.raises(IndexError, match="one value at a time, with 2 indices"):
-        PHI[0]
+        PHI[0:2]
 
 
 @pytest.mark.parametrize(

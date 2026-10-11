@@ -1,0 +1,1273 @@
+"""What a kernel leaves in its arrays, read off its term: exact dataflow.
+
+The design idea. A kernel's postcondition is a claim about its arrays once the
+body has run: ``scan`` claims ``off[0] == 0`` and ``off[r + 1] == off[r] +
+cnt[r]``. Its native runs test the claim at the inputs they try
+(:func:`loopty.faithful.postcondition_fact`). The term can decide it, for
+every input, once one thing is known of an array the kernel writes: that no
+cell of it is stored twice, or read before its store. Then the value a
+statement stores is the value the cell holds when the kernel returns, and a
+cell the statement reads holds then what it held when the statement read it,
+since nothing stores it after the read. So each statement that stores into
+such an array is an equation about the arrays as the kernel leaves them, its
+*value equation*, at every instance of its domain::
+
+    off[0] == 0                                                       (S0)
+    all(off[r + 1] == off[r] + cnt[r] for r with 0 <= r < n)          (S1)
+
+and the postcondition is decided under them, as a program's requirement is
+decided under what its calls left (:func:`loopty.hypotheses.discharge`): the
+points at which the claim fails where the equations hold are an isl set, and
+it is empty. Each equation is used at the cells the claim reads, and the cells
+that equation reads in turn, so the claim ``off[r + 1] == off[r] + cnt[r]``
+takes ``S1``'s equation at ``r``. A claim about reals, ``R[a + 2, b] ==
+-R[a, b + 2]``, is decided the same way, with each equation of values isl
+cannot read an atom of its own (``atoms=True``): the claim is the equation
+``S2`` stores, at ``(a + 2, b)``, and needs no arithmetic of reals.
+
+That a cell is stored at most once and never read before its store is a fact
+of the kernel's own, of kind ``single-assignment``, one per array, decided by
+isl and stated for Lean (:func:`loopty.obligations.single_assignment_obligation`):
+
+- two instances that store into the array, of one statement or of two, store
+  into cells that differ; and
+- an instance that stores a cell runs before every instance that reads it,
+  in the source order (:func:`loopty.flow.schedule_of`), for every read of
+  the array the kernel makes: in a statement's value, in a sum, in a
+  subscript, in a guard, and the reads a ragged layout makes. The instance
+  that stores a cell is not before itself: ``x[i] = 2 * x[i + 1 - 1] - 5``
+  reads ``x[i]`` as it was before its store, so it says nothing of what the
+  kernel leaves there, and ``x`` has no such fact.
+
+An array that is updated in place (``y[r] += ...``, or a scatter-add through
+a map, ``y[cell[c, k]] += ...``), whose cells hold what they held on entry
+plus every update and so no one statement's value, that is stored under a
+guard isl cannot state (whose instances store nowhere it can name), or that
+is stored or read through an index isl does not read exactly, has no such
+fact, and its statements no equation: the postcondition is then left to the
+native runs, as before, with the reason. So is a statement that reads an
+array without the fact: what it read may have been stored over since.
+
+The postcondition fact rests on the ``single-assignment`` facts of the
+arrays whose equations decided it, and on any theorem the kernel cites that
+did (``@kernel(uses=[...])``, see :func:`theorem_instances`). It keeps what
+the native runs found, in its provenance, and a native run that refutes it
+still refutes it: the term and the body would then disagree, which the
+``trace-faithful`` fact is about, and a counterexample is the stronger word.
+
+What is not done: a cell stored twice, as a loop that overwrites a running
+value does, needs the last store before each read, which is isl's ``lexmax``
+of the stores before it; an array with such a cell has no equations here,
+and its postcondition stays tested.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Collection, Mapping, Sequence
+from dataclasses import dataclass, field
+from functools import partial
+from typing import Any
+
+import islpy as isl
+import pymbolic.primitives as prim
+from lanky.ledger import Fact, Status, fact_id
+from lanky.prelude import FinType, Int, Real, Refined, Sort
+from lanky.terms import (
+    Comparison,
+    Forall,
+    LogicalNot,
+    LogicalOr,
+    Subscript,
+    Var,
+    conjuncts,
+    render,
+)
+
+from loopty import flow
+from loopty.description import (
+    Description,
+    Disjunct,
+    Unstatable,
+    describe,
+    description_of,
+)
+from loopty.oracle import Empty
+from loopty.term import ArrType, Hypothesis, Stmt, Term
+
+__all__ = [
+    "KIND",
+    "Decision",
+    "Stores",
+    "decide_postcondition",
+    "single_assignment_id",
+    "stores",
+]
+
+#: The kind of the fact that an array is stored at most once, and read after.
+KIND = "single-assignment"
+
+
+def single_assignment_id(
+    owner: str, array: str, *, module: str | None = None, line: int | None = None
+) -> str:
+    """``single-assignment:spmv.scan@69:off``: the kernel's definition and the array."""
+    return fact_id(KIND, owner, module=module, line=line, detail=array)
+
+
+# {{{ what the statements store
+
+
+@dataclass(frozen=True)
+class Stores:
+    """What a kernel's statements store, as equations about what it leaves.
+
+    ``facts`` are the ``single-assignment`` facts of the arrays whose
+    statements store final values, one per array, by array; ``equations``
+    the value equations of those statements (:class:`~loopty.term.Hypothesis`,
+    each resting on the facts it needs); ``why`` says, for each array the
+    kernel writes that has none, why.
+    """
+
+    facts: Mapping[str, Fact] = field(default_factory=dict)
+    equations: tuple[Hypothesis, ...] = ()
+    why: Mapping[str, str] = field(default_factory=dict)
+
+
+def stores(
+    term: Term, owner: str, *, module: str | None = None, line: int | None = None
+) -> Stores:
+    """The ``single-assignment`` facts of a kernel's arrays and its value equations.
+
+    A program's term is not a kernel's (its calls are one after another, and
+    its arrays pass between them), and gets none.
+    """
+    if term.scopes or term.temporaries:
+        return Stores()
+    from loopty.obligations import Stated, single_assignment_obligation
+
+    written = list(dict.fromkeys(stmt.assignee.array for stmt in term.stmts))
+    facts: dict[str, Fact] = {}
+    why: dict[str, str] = {}
+    for array in written:
+        found = _single_assignment(term, array)
+        if isinstance(found, str):
+            why[array] = found
+            continue
+        question, writers, places = found
+        readers = list(dict.fromkeys(stmt.id for stmt, *_ in places))
+        facts[array] = Fact(
+            id=single_assignment_id(owner, array, module=module, line=line),
+            kind=KIND,
+            statement=f"no cell of {array} is stored twice, or read before its store",
+            term=Empty(
+                question,
+                description=(
+                    f"instances that store a cell of {array} another instance "
+                    "stores, or that one reads before"
+                ),
+                lean=Stated(
+                    partial(
+                        single_assignment_obligation,
+                        term,
+                        array,
+                        tuple(writers),
+                        tuple(places),
+                    )
+                ),
+            ),
+            # decided where it is made, since what the postcondition is
+            # decided under rests on it; the check asks isl, and Lean, again
+            status=Status.DECIDED,
+            decided_by="isl",
+            provenance={
+                "array": array,
+                "writers": [writer.id for writer in writers],
+                "readers": readers,
+            },
+            where=writers[0].where,
+            owner=owner,
+        )
+    equations: list[Hypothesis] = []
+    for stmt in term.stmts:
+        array = stmt.assignee.array
+        if array not in facts:
+            continue
+        reads = {
+            name
+            for name, _indices, kind, _inames, _domain in flow.statement_accesses(
+                stmt, term
+            )
+            if kind == "read" and name in written
+        }
+        if not reads <= set(facts):
+            # what it read may have been stored over since
+            continue
+        equation = _equation(stmt)
+        if equation is None:
+            continue
+        needs = [array, *sorted(reads - {array})]
+        equations.append(
+            Hypothesis(
+                claim=equation,
+                source=f"what {stmt.id} stores in {array} at {stmt.where}",
+                rests_on=tuple(facts[name].id for name in needs),
+                mentions=frozenset({array, *reads}),
+            )
+        )
+    return Stores(facts, tuple(equations), why)
+
+
+def _single_assignment(term: Term, array: str) -> tuple[Any, list[Stmt], list] | str:
+    """isl's empty set of conflicts, the writers and the reads; or why there is none."""
+    from loopty.obligations import _affine, _both, _time_map, stated_writers
+
+    writers = [stmt for stmt in term.stmts if stmt.assignee.array == array]
+    for stmt in writers:
+        if stmt.kind == "assign":
+            continue
+        if stmt.exactness is None:
+            # y[i] = 2 * y[i]: the store reads the cell it stores, first
+            return f"{stmt.id} stores a cell of {array} that {stmt.id} reads before it"
+        # an update, y[i] += v or a scatter-add y[cell[c, k]] += v: the cell
+        # holds what it held on entry and every update, which is no one
+        # statement's value
+        shown = ", ".join(str(index) for index in stmt.assignee.indices)
+        return (
+            f"{stmt.id} updates {array}[{shown}] in place, so a cell of {array} "
+            "holds what it held on entry plus every update, not what one "
+            "statement stores"
+        )
+    if len(stated_writers(term, writers)) != len(writers):
+        return (
+            f"a statement stores into {array} under a guard isl cannot state, so "
+            "its domain is wider than where it stores"
+        )
+    if not all(_affine(index) for stmt in writers for index in stmt.assignee.indices):
+        return f"a statement stores into {array} at an index isl does not read exactly"
+    places = [
+        (stmt, tuple(indices), tuple(inames), domain)
+        for stmt in term.stmts
+        for name, indices, kind, inames, domain in flow.statement_accesses(stmt, term)
+        if name == array and kind == "read"
+    ]
+    sizes = flow.size_names(term)
+    depth = flow.instance_space_depth(term)
+    pieces: list[Any] = []
+
+    def keep(pairs: Any, tag: str) -> bool:
+        found = flow.assume_sizes(pairs.domain(), sizes)
+        pieces.append(found.set_tuple_name(tag))
+        return found.is_empty()
+
+    for k, first in enumerate(writers):
+        stores_first = flow.access_relation(
+            first.inames, first.domain, first.assignee.indices
+        )
+        for second in writers[k:]:
+            stores_second = flow.access_relation(
+                second.inames, second.domain, second.assignee.indices
+            )
+            mine, theirs = _both(stores_first, stores_second.reverse())
+            pairs = mine.apply_range(theirs)
+            if second is first:
+                identity = isl.Map.identity(pairs.get_space())
+                pairs, identity = _both(pairs, identity)
+                pairs = pairs.subtract(identity)
+            if not keep(pairs, f"store{len(pieces)}"):
+                if second is first:
+                    return f"two instances of {first.id} store into one cell of {array}"
+                return f"{first.id} and {second.id} store into one cell of {array}"
+    for stmt, indices, inames, domain in places:
+        reads = flow.access_relation(inames, domain, indices)
+        reading = _reading_time(stmt, inames, depth)
+        for writer in writers:
+            stores_writer = flow.access_relation(
+                writer.inames, writer.domain, writer.assignee.indices
+            )
+            mine, theirs = _both(reads, stores_writer.reverse())
+            same = mine.apply_range(theirs)
+            # a store at the read's own time is the store of the instance
+            # that reads, which comes after the read: lex_le, not lex_lt
+            after = reading.apply_range(isl.Map.lex_le(reading.get_space().range()))
+            after = after.apply_range(_time_map(writer, writer.inames, depth).reverse())
+            same, after = _both(same, after)
+            if not keep(same.intersect(after), f"read{len(pieces)}"):
+                return (
+                    f"{writer.id} stores a cell of {array} that {stmt.id} reads "
+                    "before it"
+                )
+    question = None
+    for piece in pieces:
+        found = isl.UnionSet.from_set(piece)
+        question = found if question is None else question.union(found)
+    if question is None:
+        question = isl.UnionSet("{ }")
+    return question, writers, places
+
+
+def _reading_time(stmt: Stmt, inames: Sequence[str], depth: int) -> Any:
+    """``{ [loops] -> [time] }``: when a read over ``inames`` of ``stmt`` is made.
+
+    A read in a sum is made inside the instance, at its time
+    (:func:`loopty.obligations._time_map`). A read made at the outer loops
+    alone, the length of a ragged row, is made once per row, before the
+    row's instances (:func:`loopty.flow.layout_reads`); it is taken to be
+    made at the time of every instance of the row, the inner loops left
+    free, which finds a store after it wherever one comes after any of
+    them: more than the read itself, never less.
+    """
+    from loopty.obligations import _time_map
+
+    if len(inames) >= len(stmt.inames):
+        return _time_map(stmt, inames, depth)
+    full = _time_map(stmt, stmt.inames, depth)
+    inner = len(stmt.inames) - len(inames)
+    return full.project_out(isl.dim_type.in_, len(inames), inner)
+
+
+def _equation(stmt: Stmt) -> Any:
+    """The value equation of one statement: the cell it stores is what it stores there.
+
+    ``all(off[r + 1] == off[r] + cnt[r] for r with <its domain>)``, a
+    universal over the statement's loops, of sort ``Int``, whose guard is the
+    statement's domain as loopty wrote it (:mod:`loopty.description`), so
+    that an instance is taken only where the statement runs. ``None`` for a
+    statement whose domain isl computed.
+    """
+    described = description_of(stmt.domain)
+    if described is None:
+        return None
+    coords = [Var(name) for name in stmt.inames]
+    try:
+        guard = described.predicate(coords)
+    except Unstatable:
+        return None
+    indices = tuple(stmt.assignee.indices)
+    cell = Subscript(
+        Var(stmt.assignee.array), indices[0] if len(indices) == 1 else indices
+    )
+    body = Comparison(cell, "==", stmt.expr)
+    if not coords:
+        return body if guard is True else Forall((), body, guard)
+    binders = tuple((coord, Int) for coord in coords)
+    return Forall(binders, body, None if guard is True else guard)
+
+
+# }}}
+
+
+# {{{ the postcondition, decided under them
+
+
+@dataclass(frozen=True)
+class Decision:
+    """A postcondition isl decided under what the statements store.
+
+    ``question`` is the isl question the fact keeps, every conjunct's empty
+    set of points at which the claim fails where the hypotheses it used hold,
+    and ``used`` the hypotheses, each once: value equations, and a cited
+    theorem's instances.
+    """
+
+    question: Empty
+    used: tuple[Hypothesis, ...]
+
+    @property
+    def rests_on(self) -> tuple[str, ...]:
+        """The facts the hypotheses it used rest on, each once, in order."""
+        return tuple(
+            dict.fromkeys(
+                fact for hypothesis in self.used for fact in hypothesis.rests_on
+            )
+        )
+
+
+def decide_postcondition(
+    term: Term,
+    hypotheses: Sequence[Hypothesis],
+    *,
+    theorems: Sequence[Any] = (),
+    entry: Sequence[Hypothesis] = (),
+) -> Decision | str:
+    """The postcondition decided conjunct by conjunct, or why it is not.
+
+    Each conjunct is asked of isl under ``hypotheses``, the value equations
+    (:func:`stores`), with every equation isl cannot state an atom of its own
+    (:func:`loopty.hypotheses.discharge`). A conjunct they do not decide is
+    asked again under the instances of the ``theorems`` the kernel cites,
+    whose hypotheses the conjuncts decided before it, and the types of the
+    arrays nothing writes (``entry``), match (:func:`theorem_instances`).
+    """
+    from loopty.hypotheses import discharge
+    from loopty.obligations import Stated
+
+    if term.post is None:
+        return "the kernel claims nothing"
+    parts = list(conjuncts(term.post))
+    sizes = flow.size_names(term)
+    types = dict(term.params)
+    types.update(term.temporaries)
+    integral = {
+        name
+        for name, typ in types.items()
+        if isinstance(typ, ArrType) and _integral(typ.dtype)
+    }
+    known = set(term.sizes) | {
+        name
+        for name, typ in term.params
+        if not isinstance(typ, ArrType) and _integral(typ)
+    }
+    # what is real, which Lean states in Mathlib's dialect
+    sorts = {
+        name: Real
+        for name, typ in types.items()
+        if _real(typ.dtype if isinstance(typ, ArrType) else typ)
+    }
+    decided: dict[int, Any] = {}
+    reasons: dict[int, str] = {}
+    pending = list(range(len(parts)))
+    offered = list(hypotheses)
+    for _round in range(2):
+        for index in list(pending):
+            stated = _claim(parts[index], term)
+            if isinstance(stated, str):
+                reasons[index] = stated
+                pending.remove(index)
+                continue
+            domain, goal, reflected = stated
+            outcome = discharge(
+                domain,
+                goal,
+                offered,
+                integral=integral,
+                known=known,
+                nonneg=set(sizes),
+                reflected=reflected,
+                description=(
+                    f"points at which {term.name} leaves {render(parts[index])} false, "
+                    "where what its statements store holds"
+                ),
+                atoms=True,
+                sorts=sorts,
+            )
+            if outcome.decided:
+                decided[index] = outcome
+                pending.remove(index)
+            else:
+                reasons[index] = outcome.reason
+        if not pending or not theorems:
+            break
+        # the conjuncts decided so far are hypotheses of a cited theorem,
+        # those about reals where they read the same as reals (exact)
+        reals = real_names(term)
+        available = [
+            Hypothesis(
+                parts[index],
+                f"the postcondition of {term.name}, its conjunct "
+                f"{render(parts[index])}",
+                rests_on=tuple(
+                    dict.fromkeys(f for h in decided[index].used for f in h.rests_on)
+                ),
+                mentions=frozenset(),
+            )
+            for index in sorted(decided)
+            if exact(parts[index], reals)
+        ]
+        found = theorem_instances(term, theorems, [*available, *entry], hypotheses)
+        # a theorem's conclusion is about the reals, and decides a conjunct
+        # the floats are claimed of only where the two readings agree
+        found = [instance for instance in found if exact(instance.claim, reals)]
+        if not found:
+            break
+        offered = [*hypotheses, *found]
+    if pending or len(decided) != len(parts):
+        missing = [index for index in range(len(parts)) if index not in decided]
+        shown = "; ".join(
+            f"{render(parts[index])}: {reasons.get(index, 'not decided')}"
+            for index in missing[:2]
+        )
+        return f"what the statements store does not decide {shown}"
+    used: list[Hypothesis] = []
+    pieces = None
+    questions = []
+    for index in range(len(parts)):
+        outcome = decided[index]
+        for hypothesis in outcome.used:
+            if not any(hypothesis is seen for seen in used):
+                used.append(hypothesis)
+        questions.append(outcome.question)
+        piece = isl.UnionSet.from_set(
+            outcome.question.obj.set_tuple_name(f"post{index}")
+        )
+        pieces = piece if pieces is None else pieces.union(piece)
+    assert pieces is not None
+    from loopty.obligations import conjunct_obligations
+
+    question = Empty(
+        pieces,
+        description=f"points at which {term.name} leaves its postcondition false",
+        lean=Stated(
+            partial(
+                conjunct_obligations,
+                tuple(questions),
+                tuple(render(part) for part in parts),
+            )
+        ),
+    )
+    return Decision(question, tuple(used))
+
+
+def _claim(conjunct: Any, term: Term) -> tuple[Any, Any, dict[str, Any]] | str:
+    """A conjunct as isl asks it: its binders' domain, the claim, the cells it reflects.
+
+    A universal's binders are the dimensions, each bounded by its sort: a
+    point of ``Fin[e]`` is ``0 <= x < e``, a natural ``x >= 0``, an integer
+    anything; the guard goes into the claim, as what it is claimed under. A
+    bound that reads an array, ``Fin[cnt[r]]``,
+    is a parameter of the domain that stands for the cell. A conjunct with no
+    binder is claimed at the one point of a set of no dimensions.
+    """
+    from loopty.idx import Reflections
+
+    if isinstance(conjunct, Forall):
+        binders = list(conjunct.binders)
+        claims = [conjunct.body]
+        under = list(conjuncts(conjunct.guard))
+    else:
+        binders = []
+        claims = [conjunct]
+        under = []
+    dims = [var.name for var, _ in binders]
+    table = term.reflections
+    if isinstance(table, Reflections):
+        table.reserve(dims)
+    reflected: dict[str, Any] = {}
+    constraints: list[str] = []
+    bounded: set[str] = set()
+    for var, sort in binders:
+        # a refinement's propositions are left out: the claim is then asked
+        # over more points, which is harder, never easier
+        base = sort
+        while isinstance(base, Refined):
+            base = base.base
+        if isinstance(base, FinType):
+            try:
+                text = flow.expr_text(base.bound, None, reflected, table)
+            except Exception:  # noqa: BLE001 - a bound isl cannot read
+                return f"isl cannot read the bound {render(base.bound)} of {var.name}"
+            constraints.append(f"0 <= {var.name} < {text}")
+            bounded.add(var.name)
+        elif isinstance(base, Sort) and base.name == "Nat":
+            constraints.append(f"{var.name} >= 0")
+        elif isinstance(base, Sort) and base.name == "Int":
+            continue
+        else:
+            return (
+                f"the postcondition quantifies {var.name} over {sort}, which isl cannot"
+            )
+    sizes = flow.size_names(term)
+    free: set[str] = set()
+    for text in constraints:
+        free |= flow.free_names(text)
+    params = sorted(free - set(dims))
+    nonneg = [name for name in params if name in sizes or name in reflected]
+    domain = isl.Set(flow._assemble(dims, constraints, params, set(nonneg)))
+    domain = describe(
+        domain,
+        Description(
+            dims=tuple(dims),
+            disjuncts=(Disjunct(tuple(constraints), tuple(nonneg)),),
+            reflected=tuple(reflected.items()),
+        ),
+    )
+    goal = claims[0]
+    if under:
+        guard = under[0] if len(under) == 1 else prim.LogicalAnd(tuple(under))
+        goal = LogicalOr((LogicalNot(guard), goal))
+    return domain, goal, reflected
+
+
+def _real(sort: Any) -> bool:
+    """Whether the points of ``sort`` are reals: ``Real``, or a numpy float type."""
+    import numpy as np
+
+    base = sort.base if isinstance(sort, Refined) else sort
+    if isinstance(base, Sort):
+        return base.name == "Real"
+    try:
+        return bool(np.issubdtype(np.dtype(base), np.floating))
+    except TypeError:
+        return False
+
+
+def _integral(sort: Any) -> bool:
+    """Whether the points of ``sort`` are integers, which isl can compare."""
+    from loopty.contract import integral_sort
+
+    return integral_sort(sort)
+
+
+def _codomain(sort: Any) -> Any:
+    """The values of a family of families, ``Real`` for ``Fn[Nat, Fn[Nat, Real]]``."""
+    from lanky.prelude import FnType
+
+    while isinstance(sort, FnType):
+        sort = sort.codomain
+    return sort
+
+
+def real_names(term: Term) -> set[str]:
+    """The kernel's arrays of reals and its scalars that are reals."""
+    return {
+        name
+        for name, typ in term.params
+        if _real(typ.dtype if isinstance(typ, ArrType) else typ)
+    }
+
+
+def exact(prop: Any, reals: set[str], families: Collection[str] = ()) -> bool:
+    """Whether ``prop`` says the same of floats read as reals as it says of floats.
+
+    A conjunct of a postcondition is decided as the kernel computes, in
+    floating point, and a theorem the kernel cites is about the reals. The
+    two readings of a comparison of reals agree where nothing in it rounds:
+    cells, scalars and literals (a float is the rational it holds, and Lean
+    reads it so), each perhaps negated. ``R[a + 2, b] == -R[a, b + 2]`` is
+    one, and a theorem may take it as a hypothesis. ``s[i] == a[i] + b[i]``
+    is not: the stored sum is rounded, so ``s[i]`` is not ``a[i] + b[i]`` as
+    reals, and a theorem that concluded ``s[i] - a[i] == b[i]`` from it
+    would say of the arrays what they do not hold. Comparisons of integers
+    are exact. A value of one of ``families``, a theorem's table that
+    nothing bound (``D(a)(b)``), is a real as it stands, and exact too.
+    """
+    from loopty.hypotheses import _call_spine, _names
+
+    def value(expr: Any) -> bool:
+        if isinstance(expr, bool):
+            return False
+        if isinstance(expr, int | float):
+            return True
+        if isinstance(expr, prim.Variable):
+            return True
+        if isinstance(expr, prim.Subscript):
+            return isinstance(expr.aggregate, prim.Variable)
+        if isinstance(expr, prim.Call):
+            spine = _call_spine(expr)
+            return spine is not None and spine[0] in families
+        if isinstance(expr, prim.Product):
+            # -x, which pymbolic writes as a product with -1
+            rest = [child for child in expr.children if not isinstance(child, int)]
+            signs = [child for child in expr.children if isinstance(child, int)]
+            return (
+                len(rest) == 1 and all(s in (1, -1) for s in signs) and value(rest[0])
+            )
+        return False
+
+    def visit(node: Any) -> bool:
+        if isinstance(node, Forall):
+            return visit(node.body) and (node.guard is None or visit(node.guard))
+        if isinstance(node, prim.LogicalAnd | prim.LogicalOr):
+            return all(visit(child) for child in node.children)
+        if isinstance(node, prim.LogicalNot):
+            return visit(node.child)
+        if isinstance(node, prim.Comparison):
+            if not (_names(node.left) | _names(node.right)) & reals:
+                return True
+            return value(node.left) and value(node.right)
+        return not (_names(node) & reals)
+
+    return visit(prop)
+
+
+# }}}
+
+
+# {{{ a cited theorem
+
+
+def theorem_instances(
+    term: Term,
+    theorems: Sequence[Any],
+    available: Sequence[Hypothesis],
+    equations: Sequence[Hypothesis],
+) -> list[Hypothesis]:
+    """The instances of the cited theorems whose hypotheses ``available`` give.
+
+    Every hypothesis of a theorem has to match a conjunct of one of
+    ``available``, as a program's cited theorem does
+    (:func:`loopty.hypotheses.theorem_instances`), and its families stand for
+    the kernel's arrays where :func:`applicable` says they may.
+    """
+    from loopty.hypotheses import linear
+    from loopty.hypotheses import theorem_instances as instances_of
+
+    sizes = set(flow.size_names(term))
+    written = {stmt.assignee.array for stmt in term.stmts}
+
+    def nonnegative(expr: Any) -> bool:
+        form = linear(expr)
+        if form is None:
+            return False
+        names, constant = form
+        return constant >= 0 and all(
+            coefficient >= 0 and name in sizes for name, coefficient in names.items()
+        )
+
+    integral = sizes | {
+        name
+        for name, typ in term.params
+        if not isinstance(typ, ArrType) and _integral(typ)
+    }
+
+    def integer(expr: Any) -> bool:
+        form = linear(expr)
+        return form is not None and all(name in integral for name in form[0])
+
+    def fits(array: str, domain: Any, codomain: Any) -> str | None:
+        return applicable(term, written, array, codomain)
+
+    out: list[Hypothesis] = []
+    for theorem in theorems:
+        found, _reasons = instances_of(theorem, available, fits, nonnegative, integer)
+        out.extend(found)
+    return out
+
+
+def applicable(term: Term, written: set[str], array: str, codomain: Any) -> str | None:
+    """Why the kernel's ``array`` cannot stand for a family into ``codomain``.
+
+    ``None`` when it can.
+
+    A family's values are points of its codomain, and an array's cells are
+    points of its element sort only where something says so: a real array
+    stands for a family of reals, and an integral one for a family of
+    integers (``Int``); a family of naturals, or of a ``Fin`` sort, takes an
+    array the kernel does not write, whose cells the contract checks are
+    points of that sort when the kernel is called. The cells a kernel writes
+    are what it stores, which nothing says are naturals: a theorem about
+    them is over ``Int``.
+    """
+    types = dict(term.params)
+    typ = types.get(array)
+    if not isinstance(typ, ArrType):
+        return f"{array} is no array of {term.name}'s"
+    element = typ.dtype.base if isinstance(typ.dtype, Refined) else typ.dtype
+    wanted = codomain.base if isinstance(codomain, Refined) else codomain
+    name = getattr(wanted, "name", None)
+    if name == "Real":
+        if _real(element):
+            return None
+        return f"the elements of {array} are not reals"
+    if not _integral(element):
+        return f"the elements of {array} are not integers"
+    if name == "Int":
+        return None
+    if array in written:
+        return (
+            f"{term.name} writes {array}, and nothing says its cells are points of "
+            f"{codomain}: a theorem about them is over Int"
+        )
+    if name == "Nat" and (
+        isinstance(element, FinType) or getattr(element, "name", None) == "Nat"
+    ):
+        return None
+    if isinstance(wanted, FinType) and isinstance(element, FinType):
+        from loopty.hypotheses import structural_key
+
+        if structural_key(wanted.bound) == structural_key(element.bound):
+            return None
+    return f"the elements of {array} are points of {typ.dtype}, not of {codomain}"
+
+
+# }}}
+
+
+# {{{ a cited theorem, applied to the postcondition
+
+#: The kind of a fact a cited theorem gives a kernel, applied to its postcondition.
+APPLIED = "by-theorem"
+
+#: How many ways of matching a theorem's hypotheses are looked at, at most.
+_SEARCH = 4096
+
+
+@dataclass(frozen=True)
+class Application:
+    """A cited theorem applied to a kernel's postcondition.
+
+    ``bindings`` give each theorem variable the kernel's postcondition
+    binds: a family, the name of the kernel's array it stands for; a scalar,
+    the expression of the kernel's sizes. ``matched`` pairs each hypothesis
+    of the theorem a conjunct of the postcondition gives with that
+    conjunct's position. ``claim`` is what follows: the theorem's conclusion
+    at the kernel's arrays, for every value of the variables nothing binds,
+    under the hypotheses nothing gives. ``conclusion`` is that conclusion
+    alone, ``free`` the names of the variables nothing binds and ``unmatched``
+    the names of the hypotheses nothing gives, which the ledger's row names.
+    """
+
+    theorem: Any
+    bindings: tuple[tuple[str, Any], ...]
+    matched: tuple[tuple[int, int], ...]
+    claim: Any
+    conclusion: Any = None
+    free: tuple[str, ...] = ()
+    unmatched: tuple[str, ...] = ()
+
+
+def theorem_applications(
+    term: Term, theorems: Sequence[Any], given: Sequence[Any]
+) -> list[Application]:
+    """What each cited theorem gives the kernel, from its postcondition's conjuncts.
+
+    As many of a theorem's hypotheses as can be are matched with conjuncts
+    of the postcondition, ``given``, up to the names of their binders, a
+    family ``R(a)(b)`` matching a cell ``R[a, b]`` (:mod:`loopty.hypotheses`),
+    which binds the families the hypotheses apply to the kernel's arrays and
+    their scalars to expressions of its sizes. The theorem's conclusion with
+    those put in is the kernel's, for every value of the variables nothing
+    bound, under the hypotheses nothing matched: ``on_the_triangle``, whose
+    copies and recurrence are the conjuncts of ``reconstruct``'s
+    postcondition, gives that ``R`` is ``D`` on the triangle for every table
+    ``D`` of the PDE's whose stored entries ``c`` holds.
+
+    A match is taken only where it says something of what the kernel
+    computes, from what the kernel was shown to leave:
+
+    - its conclusion is about an array the kernel writes, and every
+      hypothesis about such an array is a conjunct of the postcondition. A
+      hypothesis about what the kernel stores that nothing matched would be
+      a guard of the claim the kernel does not establish. A kernel whose
+      recurrence is off by one matches only the theorem's copies, and so
+      gives nothing, rather than a claim under a recurrence it does not
+      compute;
+    - a conjunct about reals is matched only where it reads the same as
+      reals as it does in floating point (:func:`exact`), since the theorem
+      is about the reals;
+    - two families of the theorem stand for two arrays of the kernel, never
+      for one: the copies ``R(a)(b) == c(a)(b)`` read backwards would
+      otherwise match the stored entries ``c(a)(b) == D(a)(b)``, with ``D``
+      and ``R`` both ``c``, and give a claim about ``c`` and itself;
+    - each binding is one an array or a size can stand for (:func:`_fits`);
+    - the claim names nothing but the kernel's names and its own binders.
+      The theorem's sizes are put in wherever they are, the sort of a family
+      nothing bound included (``D: Fn[Fin[n], Real]`` with ``n`` bound to
+      ``p`` ranges over ``Fin[p]``), so a name of the theorem's left in the
+      claim would make it about a size the kernel does not have, or about
+      one of its own that is not the size the theorem was taken at.
+
+    Of the matches that pass, the one that matches the most hypotheses is
+    taken. A theorem with none, or whose conclusion is a conjunct of the
+    postcondition already, gives nothing.
+    """
+    from lanky.prelude import FnType
+
+    from loopty.hypotheses import (
+        _apply,
+        _Matcher,
+        _names,
+        free_in,
+        linear,
+        structural_key,
+    )
+
+    sizes = set(flow.size_names(term))
+    written = {stmt.assignee.array for stmt in term.stmts}
+    given = list(given)
+    reals = real_names(term)
+    usable = [exact(part, reals) for part in given]
+    have = {structural_key(part) for part in given}
+    known = (
+        {name for name, _ in term.params}
+        | sizes
+        | {name for name, _ in term.reflected}
+        | (free_in(term.post) if term.post is not None else set())
+    )
+    out: list[Application] = []
+    for theorem in theorems:
+        variables = dict(getattr(theorem, "variables", ()))
+        functions = {
+            name for name, sort in variables.items() if isinstance(sort, FnType)
+        }
+        matcher = _Matcher(functions, set(variables) - functions)
+        named = list(getattr(theorem, "hypotheses", ()))
+        hypotheses = [prop for _name, prop in named]
+        goal = getattr(theorem, "goal", None)
+        if goal is None or not hypotheses:
+            continue
+        families = [_names(prop) & functions for prop in hypotheses]
+        concluded = _names(goal) & functions
+        reals_too = reals | {
+            name for name, sort in variables.items() if _real(_codomain(sort))
+        }
+        best: list[Any] = [None]
+        tried = [0]
+
+        def acceptable(sigma: dict[str, Any], matched: tuple) -> bool:
+            arrays = [sigma[name] for name in functions if name in sigma]
+            # two families of a theorem are two arrays: one array standing
+            # for both makes a claim about the array and itself
+            if len(set(arrays)) != len(arrays):
+                return False
+            outputs = {name for name in functions if sigma.get(name) in written}
+            if not outputs or not (concluded & outputs):
+                return False
+            used = {k for k, _ in matched}
+            if any(
+                families[k] & outputs for k in range(len(hypotheses)) if k not in used
+            ):
+                return False
+            if not _fits(term, written, sizes, variables, sigma, linear):
+                return False
+            # the conclusion is about the reals, and says what the floats
+            # hold only where the two readings agree
+            free = functions - set(sigma)
+            bound = {sigma[name] for name in functions if name in sigma}
+            conclusion = _apply(goal, sigma, set(sigma) & functions)
+            if not exact(conclusion, reals_too | bound, free):
+                return False
+            made = _applied_claim(
+                term, theorem, variables, sigma, matched, set(sigma) & functions
+            )
+            if made is None:
+                return False
+            claim, _conclusion, names = made
+            return not (free_in(claim) - set(names) - known)
+
+        def search(
+            k: int, sigma: dict[str, Any], matched: tuple[tuple[int, int], ...]
+        ) -> None:
+            tried[0] += 1
+            if tried[0] > _SEARCH:
+                return
+            if k == len(hypotheses):
+                if not matched or (
+                    best[0] is not None and len(matched) <= len(best[0][1])
+                ):
+                    return
+                if acceptable(sigma, matched):
+                    best[0] = (dict(sigma), matched)
+                return
+            for position, conjunct in enumerate(given):
+                if not usable[position]:
+                    continue
+                trial = dict(sigma)
+                if matcher.match(hypotheses[k], conjunct, trial, {}):
+                    search(k + 1, trial, (*matched, (k, position)))
+            search(k + 1, sigma, matched)
+
+        search(0, {}, ())
+        if best[0] is None:
+            continue
+        sigma, matched = best[0]
+        bound = {name for name in functions if name in sigma}
+        made = _applied_claim(term, theorem, variables, sigma, matched, bound)
+        assert made is not None
+        claim, conclusion, free = made
+        if structural_key(claim) in have:
+            continue
+        used = {k for k, _ in matched}
+        out.append(
+            Application(
+                theorem,
+                tuple((name, sigma[name]) for name in variables if name in sigma),
+                matched,
+                claim,
+                conclusion,
+                free,
+                tuple(name for k, (name, _) in enumerate(named) if k not in used),
+            )
+        )
+    return out
+
+
+def _fits(
+    term: Term,
+    written: set[str],
+    sizes: set[str],
+    variables: Mapping[str, Any],
+    sigma: Mapping[str, Any],
+    linear: Any,
+) -> bool:
+    """Whether every binding is one the theorem may be taken at.
+
+    A family stands for an array of as many axes as the family takes
+    arguments, whose cells are points of the family's values
+    (:func:`applicable`); a natural scalar for an expression of the sizes
+    that is never negative; an integer scalar for an affine expression of
+    the sizes and the kernel's integer scalars, never of a real one: a
+    theorem about an integer ``k`` taken at a real ``s`` says what may be
+    false of it.
+    """
+    from lanky.prelude import FnType
+
+    types = dict(term.params)
+    integral = set(sizes) | {
+        name
+        for name, typ in term.params
+        if not isinstance(typ, ArrType) and _integral(typ)
+    }
+    for name, sort in variables.items():
+        if name not in sigma:
+            continue
+        if isinstance(sort, FnType):
+            rank, codomain = 0, sort
+            while isinstance(codomain, FnType):
+                rank += 1
+                codomain = codomain.codomain
+            typ = types.get(sigma[name])
+            if not isinstance(typ, ArrType) or typ.ndim != rank:
+                return False
+            if applicable(term, written, sigma[name], codomain) is not None:
+                return False
+        elif getattr(sort, "name", None) == "Nat":
+            form = linear(sigma[name])
+            if form is None:
+                return False
+            names, constant = form
+            if constant < 0 or any(c < 0 or n not in sizes for n, c in names.items()):
+                return False
+        elif getattr(sort, "name", None) == "Int":
+            form = linear(sigma[name])
+            if form is None or any(n not in integral for n in form[0]):
+                return False
+        else:
+            return False
+    return True
+
+
+def _applied_claim(
+    term: Term,
+    theorem: Any,
+    variables: Mapping[str, Any],
+    sigma: Mapping[str, Any],
+    matched: Sequence[tuple[int, int]],
+    bound: set[str],
+) -> tuple[Any, Any, tuple[str, ...]] | None:
+    """The theorem's conclusion at the kernel's arrays, under what nothing matched.
+
+    A variable nothing bound is a binder of the claim, named apart from the
+    kernel's names, and a hypothesis nothing matched its guard. Every sort is
+    put in the kernel's names with the rest (:func:`loopty.hypotheses._apply_sort`),
+    and a binder whose sort names another variable nothing bound
+    (``D: Fn[Fin[m], Real]``) comes after it. Returns the claim, the
+    conclusion alone, and the names of the claim's binders; ``None`` when no
+    order of the binders has each sort name only those before it.
+    """
+    from loopty.hypotheses import _apply, _apply_sort, _fresh, _names, _sort_terms
+
+    taken = {name for name, _ in term.params} | set(term.sizes)
+    for stmt in term.stmts:
+        taken |= set(stmt.inames)
+    left = [name for name in variables if name not in sigma]
+    order: list[str] = []
+    while left:
+        ready = next(
+            (
+                name
+                for name in left
+                if not (_names(_sort_terms(variables[name])) - {name}) & set(left)
+            ),
+            None,
+        )
+        if ready is None:
+            return None
+        order.append(ready)
+        left.remove(ready)
+    renames: dict[str, Any] = {}
+    binders = []
+    for name in order:
+        sort = variables[name]
+        fresh = name if name not in taken else _fresh(name, taken)
+        taken.add(fresh)
+        if fresh != name:
+            renames[name] = Var(fresh)
+        binders.append((Var(fresh), sort))
+    # a variable nothing bound is renamed, and a family bound is the array
+    full = {**sigma, **renames}
+    used = {k for k, _ in matched}
+    hypotheses = [prop for _name, prop in getattr(theorem, "hypotheses", ())]
+    rest = [
+        _apply(prop, full, bound) for k, prop in enumerate(hypotheses) if k not in used
+    ]
+    goal = _apply(theorem.goal, full, bound)
+    binders = [(var, _apply_sort(sort, full, bound)) for var, sort in binders]
+    names = tuple(var.name for var, _ in binders)
+    if not binders and not rest:
+        return goal, goal, names
+    guard = None
+    if rest:
+        guard = rest[0] if len(rest) == 1 else prim.LogicalAnd(tuple(rest))
+    return Forall(tuple(binders), goal, guard), goal, names
+
+
+@dataclass(frozen=True)
+class Applied:
+    """The claim a cited theorem gives a kernel, as the term of its fact, for Lean.
+
+    One part: the theorem as it was proved and the conjuncts of the
+    postcondition it was matched with, as hypotheses, imply the claim. Lean
+    applies the theorem, with the variables loopty bound given by name, and
+    finds the others where its conclusion is the goal; each premise left is
+    a conjunct of the postcondition, a hypothesis of the claim's own, or
+    arithmetic. So Lean checks that the theorem applies, and not only what
+    follows from it. A claim about reals is a part of Mathlib's
+    (:attr:`lanky.obligations.Part.mathlib`).
+    """
+
+    term: Term
+    application: Application
+    given: tuple[Any, ...]
+    owner: str
+
+    def lean_obligation(self) -> Any:
+        """The part, stated from the theorem's term and the kernel's postcondition."""
+        from loopty.obligations import Claim, _declined, _lanky_obligations, _obligation
+
+        lanky = _lanky_obligations()
+        if not hasattr(lanky, "Application"):
+            return _declined(
+                "this lanky's Lean oracle applies no theorem a hypothesis of a part "
+                "is; lanky 0.3 does"
+            )
+        from lanky.prelude import FnType
+
+        application = self.application
+        sorts = {
+            name: Real
+            for name, typ in self.term.params
+            if _real(typ.dtype if isinstance(typ, ArrType) else typ)
+        }
+        reals = bool(sorts) and "mathlib" in getattr(
+            lanky.Part, "__dataclass_fields__", {}
+        )
+        if sorts and not reals:
+            return _declined(
+                "the claim is about real numbers, and this lanky states no part "
+                "of Mathlib's"
+            )
+        # an array a family stands for has the family's values, which
+        # applicable() checked its cells are: cnt of Nat is Int -> Nat, as the
+        # theorem's family prints, so that Lean can apply the theorem to it
+        variables = dict(getattr(application.theorem, "variables", ()))
+        for name, value in application.bindings:
+            sort = variables.get(name)
+            if isinstance(sort, FnType) and isinstance(value, str):
+                while isinstance(sort, FnType):
+                    sort = sort.codomain
+                sorts[value] = sort
+        theorem_term = getattr(application.theorem, "term", None)
+        if theorem_term is None:
+            return _declined("the theorem has no statement to apply")
+        claim = Claim(self.term, sorts=sorts)
+        claim.hypotheses.append(theorem_term)
+        for _k, position in application.matched:
+            claim.hypotheses.append(self.given[position])
+        closed = claim.close(application.claim)
+        guards = [render(part) for part in conjuncts(closed.guard)]
+        try:
+            index = guards.index(render(theorem_term))
+        except ValueError:
+            return _declined("the theorem is no hypothesis of its own part")
+        values = tuple(
+            (name, Var(value) if isinstance(value, str) else value)
+            for name, value in application.bindings
+        )
+        hints = lanky.Hints(applications=(lanky.Application(index, values),))
+        name = getattr(application.theorem, "__name__", "theorem")
+        extra = {"mathlib": True} if reals else {}
+        part = lanky.Part(
+            "applied",
+            f"{name} applied to the postcondition of {self.term.name}",
+            closed,
+            hints,
+            **extra,
+        )
+        return _obligation(
+            [part],
+            rests_on=(getattr(application.theorem, "fact_id", ""),),
+        )
+
+    def __str__(self) -> str:
+        return render(self.application.claim)
+
+
+def applied_statement(name: str, application: Application) -> str:
+    """The ledger's words for an application: the theorem, for what, its conclusion.
+
+    ``by on_the_triangle, for every D with pde and stored: forall a in
+    Fin(p + 1), b in Fin(p + 1) where a + b <= p. R[a, b] == D(a)(b)``: the
+    variables nothing bound, and the hypotheses nothing matched, by the names
+    the theorem gives them, which the full claim (:attr:`Application.claim`)
+    spells out.
+    """
+    conclusion = application.conclusion
+    if conclusion is None:
+        conclusion = application.claim
+    words = f"by {name}"
+    if application.free:
+        words += f", for every {', '.join(application.free)}"
+        if application.unmatched:
+            words += f" with {' and '.join(application.unmatched)}"
+    elif application.unmatched:
+        words += f", given {' and '.join(application.unmatched)}"
+    return f"{words}: {render(conclusion)}"
+
+
+def application_facts(
+    term: Term,
+    theorems: Sequence[Any],
+    post: Fact,
+    owner: str,
+    *,
+    module: str | None = None,
+    line: int | None = None,
+) -> list[Fact]:
+    """One fact per claim a cited theorem gives (:func:`theorem_applications`).
+
+    ``decided`` by ``theorem``: the theorem's hypotheses it matched are
+    conjuncts of the postcondition, so its conclusion holds of the kernel's
+    arrays, resting on the theorem's fact and the postcondition's. Lean
+    checks the application (:class:`Applied`).
+    """
+    if term.post is None:
+        return []
+    given = list(conjuncts(term.post))
+    out = []
+    for application in theorem_applications(term, theorems, given):
+        theorem = application.theorem
+        name = getattr(theorem, "__name__", "theorem")
+        identifier = getattr(theorem, "fact_id", name)
+        bindings = ", ".join(
+            f"{var} = {value if isinstance(value, str) else render(value)}"
+            for var, value in application.bindings
+        )
+        out.append(
+            Fact(
+                id=fact_id(APPLIED, owner, module=module, line=line, detail=identifier),
+                kind=APPLIED,
+                statement=applied_statement(name, application),
+                term=Applied(term, application, tuple(given), owner),
+                status=Status.DECIDED,
+                decided_by="theorem",
+                provenance={
+                    "theorem": identifier,
+                    "bindings": bindings,
+                    "matched": [
+                        render(given[position]) for _k, position in application.matched
+                    ],
+                    "rule": (
+                        f"the hypotheses of {name} it matched are conjuncts of the "
+                        f"postcondition of {term.name}, so its conclusion holds at "
+                        f"{bindings}"
+                    ),
+                },
+                where=post.where,
+                owner=owner,
+                rests_on=(identifier, post.id),
+            )
+        )
+    return out
+
+
+# }}}

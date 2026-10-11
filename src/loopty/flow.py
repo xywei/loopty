@@ -1294,7 +1294,9 @@ def definedness(
     from loopty.domain import dimension_names
 
     arrtype = term.array_types[array]
-    names = dimension_names(len(arrtype.axes), _names_in(arrtype.axes))
+    # one name per axis, the axes of a domain's points included, none a size
+    avoid = _names_in(arrtype.shape_terms)
+    names = dimension_names(arrtype.ndim, avoid)
     universe = cell_set(arrtype, names=names)
     #: What cannot be listed, in words: every read, and every write.
     unlisted_reads: dict[str, list[str]] = {}

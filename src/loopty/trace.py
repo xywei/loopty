@@ -675,6 +675,10 @@ class Tracer:
         self.reflections = Reflections(params)
         self.loops: list[_Loop] = []
         self.guards: list[Any] = []
+        #: The value of each rule called inside a ``when`` block, by the id of
+        #: the node that stands for it, with the call as the body wrote it
+        #: (:class:`loopty.calls.Guarded`).
+        self.guarded: dict[int, tuple[Any, str]] = {}
         self.stmts: list[Stmt] = []
         self._inames: set[str] = set()
         #: The loop levels that have closed, by iname, so that a statement
@@ -703,6 +707,85 @@ class Tracer:
         #: and the proxy each read goes through; see :meth:`table`.
         self.tables: dict[str, Any] = {}
         self._table_proxies: dict[str, SymArr] = {}
+        #: The kernels the body calls, each inlined where it is called
+        #: (:mod:`loopty.calls`), as :class:`loopty.term.Call` records.
+        self.calls: list[Any] = []
+        #: The calls being inlined now, outermost first: their labels, and the
+        #: kernel with the code of each function it was passed, so that a
+        #: kernel that calls itself is refused (:mod:`loopty.calls`).
+        self.inlining: list[tuple[str, Any]] = []
+        #: How many calls of each kernel the body has made, for their labels.
+        self._call_counts: dict[str, int] = {}
+        #: Every name a sum's binder has been given in this trace, and the
+        #: binders of the generators being driven now, innermost last, each
+        #: with the iterator that bound it and lanky's trace of its generator
+        #: (see :meth:`bind`).
+        self.binders: set[str] = set()
+        self.open_binders: list[tuple[Any, Var, Any, Any]] = []
+
+    # {{{ calls of other kernels
+
+    def call_label(self, kernel: str) -> str:
+        """The label of the next call of ``kernel``: ``dot``, then ``dot@2``."""
+        count = self._call_counts.get(kernel, 0) + 1
+        self._call_counts[kernel] = count
+        return kernel if count == 1 else f"{kernel}@{count}"
+
+    def bind(self, iterator: Any, binder_trace: Any, domain: Any) -> Var:
+        """Bind a sum's binder over ``domain``, the next of ``binder_trace``'s.
+
+        lanky names a binder after the generator's loop target (``k`` in
+        ``reduce_sum(a[k] * b[k] for k in a.dom)``). Inside a kernel called
+        from this body (:mod:`loopty.calls`) that name is the callee's, and
+        may already be a loop, a size or another sum's binder of the caller,
+        which isl would take for one dimension: such a binder gets a name of
+        its own, ``k_0``, as a loop the call opens does. The body's own
+        binders keep their names, and a clash among them is refused where
+        the sum is recorded, naming both (:func:`lower_reductions`).
+
+        The binder is open until its iterator is exhausted
+        (:meth:`release`), which is where a call made inside the generator
+        reads it as one of the points the call is made at.
+        """
+        position = len(binder_trace.binders)
+        if self.inlining and position < len(binder_trace.names):
+            name = binder_trace.names[position]
+            if self._binder_clashes(name):
+                binder_trace.names[position] = self._fresh_binder(name)
+        var = binder_trace.bind(domain)
+        self.binders.add(var.name)
+        self.open_binders.append((iterator, var, domain, binder_trace))
+        return var
+
+    def release(self, iterator: Any) -> None:
+        """The binder ``iterator`` bound is out of scope: its generator moved on."""
+        self.open_binders = [
+            entry for entry in self.open_binders if entry[0] is not iterator
+        ]
+
+    def _binder_clashes(self, name: str) -> bool:
+        """Whether a binder named ``name`` would be taken for another name."""
+        return (
+            name in self._inames
+            or name in self.binders
+            or name in self.integers
+            or name in self.params
+            or name in self.tables
+            or name in self.array_types
+            or self.reflections.taken(name)
+            or is_isl_keyword(name)
+        )
+
+    def _fresh_binder(self, stem: str) -> str:
+        """A binder name like ``stem`` that nothing in the trace has."""
+        suffix = 0
+        name = f"{stem}_{suffix}"
+        while self._binder_clashes(name):
+            suffix += 1
+            name = f"{stem}_{suffix}"
+        return name
+
+    # }}}
 
     # {{{ constant tables
 
@@ -2368,6 +2451,43 @@ def _index_tuple(key: Any) -> tuple[Any, ...]:
     return tuple(key) if isinstance(key, tuple) else (key,)
 
 
+def _key_of(indices: Sequence[Any]) -> Any:
+    """A subscript key as the body writes it: one index, or a tuple of them."""
+    return indices[0] if len(indices) == 1 else tuple(indices)
+
+
+def _exact_key(key: Any, tracer: Any) -> Any:
+    """``key`` without the conversions of a called kernel's scalars it does not need.
+
+    See :func:`loopty.calls.exact`: ``A[i, np.int64(j)]`` is ``A[i, j]``.
+    """
+    if tracer is None:
+        return key
+    from loopty.calls import exact_key
+
+    return exact_key(key, tracer)
+
+
+def _unguarded(expr: Any, tracer: Any, where: str) -> Any:
+    """``expr`` with the value of each rule called in an open ``when`` block.
+
+    One called in a block that has closed is refused; see
+    :func:`loopty.calls.unguarded`.
+    """
+    if tracer is None or not tracer.guarded:
+        return expr
+    from loopty.calls import unguarded
+
+    return unguarded(expr, tracer, where)
+
+
+def _exact_guard(condition: Any, tracer: Any) -> Any:
+    """A guard without the conversions of a called kernel's scalars it does not need."""
+    from loopty.calls import exact
+
+    return exact(condition, tracer, truth=True)
+
+
 def _subscript(name: str, indices: Sequence[Any]) -> Subscript:
     """Build ``name[i]`` or ``name[i, j]`` as a pymbolic subscript."""
     index = indices[0] if len(indices) == 1 else tuple(indices)
@@ -2450,6 +2570,9 @@ class SymDom:
         one index, the tuple, and gave the domain of axis 1 whatever the length
         of the tuple.
         """
+        tracer = self.array.tracer
+        where = _location(sys._getframe(1))
+        index = _exact_key(_unguarded(index, tracer, where), tracer)
         if _whole_key(index):
             raise TraceError(
                 f"{_domain_text(self)}[{_key_text(index)}] at "
@@ -2570,17 +2693,22 @@ class _DomIterator:
         from lanky.terms import current_trace
 
         if self.done:
+            tracer = current_tracer()
             if self.loop:
-                tracer = current_tracer()
                 if tracer is not None:
                     tracer.leave_loop(self, sys._getframe(1))
+            elif tracer is not None:
+                tracer.release(self)
             raise StopIteration
         self.done = True
         binder_trace = current_trace()
         if binder_trace is not None:
             # lanky is driving a generator expression: this is a reduction
             # binder, and lanky names it after the source's loop target.
-            return binder_trace.bind(self.dom)
+            tracer = current_tracer()
+            if tracer is None:
+                return binder_trace.bind(self.dom)
+            return tracer.bind(self, binder_trace, self.dom)
         tracer = current_tracer()
         if tracer is None:
             raise TraceError(
@@ -2735,23 +2863,66 @@ class SymArr:
         for axis, index in enumerate(indices):
             self.check_domain_index(axis, index, f"{spelled} at {where}")
 
-    def __getitem__(self, key: Any) -> Subscript:
-        """Read: build the index expression ``name[...]``."""
+    def __getitem__(self, key: Any) -> Any:
+        """Read: build the index expression ``name[...]``, or a view.
+
+        Fewer indices than the array has axes, ``A[i]``, name a row of it, and
+        an array of indices, ``u[cell[c]]``, the cells it picks: each is a
+        view (:class:`_RowView`, :class:`_GatherView`), an array a kernel
+        called from this body takes as a whole one, as numpy's ``A[i]`` and
+        ``u[cell[c]]`` are natively. Used as a value, a view is refused as any
+        whole array is, with the loop nest to write.
+        """
         where = _location(sys._getframe(1))
+        key = _exact_key(_unguarded(key, self.tracer, where), self.tracer)
+        view = self._view_of(key, where)
+        if view is not None:
+            return view
         self._refuse_whole(key, where, write=False)
+        return self._read(_index_tuple(key), where)
+
+    def _view_of(self, key: Any, where: str) -> SymArr | None:
+        """The view ``key`` names, or ``None`` when it names one cell or is refused."""
         if self.type.domain is not None:
-            self._check_domain_key(key, where, write=False)
-        return _subscript(self.name, _index_tuple(key))
+            return None
+        parts = _index_tuple(key)
+        if len(parts) == 1 and isinstance(parts[0], SymArr):
+            return _GatherView(self, parts[0], where)
+        if _whole_key(key) or not 0 < len(parts) < self.ndim:
+            return None
+        return _RowView(self, parts, where)
+
+    def _read(self, indices: tuple[Any, ...], where: str) -> Any:
+        """The read of the cell at ``indices``, every axis given."""
+        if self.type.domain is not None:
+            self._check_domain_key(_key_of(indices), where, write=False)
+        return _subscript(self.name, indices)
 
     def __setitem__(self, key: Any, value: Any) -> None:
         """Write: record a statement at the caller's file and line."""
         where = _location(sys._getframe(1))
+        key = _exact_key(_unguarded(key, self.tracer, where), self.tracer)
         self._refuse_whole(key, where, write=True)
+        self._store(_index_tuple(key), value, where)
+
+    def _store(self, indices: tuple[Any, ...], value: Any, where: str) -> None:
+        """Record the statement that writes ``value`` into the cell at ``indices``."""
+        value = _unguarded(value, self.tracer, where)
+        key = _key_of(indices)
         if self.type.domain is not None:
             self._check_domain_key(key, where, write=True)
         self._refuse_many_values(key, value, where)
-        indices = _index_tuple(key)
         tracer = self.tracer
+        if tracer.inlining and tracer.open_binders:
+            label = tracer.inlining[-1][0]
+            raise TraceError(
+                f"{self.name}[{_key_text(key)}] = ... at {where}, in the kernel "
+                f"called as {label}, writes an array inside a sum of the kernel "
+                "that called it, and a sum adds values: it has no statements of "
+                "its own to run. Call a kernel that writes its arguments as a "
+                "statement, outside reduce_sum(...), or have it return the value "
+                "it computes"
+            )
         expr = lower_reductions(value, tracer, where=where)
         self._refuse_untruthful(key, value, where)
         sorts = {**tracer.params, **tracer.array_types}
@@ -2980,6 +3151,127 @@ class SymArr:
 
     def __repr__(self) -> str:
         return f"SymArr({self.name}: {self.type})"
+
+
+class _RowView(SymArr):
+    """``A[i]``: the cells of an array of the trace with its leading axes fixed.
+
+    A kernel called from the body (:mod:`loopty.calls`) takes it as a whole
+    array of the remaining axes, as numpy's ``A[i]`` is a view of the row
+    natively: ``a[k]`` in the callee reads ``A[i, k]``, ``a.dom`` runs over
+    the row, and ``a[k] = v`` writes ``A[i, k]``. The row of a ragged array,
+    ``val[r]``, has ``cnt[r]`` cells. A row of a constant table is read only,
+    as the table is.
+
+    ``base`` is the array of the trace the cells are in, ``prefix`` the
+    indices fixed, as the body wrote them, and ``name`` how a message spells
+    the view, ``A[i]``.
+    """
+
+    def __init__(self, base: SymArr, prefix: tuple[Any, ...], where: str) -> None:
+        if isinstance(base, _RowView):
+            # a row of a row is a row of the array: T[e][a] is T[e, a]
+            prefix = (*base.prefix, *prefix)
+            base = base.base
+        rest = base.ndim - len(prefix)
+        axes = tuple(base.axis_bound(len(prefix) + k, prefix) for k in range(rest))
+        super().__init__(
+            f"{base.name}[{_key_text(_key_of(prefix))}]",
+            ArrType(axes=axes, dtype=base.type.dtype, ragged=(False,) * rest),
+            base.tracer,
+        )
+        self.base = base
+        self.prefix = tuple(prefix)
+        self.where = where
+
+    def _read(self, indices: tuple[Any, ...], where: str) -> Any:
+        return self.base._read((*self.prefix, *indices), where)
+
+    def _store(self, indices: tuple[Any, ...], value: Any, where: str) -> None:
+        if self.base.name in self.tracer.tables:
+            raise TraceError(
+                f"{self.name}[{_key_text(_key_of(indices))}] = ... at {where} "
+                f"writes a row of {self.base.name}, a constant table: its values "
+                "are part of the kernel's code, and nothing writes them. Pass an "
+                "array the called kernel may write instead"
+            )
+        self.base._store((*self.prefix, *indices), value, where)
+
+
+class _GatherView(SymArr):
+    """``u[cell[c]]``: the cells of an array an array of indices picks.
+
+    As numpy's ``u[cell[c]]`` is natively: an array of the index array's
+    axes, followed by the source's own after the first, whose cell ``k`` is
+    ``u[cell[c, k]]``. Natively it is a copy, so a kernel called with it
+    reads it and does not write it; a write is refused, naming the view.
+    """
+
+    def __init__(self, source: SymArr, index: SymArr, where: str) -> None:
+        from loopty.contract import integral_sort
+
+        if any(source.type.ragged):
+            raise TraceError(
+                f"{source.name}[{index.name}] at {where} gathers rows of the ragged "
+                f"array {source.name}, which have lengths of their own; gather "
+                "from a dense array, or pass the array and the indices"
+            )
+        if not integral_sort(index.type.dtype):
+            raise TraceError(
+                f"{source.name}[{index.name}] at {where} indexes {source.name} by "
+                f"the elements of {index.name}, which are {index.type.dtype} and "
+                "not integers; an index array holds Fin[n], Nat or Int elements"
+            )
+        tail = tuple(source.type.axes[1:])
+        super().__init__(
+            f"{source.name}[{index.name}]",
+            ArrType(
+                axes=(*index.type.axes, *tail),
+                dtype=source.type.dtype,
+                ragged=(*index.type.ragged, *(False,) * len(tail)),
+            ),
+            source.tracer,
+        )
+        self.source = source
+        self.index = index
+        self.where = where
+
+    def axis_bound(self, axis: int, prefix: Sequence[Any] = ()) -> Any:
+        if axis < self.index.ndim:
+            return self.index.axis_bound(axis, prefix)
+        return self.type.axes[axis]
+
+    def _view_of(self, key: Any, where: str) -> SymArr | None:
+        """A part of the gathered cells: ``u[cell][c]`` is ``u[cell[c]]``.
+
+        A row that fixes leading axes of the indices only is the gather by
+        that row of the indices, as numpy reads it, and as read only. A part
+        that fixes every axis of the indices, ``xy[cell][c, 0]``, is a row of
+        this view, which a called kernel is not given (:mod:`loopty.calls`
+        names the row of the source to pass instead).
+        """
+        parts = _index_tuple(key)
+        if (
+            not _whole_key(key)
+            and 0 < len(parts) < self.index.ndim
+            and not any(isinstance(part, SymArr) for part in parts)
+        ):
+            return _GatherView(self.source, _RowView(self.index, parts, where), where)
+        return super()._view_of(key, where)
+
+    def _read(self, indices: tuple[Any, ...], where: str) -> Any:
+        depth = self.index.ndim
+        picked = self.index._read(tuple(indices[:depth]), where)
+        return self.source._read((picked, *indices[depth:]), where)
+
+    def _store(self, indices: tuple[Any, ...], value: Any, where: str) -> None:
+        raise TraceError(
+            f"{self.name}[{_key_text(_key_of(indices))}] = ... at {where} writes "
+            f"the cells {self.name} gathers, and natively {self.name} is a copy "
+            f"of them, so the write would be lost there and kept compiled. Pass "
+            f"{self.source.name} and the indices, and write "
+            f"{self.source.name}[...] where the indices say"
+        )
 
 
 #: The index names a message spells a loop nest with, one per axis.
@@ -4131,7 +4423,8 @@ def _value_exactness(node: Any, tracer: Tracer) -> str:
     non-negative literal exponent; anything else that can produce a float does
     produce one. So a float or complex literal is ``approx``, and so is true
     division, a power whose exponent could be negative, and a call, whose
-    result nothing here knows the sort of. A comparison or a logical connective
+    result nothing here knows the sort of, but a conversion into a numpy type,
+    ``np.int64(c)``, which is of that type. A comparison or a logical connective
     is a boolean and ``exact``. A name is a scalar parameter, which has its
     sort, or a loop variable or a size, which is an integer. An array read is
     its element sort; its index is an integer by construction and is not a
@@ -4157,6 +4450,11 @@ def _value_exactness(node: Any, tracer: Tracer) -> str:
         if node.name in tracer.params:
             return _sort_exactness(tracer.params[node.name])
         return "exact"
+    conversion = _conversion_dtype(node)
+    if conversion is not None:
+        # A scalar a called kernel is given, converted into its sort's
+        # storage, np.int64(c) (loopty.calls): a value of that type.
+        return _sort_exactness(conversion)
     if isinstance(node, prim.Quotient | prim.Call):
         return "approx"
     if isinstance(node, prim.Power):
@@ -4182,6 +4480,27 @@ def _value_exactness(node: Any, tracer: Tracer) -> str:
             _value_exactness(node.denominator, tracer),
         )
     return "approx"
+
+
+def _conversion_dtype(node: Any) -> np.dtype | None:
+    """The dtype ``node`` converts its one operand into, ``np.int64(c)``, or ``None``.
+
+    A called kernel's scalar parameter is given its argument converted into
+    the storage of the sort it declares, as its contract converts it natively
+    (:meth:`loopty.calls._Inlining.converted`), and the converted value is of
+    that type whatever the operand was.
+    """
+    from loopty.contract import CONVERSIONS
+
+    function = getattr(node, "function", None)
+    if (
+        isinstance(node, prim.Call)
+        and isinstance(function, prim.Variable)
+        and function.name in CONVERSIONS
+        and len(node.parameters) == 1
+    ):
+        return CONVERSIONS[function.name]
+    return None
 
 
 def _sort_exactness(dtype: Any) -> str:
@@ -4551,17 +4870,47 @@ class _MaskedArr(Arr):
 
         An element is read in the dtype :func:`read_elements_as` gave the
         view, if any.
+
+        Fewer indices than the array has axes, ``A[i]``, read a row, and an
+        array of indices, ``u[cell[c]]``, the cells it picks; each is what
+        the trace reads as a view (:class:`_RowView`, :class:`_GatherView`),
+        an :class:`~loopty.arr.Arr` with a ``.dom``, so that a kernel the body
+        calls takes it as an array: the row shares the buffer, and its writes
+        land in it, under the same guards; the gathered cells are a copy,
+        which nothing can write. A row out of range under a false guard is
+        zeros, as a cell is zero there.
         """
+        if isinstance(key, Arr):
+            key = key.numpy()
         try:
             value = super().__getitem__(key)
         except IndexError:
             if _writes_are_masked():
-                return 0
+                return self._zero_row(key)
             raise
+        parts = key if isinstance(key, tuple) else (key,)
+        sliced = any(part is Ellipsis or isinstance(part, slice) for part in parts)
+        if isinstance(value, np.ndarray) and not sliced:
+            gathered = isinstance(key, np.ndarray) or (
+                isinstance(key, tuple)
+                and any(isinstance(part, np.ndarray) for part in key)
+            )
+            if gathered:
+                value = value.copy()
+                value.flags.writeable = False
+            return _MaskedArr(value)
         read_in = self.__dict__.get("_read_in")
         if read_in is not None and isinstance(value, np.generic):
             return read_in.type(value)
         return value
+
+    def _zero_row(self, key: Any) -> Any:
+        """What a read out of range under a false guard answers: zero, or zeros."""
+        given = len(key) if isinstance(key, tuple) else 1
+        if self.domain is not None or self.is_ragged or given >= self.ndim:
+            return 0
+        shape = self.numpy().shape[given:]
+        return _MaskedArr(np.zeros(shape, dtype=self.dtype))
 
 
 def read_elements_as(view: Any, dtype: np.dtype) -> None:
@@ -4687,6 +5036,9 @@ class when:  # noqa: N801 - a context manager written like a statement
             tracer = self.tracer
             sorts = {**tracer.params, **tracer.array_types}
             where = _location(sys._getframe(1))
+            self.condition = _exact_guard(
+                _unguarded(self.condition, tracer, where), tracer
+            )
             _refuse_bitwise(self.condition, sorts, where, truth=True)
             _refuse_arithmetic(self.condition, sorts, where)
             tracer.push_guard(self.condition)
@@ -4953,6 +5305,74 @@ def _writing_differences() -> Iterator[None]:
 # }}}
 
 
+def returned_sort(annotation: Any) -> Any:
+    """The sort a rule returns, from its return annotation, or ``None``.
+
+    ``-> Real``, ``-> Nat``, ``-> Fin[n]`` or a numpy scalar type such as
+    ``-> np.complex128`` declares a rule: a kernel whose body returns a value
+    and writes none of its parameters (:mod:`loopty.calls`). Anything else
+    after the ``->`` is a postcondition, a claim about the parameters, or
+    nothing.
+    """
+    from lanky.prelude import Sort
+
+    if isinstance(annotation, Refined) and _is_sort(annotation.base):
+        return annotation
+    if isinstance(annotation, Sort | FinType):
+        return annotation
+    if isinstance(annotation, type) and issubclass(annotation, np.generic):
+        return annotation
+    return None
+
+
+def _is_sort(value: Any) -> bool:
+    """Whether ``value`` is a sort a rule may return."""
+    from lanky.prelude import Sort
+
+    return isinstance(value, Sort | FinType) or (
+        isinstance(value, type) and issubclass(value, np.generic)
+    )
+
+
+def result_name(names: Collection[str]) -> str:
+    """The name of the one-cell array a rule's value is written into: ``result``.
+
+    ``result_0``, ``result_1``, ... when a parameter of the rule has the name.
+    """
+    name = "result"
+    suffix = 0
+    while name in names:
+        name = f"result_{suffix}"
+        suffix += 1
+    return name
+
+
+def _returning(function: Any, arguments: Sequence[Any]) -> tuple[Any, int | None]:
+    """Call ``function`` and return its value with the line it returned it at.
+
+    The line is that of the ``return`` statement, read off the function's
+    frame as it returns, through ``sys.setprofile``; the profile function in
+    place before is called as well, and put back afterwards.
+    """
+    code = getattr(function, "__code__", None)
+    line: list[int | None] = [None]
+    previous = sys.getprofile()
+
+    def profile(frame: Any, event: str, arg: Any) -> Any:
+        if event == "return" and frame.f_code is code:
+            line[0] = frame.f_lineno
+        if previous is not None:
+            return previous(frame, event, arg)
+        return None
+
+    sys.setprofile(profile)
+    try:
+        value = function(*arguments)
+    finally:
+        sys.setprofile(previous)
+    return value, line[0]
+
+
 def _proposition_of(annotation: Any) -> Any:
     """The postcondition carried by a return annotation, or ``None``.
 
@@ -4984,11 +5404,26 @@ def trace(kernel: Any, arg_types: Any) -> Term:
     The body's effects outside its array parameters are refused once it has
     run: a call :class:`_CallWatch` recognizes, and a change to the state
     :func:`_outside` copied before it started.
+
+    A rule, a kernel whose return annotation is a sort (``-> Real``), returns
+    a value and writes none of its parameters: its term is the kernel that
+    writes that value into a one-cell array of the sort, the term's
+    :attr:`~loopty.term.Term.result`, at the line of the ``return``. A rule
+    whose body returns nothing, and a kernel that returns a value without
+    declaring its sort, are refused.
     """
     function = getattr(kernel, "fn", kernel)
     name = getattr(kernel, "__name__", getattr(function, "__name__", "kernel"))
     types = dict(arg_types)
     post_annotation = types.pop("return", None)
+    returns = returned_sort(post_annotation)
+    if isinstance(returns, Refined):
+        raise TraceError(
+            f"{name} returns {returns}, a refined sort: a claim about the value "
+            "a rule returns has no name to say it by. State it as a theorem about "
+            "the rule, or have the kernel write the value into a parameter and "
+            "claim it after the ->"
+        )
 
     tracer = Tracer(name, types)
     tracer.own = _own_of(function)
@@ -5011,12 +5446,24 @@ def trace(kernel: Any, arg_types: Any) -> Term:
     keywords = sorted(n for n in tracer.integers if is_isl_keyword(n))
     if keywords:
         raise TraceError(_isl_keyword_message(name, keywords))
+    result: SymArr | None = None
+    if returns is not None:
+        written = result_name(types)
+        rtype = ArrType(axes=(1,), dtype=returns, ragged=(False,))
+        result = SymArr(written, rtype, tracer)
+        tracer.array_types[written] = rtype
+        tracer.reflections.reserve([written])
 
     _TRACERS.append(tracer)
     watching = _CallWatch.start()
     try:
         with _writing_differences():
-            function(*arguments)
+            if result is None:
+                value = function(*arguments)
+                line = None
+            else:
+                value, line = _returning(function, arguments)
+            _returned(tracer, name, function, value, result, line, post_annotation)
     except SymbolicBoolError as exc:
         raise TraceError(
             f"{exc}\nA kernel body may not branch on a value it computes: "
@@ -5049,15 +5496,82 @@ def trace(kernel: Any, arg_types: Any) -> Term:
     for _, arrtype in params:
         if isinstance(arrtype, ArrType):
             sizes |= _free_size_names(arrtype.shape_terms)
+    if returns is not None:
+        sizes |= _free_size_names([_fin_bound_of(returns)])
+    if result is not None:
+        params.append((result.name, result.type))
     return Term(
         name=name,
         params=tuple(params),
         sizes=tuple(sorted(sizes - set(types))),
         stmts=tuple(tracer.stmts),
-        post=_proposition_of(post_annotation),
+        post=None if returns is not None else _proposition_of(post_annotation),
         reflected=tracer.reflections.items(),
         tables=tuple(tracer.tables.items()),
+        calls=tuple(tracer.calls),
+        result=None if result is None else result.name,
     )
+
+
+def _fin_bound_of(sort: Any) -> Any:
+    """The bound of a ``Fin`` sort, or ``0`` for any other, which names no size."""
+    return sort.bound if isinstance(sort, FinType) else 0
+
+
+def _returned(
+    tracer: Tracer,
+    name: str,
+    function: Any,
+    value: Any,
+    result: SymArr | None,
+    line: int | None,
+    annotation: Any,
+) -> None:
+    """Record what a body returned: a rule's value, or nothing at all.
+
+    A rule's value is written into its result array where the body returned
+    it. A kernel that is no rule returns nothing, since its results are what
+    it writes into its parameters; a value it returns would be dropped by
+    the compiled kernel, so it is refused, naming the sort to declare.
+    """
+    if tracer.loops:
+        # A return inside a loop; refused by the caller of this, by the loop.
+        return
+    code = getattr(function, "__code__", None)
+    file = os.path.basename(code.co_filename) if code is not None else "<kernel>"
+    if result is None:
+        if value is None:
+            return
+        declared = (
+            ""
+            if annotation is None
+            else f", and what follows its -> is {_shown(annotation)}, a claim about "
+            "its parameters"
+        )
+        raise TraceError(
+            f"{name} returns {_shown(value)}{declared}. A kernel's results are "
+            "what it writes into its parameters, and one that returns a value "
+            "instead is a rule, which declares the sort of the value: "
+            f"def {name}(...) -> Real:, and writes none of its parameters"
+        )
+    where = f"{file}:{line}" if line is not None else f"{file}"
+    if value is None:
+        raise TraceError(
+            f"{name} is declared to return {_shown(result.type.dtype)}, and its "
+            "body returns nothing: a rule returns its value, return reduce_sum(...) "
+            "say. A kernel that writes its parameters declares no sort after ->"
+        )
+    if tracer.stmts:
+        first = tracer.stmts[0]
+        raise TraceError(
+            f"{name} returns a value and writes "
+            f"{_shown(_subscript(first.assignee.array, first.assignee.indices))} "
+            f"at {first.where}. A rule, a kernel that returns its value, writes "
+            "none of its parameters, so that a call of it is a value where it is "
+            "made; return the value, or write it into a parameter and return "
+            "nothing"
+        )
+    result._store((0,), value, where)
 
 
 # }}}

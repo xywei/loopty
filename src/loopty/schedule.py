@@ -3350,9 +3350,11 @@ class Schedule:
             if name not in draft.order and name not in draft.reductions
         ]
         if unknown:
-            listed = ", ".join(repr(name) for name in unknown)
-            verb = "is not an iname" if len(unknown) == 1 else "are not inames"
-            raise ValueError(f"{listed} {verb} of {self._term.name}")
+            raise ValueError(
+                _not_loops(
+                    self._term, unknown, (*draft.order, *draft.reductions)
+                )
+            )
         for name, tag in inames.items():
             try:
                 parse_tag(tag)
@@ -3419,7 +3421,9 @@ class Schedule:
         if iname in self._reductions:
             return self._split_reduction(iname, factor, inner, outer)
         if iname not in self._order:
-            raise ValueError(f"{iname!r} is not an iname of {self._term.name}")
+            raise ValueError(
+                _not_loops(self._term, [iname], (*self._order, *self._reductions))
+            )
         _check_factor(factor)
         draft = self._draft()
         text = f"split({iname}, {factor})"
@@ -3911,7 +3915,9 @@ class Schedule:
         """
         for iname in (first, second):
             if iname not in self._order:
-                raise ValueError(f"{iname!r} is not an iname of {self._term.name}")
+                raise ValueError(
+                    _not_loops(self._term, [iname], (*self._order, *self._reductions))
+                )
         if first == second:
             raise ValueError(f"tile() needs two different loops, not {first!r} twice")
         for factor in (first_factor, second_factor):
@@ -4659,7 +4665,7 @@ class Schedule:
             )
             raise ValueError(
                 f"{text}: {array} is {what}, and only an array the program "
-                "makes with Arr.zeros_like is its own to store or not"
+                "makes with Arr.zeros_like or Arr.zeros is its own to store or not"
             )
         if array in self._substituted:
             raise ValueError(f"{text}: {array} is substituted already")
@@ -4857,9 +4863,10 @@ class Schedule:
         That is a storage decision and not a reordering, and it is legal when
         three things hold, each asked before anything is rewritten:
 
-        * the array is the program's own, made with ``Arr.zeros_like``,
-          which no caller sees, one statement stores it besides the zeros,
-          once per cell, and reads none of it, and the others read it in
+        * the array is the program's own, made with ``Arr.zeros_like`` or
+          ``Arr.zeros`` of a dense shape (one over a domain is not kept in a
+          window), which no caller sees, one statement stores it besides the
+          zeros, once per cell, and reads none of it, and the others read it in
           values, at indices isl reads exactly: a ``ValueError`` names what
           stands in the way otherwise, as it does a loop of theirs with a
           tag that runs its instances in no order (``g.0``, ``l.0``, ``ilp``):
@@ -4899,6 +4906,18 @@ class Schedule:
         arrtype = term.array_types.get(array)
         rank = 0 if arrtype is None else len(arrtype.axes)
         head = f"contract({array!r})"
+        if (
+            arrtype is not None
+            and arrtype.domain is not None
+            and array in dict(term.temporaries)
+        ):
+            # A placement takes a cell's indices to its slot, axis by axis, and
+            # the cells of an array over a domain are its points (#74).
+            raise win.WindowError(
+                f"{head}: {array} is over the domain {arrtype.domain}, whose "
+                "cells a window does not place yet; keep it whole, or compute "
+                f"it where it is read, substitute({array!r})"
+            )
         given = (
             None
             if placement is None
@@ -5484,9 +5503,11 @@ class Schedule:
         """
         from loopty.flow import definedness
 
+        # led by the step, so that two steps' facts, a substitution's and a
+        # window's after one fusion, read apart in a ledger that lists both
         statement = (
-            f"every cell of {array} that {self._term.name} reads, {producer.id} "
-            "has stored by the time it is read"
+            f"for {text}, every cell of {array} that {self._term.name} reads, "
+            f"{producer.id} has stored by the time it is read"
         )
         verdict = definedness(self._term, array, [producer], readers)
         message = ""
@@ -7540,6 +7561,47 @@ def _shifts(shift: int | tuple[int, ...], depth: int, text: str) -> tuple[int, .
             f"shift, outermost first, not {shift!r}"
         )
     return values
+
+
+def _not_loops(term: Term, unknown: Sequence[str], loops: Iterable[str]) -> str:
+    """Say that ``unknown`` names no loop of ``term``, and what its loops are.
+
+    A loop of a kernel the body calls is a loop of the caller once the call
+    is inlined (:mod:`loopty.calls`), renamed where the caller already has
+    the name: ``for n in a.dom`` of ``fill``, called where ``n`` is a size,
+    is ``n_0``, which the message names.
+    """
+    from loopty.trace import reductions_in
+
+    listed = ", ".join(repr(name) for name in unknown)
+    verb = "is not an iname" if len(unknown) == 1 else "are not inames"
+    known = list(dict.fromkeys(loops))
+    message = f"{listed} {verb} of {term.name}"
+    if known:
+        message += f"; its loops are {', '.join(known)}"
+    notes = []
+    statements = {stmt.id: stmt for stmt in term.stmts}
+    for call in term.calls:
+        made: list[str] = []
+        for stmt_id in call.statements:
+            stmt = statements.get(stmt_id)
+            if stmt is None:
+                continue
+            made.extend(stmt.inames)
+            for reduction in reductions_in(stmt.expr):
+                made.extend(reduction.inames)
+        for name in unknown:
+            for loop in dict.fromkeys(made):
+                if loop not in call.inames and re.fullmatch(
+                    rf"{re.escape(name)}_\d+", loop
+                ):
+                    notes.append(
+                        f"{call.callee}'s loop {name}, inlined at {call.where}, is "
+                        f"{loop} here, named apart from a name {term.name} has"
+                    )
+    if notes:
+        message += "; " + "; ".join(dict.fromkeys(notes))
+    return message
 
 
 def _check_factor(factor: int) -> None:

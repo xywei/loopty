@@ -25,7 +25,7 @@ Run this file three ways.
 
 ``lanky check examples/fusion.py``
     The kernels' obligations and the program's, among them the definedness
-    of ``f``: every cell ``divergence`` reads, ``flux`` stored before it.
+    of ``f``, and the casts of each schedule of the file, under the program.
 
 ``loopty run examples/fusion.py``
     Every schedule of the file compiled and compared with the native run,

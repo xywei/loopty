@@ -47,6 +47,7 @@ NAMES = (
     "quadrature",
     "layer_potential",
     "sum_factorization",
+    "calls",
     "assembly",
     "storage_layouts",
 )
@@ -159,6 +160,7 @@ KERNELS = {
     "quadrature": {"mass_action"},
     "layer_potential": {"single_layer"},
     "sum_factorization": {"along_r", "along_s", "weak_derivative"},
+    "calls": {"dot", "matvec", "csr", "integrate", "element_mass", "mass_matrices"},
     "assembly": {"mass_action"},
     "storage_layouts": {"stored_table", "unflatten"},
     "travel": {
@@ -241,7 +243,13 @@ def test_the_spmv_ledger_has_both_deciders_and_the_accumulations_class() -> None
     # the sum is ``approx``. ``reassoc`` is not something a trace may assume;
     # it is what a schedule lowers an accumulation to when it reorders one, and
     # that fact is emitted by the schedule, below.
-    exactness = [fact for fact in facts if fact["kind"] == "exactness"]
+    # lanky check lists the casts of the file's schedule too (#191), among
+    # them the reassociation realize() makes; the kernel's own is approx
+    exactness = [
+        fact
+        for fact in facts
+        if fact["kind"] == "exactness" and not fact["id"].startswith("cast:")
+    ]
     assert exactness, "the accumulation's exactness class was never stated"
     assert all("is approx" in fact["statement"] for fact in exactness), exactness
     assert all(fact["status"] == "decided" for fact in exactness)
@@ -261,10 +269,10 @@ def test_realizing_the_spmv_accumulation_records_the_reassociation() -> None:
 def test_the_scan_postcondition_and_its_theorem_are_in_the_ledger() -> None:
     _result, facts = _invoke("spmv", "check")
     post = _statuses(facts, kind="postcondition", owner="scan")
-    # Nobody can decide the recurrence from the term alone; whether it is
-    # assumed, property-tested or proved depends on which oracles are installed,
-    # and all three are honest answers.
-    assert post and set(post) <= {"assumed", "tested", "proved"}, post
+    # Decided from the term (#113): every cell of off is stored once, and read
+    # after its store, so what each statement stores is what the kernel leaves;
+    # proved where Lean is installed.
+    assert post and set(post) <= {"decided", "proved"}, post
 
     theorem = _statuses(facts, owner="scan_monotone")
     assert theorem and set(theorem) <= {"tested", "proved", "certified"}, theorem
@@ -887,7 +895,13 @@ def test_the_fusion_demo_prints_the_refusals_and_three_kernels() -> None:
 
 def test_the_fusion_demo_states_the_definedness_of_its_intermediate() -> None:
     _result, facts = _invoke("fusion", "check")
-    (fact,) = [fact for fact in facts if fact["kind"] == "definedness"]
+    # the substitution's own definedness, a cast of the file's schedule, is
+    # listed too (#191)
+    (fact,) = [
+        fact
+        for fact in facts
+        if fact["kind"] == "definedness" and not fact["id"].startswith("cast:")
+    ]
     assert (fact["status"], fact["decided_by"]) == ("decided", "isl")
     assert fact["owner"] == "burgers_rhs"
 
@@ -967,7 +981,9 @@ def test_the_travel_demo_decides_its_requirements_or_checks_them() -> None:
         if fact["kind"] == "postcondition"
         and fact["owner"] in ("number", "scan", "scan_flat")
     ]
-    assert [fact["status"] for fact in post] == ["tested", "tested", "tested"]
+    # decided from the term, and tested on the native runs all the same (#113)
+    assert [fact["status"] for fact in post] == ["decided", "decided", "decided"]
+    assert [fact["provenance"]["native"] for fact in post] == ["tested"] * 3
 
 
 def test_the_travel_demo_decides_a_flat_access_where_the_scan_was_called() -> None:
@@ -1008,6 +1024,30 @@ def test_the_travel_demo_prints_the_check_it_compiles() -> None:
 # }}}
 
 
+# {{{ calls.py
+
+
+def test_the_calls_demo_owes_what_each_call_owes_and_compiles_its_rules() -> None:
+    """A row in bounds, a gather by type, the postcondition after each call."""
+    _result, facts = _invoke("calls", "check")
+    statements = {fact["statement"]: fact for fact in facts}
+    row = next(s for s in statements if s.startswith("A[i], the row passed to dot"))
+    assert statements[row]["status"] == "decided"
+    gathers = [s for s in statements if s.startswith("the cells X[cell[c]] picks")]
+    assert [statements[s]["decided_by"] for s in gathers] == ["type"]
+    restated = [f for f in facts if f["kind"] == "postcondition-in-scope"]
+    assert [(f["owner"], f["decided_by"]) for f in restated] == [
+        ("mass_matrices", "call")
+    ]
+    result, facts = _invoke("calls", "run")
+    assert "integrate: takes the function f" in result.stdout
+    owners = {f["owner"] for f in facts if f["kind"] == "agreement"}
+    assert owners == {"dot", "matvec", "csr", "element_mass", "mass_matrices"}
+
+
+# }}}
+
+
 # {{{ assembly
 
 
@@ -1036,10 +1076,11 @@ def test_the_assembly_owes_its_sum_and_not_distinct_writes_of_y() -> None:
         if fact["kind"] == "disjoint-writes"
     ]
     assert disjoint == ["yl"]
+    # the kernel's own; the reassociation a schedule records has no op
     (update,) = [
         fact
         for fact in facts
-        if fact["kind"] == "exactness" and fact["provenance"]["op"] == "update"
+        if fact["kind"] == "exactness" and fact["provenance"].get("op") == "update"
     ]
     assert update["statement"] == (
         "the accumulation into y[cell[c, k]] over c, k is approx"

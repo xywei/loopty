@@ -53,6 +53,7 @@ for, or a domain it cannot enumerate at the given sizes, is an
 from __future__ import annotations
 
 import builtins
+import functools
 import operator
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -65,6 +66,8 @@ from lanky.terms import Abs, evaluate, init_args, render
 
 from loopty.arr import Arr
 from loopty.contract import (
+    CONVERSIONS,
+    convert_scalar,
     native_copy,
     native_scalar,
     native_storage,
@@ -141,6 +144,12 @@ _FUNCTIONS = {
     "real": np.real,
     "imag": np.imag,
     "conj": np.conj,
+    # A scalar a called kernel converts into its sort's storage, as its
+    # contract does natively (loopty.calls): np.float32 and the rest.
+    **{
+        name: functools.partial(convert_scalar, dtype)
+        for name, dtype in CONVERSIONS.items()
+    },
 }
 
 _COMPARISONS = {
@@ -342,6 +351,19 @@ class _Run:
         """
         if any(typ.ragged):
             raise InterpretError(f"the temporary {name} is ragged")
+        dtype = native_storage(typ.dtype) or np.dtype(np.float64)
+        if typ.domain is not None:
+            # Over the domain at the arguments' sizes, boxed, as the lowering
+            # stores it; its cells are read and written at its points.
+            needed = typ.domain.size_names()
+            missing = sorted(needed - set(self.sizes))
+            if missing:
+                raise InterpretError(
+                    f"the temporary {name} is over {typ.domain}, and the arguments "
+                    f"fix no {', '.join(missing)}"
+                )
+            sizes = {size: int(self.sizes[size]) for size in needed}
+            return Arr.zeros(typ.domain, dtype=dtype, **sizes)
         try:
             shape = tuple(int(evaluate(axis, dict(self.sizes))) for axis in typ.axes)
         except Exception as exc:  # noqa: BLE001 - said as the reason
@@ -349,7 +371,6 @@ class _Run:
                 f"the temporary {name} has no shape at the sizes "
                 f"{dict(self.sizes)}: {exc}"
             ) from exc
-        dtype = native_storage(typ.dtype) or np.dtype(np.float64)
         return Arr(np.zeros(shape, dtype=dtype))
 
     # {{{ running
@@ -1039,9 +1060,17 @@ class _Run:
         raise _Unknown(name)
 
     def call(self, node: prim.Call, env: Mapping[str, Any]) -> Any:
-        """A call of a library function, by the name the term gives it."""
+        """A call of a library function, by the name the term gives it.
+
+        A parameter of a function sort (``f: Fn[Fin[3], Real]`` of a rule that
+        takes a rule, :mod:`loopty.calls`) is called as the function it was
+        given, as the native run calls it.
+        """
         function = node.function
         name = function.name if isinstance(function, prim.Variable) else None
+        given = self.scalars.get(name) if name is not None else None
+        if callable(given) and not isinstance(given, np.generic):
+            return given(*(self.value(arg, env) for arg in node.parameters))
         numpy_function = _FUNCTIONS.get(name) if name is not None else None
         if numpy_function is None:
             raise InterpretError(
