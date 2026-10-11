@@ -480,12 +480,25 @@ class LoopyExecutor:
         term, kernel, lowering, target_name = _resolve(obj, self.target)
         names = [name for name, _ in term.params]
         supplied = {**dict(zip(names, args, strict=False)), **kwargs}
+        if term.result is not None and term.result not in supplied:
+            # A rule's value is written into a one-cell array of its term's,
+            # which nobody calling the rule passes (loopty.calls).
+            from loopty.faithful import with_result
+
+            kwargs = {**kwargs, term.result: with_result(term, {})[term.result]}
+            supplied[term.result] = kwargs[term.result]
         check_arguments(
             dict(term.params),
             supplied,
             _entry_offsets(term, lowering),
             written=lowering.results,
         )
+        if term.temporaries:
+            # A program's own array whose length the sizes make negative,
+            # which numpy refuses natively when the program makes it.
+            from loopty.contract import made_extents, resolve_sizes
+
+            made_extents(term.temporaries, resolve_sizes(dict(term.params), supplied))
         # The differential runs on copies; this run writes in place.
         writeable_outputs(dict(term.params), supplied, lowering.results)
         inherited_storage(term.array_types, term.temporaries_like, supplied)
@@ -665,6 +678,9 @@ class LoopyExecutor:
         from loopty.arr import Arr
 
         term, _lowered, lowering, target = _resolve(schedule, self.target)
+        from loopty.faithful import with_result
+
+        args = with_result(term, args)
         # Before the copies: ``_copy`` gives every argument a buffer of its own,
         # which is exactly what hides an alias between two of them, and the
         # native run would otherwise be the first thing to meet a bad index.

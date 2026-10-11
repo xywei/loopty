@@ -257,6 +257,33 @@ table of row starts. Both compiled runs agree with the native one.
   false). `--show-lean` prints the Lean, and
   [docs/lean-checks.md](https://github.com/xywei/loopty/blob/main/docs/lean-checks.md)
   has the details and the coverage.
+- **A kernel is a rule with a domain of its own.** A kernel body calls a
+  kernel as Python calls a function, and the call is inlined with binders of
+  its own, which is loopy's substitution rule with a loop of its own (loopy
+  #1044) expanded where it is used. A rule returns its value:
+
+  ```python
+  @kernel
+  def dot(a: Arr[Fin[n], Real], b: Arr[Fin[n], Real]) -> Real:
+      return reduce_sum(a[k] * b[k] for k in a.dom)
+
+  @kernel
+  def matvec(A: Arr[Fin[m], Fin[n], Real], x: Arr[Fin[n], Real],
+             y: Arr[Fin[m], Real]):
+      for i in y.dom:
+          y[i] = dot(A[i], x)
+  ```
+
+  What `dot`'s contract checks at each call natively, the row `A[i]` in
+  bounds, an index argument in its sort, two rows apart where it writes
+  one, `matvec` owes at every point it calls `dot`, as facts isl decides
+  and Lean proves, and a callee's postcondition holds after each call,
+  restated of what it was passed. An argument is evaluated once, when the
+  call is made, as in Python, and a scalar is converted into the sort the
+  callee declares, as its contract converts it natively: `same(x[i])` of a
+  rule taking `s: np.float32` is `np.float32(x[i])` in `matvec`'s term,
+  and a value the contract refuses (a real for `Int`) is refused where it
+  is passed.
 - **It plugs into a proof host.** loopty registers a theory, an isl oracle, an
   executor and a `run` verb with [lanky](https://github.com/xywei/lanky), so a
   residual obligation an oracle cannot decide is an ordinary theorem a person can
@@ -295,8 +322,16 @@ release; the CHANGELOG says when one does.
   in the footprints, and it orders the instructions of the one loopy kernel
   the program lowers to. `LoopyExecutor().run(program, ...)` runs it,
   `Schedule(program)` schedules it, and `loopty run` compares every program in
-  a file with its native run, as it does a kernel. A body that does anything
-  to an argument but pass it to a kernel, or make an array like it, is refused
+  a file with its native run, as it does a kernel. A program may also make
+  an array of a declared shape, whose sizes it reads off its arguments as it
+  does natively, `Arr.zeros(TRIANGLE, n=x.dom.size)` over a domain or
+  `Arr.zeros((x.dom.size, 3))`, and a callee may take an array over a
+  `Where`, `Sigma` or union domain, whose sizes are unified across the calls
+  and whose points two calls given it have to agree on, compared as isl sets
+  (#74); an array the program makes over a domain is stored boxed, and
+  `Schedule.pack` packs an argument over one. A body that does anything to
+  an argument but pass it to a kernel, make an array like it, or read its
+  sizes, is refused
   with a `TraceError` naming the fix.
 - Facts that travel between a program's calls (`loopty.hypotheses`). A
   kernel's requirements on its inputs are its argument types, and three of
@@ -725,8 +760,9 @@ release; the CHANGELOG says when one does.
   assembled.
 - The argument contract, enforced at every entry point that runs a kernel
   (compiled, differential and native): two distinct array parameters may not
-  share storage, a ragged argument has to agree with the counts array its type
-  names and with any offsets passed alongside it, an argument over a domain has
+  share storage where the kernel writes either, a ragged argument has to
+  agree with the counts array its type names and with any offsets passed
+  alongside it, an argument over a domain has
   to have the declared domain's points at the sizes of the call, and a value
   of a refined sort such as `Fin[m]` has to be one — an array element and a
   scalar argument alike, and being one means being a finite whole number in
@@ -846,7 +882,10 @@ release; the CHANGELOG says when one does.
   element sort for it, and every call has to read a ragged family's rows
   through the same offsets; a loop in the body whose trip count is an
   argument (a host loop) is refused, and so are an array made like a ragged
-  one and a callee with an array over a `Where`, `Sigma` or union domain. A
+  one, an array made over a union of pieces, which is stored as one box
+  (#208), and an array over a domain of a `Fin[m]` or `Nat` element sort
+  that an earlier call wrote and a later one is given, whose cells no
+  checked point reads yet (#209). A
   temporary made like a parameter, `Arr.zeros_like(u)`, has `u`'s dtype
   natively, so the compiled program refuses a `u` whose dtype does not hold
   what the compiled temporary holds: `float64` for `Real`, the dtype itself
@@ -940,6 +979,30 @@ release; the CHANGELOG says when one does.
   which no frame names, is named `table`. A table holds finite numbers
   (#193), and a loop bounded by a value read from one is refused when
   traced (#194).
+- A kernel called inside another's loops (`loopty.calls`) is given whole
+  arrays, rows of dense, ragged and table arrays, the cells an index row
+  picks, scalars and functions; a row of an array over a domain is not
+  passed (a whole one is), and the cells a gather picks are a copy natively,
+  so a called kernel does not write them (#205). Two arguments over one array
+  the callee writes have to be two rows of it, decided at every call; a
+  whole array and a part of it are refused, and so is an argument that
+  reads an array the callee writes, since natively it is read once, when
+  the call is made, a value a function given captured included. A rule's claim about its value (`-> Real & (...)`)
+  is refused: state it as a theorem about the rule (#206). A call made
+  inside a sum over `Fin[...]` of a size, rather than over an array's `.dom`,
+  has points the trace does not see, and its facts are `assumed` (#207). A rule that
+  takes a function is compiled where it is called, not on its own. A real
+  given for a numpy integer sort (`np.int8`) is truncated in both runs, and
+  one outside the type converts as C leaves undefined and numpy warns; a
+  `uint64` value given for `Fin[m]`, `Nat` or `Int` is refused, since the
+  contract refuses one past `int64` (#232). A call that reads one cell of a
+  row, `first(A[i])`, leaves `A`'s second size in no loop, which fails to
+  compile (#220). A domain
+  declared outside an annotation, for `Arr.zeros(TRIANGLE, ...)` in a
+  program, names its binders and sizes as lanky variables, `i, j, n =
+  Var("i"), Var("j"), Var("n")` (#210). A program's array over a domain is
+  not kept in a window: `contract` refuses it, naming the fix, keep it whole
+  or `substitute` it (#244).
 - `loopty.math` has eight functions (#184), and numpy's own functions on a
   traced value are refused rather than read as them (#195). A function
   only a guard calls is refused when lowered: loopy resolves a function by
@@ -1295,7 +1358,7 @@ loopty is loop + ty, for types: loops, typed. It follows `loopy`, `sumpy`, and
 
 - [docs/quickstart.md](https://github.com/xywei/loopty/blob/main/docs/quickstart.md): the two demos end to end,
   with the output the commands actually print.
-- [examples/README.md](https://github.com/xywei/loopty/blob/main/examples/README.md): all thirteen demos, with every
+- [examples/README.md](https://github.com/xywei/loopty/blob/main/examples/README.md): all seventeen demos, with every
   console block regenerated by `scripts/refresh_example_outputs.py`.
 - [docs/device-runs.md](https://github.com/xywei/loopty/blob/main/docs/device-runs.md) and
   [docs/device-runs/](https://github.com/xywei/loopty/tree/main/docs/device-runs): the demos run on real OpenCL
