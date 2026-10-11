@@ -59,6 +59,9 @@ All notable changes to loopty are recorded here. The format follows
   cast facts have a `Cast` as their term where they had none (a
   substitution's definedness fact an `IslOnly`, which says why Lean is not
   asked).
+- The tests run with lanky's Lean oracle off, as CI runs them, but the ones
+  marked `lean` (`tests/test_lean_checks.py`), so that the suite passes where
+  Lean is installed and proves what the other tests read as `decided isl`.
 
 ## [0.2.0] - 2026-10-11
 

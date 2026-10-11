@@ -34,6 +34,9 @@ lanky_obligations = pytest.importorskip(
     "lanky.obligations", reason="this lanky states no obligations for Lean"
 )
 
+#: Lean is left on for these, where it is installed (tests/conftest.py).
+pytestmark = pytest.mark.lean
+
 from lanky.lean import statement_of  # noqa: E402
 from lanky.ledger import Status  # noqa: E402
 from lanky.prelude import Real  # noqa: E402
