@@ -34,9 +34,11 @@ loopty writes (:func:`loopty.flow.domain_set`,
 
 :meth:`Description.predicate` reads it back as a lanky proposition over the
 coordinates it is given: the constraint text is parsed, here, by a reader of
-the isl syntax loopty writes (chained comparisons, ``and``, ``or``, sums,
-integer multiples, ``floord(e, k)`` and ``e % k``), and anything else is
-refused, which leaves the fact to isl with the reason.
+the isl syntax loopty writes, and a person writes for
+:meth:`loopty.schedule.Schedule.affine` (chained comparisons, ``and``, ``or``,
+sums, integer multiples, ``2 i`` as well as ``2 * i``, ``floord(e, k)``,
+``floor(e / k)`` and ``e % k``), and anything else is refused, which leaves the
+fact to isl with the reason.
 """
 
 from __future__ import annotations
@@ -465,8 +467,9 @@ class _Reader:
 
     def term(self) -> Any:
         out = self.factor()
-        while self.peek() in ("*", "%", "mod"):
-            operator = self.take()
+        while self.peek() in ("*", "%", "mod") or self._implicit(out):
+            # isl writes a multiple as 2 i as well as 2 * i
+            operator = "*" if self._implicit(out) else self.take()
             right = self.factor()
             if operator == "*":
                 if not (isinstance(out, int) or isinstance(right, int)):
@@ -478,10 +481,31 @@ class _Reader:
                 out = Remainder(out, right)
         return out
 
+    def _implicit(self, left: Any) -> bool:
+        """Whether a number is followed by what it multiplies: ``2 i``, ``2 (i)``."""
+        token = self.peek()
+        if not isinstance(left, int) or token is None:
+            return False
+        if token in ("(", "floord", "floor"):
+            return True
+        named = re.fullmatch(r"[A-Za-z_][A-Za-z_0-9']*", token) is not None
+        return named and token not in _WORDS
+
     def factor(self) -> Any:
         token = self.peek()
         if token is None:
             raise Unstatable(f"{self.text!r} ends early")
+        if token == "floor":
+            # isl's floor(e / k), the same as floord(e, k)
+            self.take()
+            self.take("(")
+            numerator = self.expression()
+            self.take("/")
+            denominator = self.factor()
+            self.take(")")
+            if not (isinstance(denominator, int) and denominator > 0):
+                raise Unstatable(f"floor by {denominator} in {self.text!r}")
+            return FloorDiv(numerator, denominator)
         if token == "(":
             self.take()
             inner = self.expression()

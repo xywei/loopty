@@ -1899,12 +1899,18 @@ def kernel_definedness_facts(
     """
     if term.scopes or term.temporaries:
         return []
-    from loopty.obligations import defined_obligation, written_before
+    from loopty.obligations import defined_obligation, stated_writers, written_before
 
     facts: list[Fact] = []
     arrays = list(dict.fromkeys(stmt.assignee.array for stmt in term.stmts))
     for array in arrays:
-        writers = [stmt for stmt in term.stmts if stmt.assignee.array == array]
+        # a write under a guard isl cannot state may not have stored the cell
+        # its domain says, so it witnesses nothing (stated_writers)
+        writers = stated_writers(
+            term, [stmt for stmt in term.stmts if stmt.assignee.array == array]
+        )
+        if not writers:
+            continue
         places = [
             (stmt, tuple(indices), inames, domain)
             for stmt in term.stmts
@@ -2468,7 +2474,7 @@ def _program_definedness_statement(
     with. isl's last writer is the witness; a read or a write it cannot list
     leaves the fact to isl.
     """
-    from loopty.obligations import defined_obligation, written_before
+    from loopty.obligations import defined_obligation, stated_writers, written_before
 
     places = [
         (stmt, tuple(indices), inames, domain)
@@ -2476,7 +2482,8 @@ def _program_definedness_statement(
         for name, indices, kind, inames, domain in flow.statement_accesses(stmt, term)
         if name == array and kind in ("read", "acc")
     ]
-    stores = (*zeros, *writers)
+    # a write isl cannot list counts for nothing, as flow.definedness counts it
+    stores = tuple(stated_writers(term, (*zeros, *writers)))
     try:
         found = written_before(term, array, stores, places)
     except Exception:  # noqa: BLE001 - a question isl cannot be asked is isl's

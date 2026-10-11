@@ -2370,16 +2370,19 @@ class Cast:
     ``monotone`` (the order after the step runs every dependence forward).
     ``schedule`` is the schedule the steps start from, which holds the
     kernel's term, its source order and its first layout, and ``steps`` are
-    every step from there to this one. A refused ``monotone`` cast carries
-    the dependence it reverses and isl's pair as ``refusal``. Lean states it
-    from those (:func:`loopty.obligations.cast_obligation`); isl decided it
-    when the step was taken, so the question is not asked again.
+    every step from there to this one. ``refuted`` says that isl refused the
+    cast, and a refused ``monotone`` cast carries the dependence it reverses
+    and isl's pair as ``refusal``, at which Lean proves it false; a refused
+    cast with no such pair is not offered to Lean. Lean states it from those
+    (:func:`loopty.obligations.cast_obligation`); isl decided it when the
+    step was taken, so the question is not asked again.
     """
 
     schedule: Any
     steps: tuple[Step, ...]
     kind: str
     refusal: Any = None
+    refuted: bool = False
 
     def lean_obligation(self) -> Any:
         """How Lean is to check this cast (see :mod:`lanky.obligations`)."""
@@ -4501,7 +4504,9 @@ class Schedule:
                 detail=verdict.detail,
                 step=recipe,
                 reason=message,
-                term=Cast(self._first(), records, "bijective"),
+                term=Cast(
+                    self._first(), records, "bijective", refuted=verdict.ok is False
+                ),
             )
         )
         if not verdict.ok:
@@ -4566,6 +4571,7 @@ class Schedule:
                     records,
                     "monotone",
                     refusal=None if bad is None else (bad[0], bad[1]),
+                    refuted=refused,
                 ),
             )
         )

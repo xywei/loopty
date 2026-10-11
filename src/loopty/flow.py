@@ -485,7 +485,12 @@ def cell_set(
     if names is None:
         from loopty.domain import dimension_names
 
-        names = dimension_names(len(arrtype.axes), _names_in(arrtype.axes))
+        # Nor a name the access's indices use: a ragged row's bound is
+        # cnt[e] with e the access's index, written in the access's loops,
+        # and a loop called a0 would otherwise read as the cell's first
+        # coordinate where the bound is read back (loopty.description).
+        avoid = _names_in(arrtype.axes) | _names_in(tuple(indices or ()))
+        names = dimension_names(len(arrtype.axes), avoid)
     bounds: list[Any] = []
     for axis, (size, ragged) in enumerate(
         zip(arrtype.axes, arrtype.ragged, strict=True)

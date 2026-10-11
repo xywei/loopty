@@ -167,7 +167,7 @@ def check(paths: list[Path]) -> list[dict[str, Any]]:
                 said = provenance.get("lean_counterexample", "")
                 outcome = (
                     "refuted, negation proved"
-                    if said.startswith("Lean proved the claim false")
+                    if provenance.get("lean_refuted_by")
                     else "refuted, negation not proved"
                 )
                 why = said

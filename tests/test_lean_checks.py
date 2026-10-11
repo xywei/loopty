@@ -126,13 +126,28 @@ def test_a_call_renames_the_description_with_the_set() -> None:
         ("i - j > -3", "i - j > -3"),
         ("(0 <= i) or i >= n", "0 <= i or i >= n"),
         ("2 * i + 1 <= n", "2*i + 1 <= n"),
+        # isl's own spellings, which a map given to affine() uses
+        ("b0 = 2 a0 + a1", "b0 == 2*a0 + a1"),
+        ("2 b1 <= a1 < 2 b1 + 2", "2*b1 <= a1 and a1 < 2*b1 + 2"),
+        ("b1 = floor((a1) / 4)", "b1 == a1 // 4"),
+        ("-2 (i + 1) >= n", "-2*(i + 1) >= n"),
     ],
 )
 def test_the_reader_reads_the_text_loopty_writes(text: str, expected: str) -> None:
     assert render(parse(text)) == expected
 
 
-@pytest.mark.parametrize("text", ["exists e: i = 2e", "i * j < n", "i % n = 0", "i <"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "exists e: i = 2e",
+        "i * j < n",
+        "i % n = 0",
+        "i <",
+        "i 2 < n",
+        "floor(i / n) = 0",
+    ],
+)
 def test_the_reader_refuses_what_loopty_does_not_write(text: str) -> None:
     with pytest.raises(Unstatable):
         parse(text)
@@ -338,6 +353,29 @@ def test_a_refused_cast_is_stated_with_isls_pair() -> None:
     assert counter.point["t_outer_a1"] == 0 and counter.point["i_outer_a1"] == 1
 
 
+def test_a_refused_cast_with_no_pair_is_not_offered_to_lean_as_a_claim() -> None:
+    # A refused cast is checked at isl's pair; with no pair to check (a
+    # refused bijection, or a reversal isl did not attribute), its parts are
+    # not offered as a claim, which would read proved where isl refused.
+    from dataclasses import replace
+
+    from loopty.obligations import REFUTED_UNSTATED
+
+    with pytest.raises(IllegalCast) as refused:
+        Schedule(stencil().jacobi, sizes={"nt": 8, "nx": 8}).affine(
+            "{ [t, i] -> [a, b] : a = t + i and b = 0 }"
+        )
+    fact = refused.value.fact
+    assert fact.kind == "bijective" and fact.term.refuted
+    assert fact.term.lean_obligation().declined == REFUTED_UNSTATED
+    with pytest.raises(IllegalCast) as reversed_:
+        Schedule(stencil().jacobi, sizes={"nt": 8, "nx": 8}).tile("t", "i", 4, 4)
+    cast = reversed_.value.fact.term
+    assert cast.refuted and cast.lean_obligation().counterexample is not None
+    unattributed = replace(cast, refusal=None)
+    assert unattributed.lean_obligation().declined == REFUTED_UNSTATED
+
+
 def test_a_cast_after_a_substitution_is_left_to_isl() -> None:
     module = load(EXAMPLES / "fusion.py")
     schedule = next(
@@ -458,6 +496,131 @@ def test_an_array_the_kernel_reads_where_it_wrote_it_has_a_definedness_fact() ->
     assert [piece.disjunct for piece in pieces] == [0, 1]
     # jacobi reads what u held at its first time level: no fact
     assert not [f for f in stencil().jacobi.facts() if f.kind == "definedness"]
+
+
+GUARDED = """
+from __future__ import annotations
+
+from lanky.prelude import Real
+from loopty import Arr, Fin, kernel, when
+
+
+@kernel
+def guarded(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real], z: Arr[Fin[n], Real]):
+    for i in y.dom:
+        with when(x[i] > 0):
+            y[i] = 1.0
+    for j in z.dom:
+        z[j] = y[j]
+"""
+
+
+def test_a_write_under_a_guard_isl_cannot_state_shows_nothing_defined(
+    tmp_path: Path,
+) -> None:
+    # S0 stores y[i] only where x[i] > 0, which isl cannot state, so its
+    # domain is every i: an instance there is no witness that y[i] was
+    # stored, and S1's read of y is not claimed defined (it was, wrongly,
+    # decided by isl and proved by Lean from the wide domain).
+    path = tmp_path / "guarded.py"
+    path.write_text(GUARDED)
+    module = load(path)
+    first, _second = module.guarded.term.stmts
+    assert first.unnarrowed
+    assert not [f for f in module.guarded.facts() if f.kind == "definedness"]
+
+
+def test_a_ragged_rows_bound_reads_back_whatever_the_loops_are_called() -> None:
+    # The bound of row r + 1 is cnt[r + 1], in the access's loops; a loop
+    # called like a dimension of the cell set (a0) was read as that
+    # dimension, which stated cnt[a0 + 2] for Lean where isl had cnt[a0 + 1].
+    import pymbolic.primitives as prim
+
+    from loopty import flow
+    from loopty.idx import Reflections
+    from loopty.term import ArrType
+
+    arrtype = ArrType(
+        axes=(prim.Variable("n"), prim.Variable("cnt")),
+        dtype=Real,
+        ragged=(False, True),
+    )
+    for row in ("r", "a0", "a1"):
+        indices = (Var(row) + 1, Var("j"))
+        cells = flow.cell_set(arrtype, indices, reflections=Reflections())
+        described = description_of(cells)
+        predicate = described.predicate([Var("c0"), Var("c1")], others={row: Var(row)})
+        assert f"c1 < cnt[{row} + 1]" in render(predicate), row
+
+
+def _cell_sets(path: Path) -> Iterator[tuple[str, Any]]:
+    """Every set of cells an in-bounds fact of a file states its goal over."""
+    module = load(path)
+    for found in kernels_of(module):
+        for fact in found.facts():
+            state = getattr(getattr(fact.term, "lean", None), "state", None)
+            if fact.kind != "in-bounds" or state is None:
+                continue
+            for arg in getattr(state, "args", ()):
+                if isinstance(arg, isl.Set) and description_of(arg) is not None:
+                    yield f"{found.__name__}: {fact.statement}", arg
+
+
+@pytest.mark.parametrize(
+    "path",
+    [*sorted(EXAMPLES.glob("*.py")), *sorted(KERNELS.glob("*.py"))],
+    ids=lambda path: f"{path.parent.name}/{path.name}",
+)
+def test_the_cells_an_access_is_checked_against_read_back_as_isl_reads_them(
+    path: Path,
+) -> None:
+    """The differential of the goals: an in-bounds fact's cells against isl's.
+
+    The goal of an in-bounds part is the array's cells, read back from
+    loopty's text; one weaker than isl's set would let Lean prove an access
+    in bounds that is not. At every point of a box, at a few sizes, at a few
+    values of the loops a ragged row's bound is written in, and with each
+    array a bound reads given values of its own, the predicate holds exactly
+    where isl's set does.
+    """
+    from loopty.obligations import _names
+
+    rng = np.random.default_rng(0)
+    checked = 0
+    for label, cells in _cell_sets(path):
+        described = description_of(cells)
+        reflected = dict(described.reflected)
+        params = list(cells.get_var_names(isl.dim_type.param))
+        dims = list(cells.get_var_names(isl.dim_type.set))
+        found: dict[str, int] = {}
+        _names(tuple(reflected.values()), found)
+        arrays = {
+            name: rng.integers(0, 4, size=(8,) * rank)
+            for name, rank in found.items()
+            if rank
+        }
+        loops = [
+            name
+            for name, rank in found.items()
+            if not rank and name not in params and name not in described.dims
+        ]
+        coords = [Var(f"__x{k}") for k in range(len(dims))]
+        for size in (0, 1, 3):
+            sizes = {name: size + 2 for name in params if name not in reflected}
+            for values in itertools.product(range(3), repeat=len(loops)):
+                at = dict(zip(loops, values, strict=True))
+                predicate = described.predicate(coords, others=at)
+                known = dict(sizes)
+                for name, expr in reflected.items():
+                    known[name] = int(evaluate(expr, {**at, **sizes, **arrays}))
+                for point in itertools.product(range(-1, 4), repeat=len(dims)):
+                    where = dict(zip(dims, point, strict=True))
+                    expected = _member(cells, where, known)
+                    values_at = {f"__x{k}": v for k, v in enumerate(point)}
+                    got = bool(evaluate(predicate, {**values_at, **sizes, **arrays}))
+                    assert got == expected, (label, point, known, render(predicate))
+                    checked += 1
+    assert checked
 
 
 @kernel
@@ -688,7 +851,8 @@ def test_every_refused_cast_is_proved_false_at_isls_pair(lean: Any) -> None:
     for label, exc in _refused_casts():
         fact = lean.establish(exc.fact)
         said = fact.provenance.get("lean_counterexample", "")
-        assert said.startswith("Lean proved the claim false at"), (label, said)
+        assert said.startswith("Lean confirmed the counterexample"), (label, said)
+        assert fact.provenance["lean_refuted_by"] in ("decide", "omega"), label
 
 
 class _Planted:
@@ -719,6 +883,141 @@ def test_lean_fails_on_exactly_the_class_isl_refuses(lean: Any) -> None:
         assert result.status is Status.DECIDED, label
         failed = [r["name"] for r in result.provenance["lean_parts"] if not r["proved"]]
         assert stated.counterexample.part in failed, (label, failed)
+
+
+VARIANT = """
+from __future__ import annotations
+
+from lanky.prelude import Real
+from loopty import Arr, Fin, kernel, when
+
+
+@kernel
+def variant(u: Arr[Fin[nt], Fin[nx], Real]):
+    steps = u.dom
+    for t in steps:
+        row = u.dom[t]
+        for i in row:
+            with when({guard}):
+                u[{write}] = (u[{first}] + u[{second}]) / 2
+"""
+
+#: The stencil with its subscripts and guard perturbed: (guard, write, reads).
+VARIANTS = {
+    "jacobi": (
+        "(t + 1 < steps.size) & (i > 0) & (i + 1 < row.size)",
+        "t + 1, i", "t, i - 1", "t, i + 1",
+    ),
+    "wider": (
+        "(t + 1 < steps.size) & (i > 0) & (i + 2 < row.size)",
+        "t + 1, i", "t, i - 1", "t, i + 2",
+    ),
+    "in_place": ("(i > 0) & (i + 1 < row.size)", "t, i", "t, i - 1", "t, i + 1"),
+    "same_level": (
+        "(t + 1 < steps.size) & (i > 0) & (i + 1 < row.size)",
+        "t + 1, i", "t + 1, i - 1", "t, i + 1",
+    ),
+    "two_levels": (
+        "(t + 2 < steps.size) & (i > 0) & (i + 1 < row.size)",
+        "t + 2, i", "t, i - 1", "t + 1, i + 1",
+    ),
+    "repeated": ("t + 1 < steps.size", "t + 1, i", "t, i", "t, i"),
+}
+
+#: Schedules, legal for some variants and refused for others.
+SCHEDULES = {
+    "tile": lambda s: s.tile("t", "i", 4, 4),
+    "skew_tile": lambda s: s.skew("i", by="t").tile("t", "i", 4, 4),
+    "interchange": lambda s: s.interchange("i", "t"),
+    "split": lambda s: s.split("t", 2),
+    "reverse_i": lambda s: s.affine("{ [t, i] -> [t2, i2] : t2 = t and i2 = -i }"),
+    "reverse_t": lambda s: s.affine("{ [t, i] -> [t2, i2] : t2 = -t and i2 = i }"),
+    "wavefront": lambda s: s.affine("{ [t, i] -> [a, b] : a = 2 t + i and b = t }"),
+}
+
+
+def test_lean_fails_on_exactly_the_classes_isl_finds_reversed(
+    lean: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutations of subscripts, guards and schedules, class by class, both ways.
+
+    For each variant and schedule, the last step's legality is stated for
+    Lean as if isl had found it legal, and the classes Lean does not prove
+    are exactly those isl finds the order reverses: none for a legal cast.
+    A class isl finds reversed that Lean proves would be an unsound printer;
+    one isl finds kept that Lean does not prove, an incomplete one.
+    """
+    from dataclasses import replace
+
+    from loopty import oracle as isl_oracle
+    from loopty.obligations import _classes, cast_obligation
+    from loopty.schedule import Schedule as Scheduled
+
+    reversed_by_isl: dict[str, list] = {}
+    first_violation = Scheduled._first_violation
+
+    def recording(self: Any, schedule: Any) -> Any:
+        reversed_by_isl["deps"] = [
+            dep
+            for dep in self._deps
+            if not isl_oracle.is_monotone(schedule, dep.relation).ok
+        ]
+        return first_violation(self, schedule)
+
+    monkeypatch.setattr(Scheduled, "_first_violation", recording)
+    kinds = {
+        "raw": ("write", "read"),
+        "war": ("read", "write"),
+        "waw": ("write", "write"),
+    }
+
+    def classes_of(origin: Any, dep: Any) -> set[str]:
+        from lanky.terms import structurally_equal
+
+        return {
+            f"dependence_{n}"
+            for n, (a, b, first, second) in enumerate(_classes(origin))
+            if (a.id, b.id) == (dep.source, dep.sink)
+            and (first[0], second[0]) == kinds[dep.kind]
+            and first[1] == dep.array
+            and structurally_equal(tuple(first[2]), tuple(dep.source_indices))
+            and structurally_equal(tuple(second[2]), tuple(dep.sink_indices))
+        }
+
+    outcomes = {"legal": 0, "refused": 0}
+    for name, (guard, write, first, second) in VARIANTS.items():
+        path = tmp_path / f"variant_{name}.py"
+        path.write_text(
+            VARIANT.format(guard=guard, write=write, first=first, second=second)
+        )
+        module = load(path)
+        for label, build in SCHEDULES.items():
+            reversed_by_isl.clear()
+            start = Schedule(module.variant, target="c", sizes={"nt": 12, "nx": 12})
+            try:
+                fact = [f for f in build(start).facts() if f.kind == "monotone"][-1]
+                wanted: set[str] = set()
+                outcomes["legal"] += 1
+            except IllegalCast as refused:
+                fact = refused.fact
+                if fact.kind != "monotone":
+                    continue
+                origin = fact.term.schedule
+                wanted = set().union(
+                    *(classes_of(origin, dep) for dep in reversed_by_isl["deps"])
+                )
+                outcomes["refused"] += 1
+            stated = cast_obligation(replace(fact.term, refusal=None, refuted=False))
+            assert not stated.declined, (name, label, stated.declined)
+            planted = replace(fact, term=_Planted(stated.parts), status=Status.DECIDED)
+            result = lean.establish(planted)
+            failed = {
+                record["name"]
+                for record in result.provenance["lean_parts"]
+                if not record["proved"]
+            }
+            assert failed == wanted, (name, label, sorted(failed), sorted(wanted))
+    assert outcomes["legal"] >= 10 and outcomes["refused"] >= 10, outcomes
 
 
 MUTANT = """
@@ -778,7 +1077,8 @@ def test_lean_refuses_a_perturbed_subscript_exactly_where_isl_does(
         assert lean.establish(planted).status is Status.ASSUMED, fact.statement
         refuted = lean.establish(fact.with_status(Status.REFUTED, "isl"))
         said = refuted.provenance["lean_counterexample"]
-        assert said.startswith("Lean proved the claim false"), (fact.statement, said)
+        confirmed = said.startswith("Lean confirmed the counterexample")
+        assert confirmed, (fact.statement, said)
 
 
 def test_isls_split_closes_what_omega_cannot(lean: Any) -> None:

@@ -90,6 +90,7 @@ __all__ = [
     "ordering_obligation",
     "prove",
     "shadow_hints",
+    "stated_writers",
     "written_before",
 ]
 
@@ -342,11 +343,29 @@ class IslOnly:
         return f"stated for isl only: {self.reason}"
 
 
+#: Why a fact isl refuted, with no counterexample Lean can check, is not
+#: offered to Lean as a claim.
+REFUTED_UNSTATED = (
+    "isl refuted it, and no counterexample to a part of it could be stated for "
+    "Lean, so Lean is not asked to prove it"
+)
+
+
 def _obligation(
     parts: Sequence[Any],
     counterexample: Any = None,
     rests_on: Sequence[str] = (),
+    refuted: bool = False,
 ) -> Any:
+    """The obligation of ``parts``; a refuted one is checked at its counterexample.
+
+    A fact isl refuted is offered to Lean only as its counterexample, which
+    Lean proves the claim false at. With none that can be stated, Lean is not
+    asked at all: were the parts offered as a claim, a proof of them would
+    read ``proved`` where isl refuted, and the refutation would be lost.
+    """
+    if refuted and counterexample is None:
+        return _declined(REFUTED_UNSTATED)
     lanky = _lanky_obligations()
     if "fallback" in getattr(lanky.Part, "__dataclass_fields__", {}):
         # what isl finds only when Lean asks: the case splits of shadow_hints
@@ -362,11 +381,16 @@ def _obligation(
             )
             for part in parts
         ]
+    extra = {}
+    if "stated_by" in getattr(lanky.Obligation, "__dataclass_fields__", {}):
+        # who stated the parts, for the ledger's LEAN line
+        extra["stated_by"] = "loopty"
     return lanky.Obligation(
         parts=tuple(parts),
         counterexample=counterexample,
         rests_on=tuple(rests_on),
         decider="isl",
+        **extra,
     )
 
 
@@ -434,7 +458,7 @@ def in_bounds_obligation(
     counterexample = None
     if not verdict.ok:
         counterexample = _reaching(places, verdict, parts, text)
-    return _obligation(parts, counterexample)
+    return _obligation(parts, counterexample, refuted=verdict.ok is False)
 
 
 def _reaching(
@@ -477,7 +501,7 @@ def _reaching(
             continue
         values = {**parameters, **_point(inames, coords)}
         shown = ", ".join(f"{name}={value}" for name, value in values.items())
-        return _counterexample(part, values, f"{text} at {shown}")
+        return _counterexample(part, values, shown)
     return None
 
 
@@ -519,7 +543,7 @@ def mixed_in_bounds_obligation(
         part = _lanky_obligations().Part("in_bounds", label, claim.close(goal))
     except Unstatable as exc:
         return _declined(str(exc))
-    return _obligation([part])
+    return _obligation([part], refuted=verdict.ok is False)
 
 
 # {{{ distinct instances write distinct cells
@@ -569,7 +593,7 @@ def disjoint_writes_obligation(
         counterexample = _counterexample(
             part, values, ", ".join(f"{k}={v}" for k, v in values.items())
         )
-    return _obligation([part], counterexample)
+    return _obligation([part], counterexample, refuted=verdict.ok is False)
 
 
 # }}}
@@ -602,7 +626,7 @@ def element_sort_obligation(
         counterexample = _counterexample(
             part, values, ", ".join(f"{k}={v}" for k, v in values.items())
         )
-    return _obligation([part], counterexample)
+    return _obligation([part], counterexample, refuted=verdict.ok is False)
 
 
 # }}}
@@ -681,6 +705,17 @@ def _footprint_place(
     return place
 
 
+def _access_label(a: Stmt, first: tuple, b: Stmt, second: tuple) -> str:
+    """``S0 writes u[t + 1, i] before S0 reads u[t, i - 1]``: one pair of accesses."""
+    verbs = {"write": "writes", "read": "reads", "acc": "updates"}
+
+    def said(stmt: Stmt, access: tuple) -> str:
+        cell = f"{access[0]}[{', '.join(render(i) for i in access[1])}]"
+        return f"{stmt.id} {verbs.get(access[2], access[2])} {cell}"
+
+    return f"{said(a, first)} before {said(b, second)}"
+
+
 def ordering_obligation(term: Term, verdict: Any) -> Any:
     """The source order runs every dependence forward, one part per pair of accesses.
 
@@ -729,15 +764,18 @@ def ordering_obligation(term: Term, verdict: Any) -> Any:
                 _source_time(a, depth, x), _source_time(b, depth, y)
             )
             claim.hypotheses.append(before)
-            label = (
-                f"{a.id} {first[2]} {first[0]} before {b.id} {second[2]} {second[0]}"
+            parts.append(
+                lanky.Part(
+                    f"dependence_{n}",
+                    _access_label(a, first, b, second),
+                    claim.close(before),
+                )
             )
-            parts.append(lanky.Part(f"dependence_{n}", label, claim.close(before)))
     except Unstatable as exc:
         return _declined(str(exc))
     if not parts:
         return _declined("the term has no two accesses a dependence could join")
-    return _obligation(parts)
+    return _obligation(parts, refuted=verdict.ok is False)
 
 
 # }}}
@@ -768,6 +806,29 @@ def _time_map(stmt: Stmt, inames: Sequence[str], depth: int) -> Any:
     return isl.Map(f"{{ [{', '.join(inames)}] -> [{', '.join(time)}] }}")
 
 
+def stated_writers(term: Term, writers: Sequence[Stmt]) -> list[Stmt]:
+    """Writers whose domain is where they store: none under a guard isl cannot state.
+
+    A guard conjunct isl cannot state (:attr:`loopty.term.Stmt.unnarrowed`,
+    ``with when(x[i] > 0)``) leaves a statement's domain wider than the
+    instances that store, so an instance of it in its domain is no witness
+    that a cell was stored. Such a writer counts for nothing towards a cell
+    being written, as :func:`loopty.flow.definedness` counts it. The flag of
+    a checked point a program puts before a call is no such guard: no
+    statement runs where one is set.
+    """
+    from lanky.terms import Subscript
+
+    flags = {
+        render(Comparison(Subscript(Var(flag), 0), "==", 0)) for flag, _ in term.checks
+    }
+    return [
+        writer
+        for writer in writers
+        if all(conjunct in flags for conjunct, _why in writer.unnarrowed)
+    ]
+
+
 def written_before(
     term: Term, array: str, writers: Sequence[Stmt], places: Sequence[tuple]
 ) -> tuple[Any, list[list[Any]]] | None:
@@ -779,13 +840,19 @@ def written_before(
     one cell, the write before the read in the source order; the read is
     defined where some writer gives one. ``None`` when isl shows a read that
     is not, which a kernel may well mean (it reads what the array held when
-    the call started), or when a read or a write is one isl cannot list.
+    the call started), or when a read or a write is one isl cannot list,
+    which a write under a guard isl cannot state is (:func:`stated_writers`
+    says which writers to ask about).
     Otherwise the question, the union of the reads no write precedes, an
     empty set, and the pairs, read by read and writer by writer, for the
     witness (:func:`defined_obligation`).
     """
     depth = flow.instance_space_depth(term)
     sizes = flow.size_names(term)
+    if not writers or len(stated_writers(term, writers)) != len(writers):
+        # an instance of a writer whose domain is wider than where it
+        # stores witnesses nothing; the callers leave such writers out
+        return None
     if not all(_affine(index) for w in writers for index in w.assignee.indices):
         return None
     question = None
@@ -898,7 +965,7 @@ def defined_obligation(
             parts.append(lanky.Part(f"read_{k}", label, claim.close(goal), hints))
     except Unstatable as exc:
         return _declined(str(exc))
-    return _obligation(parts)
+    return _obligation(parts, refuted=verdict.ok is False)
 
 
 def _writer_pieces(
@@ -1066,7 +1133,7 @@ def discharged_obligation(
             instances.append(lanky.Instance(position, tuple(values)))
     hints = lanky.Hints(instances=tuple(instances))
     part = lanky.Part("claim", "the claim where the hypotheses hold", term, hints)
-    return _obligation([part])
+    return _obligation([part], refuted=verdict.ok is False)
 
 
 # }}}
@@ -1656,7 +1723,7 @@ def cast_obligation(cast: Any) -> Any:
     counterexample = None
     if cast.refusal is not None:
         counterexample = _refusal(origin, steps, cast.refusal, parts)
-    return _obligation(parts, counterexample)
+    return _obligation(parts, counterexample, refuted=cast.refuted)
 
 
 def _monotone_parts(origin: Any, steps: Sequence[Any]) -> list[Any]:
