@@ -46,7 +46,15 @@ All notable changes to loopty are recorded here. The format follows
 - A loop's stride in `Schedule.strides` names the loops of its offset
   outermost first, `2*b_inner_step - a_outer - b_outer - a_inner` for the
   tiled diamond, rather than in the order of the domain's dimensions, which
-  loopy main keeps sorted by name.
+  loopy main keeps in namedisl's order.
+
+### Fixed
+
+- `fuse` after a `split` or a `tile` of the producer's outer loop is no
+  longer refused as unbuildable. The producer's domain is cut after the fused
+  loops by name, not by position. loopy main keeps a tiled domain's loops in
+  namedisl's order, and loopy 2025.2 puts a split loop's two after the others
+  (#192).
 
 ## [0.2.0] - 2026-10-11
 

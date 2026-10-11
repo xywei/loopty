@@ -105,10 +105,16 @@ Each takes an object already on its side as it is. A domain comes back as an
    generate working code for it" (note 14).
 6. **Messages.** loopy main names the index of an access `_lpy_s0` in its
    bounds check's message, where 2025.2 wrote `i0`.
-7. **The order of a domain's loops** is namedisl's, sorted by name after a
-   split. A stride's offset (`Schedule.strides`) names the loops outermost
-   first, whatever that order: `2*b_inner_step - a_outer - b_outer - a_inner`
-   for the tiled diamond, where `main` wrote them in loopy 2025.2's order.
+7. **The order of a domain's loops** is namedisl's, not the nest's: a tile
+   of `r` and `c` gives `[r_inner, r_outer, c_outer, c_inner]`. loopty reads
+   a domain's loops by name:
+   - a stride's offset (`Schedule.strides`) names the loops outermost first,
+     `2*b_inner_step - a_outer - b_outer - a_inner` for the tiled diamond,
+     where `main` wrote them in loopy 2025.2's order;
+   - `fuse` cuts the producer's domain after the fused loops wherever they
+     sit in it. So a fusion after a `tile` builds as on `main`, and one after
+     a `split` of the producer's outer loop builds too, which `main` refuses
+     (#192: loopy 2025.2 puts the split loops last, `[j, i_outer, i_inner]`).
 8. **Still one convex piece per domain.** loopy main keeps a domain as a set
    that may have several pieces, but its code generation still asks for one
    (`isl_helpers.convexify`), so loopty's one-basic-set restriction on the

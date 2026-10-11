@@ -1037,6 +1037,29 @@ def test_the_outer_loop_of_a_nest_fuses_with_a_loop_of_one_level() -> None:
     agrees(squared_rows, substituted, {"a": Arr.from_numpy(a), "z": Arr.zeros(3)})
 
 
+def test_the_outer_loop_fuses_after_a_split_or_a_tile() -> None:
+    # After a split or a tile, the nest's outer loop is i_outer, and the
+    # domain is cut after it by name. Neither loopy keeps the loops of such a
+    # domain in the nest's order: loopy 2025.2 puts a split loop's two after
+    # the others ([j, i_outer, i_inner]), and loopy main keeps namedisl's
+    # order ([i_inner, i_outer, j_outer, j_inner] for the tile).
+    i, j = squared_rows.term.stmt("square2.S0").inames
+    base = Schedule(squared_rows)
+    for steps, schedule in (
+        (2, base.split(i, 2)),
+        (2, base.tile(i, j, 2, 2)),
+        (1, base),
+    ):
+        fused = schedule.fuse("square2", "row_total")
+        expected = [("bijective", "decided"), ("monotone", "decided")] * steps
+        assert statements(fused) == expected
+        assert fused.buildable == (True, ""), fused.buildable
+        for rows, cols in ((1, 1), (3, 4), (5, 3)):
+            a = np.arange(rows * cols, dtype=float).reshape(rows, cols) / 3.0
+            inputs = {"a": Arr.from_numpy(a), "z": Arr.zeros(rows)}
+            agrees(squared_rows, fused, inputs)
+
+
 def test_a_call_between_the_fused_runs_after_their_loop() -> None:
     # front reads the f flux stores, so it runs after the fused loop; back
     # reads h, which front writes, but at cells front does not write. The
