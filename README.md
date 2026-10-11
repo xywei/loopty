@@ -987,7 +987,7 @@ release; the CHANGELOG says when one does.
   the callee writes have to be two rows of it, decided at every call; a
   whole array and a part of it are refused, and so is an argument that
   reads an array the callee writes, since natively it is read once, when
-  the call is made. A rule's claim about its value (`-> Real & (...)`)
+  the call is made, a value a function given captured included. A rule's claim about its value (`-> Real & (...)`)
   is refused: state it as a theorem about the rule (#206). A call made
   inside a sum over `Fin[...]` of a size, rather than over an array's `.dom`,
   has points the trace does not see, and its facts are `assumed` (#207). A rule that
@@ -1000,7 +1000,9 @@ release; the CHANGELOG says when one does.
   compile (#220). A domain
   declared outside an annotation, for `Arr.zeros(TRIANGLE, ...)` in a
   program, names its binders and sizes as lanky variables, `i, j, n =
-  Var("i"), Var("j"), Var("n")` (#210).
+  Var("i"), Var("j"), Var("n")` (#210). A program's array over a domain is
+  not kept in a window: `contract` refuses it, naming the fix, keep it whole
+  or `substitute` it (#244).
 - `loopty.math` has eight functions (#184), and numpy's own functions on a
   traced value are refused rather than read as them (#195). A function
   only a guard calls is refused when lowered: loopy resolves a function by

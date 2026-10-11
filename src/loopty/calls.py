@@ -95,6 +95,7 @@ from loopty.trace import (
     Tracer,
     _binder_bound,
     _conjuncts,
+    _conversion_dtype,
     _domain_texts,
     _GatherView,
     _location,
@@ -195,7 +196,10 @@ class _Inlining:
                 arguments[param] = self.array_argument(param, value, param in written)
             elif _function_sort(sort):
                 arguments[param] = Argument(
-                    param, "function", getattr(value, "__name__", repr(value))
+                    param,
+                    "function",
+                    getattr(value, "__name__", repr(value)),
+                    value=_captured(value),
                 )
             else:
                 # What the caller passed, which the call's facts are about; the
@@ -1022,6 +1026,21 @@ class _Inlining:
                 other = writes.get(array)
                 if other is None:
                     continue
+                if argument.kind == "function":
+                    held = _shown(
+                        next(v for v in argument.value if array in _held_reads(v))
+                    )
+                    self.refuse(
+                        f"it is given {argument.spelled} for {argument.param}, which "
+                        f"holds {held}, a value it captured that reads {array}, and "
+                        f"it writes {array} through its {other.param} "
+                        f"({other.spelled}): natively the function holds the value "
+                        f"{held} had when it was made, and inlined {held} is read "
+                        f"again wherever {self.callee} calls {argument.param}, after "
+                        f"its own writes into {array}. Capture something that does "
+                        f"not read {array}, or read {array} inside the function, "
+                        f"where {self.callee} calls it"
+                    )
                 if argument.kind == "scalar":
                     natively = (
                         f"natively {argument.param} is the value "
@@ -1201,15 +1220,8 @@ _INT64 = np.dtype(np.int64)
 
 def _conversion(node: Any, name: str | None = None) -> bool:
     """Whether ``node`` is a scalar's conversion into its sort, ``np.int64(j)``."""
-    from loopty.contract import CONVERSIONS
-
-    function = getattr(node, "function", None)
-    return (
-        isinstance(node, prim.Call)
-        and isinstance(function, prim.Variable)
-        and function.name in CONVERSIONS
-        and len(node.parameters) == 1
-        and (name is None or function.name == name)
+    return _conversion_dtype(node) is not None and (
+        name is None or node.function.name == name
     )
 
 
@@ -1482,14 +1494,18 @@ def _restated_domain(
 def _read_when_passed(argument: Argument) -> set[str]:
     """The arrays a native call reads to evaluate ``argument`` as it is made.
 
-    A scalar's value, the indices of a row, and for a gather the cells it
-    copies and the indices that pick them; a whole array and a function are
-    read only where the callee reads them, as they are inlined.
+    A scalar's value, the indices of a row, for a gather the cells it
+    copies and the indices that pick them, and the values a function
+    captured when it was made (:func:`_captured`); a whole array, and what a
+    function's body reads, are read only where the callee reads them, as they
+    are inlined.
     """
     if argument.kind == "scalar":
         return _arrays_read(argument.value)
     if argument.kind == "row":
         return _arrays_read(argument.prefix)
+    if argument.kind == "function":
+        return set().union(*(_held_reads(value) for value in argument.value))
     if argument.kind == "gather":
         out = {argument.array} if argument.array is not None else set()
         index = argument.index
@@ -1499,6 +1515,78 @@ def _read_when_passed(argument: Argument) -> set[str]:
             out |= _read_when_passed(index)
         return out
     return set()
+
+
+def _captured(function: Any, seen: set[int] | None = None) -> tuple[Any, ...]:
+    """The values ``function`` captured when it was made, which a call holds.
+
+    A default, ``lambda q, saved=x[0]: ...``, a name of the caller's it
+    closes over, ``v = x[0]`` before ``lambda q: v``, and what a
+    ``functools.partial`` binds: natively each is the value it had when the
+    function was made, and inlined it is the expression that read it, read
+    again wherever the callee calls the function. A function captured in
+    turn is looked into; a kernel passed as a function captures nothing.
+    """
+    import functools
+    import types
+
+    seen = set() if seen is None else seen
+    if id(function) in seen:
+        return ()
+    seen.add(id(function))
+    if isinstance(function, functools.partial):
+        values = [*function.args, *function.keywords.values()]
+        inner = function.func
+    elif isinstance(function, types.FunctionType):
+        values = [
+            *(function.__defaults__ or ()),
+            *(function.__kwdefaults__ or {}).values(),
+        ]
+        for cell in function.__closure__ or ():
+            try:
+                values.append(cell.cell_contents)
+            except ValueError:  # a name not bound yet
+                continue
+        inner = None
+    else:
+        return ()
+    out: list[Any] = []
+    for value in values:
+        if isinstance(value, functools.partial | types.FunctionType):
+            out.extend(_captured(value, seen))
+        else:
+            out.append(value)
+    if inner is not None:
+        out.extend(_captured(inner, seen))
+    return tuple(out)
+
+
+def _held_reads(value: Any) -> set[str]:
+    """The arrays a value a function captured was read from when it was made.
+
+    An expression reads the arrays it reads a cell of; a row, ``A[p[i]]``,
+    what its indices read, its cells being read through it later; the cells
+    a gather picks, ``u[cell[c]]``, which natively are a copy, the array they
+    are copied from and the indices that pick them.
+    """
+    if isinstance(value, _RowView):
+        return _arrays_read(value.prefix) | _held_reads(value.base)
+    if isinstance(value, _GatherView):
+        return (
+            {_root(value.source), _root(value.index)}
+            | _held_reads(value.source)
+            | _held_reads(value.index)
+        )
+    if isinstance(value, SymArr | SymDom):
+        return set()
+    return _arrays_read(value)
+
+
+def _root(view: SymArr) -> str:
+    """The array of the trace a view's cells are in: ``A`` of ``A[i]``."""
+    while isinstance(view, _RowView | _GatherView):
+        view = view.base if isinstance(view, _RowView) else view.source
+    return view.name
 
 
 def _arrays_read(expr: Any) -> set[str]:

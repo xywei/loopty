@@ -4423,7 +4423,8 @@ def _value_exactness(node: Any, tracer: Tracer) -> str:
     non-negative literal exponent; anything else that can produce a float does
     produce one. So a float or complex literal is ``approx``, and so is true
     division, a power whose exponent could be negative, and a call, whose
-    result nothing here knows the sort of. A comparison or a logical connective
+    result nothing here knows the sort of, but a conversion into a numpy type,
+    ``np.int64(c)``, which is of that type. A comparison or a logical connective
     is a boolean and ``exact``. A name is a scalar parameter, which has its
     sort, or a loop variable or a size, which is an integer. An array read is
     its element sort; its index is an integer by construction and is not a
@@ -4449,6 +4450,11 @@ def _value_exactness(node: Any, tracer: Tracer) -> str:
         if node.name in tracer.params:
             return _sort_exactness(tracer.params[node.name])
         return "exact"
+    conversion = _conversion_dtype(node)
+    if conversion is not None:
+        # A scalar a called kernel is given, converted into its sort's
+        # storage, np.int64(c) (loopty.calls): a value of that type.
+        return _sort_exactness(conversion)
     if isinstance(node, prim.Quotient | prim.Call):
         return "approx"
     if isinstance(node, prim.Power):
@@ -4474,6 +4480,27 @@ def _value_exactness(node: Any, tracer: Tracer) -> str:
             _value_exactness(node.denominator, tracer),
         )
     return "approx"
+
+
+def _conversion_dtype(node: Any) -> np.dtype | None:
+    """The dtype ``node`` converts its one operand into, ``np.int64(c)``, or ``None``.
+
+    A called kernel's scalar parameter is given its argument converted into
+    the storage of the sort it declares, as its contract converts it natively
+    (:meth:`loopty.calls._Inlining.converted`), and the converted value is of
+    that type whatever the operand was.
+    """
+    from loopty.contract import CONVERSIONS
+
+    function = getattr(node, "function", None)
+    if (
+        isinstance(node, prim.Call)
+        and isinstance(function, prim.Variable)
+        and function.name in CONVERSIONS
+        and len(node.parameters) == 1
+    ):
+        return CONVERSIONS[function.name]
+    return None
 
 
 def _sort_exactness(dtype: Any) -> str:

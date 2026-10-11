@@ -119,6 +119,7 @@ __all__ = [
     "inherited_storage",
     "integral_range",
     "integral_sort",
+    "made_extents",
     "native_copy",
     "native_scalar",
     "native_storage",
@@ -521,6 +522,56 @@ def sizes_not_negative(
                 "negative, and every fact about the kernel is decided with its "
                 "sizes non-negative, so the argument is too short for its type"
             )
+
+
+def made_extents(
+    temporaries: Iterable[tuple[str, Any]], sizes: Mapping[str, int]
+) -> None:
+    """Refuse sizes that give an array a program makes a negative length.
+
+    A program's ``Arr.zeros((x.dom.size - 10,))`` has the length its sizes
+    give, and natively numpy refuses a negative one when the program makes
+    it (``negative dimensions are not allowed``), as the domain of an array
+    over a domain refuses a negative bound. The compiled program would
+    declare the array with that length, so the run is refused alike, with a
+    :class:`ValueError` naming the array, its axis and the sizes. A length
+    the sizes do not fix is left alone.
+    """
+    from lanky.terms import evaluate, free_variables, render
+
+    from loopty.domain import Union
+
+    for name, typ in temporaries:
+        if not isinstance(typ, ArrType):
+            continue
+        if typ.domain is None:
+            extents = [(f"axis {k}", axis) for k, axis in enumerate(typ.axes)]
+        else:
+            domain = typ.domain
+            pieces = domain.pieces if isinstance(domain, Union) else (domain,)
+            extents = [
+                (f"the bound of {binder}", bound)
+                for piece in pieces
+                for binder, bound in getattr(piece, "binders", ())
+            ]
+        for what, extent in extents:
+            if isinstance(extent, int | np.integer):
+                continue
+            try:
+                free = free_variables(extent)
+                if not free or not free <= set(sizes):
+                    continue
+                value = evaluate(extent, dict(sizes))
+            except Exception:  # noqa: BLE001 - a length the sizes do not fix
+                continue
+            if isinstance(value, int | np.integer) and value < 0:
+                at = ", ".join(f"{size} = {sizes[size]}" for size in sorted(free))
+                raise ValueError(
+                    f"the program makes {name} with {what} of length "
+                    f"{render(extent)}, which is {int(value)} at {at}: natively "
+                    "numpy refuses a negative length when the program makes it, "
+                    "and so is the compiled run"
+                )
 
 
 #: The dtype the lowering stores ``Nat`` and ``Int`` in, and Python's ``int``:

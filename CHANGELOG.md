@@ -199,11 +199,14 @@ All notable changes to loopty are recorded here. The format follows
   `A[p[i]]`), is owed in bounds at every point of the call, whether the
   callee uses the parameter or not, and a call whose
   callee writes an array an argument reads (`scale(A[i], A[i, 0])`) is
-  refused, naming both. A scalar argument is converted into the sort the
-  callee declares, as its contract converts it natively (#232): a double
-  given for `s: np.float32` is `np.float32(x[i])` in the caller's term,
-  which the interpreter computes as numpy does and the lowering writes as
-  C's cast, and a loop variable given for `Int` is a numpy `int64` beside a
+  refused, naming both; so is a function given whose default or captured
+  name holds a value read from such an array (`lambda q, saved=x[0]:
+  saved`), which natively is the value when the function was made. A
+  scalar argument is converted into the sort the callee declares, as its
+  contract converts it natively (#232): a double given for `s:
+  np.float32` is `np.float32(x[i])` in the caller's term, which the
+  interpreter computes as numpy does and the lowering writes as C's cast,
+  and a loop variable given for `Int` is a numpy `int64` beside a
   `float32`, while an index or a comparison of it reads as the caller's
   own, `A[i, i]`. What the contract refuses is refused where it is passed:
   a real or a truth value for an integral sort, a number for `Bool`, a
@@ -221,7 +224,16 @@ All notable changes to loopty are recorded here. The format follows
   rule called inside a `when` block is refused where it is used after the
   block. `examples/calls.py` has `dot` in a matrix-vector
   and a sparse product, and firedrake's P1 quadrature rule applied per
-  element.
+  element. A callee's update, `y[cell[k]] += yl[k]`, is an update of the
+  caller, of the class of its sum and owing no distinct writes, as written
+  inline: a step that runs two at once is refused with a pair of the
+  caller's loop and the callee's read off the example inputs (`S0[c=0, k=2]
+  and S0[c=1, k=1] both update y[3]`), and `atomic('y')` on the caller
+  lifts it. An integer a callee is given for an `Int`, `np.int64(c)`,
+  keeps such an update exact. A window (`Schedule.contract`) is taken over
+  the statements of the kernels a program's kernels call, and its
+  `no-clobber` fact is about them; a callee reads through a declared
+  layout, which is checked against its facts where it is called.
 - **A program's arrays over a domain** (#74). A program's callee may take
   an array over a `Where`, `Sigma` or union domain: the domain's sizes are
   unified across the calls, binder by binder, and two calls given one array
@@ -242,7 +254,11 @@ All notable changes to loopty are recorded here. The format follows
   points where the program makes it, its edges have definedness facts as a
   dense temporary's do, and a schedule fuses through it; `Schedule.pack`
   stores a program's argument over a domain packed. A declared dense shape
-  is `Arr.zeros((x.dom.size, 3))`.
+  is `Arr.zeros((x.dom.size, 3))`, and a run whose sizes make one of its
+  lengths negative is refused compiled, as numpy refuses it natively.
+  `Schedule.contract` may keep a dense one in a window; one over a domain is
+  refused there, naming the fix, keep it whole or `substitute` it
+  ([#244](https://github.com/xywei/loopty/issues/244)).
 
 - **Constant tables** (`loopty.table`): quadrature weights, a basis
   tabulated at the quadrature points, a differentiation matrix, declared
