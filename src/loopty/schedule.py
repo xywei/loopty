@@ -5757,6 +5757,8 @@ class Schedule:
                     "the caller's word, checked against the sizes of every call "
                     "the schedule runs"
                 ),
+                # how a cast that rests on it names it in the ledger's status
+                "label": f"assume({condition!r})",
             },
             where=self._term.stmts[0].where if self._term.stmts else "",
             owner=self._term.name,

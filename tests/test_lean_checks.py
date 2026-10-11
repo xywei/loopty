@@ -776,6 +776,8 @@ def test_an_assumption_is_a_fact_the_casts_rest_on() -> None:
     (part, *_rest) = monotone.term.lean_obligation().parts
     assert "n % 4 == 0" in render(part.term)
     assert schedule.history == ("assume('n % 4 == 0')", "split(i, 4)")
+    # the casts' status names it shortly, ``decided under assume('n % 4 == 0')``
+    assert assumption.provenance["label"] == "assume('n % 4 == 0')"
 
 
 @pytest.mark.parametrize(
