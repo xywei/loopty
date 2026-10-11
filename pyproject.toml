@@ -119,8 +119,9 @@ dev = ["pytest", "ruff"]
 # loopy, islpy and namedisl come from their main branches on this branch only,
 # as loopy main's own requirements.txt takes them: loopy main is unreleased,
 # and is what loopy's maintainers run. uv.lock pins the commits the suite was
-# last run against; `uv lock --upgrade-package loopy` moves to the current
-# head, which the loopy-main workflow does on a schedule.
+# last run against; `uv lock --upgrade-package loopy --upgrade-package islpy
+# --upgrade-package namedisl` moves to the current heads, which the head leg of
+# the loopy-main workflow does on every run.
 [tool.uv.sources]
 lanky = { path = "../lanky", editable = true }
 loopy = { git = "https://github.com/inducer/loopy.git", branch = "main" }
