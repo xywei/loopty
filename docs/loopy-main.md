@@ -48,7 +48,7 @@ Git references.
 ## Where loopty meets namedisl
 
 `loopty.named` is the one module that does. loopty's own analysis (`flow`,
-`typing`, `hypotheses`, `oracle`, `domain`) stays on islpy: it builds isl
+`typing`, `hypotheses`, `oracle`, `domain`, `dataflow`) stays on islpy: it builds isl
 objects from text, reasons by position where it means to (the padded instance
 space, with the statement's index in it), and wants a mismatch of dimensions
 to fail, where namedisl aligns two objects by name and gives a name one side
@@ -135,8 +135,9 @@ Each takes an object already on its side as it is. A domain comes back as an
 
 - `composition`, `fusion`, `pairs`, `spmv`, `sum_factorization`, `travel`:
   the same text.
-- `assembly`, `layer_potential`, `p2p`, `quadrature`, `reshape_layouts`,
-  `stencil_skew`, `storage_layouts`, `wavefront_acoustic`:
+- `assembly`, `calls`, `layer_potential`, `p2p`, `quadrature`,
+  `reshape_layouts`, `stencil_skew`, `storage_layouts`,
+  `taylor_reconstruction`, `wavefront_acoustic`:
   - the terms of an affine expression in another order, `x[-1 + n + -1 * i]`
     for `x[-1 + -1 * i + n]` and `cnt[t_in + 4 * t_out]` for
     `cnt[4 * t_out + t_in]`, which is how loopy main prints an affine
@@ -160,7 +161,7 @@ Each takes an object already on its side as it is. A domain comes back as an
     values are the same.
 
 The ledgers (`lanky check --json`, `loopty run --json`) are the same for all
-fourteen examples, and so is everything `python FILE`, `lanky check FILE` and
+sixteen examples, and so is everything `python FILE`, `lanky check FILE` and
 `loopty run FILE` print. Every transcript in the documentation is the same
 on both.
 
@@ -174,5 +175,16 @@ with `Schedule.atomic` crossed nothing new when they were merged: they
 rewrite a kernel's temporaries, instructions and atomicity by name, a layout
 is checked on loopty's side and reaches loopy as `dim_tags`, and
 `Schedule.assume` gives `lp.assume` text, which loopy main reads into a
-namedisl set itself. When loopy releases with namedisl, the branch drops the Git
-sources, sets the floors to the releases, and merges.
+namedisl set itself.
+
+Nor did the postconditions decided from what a kernel's statements store, the
+theorems a kernel cites, or a kernel called inside another kernel's loop.
+`loopty.dataflow` is analysis, and stays on islpy with the rest. A call
+(`loopty.calls`) is inlined when the body is traced, so loopy is given the
+caller's statements, with binders of their own, as before. A program's own
+array over a domain is a loopy temporary whose shape is the domain's box.
+Before a compiled run, `contract.made_extents` refuses sizes that would give
+an array the program makes a negative length, as numpy does natively.
+
+When loopy releases with namedisl, the branch drops the Git sources, sets the
+floors to the releases, and merges.
