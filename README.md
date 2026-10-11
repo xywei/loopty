@@ -607,8 +607,9 @@ release; the CHANGELOG says when one does.
   `examples/quadrature.py` is firedrake's P1 mass kernel.
 - The argument contract, enforced at every entry point that runs a kernel
   (compiled, differential and native): two distinct array parameters may not
-  share storage where the kernel writes either, a ragged argument has to agree with the counts array its type
-  names and with any offsets passed alongside it, an argument over a domain has
+  share storage where the kernel writes either, a ragged argument has to
+  agree with the counts array its type names and with any offsets passed
+  alongside it, an argument over a domain has
   to have the declared domain's points at the sizes of the call, and a value
   of a refined sort such as `Fin[m]` has to be one — an array element and a
   scalar argument alike, and being one means being a finite whole number in
