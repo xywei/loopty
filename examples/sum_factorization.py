@@ -28,8 +28,8 @@ Run this file three ways.
     its compiled run with the native one.
 
 ``lanky check examples/sum_factorization.py``
-    The two kernels' obligations, and the program's: ``v`` is defined where
-    ``along_s`` reads it.
+    The two kernels' obligations, the program's (``v`` is defined where
+    ``along_s`` reads it), and the casts of the fusion and of its window.
 
 ``loopty run examples/sum_factorization.py``
     Each kernel alone, the program as one kernel, and the fused schedule,

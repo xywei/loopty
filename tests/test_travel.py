@@ -11,13 +11,15 @@ from __future__ import annotations
 
 import importlib
 from pathlib import Path
+from typing import Any
 
 import islpy as isl
+import lanky
 import numpy as np
 import pytest
 from lanky import theorem
 from lanky.ledger import Ledger, Status
-from lanky.prelude import Fin, Fn, Nat, Real
+from lanky.prelude import Fin, Fn, Int, Nat, Real
 from lanky.terms import (
     Add,
     Comparison,
@@ -273,6 +275,64 @@ def test_a_theorems_family_is_checked_against_its_sorts_in_the_programs_names() 
     assert render(instance.claim) == "forall i in Fin(n). perm[i] <= k"
 
 
+def test_a_sum_in_a_theorem_runs_over_the_programs_size() -> None:
+    # total's n is the program's k: its sum runs over Fin(k). Left at Fin(n),
+    # it would be over a size the program does not have, or one it spells n
+    # and means otherwise (#239).
+    @theorem
+    def total(
+        n: Nat,  # noqa: F821
+        m: Int,  # noqa: F821
+        f: Fn[Fin[n], Int],  # noqa: F821
+        h: all(f(i) == m for i in Fin[n]),  # noqa: F821
+    ) -> lanky.sum(f(i) for i in Fin[n]) == n * m:  # noqa: F821
+        """A table of m's adds up to n times m."""
+
+    k = Var("k")
+    entry = Hypothesis(
+        Forall(((a0, Fin[k]),), Comparison(Subscript(perm, a0), "==", Var("s"))),
+        "perm holds s",
+    )
+    found, reasons = theorem_instances(total, [entry], lambda *_: None, lambda e: True)
+    assert reasons == []
+    (instance,) = found
+    assert render(instance.claim) == "sum(perm[i] for i in Fin(k)) == k*s"
+
+
+def test_a_theorems_variable_in_a_power_is_never_the_programs_of_its_spelling() -> None:
+    # squares' m is the k perm holds, so its second hypothesis is about k**2;
+    # off holding the program's m**2 is not that, and gives no instance,
+    # where read as the program's m it gave off[i] >= perm[i], false at k = 5
+    # and m = 0 (#239).
+    @theorem
+    def squares(
+        n: Nat,  # noqa: F821
+        m: Int,  # noqa: F821
+        f: Fn[Fin[n], Int],  # noqa: F821
+        g: Fn[Fin[n], Int],  # noqa: F821
+        h1: all(f(i) == m for i in Fin[n]),  # noqa: F821
+        h2: all(g(i) == m**2 for i in Fin[n]),  # noqa: F821
+    ) -> all(g(i) >= f(i) for i in Fin[n]):  # noqa: F821
+        """An integer's square is at least the integer."""
+
+    k, m = Var("k"), Var("m")
+
+    def holds(array: Var, value: Any) -> Hypothesis:
+        claim = Forall(((a0, Fin[n]),), Comparison(Subscript(array, a0), "==", value))
+        return Hypothesis(claim, f"{array.name} holds {render(value)}")
+
+    found, _reasons = theorem_instances(
+        squares, [holds(perm, k), holds(off, m**2)], lambda *_: None, lambda e: True
+    )
+    assert found == []
+    found, reasons = theorem_instances(
+        squares, [holds(perm, k), holds(off, k**2)], lambda *_: None, lambda e: True
+    )
+    assert reasons == []
+    (instance,) = found
+    assert render(instance.claim) == "forall i in Fin(n). off[i] >= perm[i]"
+
+
 # }}}
 
 
@@ -281,11 +341,13 @@ def test_a_theorems_family_is_checked_against_its_sorts_in_the_programs_names() 
 
 def test_a_kernels_postcondition_is_tested_against_its_native_runs() -> None:
     (post,) = facts_of("number", "postcondition")
-    assert post.status is Status.TESTED
-    assert post.decided_by == "native"
+    # tested on the native runs, and decided from the term (#113)
+    assert post.provenance["native"] == "tested"
     assert post.provenance["compared"] >= 1
-    # Its term is the claim about a call, which no oracle takes for closed.
-    assert str(post.term) == "forall i in Fin(n). perm[i] == n - 1 - i"
+    assert post.status is Status.DECIDED
+    assert post.decided_by == "isl"
+    (stmt,) = travel.number.term.stmts
+    assert post.provenance["used"] == [f"what S0 stores in perm at {stmt.where}"]
 
 
 def test_a_false_postcondition_is_refuted_by_a_native_run() -> None:

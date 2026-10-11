@@ -41,21 +41,23 @@ row verbatim, and checked by `scripts/refresh_example_outputs.py`):
 
 ```console
 $ lanky check examples/spmv.py
-STATUS   EFFECTIVE  BY             WHERE        OWNER          STATEMENT
--------  ---------  -------------  -----------  -------------  ------------------------------------------------------------------------
-decided  decided    isl            spmv.py:79   scan           off[0] is in bounds for every instance of S0
-decided  decided    isl            spmv.py:81   scan           off[r + 1] is in bounds for every instance of S1
-decided  decided    isl            spmv.py:79   scan           distinct instances of S0 write distinct cells of off
-tested   tested     native         spmv.py:69   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
-tested   tested     property-test  spmv.py:84   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat] | off(0) ==...
-decided  decided    isl            spmv.py:112  spmv           y[r] is in bounds for every instance of S0
-decided  decided    type           spmv.py:112  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
-decided  decided    isl            spmv.py:112  spmv           distinct instances of S0 write distinct cells of y
-decided  decided    type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
-tested   tested     interpreter    spmv.py:102  spmv           the traced term computes what the body computes
-decided  tested     call           spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
+STATUS   BY             WHERE        OWNER          STATEMENT
+-------  -------------  -----------  -------------  ------------------------------------------------------------------------
+decided  isl            spmv.py:79   scan           off[0] is in bounds for every instance of S0
+decided  isl            spmv.py:81   scan           off[r + 1] is in bounds for every instance of S1
+decided  isl            spmv.py:79   scan           distinct instances of S0 write distinct cells of off
+decided  isl            spmv.py:79   scan           no cell of off is stored twice, or read before its store
+decided  isl            spmv.py:69   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+tested   property-test  spmv.py:84   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat] | off(0) ==...
+decided  isl            spmv.py:112  spmv           y[r] is in bounds for every instance of S0
+decided  type           spmv.py:112  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
+decided  isl            spmv.py:112  spmv           distinct instances of S0 write distinct cells of y
+decided  type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
+tested   interpreter    spmv.py:102  spmv           the traced term computes what the body computes
+decided  isl            spmv.py:112  spmv           the order after split(j, 2) runs every dependence of spmv forward
+decided  call           spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
 ...
-23 facts: 17 decided, 6 tested
+29 facts: 24 decided, 5 tested
 ```
 
 Look at the `x[col[r, j]]` row, and at what decided it. That indirection is the
@@ -72,13 +74,20 @@ file's example inputs and on inputs drawn from the declared types. A body that
 kept state where tracing does not look would be refuted here, with the input
 and the first cell that differs.
 
-`scan`'s postcondition is `tested` by `native`: it is evaluated at what every
-native run of `scan` left in its arguments, on the file's example inputs and on
-the drawn ones, and held after each. The last row belongs to `solve`, the
+`scan`'s postcondition is `decided` by `isl`, from what the kernel's
+statements store. No cell of `off` is stored twice, or read before its store,
+which is the row above it, so what `S1` stores at `r`, `off[r] + cnt[r]`, is
+what `off[r + 1]` holds when `scan` returns, and the claim is that equation
+at every `r`. It is also evaluated at what every native run of `scan` left in
+its arguments, on the file's example inputs and on drawn ones, and held after
+each, which its provenance keeps. The `split(j, 2)` row is a cast of the
+schedule the file holds, `rows_split`, decided as the step was taken: `lanky
+check` lists the casts of a file's schedules beside the facts of the kernel
+they schedule. The last row belongs to `solve`, the
 `@program` that runs `scan` and then `spmv`. It restates `scan`'s postcondition
 in the program's scope, `decided` by the call, and rests on `scan`'s own
 postcondition fact, `postcondition:spmv.scan@69`, so it is worth what that fact
-is worth: the `EFFECTIVE` column reads `tested`. The id is the kind, then
+is worth. The id is the kind, then
 `scan`'s definition, the module the file's path gives it, its name and its
 line, so a `scan` imported from another file, or defined twice, is never taken
 for this one. `loopty run` compiles `solve` too, as one kernel: its term is the
@@ -502,6 +511,57 @@ release; the CHANGELOG says when one does.
   it, stated for Lean as a ∀∃ with isl's last writer as the witness; a
   kernel that reads what an array held when it was called owes nothing and
   gets none.
+- Postconditions decided from the term (`loopty.dataflow`). Where no cell of
+  an array a kernel writes is stored twice, or read before its store, a
+  `single-assignment` fact says so, decided by isl and proved by Lean, and
+  what each statement stores is what the kernel leaves: its value equation,
+  `off[r + 1] == off[r] + cnt[r]` at every `r` of `S1`'s loop. The
+  postcondition is decided under those equations, each taken at the cells
+  the claim reads, and rests on the `single-assignment` facts. A claim about
+  reals is decided the same way, each equation isl cannot read an atom, so
+  `R[a + 2, b] == -R[a, b + 2]` is what the recurrence stores at `(a + 2,
+  b)`; Lean states it with Mathlib's reals and proves it by `linarith`. The
+  native runs still test it, and a run that refutes it refutes it.
+- A kernel cites theorems, `@kernel(uses=[on_the_triangle])`. A theorem
+  whose hypotheses are conjuncts of the postcondition, up to the names of
+  their binders (a family `R(a)(b)` stands for the array `R[a, b]`), gives
+  its conclusion at the kernel's arrays, a `by-theorem` fact resting on the
+  theorem and the postcondition: what is left unbound stays universal, and
+  the hypotheses the postcondition does not give are its hypotheses. Lean
+  checks the application, the theorem as it was proved applied with the
+  arrays loopty matched: `examples/taylor_reconstruction.py`,
+
+  ```python
+  @kernel(uses=[on_the_triangle])
+  def reconstruct(
+      c: Arr[Where[a : Fin[2], b : Fin[p + 1], a + b <= p], Real],
+      R: Arr[Where[a : Fin[p + 1], b : Fin[p + 1], a + b <= p], Real],
+  ) -> all(
+      R[a, b] == c[a, b] for a in Fin[p + 1] for b in Fin[p + 1] if a < 2 if a + b <= p
+  ) & all(
+      R[a + 2, b] == -R[a, b + 2] for a in Fin[p + 1] for b in Fin[p + 1] if a + b + 2 <= p
+  ):
+      ...
+  ```
+
+  reads `by on_the_triangle, for every D with pde and stored: ... R[a, b] ==
+  D(a)(b)`: whatever table `D` satisfies the PDE (`pde`) and has its stored
+  entries in `c` (`stored`), `R` is `D` on the triangle. A theorem whose
+  conclusion is a conjunct of the postcondition decides that conjunct
+  instead, as a program's cited theorem decides a requirement. The
+  application says something of what the kernel computes, or it is not
+  made: every hypothesis about an array the kernel writes has to be a
+  conjunct of the postcondition, so a kernel whose recurrence is off by one
+  gets nothing from the theorem; and a conjunct about reals is a
+  hypothesis only where nothing in it rounds (copies and sign changes),
+  since the theorem is about the reals, and `s[i] == a[i] + b[i]` holds of
+  the floats and not of them read as reals. The theorem is taken at the
+  kernel's sizes in every sort as well: a table `D: Fn[Fin[n], Real]` that
+  nothing binds, with `n` matched to the kernel's `p`, ranges over `Fin[p]`.
+- `lanky check` lists a file's schedules (#191). The casts of every schedule
+  a file holds at module level are rows of the ledger beside the facts of
+  the kernel or program it schedules, decided by isl as each step was taken
+  and proved by Lean where it is installed, each id once.
 - Mixed subscripts. `X[cell[c, k], d]` is in bounds by type on its first axis,
   `cell[c, k] : Fin(nv)`, and by isl on the second, where it was assumed.
 - `Schedule.assume("n % 4 == 0")`, loopy's `assume`, checked: loopy is told,
@@ -733,9 +793,15 @@ release; the CHANGELOG says when one does.
   parameters, and the scan's recurrence, instantiated at them, is an affine
   constraint between them (`loopty.hypotheses`, `examples/travel.py`). The
   fact is the program's, resting on what it used.
-- A kernel's postcondition is `tested` against its native runs, on the
-  file's example inputs and on drawn ones, never `decided`: deciding it from
-  the term, by which statement last writes each cell, is not done yet.
+- A kernel's postcondition is decided from what its statements store where
+  every cell of the arrays it claims about is stored once at most, and read
+  only after its store (`loopty.dataflow`, below); elsewhere it is `tested`
+  against its native runs, on the file's example inputs and on drawn ones,
+  and its provenance says why it is not decided (`undecided`). A cell stored
+  twice, a running value a loop overwrites, needs the last store before
+  each read, which is not done; nor is an update, `y[i] += v` or a
+  scatter-add `y[cell[c, k]] += v`, whose cell holds what it held on entry
+  plus every update.
   `@program` restates a callee's postcondition as a fact in scope, `decided` by
   the call and resting on the callee's own fact (lanky's `rests_on`), and
   offers it as a hypothesis to the calls after it, until a call writes an
