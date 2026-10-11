@@ -25,7 +25,8 @@ All notable changes to loopty are recorded here. The format follows
   like a parameter or a size of the kernel is named apart, `y_table`.
   Writing one is a `TypeError` in both runs. Natively a table is read as an
   array is: an index is never counted from the end, and a read out of range
-  under a false `when` answers zero. A table holds finite numbers (#193),
+  under a false `when` answers zero. A table holds finite numbers (#193), in
+  a type the compiled kernel has (not `float16` or `longdouble`),
   is no argument (an array of its values is,
   `Arr.from_numpy(W.values.copy())`), and is read in a statement's values,
   not in a loop's bound (#194); each of these is refused with the fix named.

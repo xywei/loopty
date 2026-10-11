@@ -71,6 +71,13 @@ class Table:
             raise TypeError(
                 f"a table holds numbers, and {values!r} holds {array.dtype}"
             )
+        if array.dtype.kind in "fc" and array.dtype not in _COMPILED_FLOATS:
+            raise TypeError(
+                f"a table is held in a type the compiled kernel has, and "
+                f"{array.dtype} is none: C and OpenCL C have float32 and "
+                "float64, and complex64 and complex128. Pass dtype=np.float32 "
+                "or dtype=np.float64"
+            )
         _refuse_non_finite(array)
         self._values = _frozen(array)
         self._array = Arr(self._values)
@@ -173,6 +180,13 @@ def table(values: Any, dtype: Any = None) -> Table:
     changed afterwards.
     """
     return Table(values, dtype)
+
+
+#: The floating and complex dtypes a table may be held in: those C and OpenCL
+#: C have. ``float16`` and ``longdouble`` failed when the kernel was lowered.
+_COMPILED_FLOATS = frozenset(
+    np.dtype(t) for t in (np.float32, np.float64, np.complex64, np.complex128)
+)
 
 
 def _frozen(array: np.ndarray) -> np.ndarray:

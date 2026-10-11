@@ -436,6 +436,15 @@ def test_a_tables_values_cannot_be_made_writeable_again() -> None:
     assert list(PHI.values[1]) == [1 / 6, 2 / 3, 1 / 6]
 
 
+@pytest.mark.parametrize("dtype", [np.float16, np.longdouble, np.clongdouble])
+def test_a_table_is_held_in_a_type_the_compiled_kernel_has(dtype) -> None:
+    # A float16 table was accepted and failed when the kernel was lowered.
+    if np.dtype(dtype) in (np.dtype(np.float64), np.dtype(np.complex128)):
+        pytest.skip("long double is double here")
+    with pytest.raises(TypeError, match="Pass dtype=np.float32 or dtype=np.float64"):
+        make_table([1.0, 2.0], dtype=dtype)
+
+
 #: A table named like the parameter the trace reflects a product of sizes
 #: as, which the body reads after the product is reflected.
 nl_n_m = make_table([10.0, 20.0, 30.0])
