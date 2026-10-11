@@ -1056,7 +1056,7 @@ class KernelTheory:
         return registry.register_object(Kernel(obj))
 
     def facts(self, obj: Any, /) -> tuple:
-        """Return the facts of a kernel, a program or a layout; schedules' last."""
+        """Return the facts of a kernel, a program, a layout or a tested claim."""
         if isinstance(obj, Kernel | Program):
             own = obj.facts()
             return (*own, *schedule_facts(obj, {fact.id for fact in own}))
