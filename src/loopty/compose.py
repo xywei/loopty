@@ -163,6 +163,7 @@ from loopty.contract import (
     sort_bound,
     storage_wanted,
 )
+from loopty.description import describe, description_of
 from loopty.flow import NonAffine, domain_set, expr_text, free_names
 from loopty.hypotheses import (
     discharge,
@@ -174,6 +175,7 @@ from loopty.hypotheses import (
 )
 from loopty.idx import Reflections
 from loopty.names import rename
+from loopty.table import Table, passed_message
 from loopty.term import (
     Access,
     ArrType,
@@ -253,7 +255,13 @@ def rename_set(obj: Any, names: Mapping[str, str], exprs: Mapping[str, Any]) -> 
     the set already has as a parameter, and checks the names of what it
     returns.
     """
-    return rename(obj, names, exprs, what="a callee's domain in its caller's names")
+    out = rename(obj, names, exprs, what="a callee's domain in its caller's names")
+    described = description_of(obj)
+    if described is not None:
+        # the text the callee's set was written in, read in the caller's names
+        # (loopty.description)
+        describe(out, described.renamed(names, exprs))
+    return out
 
 
 def _isl_text(value: Any) -> str:
@@ -1030,6 +1038,9 @@ class _Composer:
         self.blocks = 0
         self.labels: set[str] = set()
         self.calls: dict[str, int] = {}
+        #: The constant tables the callees read, by the program's name for
+        #: each: one name for one table, whichever callees read it.
+        self.tables: dict[str, Any] = {}
 
     # {{{ names
 
@@ -1186,6 +1197,8 @@ class _Composer:
             value = call.bound[param]
             mine = isinstance(value, ProgramValue) and value._recorder is self.recorder
             if isinstance(typ, ArrType):
+                if isinstance(value, Table):
+                    self.refuse(call, passed_message(param, value))
                 if not mine:
                     self.refuse(
                         call,
@@ -1254,6 +1267,18 @@ class _Composer:
             param: _rename_type(typ, names, exprs) for param, typ in term.params
         }
 
+        for name, values in term.tables:
+            # A table is the callee's own, and the program's under a name of
+            # its own: the same one for the same table read by two calls, and
+            # another for another table its callee happens to name alike.
+            mine = next(
+                (known for known, held in self.tables.items() if held is values),
+                None,
+            )
+            if mine is None:
+                mine = self.fresh(name)
+                self.tables[mine] = values
+            names[name] = mine
         for name in _own_names(term):
             if name not in names and name not in exprs:
                 names[name] = self.fresh(name)
@@ -1289,6 +1314,7 @@ class _Composer:
                         else rename_set(stmt.loop_domain, names, exprs)
                     ),
                     unnarrowed=stmt.unnarrowed,
+                    exactness=stmt.exactness,
                 )
             )
         self.blocks += top
@@ -1890,6 +1916,7 @@ class _Composer:
             requirements=tuple(requirements),
             scopes=tuple(scopes),
             deferred_offsets=tuple(self.deferred),
+            tables=tuple(self.tables.items()),
         )
 
     # {{{ facts that travel

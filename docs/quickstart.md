@@ -84,7 +84,7 @@ device schedule: Schedule(spmv, target='c').tag(r='g.0').split(j, 32).tag(j_in='
   decided  isl  the order after realize('y', tree=True) runs every dependence of spmv forward, within one work item
   reason: the parallel tag on j_in sits inside a loop whose bound comes from an array (a ragged fiber), and loopy will not put a hardware axis in a domain with a data-dependent parameter. Parallelize an enclosing loop with a size known at launch instead, such as the rows of a CSR product
 
-  y: difference 5.55e-17 within 1.48e-06 (approx) -> tested
+  y: difference 0 within 1e-06 (approx) -> tested
 ```
 
 No loopy is involved in the first four lines: `@kernel` is inert, so the body
@@ -132,6 +132,7 @@ decided  decided    isl            spmv.py:81   scan           off[r] is in boun
 decided  decided    isl            spmv.py:81   scan           cnt[r] is in bounds for every instance of S1
 decided  decided    isl            spmv.py:79   scan           distinct instances of S0 write distinct cells of off
 decided  decided    isl            spmv.py:81   scan           distinct instances of S1 write distinct cells of off
+decided  decided    isl            spmv.py:81   scan           every cell of off that S1 reads, S0 or S1 wrote before the read
 decided  decided    isl            spmv.py:69   scan           the source order runs every dependence forward in time
 tested   tested     native         spmv.py:69   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
 tested   tested     interpreter    spmv.py:69   scan           the traced term computes what the body computes
@@ -149,7 +150,7 @@ tested   tested     interpreter    spmv.py:102  spmv           the traced term c
 decided  tested     call           spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
 tested   tested     interpreter    spmv.py:115  solve          the traced term computes what the body computes
 
-22 facts: 16 decided, 6 tested
+23 facts: 17 decided, 6 tested
 ```
 
 Read the `BY` column.
@@ -203,7 +204,7 @@ Read the `BY` column.
 ```console
 $ uv run loopty run examples/spmv.py
 spmv: Schedule(spmv, target='c').split(j, 2).realize('y', tree=True)
-  y: difference 5.55e-17 within 1.48e-06 (approx) -> tested
+  y: difference 0 within 1e-06 (approx) -> tested
 scan: Schedule(scan, target='c')
   off: difference 0 within 0 (exact) -> tested
 solve: Schedule(solve, target='c')
@@ -239,25 +240,26 @@ void spmv(int32_t const n, int64_t const *__restrict__ cnt, int32_t const *__res
   {
     acc_j_out_j_in = (double) (0.0);
     nl_cnt_r = (int32_t) (cnt[r]);
-    for (int32_t j_in = 0; j_in <= ((-1 + nl_cnt_r == 0) ? 0 : 1); ++j_in)
-      if (-1 + nl_cnt_r + -1 * j_in >= 0)
-        for (int32_t j_out = 0; j_out <= -1 + -1 * j_in + (1 + nl_cnt_r + j_in) / 2; ++j_out)
-          acc_j_out_j_in = acc_j_out_j_in + val[off_cnt[r] + j_in + j_out * 2] * x[col[off_cnt[r] + j_in + j_out * 2]];
+    for (int32_t j_out = 0; j_out <= -1 + loopy_floor_div_pos_b_int32(1 + nl_cnt_r, 2); ++j_out)
+      for (int32_t j_in = 0; j_in <= ((1 + -1 * nl_cnt_r + 2 * j_out == 0) ? 0 : 1); ++j_in)
+        acc_j_out_j_in = acc_j_out_j_in + val[off_cnt[r] + j_in + j_out * 2] * x[col[off_cnt[r] + j_in + j_out * 2]];
     y[r] = acc_j_out_j_in;
   }
 }
 ```
 
 `nl_cnt_r` is the row's count, read once per row; `off_cnt` is the offsets
-argument lowering added; `j_in` and `j_out` are the two halves of the split. The
-kernel never mentioned any of them. `cnt` is an array of `Nat`, which is 64 bits
-wide as numpy's integers are, and `col` one of `Fin[m]`, which its bound keeps
-to 32.
+argument lowering added; `j_out` and `j_in` are the two halves of the split,
+the outer one outside, so each row is summed in the order the native run sums
+it. The kernel never mentioned any of them. `cnt` is an array of `Nat`, which
+is 64 bits wide as numpy's integers are, and `col` one of `Fin[m]`, which its
+bound keeps to 32.
 
 `scan` agrees exactly, because its output is `Nat` and integer arithmetic is
-exact. `spmv` agrees to `5.55e-17`, comfortably inside the reassociation
-tolerance. The `loopy` rows are facts like any other: an executor is an oracle
-of trust class `test`.
+exact. `spmv` agrees to the last bit as well: the split sums each row in
+order, and the tree that `realize` allows for is not built on the C target.
+The `loopy` rows are facts like any other: an executor is an oracle of trust
+class `test`.
 
 `solve`, the program, is compiled as well, as one kernel. Its term is what its
 body does run against placeholders: `scan`'s statements, then `spmv`'s, in the
@@ -478,6 +480,8 @@ native run.
 | polyhedral domains, their layouts | `src/loopty/domain.py` |
 | the Term IR | `src/loopty/term.py` |
 | tracing a body | `src/loopty/trace.py` |
+| elementary functions, numpy's in both runs | `src/loopty/math.py` |
+| constant tables a kernel reads | `src/loopty/table.py` |
 | a program's term, composed from its calls | `src/loopty/compose.py` |
 | facts that travel: hypotheses decided by isl | `src/loopty/hypotheses.py` |
 | footprints and dependences | `src/loopty/flow.py` |

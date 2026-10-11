@@ -148,6 +148,18 @@ def ragged_rows8(
 
 
 @kernel
+def potential(
+    z: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[m], Real],  # noqa: F821
+    w: Arr[Fin[m], Real],  # noqa: F821
+    out: Arr[Fin[n], Real],  # noqa: F821
+):
+    """Each target's sum over every source: sumpy's layer potential, in short."""
+    for t in out.dom:
+        out[t] = reduce_sum(w[s] * (z[t] - y[s]) * (z[t] - y[s]) for s in y.dom)
+
+
+@kernel
 def row_sums_by_column8(
     x: Arr[Fin[8], Real],
     cnt: Arr[Fin[8], Nat],
@@ -226,6 +238,21 @@ def tag(**tags):
 
 def split(iname, factor, **names):
     return ("split", (iname, factor), names)
+
+
+def prioritize(*inames):
+    return ("prioritize", inames, {})
+
+
+#: sumpy's CPU tile of a layer potential (``LayerPotential``'s
+#: ``get_optimized_kernel``): 16 targets to a group, one to a work item, and
+#: 256 sources at a time outside the work items' loop.
+QBX_TILE = [
+    split("t", 16),
+    tag(t_outer="g.0", t_inner="l.0"),
+    split("s", 256),
+    prioritize("s_outer", "t_inner"),
+]
 
 
 #: ``(kernel, target, steps, part of loopty's reason, part of loopy's error)``,
@@ -369,6 +396,19 @@ CASES = {
         lower_total8, "opencl", [tag(i="l.0")], None, None
     ),
     # }}}
+    # {{{ a sum's loop outside a loop of its statement
+    "a-sum-outside-a-local-loop": (potential, "opencl", QBX_TILE, None, None),
+    "a-sum-outside-an-ilp-loop": (
+        potential, "c",
+        [
+            split("t", 4),
+            tag(t_inner="ilp"),
+            split("s", 4),
+            prioritize("s_outer", "t_inner"),
+        ],
+        None, None,
+    ),
+    # }}}
     # {{{ an axis loopy is asked to choose
     "automatic-local-axis": (
         copy8, "opencl", [tag(i="l.auto")],
@@ -473,6 +513,36 @@ def test_an_ilp_loop_around_a_row_length_is_refused_for_the_code_loopy_writes(
     assert re.search(rf"\bj <= -1 \+ {length};", code), code
     unrolled = Schedule(ragged_rows8, target=target).tag(r="unr")
     assert unrolled.buildable == (True, "")
+
+
+def test_sumpys_qbx_tile_is_buildable_and_runs_each_target_on_a_work_item(
+    plain_opencl,
+) -> None:
+    # The sources' outer loop is outside the work items' loop, which is no
+    # loop of the generated code: every work item adds its target's sum 256
+    # sources at a time, in order, with an accumulator of its own.
+    schedule = scheduled(potential, "opencl", QBX_TILE)
+    assert schedule.buildable == (True, "")
+    code = loopy_says_code(plain_opencl, schedule)
+    assert code.index("for (int s_outer") < code.index("for (int s_inner")
+    assert "out[16 * gid(0) + lid(0)]" in code
+
+
+def test_a_sum_outside_a_sequential_loop_is_the_order_loopy_drops(
+    plain_opencl,
+) -> None:
+    # On a loop that runs in sequence loopy keeps one accumulator, and runs
+    # the sum inside the loop whatever the priority says. The schedule says
+    # so, rather than claim the order.
+    steps = [split("t", 4), split("s", 4), prioritize("s_outer", "t_inner")]
+    schedule = scheduled(potential, "c", steps)
+    ok, reason = schedule.buildable
+    assert not ok
+    assert "which runs in sequence: loopy keeps one accumulator" in reason
+    with pytest.warns(UserWarning, match="Cannot satisfy constraint"):
+        code = loopy_says_code(plain_opencl, schedule)
+    assert "acc_s_outer_s_inner[" not in code
+    assert code.index("for (int32_t t_inner") < code.index("for (int32_t s_outer")
 
 
 def test_retargeting_a_device_schedule_to_c_refuses_its_axes(plain_opencl) -> None:

@@ -533,6 +533,22 @@ class RunVerb:
         parser.add_argument(
             "--json", dest="json_out", metavar="OUT", help="write the ledger as JSON"
         )
+        parser.add_argument(
+            "--show-lean",
+            nargs="?",
+            const="",
+            default=None,
+            metavar="TEXT",
+            help=(
+                "print the Lean of every row that has some, or of the rows whose "
+                "owner, id or statement contains TEXT"
+            ),
+        )
+        parser.add_argument(
+            "--verbose",
+            action="store_true",
+            help="also name each cast Lean was not asked about, and why",
+        )
 
     def run(self, args: Any, /) -> int:
         """Run the verb; returns the process exit code."""
@@ -647,9 +663,29 @@ class RunVerb:
                     f"({detail['exactness']}) -> {fact.status.value}"
                 )
 
+        # The casts were decided by isl as each step was taken, and a layout's
+        # facts above; where Lean is installed it checks each once, a cast
+        # from the steps' records, and a fact it proves reads proved; one
+        # loopty states for isl only says why under --verbose
+        # (loopty.obligations).
+        from loopty.obligations import prove
+
+        for fact in list(ledger):
+            if fact.decided_by == "isl" and callable(
+                getattr(fact.term, "lean_obligation", None)
+            ):
+                ledger.add(prove(fact))
+
         if len(ledger):
             print()
             print(ledger.render())
+        report_proved, report_unproved, report_lean = _lean_reports()
+        if report_proved is not None:
+            report_proved(ledger)
+            report_unproved(ledger, verbose=getattr(args, "verbose", False))
+        show_lean = getattr(args, "show_lean", None)
+        if show_lean is not None and report_lean is not None:
+            report_lean(ledger, show_lean)
         if args.json_out:
             Path(args.json_out).write_text(ledger.to_json(), encoding="utf-8")
         duplicated = _report_duplicates(claims)
@@ -668,6 +704,15 @@ class RunVerb:
     # lanky's Verb protocol calls ``run``; ``loopty run`` used to call the verb
     # itself, and both spellings are kept so that neither caller has to know.
     __call__ = run
+
+
+def _lean_reports() -> tuple[Any, Any, Any]:
+    """lanky's report of what Lean did not prove, and of the Lean, if it has them."""
+    try:
+        from lanky.cli import report_lean, report_proved, report_unproved
+    except ImportError:  # a lanky from before them
+        return None, None, None
+    return report_proved, report_unproved, report_lean
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -696,6 +741,14 @@ def build_parser() -> argparse.ArgumentParser:
     check_parser.add_argument(
         "--verbose", action="store_true", help="say why an oracle was skipped"
     )
+    check_parser.add_argument(
+        "--show-lean",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="TEXT",
+        help="print the Lean of every row that has some (as lanky check does)",
+    )
     return parser
 
 
@@ -708,6 +761,7 @@ def check(args: Any) -> int:
         file=args.file,
         json=getattr(args, "json_out", None),
         verbose=getattr(args, "verbose", False),
+        show_lean=getattr(args, "show_lean", None),
     )
     return verb.run(namespace)
 

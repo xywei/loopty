@@ -178,6 +178,65 @@ What does work on a device for a ragged product is one row per work group,
 `tag(r="g.0")`, with the row's entries summed sequentially inside the group. That
 ran, and it agreed.
 
+## 2026-10-11: three examples of sumpy, firedrake and grudge kernels, on the PoCL CPU device
+
+`docs/device-runs/demo_gaps.py` runs `examples/layer_potential.py`,
+`examples/quadrature.py` and `examples/sum_factorization.py` on PoCL 7.0's CPU
+device, with the GPU hidden from the process, each
+compiled for `target="opencl"` and compared with the example's own body
+(`docs/device-runs/pocl-cpu-demo-gaps.log`):
+
+| case | schedule | output | difference | tolerance | verdict |
+|---|---|---|---|---|---|
+| sumpy's QBX tile, complex `log` and `real` | `split("t", 16).tag(t_outer="g.0", t_inner="l.0").split("s", 256).prioritize("s_outer", "t_inner")` | `out` | 1.11e-16 | 1.49e-06 (`approx`) | agrees |
+| P1 mass, constant tables in `__constant` memory | `split("c", 32).tag(c_outer="g.0", c_inner="l.0")` | `yl` | 1.73e-18 | 1e-06 (`approx`) | agrees |
+| two passes fused on the element and the row | `fuse("along_r", "along_s", loops=2)` | `w` | 9.23e-16 | 1.03e-06 (`approx`) | agrees |
+
+The first is sumpy's own schedule of `LayerPotential` for a CPU device,
+written as sumpy writes it. On a device the sources' outer loop outside the
+work items' loop changes nothing in the code: every work item adds its own
+target's sum, 256 sources at a time, in order. The tests of `loopty.math` that
+need pyopencl, the generated complex functions and a device run of them, pass
+on the same device and are skipped in CI.
+
+The review of the same day reran the driver on the same device, with the same
+numbers, and found two things CI could not: a complex table did not build on
+OpenCL (pyopencl writes its values as calls, which a `__constant` array cannot
+be initialized by), and is now an array of the kernel's own, agreeing to the
+bit; and pyopencl's complex `sqrt` takes the other side of the branch cut for a
+`-0.0` imaginary part, `+2j` for `sqrt(complex(-4, -0.0))` where numpy gives
+`-2j`, which the differential refutes (#196). The OpenCL tests of
+`tests/test_table.py` and `tests/test_math.py` pass there.
+
+## 2026-10-11: PyOP2's assembly loop, its updates atomic, on the PoCL CPU device
+
+`docs/device-runs/scatter_atomic.py` takes `examples/assembly.py` to PoCL 7.0's
+CPU device, with the GPU hidden from the process
+(`docs/device-runs/pocl-cpu-scatter-atomic.log`). The kernel adds each cell's
+values into its nodes, `y[cell[c, k]] += yl[c, k]`, and the driver runs two
+schedules of it, each compiled for `target="opencl"` and compared with the
+example's own body on PyOP2's two triangles and on two meshes of the unit
+square, where many work items add into one node at once:
+
+| case | schedule | mesh | `y`: difference | tolerance | verdict |
+|---|---|---|---|---|---|
+| PyOP2's GPU split | `atomic("y").split("c", 32).tag(c_outer="g.0", c_inner="l.0")` | 2 cells | 0 | 1.13e-06 (`approx`) | agrees |
+| | | 8 192 cells | 1.08e-19 | 1e-06 (`approx`) | agrees |
+| | | 131 072 cells | 1.02e-20 | 1e-06 (`approx`) | agrees |
+| Sun et al.'s split, from C | `atomic("y").split("c", 4).tag(c_inner="ilp")` | 2 cells | 0 | 1.13e-06 (`approx`) | agrees |
+| | | 8 192 cells | 1.08e-19 | 1e-06 (`approx`) | agrees |
+| | | 131 072 cells | 1.02e-20 | 1e-06 (`approx`) | agrees |
+
+Each update is loopy's compare-and-swap loop on the bits of the double,
+`atom_cmpxchg((__global long *) &(y[...]), ...)`, with `y` declared `__global
+volatile double *`. The differences are the reassociation of each node's sum,
+far inside the tolerance. Without `atomic("y")` the split is refused with the
+node PyOP2's two triangles share, and the driver compiles it anyway, with
+loopy directly, to show what the refusal is about: the updates race, and `y`
+comes out wrong by up to 44% of its largest value on both squares (the
+numbers change from run to run, as a race does). `loopty run examples/assembly.py --target opencl` runs the
+example's own schedule there, retargeted from C, and agrees.
+
 ## Reproducing
 
 ```bash
@@ -202,6 +261,10 @@ until a device is actually asked for.
 | `device-runs/h200-cuda-device-demos.log` | the device driver, GPU |
 | `device-runs/h200-cuda-reduction-probe.log` | the reduction investigation, GPU |
 | `device-runs/pocl-epyc-cpu-*.log` | the same three, PoCL on the CPU |
+| `device-runs/demo_gaps.py` | the driver of 2026-10-11: three examples on a device |
+| `device-runs/pocl-cpu-demo-gaps.log` | that driver, PoCL on the CPU |
+| `device-runs/scatter_atomic.py` | the driver of the assembly loop: atomic updates on a device, and the race without them |
+| `device-runs/pocl-cpu-scatter-atomic.log` | that driver and `loopty run --target opencl`, PoCL on the CPU |
 
 The device-demos and reduction-probe logs each open with a `NoSuchEntryError`
 traceback from `pytools.persistent_dict`. That is loopy's transformation cache

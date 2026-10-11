@@ -1,6 +1,6 @@
 # The loopty demos
 
-Nine files, each of which runs three ways. Every console block below is a
+Thirteen files, each of which runs three ways. Every console block below is a
 snapshot of real output, not prose about it, and it is produced mechanically:
 
 ```console
@@ -26,7 +26,12 @@ marked with `...` is an excerpt and the lines it keeps are checked verbatim.
 | `pairs.py` | symmetric pair interactions over the lower triangle, an array argument over the domain `Where[i: Fin[n], j: Fin[n], j < i]`, decided in bounds over the exact triangle and run boxed and packed |
 | `composition.py` | two kernels composed by a program and lowered as one loopy kernel, with the intermediate a temporary of it and the edge between the kernels found in the footprints |
 | `travel.py` | facts that travel between a program's calls: a requirement decided under the postcondition of the call before, one checked by the compiled program between the calls, and a flat access in bounds where it follows the scan |
-| `fusion.py` | the program of `composition.py` with its two loops fused into one, a fusion one step too early refused with its pair, and the intermediate computed where it is read instead of stored |
+| `fusion.py` | the program of `composition.py` with its two loops fused into one, a fusion one step too early refused with its pair, the intermediate computed where it is read instead of stored, and kept in the three cells live at once, a window of two refused with the read that sees its slot overwritten |
+| `quadrature.py` | firedrake's P1 mass kernel cell by cell, its quadrature rule and basis held in constant tables, read-only arrays written into the compiled code, and its gathers through the cell map in bounds by type |
+| `layer_potential.py` | pytential's QBX single layer over complex points with `real` and `log` from `loopty.math`, scheduled as sumpy's CPU tile, the sources' loop outside the targets', and the same order on a loop loopy cannot keep it on |
+| `sum_factorization.py` | grudge's two passes of a sum-factorized operator, fused on the element and the row and no deeper: the deeper fusion refused with its pair, the fusion of fewer loops it names, and what passes between them kept one row at a time |
+| `storage_layouts.py` | where cells are stored, as checked maps: sumpy's compressed-Taylor storage index in two pieces, one for one onto its buffer, and grudge's `dim_tags` `N3,N0,N1,N2` the same layout as modepy's reshape of the DOFArray, a wrong nesting refuted with a cell; two kernels read through them |
+| `assembly.py` | PyOP2's assembly loop around the P1 mass kernel, `y[cell[c, k]] += yl[c, k]`: an update that owes the class of its sum and not distinct writes, PyOP2's GPU split refused with the node its two triangles share, and accepted once the updates are atomic |
 
 Run them with `uv run` from the repository root:
 
@@ -97,7 +102,7 @@ device schedule: Schedule(spmv, target='c').tag(r='g.0').split(j, 32).tag(j_in='
   decided  isl  the order after realize('y', tree=True) runs every dependence of spmv forward, within one work item
   reason: the parallel tag on j_in sits inside a loop whose bound comes from an array (a ragged fiber), and loopy will not put a hardware axis in a domain with a data-dependent parameter. Parallelize an enclosing loop with a size known at launch instead, such as the rows of a CSR product
 
-  y: difference 5.55e-17 within 1.48e-06 (approx) -> tested
+  y: difference 0 within 1e-06 (approx) -> tested
 ```
 
 ### lanky check examples/spmv.py
@@ -127,6 +132,7 @@ decided  decided    isl            spmv.py:81   scan           off[r] is in boun
 decided  decided    isl            spmv.py:81   scan           cnt[r] is in bounds for every instance of S1
 decided  decided    isl            spmv.py:79   scan           distinct instances of S0 write distinct cells of off
 decided  decided    isl            spmv.py:81   scan           distinct instances of S1 write distinct cells of off
+decided  decided    isl            spmv.py:81   scan           every cell of off that S1 reads, S0 or S1 wrote before the read
 decided  decided    isl            spmv.py:69   scan           the source order runs every dependence forward in time
 tested   tested     native         spmv.py:69   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
 tested   tested     interpreter    spmv.py:69   scan           the traced term computes what the body computes
@@ -144,7 +150,7 @@ tested   tested     interpreter    spmv.py:102  spmv           the traced term c
 decided  tested     call           spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r ...
 tested   tested     interpreter    spmv.py:115  solve          the traced term computes what the body computes
 
-22 facts: 16 decided, 6 tested
+23 facts: 17 decided, 6 tested
 ```
 
 ### loopty run examples/spmv.py
@@ -161,7 +167,7 @@ whose second kernel reads what its first wrote.
 ```console
 $ uv run loopty run examples/spmv.py
 spmv: Schedule(spmv, target='c').split(j, 2).realize('y', tree=True)
-  y: difference 5.55e-17 within 1.48e-06 (approx) -> tested
+  y: difference 0 within 1e-06 (approx) -> tested
 scan: Schedule(scan, target='c')
   off: difference 0 within 0 (exact) -> tested
 solve: Schedule(solve, target='c')
@@ -470,7 +476,7 @@ schedule: Schedule(pairs, target='c').pack(f)
 ```console
 $ uv run lanky check examples/pairs.py
 STATUS   BY           WHERE        OWNER  STATEMENT
--------  -----------  -----------  -----  ------------------------------------------------------
+-------  -----------  -----------  -----  -------------------------------------------------------
 decided  isl          pairs.py:78  pairs  f[i, j] is in bounds for every instance of S0
 decided  isl          pairs.py:78  pairs  q[i] is in bounds for every instance of S0
 decided  isl          pairs.py:78  pairs  q[j] is in bounds for every instance of S0
@@ -483,12 +489,13 @@ decided  isl          pairs.py:80  pairs  f[p, j] is in bounds for every instanc
 decided  isl          pairs.py:80  pairs  f[k, p] is in bounds for every instance of S1
 decided  isl          pairs.py:78  pairs  distinct instances of S0 write distinct cells of f
 decided  isl          pairs.py:80  pairs  distinct instances of S1 write distinct cells of e
+decided  isl          pairs.py:80  pairs  every cell of f that S1 reads, S0 wrote before the read
 decided  isl          pairs.py:65  pairs  the source order runs every dependence forward in time
 decided  type         pairs.py:80  pairs  the accumulation into e[p] over j is approx
 decided  type         pairs.py:80  pairs  the accumulation into e[p] over k is approx
 tested   interpreter  pairs.py:65  pairs  the traced term computes what the body computes
 
-16 facts: 15 decided, 1 tested
+17 facts: 16 decided, 1 tested
 ```
 
 ### loopty run examples/pairs.py
@@ -729,7 +736,7 @@ decided                                                      tested     isl     
 assumed                                                      assumed    -              travel.py:193  flat           the elements of off are points of Fin(nnz + 1) where weigh is called ...
 decided under requirement:travel.flat@189:weigh:element:off  assumed    isl            travel.py:186  flat           val[off[r_0] + j] is in bounds for every instance of weigh.S0, where ...
 ...
-71 facts: 4 assumed, 51 decided, 16 tested
+73 facts: 4 assumed, 53 decided, 16 tested
 ```
 
 ### loopty run examples/travel.py
@@ -806,9 +813,18 @@ stored before the read (the `definedness` fact), and nothing writes `u` in
 between (the `monotone` fact, over the program as it now runs). The temporary
 goes, and with it the loop that zeroed it.
 
+`contract("f")` keeps the flux instead, but only the three cells live at once:
+`divergence` reads `f[j]` and `f[j - 2]` at step `j`, so the window `lambda j:
+j % 3` is found, and `f` is `double f_window[3]`, each flux computed once. It
+is legal by the same `definedness` fact and by `no-clobber`: no read sees its
+slot overwritten, since between `flux` storing `f[j - 2]` and the read of it,
+the fluxes at `j - 1` and `j` store into the other two slots. A window of two
+cells is refused with the read and the flux that overwrote its slot, and from
+then on the slots are dependences a later step has to keep.
+
 ### python examples/fusion.py
 
-The refusal, then each accepted schedule with its facts, the code loopy
+The two refusals, then each accepted schedule with its facts, the code loopy
 generates for it, and its compiled run against the native one.
 
 ```console
@@ -816,6 +832,8 @@ $ uv run python examples/fusion.py
 native: the program agrees with the numpy slices: True
 
 refused: fuse(flux, divergence) illegal: instance flux.S0[j=2] writes f[2] read by divergence.S0[i=1] scheduled earlier (at n=16, as hinted); fuse('flux', 'divergence', shift=1) runs every dependence between them forward
+
+refused: contract('f', lambda j: j % 2) illegal: instance divergence.S0[i=14] reads f[13], which flux.S0[j=13] stored in slot 1, after flux.S0[j=15] stored f[15] there (at n=16, as hinted); contract('f') finds the smallest window that keeps every read, lambda j: j % 3
 
 accepted: Schedule(burgers_rhs, target='c').fuse(flux, divergence, shift=1)
   decided  isl  fuse(flux, divergence, shift=1) renames the instances of burgers_rhs one for one
@@ -856,6 +874,29 @@ void burgers_rhs(int32_t const n, double const *__restrict__ u, double *__restri
 }
 
   rhs: difference 0 within 1e-06 (approx) -> tested
+
+accepted: Schedule(burgers_rhs, target='c').fuse(flux, divergence, shift=1).contract('f', lambda j: j % 3)
+  decided  isl  fuse(flux, divergence, shift=1) renames the instances of burgers_rhs one for one
+  decided  isl  the order after fuse(flux, divergence, shift=1) runs every dependence of burgers_rhs forward
+  decided  isl  every cell of f that burgers_rhs reads, flux.S0 has stored by the time it is read
+  decided  isl  no read of f sees its slot overwritten after contract('f', lambda j: j % 3): f kept in 3 cells, f[j] in slot j % 3
+
+#include <stdint.h>
+#include <stdbool.h>
+
+void burgers_rhs(int32_t const n, double const *__restrict__ u, double *__restrict__ rhs)
+{
+  double f_window[3];
+
+  for (int32_t j = 0; j <= -1 + n; ++j)
+  {
+    f_window[j + -3 * (j / 3)] = 0.5 * u[j] * u[j];
+    if (-2 + j >= 0 && -1 + j > 0 && -1 + j + 1 < n)
+      rhs[-1 + j] = (-1.0 * (f_window[j + -3 * (j / 3)] + -1.0 * f_window[1 + j + -3 * ((1 + j) / 3)])) / 2.0;
+  }
+}
+
+  rhs: difference 0 within 1e-06 (approx) -> tested
 ```
 
 ### lanky check examples/fusion.py
@@ -868,19 +909,19 @@ the ledger `loopty run` prints.
 $ uv run lanky check examples/fusion.py
 STATUS   BY           WHERE         OWNER        STATEMENT
 -------  -----------  ------------  -----------  ------------------------------------------------------------
-decided  isl          fusion.py:71  flux         f[j] is in bounds for every instance of S0
-decided  isl          fusion.py:71  flux         u[j] is in bounds for every instance of S0
-decided  isl          fusion.py:71  flux         distinct instances of S0 write distinct cells of f
-decided  isl          fusion.py:67  flux         the source order runs every dependence forward in time
-tested   interpreter  fusion.py:67  flux         the traced term computes what the body computes
-decided  isl          fusion.py:79  divergence   rhs[i] is in bounds for every instance of S0
-decided  isl          fusion.py:79  divergence   f[i + 1] is in bounds for every instance of S0
-decided  isl          fusion.py:79  divergence   f[i - 1] is in bounds for every instance of S0
-decided  isl          fusion.py:79  divergence   distinct instances of S0 write distinct cells of rhs
-decided  isl          fusion.py:74  divergence   the source order runs every dependence forward in time
-tested   interpreter  fusion.py:74  divergence   the traced term computes what the body computes
-decided  isl          fusion.py:87  burgers_rhs  every cell of f that divergence reads, flux stored before it
-tested   interpreter  fusion.py:82  burgers_rhs  the traced term computes what the body computes
+decided  isl          fusion.py:81  flux         f[j] is in bounds for every instance of S0
+decided  isl          fusion.py:81  flux         u[j] is in bounds for every instance of S0
+decided  isl          fusion.py:81  flux         distinct instances of S0 write distinct cells of f
+decided  isl          fusion.py:77  flux         the source order runs every dependence forward in time
+tested   interpreter  fusion.py:77  flux         the traced term computes what the body computes
+decided  isl          fusion.py:89  divergence   rhs[i] is in bounds for every instance of S0
+decided  isl          fusion.py:89  divergence   f[i + 1] is in bounds for every instance of S0
+decided  isl          fusion.py:89  divergence   f[i - 1] is in bounds for every instance of S0
+decided  isl          fusion.py:89  divergence   distinct instances of S0 write distinct cells of rhs
+decided  isl          fusion.py:84  divergence   the source order runs every dependence forward in time
+tested   interpreter  fusion.py:84  divergence   the traced term computes what the body computes
+decided  isl          fusion.py:97  burgers_rhs  every cell of f that divergence reads, flux stored before it
+tested   interpreter  fusion.py:92  burgers_rhs  the traced term computes what the body computes
 
 13 facts: 10 decided, 3 tested
 ```
@@ -896,6 +937,8 @@ burgers_rhs: Schedule(burgers_rhs, target='c').fuse(flux, divergence, shift=1)
   rhs: difference 0 within 1e-06 (approx) -> tested
 burgers_rhs: Schedule(burgers_rhs, target='c').fuse(flux, divergence, shift=1).substitute('f')
   rhs: difference 0 within 1e-06 (approx) -> tested
+burgers_rhs: Schedule(burgers_rhs, target='c').fuse(flux, divergence, shift=1).contract('f', lambda j: j % 3)
+  rhs: difference 0 within 1e-06 (approx) -> tested
 flux: Schedule(flux, target='c')
   f: difference 0 within 1e-06 (approx) -> tested
 divergence: Schedule(divergence, target='c')
@@ -903,17 +946,322 @@ divergence: Schedule(divergence, target='c')
 
 STATUS   BY     WHERE         OWNER        STATEMENT
 -------  -----  ------------  -----------  ------------------------------------------------------------------------
-decided  isl    fusion.py:85  burgers_rhs  fuse(flux, divergence, shift=1) renames the instances of burgers_rhs ...
-decided  isl    fusion.py:85  burgers_rhs  the order after fuse(flux, divergence, shift=1) runs every dependence...
-tested   loopy  fusion.py:82  burgers_rhs  the scheduled run of burgers_rhs agrees with the native run to the ac...
-decided  isl    fusion.py:85  burgers_rhs  every cell of f that burgers_rhs reads, flux.S0 has stored by the tim...
-decided  isl    fusion.py:85  burgers_rhs  substitute('f') renames the instances of burgers_rhs one for one
-decided  isl    fusion.py:85  burgers_rhs  the order after substitute('f') runs every dependence of burgers_rhs ...
-tested   loopy  fusion.py:82  burgers_rhs  the scheduled run of burgers_rhs agrees with the native run to the ac...
-tested   loopy  fusion.py:71  flux         the scheduled run of flux agrees with the native run to the accuracy ...
-tested   loopy  fusion.py:79  divergence   the scheduled run of divergence agrees with the native run to the acc...
+decided  isl    fusion.py:95  burgers_rhs  fuse(flux, divergence, shift=1) renames the instances of burgers_rhs ...
+decided  isl    fusion.py:95  burgers_rhs  the order after fuse(flux, divergence, shift=1) runs every dependence...
+tested   loopy  fusion.py:92  burgers_rhs  the scheduled run of burgers_rhs agrees with the native run to the ac...
+decided  isl    fusion.py:95  burgers_rhs  every cell of f that burgers_rhs reads, flux.S0 has stored by the tim...
+decided  isl    fusion.py:95  burgers_rhs  substitute('f') renames the instances of burgers_rhs one for one
+decided  isl    fusion.py:95  burgers_rhs  the order after substitute('f') runs every dependence of burgers_rhs ...
+tested   loopy  fusion.py:92  burgers_rhs  the scheduled run of burgers_rhs agrees with the native run to the ac...
+decided  isl    fusion.py:95  burgers_rhs  every cell of f that burgers_rhs reads, flux.S0 has stored by the tim...
+decided  isl    fusion.py:95  burgers_rhs  no read of f sees its slot overwritten after contract('f', lambda j: ...
+tested   loopy  fusion.py:92  burgers_rhs  the scheduled run of burgers_rhs agrees with the native run to the ac...
+tested   loopy  fusion.py:81  flux         the scheduled run of flux agrees with the native run to the accuracy ...
+tested   loopy  fusion.py:89  divergence   the scheduled run of divergence agrees with the native run to the acc...
 
-9 facts: 5 decided, 4 tested
+12 facts: 7 decided, 5 tested
+```
+
+## quadrature.py
+
+The element kernel FFC and TSFC generate for the P1 mass matrix, `mass_ffc` of
+firedrake's PyOP2 tests, applied to a field on every cell of a mesh. Its
+3-point rule and the basis at the rule's points are constant tables, declared
+next to the kernel as the numpy arrays they are, `W = table([1 / 6, 1 / 6, 1 /
+6])`, and read by the body as arrays are. Each read is in bounds over the
+table's shape, decided by isl, and the compiled kernel holds the values with
+every digit, `static double W[3]`, so both runs read the same numbers. The
+gathers through the cell map, `u[cell[c, k]]`, are in bounds by type, since
+the map's entries are points of `Fin[nv]`.
+
+### python examples/quadrature.py
+
+Both meshes against the element mass matrix in closed form, then the tables
+as the compiled code holds them, and the compiled run of PyOP2's split of the
+cells against the native one.
+
+```console
+$ uv run python examples/quadrature.py
+PyOP2's two triangles: 2 cells, agrees with the closed form: True
+a square: 32 cells, agrees with the closed form: True
+
+static double PHI[3 * 3] = { 0.6666666666666666, 0.16666666666666666, 0.16666666666666666, 0.16666666666666666, 0.6666666666666666, 0.16666666666666666, 0.16666666666666666, 0.16666666666666666, 0.6666666666666666 };
+static double W[3] = { 0.16666666666666666, 0.16666666666666666, 0.16666666666666666 };
+
+schedule: Schedule(mass_action, target='c').split(c, 32)
+  yl: difference 0 within 1.01e-06 (approx) -> tested
+```
+
+### lanky check examples/quadrature.py
+
+```console
+$ uv run lanky check examples/quadrature.py
+STATUS   BY           WHERE             OWNER        STATEMENT
+-------  -----------  ----------------  -----------  ---------------------------------------------------------
+decided  isl          quadrature.py:78  mass_action  yl[c, j] is in bounds for every instance of S0
+decided  type         quadrature.py:78  mass_action  X[cell[c, 1]] is in bounds by type (cell[c, 1] : Fin(nv))
+decided  isl          quadrature.py:78  mass_action  cell[c, 1] is in bounds for every instance of S0
+decided  type         quadrature.py:78  mass_action  X[cell[c, 0]] is in bounds by type (cell[c, 0] : Fin(nv))
+decided  isl          quadrature.py:78  mass_action  cell[c, 0] is in bounds for every instance of S0
+decided  type         quadrature.py:78  mass_action  Y[cell[c, 2]] is in bounds by type (cell[c, 2] : Fin(nv))
+decided  isl          quadrature.py:78  mass_action  cell[c, 2] is in bounds for every instance of S0
+decided  type         quadrature.py:78  mass_action  Y[cell[c, 0]] is in bounds by type (cell[c, 0] : Fin(nv))
+decided  type         quadrature.py:78  mass_action  X[cell[c, 2]] is in bounds by type (cell[c, 2] : Fin(nv))
+decided  type         quadrature.py:78  mass_action  Y[cell[c, 1]] is in bounds by type (cell[c, 1] : Fin(nv))
+decided  isl          quadrature.py:78  mass_action  W[q] is in bounds for every instance of S0
+decided  isl          quadrature.py:78  mass_action  PHI[q, j] is in bounds for every instance of S0
+decided  isl          quadrature.py:78  mass_action  PHI[q, k] is in bounds for every instance of S0
+decided  type         quadrature.py:78  mass_action  u[cell[c, k]] is in bounds by type (cell[c, k] : Fin(nv))
+decided  isl          quadrature.py:78  mass_action  cell[c, k] is in bounds for every instance of S0
+decided  isl          quadrature.py:78  mass_action  distinct instances of S0 write distinct cells of yl
+decided  isl          quadrature.py:63  mass_action  the source order runs every dependence forward in time
+decided  type         quadrature.py:78  mass_action  the accumulation into yl[c, j] over q, k is approx
+tested   interpreter  quadrature.py:63  mass_action  the traced term computes what the body computes
+
+19 facts: 18 decided, 1 tested
+```
+
+### loopty run examples/quadrature.py
+
+```console
+$ uv run loopty run examples/quadrature.py
+mass_action: Schedule(mass_action, target='c').split(c, 32)
+  yl: difference 0 within 1.01e-06 (approx) -> tested
+
+STATUS   BY     WHERE             OWNER        STATEMENT
+-------  -----  ----------------  -----------  ------------------------------------------------------------------------
+decided  isl    quadrature.py:78  mass_action  split(c, 32) renames the instances of mass_action one for one
+decided  isl    quadrature.py:78  mass_action  the order after split(c, 32) runs every dependence of mass_action for...
+tested   loopy  quadrature.py:78  mass_action  the scheduled run of mass_action agrees with the native run to the ac...
+
+3 facts: 2 decided, 1 tested
+```
+
+## layer_potential.py
+
+The QBX single layer pytential evaluates at a target on a curve, through the
+line-Taylor expansion of `log` about a center just off the curve, written over
+complex points with `real` and `log` from `loopty.math`. On the unit circle,
+for the density `cos(theta)`, the answer is `cos(theta) / 2`.
+
+The schedule is sumpy's CPU tile, `LayerPotential.get_optimized_kernel`: the
+targets split by 16, the sources by 256, and the sources' outer loop outside
+the targets' inner loop, `.prioritize("s_outer", "t_inner")`. Each target's
+sum still adds its sources in order. On the C target the 16 targets are an
+`ilp` loop, which gives each an accumulator of its own; the same order on a
+target loop in sequence is one loopy cannot keep, and the schedule's
+`buildable` fact says so with the tag that fixes it.
+
+### python examples/layer_potential.py
+
+```console
+$ uv run python examples/layer_potential.py
+32 targets, 512 sources, order 4
+largest error against cos(theta) / 2: 3.0e-10
+
+schedule: Schedule(single_layer, target='c').split(t, 16).tag(t_inner='ilp').split(s, 256).prioritize(s_outer, t_inner)
+  decided  isl  split(t, 16) renames the instances of single_layer one for one
+  decided  isl  the order after split(t, 16) runs every dependence of single_layer forward
+  decided  isl  tag(t_inner='ilp') renames the instances of single_layer one for one
+  decided  isl  the order after tag(t_inner='ilp') runs every dependence of single_layer forward
+  decided  isl  split(s, 256) renames the instances of single_layer one for one
+  decided  isl  the order after split(s, 256) runs every dependence of single_layer forward
+  decided  isl  prioritize(s_outer, t_inner) renames the instances of single_layer one for one
+  decided  isl  the order after prioritize(s_outer, t_inner) runs every dependence of single_layer forward
+  out: the compiled run agrees with the native run to the approx tolerance: True -> tested
+
+schedule: Schedule(single_layer, target='c').split(t, 16).split(s, 256).prioritize(s_outer, t_inner)
+  buildable: False
+  reason: the loop s_outer of the sum over s_outer, s_inner in S0 is ordered outside t_inner, which runs in sequence: loopy keeps one accumulator for the sum, so it would run the sum inside every loop of S0 anyway, in another order than the one this schedule's facts were checked for. Tag t_inner 'ilp', tag(t_inner='ilp'), which gives each of its iterations an accumulator of its own, or on a device put it on a hardware axis, tag(t_inner='l.0')
+```
+
+### lanky check examples/layer_potential.py
+
+```console
+$ uv run lanky check examples/layer_potential.py
+STATUS   BY           WHERE                  OWNER         STATEMENT
+-------  -----------  ---------------------  ------------  ------------------------------------------------------
+decided  isl          layer_potential.py:88  single_layer  out[t] is in bounds for every instance of S0
+decided  isl          layer_potential.py:88  single_layer  w[s] is in bounds for every instance of S0
+decided  isl          layer_potential.py:88  single_layer  c[t] is in bounds for every instance of S0
+decided  isl          layer_potential.py:88  single_layer  y[s] is in bounds for every instance of S0
+decided  isl          layer_potential.py:88  single_layer  z[t] is in bounds for every instance of S0
+decided  isl          layer_potential.py:88  single_layer  distinct instances of S0 write distinct cells of out
+decided  isl          layer_potential.py:78  single_layer  the source order runs every dependence forward in time
+decided  type         layer_potential.py:88  single_layer  the accumulation into out[t] over s is approx
+tested   interpreter  layer_potential.py:78  single_layer  the traced term computes what the body computes
+
+9 facts: 8 decided, 1 tested
+```
+
+### loopty run examples/layer_potential.py
+
+`uv run loopty run examples/layer_potential.py` compiles the tile on the C
+target and compares it with the native run, as for every demo. Its transcript
+is not kept here: the difference it prints is one of `log`'s last bits,
+numpy's against the C library's, which can differ from machine to machine.
+
+## sum_factorization.py
+
+The weak derivative along `r` on quadrilaterals, as grudge applies it, a pass
+per reference axis: the differentiation matrix along `r`, then the quadrature
+weights along `s`, each pass a kernel over the elements and a program running
+one after the other. Fused on every loop, the second pass would read a cell of
+the row before the first stores it, and the refusal names that pair and the
+fusion of fewer loops it checked, `fuse("along_r", "along_s", loops=2)`, which
+fuses the element and the row and leaves the inner loops one after the other.
+Each element's result is the Kronecker product of the two matrices applied to
+it. Fused so, the second pass reads only the row the first has just stored, so
+`contract("v")` keeps `v` one row at a time, `lambda e, a, b: b`, and the
+program stores `n` cells where it stored `ne * n * n`.
+
+### python examples/sum_factorization.py
+
+```console
+$ uv run python examples/sum_factorization.py
+native: each element is kron(D, M) applied to it: True
+
+refused: fuse(along_r, along_s) illegal: instance along_r.S0[e=0, a=1, b=1] writes v[0, 1, 1] read by along_s.S0[e_0=0, a_0=1, b_0=0] scheduled earlier (at n=2, ne=1, isl's choice); fuse('along_r', 'along_s', loops=2) runs every dependence between them forward
+
+accepted: Schedule(weak_derivative, target='c').fuse(along_r, along_s, loops=2)
+  the passes' loops, outermost first: e, a, b, b_0
+  decided  isl  fuse(along_r, along_s, loops=2) renames the instances of weak_derivative one for one
+  decided  isl  the order after fuse(along_r, along_s, loops=2) runs every dependence of weak_derivative forward
+  w: difference 0 within 1e-06 (approx) -> tested
+
+accepted: Schedule(weak_derivative, target='c').fuse(along_r, along_s, loops=2).contract('v', lambda e, a, b: b)
+  v kept in n cells, lambda e, a, b: b
+  decided  isl  every cell of v that weak_derivative reads, along_r.S0 has stored by the time it is read
+  decided  isl  no read of v sees its slot overwritten after contract('v', lambda e, a, b: b): v kept in n cells, v[e, a, b] in slot b
+  w: agrees with the native run -> tested
+```
+
+### lanky check examples/sum_factorization.py
+
+```console
+$ uv run lanky check examples/sum_factorization.py
+STATUS   BY           WHERE                     OWNER            STATEMENT
+-------  -----------  ------------------------  ---------------  ------------------------------------------------------------
+decided  isl          sum_factorization.py:82   along_r          v[e, a, b] is in bounds for every instance of S0
+decided  isl          sum_factorization.py:82   along_r          F[a, m] is in bounds for every instance of S0
+decided  isl          sum_factorization.py:82   along_r          u[e, m, b] is in bounds for every instance of S0
+decided  isl          sum_factorization.py:82   along_r          distinct instances of S0 write distinct cells of v
+decided  isl          sum_factorization.py:72   along_r          the source order runs every dependence forward in time
+decided  type         sum_factorization.py:82   along_r          the accumulation into v[e, a, b] over m is approx
+tested   interpreter  sum_factorization.py:72   along_r          the traced term computes what the body computes
+decided  isl          sum_factorization.py:95   along_s          w[e, a, b] is in bounds for every instance of S0
+decided  isl          sum_factorization.py:95   along_s          G[b, m] is in bounds for every instance of S0
+decided  isl          sum_factorization.py:95   along_s          v[e, a, m] is in bounds for every instance of S0
+decided  isl          sum_factorization.py:95   along_s          distinct instances of S0 write distinct cells of w
+decided  isl          sum_factorization.py:85   along_s          the source order runs every dependence forward in time
+decided  type         sum_factorization.py:95   along_s          the accumulation into w[e, a, b] over m is approx
+tested   interpreter  sum_factorization.py:85   along_s          the traced term computes what the body computes
+decided  isl          sum_factorization.py:103  weak_derivative  every cell of v that along_s reads, along_r stored before it
+tested   interpreter  sum_factorization.py:98   weak_derivative  the traced term computes what the body computes
+
+16 facts: 13 decided, 3 tested
+```
+
+### loopty run examples/sum_factorization.py
+
+```console
+$ uv run loopty run examples/sum_factorization.py
+weak_derivative: Schedule(weak_derivative, target='c').fuse(along_r, along_s, loops=2)
+  w: difference 0 within 1e-06 (approx) -> tested
+weak_derivative: Schedule(weak_derivative, target='c').fuse(along_r, along_s, loops=2).contract('v', lambda e, a, b: b)
+  w: difference 0 within 1e-06 (approx) -> tested
+along_r: Schedule(along_r, target='c')
+  v: difference 0 within 1.02e-06 (approx) -> tested
+along_s: Schedule(along_s, target='c')
+  w: difference 0 within 1e-06 (approx) -> tested
+
+STATUS   BY     WHERE                     OWNER            STATEMENT
+-------  -----  ------------------------  ---------------  ------------------------------------------------------------------------
+decided  isl    sum_factorization.py:101  weak_derivative  fuse(along_r, along_s, loops=2) renames the instances of weak_derivat...
+decided  isl    sum_factorization.py:101  weak_derivative  the order after fuse(along_r, along_s, loops=2) runs every dependence...
+tested   loopy  sum_factorization.py:98   weak_derivative  the scheduled run of weak_derivative agrees with the native run to th...
+decided  isl    sum_factorization.py:101  weak_derivative  every cell of v that weak_derivative reads, along_r.S0 has stored by ...
+decided  isl    sum_factorization.py:101  weak_derivative  no read of v sees its slot overwritten after contract('v', lambda e, ...
+tested   loopy  sum_factorization.py:98   weak_derivative  the scheduled run of weak_derivative agrees with the native run to th...
+tested   loopy  sum_factorization.py:82   along_r          the scheduled run of along_r agrees with the native run to the accura...
+tested   loopy  sum_factorization.py:95   along_s          the scheduled run of along_s agrees with the native run to the accura...
+
+8 facts: 4 decided, 4 tested
+```
+
+## storage_layouts.py
+
+Two layouts from the codes the demos come from, each a Python function from a
+cell's indices to its address, with its cells and its buffer in its
+annotations. sumpy's storage index keeps the compressed derivatives of a 2-D
+Laplace local expansion, `(0, 0)` at 0 and then two per order, which no one
+formula gives, so it is a layout of two pieces, `layout(centre,
+derivatives)`. grudge's DOFArray is `(ne, N**3)`, each element reshaped by
+modepy in F order, and grudge #418 writes the same layout as loopy's
+`dim_tags` `N3,N0,N1,N2`: `dof_array.same_as("N3,N0,N1,N2")` is that claim,
+and `N3,N2,N1,N0`, the reshape in C order, is refuted with a cell. Each layout
+stores every cell inside its buffer, no two at one address and a cell at every
+address; with Lean installed, the last is proved with isl's inverse of the
+layout as the witness, `//` and `%` by 2 for sumpy's. Two kernels read
+through the layouts' own functions, `coeffs[i, derivatives((a, b))]`.
+
+### python examples/storage_layouts.py
+
+```console
+$ uv run python examples/storage_layouts.py
+sumpy's storage index, (a, b) -> address:
+  (0, 0) -> 0, (0, 1) -> 1, (1, 0) -> 2, (0, 2) -> 3, (1, 1) -> 4, (0, 3) -> 5, (1, 2) -> 6, (0, 4) -> 7, (1, 3) -> 8
+  box 0 read through it: R[0, 1, 3] = 8 (address 8)
+grudge's DOFArray through dof_array is modepy's reshape: True
+refuted: dof_array stores every cell where dim_tags N3,N2,N1,N0 does
+  dof_array stores (e=0, a=1, b=0, c=2) at 19, and dim_tags N3,N2,N1,N0 at 11 (at ne=1)
+```
+
+### lanky check examples/storage_layouts.py
+
+```console
+$ uv run lanky check examples/storage_layouts.py
+STATUS   BY           WHERE                   OWNER          STATEMENT
+-------  -----------  ----------------------  -------------  ------------------------------------------------------------------
+decided  isl          storage_layouts.py:56   storage_index  storage_index stores every cell at an address of Fin(9)
+decided  isl          storage_layouts.py:56   storage_index  storage_index stores no two cells at one address
+decided  isl          storage_layouts.py:56   storage_index  storage_index stores a cell at every address of Fin(9)
+decided  isl          storage_layouts.py:83   stored_table   R[i, a, b] is in bounds for every instance of S0
+decided  isl          storage_layouts.py:83   stored_table   coeffs[i, 0] is in bounds for every instance of S0
+decided  isl          storage_layouts.py:85   stored_table   R[i, a, b] is in bounds for every instance of S1
+decided  isl          storage_layouts.py:85   stored_table   coeffs[i, 2*(a + b) - 1 + a] is in bounds for every instance of S1
+decided  isl          storage_layouts.py:83   stored_table   distinct instances of S0 write distinct cells of R
+decided  isl          storage_layouts.py:85   stored_table   distinct instances of S1 write distinct cells of R
+decided  isl          storage_layouts.py:73   stored_table   the source order runs every dependence forward in time
+tested   interpreter  storage_layouts.py:73   stored_table   the traced term computes what the body computes
+decided  isl          storage_layouts.py:94   dof_array      dof_array stores every cell at an address of Fin(ne*27)
+decided  isl          storage_layouts.py:94   dof_array      dof_array stores no two cells at one address
+decided  isl          storage_layouts.py:94   dof_array      dof_array stores a cell at every address of Fin(ne*27)
+decided  isl          storage_layouts.py:101  as_dim_tags    dof_array stores every cell where dim_tags N3,N0,N1,N2 does
+decided  isl          storage_layouts.py:114  unflatten      u[e, a, b, c] is in bounds for every instance of S0
+decided  isl          storage_layouts.py:114  unflatten      flat[27*e + a + 3*b + 9*c] is in bounds for every instance of S0
+decided  isl          storage_layouts.py:114  unflatten      distinct instances of S0 write distinct cells of u
+decided  isl          storage_layouts.py:104  unflatten      the source order runs every dependence forward in time
+tested   interpreter  storage_layouts.py:104  unflatten      the traced term computes what the body computes
+
+20 facts: 18 decided, 2 tested
+```
+
+### loopty run examples/storage_layouts.py
+
+```console
+$ uv run loopty run examples/storage_layouts.py
+stored_table: Schedule(stored_table, target='c')
+  R: difference 0 within 1e-06 (approx) -> tested
+unflatten: Schedule(unflatten, target='c')
+  u: difference 0 within 1e-06 (approx) -> tested
+
+STATUS  BY     WHERE                   OWNER         STATEMENT
+------  -----  ----------------------  ------------  ------------------------------------------------------------------------
+tested  loopy  storage_layouts.py:83   stored_table  the scheduled run of stored_table agrees with the native run to the a...
+tested  loopy  storage_layouts.py:114  unflatten     the scheduled run of unflatten agrees with the native run to the accu...
+
+2 facts: 2 tested
 ```
 
 ## reshape_layouts.py and p2p.py
@@ -923,3 +1271,98 @@ Both run the same three ways and are documented in their own module docstrings.
 ledger of what isl decided about them; `p2p.py` prints the near-field potential
 of sixteen points in a four by four grid of boxes and checks it against a direct
 sum over the same interaction lists.
+
+## assembly.py
+
+PyOP2's assembly loop around the element kernel of `quadrature.py`: per cell,
+gather the field at the cell's nodes, compute the cell's three values, and add
+them into the nodes, `y[cell[c, k]] += yl[c, k]`. Two cells that share a node
+add into one cell of `y`. Such a statement is an update: either order of two
+updates of one cell gives the same sum, to the class of the sum, so the kernel
+owes that class and not distinct writes, and a schedule may reorder the
+updates but not run two of one cell at the same time. The cell an update
+writes is read from the cell map, which isl cannot follow, so the refusal of
+PyOP2's GPU split names two updates that collide on the example inputs, the
+node the two triangles share, and `atomic("y")` is what makes the split legal.
+
+### python examples/assembly.py
+
+Both meshes against the assembled matrix, PyOP2's split of the cells onto
+groups and work items refused and then accepted with atomic updates (on the C
+target, which has no work items, it is legal and cannot be built), and Sun et
+al.'s schedule, the cells four at a time, compiled and compared.
+
+```console
+$ uv run python examples/assembly.py
+PyOP2's two triangles: 2 cells, y agrees with the assembled matrix: True
+a square: 32 cells, y agrees with the assembled matrix: True
+
+Schedule(mass_action).split('c', 32).tag(c_outer='g.0', c_inner='l.0') ->
+  IllegalCast: tag(c_outer='g.0', c_inner='l.0') illegal: S1[c=0, k=2] and S1[c=1, k=1] both update y[3] on example_inputs() (nc=2, nv=4), where cell[0, 2] = 3 and cell[1, 1] = 3, and the loop c_inner on l.0 runs them on two work items, so one can overwrite what the other added; make the updates atomic, with atomic('y') before this step
+
+accepted: Schedule(mass_action, target='c').atomic('y').split(c, 32).tag(c_outer='g.0', c_inner='l.0')
+  decided  isl  split(c, 32) renames the instances of mass_action one for one
+  decided  isl  the order after split(c, 32) runs every dependence of mass_action forward
+  decided  isl  tag(c_outer='g.0', c_inner='l.0') renames the instances of mass_action one for one
+  decided  isl  the order after tag(c_outer='g.0', c_inner='l.0') runs every dependence of mass_action forward, within one work item
+  decided  isl  atomic updates of y run at the same time after tag(c_outer='g.0', c_inner='l.0'), so their sum is reassociated and compared at 'reassoc'
+  buildable on c: False: the tag c_outer='g.0', c_inner='l.0' puts a loop on a hardware axis, and the C target has none
+
+schedule: Schedule(mass_action, target='c').atomic('y').split(c, 4).tag(c_inner='ilp')
+  yl: difference 0 within 1.01e-06 (approx) -> tested
+  y: difference 0 within 1.01e-06 (approx) -> tested
+```
+
+### lanky check examples/assembly.py
+
+```console
+$ uv run lanky check examples/assembly.py
+STATUS   BY           WHERE           OWNER        STATEMENT
+-------  -----------  --------------  -----------  ---------------------------------------------------------
+decided  isl          assembly.py:83  mass_action  yl[c, j] is in bounds for every instance of S0
+decided  type         assembly.py:83  mass_action  X[cell[c, 1]] is in bounds by type (cell[c, 1] : Fin(nv))
+decided  isl          assembly.py:83  mass_action  cell[c, 1] is in bounds for every instance of S0
+decided  type         assembly.py:83  mass_action  X[cell[c, 0]] is in bounds by type (cell[c, 0] : Fin(nv))
+decided  isl          assembly.py:83  mass_action  cell[c, 0] is in bounds for every instance of S0
+decided  type         assembly.py:83  mass_action  Y[cell[c, 2]] is in bounds by type (cell[c, 2] : Fin(nv))
+decided  isl          assembly.py:83  mass_action  cell[c, 2] is in bounds for every instance of S0
+decided  type         assembly.py:83  mass_action  Y[cell[c, 0]] is in bounds by type (cell[c, 0] : Fin(nv))
+decided  type         assembly.py:83  mass_action  X[cell[c, 2]] is in bounds by type (cell[c, 2] : Fin(nv))
+decided  type         assembly.py:83  mass_action  Y[cell[c, 1]] is in bounds by type (cell[c, 1] : Fin(nv))
+decided  isl          assembly.py:83  mass_action  W[q] is in bounds for every instance of S0
+decided  isl          assembly.py:83  mass_action  PHI[q, j] is in bounds for every instance of S0
+decided  isl          assembly.py:83  mass_action  PHI[q, k] is in bounds for every instance of S0
+decided  type         assembly.py:83  mass_action  u[cell[c, k]] is in bounds by type (cell[c, k] : Fin(nv))
+decided  isl          assembly.py:83  mass_action  cell[c, k] is in bounds for every instance of S0
+decided  type         assembly.py:89  mass_action  y[cell[c, k]] is in bounds by type (cell[c, k] : Fin(nv))
+decided  isl          assembly.py:89  mass_action  cell[c, k] is in bounds for every instance of S1
+decided  isl          assembly.py:89  mass_action  yl[c, k] is in bounds for every instance of S1
+decided  isl          assembly.py:83  mass_action  distinct instances of S0 write distinct cells of yl
+decided  isl          assembly.py:89  mass_action  every cell of yl that S1 reads, S0 wrote before the read
+decided  isl          assembly.py:67  mass_action  the source order runs every dependence forward in time
+decided  type         assembly.py:83  mass_action  the accumulation into yl[c, j] over q, k is approx
+decided  type         assembly.py:89  mass_action  the accumulation into y[cell[c, k]] over c, k is approx
+tested   interpreter  assembly.py:67  mass_action  the traced term computes what the body computes
+
+24 facts: 23 decided, 1 tested
+```
+
+### loopty run examples/assembly.py
+
+```console
+$ uv run loopty run examples/assembly.py
+mass_action: Schedule(mass_action, target='c').atomic('y').split(c, 4).tag(c_inner='ilp')
+  yl: difference 0 within 1.01e-06 (approx) -> tested
+  y: difference 0 within 1.01e-06 (approx) -> tested
+
+STATUS   BY     WHERE           OWNER        STATEMENT
+-------  -----  --------------  -----------  ------------------------------------------------------------------------
+decided  isl    assembly.py:83  mass_action  split(c, 4) renames the instances of mass_action one for one
+decided  isl    assembly.py:83  mass_action  the order after split(c, 4) runs every dependence of mass_action forward
+decided  isl    assembly.py:83  mass_action  tag(c_inner='ilp') renames the instances of mass_action one for one
+decided  isl    assembly.py:83  mass_action  the order after tag(c_inner='ilp') runs every dependence of mass_acti...
+decided  isl    assembly.py:83  mass_action  atomic updates of y run at the same time after tag(c_inner='ilp'), so...
+tested   loopy  assembly.py:83  mass_action  the scheduled run of mass_action agrees with the native run to the ac...
+
+6 facts: 5 decided, 1 tested
+```

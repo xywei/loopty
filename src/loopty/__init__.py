@@ -60,14 +60,17 @@ _EXPORTS = {
     "Schedule": "loopty.schedule",
     "Sigma": "loopty.domain",
     "Stmt": "loopty.term",
+    "Table": "loopty.table",
     "Term": "loopty.term",
     "TraceError": "loopty.trace",
     "UnbuildableSchedule": "loopty.schedule",
     "Where": "loopty.domain",
     "facts_for": "loopty.typing",
     "kernel": "loopty.kernel",
+    "layout": "loopty.layout",
     "program": "loopty.kernel",
     "reduce_sum": "loopty.reduction",
+    "table": "loopty.table",
     "trace": "loopty.trace",
     "when": "loopty.trace",
 }
@@ -92,6 +95,7 @@ __all__ = [
     "Schedule",
     "Sigma",
     "Stmt",
+    "Table",
     "Term",
     "TraceError",
     "UnbuildableSchedule",
@@ -99,8 +103,10 @@ __all__ = [
     "__version__",
     "facts_for",
     "kernel",
+    "layout",
     "program",
     "reduce_sum",
+    "table",
     "trace",
     "when",
 ]
@@ -150,9 +156,11 @@ if TYPE_CHECKING:
     from loopty.domain import Sigma, Where
     from loopty.idx import Fin
     from loopty.kernel import Kernel, Program, kernel, program
+    from loopty.layout import layout
     from loopty.oracle import IslOracle
     from loopty.reduction import reduce_sum
     from loopty.schedule import IllegalCast, Schedule, UnbuildableSchedule
+    from loopty.table import Table, table
     from loopty.term import Access, ArrType, Reduction, Stmt, Term
     from loopty.trace import TraceError, trace, when
     from loopty.typing import facts_for

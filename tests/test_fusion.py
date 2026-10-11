@@ -671,6 +671,36 @@ def burgers_inputs(size: int = 8) -> dict:
     return {"u": Arr.from_numpy(velocity(size)), "rhs": Arr.zeros(size)}
 
 
+@kernel
+def along(
+    F: Arr[Fin[m], Fin[m], Real],  # noqa: F821
+    u: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+    t: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+):
+    """Each element's values through the matrix ``F``: one pass of grudge's."""
+    for e in t.dom:
+        for a in t.dom[e]:
+            t[e, a] = reduce_sum(F[a, k] * u[e, k] for k in u.dom[e])
+
+
+@program
+def two_passes(F, G, u, v):
+    """Two passes over the elements, the second reading all the first wrote."""
+    t = Arr.zeros_like(u)
+    along(F, u, t)
+    along(G, t, v)
+
+
+def passes_inputs(elements: int, width: int) -> dict:
+    rng = np.random.default_rng(elements * 10 + width)
+    return {
+        "F": Arr.from_numpy(rng.normal(size=(width, width))),
+        "G": Arr.from_numpy(rng.normal(size=(width, width))),
+        "u": Arr.from_numpy(rng.normal(size=(elements, width))),
+        "v": Arr.zeros((elements, width)),
+    }
+
+
 def agrees(prog, schedule, inputs: dict) -> None:
     fact = LoopyExecutor().differential(prog, schedule, inputs)
     assert fact.status is Status.TESTED, fact.provenance
@@ -979,9 +1009,11 @@ def test_two_loops_fuse_with_a_shift_each() -> None:
     schedule = Schedule(squares, sizes={"n": 6, "m": 5})
     with pytest.raises(IllegalCast) as caught:
         schedule.fuse("square2", "down")
+    # Both fusions the refusal names were checked: the two loops one row
+    # apart, and the rows alone, one apart.
     assert str(caught.value).endswith(
         "fuse('square2', 'down', shift=(1, 0)) runs every dependence between "
-        "them forward"
+        "them forward, and so does fuse('square2', 'down', shift=1, loops=1)"
     )
     fused = schedule.fuse("square2", "down", shift=(1, 0))
     assert statements(fused) == [("bijective", "decided"), ("monotone", "decided")]
@@ -1042,7 +1074,7 @@ def test_the_outer_loop_fuses_after_a_split_or_a_tile() -> None:
     # domain is cut after it by name. Neither loopy keeps the loops of such a
     # domain in the nest's order: loopy 2025.2 puts a split loop's two after
     # the others ([j, i_outer, i_inner]), and loopy main keeps namedisl's
-    # order ([i_inner, i_outer, j_outer, j_inner] for the tile).
+    # order ([i_inner, i_outer, j_outer, j_inner] for the tile) (#192).
     i, j = squared_rows.term.stmt("square2.S0").inames
     base = Schedule(squared_rows)
     for steps, schedule in (
@@ -1195,6 +1227,83 @@ def test_a_parallel_loop_after_fusion_is_refused_for_the_edge_it_carries() -> No
     loop = fused.order[-1]
     with pytest.raises(IllegalCast, match="on another work item"):
         fused.tag(**{loop: "g.0"})
+
+
+def test_two_passes_fuse_on_the_element_loop_and_no_deeper() -> None:
+    # The second pass reads t[e, k] for every k of the element: fused on e
+    # and a, it would read a cell of the element before the first pass
+    # stores it. The refusal names that pair, and the fusion of fewer loops
+    # that is accepted, which it checked.
+    schedule = Schedule(two_passes)
+    with pytest.raises(IllegalCast) as caught:
+        schedule.fuse("along", "along@2")
+    assert caught.value.fact.kind == "monotone"
+    (source, source_at), (sink, sink_at), _sizes = caught.value.witness
+    assert (source, sink) == ("along.S0", "along@2.S0")
+    element, row = two_passes.term.stmt("along.S0").inames
+    later = two_passes.term.stmt("along@2.S0").inames
+    assert source_at[element] == sink_at[later[0]]
+    assert source_at[row] > sink_at[later[1]]
+    assert str(caught.value).endswith(
+        "fuse('along', 'along@2', loops=1) runs every dependence between them "
+        "forward"
+    )
+    fused = schedule.fuse("along", "along@2", loops=1)
+    assert fused.history == ("fuse(along, along@2, loops=1)",)
+    assert fused.key == "two_passes[c].fuse('along', 'along@2', loops=1)"
+    assert statements(fused) == [("bijective", "decided"), ("monotone", "decided")]
+    assert fused.buildable == (True, "")
+    # One loop over the elements, and the two passes' row loops in it, one
+    # after the other (the loops before them zero t).
+    assert fused.order[-3:] == (element, row, later[1])
+    entry = fused.kernel.default_entrypoint
+    insns = {insn.id: insn for insn in entry.instructions}
+    assert element in insns["along_S0"].within_inames
+    assert element in insns["along_2_S0"].within_inames
+    assert row not in insns["along_2_S0"].within_inames
+    for elements, width in ((1, 1), (3, 2), (4, 5)):
+        agrees(two_passes, fused, passes_inputs(elements, width))
+
+
+def test_loops_counts_the_outer_loops_a_fusion_takes() -> None:
+    # Two loops of two levels each fuse both by default, and one with
+    # loops=1: the shift is then one number, for the one loop.
+    whole_nest = Schedule(squares, sizes={"n": 6, "m": 5})
+    loops = len(whole_nest.order)
+    assert len(whole_nest.fuse("square2", "down", shift=(1, 0)).order) == loops - 2
+    outer = whole_nest.fuse("square2", "down", shift=1, loops=1)
+    assert outer.history == ("fuse(square2, down, shift=1, loops=1)",)
+    assert len(outer.order) == loops - 1
+    assert statements(outer) == [("bijective", "decided"), ("monotone", "decided")]
+    for height, width in ((1, 1), (2, 3), (6, 5)):
+        a = np.arange(height * width, dtype=float).reshape(height, width) / 7.0
+        agrees(
+            squares,
+            outer,
+            {"a": Arr.from_numpy(a), "b": Arr.from_numpy(np.zeros((height, width)))},
+        )
+    # Replayed with its loops when retargeted.
+    again = outer.retarget("c-source")
+    assert again.history == outer.history
+    assert again.order == outer.order
+
+
+@pytest.mark.parametrize(
+    ("loops", "error", "message"),
+    [
+        (0, ValueError, "takes from 1 to 2 of their outer loops, not 0"),
+        (3, ValueError, "takes from 1 to 2 of their outer loops, not 3"),
+        (True, TypeError, "a whole number counted from the outermost .*, not True"),
+        (1.0, TypeError, "a whole number counted from the outermost .*, not 1.0"),
+        # A loop's name is not how many: the message says what loops=1 fuses.
+        ("i", TypeError, r"\(loops=1 fuses i with p\), not 'i'"),
+    ],
+)
+def test_a_fusion_of_more_loops_than_both_sides_have_is_refused(
+    loops, error: type, message: str
+) -> None:
+    with pytest.raises(error, match=message):
+        Schedule(squares).fuse("square2", "down", loops=loops)
 
 
 # }}}

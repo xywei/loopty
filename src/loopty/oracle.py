@@ -27,7 +27,7 @@ or to ``ASSUMED``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import islpy as isl
@@ -312,8 +312,34 @@ def is_monotone(schedule: isl.Map, deps: isl.Map) -> Verdict:
 # {{{ the questions a typing rule may ask
 
 
+class _Stated:
+    """What every question has: a way to state it for Lean.
+
+    ``lean`` is a function of isl's verdict that states the question's fact
+    from loopty's own description of the kernel (:mod:`loopty.obligations`),
+    or ``None`` for a question loopty states for isl only. lanky's Lean
+    oracle calls :meth:`lean_obligation` when it is asked about the fact,
+    and isl decides the question first, so that a refuted fact is stated
+    with its counterexample.
+    """
+
+    lean: Any
+    #: A function of a refuting verdict that says what refutes the question
+    #: in the user's words, or ``None`` for the witness and the description
+    #: (see :func:`_refutation`).
+    explain: Any
+
+    def lean_obligation(self) -> Any:
+        """How Lean is to check this question's fact (see :mod:`lanky.obligations`)."""
+        from loopty.obligations import IslOnly
+
+        if self.lean is None:
+            return IslOnly().lean_obligation()
+        return self.lean(decide(self))
+
+
 @dataclass(frozen=True)
-class Empty:
+class Empty(_Stated):
     """Is this set (or map) empty?
 
     The shape of a disjointness obligation: the set is the *bad* case, the pairs
@@ -324,10 +350,12 @@ class Empty:
     obj: Any
     description: str = ""
     labels: tuple[str, ...] = ()
+    lean: Any = field(default=None, compare=False, repr=False)
+    explain: Any = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
-class Subset:
+class Subset(_Stated):
     """Is every point of ``small`` a point of ``large``?
 
     The shape of an in-bounds obligation: ``small`` is the set of cells an
@@ -338,10 +366,12 @@ class Subset:
     large: Any
     description: str = ""
     labels: tuple[str, ...] = ()
+    lean: Any = field(default=None, compare=False, repr=False)
+    explain: Any = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
-class Bijective:
+class Bijective(_Stated):
     """Is this map a bijection?
 
     The shape of a reindexing cast: split, tile, interchange and skew are
@@ -351,10 +381,12 @@ class Bijective:
     map: Any
     description: str = ""
     labels: tuple[str, ...] = ()
+    lean: Any = field(default=None, compare=False, repr=False)
+    explain: Any = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
-class Monotone:
+class Monotone(_Stated):
     """Does ``schedule`` run every dependence of ``deps`` forward in time?
 
     The shape of a legality obligation, asked of the source order by the typing
@@ -365,6 +397,8 @@ class Monotone:
     deps: Any
     description: str = ""
     labels: tuple[str, ...] = ()
+    lean: Any = field(default=None, compare=False, repr=False)
+    explain: Any = field(default=None, compare=False, repr=False)
 
 
 #: The questions :class:`IslOracle` answers.
@@ -424,8 +458,15 @@ def _refutation(question: IslQuestion, verdict: Verdict) -> str:
     other three it states the claim, so the witness is the exception: ``cells
     u[i + 1] reaches are cells u has, except [a0=1]``. The sizes the witness was
     read off at close the sentence. A question with no description, or a
-    verdict with no witness, is explained by the verdict's own ``detail``.
+    verdict with no witness, is explained by the verdict's own ``detail``. A
+    question that says how to put its witness in words (``explain``, as a
+    layout's do: ``fold stores (a=1, b=3) and (a=3, b=2) both at 7``) is
+    explained so.
     """
+    if question.explain is not None:
+        said = question.explain(verdict)
+        if said:
+            return said
     labelled = label_witness(verdict.witness, question.labels)
     if not question.description or not labelled:
         return verdict.detail

@@ -595,7 +595,10 @@ class Kernel(_Decorated):
         (:func:`loopty.faithful.postcondition_fact`), which is what a program
         that calls the kernel counts it as. So is a ``layout`` fact no isl
         question decides, which a run that moves a row off its buffer or onto
-        another refutes (:func:`loopty.faithful.layout_fact`).
+        another refutes (:func:`loopty.faithful.layout_fact`), and a write
+        through a cell read from an array, whose distinct writes isl cannot
+        decide: refuted by two instances that write one cell on an input, or
+        ``tested`` (:func:`loopty.faithful.collision_fact`).
 
         A body that cannot be traced is itself reported as a fact rather than as
         a crash, so that ``lanky check`` on a file with one broken kernel still
@@ -631,14 +634,32 @@ class Kernel(_Decorated):
                 ),
             )
             return self._facts
-        from loopty.faithful import faithfulness_fact, layout_fact, postcondition_fact
+        from loopty.faithful import (
+            collision_fact,
+            faithfulness_fact,
+            layout_fact,
+            postcondition_fact,
+        )
 
         key = {"module": self.module, "line": self.line}
-        observed: list[Any] = []
-        faithful = faithfulness_fact(
-            self, term, owner=self.qualname, where=self.where, observed=observed, **key
-        )
         stated = rules.facts_for(term, owner=self.qualname, where=self.where, **key)
+        # A write through a subscript read from an array is decided on the
+        # runs, from the cells the interpreted term wrote (collision_fact).
+        native = any(
+            fact.kind == "disjoint-writes" and fact.provenance.get("native")
+            for fact in stated
+        )
+        observed: list[Any] = []
+        touched: list[Any] | None = [] if native else None
+        faithful = faithfulness_fact(
+            self,
+            term,
+            owner=self.qualname,
+            where=self.where,
+            observed=observed,
+            touched=touched,
+            **key,
+        )
         tested = [
             postcondition_fact(
                 self, term, observed, owner=self.qualname, where=self.where, **key
@@ -646,6 +667,8 @@ class Kernel(_Decorated):
             if fact.kind == "postcondition"
             else layout_fact(term, fact, observed)
             if fact.kind == "layout"
+            else collision_fact(term, fact, touched or ())
+            if fact.kind == "disjoint-writes" and fact.provenance.get("native")
             else fact
             for fact in stated
         ]
@@ -921,6 +944,10 @@ class KernelTheory:
     def facts(self, obj: Any, /) -> tuple:
         """Return the facts claimed by a decorated kernel or program."""
         if isinstance(obj, Kernel | Program):
+            return obj.facts()
+        from loopty.layout import Layout, SameLayout
+
+        if isinstance(obj, Layout | SameLayout):
             return obj.facts()
         return ()
 

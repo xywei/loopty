@@ -76,6 +76,7 @@ import inspect
 import itertools
 import os
 import random
+import re
 import sys
 import sysconfig
 import threading
@@ -134,6 +135,8 @@ __all__ = [
     "reduction_exactness",
     "reductions_in",
     "trace",
+    "update_exactness",
+    "update_operands",
     "when",
 ]
 
@@ -151,6 +154,192 @@ def _abandoned_message(inames: Sequence[str]) -> str:
         "part that should not run instead: it records the condition, narrows "
         "the statement's domain, and masks the writes under plain python."
     )
+
+
+#: numpy's name of each function :mod:`loopty.math` has, as numpy's loop over
+#: objects asks a value for it (``numpy.conj`` asks for ``conjugate``), and as
+#: an attribute a value is asked for (``x.real``), with its name there.
+_NUMPY_NAMES = {
+    "sqrt": "sqrt",
+    "exp": "exp",
+    "log": "log",
+    "sin": "sin",
+    "cos": "cos",
+    "real": "real",
+    "imag": "imag",
+    "conjugate": "conj",
+    "conj": "conj",
+}
+
+#: What numpy says when one of its functions meets a value it cannot compute
+#: with: it asks the object for a method of the function's name.
+_UFUNC_OF_AN_OBJECT = re.compile(
+    r"loop of ufunc does not support argument \d+ of type \w+ which has no "
+    r"callable (\w+) method"
+)
+
+#: What loopty.math has, for a message about a function it has not.
+_MATH_HAS = "sqrt, exp, log, sin, cos, real, imag and conj"
+
+
+def _numbers_message(exc: BaseException) -> str | None:
+    """What to say about numpy or Python's ``math`` given a traced value, or ``None``.
+
+    A body that runs natively on numbers is free to call ``numpy.sqrt`` or
+    ``math.sqrt`` on them, or to read ``x[i].real``; traced, each value is a
+    term, and the three fail far from the body, with numpy's "loop of ufunc
+    does not support argument 0 of type Subscript which has no callable sqrt
+    method", pymbolic's ``UnknownVariableError: x`` (``math.sqrt`` asks
+    ``float()`` of the term, which pymbolic answers by evaluating it), and
+    "'Subscript' object has no attribute 'real'". Each is named here, at the
+    body's line, with the function of :mod:`loopty.math` that is numpy's
+    natively and a call of the target's when compiled.
+    """
+    where = _body_location(exc)
+    at = f" at {where}" if where else ""
+    if isinstance(exc, TypeError):
+        match = _UFUNC_OF_AN_OBJECT.search(str(exc))
+        if match is None:
+            return None
+        numpy_name = match.group(1)
+        return (
+            f"numpy.{numpy_name} of a traced value{at}: numpy's functions "
+            "compute on numbers, and while a kernel is traced its values are "
+            f"terms. {_math_fix(numpy_name)}"
+        )
+    if isinstance(exc, AttributeError):
+        name = getattr(exc, "name", None)
+        value = getattr(exc, "obj", None)
+        if name not in _NUMPY_NAMES or not isinstance(value, prim.ExpressionNode):
+            return None
+        shown = _shown(value)
+        math_name = _NUMPY_NAMES[name]
+        return (
+            f"{shown}.{name}{at}: while a kernel is traced {shown} is a term, "
+            f"which has no attribute {name}. Write {math_name}({shown}), with "
+            f"{math_name} from loopty.math (from loopty.math import "
+            f"{math_name}), which is numpy's {math_name} when the body runs "
+            "natively and the target's when it is compiled"
+        )
+    if _through_float(exc):
+        return (
+            f"a traced value was made a Python number{at}, as float() does, and "
+            "math.sqrt and the other functions of Python's math and cmath "
+            "modules: while a kernel is traced its values are terms, not "
+            f"numbers. Call loopty.math's functions on them ({_MATH_HAS}; "
+            "from loopty.math import sqrt), which are numpy's when the body "
+            "runs natively and the target's when it is compiled"
+        )
+    return None
+
+
+def _math_fix(numpy_name: str) -> str:
+    """The function of :mod:`loopty.math` to write for numpy's ``numpy_name``."""
+    math_name = _NUMPY_NAMES.get(numpy_name)
+    if math_name is not None:
+        return (
+            f"Write {math_name}(...) from loopty.math (from loopty.math import "
+            f"{math_name}), which is numpy.{numpy_name} when the body runs "
+            "natively and the target's when it is compiled"
+        )
+    return (
+        f"loopty.math has {_MATH_HAS}, each numpy's when the body runs natively "
+        f"and the target's when it is compiled, and no {numpy_name} yet. Until "
+        "it has, a body builds the call itself where it is traced, "
+        f"pymbolic.primitives.Call(Variable({numpy_name!r}), (x,)), and calls "
+        "numpy's on numbers (note 2 in docs/loopy-notes.md)"
+    )
+
+
+def _body_location(exc: BaseException) -> str:
+    """``file:line`` of the last frame of the kernel's code ``exc`` came through.
+
+    The body, or a helper of it: the last frame that is not the machinery's
+    (:func:`_machinery_module`) and has a file, which numpy's and Python's
+    functions written in C have no frame for at all.
+    """
+    where = ""
+    tb = exc.__traceback__
+    while tb is not None:
+        frame = tb.tb_frame
+        filename = frame.f_code.co_filename
+        module = frame.f_globals.get("__name__")
+        # Code a library generates (a dataclass's methods) has no file.
+        if not filename.startswith("<") and not _machinery_module(module, filename):
+            where = f"{filename.rsplit('/', 1)[-1]}:{tb.tb_lineno}"
+        tb = tb.tb_next
+    return where
+
+
+def _through_float(exc: BaseException) -> bool:
+    """Whether ``exc`` was raised making a term a number, as ``float()`` does.
+
+    pymbolic answers ``float()`` of a term by evaluating it, which fails on
+    the first array or loop variable it meets, ``UnknownVariableError``, or on
+    a warning a test run turns into an error on the way there.
+    """
+    if isinstance(exc, TraceError):
+        return False
+    tb = exc.__traceback__
+    while tb is not None:
+        frame = tb.tb_frame
+        module = (frame.f_globals.get("__name__") or "").split(".", 1)[0]
+        if frame.f_code.co_name in ("__float__", "__complex__") and module in (
+            "pymbolic",
+            "lanky",
+        ):
+            return True
+        tb = tb.tb_next
+    return False
+
+
+def _refuse_table_bounds(tracer: Tracer) -> None:
+    """Refuse a loop or a sum bounded by a value read from a constant table.
+
+    ``Fin[SIZES[i]]`` traced, with its bound a parameter isl reads the table
+    cell as, and the lowering took that parameter for a size the caller
+    passes: the compiled run failed with loopy's "value argument
+    'nl_SIZES_i' was not given". A bound read from an array is a ragged
+    family's count, which a parameter of the kernel holds.
+    """
+    if not tracer.tables:
+        return
+    for symbol, expr in tracer.reflections.items():
+        read = sorted(
+            {access.array for access in accesses_in(expr)} & set(tracer.tables)
+        )
+        if not read:
+            continue
+        where = next(
+            (
+                stmt.where
+                for stmt in tracer.stmts
+                if symbol in _statement_parameters(stmt)
+            ),
+            "",
+        )
+        at = f" at {where}" if where else ""
+        raise TraceError(
+            f"a loop{at} is bounded by {_shown(expr)}, a value of the constant "
+            f"table {read[0]}, and a bound is read from an array the kernel is "
+            "given, not from a table: the compiled kernel computes each bound "
+            "before the loop it bounds, from its arguments. Pass the bounds as "
+            "an array of whole numbers (counts: Arr[Fin[k], Nat]), as a ragged "
+            "family's counts are, or write the loop over the largest bound with "
+            "a when(...) guard"
+        )
+
+
+def _statement_parameters(stmt: Stmt) -> set[str]:
+    """The isl parameters of a statement's domain and of its sums' domains."""
+    from loopty.lower import reductions_of
+
+    domains = [stmt.domain, *(sum_.domain for sum_ in reductions_of(stmt.expr))]
+    names: set[str] = set()
+    for domain in domains:
+        if domain is not None:
+            names.update(domain.get_var_names(isl.dim_type.param))
+    return names
 
 
 #: The two ways to give loop-carried state an index, which is what both
@@ -510,6 +699,53 @@ class Tracer:
         #: The kernel's own code, which is watched and followed wherever it is
         #: installed; see :class:`_Own`. :func:`trace` sets it.
         self.own: _Own | None = None
+        #: The constant tables the body reads, by the name it reads each by,
+        #: and the proxy each read goes through; see :meth:`table`.
+        self.tables: dict[str, Any] = {}
+        self._table_proxies: dict[str, SymArr] = {}
+
+    # {{{ constant tables
+
+    def table(self, values: Any, frame: Any) -> SymArr:
+        """The proxy a constant table is read through, recorded on first use.
+
+        The table is named as it is declared, by the global of the module
+        that reads it that holds that very object (``W = table([...])``), or
+        else by the local or closure variable of the frame that reads it,
+        the body's or a helper's; one no frame names (``tables["W"][q]``) is
+        ``table``. The name is only what the term, the ledger and the
+        generated code call it, so one that is already a parameter, a size,
+        a scalar, a loop variable, a reflected parameter or another table of
+        the kernel is made unique, ``W_table`` for a table named like the
+        parameter ``W``.
+        """
+        for name, known in self.tables.items():
+            if known is values:
+                return self._table_proxies[name]
+        from loopty.table import table_type
+
+        stem = _table_name(values, frame) or "table"
+        taken = set(self.params) | self.integers | set(self.tables)
+
+        def clashes(name: str) -> bool:
+            # A reflected parameter already allocated (nl_n_m for a bound n *
+            # m) is a name of the term too, and is not in the sets above.
+            return name in taken or self.reflections.taken(name)
+
+        name = stem if not clashes(stem) else f"{stem}_table"
+        count = 0
+        while clashes(name):
+            count += 1
+            name = f"{stem}_table_{count}"
+        arrtype = table_type(values)
+        self.tables[name] = values
+        self.array_types[name] = arrtype
+        self.reflections.reserve([name])
+        proxy = SymArr(name, arrtype, self)
+        self._table_proxies[name] = proxy
+        return proxy
+
+    # }}}
 
     # {{{ loops
 
@@ -813,6 +1049,7 @@ class Tracer:
         kind: str,
         where: str,
         source: Any = None,
+        exactness: str | None = None,
     ) -> Stmt:
         """Append one statement instance family to the term being built.
 
@@ -829,6 +1066,10 @@ class Tracer:
         there: ``reduce_sum(... for r in val.dom[r])`` after a loop over ``r``
         reads that loop's ``r`` in its bound, which the lowered domain can no
         longer tell from the binder.
+
+        ``exactness`` is the class of an update, ``y[cell[c, j]] += v``
+        (:func:`update_exactness`), which :attr:`loopty.term.Stmt.exactness`
+        keeps.
         """
         escaped = self._escaped(assignee, expr, source)
         if escaped:
@@ -851,6 +1092,7 @@ class Tracer:
             order=(*self._path, self._position()),
             loop_domain=self.loop_domain() if self.guards else None,
             unnarrowed=self.unnarrowed(),
+            exactness=exactness if kind == "accumulate" else None,
         )
         self.stmts.append(stmt)
         return stmt
@@ -880,6 +1122,15 @@ class Tracer:
 
 
 _TRACERS: list[Tracer] = []
+
+
+def _table_name(values: Any, frame: Any) -> str | None:
+    """The name ``frame`` holds ``values`` by: a global, a local, a closure variable."""
+    for scope in (frame.f_globals, frame.f_locals):
+        for name, value in scope.items():
+            if value is values and name.isidentifier():
+                return name
+    return None
 
 
 def current_tracer() -> Tracer | None:
@@ -2510,7 +2761,12 @@ class SymArr:
         _refuse_unheld_store(self, expr, where)
         assignee = Access(self.name, indices)
         kind = "accumulate" if _reads_assignee(expr, assignee) else "assign"
-        tracer.record(assignee, expr, kind, where, source=value)
+        exactness = (
+            update_exactness(expr, assignee, tracer.guard(), tracer)
+            if kind == "accumulate"
+            else None
+        )
+        tracer.record(assignee, expr, kind, where, source=value, exactness=exactness)
 
     def _refuse_many_values(self, key: Any, value: Any, where: str) -> None:
         """Refuse a store of many values into one cell.
@@ -3108,8 +3364,49 @@ def _refuse_arithmetic(expr: Any, params: Mapping[str, Any], where: str) -> None
             _refuse_division_by_zero(node, promotion, where)
         elif isinstance(node, prim.Quotient):
             _refuse_division_by_zero(node, promotion, where)
+        elif isinstance(node, prim.Call):
+            _refuse_half_precision(node, promotion, where)
         _refuse_unheld_literal(node, promotion, where)
     _refuse_untyped_literals(expr, promotion, where)
+
+
+def _refuse_half_precision(node: prim.Call, promotion: Any, where: str) -> None:
+    """Refuse a function of :mod:`loopty.math` numpy computes in half precision.
+
+    numpy computes ``sqrt``, ``log`` and the rest of an integer narrower than
+    32 bits in the narrowest floating type that holds it, a ``float16`` for an
+    ``int8`` or a truth value, which neither C nor OpenCL C has; a double is
+    what ``1.0 *`` the operand asks for.
+    """
+    from loopty.promotion import MATH_FUNCTIONS, _one_dtype
+
+    function = node.function
+    if not isinstance(function, prim.Variable) or function.name not in MATH_FUNCTIONS:
+        return
+    if len(node.parameters) != 1:
+        return
+    result = _one_dtype(promotion.types(node)[0])
+    if result is None or result.kind != "f" or result.itemsize > 2:
+        return
+    (operand,) = node.parameters
+    operand_type = _one_dtype(promotion.types(operand)[0])
+    shown = _written(operand)
+    scaled = f"({shown})" if isinstance(operand, prim.Sum) else shown
+    raise TraceError(
+        f"{function.name}({shown}) at {where} is a {result} natively, the type "
+        f"numpy computes it in for {_a(operand_type)}, and the compiled kernel "
+        f"has no {result}; write {function.name}(1.0 * {scaled}) for a double"
+    )
+
+
+def _a(dtype: Any) -> str:
+    """``an int8``, ``a truth value``: a dtype as a sentence names one."""
+    if dtype is None:
+        return "its operand"
+    if dtype.kind == "b":
+        return "a truth value"
+    name = str(dtype)
+    return f"an {name}" if name[0] in "aeiou" else f"a {name}"
 
 
 def _negated(expr: Any) -> Any:
@@ -3730,6 +4027,77 @@ def join_exactness(*classes: str) -> str:
         key=EXACTNESS_ORDER.index,
         default="exact",
     )
+
+
+def update_operands(expr: Any, assignee: Access, guard: Any) -> tuple[Any, ...] | None:
+    """What an update, ``y[cell[c, j]] += v``, adds to its cell, or ``None``.
+
+    An update is a sum one operand of which is the cell the statement
+    writes, read once and added (``y[c] - v`` is one, ``v - y[c]`` is not),
+    and none of whose other operands reads the array, any cell of it, as
+    neither do the statement's guard and the cell's own subscripts. Those
+    other operands are returned. ``None`` for any other statement, an
+    assignment or a read-modify-write that is no such sum
+    (``y[i] = 2 * y[i]``). Whether the sum commutes is
+    :func:`update_exactness`'s question.
+    """
+    if not isinstance(expr, prim.Sum):
+        return None
+    array = assignee.array
+
+    def is_cell(node: Any) -> bool:
+        if not isinstance(node, prim.Subscript | Access):
+            return False
+        found = accesses_in(node)
+        return bool(found) and (
+            found[0].array == array
+            and structurally_equal(found[0].indices, assignee.indices)
+        )
+
+    def reads_array(node: Any) -> bool:
+        return any(access.array == array for access in accesses_in(node))
+
+    own = [k for k, operand in enumerate(expr.children) if is_cell(operand)]
+    if len(own) != 1 or subtracted(expr, own[0]):
+        return None
+    added = tuple(operand for k, operand in enumerate(expr.children) if k != own[0])
+    cell = expr.children[own[0]]
+    inside = cell.indices if isinstance(cell, Access) else cell.index
+    if (
+        any(reads_array(operand) for operand in added)
+        or reads_array(inside)
+        or (guard is not None and reads_array(guard))
+    ):
+        return None
+    return added
+
+
+def update_exactness(
+    expr: Any, assignee: Access, guard: Any, tracer: Tracer
+) -> str | None:
+    """The exactness class of an update, ``y[cell[c, j]] += v``, or ``None``.
+
+    An update is what :func:`update_operands` reads: the cell plus values
+    that read nothing else of the array. Two instances' updates of one cell
+    then commute: each adds its own value, whatever the other has left in
+    the cell. The class is the weaker of the array's element sort and the
+    value added (:func:`_value_exactness`), as a reduction's is read off
+    what it sums: ``approx`` for ``Real``, ``exact`` for an integer added to
+    an integral array. An integral array updated by a value that is not
+    integral is no update: each partial sum is truncated when it is stored,
+    so the order of the updates changes the result by more than any class
+    allows, and ``None`` is returned, as it is for any other
+    read-modify-write (``y[i] = 2 * y[i]``).
+    """
+    added = update_operands(expr, assignee, guard)
+    if added is None:
+        return None
+    arrtype = tracer.array_types.get(assignee.array)
+    stored = "approx" if arrtype is None else _sort_exactness(arrtype.dtype)
+    value = join_exactness(*(_value_exactness(operand, tracer) for operand in added))
+    if stored == "exact" and value != "exact":
+        return None
+    return join_exactness(stored, value)
 
 
 def reduction_exactness(body: Any, tracer: Tracer) -> str:
@@ -4655,6 +5023,11 @@ def trace(kernel: Any, arg_types: Any) -> Term:
             "write 'with when(condition):' instead of 'if condition:', which "
             "masks the writes of the block rather than choosing a branch."
         ) from exc
+    except Exception as exc:
+        message = _numbers_message(exc)
+        if message is None:
+            raise
+        raise TraceError(message) from exc
     finally:
         if watching:
             _CallWatch.stop()
@@ -4670,6 +5043,7 @@ def trace(kernel: Any, arg_types: Any) -> Term:
     changes = _outside_changes(outside, tracer)
     if changes:
         raise TraceError(_outside_message(name, changes))
+    _refuse_table_bounds(tracer)
 
     sizes: set[str] = set()
     for _, arrtype in params:
@@ -4682,6 +5056,7 @@ def trace(kernel: Any, arg_types: Any) -> Term:
         stmts=tuple(tracer.stmts),
         post=_proposition_of(post_annotation),
         reflected=tracer.reflections.items(),
+        tables=tuple(tracer.tables.items()),
     )
 
 

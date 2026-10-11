@@ -46,12 +46,19 @@ a claim about one cell rather than about an average.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import warnings
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from loopty.contract import check_arguments, checked_storage, inherited_storage
+from loopty.contract import (
+    check_arguments,
+    checked_storage,
+    inherited_storage,
+    writeable_outputs,
+)
 from loopty.isl_reading import declining
 from loopty.term import Term
 from loopty.tolerance import (
@@ -310,6 +317,28 @@ def _call_arguments(
     return out
 
 
+@contextmanager
+def _quiet_parameter_finder() -> Iterator[None]:
+    """Silence loopy's ``ParameterFinderWarning`` while a kernel is called.
+
+    loopy's invoker finds each size the caller does not pass from the shapes
+    of the arrays, one equation at a time, and warns about every equation it
+    cannot solve, ``Unable to generate code to automatically find 'm' from
+    'u': nonlinear expression``, though another equation finds it: a
+    four-axis array over ``Fin[m]`` three times states ``m`` in its strides
+    as ``m * m`` and ``m * m * m``, and a triangle boxed over ``Fin[q] x
+    Fin[q]`` likewise. A size no equation finds is an error when the kernel
+    is called, which this leaves alone; the warning is about code nobody
+    wrote, and was printed by every first run of such a kernel (note 28 in
+    ``docs/loopy-notes.md``).
+    """
+    from loopy.diagnostic import ParameterFinderWarning
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=ParameterFinderWarning)
+        yield
+
+
 def _pad_empty_arrays(
     call: dict, lowering: Lowering
 ) -> tuple[dict, dict[str, np.ndarray]]:
@@ -348,6 +377,45 @@ def _pad_empty_arrays(
             originals[name] = value
             out[name] = np.zeros(1, dtype=value.dtype)
     return out, originals
+
+
+def _check_assumptions(obj: Any, term: Any, supplied: dict[str, Any]) -> None:
+    """Refuse a call whose sizes break what its schedule assumed of them.
+
+    A schedule that assumed ``n % 4 == 0`` (:meth:`loopty.schedule.Schedule.assume`)
+    was checked, and its code generated, where that holds, so a call with
+    ``n = 10`` would run code nobody checked for it. The sizes are read off
+    the arrays as the contract reads them
+    (:func:`loopty.contract.resolve_sizes`), and a size the arrays do not
+    determine is refused too, since the assumption cannot be checked.
+    """
+    assumed = getattr(obj, "assumptions", ())
+    if not assumed:
+        return
+    from pymbolic import evaluate
+    from pymbolic.mapper.dependency import DependencyMapper
+
+    from loopty.contract import resolve_sizes
+
+    sizes = resolve_sizes(dict(term.params), supplied)
+    for expr in assumed:
+        names = {
+            dep.name
+            for dep in DependencyMapper(composite_leaves=False)(expr)
+            if hasattr(dep, "name")
+        }
+        missing = sorted(names - set(sizes))
+        if missing:
+            raise ValueError(
+                f"{obj!r} assumes {expr} of its sizes, and {', '.join(missing)} is "
+                "not read off the arguments, so the assumption cannot be checked"
+            )
+        if not evaluate(expr, sizes):
+            at = ", ".join(f"{name} = {sizes[name]}" for name in sorted(names))
+            raise ValueError(
+                f"{obj!r} assumes {expr} of its sizes, and here {at}: its casts "
+                "were checked, and its code generated, where the assumption holds"
+            )
 
 
 class LoopyExecutor:
@@ -418,8 +486,11 @@ class LoopyExecutor:
             _entry_offsets(term, lowering),
             written=lowering.results,
         )
+        # The differential runs on copies; this run writes in place.
+        writeable_outputs(dict(term.params), supplied, lowering.results)
         inherited_storage(term.array_types, term.temporaries_like, supplied)
         checked_storage(term, supplied)
+        _check_assumptions(obj, term, supplied)
         from loopty.refusal import naming_the_fix, refuse_where_native_does
 
         refused = refuse_where_native_does(term, supplied)
@@ -430,7 +501,7 @@ class LoopyExecutor:
             kernel, heap = _off_the_stack(kernel, term, supplied)
             for name, (shape, dtype) in heap.items():
                 call[name] = np.zeros(shape, dtype=dtype)
-        with naming_the_fix(lowering):
+        with naming_the_fix(lowering), _quiet_parameter_finder():
             if target_name == "opencl":
                 out = self._run_opencl(kernel, lowering, call)
             else:

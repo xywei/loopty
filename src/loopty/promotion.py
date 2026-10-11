@@ -230,6 +230,33 @@ def _one_dtype(native: Native) -> np.dtype | None:
     return dtypes.pop() if len(dtypes) == 1 else None
 
 
+#: The functions of :mod:`loopty.math`, which the lowering writes in the type
+#: numpy computes each in (:meth:`loopty.lower.ExpressionLowerer._math`).
+MATH_FUNCTIONS = frozenset(
+    {"sqrt", "exp", "log", "sin", "cos", "real", "imag", "conj"}
+)
+
+
+def _math_compiled(
+    name: str, native: Native, operand: np.dtype | None
+) -> np.dtype | None:
+    """The type the lowering computes a function of :mod:`loopty.math` in.
+
+    Of a complex operand the library's: complex, and the real type of its
+    width for ``real`` and ``imag``. Of any other numpy's, to which the
+    lowering converts the operand, a double for ``sqrt`` of an integer, or
+    writes the result, the operand itself for ``real`` and ``conj`` and a
+    zero for ``imag``. ``None`` where numpy's is not one type.
+    """
+    if operand is None:
+        return None
+    if operand.kind == "c":
+        if name in ("real", "imag"):
+            return np.dtype(np.float32 if operand.itemsize <= 8 else np.float64)
+        return operand
+    return _one_dtype(native)
+
+
 def _precision(dtype: np.dtype) -> int:
     """The width of a floating dtype's real part in bytes, ``0`` for any other."""
     if dtype.kind == "f":
@@ -1134,6 +1161,8 @@ class Promotion:
             if numpy_function is None
             else _apply(numpy_function, *(native for native, _ in operands))
         )
+        if name in MATH_FUNCTIONS and len(operands) == 1:
+            return native, _math_compiled(name, native, operands[0][1])
         widths = [
             _precision(compiled)
             for _, compiled in operands

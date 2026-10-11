@@ -1,0 +1,15 @@
+--- sumpy's QBX tile, complex log and real
+  Schedule(single_layer, target='opencl').split(t, 16).tag(t_outer='g.0', t_inner='l.0').split(s, 256).prioritize(s_outer, t_inner)
+  buildable: (True, '')
+  out: difference 1.11e-16 within 1.49e-06 (approx) -> tested
+--- P1 mass with constant tables, cells on g.0/l.0
+  Schedule(mass_action, target='opencl').split(c, 32).tag(c_outer='g.0', c_inner='l.0')
+  buildable: (True, '')
+  yl: difference 1.73e-18 within 1e-06 (approx) -> tested
+  __constant double PHI[3 * 3] = { 0.6666666666666666, 0.16666666666666666, 0.16666666666666666, 0.16666666666666666, 0.6666666666666666, 0.16666666666666666, 0.16666666666666666, 0.16666666666666666, 0.6666666666666666 };
+  __constant double W[3] = { 0.16666666666666666, 0.16666666666666666, 0.16666666666666666 };
+--- two passes fused on the element and the row
+  Schedule(weak_derivative, target='opencl').fuse(along_r, along_s, loops=2)
+  buildable: (True, '')
+  w: difference 9.23e-16 within 1.03e-06 (approx) -> tested
+ALL OK
