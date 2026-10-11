@@ -475,6 +475,22 @@ def test_a_table_is_named_apart_from_a_reflected_parameter() -> None:
     reflected = dict(flattened.term.reflected)
     assert "nl_n_m" in reflected
     assert list(tables) == ["nl_n_m_table"]
-    code = emit_code(Schedule(flattened))
+    # loopy main checks y[i] against y's shape, n * m, which isl cannot read,
+    # and fails in its bounds check, where loopy 2025.2 left the access
+    # unchecked, since n and m are not in the loop's domain (#245). So the
+    # names are read off the code loopy writes with that check off.
+    import islpy as isl
+    import loopy as lp
+
+    from loopty.isl_reading import declining
+
+    schedule = Schedule(flattened)
+    with pytest.raises(isl.Error, match="isl_pw_aff_mul"):
+        emit_code(schedule)
+    unchecked = lp.set_options(
+        schedule.kernel, enforce_array_accesses_within_bounds="no_check"
+    )
+    with declining():
+        code = lp.generate_code_v2(unchecked).device_code()
     assert "static double nl_n_m_table[3] = { 10.0, 20.0, 30.0 };" in code
     assert "z[k] = nl_n_m_table[k];" in code

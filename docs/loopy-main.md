@@ -10,7 +10,7 @@ gets; the branch `port/loopy-main` runs on loopy main, and is merged into
 
 Nothing a user writes changes. Every example prints the same ledger on both,
 row for row, and the compiled runs agree with the native ones as before; the
-code loopy generates differs in the three ways listed below.
+code loopy generates differs in the four ways listed below.
 
 ## Install
 
@@ -112,20 +112,31 @@ Each takes an object already on its side as it is. A domain comes back as an
      `2*b_inner_step - a_outer - b_outer - a_inner` for the tiled diamond,
      where `main` wrote them in loopy 2025.2's order;
    - `fuse` cuts the producer's domain after the fused loops wherever they
-     sit in it. So a fusion after a `tile` builds as on `main`, and one after
-     a `split` of the producer's outer loop builds too, which `main` refuses
-     (#192: loopy 2025.2 puts the split loops last, `[j, i_outer, i_inner]`).
+     sit in it, as `main` does too since #192 (loopy 2025.2 puts the split
+     loops last, `[j, i_outer, i_inner]`). So a fusion after a `split` or a
+     `tile` of the producer's outer loop builds on both.
 8. **Still one convex piece per domain.** loopy main keeps a domain as a set
    that may have several pieces, but its code generation still asks for one
    (`isl_helpers.convexify`), so loopty's one-basic-set restriction on the
    images of its maps stays.
+9. **A loop over a product of sizes fails earlier.** loopy main's bounds
+   check adds a size that only an array's shape names to the domain it
+   checks an access over, where 2025.2 skipped the access. So `y[i]` in a
+   loop over `Fin[n * m]` is now checked against the shape `n * m`, which isl
+   cannot read, and code generation stops with isl's error
+   (`isl_pw_aff_mul`). On `main` the code is generated and the run fails
+   when it is called (#197). An access at an affine index inside loops that
+   bring both sizes in fails in the same place on both (#245). loopty's own
+   in-bounds fact for such an access is decided as before.
 
 ## What differs in the generated code
 
 `loopty run FILE --emit-code` for each example, against `main`:
 
-- `composition`, `fusion`, `pairs`, `travel`: the same text.
-- `spmv`, `p2p`, `reshape_layouts`, `stencil_skew`, `wavefront_acoustic`:
+- `composition`, `fusion`, `pairs`, `spmv`, `sum_factorization`, `travel`:
+  the same text.
+- `assembly`, `layer_potential`, `p2p`, `quadrature`, `reshape_layouts`,
+  `stencil_skew`, `storage_layouts`, `wavefront_acoustic`:
   - the terms of an affine expression in another order, `x[-1 + n + -1 * i]`
     for `x[-1 + -1 * i + n]` and `cnt[t_in + 4 * t_out]` for
     `cnt[4 * t_out + t_in]`, which is how loopy main prints an affine
@@ -140,15 +151,28 @@ Each takes an object already on its side as it is. A domain comes back as an
     them already imply (`-3 + nx >= 0` inside `if (-2 + nt >= 0 && -3 + nx
     >= 0)`). This is loopy main's code generation, with or without the
     sizes' assumption. Compiled and run, the two loop nests visit the same
-    iterations in the same order for every `nt` and `nx` up to 40.
+    iterations in the same order for every `nt` and `nx` up to 40;
+  - and, in `assembly` only, constants left unfolded in the subscripts of
+    the unrolled loop, `cell[1 + 3 + 12 * c_outer]` and `cell[3 * 2 + 12 *
+    c_outer]` for `cell[4 + 12 * c_outer]` and `cell[6 + 12 * c_outer]`.
+    loopy main's C code generator simplifies a subscript before it puts in
+    an unrolled loop's value, where 2025.2 put the value in first. The
+    values are the same.
 
-The ledgers (`lanky check --json`, `loopty run --json`) are the same, and so
-is everything `python FILE`, `lanky check FILE` and `loopty run FILE` print.
-One transcript excerpt in `quickstart.md` changed with the term order.
+The ledgers (`lanky check --json`, `loopty run --json`) are the same for all
+fourteen examples, and so is everything `python FILE`, `lanky check FILE` and
+`loopty run FILE` print. Every transcript in the documentation is the same
+on both.
 
 ## Keeping the branch
 
 Merge `main` into `port/loopy-main` as it moves. What `main` adds that reads a
 loopy kernel's domains or bounds, or calls loopy's reader, goes through
-`loopty.named`. When loopy releases with namedisl, the branch drops the Git
+`loopty.named`. The windows (`Schedule.contract`, `loopty.window`), the
+declared layouts (`loopty.layout`), the constant tables, and the updates
+with `Schedule.atomic` crossed nothing new when they were merged: they
+rewrite a kernel's temporaries, instructions and atomicity by name, a layout
+is checked on loopty's side and reaches loopy as `dim_tags`, and
+`Schedule.assume` gives `lp.assume` text, which loopy main reads into a
+namedisl set itself. When loopy releases with namedisl, the branch drops the Git
 sources, sets the floors to the releases, and merges.

@@ -525,7 +525,9 @@ def test_sumpys_qbx_tile_is_buildable_and_runs_each_target_on_a_work_item(
     assert schedule.buildable == (True, "")
     code = loopy_says_code(plain_opencl, schedule)
     assert code.index("for (int s_outer") < code.index("for (int s_inner")
-    assert "out[16 * gid(0) + lid(0)]" in code
+    # loopy main prints an affine expression in namedisl's order of names:
+    # out[lid(0) + 16 * gid(0)], where loopy 2025.2 wrote 16 * gid(0) first
+    assert "out[lid(0) + 16 * gid(0)]" in code
 
 
 def test_a_sum_outside_a_sequential_loop_is_the_order_loopy_drops(

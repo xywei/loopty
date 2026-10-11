@@ -22,8 +22,12 @@ All notable changes to loopty are recorded here. The format follows
   example and the transcripts against the pinned commits, on 3.13 and 3.14,
   and against loopy main's current head. Every example's ledger is unchanged.
   The generated code differs in the order of an affine expression's terms, in
-  a division of a size (below), and in the pieces of the tiled diamond's inner
-  bounds, which visit the same iterations.
+  a division of a size (below), in the pieces of the tiled diamond's inner
+  bounds, which visit the same iterations, and in constants loopy main leaves
+  unfolded in an unrolled loop's subscripts, `cell[3 * 2 + 12 * c_outer]`. A
+  loop over a product of sizes, `Fin[n * m]`, which does not run compiled on
+  loopy 2025.2 either (#197), stops earlier on loopy main, in loopy's bounds
+  check, which cannot read the shape `n * m` (#245).
 - **Window contraction** (`Schedule.contract`,
   [#132](https://github.com/xywei/loopty/issues/132)): an array a program
   makes, kept in the cells live at once. Fused one step behind, the Burgers
