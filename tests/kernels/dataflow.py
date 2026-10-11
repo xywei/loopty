@@ -45,6 +45,12 @@ def triangle(
                 R[a, b] = -R[a - 2, b + 2]
 
 
+@kernel
+def one_cell(lim: Arr[Fin[1], Nat]) -> lim[0] == 1:
+    """A statement without loops runs once, so it stores its one cell once."""
+    lim[0] = 1
+
+
 # }}}
 
 

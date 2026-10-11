@@ -1083,8 +1083,6 @@ def single_assignment_obligation(
     try:
         for k, first in enumerate(writers):
             for second in writers[k:]:
-                if second is first and not first.inames:
-                    continue
                 claim = Claim(term)
                 x = claim.coordinates(first.inames, "a")
                 y = claim.coordinates(second.inames, "b")
@@ -1092,7 +1090,9 @@ def single_assignment_obligation(
                     domain = _described(stmt.domain, f"the loops of {stmt.id}")
                     claim.hypotheses.append(domain.predicate(coords))
                 if second is first:
-                    claim.hypotheses.append(LogicalNot(_equal(x, y)))
+                    # a statement without loops runs once: no two of its
+                    # instances differ, a hypothesis False as written
+                    claim.hypotheses.append(LogicalNot(_equal(x, y)) if x else False)
                 goal = LogicalNot(
                     _equal(
                         [_renamed(i, first.inames, x) for i in first.assignee.indices],
@@ -1148,7 +1148,7 @@ def single_assignment_obligation(
     except Unstatable as exc:
         return _declined(str(exc))
     if not parts:
-        return _declined(f"{array} has one cell stored once, and nothing reads it")
+        return _declined(f"no statement stores into {array}")
     return _obligation(parts, refuted=verdict.ok is False)
 
 

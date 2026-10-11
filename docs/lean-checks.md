@@ -152,7 +152,32 @@ licenses them is a fact of its own, which Lean proves too:
 ```console
 $ lanky check examples/spmv.py --show-lean "off[r + 1] == off[r] + cnt[r])"
 ...
+proved   proved     lean         spmv.py:79   scan           no cell of off is stored twice, or read before its store
+proved   proved     lean         spmv.py:69   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+...
+LEAN scan at spmv.py:69: off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+  proved by Lean (omega; omega, with the hypotheses taken at 1 point)
+    set_option autoImplicit false in
+    theorem Lanky.scan_conjunct_0 (off : Int → Int) (h0 : off 0 = 0) : off 0 = 0 := by
+      omega
+
+    set_option autoImplicit false in
+    theorem Lanky.scan_conjunct_1
+        (n : Int)
+        (cnt : Int → Int)
+        (off : Int → Int)
+        (r : Int)
+        (h0 : n ≥ 0)
+        (h1 : 0 ≤ r)
+        (h2 : r < n)
+        (h3 : ∀ r_0 : Int, 0 ≤ r_0 → r_0 < n → n ≥ 0 → off (r_0 + 1) = off r_0 + cnt r_0)
+        : off (r + 1) = off r + cnt r := by
+      have hi0 := h3 r
+      omega
 ```
+
+`h3` is `S1`'s value equation: what it stores at `r` is `off[r] + cnt[r]`,
+and isl's discharge took it at `r`, the hint `have hi0 := h3 r`.
 
 That the equations are what the kernel does is the reading of a kernel's
 source order loopty and isl share (below), and the native runs test the

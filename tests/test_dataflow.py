@@ -109,6 +109,16 @@ def test_a_postcondition_about_reals_is_decided_with_each_equation_an_atom() -> 
     assert len(post.provenance["used"]) == 2
 
 
+def test_a_statement_without_loops_is_stated_for_lean_as_storing_once() -> None:
+    """One instance, so no two that differ: a part, its hypothesis ``False``."""
+    (fact,) = facts(kernels.one_cell, KIND)
+    assert fact.status is Status.DECIDED
+    obligation = fact.term.lean_obligation()
+    assert not obligation.declined
+    (part,) = obligation.parts
+    assert "two instances of S0 storing into lim" in part.label
+
+
 # }}}
 
 
@@ -298,6 +308,14 @@ def test_lean_proves_the_scans_postcondition_and_what_it_rests_on(lean: Any) -> 
 
 
 @pytest.mark.lean
+def test_lean_proves_a_statement_without_loops_stores_its_cell_once(lean: Any) -> None:
+    for kind in (KIND, "postcondition"):
+        (fact,) = facts(kernels.one_cell, kind)
+        proved = lean.establish(fact)
+        assert proved.status is Status.PROVED, proved.provenance.get("lean_reason")
+
+
+@pytest.mark.lean
 def test_lean_checks_that_the_cited_theorem_applies(lean: Any) -> None:
     (applied,) = facts(kernels.scan_cited, APPLIED)
     proved = lean.establish(applied)
@@ -316,6 +334,24 @@ def test_without_mathlib_a_claim_about_reals_is_left_to_isl_saying_why(
     result = lean.establish(post)
     assert result.status is Status.DECIDED
     assert "real numbers" in result.provenance["lean_declined"]
+
+
+@pytest.mark.lean
+def test_with_mathlib_the_reconstruction_and_the_theorem_it_cites_are_proved(
+    lean: Any,
+) -> None:
+    """Over reals: the postcondition by ``linarith``, the application by ``apply``."""
+    if not lean._mathlib():
+        pytest.skip("Mathlib is not imported here (LANKY_LEAN_MATHLIB)")
+    for kind in (KIND, "postcondition"):
+        (fact,) = facts(kernels.triangle, kind)
+        proved = lean.establish(fact)
+        assert proved.status is Status.PROVED, proved.provenance.get("lean_reason")
+    (applied,) = facts(kernels.reconstruct, APPLIED)
+    proved = lean.establish(applied)
+    assert proved.status is Status.PROVED, proved.provenance.get("lean_reason")
+    assert "apply h" in proved.provenance["lean_source"]
+    assert kernels.on_the_triangle.fact_id in proved.rests_on
 
 
 @pytest.mark.lean
