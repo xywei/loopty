@@ -26,6 +26,7 @@ from typing import Any
 import islpy as isl
 import numpy as np
 import pytest
+from lanky.prelude import FnType
 
 pytest.importorskip("loopy")
 
@@ -51,6 +52,28 @@ NAMES = (
     "storage_layouts",
     "hexahedra",
 )
+
+#: The families with several indices, ``Fn[Fin[n], Fin[n], Real]`` applied as
+#: ``Fr[i, a]``, that ``examples/hexahedra.py`` writes its theorem with, are
+#: lanky main's and not the 0.2.0 release's, which the released-lanky job
+#: installs.
+SEVERAL_INDICES = hasattr(FnType, "indices")
+
+#: The demos that need them.
+NEEDS_SEVERAL_INDICES = {"hexahedra"}
+
+needs_several_indices = pytest.mark.skipif(
+    not SEVERAL_INDICES,
+    reason="the demo's theorems index families at several indices (lanky main)",
+)
+
+#: Every demo, as a parameter: those that need lanky main skip without it.
+DEMOS = [
+    pytest.param(name, marks=needs_several_indices)
+    if name in NEEDS_SEVERAL_INDICES
+    else name
+    for name in NAMES
+]
 
 _RESULTS: dict[tuple[str, str], tuple[Any, list[dict]]] = {}
 _MODULES: dict[str, Any] = {}
@@ -125,14 +148,14 @@ def _statuses(facts: list[dict], **fields: Any) -> list[str]:
 # {{{ every demo, the three commands
 
 
-@pytest.mark.parametrize("name", NAMES)
+@pytest.mark.parametrize("name", DEMOS)
 def test_a_demo_runs_under_plain_python(name: str) -> None:
     result, _ = _invoke(name, "python")
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.strip(), "a demo that prints nothing demonstrates nothing"
 
 
-@pytest.mark.parametrize("name", NAMES)
+@pytest.mark.parametrize("name", DEMOS)
 def test_a_demo_states_obligations_and_none_is_refuted(name: str) -> None:
     result, facts = _invoke(name, "check")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -197,7 +220,7 @@ KERNELS = {
 REFUSES_DRAWS = {("travel", "weigh"), ("travel", "flat")}
 
 
-@pytest.mark.parametrize("name", NAMES)
+@pytest.mark.parametrize("name", DEMOS)
 def test_every_kernel_of_a_demo_computes_what_its_body_computes(name: str) -> None:
     # The traced term, interpreted, against the native body: on the demo's
     # own example inputs first, then on inputs drawn from the declared types.
@@ -221,7 +244,7 @@ def test_every_kernel_of_a_demo_computes_what_its_body_computes(name: str) -> No
         assert outcomes == ["agreed"] * 4
 
 
-@pytest.mark.parametrize("name", NAMES)
+@pytest.mark.parametrize("name", DEMOS)
 def test_a_demo_compiles_and_agrees_with_the_native_run(name: str) -> None:
     result, facts = _invoke(name, "run")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -956,6 +979,7 @@ def test_the_storage_layouts_demo_refutes_the_wrong_nesting() -> None:
 # {{{ hexahedra
 
 
+@needs_several_indices
 def test_the_hexahedra_demo_decides_its_layouts_and_its_programs() -> None:
     result, facts = _invoke("hexahedra", "check")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -987,6 +1011,7 @@ def test_the_hexahedra_demo_decides_its_layouts_and_its_programs() -> None:
     assert "assumed" not in {fact["status"] for fact in facts}
 
 
+@needs_several_indices
 def test_the_hexahedra_theorem_holds_at_exact_matrices() -> None:
     from fractions import Fraction
 
@@ -1007,6 +1032,7 @@ def test_the_hexahedra_theorem_holds_at_exact_matrices() -> None:
                 assert claim.holds, (k, j, i)
 
 
+@needs_several_indices
 @pytest.mark.parametrize("order", [1, 2, 3, 4, 5, 6])
 def test_the_hexahedra_factors_are_the_stiffness_and_the_mass(order: int) -> None:
     # sum_j S^T[i, j] is the integral of the i-th basis function's derivative,
@@ -1021,6 +1047,7 @@ def test_the_hexahedra_factors_are_the_stiffness_and_the_mass(order: int) -> Non
     assert np.all(np.linalg.eigvalsh(mass) > 0)
 
 
+@needs_several_indices
 def test_the_hexahedra_demo_refuses_the_deeper_fusion_and_keeps_the_windows() -> None:
     result, _ = _invoke("hexahedra", "python")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -1034,6 +1061,7 @@ def test_the_hexahedra_demo_refuses_the_deeper_fusion_and_keeps_the_windows() ->
     assert out.count("all decided by isl") == 3
 
 
+@needs_several_indices
 def test_the_hexahedra_launches_are_legal_and_build_on_opencl(plain_opencl) -> None:
     module = _module("hexahedra")
     for operator in ("grad", "div"):
