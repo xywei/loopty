@@ -95,6 +95,7 @@ from loopty import (
     upstream,
     when,
 )
+from loopty.math import ipow
 
 #: The order of the expansion. sumpy generates a kernel per order, and so is
 #: this one written at one; ``benchmarks/l2p.py`` writes it out at others.
@@ -269,13 +270,18 @@ def evaluate(
     pot: Arr[Fin[nb], Fin[cnt], Real],
     rscale: Real,
 ):
-    """Each target's Taylor polynomial: the sum over its box's triangle."""
+    """Each target's Taylor polynomial: the sum over its box's triangle.
+
+    ``ipow(x, a)`` is ``x`` to the ``a``, multiplied out as loopy multiplies
+    an integer power, in both runs; ``x**a`` would be the C library's ``pow``
+    in both, as numpy computes it.
+    """
     for i in pot.dom:
         for t in pot.dom[i]:
             x = (tx[i, t] - cx[i]) / rscale
             y = (ty[i, t] - cy[i]) / rscale
             pot[i, t] = SCALING * reduce_sum(
-                R[i, a, b] * x**a * y**b * INV_FACT[a] * INV_FACT[b]
+                R[i, a, b] * ipow(x, a) * ipow(y, b) * INV_FACT[a] * INV_FACT[b]
                 for a in R.dom[i]
                 for b in R.dom[i, a]
             )

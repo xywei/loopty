@@ -1083,6 +1083,12 @@ class ExpressionLowerer(Mapper):
             and len(expr.parameters) == 1
         ):
             return self._conversion(CONVERSIONS[function.name], expr.parameters[0])
+        if (
+            isinstance(function, prim.Variable)
+            and function.name == "ipow"
+            and len(expr.parameters) == 2
+        ):
+            return self._integer_power(expr, *expr.parameters)
         return prim.Call(
             self.rec(expr.function), tuple(self.rec(p) for p in expr.parameters)
         )
@@ -1149,6 +1155,26 @@ class ExpressionLowerer(Mapper):
         if name in ("real", "conj"):
             return lowered
         return prim.Call(prim.Variable(name), (lowered,))
+
+    def _integer_power(self, expr: Any, base: Any, exponent: Any) -> prim.Expression:
+        """``ipow(x, n)`` of :mod:`loopty.math`: loopy's own integer power.
+
+        Written as the power it is, with the exponent left an integer, so that
+        loopy calls the ``loopy_pow_<base>_<exponent>`` it defines, which
+        multiplies as :func:`loopty.math.integer_power` does natively; ``x **
+        n`` would get a floating exponent and the C library's ``pow``
+        (:mod:`loopty.promotion`). The base is converted into numpy's type of
+        the result where the lowering computes it in another.
+        """
+        promotion = self.lowering.promotion
+        lowered = self.rec(base)
+        power = self.rec(exponent)
+        if promotion is not None:
+            compiled = promotion.types(base)[1]
+            target = promotion.types(expr)[1]
+            if compiled is not None and target is not None and compiled != target:
+                lowered = self._convert(lowered, target)
+        return prim.Power(lowered, power)
 
     def _absolute(self, expr: Any, operand: Any) -> prim.Expression:
         """``abs(operand)``: C's ``abs`` of a number, and numpy's of an integer.
@@ -3573,7 +3599,9 @@ def _power_preambles(term: Term, target: str | None) -> tuple[tuple[str, str], .
         for node in walk((stmt.assignee, stmt.expr, stmt.guard))
     ]
     if not any(
-        isinstance(node, prim.Power) and not _written_as_product(node)
+        isinstance(node, prim.Power)
+        and not _written_as_product(node)
+        or _integer_power_call(node)
         for node in nodes
     ):
         return ()
@@ -3587,6 +3615,20 @@ def _power_preambles(term: Term, target: str | None) -> tuple[tuple[str, str], .
     if complex_term:
         return ((_POWER_TAG, f"{POWER_INCLUDES}\n{_COMPLEX_INCLUDE}"),)
     return ((_POWER_TAG, POWER_INCLUDES),)
+
+
+def _integer_power_call(node: Any) -> bool:
+    """Whether ``node`` is ``ipow(x, n)``, which loopy writes as its own power."""
+    return (
+        isinstance(node, prim.Call)
+        and isinstance(node.function, prim.Variable)
+        and node.function.name == "ipow"
+        and not (
+            len(node.parameters) == 2
+            and isinstance(node.parameters[1], int | np.integer)
+            and node.parameters[1] in (0, 1, 2)
+        )
+    )
 
 
 def _written_as_product(power: prim.Power) -> bool:

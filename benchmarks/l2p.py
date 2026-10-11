@@ -415,6 +415,26 @@ def run_sumpy(inputs: dict, args: argparse.Namespace) -> tuple[dict, np.ndarray]
 # {{{ the same algorithm in plain loopy
 
 
+#: The plain loopy variants: ``loop``, ``unrolled`` (the triangle's loops
+#: unrolled), and two that make loopty's choices in plain loopy, to tell its
+#: costs apart: ``pow`` computes ``x**a`` with the C library's ``pow``, as
+#: loopty does to round as numpy does, where loopy multiplies; ``pow_global``
+#: also keeps every box's triangle in one array of the kernel's, zeroed first,
+#: as loopty's program keeps the array it makes, where loopy keeps a box's.
+LOOPY_VARIANTS = ("loop", "unrolled", "pow", "pow_global")
+
+
+def _c_headers(preamble_info: Any) -> Any:
+    """``stdint.h`` and ``math.h``, which loopy 2025.2's C target leaves out.
+
+    loopy writes ``x**a`` of an integer ``a`` as a call of a function it
+    defines with ``int32_t`` in its signature, and a real exponent as a call
+    of ``pow``, and includes neither header before them (loopty's
+    docs/loopy-notes.md, note 2); a kernel author adds them, as here.
+    """
+    yield ("00_l2p_headers", "#include <stdint.h>\n#include <math.h>")
+
+
 def plain_loopy_kernel(order: int, target: str, variant: str) -> Any:
     """The L2P written directly in loopy, as a kernel author would write it.
 
@@ -427,34 +447,58 @@ def plain_loopy_kernel(order: int, target: str, variant: str) -> Any:
     """
     import loopy as lp
 
+    if variant not in LOOPY_VARIANTS:
+        raise SystemExit(f"--variant is one of {', '.join(LOOPY_VARIANTS)}")
     p = order
+    power = "x**(1.0*ia) * y**(1.0*ib)" if variant.startswith("pow") else (
+        "x**ia * y**ib"
+    )
+    keep = "R[ibox, {}]" if variant == "pow_global" else "R[{}]"
+    zero = (
+        """
+        for ibox_z, az, bz
+            R[ibox_z, az, bz] = 0 {id=zero}
+        end
+        """
+        if variant == "pow_global"
+        else ""
+    )
+    centre = "id=centre, dep=zero" if variant == "pow_global" else "id=centre"
     knl = lp.make_kernel(
         [
             "{[ibox]: 0 <= ibox < nboxes}",
             f"{{[a, b]: 0 <= a and 0 <= b and a + b <= {p}}}",
             "{[itgt]: itgt_start <= itgt < itgt_end}",
             f"{{[ia, ib]: 0 <= ia and 0 <= ib and ia + ib <= {p}}}",
+            *(
+                [f"{{[ibox_z, az, bz]: 0 <= ibox_z < nboxes and 0 <= az, bz <= {p}}}"]
+                if variant == "pow_global"
+                else []
+            ),
         ],
         f"""
+        {zero}
         for ibox
             <> itgt_start = box_target_starts[ibox]
             <> itgt_end = itgt_start + box_target_counts[ibox]
             for a, b
                 if a + b == 0
-                    R[a, b] = coeffs[ibox, 0] {{id=centre}}
+                    {keep.format("a, b")} = coeffs[ibox, 0] {{{centre}}}
                 end
                 if a < 2 and a + b >= 1
-                    R[a, b] = coeffs[ibox, 2*(a + b) - 1 + a] {{id=stored, dep=centre}}
+                    {keep.format("a, b")} = coeffs[ibox, 2*(a + b) - 1 + a] \
+                        {{id=stored, dep=centre}}
                 end
                 if a >= 2
-                    R[a, b] = -R[a - 2, b + 2] {{id=recurrence, dep=stored}}
+                    {keep.format("a, b")} = -{keep.format("a - 2, b + 2")} \
+                        {{id=recurrence, dep=stored}}
                 end
             end
             for itgt
                 <> x = (targets[0, itgt] - centers[0, ibox]) / rscale
                 <> y = (targets[1, itgt] - centers[1, ibox]) / rscale
                 result[itgt] = {SCALING!r} * sum((ia, ib),
-                    R[ia, ib] * x**ia * y**ib * inv_fact[ia] * inv_fact[ib]
+                    {keep.format("ia, ib")} * {power} * inv_fact[ia] * inv_fact[ib]
                     ) {{id=evaluate, dep=recurrence}}
             end
         end
@@ -474,20 +518,33 @@ def plain_loopy_kernel(order: int, target: str, variant: str) -> Any:
                 read_only=True,
                 address_space=lp.AddressSpace.GLOBAL,
             ),
-            lp.TemporaryVariable("R", np.float64, shape=(p + 1, p + 1)),
+            lp.TemporaryVariable(
+                "R",
+                np.float64,
+                shape=("nboxes", p + 1, p + 1) if variant == "pow_global"
+                else (p + 1, p + 1),
+                address_space=lp.AddressSpace.GLOBAL if variant == "pow_global"
+                else lp.auto,
+            ),
             lp.ValueArg("rscale", np.float64),
             lp.ValueArg("nboxes,ntargets", np.int32),
         ],
         name="l2p_plain",
         target=lp.ExecutableCTarget() if target == "c" else lp.PyOpenCLTarget(),
         lang_version=(2018, 2),
+        silenced_warnings=["write_race(evaluate)", "write_race(zero)"],
     )
     knl = lp.prioritize_loops(knl, "a,b")
     knl = lp.prioritize_loops(knl, "ia,ib")
     if variant == "unrolled":
         knl = lp.tag_inames(knl, {"a": "unr", "b": "unr", "ia": "unr", "ib": "unr"})
     if target == "opencl":
-        knl = lp.tag_inames(knl, {"ibox": "g.0"})
+        tags = {"ibox": "g.0"}
+        if variant == "pow_global":
+            tags["ibox_z"] = "g.0"
+        knl = lp.tag_inames(knl, tags)
+    else:
+        knl = lp.register_preamble_generators(knl, [_c_headers])
     return knl
 
 
@@ -620,7 +677,31 @@ def loopty_arguments(inputs: dict) -> dict:
 
 
 #: The schedules of ``examples/l2p.py`` that ``loopty --variant`` names.
-VARIANTS = ("fused", "unfused")
+VARIANTS = ("fused", "unrolled", "unfused")
+
+
+def unrolled(schedule: Any) -> Any:
+    """``schedule`` with the triangle's loops unrolled: every loop over ``a`` and ``b``.
+
+    Those of the calls, which loop over the box's triangle within the loop
+    over the boxes, and the Taylor sum's, which runs inside the loop over a
+    box's targets: every loop of a call's statements that is not its
+    outermost or the targets', and every loop of a sum. loopy writes each
+    out over the triangle's bounding box with the triangle as a guard
+    (``unr``), as plain loopy's ``unrolled`` variant has it; the arrays the
+    program zeroes keep their loops.
+    """
+    order = schedule.order
+    rank = {name: k for k, name in enumerate(order)}
+    entry = schedule.kernel.default_entrypoint
+    loops: set[str] = set()
+    for insn in entry.instructions:
+        if insn.id.endswith("_zeros") or not insn.within_inames:
+            continue
+        outer = min(insn.within_inames, key=lambda name: rank.get(name, len(rank)))
+        loops |= {name for name in insn.within_inames if name not in (outer, "t")}
+        loops |= set(insn.reduction_inames())
+    return schedule.tag(**dict.fromkeys(sorted(loops), "unr"))
 
 
 def loopty_schedule(example: Any, variant: str, target: str) -> Any:
@@ -635,6 +716,8 @@ def loopty_schedule(example: Any, variant: str, target: str) -> Any:
 
     if variant == "fused":
         schedule = example.fused
+    elif variant == "unrolled":
+        schedule = unrolled(example.fused)
     elif variant == "unfused":
         schedule = Schedule(example.l2p, target="c")
     else:
@@ -865,7 +948,12 @@ def main(argv: list[str] | None = None) -> int:
         run.add_argument("--label", default="", help="a free-form tag for the record")
         if name != "sumpy":
             run.add_argument("--target", choices=("c", "opencl"), default="c")
-            run.add_argument("--variant", default="loop")
+            run.add_argument(
+                "--variant",
+                default="loop" if name == "loopy" else "fused",
+                help=f"one of {', '.join(LOOPY_VARIANTS)} for loopy, of "
+                f"{', '.join(VARIANTS)} for loopty",
+            )
 
     sample = commands.add_parser("example", help="write examples/l2p.py's inputs")
     sample.add_argument("--out", required=True)
