@@ -1421,7 +1421,7 @@ whose branches C converts to one type, is not planned: a body cannot write
 one, and `abs` of an integer lowers without one; `abs` of a real in a guard
 is one whose branches are of the real's type (note 20). The written `-1 *
 u[i]` of an unsigned `u`, which numpy refuses at every point, is one node
-with `-u[i]`, which it computes, and is read as the second. A term built
+with `-u[i]`, which it computes, and is read as the second (#168). A term built
 outside a trace, by hand, has no differences, and its sums are read as
 written. A comparison of `abs` of an element does not trace (`abs(k[i]) >
 2`, xywei/lanky#94): lanky's terms leave `abs` to pymbolic, whose call has
