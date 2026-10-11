@@ -16,7 +16,17 @@ import pytest
 from lanky.ledger import Status
 from lanky.prelude import Int, Real
 
-from loopty import Arr, Fin, Schedule, Table, kernel, program, reduce_sum
+from loopty import (
+    Arr,
+    Fin,
+    Schedule,
+    Table,
+    TraceError,
+    kernel,
+    program,
+    reduce_sum,
+    when,
+)
 from loopty import table as make_table
 from loopty.executor import LoopyExecutor, emit_code
 from loopty.faithful import KIND
@@ -115,6 +125,49 @@ def clashing(y: Arr[Fin[n], Real]):  # noqa: F821
         y[i] = first_weight()
 
 
+#: One, two, three.
+STEPS = make_table([1.0, 2.0, 3.0])
+
+
+@kernel
+def one_back(y: Arr[Fin[n], Real]):  # noqa: F821
+    """The step before each cell's: none before the first."""
+    for i in y.dom:
+        y[i] = STEPS[i - 1]
+
+
+@kernel
+def one_ahead_where_there_is_one(y: Arr[Fin[n], Real]):  # noqa: F821
+    """The step after each cell's, under a guard that holds where there is one."""
+    for i in y.dom:
+        with when(i < 2):
+            y[i] = STEPS[i + 1]
+
+
+@kernel
+def times(t: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """Each cell by the array it is given."""
+    for i in y.dom:
+        y[i] = t[i] * y[i]
+
+
+@program
+def passes_the_weights(y):
+    """A program that passes a table to a kernel."""
+    times(W, y)
+
+
+#: How many terms each cell sums, as a table: a bound no table can give.
+COUNTS = make_table([2, 3, 1])
+
+
+@kernel
+def counted(y: Arr[Fin[n], Real]):  # noqa: F821
+    """A sum bounded by a value read from a table."""
+    for i in y.dom:
+        y[i] = reduce_sum(1.0 for j in Fin[COUNTS[i % 3]])
+
+
 # }}}
 
 
@@ -152,6 +205,12 @@ def test_a_table_is_a_read_only_copy_of_its_values() -> None:
         (2.0, ValueError, "at least one axis"),
         ([], ValueError, "at least one value"),
         (["a", "b"], TypeError, "holds numbers"),
+        # The compiled code writes each value as a literal, and C has none
+        # for these: NAN and INFINITY are math.h's, which loopy does not
+        # include, and an infinite imaginary part makes a nan real one.
+        ([1.0, np.nan], ValueError, "finite numbers, and the value at 1 is nan"),
+        ([[1.0, 2.0], [np.inf, 0.0]], ValueError, r"the value at \[1, 0\] is inf"),
+        ([1 + 1j, complex(1.0, -np.inf)], ValueError, "the value at 1 is"),
     ],
 )
 def test_a_table_holds_numbers_along_an_axis(values, error: type, message: str) -> None:
@@ -256,3 +315,58 @@ def test_opencl_code_holds_a_table_in_constant_memory(plain_opencl) -> None:
     with lp.CacheMode(False), declining():
         code = lp.generate_code_v2(Schedule(mass, target="opencl").kernel).device_code()
     assert "__constant double W[3] = { 0.16666666666666666," in code
+
+
+def test_natively_a_table_is_read_as_an_array_is() -> None:
+    # STEPS[i - 1] at i = 0 read STEPS[-1], the last step, natively, where
+    # the compiled kernel reads in front of the table; an array refuses it.
+    with pytest.raises(IndexError, match="is negative"):
+        one_back(Arr.zeros(3))
+    # Under a false guard a read out of range answers zero, as an array's
+    # does, where it raised IndexError natively and compiled fine.
+    native = Arr.zeros(3)
+    one_ahead_where_there_is_one(native)
+    assert list(native.numpy()) == [2.0, 3.0, 0.0]
+    agrees(
+        one_ahead_where_there_is_one,
+        Schedule(one_ahead_where_there_is_one),
+        {"y": Arr.zeros(3)},
+    )
+
+
+def test_a_table_is_no_argument() -> None:
+    # Passed, it ran natively and failed compiled ("'Table' object has no
+    # attribute 'strides'"); every entry point now names the array to pass.
+    message = "the argument t is a constant table of shape"
+    with pytest.raises(ValueError, match=message):
+        times(W, Arr.zeros(3))
+    with pytest.raises(ValueError, match=message):
+        LoopyExecutor().run(times, t=W, y=np.zeros(3))
+    with pytest.raises(ValueError, match=message):
+        LoopyExecutor().differential(
+            times, Schedule(times), {"t": W, "y": Arr.zeros(3)}
+        )
+    with pytest.raises(ValueError, match=message):
+        passes_the_weights(Arr.zeros(3))
+    with pytest.raises(TraceError, match=message):
+        passes_the_weights.trace()
+    fix = r"pass an array of them, Arr.from_numpy\(W.values.copy\(\)\)"
+    with pytest.raises(ValueError, match=fix):
+        times(W, Arr.zeros(3))
+    y = Arr.from_numpy(np.ones(3))
+    times(Arr.from_numpy(STEPS.values.copy()), y)
+    assert list(y.numpy()) == [1.0, 2.0, 3.0]
+
+
+def test_a_bound_read_from_a_table_is_refused_when_traced() -> None:
+    # It traced, and the compiled run failed with loopy's "value argument
+    # 'nl_COUNTS_i_3' was not given and could not be automatically determined".
+    with pytest.raises(TraceError) as caught:
+        counted.trace()
+    message = str(caught.value)
+    assert (
+        "is bounded by COUNTS[i % 3], a value of the constant table COUNTS"
+        in message
+    )
+    assert "test_table.py:" in message
+    assert "counts: Arr[Fin[k], Nat]" in message

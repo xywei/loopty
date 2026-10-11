@@ -1551,6 +1551,22 @@ def domain_arguments(
         )
 
 
+def no_tables(supplied: Mapping[str, Any]) -> None:
+    """Refuse a constant table (:mod:`loopty.table`) passed as an argument.
+
+    A table is part of the kernel's code and read by its name. Passed, it ran
+    natively, where it reads as an array does, and failed compiled, where it
+    is no buffer (``'Table' object has no attribute 'strides'``); and a kernel
+    that writes the parameter would write the table. Raises
+    :class:`ValueError` naming the argument and the array to pass instead.
+    """
+    from loopty.table import Table, passed_message
+
+    for name, value in supplied.items():
+        if isinstance(value, Table):
+            raise ValueError(passed_message(name, value))
+
+
 def check_arguments(
     types: Mapping[str, Any],
     supplied: Mapping[str, Any],
@@ -1573,6 +1589,7 @@ def check_arguments(
     array and a scalar declared over the same ``Fin[n]`` are measured against
     the same ``n``.
     """
+    no_tables(supplied)
     disjoint_arguments(supplied)
     ragged_arguments(types, supplied, offsets_args)
     sizes_not_negative(types, supplied)

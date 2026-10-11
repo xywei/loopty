@@ -33,7 +33,13 @@ read the same numbers. The interpreter reads the same values.
 A table is copied when it is declared and cannot be written afterwards, by
 the kernel or by anyone: its values are part of the kernel's code, and a
 change after the kernel was compiled would make the native run read numbers
-the compiled one does not.
+the compiled one does not. For the same reason it is not an argument: a
+kernel reads it by name, and an array of its values is what is passed. Its
+values are finite, since the compiled code writes each one as a literal.
+
+Natively a table is read as an array is, one value at a time: an index is a
+point of its axis, never counted from the end, and a read out of range inside
+a ``when`` block whose guard is false answers zero, as for an array.
 """
 
 from __future__ import annotations
@@ -65,6 +71,7 @@ class Table:
             raise TypeError(
                 f"a table holds numbers, and {values!r} holds {array.dtype}"
             )
+        _refuse_non_finite(array)
         array.flags.writeable = False
         self._values = array
         self._array = Arr(array)
@@ -117,21 +124,36 @@ class Table:
         return self._array.dom if proxy is None else proxy.dom
 
     def __getitem__(self, key: Any) -> Any:
-        """The value at ``key``, natively; an access of the table, when traced."""
+        """The value at ``key``, natively; an access of the table, when traced.
+
+        Natively a table is read as an array is: an index is a point of the
+        axis, so a negative one is refused with an ``IndexError`` rather than
+        counted from the end, as the compiled kernel would read in front of
+        the table; and inside a ``when`` block whose guard is false, a read
+        out of range answers zero, since nothing the block computes is
+        stored (:func:`loopty.trace.mask_writes`).
+        """
         proxy = _traced(self)
         if proxy is not None:
             return proxy[key]
-        if (
+        if not (
             isinstance(key, tuple)
             and len(key) == self.ndim
             or (not isinstance(key, tuple) and self.ndim == 1)
         ):
-            return self._values[key]
-        raise IndexError(
-            f"a table of {self.ndim} axes is read one value at a time, with "
-            f"{self.ndim} indices, such as W[q] or PHI[q, j]: a kernel computes "
-            "cell by cell"
-        )
+            raise IndexError(
+                f"a table of {self.ndim} axes is read one value at a time, with "
+                f"{self.ndim} indices, such as W[q] or PHI[q, j]: a kernel "
+                "computes cell by cell"
+            )
+        from loopty.trace import _writes_are_masked
+
+        try:
+            return self._array[key]
+        except IndexError:
+            if _writes_are_masked():
+                return 0
+            raise
 
     def __setitem__(self, key: Any, value: Any) -> None:
         raise TypeError(
@@ -146,12 +168,50 @@ class Table:
 def table(values: Any, dtype: Any = None) -> Table:
     """A constant table of ``values``, a kernel reads; see :mod:`loopty.table`.
 
-    ``values`` is anything ``numpy.array`` takes, of numbers, with at least one
-    axis; ``dtype`` is the dtype to hold them in, ``float64`` for floats by
-    default, as numpy chooses. The values are copied, and cannot be changed
-    afterwards.
+    ``values`` is anything ``numpy.array`` takes, of finite numbers, with at
+    least one axis; ``dtype`` is the dtype to hold them in, ``float64`` for
+    floats by default, as numpy chooses. The values are copied, and cannot be
+    changed afterwards.
     """
     return Table(values, dtype)
+
+
+def _refuse_non_finite(array: np.ndarray) -> None:
+    """Refuse a table holding a ``nan`` or an infinity, naming the first.
+
+    The lowering writes each value into the kernel's code, and C has no
+    literal for either: loopy writes the macros ``NAN`` and ``INFINITY``,
+    which ``math.h`` defines and loopy does not include, and a complex
+    number as ``re + im * I``, which is ``nan`` in the real part when ``im``
+    is infinite. A ``nan`` also defeats loopy's caches, which compare
+    kernels by their values. Quadrature weights, basis tables and
+    differentiation matrices are finite; a value that is not is passed in an
+    array.
+    """
+    if array.dtype.kind not in "fc":
+        return
+    finite = np.isfinite(array)
+    if finite.all():
+        return
+    index = tuple(int(i) for i in np.argwhere(~finite)[0])
+    at = index[0] if len(index) == 1 else list(index)
+    raise ValueError(
+        f"a table holds finite numbers, and the value at {at} is "
+        f"{array[index].item()!r}: the compiled kernel holds each value of a "
+        "table in its code, where a nan or an infinity is not written as numpy "
+        "holds it. Pass an array holding such values to the kernel instead"
+    )
+
+
+def passed_message(param: str, value: Table) -> str:
+    """Why a table is refused as an argument, with the fix: pass its values."""
+    return (
+        f"the argument {param} is a constant table of shape {value.shape}: a "
+        "table is part of the kernel's code, read in the body by the name it "
+        "is declared by (W[q]), and is not passed to a kernel. To pass the same "
+        "values, pass an array of them, Arr.from_numpy(W.values.copy()) for a "
+        "table W"
+    )
 
 
 def table_type(values: Table) -> Any:

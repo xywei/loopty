@@ -174,6 +174,7 @@ from loopty.hypotheses import (
 )
 from loopty.idx import Reflections
 from loopty.names import rename
+from loopty.table import Table, passed_message
 from loopty.term import (
     Access,
     ArrType,
@@ -1189,6 +1190,8 @@ class _Composer:
             value = call.bound[param]
             mine = isinstance(value, ProgramValue) and value._recorder is self.recorder
             if isinstance(typ, ArrType):
+                if isinstance(value, Table):
+                    self.refuse(call, passed_message(param, value))
                 if not mine:
                     self.refuse(
                         call,

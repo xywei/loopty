@@ -153,6 +153,55 @@ def _abandoned_message(inames: Sequence[str]) -> str:
     )
 
 
+def _refuse_table_bounds(tracer: Tracer) -> None:
+    """Refuse a loop or a sum bounded by a value read from a constant table.
+
+    ``Fin[SIZES[i]]`` traced, with its bound a parameter isl reads the table
+    cell as, and the lowering took that parameter for a size the caller
+    passes: the compiled run failed with loopy's "value argument
+    'nl_SIZES_i' was not given". A bound read from an array is a ragged
+    family's count, which a parameter of the kernel holds.
+    """
+    if not tracer.tables:
+        return
+    for symbol, expr in tracer.reflections.items():
+        read = sorted(
+            {access.array for access in accesses_in(expr)} & set(tracer.tables)
+        )
+        if not read:
+            continue
+        where = next(
+            (
+                stmt.where
+                for stmt in tracer.stmts
+                if symbol in _statement_parameters(stmt)
+            ),
+            "",
+        )
+        at = f" at {where}" if where else ""
+        raise TraceError(
+            f"a loop{at} is bounded by {_shown(expr)}, a value of the constant "
+            f"table {read[0]}, and a bound is read from an array the kernel is "
+            "given, not from a table: the compiled kernel computes each bound "
+            "before the loop it bounds, from its arguments. Pass the bounds as "
+            "an array of whole numbers (counts: Arr[Fin[k], Nat]), as a ragged "
+            "family's counts are, or write the loop over the largest bound with "
+            "a when(...) guard"
+        )
+
+
+def _statement_parameters(stmt: Stmt) -> set[str]:
+    """The isl parameters of a statement's domain and of its sums' domains."""
+    from loopty.lower import reductions_of
+
+    domains = [stmt.domain, *(sum_.domain for sum_ in reductions_of(stmt.expr))]
+    names: set[str] = set()
+    for domain in domains:
+        if domain is not None:
+            names.update(domain.get_var_names(isl.dim_type.param))
+    return names
+
+
 #: The two ways to give loop-carried state an index, which is what both
 #: loop-carried refusals end with.
 _INDEX_THE_STATE = (
@@ -4760,6 +4809,7 @@ def trace(kernel: Any, arg_types: Any) -> Term:
     changes = _outside_changes(outside, tracer)
     if changes:
         raise TraceError(_outside_message(name, changes))
+    _refuse_table_bounds(tracer)
 
     sizes: set[str] = set()
     for _, arrtype in params:
