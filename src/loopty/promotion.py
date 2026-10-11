@@ -1000,7 +1000,12 @@ class Promotion:
         (int64_t) (u[i])``), and the sum adds a value of that type. A real is
         negated exactly in its own type, and the sum's step converts it. A
         negation of a Python int, a loop variable's, is planned as it stands
-        (:func:`_negation`).
+        (:func:`_negation`), but where the difference is a real: numpy
+        converts ``i`` into the real's type first, and ``x[i] - i`` is ``-0.0``
+        at ``x[i] = -0.0`` and ``i = 0``, where ``-1 * i`` is the integer
+        ``0``, which C adds as ``0.0``, and ``-0.0 + 0.0`` is ``0.0``. So ``i``
+        is converted into the real's type and negated there, ``-1 * (double)
+        (i)``, which is ``-0.0`` at ``i = 0``.
         """
         x = _subtrahend(node)
         x_native, x_compiled = self.types(x)
@@ -1009,7 +1014,14 @@ class Promotion:
         numbers = (
             x_native is not None
             and difference is not None
-            and all(isinstance(sample, np.generic) for sample in x_native)
+            and (
+                all(isinstance(sample, np.generic) for sample in x_native)
+                or (
+                    target is not None
+                    and target.kind in "fc"
+                    and _weak_integers(x_native)
+                )
+            )
             and all(isinstance(sample, np.generic) for sample in difference)
         )
         if not numbers or target is None or x_compiled is None:

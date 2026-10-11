@@ -149,19 +149,23 @@ def _in_bounds_guards(stmt: Stmt, lowering: Lowering) -> list[str]:
 
     For each access of the statement's value and its assignee that is not in
     bounds at every point of the statement's domain, the points where it is,
-    less what the domain says already, written as Python: ``i <= n - 5`` for
-    ``x[i + 4]`` of an ``x`` of ``n`` cells. Only one isl writes with no
-    quotient and over the loop variables and the sizes is given; anything
-    else, or an error, gives none.
+    less what the domain says already, written as the body would write it:
+    ``i <= x.dom.size - 5`` for ``x[i + 4]`` of an ``x`` of ``n`` cells, a
+    size as an array's domain reads it (:func:`_size_spellings`), since the
+    body has no name ``n``. Only one isl writes with no quotient and over the
+    loop variables, the scalars and the sizes an axis of an array is is
+    given; anything else, or an error, gives none.
     """
     from loopty import flow
 
     term = lowering.term
     types = dict(term.params)
-    names = set(stmt.inames) | set(flow.size_names(term))
-    names |= {
-        name for name, sort in term.params if not isinstance(sort, ArrType)
-    }
+    names = dict.fromkeys(stmt.inames, "")
+    names.update(_size_spellings(term, stmt))
+    names.update(
+        (name, "") for name, sort in term.params if not isinstance(sort, ArrType)
+    )
+    names = {name: spelled or name for name, spelled in names.items()}
     out: list[str] = []
     try:
         for array, indices, _kind, inames, domain in flow.statement_accesses(
@@ -190,8 +194,37 @@ def _in_bounds_guards(stmt: Stmt, lowering: Lowering) -> list[str]:
     return out
 
 
-def _guard_text(points: isl.Set, names: set[str]) -> str | None:
-    """``points`` as a Python guard, ``(i <= n - 5) & (j >= 1)``, or ``None``."""
+def _size_spellings(term: Term, stmt: Stmt) -> dict[str, str]:
+    """How the body reads each size that is an axis of an array parameter.
+
+    ``x.dom.size`` for the ``n`` of ``x: Arr[Fin[n], Real]``, and
+    ``m.dom[0].size`` for the ``k`` of ``m: Arr[Fin[n], Fin[k], Real]``: a
+    body asks an array's domain for a size, and has no name for it. The
+    statement's own array is asked first, then the parameters in order. A
+    ragged axis, an extent that is not one size, and an array over a
+    polyhedral domain spell none.
+    """
+    types = dict(term.params)
+    order = [stmt.assignee.array, *(name for name, _ in term.params)]
+    out: dict[str, str] = {}
+    for array in order:
+        typ = types.get(array)
+        if not isinstance(typ, ArrType) or typ.domain is not None:
+            continue
+        for axis, (extent, ragged) in enumerate(zip(typ.axes, typ.ragged, strict=True)):
+            if ragged or not isinstance(extent, prim.Variable) or extent.name in out:
+                continue
+            fiber = f"[{', '.join(['0'] * axis)}]" if axis else ""
+            out[extent.name] = f"{array}.dom{fiber}.size"
+    return out
+
+
+def _guard_text(points: isl.Set, names: Mapping[str, str]) -> str | None:
+    """``points`` as a Python guard, ``(i <= x.dom.size - 5) & (j >= 1)``, or ``None``.
+
+    ``names`` holds the names a guard may use, each with how the body writes
+    it.
+    """
     from loopty.flow import _constraint_text
 
     pieces = points.coalesce().get_basic_sets()
@@ -214,6 +247,8 @@ def _guard_text(points: isl.Set, names: set[str]) -> str | None:
             continue
         if any(name not in names for name, _ in (*on, *by)):
             return None
+        on = [(names[name], value) for name, value in on]
+        by = [(names[name], value) for name, value in by]
         constant = int(constraint.get_constant_val().to_python())
         text = _constraint_text(on, by, constant, bool(constraint.is_equality()))
         texts.append(text.replace(" = ", " == ").replace("*", " * "))
@@ -317,7 +352,9 @@ def refuse_where_native_does(term: Term, supplied: Mapping[str, Any]) -> None:
       ``>>``, of such arithmetic beside a numpy integer narrower than 64 bits
       or an unsigned one, over the loops around the statement with no guard
       applied, since a ``when`` masks the write and the body computes at
-      every point of its loops; inside a sum, over the sum's own. A point
+      every point of its loops; inside a sum, over the sum's own, narrowed by
+      the generator's ``if`` clause, which skips the body
+      (:func:`_summed_points`). A point
       where one of the integer's reads is out of bounds is left out: under a
       false guard the native run reads such a cell as the Python int ``0``;
     * a store of such arithmetic into an array stored so natively, over the
@@ -327,8 +364,9 @@ def refuse_where_native_does(term: Term, supplied: Mapping[str, Any]) -> None:
     An integer of 64 bits that is signed is not asked about, since loop
     arithmetic leaves it only past 64 bits, which is #139's limit; nor is
     arithmetic isl cannot read, a product of two loop variables say, nor
-    loops whose bounds the call's sizes do not fix, a ragged row's: those are
-    left to the native refusal.
+    loops whose bounds the call's sizes do not fix, a ragged row's, nor a
+    store under a guard isl does not read, which stores where an array's
+    entries say: those are left to the native refusal (#166).
     """
     from loopty.contract import resolve_sizes
     from loopty.promotion import Promotion
@@ -357,7 +395,7 @@ def _operations(
     if expr is None:
         return
     if isinstance(expr, Reduction):
-        inner = expr.loop_domain if expr.loop_domain is not None else expr.domain
+        inner = _summed_points(expr, stmt)
         _operations(expr.body, term, stmt, promotion, inner, sizes)
         return
     if isinstance(expr, Access):
@@ -373,6 +411,42 @@ def _operations(
         _operation(expr, term, stmt, promotion, loops, sizes)
     for arg in init_args(expr):
         _operations(arg, term, stmt, promotion, loops, sizes)
+
+
+def _summed_points(reduction: Reduction, stmt: Stmt) -> isl.Set:
+    """The points at which the native run computes a sum's body.
+
+    The sum's loops, narrowed by the generator's own ``if`` clause, which
+    skips the body where it is false, and not by the statement's guard,
+    which masks only the write: ``reduce_sum(a[j] + j for j in a.dom if j <
+    100)`` computes ``a[j] + j`` for ``j < 100`` alone. The sum's
+    ``loop_domain`` is narrowed by neither and its ``domain`` by both. Under a
+    guard the clause cannot be told apart from the guard once both narrow the
+    domain, and then the sum's ``domain`` is asked, a part of those points;
+    the points the guard leaves out are left to the native refusal (#166).
+    """
+    if reduction.loop_domain is None:
+        return reduction.domain
+    if stmt.guard is None:
+        # Nothing but the clause narrowed the domain.
+        return reduction.domain
+    try:
+        loops = reduction.loop_domain
+        names = loops.get_var_names(isl.dim_type.set)
+        outer = stmt.domain.get_var_names(isl.dim_type.set)
+        if names[: len(outer)] != outer:
+            return reduction.domain
+        guarded = stmt.domain.add_dims(isl.dim_type.set, len(names) - len(outer))
+        for k in range(len(outer), len(names)):
+            guarded = guarded.set_dim_name(isl.dim_type.set, k, names[k])
+        guarded, loops = isl.align_two(guarded, loops)
+        narrowed, domain = isl.align_two(loops.intersect(guarded), reduction.domain)
+        if narrowed.is_equal(domain):
+            # The guard alone narrowed it: there is no clause.
+            return reduction.loop_domain
+    except isl.Error:
+        pass
+    return reduction.domain
 
 
 def _operands(node: Any) -> tuple[Any, ...]:

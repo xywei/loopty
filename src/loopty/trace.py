@@ -3032,6 +3032,11 @@ def _refuse_arithmetic(expr: Any, params: Mapping[str, Any], where: str) -> None
       (#130), alone or added, ``c[i] + -b[i]``. pymbolic builds it as ``-1 *
       b[i]``, so that product is refused too, though numpy computes it, but
       not where it is subtracted, ``1 - b[i]``, which numpy computes;
+    * a truth value subtracted, ``k[i] - True``, which numpy computes as the
+      integer it is, and pymbolic, whose nodes the terms are, takes no truth
+      value as an operand of. The trace keeps it as written
+      (:func:`_difference_operator`), so that ``b[i] - True`` of a truth
+      value is refused as a difference of two, and this names the integer;
     * a numpy integer to a negative integer power, ``k[i] ** -1``: numpy
       refuses it at every point, and loopy's integer power inverts the base
       into an integer, ``0`` for every base but ``1`` and ``-1`` (#109). A
@@ -3083,6 +3088,7 @@ def _refuse_arithmetic(expr: Any, params: Mapping[str, Any], where: str) -> None
     for node in _nodes(expr):
         if isinstance(node, prim.Sum):
             _refuse_truth_sum(node, promotion, where)
+            _refuse_subtracted_truth(node, where)
             differences.update(
                 id(child)
                 for position, child in enumerate(node.children)
@@ -3156,6 +3162,33 @@ def _refuse_truth_sum(node: prim.Sum, promotion: Any, where: str) -> None:
             "and makes 2, so the two runs would compute different things. Write "
             f"'{a} | {b}' for 'or', or '1 * {a} + {b}' for a count"
         )
+
+
+def _refuse_subtracted_truth(node: prim.Sum, where: str) -> None:
+    """Refuse a truth value a difference subtracts, ``k[i] - True``.
+
+    See :func:`_refuse_arithmetic`. pymbolic takes no truth value as an
+    operand, and refuses ``k[i] + True`` as the body runs; the trace keeps
+    the one a ``-`` subtracts as written, ``-1 * True``, so that
+    :func:`_refuse_truth_sum` can refuse ``b[i] - True`` of a truth value
+    ``b``, which numpy refuses. Of anything else, numpy subtracts the integer
+    the truth value is, and loopy, given ``-1 * True``, failed with a bare
+    ``AssertionError``.
+    """
+    last = len(node.children) - 1
+    if not subtracted(node, last):
+        return
+    value = _negated(node.children[last])
+    if not isinstance(value, bool | np.bool_):
+        return
+    left = _written(node.children[0])
+    raise TraceError(
+        f"{_written(node)} at {where} subtracts the truth value {value}, which "
+        "numpy subtracts as the integer it is, and which pymbolic, whose nodes "
+        "a kernel's terms are, takes as no operand of arithmetic, so the "
+        f"compiled kernel cannot be built. Write the integer, '{left} - "
+        f"{int(value)}', which both runs compute as numpy does"
+    )
 
 
 def _refuse_truth_negation(node: prim.Product, promotion: Any, where: str) -> None:
@@ -3274,29 +3307,57 @@ def _refuse_unheld_literal(node: Any, promotion: Any, where: str) -> None:
                 )
             article = "an" if unheld.name.startswith("int") else "a"
             double = " (in double beside a uint64)" if unheld == np.uint64 else ""
+            words = f"Python integer {value} out of bounds for {unheld}"
+            fix = (
+                f"Write the literal as a numpy integer, np.int64({value}), with "
+                f"which numpy computes in a type that holds both{double}, as "
+                "the compiled run does too"
+            )
+            if not -(2**63) <= value < 2**63:
+                # Past int64, which no np.int64 holds either: numpy's own
+                # words are C's, and a real holds it.
+                words = "Python int too large to convert to C long"
+                fix = (
+                    f"Write the literal as a real, {_real_spelling(value)}, "
+                    "with which both runs compute alike"
+                )
             raise TraceError(
                 f"{_written(node)} at {where} computes the integer {value} with "
                 f"{article} {unheld} value, whose type does not hold it: numpy "
-                f"refuses it at every point ('Python integer {value} out of "
-                f"bounds for {unheld}', NEP 50), while the compiled kernel "
-                "computes it in C's type, so the compiled run would compute a "
-                "value where the native one has none. Write the literal as a "
-                f"numpy integer, np.int64({value}), with which numpy computes in "
-                f"a type that holds both{double}, as the compiled run does "
-                f"too{other}"
+                f"refuses it at every point ('{words}', NEP 50), while the "
+                "compiled kernel computes it in C's type, so the compiled run "
+                f"would compute a value where the native one has none. {fix}"
+                f"{other}"
             )
         if position - 1 < len(steps):
             accumulated = steps[position - 1].native
 
 
 def _unheld(value: int, native: Any) -> np.dtype | None:
-    """The dtype of a numpy integer sample of ``native`` not holding ``value``."""
+    """The dtype of a numpy integer sample of ``native`` not holding ``value``.
+
+    numpy computes a truth value beside a Python int in ``int64``, so one
+    beside ``b[i] - 2**63`` is refused as an ``int64`` is.
+    """
     for sample in native or ():
+        dtype = None
         if isinstance(sample, np.integer):
-            info = np.iinfo(sample.dtype)
+            dtype = sample.dtype
+        elif isinstance(sample, np.bool_):
+            dtype = np.dtype(np.int64)
+        if dtype is not None:
+            info = np.iinfo(dtype)
             if not int(info.min) <= value <= int(info.max):
-                return sample.dtype
+                return dtype
     return None
+
+
+def _real_spelling(value: int) -> str:
+    """An integer as the real a body writes it, ``2.0 ** 63`` or ``1e+19``."""
+    exponent = abs(value).bit_length() - 1
+    if abs(value) == 2**exponent:
+        return f"{'-' if value < 0 else ''}2.0 ** {exponent}"
+    return repr(float(value))
 
 
 def _refuse_unheld_store(array: SymArr, value: Any, where: str) -> None:

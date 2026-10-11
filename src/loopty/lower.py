@@ -107,6 +107,7 @@ from loopty.term import (
     count_param_names,
     free_name_sorts,
     free_name_sorts_message,
+    subtracted,
 )
 
 __all__ = [
@@ -427,6 +428,9 @@ class _LaunchWithoutConditionals(PyOpenCLPythonASTBuilder):
 
 class _OpenCLExpressions(NumpyArithmetic, ExpressionToPyOpenCLCExpressionMapper):
     """loopy's OpenCL C expressions, with numpy's arithmetic."""
+
+    #: OpenCL C has no ``-fwrapv``; see :meth:`NumpyArithmetic.map_constant`.
+    wraps = False
 
 
 class _OpenCLCode(PyOpenCLCASTBuilder):
@@ -881,7 +885,8 @@ class ExpressionLowerer(Mapper):
         return TypeCast(dtype, operand)
 
     def map_sum(self, expr: Any) -> prim.Expression:
-        return self._operation(expr, expr.children, lambda ops: prim.Sum(tuple(ops)))
+        operands = _subtracted_zero(expr, self.lowering.promotion)
+        return self._operation(expr, operands, lambda ops: prim.Sum(tuple(ops)))
 
     def map_product(self, expr: Any) -> prim.Expression:
         return self._operation(
@@ -1076,6 +1081,33 @@ def _real_absolute(operand: Any, dtype: np.dtype) -> prim.Expression:
         prim.Product((dtype.type(-1), operand)),
         prim.If(prim.Comparison(operand, "==", zero), zero, operand),
     )
+
+
+def _subtracted_zero(expr: Any, promotion: Promotion | None) -> tuple[Any, ...]:
+    """The operands of a sum, the integer ``0`` a real difference subtracts as ``-0.0``.
+
+    pymbolic builds ``x[i] - 0`` as ``x[i] + 0``, and C computes ``-0.0 + 0``
+    as ``0.0``, where numpy computes ``-0.0 - 0`` as ``-0.0`` (#151). Written
+    as ``-0.0`` in the difference's real precision, ``x + -0.0`` is ``x`` at
+    every ``x``, as ``x - 0`` is. A literal the plan converts is written in its
+    dtype, which keeps the sign (:func:`_converted`).
+    """
+    children = tuple(expr.children)
+    last = len(children) - 1
+    zero = children[last]
+    if (
+        promotion is None
+        or not subtracted(expr, last)
+        or isinstance(zero, bool)
+        or not isinstance(zero, int)
+        or zero != 0
+    ):
+        return children
+    steps = promotion.steps(expr)
+    dtype = steps[-1].compiled if len(steps) == last else None
+    if dtype is None or dtype.kind not in "fc":
+        return children
+    return (*children[:last], np.finfo(dtype).dtype.type(-0.0))
 
 
 def _without_widening(step: Any) -> Any:

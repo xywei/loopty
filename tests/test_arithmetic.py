@@ -2153,6 +2153,10 @@ def test_a_sum_of_a_negation_is_computed_as_the_body_wrote_it():
     assert list(native["z"]) == [6, 1, 256, 246]
     assert list(native["w"]) == [5 - 2**31, 1 - 2**31, 2**31 - 1, -1]
     agrees(plus_negations, make)
+    # Each is a sum as written, and a '-' the body writes is a Difference.
+    term = plus_negations.term
+    assert not any(isinstance(stmt.expr, Difference) for stmt in term.stmts)
+    assert isinstance(differences.term.stmts[0].expr, Difference)
     # C has no literal of the smallest int32: -2147483648 is the negation of
     # a long, and k[i] + -2147483648 was computed in 64 bits, never wrapping.
     assert "k[i] + (-2147483647 - 1)" in emit_code(plus_negations)
@@ -2179,9 +2183,20 @@ def test_the_smallest_int64_is_written_as_c_writes_it():
     assert list(native["b"]) == [True, True, True, False]
     agrees(above_the_smallest, make)
     assert "(-9223372036854775807l - 1)" in emit_code(above_the_smallest)
-    term = plus_negations.term
-    assert not any(isinstance(stmt.expr, Difference) for stmt in term.stmts)
-    assert isinstance(differences.term.stmts[0].expr, Difference)
+
+
+def test_the_smallest_int32_is_left_to_loopy_on_opencl():
+    # OpenCL C has no -fwrapv, and its compilers (PoCL's, Intel's) fold k[i]
+    # + (-2147483647 - 1) of an int32 k into k[i] | (-2147483647 - 1), which
+    # a sum that cannot overflow is: -1 at k[i] = -1, where numpy wraps round
+    # to 2**31 - 1. loopy's literal, a long, computes that sum without
+    # overflow, which a store into an int32 array takes round as numpy does.
+    from loopty.lower import _CExpressions, _OpenCLExpressions
+
+    assert _CExpressions.wraps and not _OpenCLExpressions.wraps
+    pytest.importorskip("pyopencl")
+    code = emit_code(plus_negations, target="opencl")
+    assert "k[i] + -2147483648" in code and "2147483647 - 1" not in code
 
 
 @kernel
@@ -2356,6 +2371,119 @@ def test_a_difference_is_marked_only_in_a_body_being_traced():
         broken_off.trace()
     assert wrapped() == own
     assert type(i - 1) is Add
+
+
+@kernel
+def minus_truths(
+    k: Arr[Fin[n], Int],  # noqa: F821
+    x: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Int],  # noqa: F821
+    z: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A truth value subtracted from an integer and from a real."""
+    for i in k.dom:
+        y[i] = k[i] - True
+        z[i] = x[i] - np.False_
+
+
+def test_a_truth_value_subtracted_is_refused_naming_the_integer():
+    # numpy subtracts the integer a truth value is, and pymbolic takes no
+    # truth value as an operand: the trace kept k[i] - True as written, as
+    # -1 * True, and loopy failed on it with a bare AssertionError.
+    native = {
+        "k": np.array([5, -3]),
+        "x": np.array([-0.0, 1.5]),
+        "y": np.zeros(2, np.int64),
+        "z": np.zeros(2),
+    }
+    minus_truths(**native)
+    assert list(native["y"]) == [4, -4]
+    with pytest.raises(
+        TraceError, match=r"k\[i\] - True at .* the truth value True"
+    ) as refused:
+        minus_truths.trace()
+    assert "Write the integer, 'k[i] - 1'" in str(refused.value)
+
+
+@kernel
+def minus_zeros(
+    x: Arr[Fin[n], Real],  # noqa: F821
+    f: Arr[Fin[n], np.float32],  # noqa: F821
+    c: Arr[Fin[n], np.complex128],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+    g: Arr[Fin[n], np.float32],  # noqa: F821
+    w: Arr[Fin[n], np.complex128],  # noqa: F821
+    v: Arr[Fin[n], Real],  # noqa: F821
+    u: Arr[Fin[n], np.float32],  # noqa: F821
+):
+    """A real less the integer zero, a loop variable, and arithmetic of both."""
+    for i in x.dom:
+        y[i] = x[i] - 0
+        g[i] = f[i] - i
+        w[i] = c[i] - i
+        v[i] = x[i] - (i - i)
+        u[i] = f[i] - (f[i] - 0)
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_a_real_less_an_integer_zero_keeps_the_sign_of_zero():
+    # numpy converts the integer into the real's type and subtracts, and
+    # -0.0 - 0 is -0.0. pymbolic builds x - 0 as x + 0 and x - i as x + -1 *
+    # i, the integer 0 at i = 0, and C's -0.0 + 0 is 0.0 (#151).
+    def make() -> dict:
+        return {
+            "x": np.array([-0.0, 0.0, -1.5]),
+            "f": np.array([-0.0, 0.5, np.inf], np.float32),
+            "c": np.array([complex(-0.0, -0.0), complex(0.0, -0.0), 1 - 2j]),
+            "y": np.zeros(3),
+            "g": np.zeros(3, np.float32),
+            "w": np.zeros(3, np.complex128),
+            "v": np.zeros(3),
+            "u": np.zeros(3, np.float32),
+        }
+
+    native = make()
+    minus_zeros(**native)
+    assert np.signbit(native["y"][0]) and np.signbit(native["g"][0])
+    assert np.signbit(native["w"][0].real) and np.signbit(native["w"][0].imag)
+    agrees(minus_zeros, make)
+    code = emit_code(minus_zeros)
+    assert "x[i] + -0.0;" in code and "-1.0f * (float) (i)" in code
+
+
+@kernel
+def past_int64_less(
+    k: Arr[Fin[n], Int],  # noqa: F821
+    y: Arr[Fin[n], Int],  # noqa: F821
+):
+    """``k[i] - 2**63``, which no int64 holds."""
+    for i in k.dom:
+        y[i] = k[i] - 2**63
+
+
+@kernel
+def truth_past_int64(
+    b: Arr[Fin[n], Bool],  # noqa: F821
+    y: Arr[Fin[n], Int],  # noqa: F821
+):
+    """``b[i] - 2**63`` of a truth value, computed in int64 natively."""
+    for i in b.dom:
+        y[i] = b[i] - 2**63
+
+
+def test_a_literal_past_int64_is_refused_naming_a_real():
+    # numpy computes a truth value beside a Python int in int64, and refuses
+    # 2**63 there ('Python int too large to convert to C long'), where the
+    # compiled run computed it; np.int64(2**63), which the refusal of k[i] -
+    # 2**63 named, is refused by numpy itself.
+    with pytest.raises(OverflowError, match="too large to convert to C long"):
+        truth_past_int64(b=np.array([True]), y=np.zeros(1, np.int64))
+    for kern in (past_int64_less, truth_past_int64):
+        with pytest.raises(TraceError, match="9223372036854775808") as refused:
+            kern.trace()
+        message = str(refused.value)
+        assert "Write the literal as a real, 2.0 ** 63" in message
+        assert "np.int64(" not in message
 
 
 # }}}
@@ -3243,6 +3371,32 @@ def within_the_type(
 
 
 @kernel
+def summed_with_a_clause(a: Arr[Fin[n], np.int8], y: Arr[Fin[n], Int]):  # noqa: F821
+    """``a[j] + j`` only where the generator's clause holds, ``j < 100``."""
+    for i in a.dom:
+        y[i] = reduce_sum(a[j] + j for j in a.dom if j < 100)
+
+
+@kernel
+def summed_with_a_clause_guarded(
+    a: Arr[Fin[n], np.int8],  # noqa: F821
+    y: Arr[Fin[n], Int],  # noqa: F821
+):
+    """The same sum under a guard, which masks the write and not the sum."""
+    for i in a.dom:
+        with when(i < 3):
+            y[i] = reduce_sum(a[j] + j for j in a.dom if j < 100)
+
+
+@kernel
+def summed_guarded(a: Arr[Fin[n], np.int8], y: Arr[Fin[n], Int]):  # noqa: F821
+    """A sum with no clause under a guard: computed at every j."""
+    for i in a.dom:
+        with when(i < 3):
+            y[i] = reduce_sum(a[j] + j for j in a.dom)
+
+
+@kernel
 def stored_literal(y: Arr[Fin[n], np.uint8]):  # noqa: F821
     """``300`` stored into a ``uint8``, which numpy refuses at every point."""
     for i in y.dom:
@@ -3309,6 +3463,19 @@ def test_loop_arithmetic_a_numpy_integer_does_not_hold_is_refused_compiled_too()
         stored_literal(y=np.zeros(2, np.uint8))
     with pytest.raises(TraceError, match="the store of 300 into y"):
         stored_literal.trace()
+
+    # A generator's clause skips the sum's body, and a guard does not: a[j] +
+    # j is computed natively for j < 100 alone, and the compiled run was
+    # refused at j = 128 all the same.
+    def long(size: int = 200) -> dict:
+        return {"a": np.ones(size, np.int8), "y": np.zeros(size, np.int64)}
+
+    agrees(summed_with_a_clause, long)
+    agrees(summed_with_a_clause_guarded, long)
+    with pytest.raises(OverflowError, match="128 out of bounds for int8"):
+        summed_guarded(**long())
+    with pytest.raises(RefusedNatively, match="128 at i = 0, j = 128"):
+        LoopyExecutor().run(summed_guarded, **long())
 
 
 # }}}

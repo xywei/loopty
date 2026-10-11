@@ -644,6 +644,16 @@ def corner_guard(m: Arr[Fin[n], Fin[k], Real], y: Arr[Fin[n], Fin[k], Real]):  #
 
 
 @kernel
+def corner_guard_fixed(m: Arr[Fin[n], Fin[k], Real], y: Arr[Fin[n], Fin[k], Real]):  # noqa: F821
+    """corner_guard with the integer guard its refusal names, as it names it."""
+    for i in y.dom:
+        for j in y.dom[i]:
+            with when(m[i, j] > 0.5):
+                with when((j >= 1) & (i <= y.dom.size - 2)):
+                    y[i, j] = m[i + 1, j - 1]
+
+
+@kernel
 def half_guard_fixed(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     """half_guard with the integer guard its refusal names."""
     for i in y.dom:
@@ -669,9 +679,9 @@ def test_loopys_refusal_under_a_guard_it_does_not_read_names_the_fix() -> None:
     from loopty.refusal import GuardNotRead
 
     for kern, guard, fix in (
-        (half_guard, "'i*0.5 < 2'", "'with when(i <= n - 5):'"),
-        (twice_under, "'i*2.0 < n'", "'with when(2 * i <= n - 1):'"),
-        (squared_guard, "'i*i < 16'", "'with when(i <= n - 5):'"),
+        (half_guard, "'i*0.5 < 2'", "'with when(i <= y.dom.size - 5):'"),
+        (twice_under, "'i*2.0 < n'", "'with when(2 * i <= y.dom.size - 1):'"),
+        (squared_guard, "'i*i < 16'", "'with when(i <= y.dom.size - 5):'"),
     ):
         with pytest.raises(GuardNotRead) as refused:
             LoopyExecutor().run(kern, **inputs(9)())
@@ -683,14 +693,17 @@ def test_loopys_refusal_under_a_guard_it_does_not_read_names_the_fix() -> None:
     with pytest.raises(GuardNotRead) as refused:
         emit_code(half_guard)
     assert "S0 of half_guard at test_isl_reading.py:" in str(refused.value)
-    assert "'with when(i <= n - 5):'" in str(refused.value)
+    assert "'with when(i <= y.dom.size - 5):'" in str(refused.value)
     with pytest.raises(GuardNotRead, match=r"under the guard 'm\[i\] > 0.5'"):
         LoopyExecutor().run(entry_guard, m=np.zeros(9), **inputs(9)())
     with pytest.raises(GuardNotRead) as refused:
         emit_code(corner_guard)
-    assert "'with when((j >= 1) & (i <= n - 2)):'" in str(refused.value)
+    # A size is named as the body reads it, from an array's domain: the body
+    # has no name n, and 'when(i <= n - 5)' was a NameError there.
+    assert "'with when((j >= 1) & (i <= y.dom.size - 2)):'" in str(refused.value)
     # The guard it names keeps the access in bounds, and loopy reads it.
     agrees(half_guard_fixed, inputs(9))
+    agrees(corner_guard_fixed, lambda: {"m": np.ones((4, 5)), "y": np.zeros((4, 5))})
     # Under a guard loopy reads, the refusal is loopy's own, as it was.
     with pytest.raises(LoopyIndexError) as refused:
         LoopyExecutor().run(past_on_the_loops, **inputs(9)())

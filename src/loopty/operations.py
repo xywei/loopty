@@ -296,6 +296,10 @@ class NumpyArithmetic:
     and a size are far from the ends of the range.
     """
 
+    #: Whether the target's signed arithmetic wraps round, as C's does under
+    #: ``-fwrapv`` (``lower.WRAP_FLAG``); OpenCL C has no such option.
+    wraps = True
+
     def map_sum(self, expr: Any, type_context: Any) -> Any:
         return super().map_sum(expr, self._literal_context(expr, type_context))
 
@@ -409,14 +413,18 @@ class NumpyArithmetic:
         no signed type at all, which GCC reads in 128 bits with a warning and
         clang as an ``unsigned long``. Each is written as C writes ``INT_MIN``,
         ``(-2147483647 - 1)``, and ``(-9223372036854775807l - 1)``, in the type
-        loopy gives it (:func:`_smallest`).
+        loopy gives it (:func:`_smallest`), where the target wraps round a
+        signed sum (:attr:`wraps`). OpenCL C does not, and its compilers fold
+        ``k[i] + (-2147483647 - 1)`` into ``k[i] | (-2147483647 - 1)``, which
+        a sum that cannot overflow is: the literal is left to loopy there,
+        whose wider type computes the sum without overflow.
         """
         from loopy.symbolic import Literal
 
         if isinstance(expr, np.uint8 | np.uint16 | np.uint32):
             suffix = "u" if isinstance(expr, np.uint32) else ""
             return Literal(f"{int(expr)}{suffix}")
-        smallest = _smallest(expr, type_context)
+        smallest = _smallest(expr, type_context) if self.wraps else None
         if smallest is not None:
             return Literal(smallest)
         return super().map_constant(expr, type_context)
