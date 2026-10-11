@@ -8,6 +8,23 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Added
 
+- **The S3 demo: firedrake's PyOP2 assembly loop** (`examples/assembly.py`).
+  FFC's P1 mass kernel of firedrake's PyOP2 tests, `mass_ffc`, with its
+  15-digit tables as constant tables, is a kernel of its own, called inside
+  the loop over the cells as PyOP2 calls it, `mass_ffc(coords[cell[c]],
+  Ae[c])`, and the cell's matrix applied to `u` is added into the nodes,
+  `y[cell[c, a]] += ...`. The three identities the loop rests on are lanky
+  theorems in the same file, proved where Mathlib is installed: the 3-point
+  rule integrates every quadratic exactly, a cell's mass matrix is `|J| (1 +
+  delta_jk) / 24`, and the scatter keeps the total on every mesh. PyOP2's GPU
+  split is refused with the node its two test triangles share and accepted
+  once the updates are atomic, and both PyOP2 branches' schedules take the
+  assumptions their transforms make (`assume("nc >= 1")`, `assume("nc % 4
+  == 0")`). `benchmarks/assembly.py` times loopty's schedules against a
+  plain-loopy transcription of PyOP2's wrapper with Kulkarni's and Sun et
+  al.'s transforms applied, and `benchmarks/assembly_agreement.py` compares
+  the example with firedrake's own assembly and PyOP2's own `par_loop`.
+
 - **A kernel's postcondition decided from what its statements store**
   (`loopty.dataflow`, #113). Where no cell of an array a kernel writes is
   stored twice, or read before its store, a `single-assignment` fact says
@@ -520,6 +537,16 @@ All notable changes to loopty are recorded here. The format follows
   `fill's loop n, inlined at ..., is n_0 here`.
 
 ### Fixed
+
+- An array of several axes read only through an index array,
+  `coords[cell[c, k], d]` with `nv` in no loop bound, is declared with its
+  strides, `stride:2,stride:1`, so that loopy indexes its rows; it was
+  declared without a shape, and loopy refused the read.
+- An access with mixed subscripts that a statement reads twice over one
+  domain, `x[0, 0]` read for two entries of an inlined Jacobian, is one
+  place, decided by isl; it was `assumed`.
+- A schedule's assumption is named `assume('nc % 4 == 0')` in the status of
+  the casts that rest on it (with lanky's `label`), where its whole id was.
 
 - A write through a cell read from an array, `y[perm[i]] = x[i]`, no longer
   has its distinct writes refuted by isl with two instances that write no
