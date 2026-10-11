@@ -520,36 +520,27 @@ class Tracer:
     def table(self, values: Any, frame: Any) -> SymArr:
         """The proxy a constant table is read through, recorded on first use.
 
-        The table is named as the frame that reads it names it, the body's or
-        a helper's: a global, a closure variable or a local, whichever holds
-        that very object. A table read by none (``tables["W"][q]``) is
-        ``table``, numbered past one already taken. A name that is also a
-        parameter, a size or a scalar of the kernel would make two things
-        one, and is refused.
+        The table is named as it is declared, by the global of the module
+        that reads it that holds that very object (``W = table([...])``), or
+        else by the local or closure variable of the frame that reads it,
+        the body's or a helper's; one no frame names (``tables["W"][q]``) is
+        ``table``. The name is only what the term, the ledger and the
+        generated code call it, so one that is already a parameter, a size,
+        a scalar or another table of the kernel is made unique,
+        ``W_table`` for a table named like the parameter ``W``.
         """
         for name, known in self.tables.items():
             if known is values:
                 return self._table_proxies[name]
         from loopty.table import table_type
 
-        name = _table_name(values, frame)
-        if name is None:
-            name = "table"
-            count = 0
-            while name in self.tables:
-                count += 1
-                name = f"table_{count}"
-        elif name in self.tables:
-            raise TraceError(
-                f"{self.name} reads two different tables as {name}; give each "
-                "a name of its own"
-            )
-        if name in self.params or name in self.integers:
-            raise TraceError(
-                f"{self.name} reads a constant table as {name}, which is also "
-                f"the name of a parameter or a size of {self.name}; rename the "
-                "table"
-            )
+        stem = _table_name(values, frame) or "table"
+        taken = set(self.params) | self.integers | set(self.tables)
+        name = stem if stem not in taken else f"{stem}_table"
+        count = 0
+        while name in taken:
+            count += 1
+            name = f"{stem}_table_{count}"
         arrtype = table_type(values)
         self.tables[name] = values
         self.array_types[name] = arrtype
@@ -932,8 +923,8 @@ _TRACERS: list[Tracer] = []
 
 
 def _table_name(values: Any, frame: Any) -> str | None:
-    """The name ``frame`` holds ``values`` by: a local, a closure variable, a global."""
-    for scope in (frame.f_locals, frame.f_globals):
+    """The name ``frame`` holds ``values`` by: a global, a local, a closure variable."""
+    for scope in (frame.f_globals, frame.f_locals):
         for name, value in scope.items():
             if value is values and name.isidentifier():
                 return name

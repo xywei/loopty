@@ -16,7 +16,7 @@ import pytest
 from lanky.ledger import Status
 from lanky.prelude import Int, Real
 
-from loopty import Arr, Fin, Schedule, Table, TraceError, kernel, program, reduce_sum
+from loopty import Arr, Fin, Schedule, Table, kernel, program, reduce_sum
 from loopty import table as make_table
 from loopty.executor import LoopyExecutor, emit_code
 from loopty.faithful import KIND
@@ -103,8 +103,8 @@ def writes_a_table(y: Arr[Fin[n], Real]):  # noqa: F821
 
 
 def first_weight():
-    """A helper that holds a table by the name of the kernel's array."""
-    y = W
+    """A helper that makes a table and holds it by the name of the kernel's array."""
+    y = make_table([5.0, 6.0])
     return y[0]
 
 
@@ -239,10 +239,14 @@ def test_a_table_is_written_by_nobody() -> None:
         writes_a_table.trace()
 
 
-def test_a_table_named_like_a_parameter_is_refused() -> None:
-    # The helper's frame names the table y, which is the kernel's array.
-    with pytest.raises(TraceError, match="reads a constant table as y, which is"):
-        clashing.trace()
+def test_a_table_named_like_a_parameter_is_named_apart() -> None:
+    # The helper's frame names its table y, which is the kernel's array: the
+    # table is y_table in the term and the generated code.
+    tables = dict(clashing.term.tables)
+    assert list(tables) == ["y_table"]
+    assert list(tables["y_table"].values) == [5.0, 6.0]
+    assert "static double y_table[2] = { 5.0, 6.0 };" in emit_code(Schedule(clashing))
+    agrees(clashing, Schedule(clashing), {"y": Arr.zeros(3)})
 
 
 def test_opencl_code_holds_a_table_in_constant_memory(plain_opencl) -> None:

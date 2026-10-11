@@ -20,9 +20,10 @@ All notable changes to loopty are recorded here. The format follows
   0.16666666666666666, ... };` on the C target and `__constant` on OpenCL, so
   both runs read the same numbers; the interpreter reads them too. Complex,
   single precision and integer tables are read in their own dtype. A table
-  read in a helper of the body is the kernel's, a program holds one table for
-  every call that reads it, and a table named like a parameter or a size of
-  the kernel is a `TraceError`. Writing one is a `TypeError` in both runs.
+  read in a helper of the body is the kernel's, named as it is declared, a
+  program holds one table for every call that reads it, and a table named
+  like a parameter or a size of the kernel is named apart, `y_table`.
+  Writing one is a `TypeError` in both runs.
 - **`loopty.math`**: `sqrt`, `exp`, `log`, `sin`, `cos`, `real`, `imag` and
   `conj` for kernel bodies (gap 12). Each is numpy's natively and a call the
   trace records, which the interpreter evaluates with the same numpy function
