@@ -831,7 +831,12 @@ release; the CHANGELOG says when one does.
   is refused: state it as a theorem about the rule (#206). A call made
   inside a sum over `Fin[...]` of a size, rather than over an array's `.dom`,
   has points the trace does not see, and its facts are `assumed` (#207). A rule that
-  takes a function is compiled where it is called, not on its own. A domain
+  takes a function is compiled where it is called, not on its own. A scalar
+  argument is passed in the caller's type, where the native call converts
+  it to a narrower sort the callee declares (`np.float32`, `np.int8`)
+  (#232); a callee's positional-only parameters are refused by Python where
+  it is called (#233); and a call that reads one cell of a row, `first(A[i])`,
+  leaves `A`'s second size in no loop, which fails to compile (#220). A domain
   declared outside an annotation, for `Arr.zeros(TRIANGLE, ...)` in a
   program, names its binders and sizes as lanky variables, `i, j, n =
   Var("i"), Var("j"), Var("n")` (#210).
