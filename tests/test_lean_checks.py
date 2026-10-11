@@ -153,19 +153,6 @@ def test_the_reader_refuses_what_loopty_does_not_write(text: str) -> None:
         parse(text)
 
 
-def _assignments(described: Any, sizes: dict[str, int], box: int) -> Iterator[dict]:
-    """Points of a box around the set, and a value for each array cell a bound reads."""
-    rng = np.random.default_rng(0)
-    arrays = {}
-    for _name, expr in described.reflected:
-        aggregate = getattr(expr, "aggregate", None)
-        if aggregate is not None and aggregate.name not in arrays:
-            rank = len(expr.index) if isinstance(expr.index, tuple) else 1
-            arrays[aggregate.name] = rng.integers(0, 4, size=(box + 4,) * rank)
-    for point in itertools.product(range(-1, box), repeat=len(described.dims)):
-        yield dict(zip(described.dims, point, strict=True)), arrays
-
-
 def _member(obj: Any, point: dict[str, int], params: dict[str, int]) -> bool:
     """Whether isl's set holds the point at the parameters."""
     fixed = obj
@@ -180,17 +167,35 @@ def _member(obj: Any, point: dict[str, int], params: dict[str, int]) -> bool:
     return not fixed.is_empty()
 
 
-def _domains(path: Path) -> Iterator[tuple[str, Any]]:
+#: The most points of a box a domain is compared with isl at, per size.
+_POINTS = 64
+
+
+def _domains(path: Path) -> Iterator[tuple[str, Any, Any]]:
+    """Every domain of a file's kernels and programs, a program's in its calls' names.
+
+    Each with the term it belongs to, whose reflections say what a parameter
+    a call renamed stands for.
+    """
+    from loopty.kernel import Program
     from loopty.trace import reductions_in
 
     module = load(path)
-    for found in kernels_of(module):
-        for stmt in found.term.stmts:
-            yield f"{found.__name__}.{stmt.id}", stmt.domain
+    # a program's, for the examples: tracing the test kernels' many programs
+    # takes half a minute, and the examples' have the calls' renamings
+    programs = [
+        value
+        for value in vars(module).values()
+        if isinstance(value, Program) and path.parent == EXAMPLES
+    ]
+    for found in [*kernels_of(module), *programs]:
+        term = found.term
+        for stmt in term.stmts:
+            yield f"{found.__name__}.{stmt.id}", stmt.domain, term
             if stmt.loop_domain is not None:
-                yield f"{found.__name__}.{stmt.id} loops", stmt.loop_domain
+                yield f"{found.__name__}.{stmt.id} loops", stmt.loop_domain, term
             for reduction in reductions_in(stmt.expr):
-                yield f"{found.__name__}.{stmt.id} sum", reduction.domain
+                yield f"{found.__name__}.{stmt.id} sum", reduction.domain, term
 
 
 @pytest.mark.parametrize(
@@ -202,33 +207,55 @@ def test_the_description_reads_back_as_isl_reads_it(path: Path) -> None:
     """The predicate built from loopty's text holds exactly where isl's set does.
 
     The differential of the printed predicates against isl's membership:
-    every domain of every kernel, at every point of a box around it, at a few
-    sizes, with each array cell a bound reads given a value of its own.
+    every domain of every kernel and program, a program's after its calls'
+    renamings, at every point of a box around it, at a few sizes, with each
+    array cell a bound reads given a value of its own. The points are read
+    by position, since a call renames isl's dimensions and the description
+    keeps the callee's names until it is read.
     """
+    rng = np.random.default_rng(0)
     checked = 0
-    for label, domain in _domains(path):
+    renamed = 0
+    for label, domain, term in _domains(path):
         described = description_of(domain)
+        if described is None and term.checks:
+            # the check a program puts before a call, a statement of its own
+            # built from isl's sets, which no fact is stated over for Lean
+            continue
         assert described is not None, label
-        names = [name for name in domain.get_var_names(isl.dim_type.param)]
-        reflected = dict(described.reflected)
+        dims = list(domain.get_var_names(isl.dim_type.set))
+        names = list(domain.get_var_names(isl.dim_type.param))
+        reflected = {**dict(described.reflected), **dict(term.reflected)}
+        arrays: dict[str, Any] = {}
+        for expr in reflected.values():
+            aggregate = getattr(expr, "aggregate", None)
+            if aggregate is not None and aggregate.name not in arrays:
+                rank = len(expr.index) if isinstance(expr.index, tuple) else 1
+                arrays[aggregate.name] = rng.integers(0, 4, size=(8,) * rank)
+        coords = [Var(f"__x{k}") for k in range(len(dims))]
+        predicate = described.predicate(coords)
+        renamed += bool(described.renamings)
+        box = list(itertools.product(range(-1, 4), repeat=len(dims)))
+        if len(box) > _POINTS:
+            # a seeded sample of a large box, which keeps the test quick
+            box = [box[k] for k in sorted(rng.choice(len(box), _POINTS, replace=False))]
         for size in (0, 1, 3):
             sizes = {name: size + 2 for name in names if name not in reflected}
-            coords = [Var(f"__x{k}") for k in range(len(described.dims))]
-            predicate = described.predicate(coords)
-            for point, arrays in _assignments(described, sizes, 4):
-                values = {f"__x{k}": point[d] for k, d in enumerate(described.dims)}
+            for point in box:
+                where = dict(zip(dims, point, strict=True))
+                at = {**dict(zip(described.dims, point, strict=True)), **where, **sizes}
                 params = dict(sizes)
-                at = {**point, **sizes}
-                for name, expr in reflected.items():
-                    params[name] = int(evaluate(expr, {**at, **arrays}))
-                expected = _member(domain, point, params)
+                for name in names:
+                    if name in reflected:
+                        params[name] = int(evaluate(reflected[name], {**at, **arrays}))
+                values = {f"__x{k}": v for k, v in enumerate(point)}
+                expected = _member(domain, where, params)
                 got = bool(evaluate(predicate, {**values, **sizes, **arrays}))
                 assert got == expected, (label, point, params, render(predicate))
                 checked += 1
     assert checked
-
-
-# }}}
+    if path.parent == EXAMPLES and path.name in ("composition.py", "travel.py"):
+        assert renamed, "a program's domains, after its calls' renamings"
 
 
 # {{{ the statements
