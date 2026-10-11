@@ -91,9 +91,8 @@ def test_a_wrong_nesting_is_refuted_with_the_cell_it_moves() -> None:
     result = IslOracle().establish(fact)
     assert result.status is Status.REFUTED
     assert result.provenance["reason"] == (
-        "[e=0, a=1, b=0, c=2, address=19] is one of the cells dof_array and "
-        "dim_tags N3,N2,N1,N0 store at different addresses, given with the "
-        "address one of the two has for it at [ne=1]"
+        "dof_array stores (e=0, a=1, b=0, c=2) at 19, and dim_tags N3,N2,N1,N0 "
+        "at 11 (at ne=1)"
     )
 
 
@@ -114,6 +113,82 @@ def test_a_layout_that_folds_two_cells_or_leaves_an_address_is_refuted() -> None
         "decided",
         "refuted",
     ]
+
+
+def reasons(obj) -> list[tuple[str, str | None]]:
+    oracle = IslOracle()
+    out = []
+    for fact in obj.facts():
+        result = oracle.establish(fact) or fact
+        out.append((result.status.value, result.provenance.get("reason")))
+    return out
+
+
+def test_a_refuted_layout_names_the_cells_and_the_address() -> None:
+    def fold(a: Fin[4], b: Fin[4]) -> Fin[16]:  # noqa: F821
+        return a + 2 * b
+
+    def wide(a: Fin[4], b: Fin[5]) -> Fin[16]:  # noqa: F821
+        return 4 * a + b
+
+    def even(i: Fin[n]) -> Fin[2 * n]:  # noqa: F821
+        return 2 * i
+
+    assert reasons(layout(fold)) == [
+        ("decided", None),
+        ("refuted", "fold stores (a=1, b=3) and (a=3, b=2) both at 7"),
+        ("refuted", "fold stores no cell at 15 of Fin(16)"),
+    ]
+    assert reasons(layout(wide))[:2] == [
+        ("refuted", "wide stores (a=3, b=4) at 16, outside Fin(16)"),
+        ("refuted", "wide stores (a=2, b=4) and (a=3, b=0) both at 12"),
+    ]
+    assert reasons(layout(even))[2] == (
+        "refuted",
+        "even stores no cell at 1 of Fin(2*n) (at n=1)",
+    )
+
+
+def test_two_pieces_at_one_address_are_refuted_with_both_cells() -> None:
+    def low(cell: Where[i: Fin[4], i < 2]) -> Fin[4]:  # noqa: F821
+        (i,) = cell
+        return i
+
+    def high(cell: Where[i: Fin[4], i >= 2]) -> Fin[4]:  # noqa: F821
+        (i,) = cell
+        return i - 1
+
+    assert reasons(layout(low, high))[1:] == [
+        ("refuted", "low stores (i=1) and (i=2) both at 1"),
+        ("refuted", "low stores no cell at 3 of Fin(4)"),
+    ]
+
+
+def test_a_quasi_affine_layout_is_decided_one_for_one_or_refuted() -> None:
+    def interleave(i: Fin[8]) -> Fin[8]:  # noqa: F821
+        return (i % 2) * 4 + i // 2
+
+    def halves(i: Fin[8]) -> Fin[8]:  # noqa: F821
+        return (i % 2) * 4 + i // 4
+
+    assert [status for status, _ in reasons(layout(interleave))] == ["decided"] * 3
+    assert reasons(layout(halves))[1] == (
+        "refuted",
+        "halves stores (i=2) and (i=0) both at 0",
+    )
+
+
+def test_a_size_in_a_layouts_body_is_said_to_be_one() -> None:
+    def backwards(i: Fin[n]) -> Fin[n]:  # noqa: F821
+        return n - 1 - i  # noqa: F821
+
+    with pytest.raises(LayoutError) as caught:
+        layout(backwards)
+    assert str(caught.value) == (
+        "backwards: the address reads the size n, which a layout cannot know: it "
+        "is called with a cell's indices alone, in a kernel too; make the sizes "
+        "it computes with module constants, N = 8 and Fin[N] for Fin[n]"
+    )
 
 
 def test_a_kernel_reads_through_the_layout_it_declares() -> None:

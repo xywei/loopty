@@ -19,7 +19,9 @@ b: Fin[Q], a + b < Q]``, unpacked in the body. The return annotation is the
 buffer, ``Fin[k]``. The annotations are read as a kernel's are, so the
 sizes need no definition; the body is run once on symbolic indices, so the
 address is quasi-affine: a sum of the indices times numbers, with ``//`` and
-``%`` by numbers.
+``%`` by numbers. The body sees a cell's indices and nothing else, natively
+in a kernel too, so the numbers it computes with are module constants, as
+``N`` is here, and ``ne``, which only the annotations name, is not read there.
 
 A layout of several pieces, each over its own cells, is ``layout(centre,
 derivatives)``: sumpy keeps the value at the centre at address 0 and the two
@@ -153,6 +155,21 @@ def _piece(fn: Any) -> Piece:
         args = tuple(Var(n) for n in names)
     try:
         address = fn(*args)
+    except NameError as exc:
+        sizes = set(cells.get_var_names(isl.dim_type.param)) | _sizes(
+            buffer.bound, names
+        )
+        if exc.name in sizes:
+            raise LayoutError(
+                f"{name}: the address reads the size {exc.name}, which a layout "
+                "cannot know: it is called with a cell's indices alone, in a "
+                "kernel too; make the sizes it computes with module constants, "
+                f"N = 8 and Fin[N] for Fin[{exc.name}]"
+            ) from None
+        raise LayoutError(
+            f"{name}: the address could not be computed on symbolic indices: "
+            f"NameError: {exc}"
+        ) from None
     except Exception as exc:  # noqa: BLE001 - said in the author's words
         raise LayoutError(
             f"{name}: the address could not be computed on symbolic indices: "
@@ -331,6 +348,7 @@ class Layout:
             + " and ".join(piece.label for piece in self.pieces)
         )
         key = {"module": self.module, "line": self.line}
+        explain = partial(_explained, self)
         questions = [
             (
                 "layout-in-bounds",
@@ -341,6 +359,7 @@ class Layout:
                     description=f"the addresses {owner} stores {cells} at are "
                     f"addresses of {buffer}",
                     lean=Stated(partial(layout_bounds_obligation, self)),
+                    explain=partial(explain, "in-bounds"),
                 ),
             ),
             (
@@ -352,6 +371,7 @@ class Layout:
                     "address",
                     labels=(*labels, *(f"{label}'" for label in labels)),
                     lean=Stated(partial(layout_injective_obligation, self)),
+                    explain=partial(explain, "one-for-one"),
                 ),
             ),
             (
@@ -362,6 +382,7 @@ class Layout:
                     image,
                     description=f"every address of {buffer} stores one of {cells}",
                     lean=Stated(partial(layout_onto_obligation, self)),
+                    explain=partial(explain, "onto"),
                 ),
             ),
         ]
@@ -434,6 +455,7 @@ class SameLayout:
                 ),
                 labels=labels,
                 lean=Stated(partial(layout_same_obligation, self.first, self.second)),
+                explain=partial(_explained_apart, self.first, self.second),
             ),
             status=Status.ASSUMED,
             provenance={"layouts": [self.first.name, second]},
@@ -442,6 +464,109 @@ class SameLayout:
         )
         self._facts = (fact,)
         return self._facts
+
+
+def _cell_words(layout: Layout, values: Sequence[int]) -> str:
+    """``(a=1, b=3)``: a cell, by the names its first piece gives its indices."""
+    names = _labels(layout)
+    return "(" + ", ".join(f"{n}={v}" for n, v in zip(names, values, strict=True)) + ")"
+
+
+def _sizes_words(params: Any) -> str:
+    """`` (at n=1)``, the sizes a witness was read off at, or nothing."""
+    if not params:
+        return ""
+    return " (at " + ", ".join(f"{k}={v}" for k, v in sorted(params.items())) + ")"
+
+
+def _fixed(obj: Any, params: Any) -> Any:
+    """``obj`` at the sizes ``params``: its parameters fixed to them."""
+    for name, value in (params or {}).items():
+        at = obj.find_dim_by_name(isl.dim_type.param, name)
+        if at >= 0:
+            obj = obj.fix_val(isl.dim_type.param, at, int(value))
+    return obj
+
+
+def _address_of(layout: Layout, cell: Sequence[int], params: Any) -> int | None:
+    """The address ``layout`` stores ``cell`` at, at the sizes, or ``None``."""
+    from loopty.oracle import sample_point
+
+    relation = _fixed(layout.relation(), params)
+    for k, value in enumerate(cell):
+        relation = relation.fix_val(isl.dim_type.in_, k, int(value))
+    point = sample_point(relation.range())
+    return None if point is None else int(point[0])
+
+
+def _cell_at(layout: Layout, address: int, params: Any) -> tuple[int, ...] | None:
+    """A cell ``layout`` stores at ``address``, at the sizes, or ``None``."""
+    from loopty.oracle import sample_point
+
+    relation = _fixed(layout.relation(), params)
+    relation = relation.fix_val(isl.dim_type.out, 0, int(address))
+    point = sample_point(relation.domain())
+    return None if point is None else tuple(int(v) for v in point)
+
+
+def _explained(layout: Layout, kind: str, verdict: Any) -> str | None:
+    """A refuted fact of ``layout``, in words: the cells and the address.
+
+    ``fold stores (a=1, b=3) and (a=3, b=2) both at 7``; ``wide stores
+    (a=3, b=4) at 16, outside Fin(16)``; ``fold stores no cell at 15 of
+    Fin(16)``. ``None`` where the witness cannot be read so.
+    """
+    witness = verdict.witness
+    params = dict(verdict.parameters or {})
+    at = _sizes_words(params)
+    buffer = f"Fin({layout.buffer})"
+    name = layout.name
+    try:
+        if kind == "one-for-one":
+            rank = layout.rank
+            one, other = witness[:rank], witness[rank : 2 * rank]
+            address = _address_of(layout, one, params)
+            where = "one address" if address is None else address
+            return (
+                f"{name} stores {_cell_words(layout, one)} and "
+                f"{_cell_words(layout, other)} both at {where}{at}"
+            )
+        (address,) = witness
+        if kind == "onto":
+            return f"{name} stores no cell at {address} of {buffer}{at}"
+        cell = _cell_at(layout, address, params)
+        which = "a cell" if cell is None else _cell_words(layout, cell)
+        return f"{name} stores {which} at {address}, outside {buffer}{at}"
+    except (TypeError, ValueError, isl.Error):
+        return None
+
+
+def _explained_apart(first: Layout, second: Layout, verdict: Any) -> str | None:
+    """A refuted ``same_as``, in words: the cell, and the address each gives it.
+
+    ``dof_array stores (e=0, a=1, b=0, c=2) at 19, and dim_tags N3,N2,N1,N0
+    at 11``.
+    """
+    params = dict(verdict.parameters or {})
+    try:
+        cell = tuple(verdict.witness[: first.rank])
+        mine = _address_of(first, cell, params)
+        theirs = _address_of(second, cell, params)
+    except (TypeError, ValueError, isl.Error):
+        return None
+    if mine is None and theirs is None:
+        return None
+    cell_text = _cell_words(first, cell)
+    if mine is None:
+        said = f"{second.name} stores {cell_text} at {theirs}, and {first.name} none"
+    elif theirs is None:
+        said = f"{first.name} stores {cell_text} at {mine}, and {second.name} none"
+    else:
+        said = (
+            f"{first.name} stores {cell_text} at {mine}, and {second.name} at "
+            f"{theirs}"
+        )
+    return said + _sizes_words(params)
 
 
 def _labels(layout: Layout) -> tuple[str, ...]:
