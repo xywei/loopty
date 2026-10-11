@@ -430,30 +430,67 @@ def test_a_refused_cast_with_no_pair_is_not_offered_to_lean_as_a_claim() -> None
     assert unattributed.lean_obligation().declined == REFUTED_UNSTATED
 
 
-def test_a_cast_after_a_substitution_is_left_to_isl() -> None:
-    module = load(EXAMPLES / "fusion.py")
-    schedule = next(
-        value
-        for value in vars(module).values()
-        if isinstance(value, Schedule) and "substitute" in repr(value)
+def test_a_cast_after_a_substitution_states_the_reads_it_computes_again() -> None:
+    # After substitute("f"), divergence reads u where it read f, at the cell
+    # the flux's instance that stored f read: a class per write of u (bump's),
+    # in the order of the write and that instance (#187). The producer and
+    # the zeros run no more and are in no class.
+    windows = load(KERNELS / "windows.py")
+    monotone = windows.substituted.facts()[-1]
+    obligation = cast_obligation(monotone.term)
+    assert not obligation.declined
+    carried = [part for part in obligation.parts if part.name.startswith("carried_")]
+    assert [part.label for part in carried] == [
+        "u[k] overwritten by bump.S0 after u[i + 1] is read by divergence.S0, "
+        "through flux.S0",
+        "u[i + 1] read by divergence.S0 after u[k] is written by bump.S0, "
+        "through flux.S0",
+        "u[k] overwritten by bump.S0 after u[i - 1] is read by divergence.S0, "
+        "through flux.S0",
+        "u[i - 1] read by divergence.S0 after u[k] is written by bump.S0, "
+        "through flux.S0",
+    ]
+    assert not any(
+        "flux.S0" in part.label or "f.zeros" in part.label
+        for part in obligation.parts
+        if not part.name.startswith("carried_")
     )
-    monotone = schedule.facts()[-1]
-    assert "a substitution before this step" in cast_obligation(monotone.term).declined
 
 
-def test_a_substitutions_definedness_is_isls_and_says_why() -> None:
-    # Decided over the dependences isl computed of what the substitution
-    # leaves: its term says it is isl's, and why Lean is not asked, where it
-    # had none and read as a fact isl did not decide.
+def test_a_substitutions_definedness_is_stated_with_its_last_writer() -> None:
+    # Every read of f is of a cell flux.S0 stored before it, a ∀∃ whose
+    # witness is isl's last writer, as a kernel's definedness is (#187).
     module = load(EXAMPLES / "fusion.py")
-    schedule = next(
-        value
-        for value in vars(module).values()
-        if isinstance(value, Schedule) and "substitute" in repr(value)
-    )
-    (fact,) = [fact for fact in schedule.facts() if fact.kind == "definedness"]
+    (fact,) = [
+        fact for fact in module.substituted.facts() if fact.kind == "definedness"
+    ]
     assert (fact.status, fact.decided_by) == (Status.DECIDED, "isl")
-    assert "for isl only" in fact.term.lean_obligation().declined
+    obligation = fact.term.lean_obligation()
+    assert not obligation.declined
+    assert [part.name for part in obligation.parts] == ["read_0", "read_1"]
+    assert all(part.hints.witness for part in obligation.parts)
+
+
+def test_a_rewritten_layout_is_stated_as_the_induction_step() -> None:
+    # The row starts: each write of off stores the value its cell holds,
+    # where off starts at 0 and steps by cnt, with the step taken at the
+    # cell written. By induction: each write's discharge question (#186).
+    travel = load(EXAMPLES / "travel.py")
+    (fact,) = [f for f in travel.through.facts() if f.kind == "layout"]
+    parts = fact.term.lean_obligation().parts
+    assert [part.name for part in parts] == ["scan_S0_keeps", "scan_S1_keeps"]
+    assert parts[1].hints.instances
+    wrong = load(KERNELS / "travel_wrong.py")
+    (fact,) = [
+        f
+        for f in wrong.two_buffers.facts()
+        if f.kind == "layout" and "wt2" in f.statement
+    ]
+    parts = fact.term.lean_obligation().parts
+    assert [part.name for part in parts] == [
+        "scan_flat_2_S0_claim",
+        "scan_flat_2_S1_claim",
+    ]
 
 
 def _pugh() -> Any:
@@ -780,15 +817,29 @@ def _isl_facts(path: Path) -> list[Any]:
     ]
 
 
-#: What loopty states for isl alone so far, by the words of the statement: a
-#: layout fact, an induction over the run; and a substitution's definedness
-#: and the casts after it, whose dependences are isl's. The coverage report
-#: lists them with the reason (docs/lean-checks.md), and an issue each.
-NOT_STATED = (
-    "stay inside their buffers",
-    "substitute(",
-    "has stored by the time",
-)
+#: What loopty states for isl alone in the examples, by the words of the
+#: statement: nothing, since a rewritten layout (#186) and a substitution's
+#: definedness and the casts after it (#187) are stated. The coverage report
+#: lists what is left with the reason (docs/lean-checks.md).
+NOT_STATED: tuple[str, ...] = ()
+
+
+def test_lean_proves_the_windows_and_the_substitution_of_the_test_kernels(
+    lean: Any,
+) -> None:
+    unproved = []
+    for path, words in (
+        (KERNELS / "windows.py", ""),
+        (KERNELS / "travel.py", "stay inside their buffers"),
+        (KERNELS / "travel_wrong.py", "stay inside their buffers"),
+    ):
+        for fact in _isl_facts(path):
+            if words not in fact.statement:
+                continue
+            result = lean.establish(fact)
+            if result.status is not Status.PROVED:
+                unproved.append((path.name, fact.statement))
+    assert not unproved
 
 
 @pytest.mark.parametrize("path", sorted(EXAMPLES.glob("*.py")), ids=lambda p: p.name)
@@ -814,6 +865,7 @@ def _refused_casts() -> list[tuple[str, IllegalCast]]:
     stencil_module = stencil()
     wave = load(EXAMPLES / "wavefront_acoustic.py")
     fusion = load(EXAMPLES / "fusion.py")
+    windows = load(KERNELS / "windows.py")
     sizes = {"nt": wave.NT, "nx": wave.NX}
     asks = [
         (
@@ -842,6 +894,16 @@ def _refused_casts() -> list[tuple[str, IllegalCast]]:
             "a fusion one step early",
             lambda: Schedule(fusion.burgers_rhs, sizes={"n": fusion.N}).fuse(
                 "flux", "divergence"
+            ),
+        ),
+        (
+            "a window of two cells",
+            lambda: windows.fused.contract("f", lambda j: j % 2),
+        ),
+        (
+            "a step after the window, past the slot it reads",
+            lambda: windows.windowed.affine(
+                "{ flux_S0[j] -> [k] : k = j; divergence_S0[j] -> [k] : k = j + 1 }"
             ),
         ),
     ]
@@ -879,11 +941,37 @@ def test_run_proves_the_casts_and_shows_their_lean(
     assert "theorem Lanky." in out
 
 
+#: A tile of two loops, one statement in the first only: the part of the
+#: tile's map over its loop is isl's (#189), so its casts are isl's alone.
+TILE_PART = """
+from __future__ import annotations
+
+from lanky.prelude import Real
+
+from loopty import Arr, Fin, Schedule, kernel
+
+
+@kernel
+def scale_rows(a: Arr[Fin[n], Fin[m], Real], s: Arr[Fin[n], Real]):
+    for i in a.dom:
+        s[i] = 2.0
+        for j in a.dom[i]:
+            a[i, j] = a[i, j] * 3.0
+
+
+tiled = (
+    Schedule(scale_rows, sizes={"n": 4, "m": 4})
+    .tile("i", "j", 2, 2)
+    .interchange("i_inner", "j_outer")
+)
+"""
+
+
 def test_run_names_a_cast_lean_was_not_asked_about_when_verbose(
     lean: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
 ) -> None:
-    # The casts after fusion's substitution are isl's alone: decided, and
-    # with --verbose a NOT PROVED line says so, and why.
+    # A cast through the part of a tile isl computed is isl's alone: decided,
+    # and with --verbose a NOT PROVED line says so, and why.
     from lanky.oracles.lean import LeanOracle, ProofCache
     from lanky.plugins import registry
 
@@ -892,13 +980,17 @@ def test_run_names_a_cast_lean_was_not_asked_about_when_verbose(
     for oracle in registry.sorted_oracles():
         if isinstance(oracle, LeanOracle):
             monkeypatch.setattr(oracle, "proofs", ProofCache(str(tmp_path)))
-    path = EXAMPLES / "fusion.py"
+    path = tmp_path / "tile_part.py"
+    path.write_text(TILE_PART, encoding="utf-8")
     assert main(["run", str(path)]) == 0
     assert "Lean was not asked" not in capsys.readouterr().out
     assert main(["run", str(path), "--verbose"]) == 0
     out = capsys.readouterr().out
-    assert "NOT PROVED burgers_rhs" in out
-    assert "isl decided it; Lean was not asked: a substitution before this step" in out
+    assert "NOT PROVED scale_rows" in out
+    assert (
+        "isl decided it; Lean was not asked: tile(i,j,2,2) moves S0 by the part "
+        "of its map over the loops S0 runs in, which isl computed"
+    ) in out
 
 
 def test_every_refused_cast_is_proved_false_at_isls_pair(lean: Any) -> None:

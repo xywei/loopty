@@ -1934,11 +1934,14 @@ def _cast_classes(origin: Any, steps: Sequence[Any]) -> list[_Class]:
             continue
         array, producer, readers = step.substituted
         stored = producer.assignee.indices
-        reads = [
-            access
-            for access in schedule._accesses(producer, term)
-            if access[0] == "read"
-        ]
+        # each read once: u[j] * u[j] reads one cell
+        reads = list(
+            {
+                (access[1], tuple(render(i) for i in access[2])): access
+                for access in schedule._accesses(producer, term)
+                if access[0] == "read"
+            }.values()
+        )
         writes = [
             (stmt, access)
             for stmt in term.stmts

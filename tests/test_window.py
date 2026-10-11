@@ -1,0 +1,330 @@
+"""Window contraction: an array a program makes, kept in the cells live at once (#132).
+
+``Schedule.contract`` keeps an array in a window, each cell in a slot its
+placement gives, and it is legal when every read is of a cell the producer
+stored before it (``definedness``) and no read sees its slot overwritten
+(``no-clobber``), both decided by isl over the schedule's order. From then
+on the pairs of accesses to one slot are dependences of the schedule, so a
+later step that breaks the window is refused with its pair. These tests need
+no Lean; ``tests/test_lean_checks.py`` proves the same facts where it is
+installed.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+from lanky.ledger import Status
+from lanky.prelude import Real
+
+from loopty import Arr, Fin, Schedule, kernel, program, when
+from loopty.executor import LoopyExecutor, emit_code
+from loopty.schedule import IllegalCast
+from loopty.window import Placement, WindowError
+
+lp = pytest.importorskip("loopy")
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def load(path: Path):
+    """Import an example or a test kernel's file as a module of its own."""
+    name = f"window_{path.parent.name}_{path.stem}"
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    sys.path.insert(0, str(path.parent))
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.remove(str(path.parent))
+    return module
+
+
+WINDOWS = load(ROOT / "tests" / "kernels" / "windows.py")
+
+
+@kernel
+def interior_flux(u: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):  # noqa: F821
+    """The flux at the interior points only."""
+    for j in u.dom:
+        with when((j > 0) & (j + 1 < u.dom.size)):
+            f[j] = 0.5 * u[j] * u[j]
+
+
+@kernel
+def shifted(f: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """Every cell, plus one."""
+    for i in y.dom:
+        y[i] = f[i] + 1.0
+
+
+@program
+def padded(u, y):
+    """A consumer that reads the boundary cells the producer leaves zero."""
+    f = Arr.zeros_like(u)
+    interior_flux(u, f)
+    shifted(f, y)
+
+
+@program
+def through(u, f, rhs):
+    """The producer's array is a parameter of the program."""
+    WINDOWS.flux(u, f)
+    WINDOWS.divergence(f, rhs)
+
+
+def velocity(n: int = 16) -> np.ndarray:
+    x = np.linspace(0.0, 2.0 * np.pi, n, endpoint=False)
+    return np.sin(x) + 0.2 * np.sin(3.0 * x)
+
+
+def agrees(prog, schedule, inputs: dict, target: str = "c") -> None:
+    fact = LoopyExecutor(target=target).differential(prog, schedule, inputs)
+    assert fact.status is Status.TESTED, fact.provenance
+
+
+def burgers_inputs(n: int = 16) -> dict:
+    return {"u": Arr.from_numpy(velocity(n)), "rhs": Arr.zeros(n)}
+
+
+def facts(schedule: Schedule) -> list[tuple[str, str]]:
+    return [(fact.kind, fact.status.value) for fact in schedule.facts()]
+
+
+# {{{ the window, found and given
+
+
+def test_the_window_after_the_fusion_is_three_cells_found_along_the_loop() -> None:
+    windowed = WINDOWS.windowed
+    window = windowed.windows["f"]
+    assert repr(window.placement) == "lambda j: j % 3"
+    assert window.extents == (3,)
+    assert windowed.history[-1] == "contract('f', lambda j: j % 3)"
+    assert facts(windowed)[-2:] == [
+        ("definedness", "decided"),
+        ("no-clobber", "decided"),
+    ]
+    (no_clobber,) = [f for f in windowed.facts() if f.kind == "no-clobber"]
+    assert no_clobber.statement == (
+        "no read of f sees its slot overwritten after contract('f', lambda j: j % "
+        "3): f kept in 3 cells, f[j] in slot j % 3"
+    )
+    (definedness,) = [f for f in windowed.facts() if f.kind == "definedness"]
+    assert no_clobber.rests_on == (definedness.id,)
+
+
+def test_the_window_is_a_temporary_of_three_cells_and_the_zeros_are_gone() -> None:
+    code = emit_code(WINDOWS.windowed)
+    assert "double f_window[3];" in code
+    assert "f_window[j + -3 * (j / 3)] = 0.5 * u[j] * u[j];" in code
+    assert "double *__restrict__ f" not in code
+    for n in (1, 2, 3, 16):
+        agrees(WINDOWS.burgers, WINDOWS.windowed, burgers_inputs(n))
+
+
+def test_a_placement_the_author_gives_is_checked_as_given() -> None:
+    four = WINDOWS.fused.contract("f", lambda j: j % 4)
+    assert four.windows["f"].extents == (4,)
+    assert four.history[-1] == "contract('f', lambda j: j % 4)"
+    assert facts(four)[-1] == ("no-clobber", "decided")
+    agrees(WINDOWS.burgers, four, burgers_inputs())
+    # the same placement as the one found is the same schedule
+    three = WINDOWS.fused.contract("f", lambda j: j % 3)
+    assert three.key == WINDOWS.fused.contract("f", Placement(("j",), (
+        WINDOWS.windowed.windows["f"].placement.slots[0],
+    ))).key
+
+
+def test_a_window_too_small_is_refused_with_the_read_and_the_overwrite() -> None:
+    with pytest.raises(IllegalCast) as caught:
+        WINDOWS.fused.contract("f", lambda j: j % 2)
+    assert str(caught.value) == (
+        "contract('f', lambda j: j % 2) illegal: instance divergence.S0[i=14] "
+        "reads f[13], which flux.S0[j=13] stored in slot 1, after "
+        "flux.S0[j=15] stored f[15] there (at n=16, as hinted)"
+    )
+    fact = caught.value.fact
+    assert (fact.kind, fact.status) == ("no-clobber", Status.REFUTED)
+    (reader, _), (writer, _), (other, _), params = fact.provenance["witness"]
+    assert (reader, writer, other, params) == (
+        "divergence.S0",
+        "flux.S0",
+        "flux.S0",
+        {"n": 16},
+    )
+
+
+def test_a_shift_register_keeps_every_access_at_a_constant_index() -> None:
+    code = emit_code(WINDOWS.registers)
+    assert "f_window[0] = f_window[1];" in code
+    assert "f_window[1] = f_window[2];" in code
+    assert "f_window[2] = 0.5 * u[j] * u[j];" in code
+    assert "(f_window[2] + -1.0 * f_window[0])" in code
+    assert "%" not in code.split("{", 1)[1] and "/ 3" not in code
+    assert WINDOWS.registers.history[-1] == (
+        "contract('f', lambda j: j % 3, registers=True)"
+    )
+    for n in (1, 2, 3, 16):
+        agrees(WINDOWS.burgers, WINDOWS.registers, burgers_inputs(n))
+
+
+def test_registers_where_the_window_is_not_one_along_a_loop_are_refused() -> None:
+    with pytest.raises(ValueError, match="the accesses span 3 cells of f along j"):
+        WINDOWS.fused.contract("f", lambda j: j % 4, registers=True)
+
+
+def test_the_window_of_a_sum_factorized_pass_is_one_row() -> None:
+    example = load(ROOT / "examples" / "sum_factorization.py")
+    contracted = example.fused.contract("v")
+    window = contracted.windows["v"]
+    assert repr(window.placement) == "lambda e, a, b: b"
+    assert [str(extent) for extent in window.extents] == ["n"]
+    assert "double v_window[n];" in emit_code(contracted)
+    agrees(example.weak_derivative, contracted, example.inputs())
+
+
+# }}}
+
+
+# {{{ what it is checked against
+
+
+def test_a_window_before_any_fusion_is_refused_as_no_smaller() -> None:
+    with pytest.raises(ValueError) as caught:
+        Schedule(WINDOWS.burgers, sizes={"n": 16}).contract("f")
+    assert str(caught.value) == (
+        "contract('f'): every cell of f is still to be read while the others are "
+        "stored, in the order as it stands, so no window is smaller than f; fuse "
+        "its readers with flux.S0 first, so that fewer cells are live at once"
+    )
+
+
+def test_a_read_of_the_zeros_refuses_the_window() -> None:
+    fused = Schedule(padded, sizes={"n": 8}).fuse("interior_flux", "shifted")
+    with pytest.raises(IllegalCast) as caught:
+        fused.contract("f")
+    fact = caught.value.fact
+    assert (fact.kind, fact.status) == ("definedness", Status.REFUTED)
+    assert "and a window would not" in str(caught.value)
+
+
+def test_only_an_array_the_program_makes_is_kept_in_a_window() -> None:
+    fused = Schedule(through, sizes={"n": 8}).fuse("flux", "divergence", shift=1)
+    with pytest.raises(WindowError, match="f is a parameter of through"):
+        fused.contract("f")
+    with pytest.raises(ValueError, match="kept in a window already"):
+        WINDOWS.windowed.contract("f")
+    with pytest.raises(ValueError, match="kept in a window, lambda j: j % 3"):
+        WINDOWS.windowed.substitute("f")
+    with pytest.raises(ValueError, match="computed where it is read already"):
+        WINDOWS.fused.substitute("f").contract("f")
+
+
+@pytest.mark.parametrize(
+    ("placement", "error", "words"),
+    [
+        (lambda j, k: j, TypeError, "one index per axis of f, 1 of them"),
+        ("j % 3", TypeError, "a placement is a function"),
+        (lambda j: j * j, WindowError, "the slot j*j is not a sum of the indices"),
+        (lambda j: j % 3 - 1, WindowError, "is below zero for some cells"),
+        (lambda j: j // 2, WindowError, "grows with the sizes"),
+    ],
+)
+def test_a_placement_is_quasi_affine_in_the_indices(placement, error, words) -> None:
+    with pytest.raises(error, match=words.replace("*", r"\*")):
+        WINDOWS.fused.contract("f", placement)
+
+
+def test_a_tag_before_the_window_is_refused_and_one_after_is_checked() -> None:
+    # A window is taken over an order, so a loop that runs its instances in
+    # none (ilp, here on the row of the first pass) refuses it. The elements
+    # of the passes are independent, but a window of one row shared by every
+    # element is not, and a group axis after it is refused with the pair.
+    example = load(ROOT / "examples" / "sum_factorization.py")
+    fused = example.fused
+    assert ("monotone", "decided") in facts(fused.tag(b="ilp"))[-3:]
+    with pytest.raises(ValueError, match="b on ilp runs its instances in no order"):
+        fused.tag(b="ilp").contract("v")
+    with pytest.raises(IllegalCast) as caught:
+        fused.contract("v").tag(e="g.0")
+    # two elements store into one slot, and the group axis orders them not
+    assert (
+        "stores v[0, 0, 0] in the slot of the window lambda e, a, b: b that "
+        "along_r.S0[e=1, a=0, b=0] stores v[1, 0, 0] in"
+    ) in str(caught.value)
+
+
+def test_a_step_after_the_window_keeps_the_order_of_every_slot() -> None:
+    assert facts(WINDOWS.split_after)[-2:] == [
+        ("bijective", "decided"),
+        ("monotone", "decided"),
+    ]
+    agrees(WINDOWS.burgers, WINDOWS.split_after, burgers_inputs())
+    assert WINDOWS.rejected_after_window() == (
+        "affine({ flux_S0[j] -> [k = j]; divergence_S0[j] -> [k = 1 + j] }) "
+        "illegal: instance divergence.S0[i=1] reads f[0] from its slot of the "
+        "window lambda j: j % 3, which flux.S0[j=3] overwrites with f[3], "
+        "scheduled earlier (at n=16, as hinted)"
+    )
+    # the same step before the window takes a window of four
+    later = WINDOWS.fused.affine(
+        "{ flux_S0[j] -> [k] : k = j; divergence_S0[j] -> [k] : k = j + 1 }"
+    ).contract("f")
+    assert repr(later.windows["f"].placement) == "lambda j: j % 4"
+
+
+def test_a_window_is_replayed_with_its_schedule() -> None:
+    again = Schedule(WINDOWS.registers)
+    assert again.key == WINDOWS.registers.key
+    assert again.history == WINDOWS.registers.history
+    assert emit_code(again) == emit_code(WINDOWS.registers)
+
+
+def test_a_window_on_opencl_is_a_shift_register_unless_asked_otherwise() -> None:
+    pytest.importorskip("pyopencl")
+    on_device = WINDOWS.windowed.retarget("opencl")
+    code = emit_code(on_device)
+    assert "f_window[0] = f_window[1];" in code
+    assert "f_window[j + -3 * (j / 3)]" in emit_code(
+        Schedule(WINDOWS.burgers, target="opencl", sizes={"n": 16})
+        .fuse("flux", "divergence", shift=1)
+        .contract("f", registers=False)
+    )
+    # back on the C target the window is addressed modulo again
+    assert "f_window[j + -3 * (j / 3)]" in emit_code(on_device.retarget("c"))
+
+
+# }}}
+
+
+# {{{ the statements Lean is given, without Lean
+
+
+def test_the_no_clobber_fact_is_stated_from_the_description() -> None:
+    (fact,) = [f for f in WINDOWS.windowed.facts() if f.kind == "no-clobber"]
+    obligation = fact.term.lean_obligation()
+    assert not obligation.declined
+    assert [part.name for part in obligation.parts] == ["read_0", "read_1"]
+    from lanky.terms import render
+
+    assert "% 3" in render(obligation.parts[1].term)
+
+
+def test_the_casts_after_a_window_state_its_slots() -> None:
+    from loopty.obligations import cast_obligation
+
+    monotone = WINDOWS.split_after.facts()[-1]
+    names = [part.name for part in cast_obligation(monotone.term).parts]
+    assert any(name.startswith("window_") for name in names)
+    assert not any(
+        part.name.startswith("dependence_") and "f.zeros" in part.label
+        for part in cast_obligation(monotone.term).parts
+    )
+
+
+# }}}

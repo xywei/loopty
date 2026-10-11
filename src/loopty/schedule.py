@@ -4378,9 +4378,9 @@ class Schedule:
         gone, and the reads that replace them are there. The kernel's
         instructions are ordered by those too
         (:meth:`_ordered_by_dependences`). A substitution through two arrays,
-        one computed from the other, is refused. Contracting an array to the
-        window of cells that are live at once is the other way of storing it
-        less, and is not done.
+        one computed from the other, is refused. Keeping an array in the
+        window of cells that are live at once (:meth:`contract`) is the other
+        way of storing it less, and an array is stored one way or the other.
         """
         text = f"substitute({array!r})"
         recipe = ("substitute", (array,), {})
@@ -4399,6 +4399,11 @@ class Schedule:
             )
         if array in self._substituted:
             raise ValueError(f"{text}: {array} is substituted already")
+        if array in self._windows:
+            raise ValueError(
+                f"{text}: {array} is kept in a window, "
+                f"{self._windows[array].placement}, and a window is computed once"
+            )
         zeros = f"{array}.zeros"
         writers = [stmt for stmt in term.stmts if stmt.assignee.array == array]
         producers = [stmt for stmt in writers if stmt.id != zeros]
