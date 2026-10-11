@@ -342,7 +342,10 @@ def test_a_postcondition_calls_the_functions_the_body_calls() -> None:
     # it was "not evaluated: UnknownVariableError: sqrt" and stayed assumed.
     (post,) = [fact for fact in roots.facts() if fact.kind == "postcondition"]
     assert post.statement.endswith("y[i] == sqrt(x[i])")
-    assert post.status is Status.TESTED, post.provenance
+    assert post.provenance["native"] == "tested", post.provenance
+    # and decided from the term (#113): what y stores is the claim, an
+    # equation of reals isl reads as an atom
+    assert post.status is Status.DECIDED, post.provenance
 
 
 

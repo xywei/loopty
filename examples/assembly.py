@@ -28,7 +28,8 @@ Run this file three ways.
     Mathlib is installed, tested where it is not. The kernels: the call's
     rows and gathers in bounds, ``mass_ffc``'s symmetric matrix restated of
     every cell after its call, and the accumulation into ``y`` approx, which
-    is what an update owes in place of distinct writes.
+    is what an update owes in place of distinct writes. Then Sun et al.'s
+    casts, under the assumption their schedule makes.
 
 ``loopty run examples/assembly.py``
     Both kernels and Sun et al.'s schedule compiled and compared with the

@@ -1360,8 +1360,8 @@ def test_a_read_of_a_cell_the_producer_does_not_store_is_refused() -> None:
     fact = caught.value.fact
     assert (fact.kind, fact.status) == ("definedness", Status.REFUTED)
     assert fact.statement == (
-        "every cell of f that padded reads, interior_flux.S0 has stored by the "
-        "time it is read"
+        "for substitute('f'), every cell of f that padded reads, interior_flux.S0 "
+        "has stored by the time it is read"
     )
     message = str(caught.value)
     assert message.startswith("substitute('f') illegal: shifted.S0 reads f[")
