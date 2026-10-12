@@ -121,3 +121,6 @@ def test_the_report_matches_copies_by_mesh_and_device_and_drops_wrong_rows(
     assert "| right | 0.00051 (100%) |" in out
     assert "| other mesh | 0.00051 |" in out
     assert "| wrong |" not in out
+    # the other mesh is another measurement, in a table of its own
+    assert out.count("weak_grad: GDOFs/s") == 2
+    assert "4**3 hexahedra on a GPU" in out

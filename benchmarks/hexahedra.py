@@ -925,7 +925,16 @@ def _time_order(
                     run(queue, arrays)
 
             arrays[out].fill(0)
-            call()
+            try:
+                call()
+                queue.finish()
+            except Exception as exc:  # noqa: BLE001 - a shape the device refuses
+                print(
+                    f"{name} order {order} {variant}: does not launch: "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+                continue
             got = (
                 arrays[out].get()[:, checked]
                 if name == "weak_grad"
@@ -1312,13 +1321,25 @@ def mode_report(options: argparse.Namespace) -> None:
                     print(f"left out, it disagrees with numpy: {row['variant']}")
                 else:
                     rows.append(row)
-    for name, op in OPERATORS.items():
-        mine = [r for r in rows if r["operator"] == name]
+
+    # a table per operator and setup: rows of another mesh, device or loopy
+    # are other measurements, not repeats
+    def setup(row: dict[str, str]) -> tuple[str, ...]:
+        return (row["elements"], row["device"], row["driver"], row["loopy"])
+
+    setups = list(dict.fromkeys(setup(r) for r in rows))
+    for (name, op), this in ((item, s) for item in OPERATORS.items() for s in setups):
+        mine = [r for r in rows if r["operator"] == name and setup(r) == this]
         if not mine:
             continue
         orders = sorted({r["order"] for r in mine}, key=int)
         names = list(dict.fromkeys(r["variant"] for r in mine))
-        print(f"\n{name}: GDOFs/s (% of the copy roof)\n")
+        where = (
+            f", {this[0]}**3 hexahedra on {this[1]}, loopy {this[3]}"
+            if len(setups) > 1
+            else ""
+        )
+        print(f"\n{name}: GDOFs/s (% of the copy roof){where}\n")
         print("| variant | " + " | ".join(f"order {o}" for o in orders) + " |")
         print("|---|" + "---:|" * len(orders))
         for variant in names:
