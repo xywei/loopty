@@ -433,6 +433,17 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Changed
 
+- **A substitution through an array computed from inputs alone.**
+  `Schedule.substitute` computes an array where it is read from what its
+  producer read, and refused one whose producer reads an array an earlier
+  substitution computes where it is read, since the dependences of that
+  array's own reads were carried to a statement that no longer runs. Where
+  that array is computed from arrays nothing in the program writes (its
+  inputs), there are none, and the chain is substituted: grudge's `v.n`
+  from the normals, read by the upwind flux, read by the lift
+  (`examples/advection.py`). A chain through an array something writes is
+  refused as before.
+
 - A kernel's postcondition that its statements' stores decide reads
   `decided isl` where it read `tested native`, after a new `single-assignment`
   row, and the restatements of it in programs are worth `decided`; the
@@ -526,6 +537,23 @@ All notable changes to loopty are recorded here. The format follows
   `fill's loop n, inlined at ..., is n_0 here`.
 
 ### Fixed
+
+- **An access with mixed subscripts made twice in one statement read
+  `assumed`.** `u[e, m[f, k]]` in `u[e, m[f, k]] + u[e, m[f, k]] * w[k]`, an
+  upwind flux's average and jump, was listed once per place, and the rule
+  for mixed subscripts took only an access made once, so the fact fell to
+  "the index is not quasi-affine". Places of one access over one domain are
+  one place: in bounds by type on the typed axes and by isl on the others,
+  and proved by Lean.
+- **Two statements' atomic updates of one cell asked loopy for a global
+  barrier.** `y[p] += a[p]` and `y[p + 1] += a[p]` with `p` on `l.0` race
+  on `y[p + 1]`, and after `atomic("y")` the schedule is legal and its
+  `buildable` fact holds, but the lowered kernel kept the source's order of
+  the two, so loopy refused to generate it (`MissingBarrierError`). Once an
+  array's updates are atomic, the order is drawn again from the dependences
+  the casts are checked against, and two updates no dependence joins need
+  no order (loopy's `no_sync_with`): libParanumal's lift onto the face nodes
+  (`examples/advection.py`).
 
 - A write through a cell read from an array, `y[perm[i]] = x[i]`, no longer
   has its distinct writes refuted by isl with two instances that write no
