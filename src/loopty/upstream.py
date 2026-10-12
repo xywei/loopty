@@ -16,8 +16,10 @@ The function takes the kernel's arguments, by name, as the file's
 ``example_inputs()`` gives them (copies, so it may not change what the kernel
 reads), and returns a dictionary from the names of the arrays the kernel
 writes to what the code it mirrors leaves in them: an array of the kernel's
-cells, flat for a ragged array as :meth:`loopty.arr.Arr.numpy` gives it, or
-in the order of :meth:`loopty.arr.Arr.cells` for an array over a domain.
+cells, in the array's own shape for a dense array, flat for a ragged array
+as :meth:`loopty.arr.Arr.numpy` gives it, or in the order of
+:meth:`loopty.arr.Arr.cells` for an array over a domain. An array of another
+shape is refuted, with both shapes, even where its cells would agree.
 
 ``lanky check`` runs the kernel natively on the same inputs and compares,
 output by output, at the accuracy the kernel's types claim for that output
@@ -244,10 +246,16 @@ class Upstream:
             got = native[name]
             if isinstance(got, Arr):
                 got = got.cells() if got.domain is not None else got.numpy()
-            got = np.asarray(got).reshape(-1)
-            want = np.asarray(value).reshape(-1)
+            got = np.asarray(got)
+            want = np.asarray(value)
+            # the shapes as given: an array of another shape is not the
+            # kernel's output, even where its cells agree flattened, a (2, 3)
+            # output returned as (6,) say
+            shapes = [list(got.shape), list(want.shape)]
+            got, want = got.reshape(-1), want.reshape(-1)
             exactness = output_class(term, name)
             agree, difference, tolerance = _compare(got, want, exactness)
+            agree = agree and shapes[0] == shapes[1]
             detail: dict[str, Any] = {
                 "exactness": exactness,
                 "difference": difference,
@@ -255,8 +263,8 @@ class Upstream:
                 "largest": float(np.max(np.abs(want))) if want.size else 0.0,
                 "agree": agree,
             }
-            if got.shape != want.shape:
-                detail["shapes"] = [list(got.shape), list(want.shape)]
+            if shapes[0] != shapes[1]:
+                detail["shapes"] = shapes
             elif not agree:
                 from loopty.tolerance import disagreement
 

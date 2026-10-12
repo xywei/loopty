@@ -61,7 +61,26 @@ def integer_power(x: Any, n: Any) -> Any:
     and ``x * y`` at the end. This is that loop, in ``x``'s own type, so the
     native run and the compiled one multiply the same numbers in the same
     order.
+
+    The one power it cannot match is the smallest of the integer type the
+    compiled kernel holds ``n`` in, whose negation that type does not hold:
+    there loopy's ``-n`` stays negative and its loop computes another power.
+    So it is refused, ``-2**31`` and ``-2**63`` of a Python integer, and the
+    smallest value of a numpy one.
     """
+    smallest = (
+        {int(np.iinfo(n.dtype).min)}
+        if isinstance(n, np.signedinteger)
+        else {-(2**31), -(2**63)}
+        if isinstance(n, int) and not isinstance(n, bool)
+        else set()
+    )
+    if int(n) in smallest:
+        raise ValueError(
+            f"loopty.math.ipow cannot take the power {int(n)}: the compiled kernel "
+            "holds it in an integer type that has no -n, and loopy's integer "
+            "power computes another power there"
+        )
     x = np.float64(x) if isinstance(x, float) else x
     n = int(n)
     one = x.dtype.type(1) if isinstance(x, np.generic) else 1.0

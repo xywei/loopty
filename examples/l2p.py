@@ -14,8 +14,8 @@ L2P, read top to bottom, in three layers:
    with the derivatives where sumpy stores them and follows the recurrence
    everywhere else is the table of derivatives. ``on_every_triangle`` is its
    form for a kernel of order ``p``: box by box, on the triangle ``a + b <=
-   p``, with what sumpy stores a table ``c[i, a, b]``. Lean proves both, for
-   every order, with Mathlib; ``lanky check --show-lean`` prints the Lean.
+   p``, what sumpy stores taken as a table ``c[i, a, b]``. Lean proves both,
+   for every order, with Mathlib; ``lanky check --show-lean`` prints the Lean.
 2. **The kernels, in loopty.** ``unpack`` reads each box's ``2p + 1``
    coefficients, in sumpy's storage order, into that table: through sumpy's
    storage index, ``storage_index``, a layout whose three facts say it is one

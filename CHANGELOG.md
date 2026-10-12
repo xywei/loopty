@@ -26,16 +26,19 @@ All notable changes to loopty are recorded here. The format follows
   (`loopty.upstream`). The decorated function computes, on the file's
   example inputs, what the code the kernel is written after computes there;
   `lanky check` runs the kernel natively on the same inputs and compares,
-  output by output, at the accuracy the kernel's types claim. The row is
-  `tested` by `upstream`, `refuted` with the cell and both values, or
-  `assumed` with why where the function cannot run: its package is not
-  installed, or its recording is not there.
+  output by output, at the accuracy the kernel's types claim, a dense
+  output in its own shape. The row is `tested` by `upstream`, `refuted`
+  with the cell and both values (or both shapes), or `assumed` with why
+  where the function cannot run: its package is not installed, or its
+  recording is not there.
 - **`loopty.math.ipow(x, n)`**, `x` to an integer power multiplied out as
   loopy multiplies one, by squaring, rounded at every product, in both runs:
   natively by the same loop (`loopty.math.integer_power`), compiled as
   loopy's `loopy_pow_<base>_<exponent>`. The two runs agree bit for bit, in
   single precision too. An integer base or a real power is refused, natively
-  from the values and traced from the operands' types. `x ** n` of a real `x` stays numpy's power, the C
+  from the values and traced from the operands' types, and so is the
+  smallest power of the type the compiled kernel holds the power in
+  (`-2**31`, `-2**63`), whose negation loopy's helper cannot take. `x ** n` of a real `x` stays numpy's power, the C
   library's `pow` in both runs; at the flagship's Taylor sum `ipow` is an
   order of magnitude faster on the C target (`benchmarks/l2p.py`).
 - The coverage report (`docs/lean-checks.md`) covers the flagship and the

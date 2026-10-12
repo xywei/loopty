@@ -138,6 +138,41 @@ def test_a_file_without_example_inputs_leaves_it_assumed(tmp_path) -> None:
     )
 
 
+def test_an_output_of_another_shape_is_refuted_with_both_shapes(tmp_path) -> None:
+    # (2, 3) returned as (6,): the cells agree flattened, the array is not
+    # the kernel's output (Codex on #248)
+    source = tmp_path / "shaped.py"
+    source.write_text(
+        "from __future__ import annotations\n"
+        "import numpy as np\n"
+        "from lanky.prelude import Fin, Real\n"
+        "from loopty import Arr, kernel, upstream\n"
+        "@kernel\n"
+        "def copy(x: Arr[Fin[m], Fin[n], Real], y: Arr[Fin[m], Fin[n], Real]):\n"
+        "    for i in y.dom:\n"
+        "        for j in y.dom[i]:\n"
+        "            y[i, j] = x[i, j]\n"
+        "def example_inputs():\n"
+        "    x = np.arange(6.0).reshape(2, 3)\n"
+        "    return {'copy': {'x': Arr.from_numpy(x), 'y': Arr.zeros((2, 3))}}\n"
+        "@upstream(copy)\n"
+        "def flattened(x, y):\n"
+        "    return {'y': x.numpy().reshape(-1)}\n"
+        "@upstream(copy)\n"
+        "def shaped(x, y):\n"
+        "    return {'y': x.numpy().copy()}\n"
+    )
+    ledger = check_path(source)
+    rows = {fact.provenance["upstream"]: fact for fact in ledger if fact.kind == KIND}
+    assert rows["shaped"].status is Status.TESTED
+    flat = rows["flattened"]
+    assert flat.status is Status.REFUTED
+    assert flat.provenance["outputs"]["y"]["shapes"] == [[2, 3], [6]]
+    assert flat.provenance["reason"] == (
+        "y: [2, 3] cells natively, [6] from flattened"
+    )
+
+
 def test_upstream_takes_a_kernel() -> None:
     with pytest.raises(TypeError, match=r"@upstream\(l2p\)"):
         upstream(len)(lambda: None)

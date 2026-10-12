@@ -449,6 +449,18 @@ def test_ipow_takes_a_real_base_and_an_integer_power(x, k, message: str) -> None
         ipow(x, k)
 
 
+@pytest.mark.parametrize(
+    "k", [np.int64(-(2**63)), np.int32(-(2**31)), -(2**31), -(2**63)]
+)
+def test_ipow_refuses_the_power_whose_negation_its_type_does_not_hold(k) -> None:
+    # loopy's helper negates a negative power in its own type, and the
+    # smallest one stays negative there, so its loop computes another power
+    # than the native one (Codex on #248)
+    with pytest.raises(ValueError, match=r"cannot take the power -\d+"):
+        ipow(1.5, k)
+    assert ipow(1.0, np.int64(-(2**63) + 1)) == 1.0
+
+
 @kernel
 def integer_base(k: Arr[Fin[n], Int], y: Arr[Fin[n], Int]):  # noqa: F821
     """An integer to a power: natively refused, so traced too."""
