@@ -591,10 +591,18 @@ def _mixed_fact(
     rests on, the element-sort facts of the arrays its indices are read
     from. Lean states the whole access, with what the type says of each
     typed index as a hypothesis (:func:`loopty.obligations.mixed_in_bounds_obligation`).
+
+    An access the statement makes twice over one domain, ``u[e, m[f]]`` in
+    ``u[e, m[f]] + u[e, m[f]] * w[f]``, is one place: it reaches the same
+    cells each time.
     """
-    if len(places) != 1:
+    distinct: list[tuple[tuple[Any, ...], tuple[str, ...], Any]] = []
+    for place in places:
+        if not any(_same_place(place, other) for other in distinct):
+            distinct.append(place)
+    if len(distinct) != 1:
         return None
-    (place_indices, inames, domain) = places[0]
+    (place_indices, inames, domain) = distinct[0]
     found = _mixed_axes(place_indices, arrtype, types)
     if found is None:
         return None
@@ -652,6 +660,24 @@ def _mixed_fact(
         owner=owner,
         rests_on=rests_on,
     )
+
+
+def _same_place(
+    one: tuple[tuple[Any, ...], tuple[str, ...], Any],
+    other: tuple[tuple[Any, ...], tuple[str, ...], Any],
+) -> bool:
+    """Whether two places of an access are the same indices over the same loops."""
+    (indices, inames, domain), (indices2, inames2, domain2) = one, other
+    if tuple(inames) != tuple(inames2) or len(indices) != len(indices2):
+        return False
+    if not all(structurally_equal(a, b) for a, b in zip(indices, indices2)):
+        return False
+    if domain is domain2:
+        return True
+    try:
+        return bool(domain.is_equal(domain2))
+    except Exception:  # noqa: BLE001 - two sets isl cannot compare are two places
+        return False
 
 
 def _access_text(array: str, indices: Sequence[Any]) -> str:

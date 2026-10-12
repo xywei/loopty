@@ -581,6 +581,39 @@ def test_a_mixed_subscript_is_in_bounds_by_type_and_isl() -> None:
     assert "0 <= cell[c, k]" in text and "cell[c, k] < nv" in text
 
 
+@kernel
+def gather_twice(
+    face: Arr[Fin[nf], Fin[3], Fin[n]],  # noqa: F821
+    u: Arr[Fin[ne], Fin[n], Real],  # noqa: F821
+    g: Arr[Fin[ne], Fin[nf], Fin[3], Real],  # noqa: F821
+):
+    """Each element's values at its face nodes, read twice: an upwind flux's shape."""
+    for e in g.dom:
+        for f in g.dom[e]:
+            for k in g.dom[e, f]:
+                g[e, f, k] = u[e, face[f, k]] * u[e, face[f, k]] + u[e, face[f, k]]
+
+
+def test_a_mixed_subscript_read_twice_in_a_statement_is_one_place() -> None:
+    """``u[e, face[f, k]]`` three times in one statement: one fact, decided.
+
+    It used to be ``assumed`` ("the index is not quasi-affine"): the rule for
+    mixed subscripts took only an access made once, and a flux reads the
+    value inside the element twice, in its average and in its jump.
+    """
+    from loopty.oracle import IslOracle
+
+    (fact,) = [f for f in gather_twice.facts() if f.statement.startswith("u[")]
+    assert fact.statement == (
+        "u[e, face[f, k]] is in bounds for every instance of S0 "
+        "(face[f, k] : Fin(n), by type)"
+    )
+    decided = IslOracle().establish(fact)
+    assert decided.status is Status.DECIDED and decided.decided_by == "isl"
+    (part,) = fact.term.lean_obligation().parts
+    assert "face[f, k] < n" in render(part.term)
+
+
 def test_an_array_the_kernel_reads_where_it_wrote_it_has_a_definedness_fact() -> None:
     spmv = load(EXAMPLES / "spmv.py")
     facts = [f for f in spmv.scan.facts() if f.kind == "definedness"]
