@@ -552,7 +552,7 @@ def box(elements: int = ELEMENTS) -> np.ndarray:
 
 
 def inputs(elements: int = ELEMENTS, order: int = ORDER, mass: str = "exact") -> dict:
-    """A smooth field on the periodic box ``[-1, 1]^3``, its geometry and the tables.
+    """A field on the periodic box ``[-1, 1]^3``, its geometry and the tables.
 
     The geometry is grudge's: the metric terms ``J dr_d/dx_x`` at every node,
     and the unit normal and the area element ``sJ`` at every face node.
@@ -569,7 +569,14 @@ def inputs(elements: int = ELEMENTS, order: int = ORDER, mass: str = "exact") ->
     X = corner[:, 0, None, None, None] + ref[None, None, None, :]
     Y = corner[:, 1, None, None, None] + ref[None, None, :, None]
     Z = corner[:, 2, None, None, None] + ref[None, :, None, None]
-    u = np.sin(np.pi * X) * np.cos(np.pi * Y) + 0.3 * np.sin(np.pi * Z)
+    # a smooth field, shifted up and down on alternate elements: a DG field
+    # jumps across faces, and the flux has to take the upwind side
+    alternate = (-1.0) ** (e % E + (e // E) % E + e // E**2)
+    u = (
+        np.sin(np.pi * X) * np.cos(np.pi * Y)
+        + 0.3 * np.sin(np.pi * Z)
+        + 0.25 * alternate[:, None, None, None]
+    )
     shape = (ne, n, n, n)
     # dr_d/dx_x is 2/h where d is x, and J is (h/2)**3
     G = np.zeros((9, *shape))
@@ -733,9 +740,16 @@ def main() -> int:
     )
     print()
 
+    # one loop deeper than fused: the fluxes on the loops of the nodes
+    sizes = {"n": N, "ne": ELEMENTS**3}
+    on_nodes = (
+        Schedule(advection_rhs, sizes=sizes)
+        .substitute("V")
+        .substitute("vn")
+        .fuse("volume", "lift", loops=4)
+    )
     try:
-        sizes = {"n": N, "ne": ELEMENTS**3}
-        Schedule(advection_rhs, sizes=sizes).fuse("upwind", "lift", loops=2)
+        on_nodes.fuse("upwind", "volume")
     except IllegalCast as exc:
         print(f"refused: {exc}")
     print()
