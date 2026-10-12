@@ -1560,7 +1560,7 @@ faces update, and accepted once the updates are atomic.
 
 ```console
 $ uv run python examples/advection.py
-order 3, 2**3 periodic hexahedra: the right-hand side is grudge's, inverse mass and all: True (largest difference 1e-15 of the largest; M^-1 M is the identity: True)
+order 3, 2**3 periodic hexahedra: the right-hand side is grudge's, inverse mass and all, to 1e-13 of the largest value: True (M^-1 M is the identity: True)
 
 refused: fuse(upwind, volume) illegal: instance upwind.S0[e_1=0, f_0=1, a_0=0, b_0=0] writes flux[0, 1, 0, 0] read by lift.S0[e_3=0, k_1=0, j_1=0, i_1=0] scheduled earlier (at n=4, ne=8, as hinted); fuse('upwind', 'volume', loops=1) runs every dependence between them forward
 

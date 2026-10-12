@@ -785,10 +785,11 @@ def main() -> int:
         np.abs(once["rhs"].numpy() - expected).max(),
     )
     native = bool(gap <= 1e-13 * scale)
+    # the bound, not the difference, which rounds differently on another BLAS
     print(
         f"order {ORDER}, {ELEMENTS}**3 periodic hexahedra: the right-hand side is "
-        f"grudge's, inverse mass and all: {native} (largest difference "
-        f"{gap / scale:.0e} of the largest; M^-1 M is the identity: {inverse})"
+        f"grudge's, inverse mass and all, to 1e-13 of the largest value: {native} "
+        f"(M^-1 M is the identity: {inverse})"
     )
     print()
 

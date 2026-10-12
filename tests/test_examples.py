@@ -1269,7 +1269,7 @@ def test_the_advection_demo_refuses_the_deeper_fusion_and_runs_every_split() -> 
     result, _ = _invoke("advection", "python")
     assert result.returncode == 0, result.stdout + result.stderr
     out = result.stdout
-    assert "the right-hand side is grudge's, inverse mass and all: True" in out
+    assert "inverse mass and all, to 1e-13 of the largest value: True" in out
     assert "M^-1 M is the identity: True" in out
     assert "refused: fuse(upwind, volume) illegal: instance upwind.S0" in out
     assert "fuse('upwind', 'volume', loops=1) runs every dependence" in out
