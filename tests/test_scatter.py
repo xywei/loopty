@@ -484,6 +484,40 @@ def test_atomic_updates_compile_to_a_compare_and_swap_on_opencl(plain_opencl) ->
     assert "loopy_new_val = loopy_old_val + yl[" in code
 
 
+@kernel
+def both_ends(
+    a: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n + 1], Real],  # noqa: F821
+):
+    """Each segment's value onto both its ends, as a face's flux onto its nodes."""
+    for p in a.dom:
+        y[p] += a[p]
+        y[p + 1] += a[p]
+
+
+def test_two_statements_updating_one_cell_need_no_barrier_once_atomic(
+    plain_opencl,
+) -> None:
+    # S0 at p = 1 and S1 at p = 0 both update y[1]: on two work items they
+    # race, and once atomic the two need no order. The lowering's order of
+    # S1 after S0 has to go with it, or loopy asks for a global barrier
+    # between them and generates nothing (MissingBarrierError).
+    with pytest.raises(IllegalCast, match="both update y"):
+        Schedule(both_ends).split("p", 32).tag(p_outer="g.0", p_inner="l.0")
+    schedule = (
+        Schedule(both_ends, target="opencl")
+        .atomic("y")
+        .split("p", 32)
+        .tag(p_outer="g.0", p_inner="l.0")
+    )
+    assert schedule.buildable == (True, "")
+    insns = {insn.id: insn for insn in schedule.kernel.default_entrypoint.instructions}
+    assert not insns["S1"].depends_on
+    assert ("S0", "any") in insns["S1"].no_sync_with
+    code = emit_code(schedule)
+    assert code.count("atom_cmpxchg") == 2
+
+
 def test_atomic_on_c_changes_no_code_and_agrees() -> None:
     plain = Schedule(scatter).split("c", 2)
     schedule = Schedule(scatter).atomic("y").split("c", 2).tag(c_inner="ilp")

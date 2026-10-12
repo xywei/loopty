@@ -206,6 +206,7 @@ KERNELS = {
         "upwind",
         "volume",
         "lift",
+        "lift_on_faces",
         "advection_rhs",
         "folded_rhs",
         "surface",
@@ -1209,6 +1210,24 @@ def test_the_gll_tables_are_the_quadratures_and_conserve(order: int) -> None:
 
 
 @needs_several_indices
+def test_the_lift_onto_the_face_nodes_is_the_lift_with_the_gll_tables() -> None:
+    from loopty import Arr
+
+    module = _module("advection")
+    inputs = module.example_inputs()["lift_on_faces"]
+    _D, L = module.tables(mass="gll")
+    dense = {
+        name: Arr.from_numpy(inputs[name].numpy().copy())
+        for name in ("invJ", "flux", "rhs")
+    }
+    module.lift(Arr.from_numpy(L), **dense)
+    module.lift_on_faces(**inputs)
+    expected = dense["rhs"].numpy()
+    gap = np.abs(inputs["rhs"].numpy() - expected).max()
+    assert gap <= 1e-14 * np.abs(expected).max()
+
+
+@needs_several_indices
 def test_the_face_maps_are_modepys_faces_and_the_box_is_periodic() -> None:
     module = _module("advection")
     n = module.N
@@ -1255,6 +1274,11 @@ def test_the_advection_demo_refuses_the_deeper_fusion_and_runs_every_split() -> 
     assert "refused: fuse(upwind, volume) illegal: instance upwind.S0" in out
     assert "fuse('upwind', 'volume', loops=1) runs every dependence" in out
     assert "flux kept in lambda" in out and "-> tested" in out
+    # libParanumal's lift onto the face nodes races on an edge without its
+    # barriers, and is legal once the updates are atomic
+    assert "refused: tag(e='g.0', a='l.1', b='l.0') illegal: S" in out
+    assert "both update rhs[" in out and "atomic('rhs')" in out
+    assert "accepted: atomic('rhs').tag(" in out
     for split in _module("advection").SPLITS:
         assert f"  {split}: " in out, split
     assert "all decided" in out and "refuted" not in out

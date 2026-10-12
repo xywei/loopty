@@ -102,6 +102,14 @@ def load_demo() -> dict[str, Any]:
 #: velocity folded into it once per mesh.
 FROM_THE_METRIC = "from the metric"
 
+#: The variants with the GLL quadrature's mass, whose lift is onto the face
+#: nodes alone, as libParanumal's surface kernel lifts; its updates of an
+#: edge node from two faces are atomic.
+ON_THE_FACE_NODES = "the GLL lift on the face nodes, atomic"
+
+#: The tables such a variant reads, in place of the exact mass's.
+_GLL = {"D": "D_gll", "L": "L_gll"}
+
 
 def required_bytes(order: int, elements: int, variant: str = "") -> int:
     """The bytes the right-hand side cannot avoid moving on ``elements`` hexahedra.
@@ -157,7 +165,18 @@ class Shape:
     def steps(
         self, role: str, loops: Sequence[str]
     ) -> tuple[list[tuple[str, int]], dict[str, str], list[str]]:
-        """The splits, the tags and the sequential loops of a launch's ``loops``."""
+        """The splits, the tags and the sequential loops of a launch's ``loops``.
+
+        ``role`` is ``"nodes"`` (``e, k, j, i``), ``"faces"`` (``e, f, a,
+        b``) or ``"face nodes"``, a face's nodes with the six faces' statements
+        in each (``e, a, b``).
+        """
+        if role == "face nodes":
+            e, middle, inner = loops
+            if self.per_group > 1:
+                tags = {f"{e}_outer": "g.0", f"{e}_inner": "l.2"}
+                return [(e, self.per_group)], {**tags, middle: "l.1", inner: "l.0"}, []
+            return [], {e: "g.0", middle: "l.1", inner: "l.0"}, []
         e, outer, middle, inner = loops
         splits: list[tuple[str, int]] = []
         if self.per_group > 1:
@@ -213,6 +232,11 @@ SPLITS = {
             "nodes",
         ),
     ),
+    f"three launches, {ON_THE_FACE_NODES}": (
+        ("upwind", (), "upwind", "faces"),
+        ("volume", (), "volume", "nodes"),
+        ("lift_on_faces", (("atomic", ("rhs",), {}),), "lift_on_faces", "face nodes"),
+    ),
     f"one launch, {FROM_THE_METRIC}": (
         (
             "advection_rhs",
@@ -229,18 +253,26 @@ SPLITS = {
 }
 
 
-def _loops_of(schedule: Any, call: str) -> tuple[str, ...]:
+def _loops_of(schedule: Any, call: str, role: str) -> tuple[str, ...]:
     """The loops of ``call``'s statement in ``schedule``, outermost first."""
     stmt = next(s for s in schedule.term.stmts if s.id in ("S0", f"{call}.S0"))
-    return tuple(stmt.inames[:4])
+    return tuple(stmt.inames[: 3 if role == "face nodes" else 4])
 
 
-def _arguments(kernel: Any) -> dict[str, str]:
-    """A launch's arrays, each passed as the buffer of its own name."""
+def _arguments(kernel: Any, split: str) -> dict[str, str]:
+    """A launch's arrays, each passed as the buffer of its own name.
+
+    A variant with the GLL quadrature's mass reads its tables.
+    """
     import loopy as lp
 
     entry = kernel.default_entrypoint
-    return {arg.name: arg.name for arg in entry.args if isinstance(arg, lp.ArrayArg)}
+    tables = _GLL if ON_THE_FACE_NODES in split else {}
+    return {
+        arg.name: tables.get(arg.name, arg.name)
+        for arg in entry.args
+        if isinstance(arg, lp.ArrayArg)
+    }
 
 
 def loopty_launches(
@@ -255,11 +287,11 @@ def loopty_launches(
         schedule = Schedule(demo[name])
         for method, args, kwargs in steps:
             schedule = getattr(schedule, method)(*args, **kwargs)
-        splits, tags, _sequential = shape.steps(role, _loops_of(schedule, call))
+        splits, tags, _sequential = shape.steps(role, _loops_of(schedule, call, role))
         for loop, factor in splits:
             schedule = schedule.split(loop, factor)
         launch = from_schedule(schedule.tag(**tags), {}, **sizes)
-        launch.args = _arguments(launch.kernel)
+        launch.args = _arguments(launch.kernel, split)
         out.append(launch if shape.contraction else _without_contraction(launch))
     return out
 
@@ -352,6 +384,26 @@ PLAIN = {
         f"rhs[e, k, j, i] = {_lift('flux')} {{dep=volume}}",
         ("e", "k", "j", "i"),
     ),
+    "lift_on_faces": (
+        "{[e, a, b]: 0 <= e < ne and 0 <= a, b < n}",
+        "\n".join(
+            f"{cell} = {cell} - invJ{cell[3:]} * ends[{end}] * flux[e, {face}, a, b]"
+            # atomic updates of a cell need no order with each other, as
+            # loopty leaves them
+            f" {{id=face{face}, atomic, nosync="
+            + ":".join(f"face{other}" for other in range(6) if other != face)
+            + "}"
+            for face, end, cell in (
+                (0, 0, "rhs[e, 0, a, b]"),
+                (1, 1, "rhs[e, n - 1, a, b]"),
+                (2, 0, "rhs[e, a, b, 0]"),
+                (3, 1, "rhs[e, a, b, n - 1]"),
+                (4, 0, "rhs[e, a, 0, b]"),
+                (5, 1, "rhs[e, a, n - 1, b]"),
+            )
+        ),
+        ("e", "a", "b"),
+    ),
     "folded_rhs": (
         f"{{[e, k, j, i, a, b, c]: {_NODES} and 0 <= a, b, c < n}}",
         _RULES + f"rhs[e, k, j, i] = {_VOLUME} {{id=volume}}\n"
@@ -387,6 +439,7 @@ _ARRAYS = {
     "v": ("3", np.float64),
     "normal": ("3, ne, 6, n, n", np.float64),
     "sJ": ("ne, 6, n, n", np.float64),
+    "ends": ("2", np.float64),
 }
 
 
@@ -399,10 +452,19 @@ def plain_launches(split: str, shape: Shape, order: int, ne: int) -> list[Any]:
     for name, _steps, _call, role in SPLITS[split]:
         domain, instructions, loops = PLAIN[name]
         reads = sorted(word for word in _ARRAYS if f"{word}[" in instructions)
+        atomic = {"rhs"} if "atomic" in instructions else set()
         kernel = lp.make_kernel(
             "[n, ne] -> " + domain,
             instructions,
-            [lp.GlobalArg(arg, _ARRAYS[arg][1], shape=_ARRAYS[arg][0]) for arg in reads]
+            [
+                lp.GlobalArg(
+                    arg,
+                    _ARRAYS[arg][1],
+                    shape=_ARRAYS[arg][0],
+                    for_atomic=arg in atomic,
+                )
+                for arg in reads
+            ]
             + [lp.ValueArg(size, np.int32) for size in ("n", "ne")],
             name=name,
             lang_version=(2018, 2),
@@ -414,7 +476,10 @@ def plain_launches(split: str, shape: Shape, order: int, ne: int) -> list[Any]:
         kernel = lp.tag_inames(kernel, tags)
         if len(sequential) > 1:
             kernel = lp.prioritize_loops(kernel, ",".join(sequential))
-        launch = Launch(kernel, {arg: arg for arg in reads}, loopty=False)
+        tables = _GLL if ON_THE_FACE_NODES in split else {}
+        launch = Launch(
+            kernel, {arg: tables.get(arg, arg) for arg in reads}, loopty=False
+        )
         out.append(launch if shape.contraction else _without_contraction(launch))
     return out
 
@@ -466,6 +531,8 @@ def host_arrays(demo: dict[str, Any], order: int, elements: int) -> dict[str, An
     out = {name: value.numpy() for name, value in data.items()}
     out.update(folded_geometry(out))
     out["flux"] = np.zeros_like(out["vn"])
+    out["D_gll"], out["L_gll"] = demo["tables"](order, "gll")
+    out["ends"] = np.array([out["L_gll"][0, 0], out["L_gll"][1, -1]])
     return out
 
 
@@ -601,7 +668,10 @@ def _time_order(
     host = host_arrays(demo, order, options.elements)
     arrays = {name: cla.to_device(queue, value) for name, value in host.items()}
     checked = sample(ne)
-    expected = reference(host, checked)
+    expected = {
+        False: reference(host, checked),
+        True: reference({**host, "D": host["D_gll"], "L": host["L_gll"]}, checked),
+    }
     del host
     ndofs = ne * (order + 1) ** 3
     for variant, (build, shape) in variants().items():
@@ -634,7 +704,8 @@ def _time_order(
             )
             continue
         got = arrays["rhs"].get()[checked]
-        gap = float(np.abs(got - expected).max() / np.abs(expected).max())
+        mine = expected[ON_THE_FACE_NODES in variant]
+        gap = float(np.abs(got - mine).max() / np.abs(mine).max())
         if not gap <= AGREEMENT:
             print(
                 f"order {order} {variant}: DISAGREES with numpy by {gap:.1e} of "
@@ -1020,6 +1091,8 @@ def mode_agree(options: argparse.Namespace) -> None:
         arrays["flux"] = cla.zeros(queue, host["vn"].shape, np.float64)
         arrays["rhs"] = cla.zeros(queue, expected.shape, np.float64)
         for split in SPLITS:
+            if ON_THE_FACE_NODES in split:
+                continue  # the GLL quadrature's mass, which grudge #418's is not
             arrays["rhs"].fill(0)
             for launch in loopty_launches(demo, split, Shape(), order, ne):
                 launch.executor(context)(queue, arrays)

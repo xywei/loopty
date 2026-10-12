@@ -150,7 +150,8 @@ def test_the_advection_bytes_are_those_of_each_geometry() -> None:
 def test_every_advection_shape_names_its_axes() -> None:
     driver = _advection()
     for shape in driver["SHAPES"]:
-        for role, loops in (("nodes", "ekji"), ("faces", "efab")):
+        roles = (("nodes", "ekji"), ("faces", "efab"), ("face nodes", "eab"))
+        for role, loops in roles:
             splits, tags, sequential = shape.steps(role, tuple(loops))
             assert "g.0" in tags.values() and "l.0" in tags.values(), shape
             assert not set(sequential) & set(tags), shape
@@ -163,6 +164,7 @@ def test_every_advection_shape_names_its_axes() -> None:
         "volume, surface",
         "fluxes, volume",
         "one launch",
+        "three launches, the GLL lift on the face nodes, atomic",
         "one launch, from the metric",
     ],
 )

@@ -5908,6 +5908,12 @@ class Schedule:
         if draft.target not in _C_TARGETS:
             ids = {self._lowering.insn_ids[stmt.id] for stmt in updates}
             draft.kernel = _transformed(draft.kernel, _atomic_kernel, array, ids)
+            # Two statements that update one cell are ordered by no
+            # dependence once their updates are atomic, so the order the
+            # lowering gave them goes: loopy would otherwise ask for a global
+            # barrier between two work items that update one cell.
+            if len(updates) > 1 and draft.kernel is not None:
+                draft.kernel = self._ordered_by_dependences(draft)
         return self._commit(draft, text, ("atomic", (array,), {}), cast=False)
 
     @property

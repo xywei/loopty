@@ -5,78 +5,95 @@ what grudge's ``WeakAdvectionOperator`` computes (as of a-alveyblanc/grudge
 4d103bb, grudge PR #418), and what this file states, kernel by kernel:
 
 * ``WeakAdvectionOperator.operator``
-  (`models/advection.py#L143-L183
-  <https://github.com/a-alveyblanc/grudge/blob/4d103bbbb31bfdb175f8997ae53a76a6cb8c14dc/grudge/models/advection.py#L143-L183>`__)
-  is ``inverse_mass(v . weak_local_grad(u) - face_mass(flux))``;
+  (`models/advection.py#L143-L184
+  <https://github.com/a-alveyblanc/grudge/blob/4d103bbbb31bfdb175f8997ae53a76a6cb8c14dc/grudge/models/advection.py#L143-L184>`__)
+  is ``inverse_mass(v . weak_local_grad(u) - face_mass(flux))``, the weak
+  gradient through grudge's metric terms ``J dr_d/dx_x``
+  (`metrics.py#L522
+  <https://github.com/a-alveyblanc/grudge/blob/4d103bbbb31bfdb175f8997ae53a76a6cb8c14dc/grudge/geometry/metrics.py#L522>`__);
 * the flux is the upwind flux, ``where(v.n > 0, u_inside, u_outside) * v.n``
   at every face node (``advection_weak_flux``,
-  `models/advection.py#L42-L60
-  <https://github.com/a-alveyblanc/grudge/blob/4d103bbbb31bfdb175f8997ae53a76a6cb8c14dc/grudge/models/advection.py#L42-L60>`__),
+  `models/advection.py#L42-L61
+  <https://github.com/a-alveyblanc/grudge/blob/4d103bbbb31bfdb175f8997ae53a76a6cb8c14dc/grudge/models/advection.py#L42-L61>`__),
   the outside value read from the neighbor across the face;
 * ``face_mass`` puts each face's ``sJ * flux`` back on the element's nodes,
   the face's own mass on its two axes and the face's end of the element on
-  the third (`op.py#L1368-L1546
-  <https://github.com/a-alveyblanc/grudge/blob/4d103bbbb31bfdb175f8997ae53a76a6cb8c14dc/grudge/op.py#L1368-L1546>`__),
+  the third (`op.py#L1368-L1545
+  <https://github.com/a-alveyblanc/grudge/blob/4d103bbbb31bfdb175f8997ae53a76a6cb8c14dc/grudge/op.py#L1368-L1545>`__),
   and ``inverse_mass`` applies the inverse of the mass on every axis and
-  divides by the Jacobian ``J`` (`op.py#L1118-L1182
-  <https://github.com/a-alveyblanc/grudge/blob/4d103bbbb31bfdb175f8997ae53a76a6cb8c14dc/grudge/op.py#L1118-L1182>`__).
+  divides by the Jacobian ``J`` (`op.py#L1118-L1181
+  <https://github.com/a-alveyblanc/grudge/blob/4d103bbbb31bfdb175f8997ae53a76a6cb8c14dc/grudge/op.py#L1118-L1181>`__).
 
 The inverse mass is pushed inward, as grudge PR #362 rewrites it: on every
 axis but one it meets a mass and cancels, so the volume term is one pass of
 ``D = M^-1 S^T`` along each axis, and a face's term is the column ``L =
 M^-1 e`` of the face's end along its normal, times the face's flux. The two
-theorems below are that rearrangement, proved for every order; that ``M^-1``
-is the mass's inverse is a property of the tables, which ``main`` checks.
-The same kernels take the tables of a GLL quadrature mass, the one
-Alvey-Blanco's matched right-hand side and libParanumal use, where ``L`` is
-a face node's own weight and nothing else.
+theorems are that rearrangement, for every order; that ``M^-1`` is the
+mass's inverse is a property of the tables, which ``main`` checks. The same
+kernels take the tables of the GLL quadrature's mass, which Alvey-Blanco's
+matched right-hand side and libParanumal use: there ``L`` is a face node's
+own weight and nothing else.
 
-What the kernels read, per element ``e`` of a periodic mesh:
+What the right-hand side reads, per element ``e`` of a periodic mesh:
 
 * ``u[e, k, j, i]``, node ``(i, j, k)`` with ``i`` along ``r``, the DOFArray
   of ``examples/hexahedra.py``;
-* ``V[d, e, k, j, i]``, the velocity in reference direction ``d`` times
-  ``J``: grudge's metric terms ``J dr_d/dx_x`` summed against ``v``;
-* ``vn[e, f, a, b]``, ``sJ v.n`` at node ``(a, b)`` of face ``f``, the faces
-  in modepy's order (``t``, ``r`` and ``s`` at ``-1`` and ``+1``,
-  `shapes.py#L522-L571
+* grudge's geometry: the metric terms ``G[3 x + d] = J dr_d/dx_x`` and
+  ``1 / J`` at every node, and the unit normal and the area element ``sJ``
+  at every face node, the faces in modepy's order (``t``, ``r`` and ``s``,
+  each at ``-1`` and ``+1``, `shapes.py#L522-L571
   <https://github.com/inducer/modepy/blob/01ac7955d30e248e460ccd751d40da4b0ff3e3e6/modepy/shapes.py#L522-L571>`__);
 * the face maps: ``nbr[e, f]``, the element across face ``f``, and
-  ``inside[f, a, b]`` and ``outside[f, a, b]``, the node ``(k, j, i)`` of the
-  face node on this element and on the neighbor.
+  ``inside[f, a, b]`` and ``outside[f, a, b]``, the node ``(k, j, i)`` of
+  face node ``(a, b)`` on this element and on the neighbor.
+
+The velocity enters through ``V[d] = J dr_d/dx . v`` at a node and ``vn =
+sJ v.n`` at a face node, which the program computes first. A time stepper
+computes them once per mesh (``folded_rhs`` reads them); a kernel may also
+compute them where it reads them, from the nine metric terms, as grudge's
+kernel does.
 
 Run this file three ways.
 
 ``python examples/advection.py``
     Computes the right-hand side natively and compares it with grudge's
     operators applied as dense matrices, before the rearrangement. Then fuses
-    the three kernels on the element, refuses one loop deeper with its pair,
-    keeps the fluxes one element at a time, and compares the compiled run
-    with the native one; and lists the facts of the launches a device runs.
+    the kernels on the element, refuses one loop deeper with its pair, keeps
+    the fluxes one element at a time, and compares the compiled run with the
+    native one; and lists the facts of every split's launches on a device,
+    and the race libParanumal's surface kernel avoids with its barriers.
 
 ``lanky check examples/advection.py``
-    The theorems, every kernel's facts, the program's, the schedules'.
+    The theorems, every kernel's facts, the programs', the schedules'.
 
 ``loopty run examples/advection.py``
-    Each kernel, the program and the fused schedule, compiled and compared.
+    Each kernel, the programs and the fused schedule, compiled and compared.
 
 What is worth reading here
 --------------------------
 
 *The face gather.* ``u[nbr[e, f], outside[f, a, b, 0], ...]`` reads the
-neighbor's node through three tables. Every subscript is in bounds by type:
-``nbr`` holds points of ``Fin[ne]``, ``outside`` points of ``Fin[n]``.
+neighbor's node through the face maps, and every subscript is in bounds by
+type: ``nbr`` holds points of ``Fin[ne]``, ``outside`` points of ``Fin[n]``.
 
 *How deep the fusion goes.* The lift at node ``(k, j, i)`` reads the fluxes
-of the faces through it, which the flux kernel computes at other ``(a, b)``,
-so the two fuse on the element and no deeper; the volume term and the lift
-fuse on every loop.
+of the six faces through it, which the flux kernel stores at other ``(a,
+b)``, so the two fuse on the element and no deeper; the volume term and the
+lift fuse on every loop.
 
-*Splits on a device.* libParanumal runs a volume kernel and a surface
-kernel; grudge one kernel for the whole right-hand side. Every launch below
-is a schedule whose facts are decided before it runs: the split, the other
-split, three launches, and one, the fluxes computed where the lift reads
-them. ``benchmarks/advection.py`` times them.
+*Splits on a device.* libParanumal runs a volume kernel and a surface kernel
+(`advectionVolumeHex3D.okl
+<https://github.com/paranumal/libparanumal/blob/5f96a9a5e7f316ea3c030a6c5c32f1c4aff6a7ab/solvers/advection/okl/advectionVolumeHex3D.okl>`__,
+`advectionSurfaceHex3D.okl
+<https://github.com/paranumal/libparanumal/blob/5f96a9a5e7f316ea3c030a6c5c32f1c4aff6a7ab/solvers/advection/okl/advectionSurfaceHex3D.okl#L27-L80>`__),
+whose flux, the average and half the jump, ``upwind_flux`` writes too;
+grudge one kernel for the whole right-hand side. Each split below is
+launches whose facts are decided before they run: libParanumal's, the
+fluxes first, three launches, one, and one from the metric.
+``benchmarks/advection.py`` times them. libParanumal's surface kernel lifts
+onto the face nodes alone, with a barrier between pairs of faces; without
+the barriers, ``lift_on_faces`` on a device is refused with the edge node
+two faces write from two work items.
 """
 
 from __future__ import annotations
@@ -317,6 +334,33 @@ def lift(
                     )
 
 
+@kernel
+def lift_on_faces(
+    ends: Arr[Fin[2], Real],
+    invJ: Arr[Fin[ne], Fin[n], Fin[n], Fin[n], Real],
+    flux: Arr[Fin[ne], Fin[6], Fin[n], Fin[n], Real],
+    rhs: Arr[Fin[ne], Fin[n], Fin[n], Fin[n], Real],
+):
+    """libParanumal's lift with the GLL mass: each face's flux onto its own nodes.
+
+    ``ends`` is ``1 / w`` at the two ends, ``lift``'s ``L`` with the GLL
+    quadrature's tables, where it is zero but on the face's nodes.
+    """
+    for e in flux.dom:
+        last = rhs.dom[e].size - 1
+        for a in flux.dom[e, 0]:
+            for b in flux.dom[e, 0, a]:
+                # the faces t = -1 and t = +1, at k = 0 and k = n - 1
+                rhs[e, 0, a, b] -= invJ[e, 0, a, b] * ends[0] * flux[e, 0, a, b]
+                rhs[e, last, a, b] -= invJ[e, last, a, b] * ends[1] * flux[e, 1, a, b]
+                # r = -1 and r = +1, at i = 0 and i = n - 1
+                rhs[e, a, b, 0] -= invJ[e, a, b, 0] * ends[0] * flux[e, 2, a, b]
+                rhs[e, a, b, last] -= invJ[e, a, b, last] * ends[1] * flux[e, 3, a, b]
+                # s = -1 and s = +1, at j = 0 and j = n - 1
+                rhs[e, a, 0, b] -= invJ[e, a, 0, b] * ends[0] * flux[e, 4, a, b]
+                rhs[e, a, last, b] -= invJ[e, a, last, b] * ends[1] * flux[e, 5, a, b]
+
+
 @program
 def advection_rhs(u, G, v, normal, sJ, invJ, nbr, inside, outside, D, L, rhs):
     """grudge's ``WeakAdvectionOperator.operator``, from grudge's own geometry."""
@@ -499,7 +543,8 @@ def tables(order: int = ORDER, mass: str = "exact") -> tuple[np.ndarray, np.ndar
     if mass == "gll":
         _, weights = gll(order)
         ends = np.eye(order + 1)[[0, -1]] / weights[[0, -1], None]
-        return differentiation(order).T * weights / weights[:, None], ends
+        operator = differentiation(order).T * weights / weights[:, None]
+        return np.ascontiguousarray(operator), ends
     stiffness_t, exact = factors(order)
     inverse = np.linalg.inv(exact)
     return inverse @ stiffness_t, np.stack([inverse[:, 0], inverse[:, -1]])
@@ -698,6 +743,12 @@ def example_inputs() -> dict:
             "flux": flux,
             "rhs": Arr.from_numpy(volume_term),
         },
+        "lift_on_faces": {
+            "ends": Arr.from_numpy(1 / gll(ORDER)[1][[0, -1]]),
+            "invJ": invJ,
+            "flux": flux,
+            "rhs": Arr.from_numpy(volume_term),
+        },
         "advection_rhs": data,
         "folded_rhs": once,
         "surface": {**faces, "L": L, "invJ": invJ, "rhs": Arr.from_numpy(volume_term)},
@@ -765,8 +816,22 @@ def main() -> int:
         )
     print()
 
+    print("libParanumal's lift onto the face nodes, a face's nodes on the work items:")
+    on_faces = {"e": "g.0", "a": "l.1", "b": "l.0"}
+    try:
+        Schedule(lift_on_faces, sizes=sizes).tag(**on_faces)
+    except IllegalCast as exc:
+        print(f"  refused: {exc}")
+    atomic = Schedule(lift_on_faces).atomic("rhs").tag(**on_faces)
+    cast = [fact for fact in atomic.facts() if fact.kind != "buildable"]
+    print(
+        f"  accepted: {'.'.join(atomic.history)}: {len(cast)} facts, all "
+        f"{cast[0].status.value}"
+    )
+    legal = all(fact.status.value == "decided" for fact in cast)
+    print()
+
     print("on a device, each split's launches, every node on a work item:")
-    legal = True
     for split in SPLITS:
         for schedule in launches(split):
             cast = [fact for fact in schedule.facts() if fact.kind != "buildable"]
