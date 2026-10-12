@@ -41,7 +41,8 @@ tags its passes' outputs with loopy's ``dim_tags`` ``N3,N0,N1,N2`` to say so
 loopty's arrays are row-major, so the kernels below read node ``(i, j, k)``
 of element ``e`` as ``u[e, k, j, i]``: the same buffer, the reference axes
 written slowest first. That the three are one layout is a fact, decided and
-proved (``dof_array``).
+proved (``dof_array``), at order 3: ``N**3 * e`` is linear in ``e`` only
+when ``N`` is a number.
 
 Run this file three ways.
 
@@ -50,8 +51,8 @@ Run this file three ways.
     Kronecker operators grudge's escape hatch builds. Then fuses the passes
     as deep as each pair allows, refuses one step deeper with its pair, keeps
     what passes between them in the cells live at once, and compares the
-    compiled run with the native one; and asks for the device schedule that
-    runs every node on a work item of its own, which is refused.
+    compiled run with the native one; and lists the facts of the three
+    launches a device runs.
 
 ``lanky check examples/hexahedra.py``
     The theorem, every kernel's facts, the programs', and the layout's.
@@ -63,8 +64,9 @@ What is worth reading here
 --------------------------
 
 *Every order at once.* The kernels are written for ``n`` nodes per axis, so
-each fact below is decided for every order, and the theorem that three
-passes are the Kronecker operator is proved for every ``n``.
+each fact about them and their schedules is decided for every order, and
+the theorem that three passes are the Kronecker operator is proved for every
+``n``. The layouts are the exception: they are decided at order 3.
 
 *How deep each fusion goes.* ``along_s`` reads a whole column of what
 ``along_r`` stored in the same ``k``-slab, so the two fuse on ``(q, e, k)``
@@ -76,10 +78,10 @@ backwards.
 and ``v`` one slab at a time, so ``contract`` keeps them in ``n`` and
 ``n * n`` cells, with the no-clobber fact for each.
 
-*On a device.* Every pass needs the column another work item stored, so a
-schedule with a node per work item is refused with the pair (no barrier
-orders two work items), and the timing driver runs each pass as a launch of
-its own, every node on a work item: ``passes_on_a_device``.
+*On a device.* Every pass reads a column other work items stored, and
+nothing inside one kernel orders two work items through global memory, so
+each pass is a launch of its own, every node on a work item:
+``passes_on_a_device``, which ``benchmarks/hexahedra.py`` times.
 """
 
 from __future__ import annotations

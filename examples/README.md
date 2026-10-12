@@ -34,7 +34,7 @@ marked with `...` is an excerpt and the lines it keeps are checked verbatim.
 | `assembly.py` | PyOP2's assembly loop around the P1 mass kernel, `y[cell[c, k]] += yl[c, k]`: an update that owes the class of its sum and not distinct writes, PyOP2's GPU split refused with the node its two triangles share, and accepted once the updates are atomic |
 | `calls.py` | kernels calling kernels inside their loops: a rule with a loop of its own (`dot`, loopy #1044) in a matrix-vector and a sparse product, and firedrake's P1 quadrature rule applied per element through a rule that takes the integrand (#1043), each call inlined with binders of its own and owing the caller what the callee's contract checks |
 | `taylor_reconstruction.py` | sumpy's compressed Taylor reconstruction in one file, theorem, kernel and schedule: the theorem proved for every order, the kernel's postcondition decided from what it stores, the theorem applied to it, and the schedule's casts, in one ledger |
-| `hexahedra.py` | grudge #418's weak gradient and weak divergence on hexahedra, for every order: the metric product, a pass per reference axis and the three directions summed, each a kernel and together a program; the Kronecker theorem the passes rest on, for every `n`; the DOFArray's layout, the same as #418's `dim_tags` `N3,N0,N1,N2` and as the kernels' row-major arrays; the passes fused as deep as each pair allows, one loop deeper refused with its pair, and what passes between them kept a row and a slab at a time; and the three launches a device runs, every node on a work item, which `benchmarks/hexahedra.py` times |
+| `hexahedra.py` | grudge #418's weak gradient and weak divergence on hexahedra, the kernels for every order: the metric product, a pass per reference axis and the three directions summed, each a kernel and together a program; the Kronecker theorem the passes rest on, for every `n`; the DOFArray's layout at order 3, the same as #418's `dim_tags` `N3,N0,N1,N2` and as the kernels' row-major arrays; the passes fused as deep as each pair allows, one loop deeper refused with its pair, and what passes between them kept a row and a slab at a time; and the three launches a device runs, every node on a work item, which `benchmarks/hexahedra.py` times |
 
 Run them with `uv run` from the repository root:
 
@@ -1318,7 +1318,9 @@ tested  loopy  storage_layouts.py:114  unflatten     the scheduled run of unflat
 
 grudge's weak gradient and divergence on hexahedra (grudge PR #418, as of
 a-alveyblanc/grudge 4d103bb), written for `n` nodes per axis, so every fact
-holds at every order. Each weak derivative is the field times the metric
+about the kernels and their schedules holds at every order; the layouts are
+decided at order 3, since `N**3 * e` is linear only when `N` is a number.
+Each weak derivative is the field times the metric
 terms `J dr_d/dx_x`, then a pass per reference axis with the factors
 `make_stiffness_t_operator` builds, `S^T` on the derivative's axis and the
 mass `M` on the others, then the three directions summed: the kernels
@@ -1376,92 +1378,92 @@ on a device, the weak gradient as three launches, every node on a work item:
 $ uv run lanky check examples/hexahedra.py
 STATUS   BY             WHERE             OWNER                  STATEMENT
 -------  -------------  ----------------  ---------------------  ------------------------------------------------------------------------
-tested   property-test  hexahedra.py:104  sum_factorization      n : Nat, Fr : Fn[Fin(n), Fin(n), Real], Fs : Fn[Fin(n), Fin(n), Real]...
-tested   python         hexahedra.py:104  sum_factorization      the term computes what the annotations compute
-decided  isl            hexahedra.py:139  dof_array              dof_array stores every cell at an address of Fin(ne*64)
-decided  isl            hexahedra.py:139  dof_array              dof_array stores no two cells at one address
-decided  isl            hexahedra.py:139  dof_array              dof_array stores a cell at every address of Fin(ne*64)
-decided  isl            hexahedra.py:146  as_dim_tags            dof_array stores every cell where dim_tags N3,N0,N1,N2 does
-decided  isl            hexahedra.py:149  row_major              row_major stores every cell at an address of Fin(ne*64)
-decided  isl            hexahedra.py:149  row_major              row_major stores no two cells at one address
-decided  isl            hexahedra.py:149  row_major              row_major stores a cell at every address of Fin(ne*64)
-decided  isl            hexahedra.py:156  as_row_major           dof_array stores every cell where row_major does
-decided  isl            hexahedra.py:177  metric                 w[q, e, k, j, i] is in bounds for every instance of S0
-decided  isl            hexahedra.py:177  metric                 G[q, e, k, j, i] is in bounds for every instance of S0
-decided  isl            hexahedra.py:177  metric                 u[e, k, j, i] is in bounds for every instance of S0
-decided  isl            hexahedra.py:177  metric                 distinct instances of S0 write distinct cells of w
-decided  isl            hexahedra.py:165  metric                 the source order runs every dependence forward in time
-tested   interpreter    hexahedra.py:165  metric                 the traced term computes what the body computes
-decided  isl            hexahedra.py:192  contravariant          w[d, e, k, j, i] is in bounds for every instance of S0
-decided  isl            hexahedra.py:192  contravariant          G[0 + d, e, k, j, i] is in bounds for every instance of S0
-decided  isl            hexahedra.py:192  contravariant          f[0, e, k, j, i] is in bounds for every instance of S0
-decided  isl            hexahedra.py:192  contravariant          G[3 + d, e, k, j, i] is in bounds for every instance of S0
-decided  isl            hexahedra.py:192  contravariant          f[1, e, k, j, i] is in bounds for every instance of S0
-decided  isl            hexahedra.py:192  contravariant          G[6 + d, e, k, j, i] is in bounds for every instance of S0
-decided  isl            hexahedra.py:192  contravariant          f[2, e, k, j, i] is in bounds for every instance of S0
-decided  isl            hexahedra.py:192  contravariant          distinct instances of S0 write distinct cells of w
-decided  isl            hexahedra.py:180  contravariant          the source order runs every dependence forward in time
-tested   interpreter    hexahedra.py:180  contravariant          the traced term computes what the body computes
-decided  isl            hexahedra.py:209  along_r                v[q, e, k, j, i] is in bounds for every instance of S0
-decided  isl            hexahedra.py:209  along_r                Fr[q, i, a] is in bounds for every instance of S0
-decided  isl            hexahedra.py:209  along_r                w[q, e, k, j, a] is in bounds for every instance of S0
-decided  isl            hexahedra.py:209  along_r                distinct instances of S0 write distinct cells of v
-decided  isl            hexahedra.py:197  along_r                the source order runs every dependence forward in time
-decided  type           hexahedra.py:209  along_r                the accumulation into v[q, e, k, j, i] over a is approx
-tested   interpreter    hexahedra.py:197  along_r                the traced term computes what the body computes
-decided  isl            hexahedra.py:226  along_s                vs[q, e, k, j, i] is in bounds for every instance of S0
-decided  isl            hexahedra.py:226  along_s                Fs[q, j, b] is in bounds for every instance of S0
-decided  isl            hexahedra.py:226  along_s                v[q, e, k, b, i] is in bounds for every instance of S0
-decided  isl            hexahedra.py:226  along_s                distinct instances of S0 write distinct cells of vs
-decided  isl            hexahedra.py:214  along_s                the source order runs every dependence forward in time
-decided  type           hexahedra.py:226  along_s                the accumulation into vs[q, e, k, j, i] over b is approx
-tested   interpreter    hexahedra.py:214  along_s                the traced term computes what the body computes
-decided  isl            hexahedra.py:243  gradient_along_t       grad[x, e, k, j, i] is in bounds for every instance of S0
-decided  isl            hexahedra.py:243  gradient_along_t       Ft[3*x + 0, k, c] is in bounds for every instance of S0
-decided  isl            hexahedra.py:243  gradient_along_t       vs[3*x + 0, e, c, j, i] is in bounds for every instance of S0
-decided  isl            hexahedra.py:243  gradient_along_t       Ft[3*x + 1, k, c] is in bounds for every instance of S0
-decided  isl            hexahedra.py:243  gradient_along_t       vs[3*x + 1, e, c, j, i] is in bounds for every instance of S0
-decided  isl            hexahedra.py:243  gradient_along_t       Ft[3*x + 2, k, c] is in bounds for every instance of S0
-decided  isl            hexahedra.py:243  gradient_along_t       vs[3*x + 2, e, c, j, i] is in bounds for every instance of S0
-decided  isl            hexahedra.py:243  gradient_along_t       distinct instances of S0 write distinct cells of grad
-decided  isl            hexahedra.py:231  gradient_along_t       the source order runs every dependence forward in time
-decided  type           hexahedra.py:243  gradient_along_t       the accumulation into grad[x, e, k, j, i] over c is approx
-decided  type           hexahedra.py:243  gradient_along_t       the accumulation into grad[x, e, k, j, i] over c is approx
-decided  type           hexahedra.py:243  gradient_along_t       the accumulation into grad[x, e, k, j, i] over c is approx
-tested   interpreter    hexahedra.py:231  gradient_along_t       the traced term computes what the body computes
-decided  isl            hexahedra.py:263  divergence_along_t     div[e, k, j, i] is in bounds for every instance of S0
-decided  isl            hexahedra.py:263  divergence_along_t     Ft[0, k, c] is in bounds for every instance of S0
-decided  isl            hexahedra.py:263  divergence_along_t     vs[0, e, c, j, i] is in bounds for every instance of S0
-decided  isl            hexahedra.py:263  divergence_along_t     Ft[1, k, c] is in bounds for every instance of S0
-decided  isl            hexahedra.py:263  divergence_along_t     vs[1, e, c, j, i] is in bounds for every instance of S0
-decided  isl            hexahedra.py:263  divergence_along_t     Ft[2, k, c] is in bounds for every instance of S0
-decided  isl            hexahedra.py:263  divergence_along_t     vs[2, e, c, j, i] is in bounds for every instance of S0
-decided  isl            hexahedra.py:263  divergence_along_t     distinct instances of S0 write distinct cells of div
-decided  isl            hexahedra.py:252  divergence_along_t     the source order runs every dependence forward in time
-decided  type           hexahedra.py:263  divergence_along_t     the accumulation into div[e, k, j, i] over c is approx
-decided  type           hexahedra.py:263  divergence_along_t     the accumulation into div[e, k, j, i] over c is approx
-decided  type           hexahedra.py:263  divergence_along_t     the accumulation into div[e, k, j, i] over c is approx
-tested   interpreter    hexahedra.py:252  divergence_along_t     the traced term computes what the body computes
-decided  isl            hexahedra.py:278  weak_grad              every cell of w that along_r reads, metric stored before it
-decided  isl            hexahedra.py:279  weak_grad              every cell of v that along_s reads, along_r stored before it
-decided  isl            hexahedra.py:280  weak_grad              every cell of vs that gradient_along_t reads, along_s stored before it
-tested   interpreter    hexahedra.py:271  weak_grad              the traced term computes what the body computes
-decided  isl            hexahedra.py:274  weak_grad              fuse(metric, along_r, loops=4) renames the instances of weak_grad one...
-decided  isl            hexahedra.py:274  weak_grad              the order after fuse(metric, along_r, loops=4) runs every dependence ...
-decided  isl            hexahedra.py:274  weak_grad              fuse(along_r, along_s, loops=3) renames the instances of weak_grad on...
-decided  isl            hexahedra.py:274  weak_grad              the order after fuse(along_r, along_s, loops=3) runs every dependence...
-decided  isl            hexahedra.py:274  weak_grad              for contract('w'), every cell of w that weak_grad reads, metric.S0 ha...
-decided  isl            hexahedra.py:274  weak_grad              no read of w sees its slot overwritten after contract('w', lambda q, ...
-decided  isl            hexahedra.py:274  weak_grad              for contract('v'), every cell of v that weak_grad reads, along_r.S0 h...
-decided  isl            hexahedra.py:274  weak_grad              no read of v sees its slot overwritten after contract('v', lambda q_0...
-decided  isl            hexahedra.py:290  weak_div               every cell of w that along_r reads, contravariant stored before it
-decided  isl            hexahedra.py:291  weak_div               every cell of v that along_s reads, along_r stored before it
-decided  isl            hexahedra.py:292  weak_div               every cell of vs that divergence_along_t reads, along_s stored before it
-tested   interpreter    hexahedra.py:283  weak_div               the traced term computes what the body computes
-decided  isl            hexahedra.py:317  metric_along_r         every cell of w that along_r reads, metric stored before it
-tested   interpreter    hexahedra.py:312  metric_along_r         the traced term computes what the body computes
-decided  isl            hexahedra.py:325  contravariant_along_r  every cell of w that along_r reads, contravariant stored before it
-tested   interpreter    hexahedra.py:320  contravariant_along_r  the traced term computes what the body computes
+tested   property-test  hexahedra.py:106  sum_factorization      n : Nat, Fr : Fn[Fin(n), Fin(n), Real], Fs : Fn[Fin(n), Fin(n), Real]...
+tested   python         hexahedra.py:106  sum_factorization      the term computes what the annotations compute
+decided  isl            hexahedra.py:141  dof_array              dof_array stores every cell at an address of Fin(ne*64)
+decided  isl            hexahedra.py:141  dof_array              dof_array stores no two cells at one address
+decided  isl            hexahedra.py:141  dof_array              dof_array stores a cell at every address of Fin(ne*64)
+decided  isl            hexahedra.py:148  as_dim_tags            dof_array stores every cell where dim_tags N3,N0,N1,N2 does
+decided  isl            hexahedra.py:151  row_major              row_major stores every cell at an address of Fin(ne*64)
+decided  isl            hexahedra.py:151  row_major              row_major stores no two cells at one address
+decided  isl            hexahedra.py:151  row_major              row_major stores a cell at every address of Fin(ne*64)
+decided  isl            hexahedra.py:158  as_row_major           dof_array stores every cell where row_major does
+decided  isl            hexahedra.py:179  metric                 w[q, e, k, j, i] is in bounds for every instance of S0
+decided  isl            hexahedra.py:179  metric                 G[q, e, k, j, i] is in bounds for every instance of S0
+decided  isl            hexahedra.py:179  metric                 u[e, k, j, i] is in bounds for every instance of S0
+decided  isl            hexahedra.py:179  metric                 distinct instances of S0 write distinct cells of w
+decided  isl            hexahedra.py:167  metric                 the source order runs every dependence forward in time
+tested   interpreter    hexahedra.py:167  metric                 the traced term computes what the body computes
+decided  isl            hexahedra.py:194  contravariant          w[d, e, k, j, i] is in bounds for every instance of S0
+decided  isl            hexahedra.py:194  contravariant          G[0 + d, e, k, j, i] is in bounds for every instance of S0
+decided  isl            hexahedra.py:194  contravariant          f[0, e, k, j, i] is in bounds for every instance of S0
+decided  isl            hexahedra.py:194  contravariant          G[3 + d, e, k, j, i] is in bounds for every instance of S0
+decided  isl            hexahedra.py:194  contravariant          f[1, e, k, j, i] is in bounds for every instance of S0
+decided  isl            hexahedra.py:194  contravariant          G[6 + d, e, k, j, i] is in bounds for every instance of S0
+decided  isl            hexahedra.py:194  contravariant          f[2, e, k, j, i] is in bounds for every instance of S0
+decided  isl            hexahedra.py:194  contravariant          distinct instances of S0 write distinct cells of w
+decided  isl            hexahedra.py:182  contravariant          the source order runs every dependence forward in time
+tested   interpreter    hexahedra.py:182  contravariant          the traced term computes what the body computes
+decided  isl            hexahedra.py:211  along_r                v[q, e, k, j, i] is in bounds for every instance of S0
+decided  isl            hexahedra.py:211  along_r                Fr[q, i, a] is in bounds for every instance of S0
+decided  isl            hexahedra.py:211  along_r                w[q, e, k, j, a] is in bounds for every instance of S0
+decided  isl            hexahedra.py:211  along_r                distinct instances of S0 write distinct cells of v
+decided  isl            hexahedra.py:199  along_r                the source order runs every dependence forward in time
+decided  type           hexahedra.py:211  along_r                the accumulation into v[q, e, k, j, i] over a is approx
+tested   interpreter    hexahedra.py:199  along_r                the traced term computes what the body computes
+decided  isl            hexahedra.py:228  along_s                vs[q, e, k, j, i] is in bounds for every instance of S0
+decided  isl            hexahedra.py:228  along_s                Fs[q, j, b] is in bounds for every instance of S0
+decided  isl            hexahedra.py:228  along_s                v[q, e, k, b, i] is in bounds for every instance of S0
+decided  isl            hexahedra.py:228  along_s                distinct instances of S0 write distinct cells of vs
+decided  isl            hexahedra.py:216  along_s                the source order runs every dependence forward in time
+decided  type           hexahedra.py:228  along_s                the accumulation into vs[q, e, k, j, i] over b is approx
+tested   interpreter    hexahedra.py:216  along_s                the traced term computes what the body computes
+decided  isl            hexahedra.py:245  gradient_along_t       grad[x, e, k, j, i] is in bounds for every instance of S0
+decided  isl            hexahedra.py:245  gradient_along_t       Ft[3*x + 0, k, c] is in bounds for every instance of S0
+decided  isl            hexahedra.py:245  gradient_along_t       vs[3*x + 0, e, c, j, i] is in bounds for every instance of S0
+decided  isl            hexahedra.py:245  gradient_along_t       Ft[3*x + 1, k, c] is in bounds for every instance of S0
+decided  isl            hexahedra.py:245  gradient_along_t       vs[3*x + 1, e, c, j, i] is in bounds for every instance of S0
+decided  isl            hexahedra.py:245  gradient_along_t       Ft[3*x + 2, k, c] is in bounds for every instance of S0
+decided  isl            hexahedra.py:245  gradient_along_t       vs[3*x + 2, e, c, j, i] is in bounds for every instance of S0
+decided  isl            hexahedra.py:245  gradient_along_t       distinct instances of S0 write distinct cells of grad
+decided  isl            hexahedra.py:233  gradient_along_t       the source order runs every dependence forward in time
+decided  type           hexahedra.py:245  gradient_along_t       the accumulation into grad[x, e, k, j, i] over c is approx
+decided  type           hexahedra.py:245  gradient_along_t       the accumulation into grad[x, e, k, j, i] over c is approx
+decided  type           hexahedra.py:245  gradient_along_t       the accumulation into grad[x, e, k, j, i] over c is approx
+tested   interpreter    hexahedra.py:233  gradient_along_t       the traced term computes what the body computes
+decided  isl            hexahedra.py:265  divergence_along_t     div[e, k, j, i] is in bounds for every instance of S0
+decided  isl            hexahedra.py:265  divergence_along_t     Ft[0, k, c] is in bounds for every instance of S0
+decided  isl            hexahedra.py:265  divergence_along_t     vs[0, e, c, j, i] is in bounds for every instance of S0
+decided  isl            hexahedra.py:265  divergence_along_t     Ft[1, k, c] is in bounds for every instance of S0
+decided  isl            hexahedra.py:265  divergence_along_t     vs[1, e, c, j, i] is in bounds for every instance of S0
+decided  isl            hexahedra.py:265  divergence_along_t     Ft[2, k, c] is in bounds for every instance of S0
+decided  isl            hexahedra.py:265  divergence_along_t     vs[2, e, c, j, i] is in bounds for every instance of S0
+decided  isl            hexahedra.py:265  divergence_along_t     distinct instances of S0 write distinct cells of div
+decided  isl            hexahedra.py:254  divergence_along_t     the source order runs every dependence forward in time
+decided  type           hexahedra.py:265  divergence_along_t     the accumulation into div[e, k, j, i] over c is approx
+decided  type           hexahedra.py:265  divergence_along_t     the accumulation into div[e, k, j, i] over c is approx
+decided  type           hexahedra.py:265  divergence_along_t     the accumulation into div[e, k, j, i] over c is approx
+tested   interpreter    hexahedra.py:254  divergence_along_t     the traced term computes what the body computes
+decided  isl            hexahedra.py:280  weak_grad              every cell of w that along_r reads, metric stored before it
+decided  isl            hexahedra.py:281  weak_grad              every cell of v that along_s reads, along_r stored before it
+decided  isl            hexahedra.py:282  weak_grad              every cell of vs that gradient_along_t reads, along_s stored before it
+tested   interpreter    hexahedra.py:273  weak_grad              the traced term computes what the body computes
+decided  isl            hexahedra.py:276  weak_grad              fuse(metric, along_r, loops=4) renames the instances of weak_grad one...
+decided  isl            hexahedra.py:276  weak_grad              the order after fuse(metric, along_r, loops=4) runs every dependence ...
+decided  isl            hexahedra.py:276  weak_grad              fuse(along_r, along_s, loops=3) renames the instances of weak_grad on...
+decided  isl            hexahedra.py:276  weak_grad              the order after fuse(along_r, along_s, loops=3) runs every dependence...
+decided  isl            hexahedra.py:276  weak_grad              for contract('w'), every cell of w that weak_grad reads, metric.S0 ha...
+decided  isl            hexahedra.py:276  weak_grad              no read of w sees its slot overwritten after contract('w', lambda q, ...
+decided  isl            hexahedra.py:276  weak_grad              for contract('v'), every cell of v that weak_grad reads, along_r.S0 h...
+decided  isl            hexahedra.py:276  weak_grad              no read of v sees its slot overwritten after contract('v', lambda q_0...
+decided  isl            hexahedra.py:292  weak_div               every cell of w that along_r reads, contravariant stored before it
+decided  isl            hexahedra.py:293  weak_div               every cell of v that along_s reads, along_r stored before it
+decided  isl            hexahedra.py:294  weak_div               every cell of vs that divergence_along_t reads, along_s stored before it
+tested   interpreter    hexahedra.py:285  weak_div               the traced term computes what the body computes
+decided  isl            hexahedra.py:319  metric_along_r         every cell of w that along_r reads, metric stored before it
+tested   interpreter    hexahedra.py:314  metric_along_r         the traced term computes what the body computes
+decided  isl            hexahedra.py:327  contravariant_along_r  every cell of w that along_r reads, contravariant stored before it
+tested   interpreter    hexahedra.py:322  contravariant_along_r  the traced term computes what the body computes
 
 86 facts: 74 decided, 12 tested
 ```
@@ -1495,25 +1497,25 @@ contravariant_along_r: Schedule(contravariant_along_r, target='c')
 
 STATUS   BY     WHERE             OWNER                  STATEMENT
 -------  -----  ----------------  ---------------------  ------------------------------------------------------------------------
-decided  isl    hexahedra.py:274  weak_grad              fuse(metric, along_r, loops=4) renames the instances of weak_grad one...
-decided  isl    hexahedra.py:274  weak_grad              the order after fuse(metric, along_r, loops=4) runs every dependence ...
-decided  isl    hexahedra.py:274  weak_grad              fuse(along_r, along_s, loops=3) renames the instances of weak_grad on...
-decided  isl    hexahedra.py:274  weak_grad              the order after fuse(along_r, along_s, loops=3) runs every dependence...
-tested   loopy  hexahedra.py:271  weak_grad              the scheduled run of weak_grad agrees with the native run to the accu...
-decided  isl    hexahedra.py:274  weak_grad              for contract('w'), every cell of w that weak_grad reads, metric.S0 ha...
-decided  isl    hexahedra.py:274  weak_grad              no read of w sees its slot overwritten after contract('w', lambda q, ...
-decided  isl    hexahedra.py:274  weak_grad              for contract('v'), every cell of v that weak_grad reads, along_r.S0 h...
-decided  isl    hexahedra.py:274  weak_grad              no read of v sees its slot overwritten after contract('v', lambda q_0...
-tested   loopy  hexahedra.py:271  weak_grad              the scheduled run of weak_grad agrees with the native run to the accu...
-tested   loopy  hexahedra.py:177  metric                 the scheduled run of metric agrees with the native run to the accurac...
-tested   loopy  hexahedra.py:192  contravariant          the scheduled run of contravariant agrees with the native run to the ...
-tested   loopy  hexahedra.py:209  along_r                the scheduled run of along_r agrees with the native run to the accura...
-tested   loopy  hexahedra.py:226  along_s                the scheduled run of along_s agrees with the native run to the accura...
-tested   loopy  hexahedra.py:243  gradient_along_t       the scheduled run of gradient_along_t agrees with the native run to t...
-tested   loopy  hexahedra.py:263  divergence_along_t     the scheduled run of divergence_along_t agrees with the native run to...
-tested   loopy  hexahedra.py:283  weak_div               the scheduled run of weak_div agrees with the native run to the accur...
-tested   loopy  hexahedra.py:312  metric_along_r         the scheduled run of metric_along_r agrees with the native run to the...
-tested   loopy  hexahedra.py:320  contravariant_along_r  the scheduled run of contravariant_along_r agrees with the native run...
+decided  isl    hexahedra.py:276  weak_grad              fuse(metric, along_r, loops=4) renames the instances of weak_grad one...
+decided  isl    hexahedra.py:276  weak_grad              the order after fuse(metric, along_r, loops=4) runs every dependence ...
+decided  isl    hexahedra.py:276  weak_grad              fuse(along_r, along_s, loops=3) renames the instances of weak_grad on...
+decided  isl    hexahedra.py:276  weak_grad              the order after fuse(along_r, along_s, loops=3) runs every dependence...
+tested   loopy  hexahedra.py:273  weak_grad              the scheduled run of weak_grad agrees with the native run to the accu...
+decided  isl    hexahedra.py:276  weak_grad              for contract('w'), every cell of w that weak_grad reads, metric.S0 ha...
+decided  isl    hexahedra.py:276  weak_grad              no read of w sees its slot overwritten after contract('w', lambda q, ...
+decided  isl    hexahedra.py:276  weak_grad              for contract('v'), every cell of v that weak_grad reads, along_r.S0 h...
+decided  isl    hexahedra.py:276  weak_grad              no read of v sees its slot overwritten after contract('v', lambda q_0...
+tested   loopy  hexahedra.py:273  weak_grad              the scheduled run of weak_grad agrees with the native run to the accu...
+tested   loopy  hexahedra.py:179  metric                 the scheduled run of metric agrees with the native run to the accurac...
+tested   loopy  hexahedra.py:194  contravariant          the scheduled run of contravariant agrees with the native run to the ...
+tested   loopy  hexahedra.py:211  along_r                the scheduled run of along_r agrees with the native run to the accura...
+tested   loopy  hexahedra.py:228  along_s                the scheduled run of along_s agrees with the native run to the accura...
+tested   loopy  hexahedra.py:245  gradient_along_t       the scheduled run of gradient_along_t agrees with the native run to t...
+tested   loopy  hexahedra.py:265  divergence_along_t     the scheduled run of divergence_along_t agrees with the native run to...
+tested   loopy  hexahedra.py:285  weak_div               the scheduled run of weak_div agrees with the native run to the accur...
+tested   loopy  hexahedra.py:314  metric_along_r         the scheduled run of metric_along_r agrees with the native run to the...
+tested   loopy  hexahedra.py:322  contravariant_along_r  the scheduled run of contravariant_along_r agrees with the native run...
 
 19 facts: 8 decided, 11 tested
 ```

@@ -118,12 +118,40 @@ def describe(queue: Any) -> dict[str, str]:
         "platform": device.platform.name.strip(),
         "platform_version": device.platform.version.strip(),
         "driver": device.driver_version.strip(),
-        "loopy": ".".join(map(str, loopy.VERSION)),
-        "islpy": islpy.__version__,
+        "loopty": _checkout(),
+        "loopy": _provenance("loopy", ".".join(map(str, loopy.VERSION))),
+        "islpy": _provenance("islpy", islpy.__version__),
         "pyopencl": ".".join(map(str, cl.VERSION)),
         "numpy": np.__version__,
         "python": sys.version.split()[0],
     }
+
+
+def _checkout() -> str:
+    """loopty's version, and the commit of the checkout it was imported from.
+
+    A checkout with changes to tracked files says so, since its commit alone
+    does not say what ran.
+    """
+    import subprocess
+
+    try:
+        import loopty
+    except ImportError:  # grudge's environment need not have it
+        return "not installed"
+    where = str(Path(loopty.__file__).resolve().parent)
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", where, *args], capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    try:
+        commit = git("rev-parse", "--short=7", "HEAD")
+        changed = git("status", "--porcelain", "--untracked-files=no")
+    except (OSError, subprocess.CalledProcessError):
+        return loopty.__version__
+    return f"{loopty.__version__} at {commit}" + (" with changes" if changed else "")
 
 
 @dataclass
@@ -690,23 +718,42 @@ def buffers(
     return arrays
 
 
-def reference(arrays: dict[str, Any], op: str, elements: slice) -> np.ndarray:
-    """The operator on a few elements, in numpy: the passes as einsums."""
-    G = arrays["G"].get()[:, elements]
+def operator(
+    op: str, G: np.ndarray, field: np.ndarray, Fr: Any, Fs: Any, Ft: Any
+) -> np.ndarray:
+    """``op`` in numpy, the passes as einsums: ``field`` is ``u`` or ``f``.
+
+    ``G`` is ``(9, ne, n, n, n)``, field ``3 x + d`` the metric term ``J
+    dr_d/dx_x``; ``Fr``, ``Fs`` and ``Ft`` are each field's matrix along an
+    axis, nine of them for the gradient and three for the divergence.
+    """
     if op == "weak_grad":
-        u = arrays["u"].get()[elements]
-        w = G * u
-        Fr, Fs, Ft = (arrays[f"F{a}9"].get() for a in "rst")
-        v = np.einsum("qia,qekja->qekji", Fr, w)
-        vs = np.einsum("qjb,qekbi->qekji", Fs, v)
-        t = np.einsum("qkc,qecji->qekji", Ft, vs)
-        return t.reshape(3, 3, *t.shape[1:]).sum(axis=1)
-    f = arrays["f"].get()[:, elements]
-    w = np.einsum("xdekji,xekji->dekji", G.reshape(3, 3, *G.shape[1:]), f)
-    Fr, Fs, Ft = (arrays[f"F{a}3"].get() for a in "rst")
+        w = G * field
+    else:
+        w = np.einsum("xdekji,xekji->dekji", G.reshape(3, 3, *G.shape[1:]), field)
     v = np.einsum("qia,qekja->qekji", Fr, w)
     vs = np.einsum("qjb,qekbi->qekji", Fs, v)
-    return np.einsum("qkc,qecji->ekji", Ft, vs)
+    t = np.einsum("qkc,qecji->qekji", Ft, vs)
+    if op == "weak_grad":
+        return t.reshape(3, 3, *t.shape[1:]).sum(axis=1)
+    return t.sum(axis=0)
+
+
+def sample(ne: int, each: int = 4) -> np.ndarray:
+    """A few elements at the start, the middle and the end of ``ne``."""
+    middle = ne // 2 - each // 2
+    picked = np.r_[0:each, middle : middle + each, ne - each : ne]
+    return np.unique(picked.clip(0, ne - 1))
+
+
+def reference(arrays: dict[str, Any], op: str, elements: Any) -> np.ndarray:
+    """The operator on a few elements, in numpy, from the device's arrays."""
+    if op == "weak_grad":
+        field, fields = arrays["u"].get()[elements], 9
+    else:
+        field, fields = arrays["f"].get()[:, elements], 3
+    tables = (arrays[f"F{a}{fields}"].get() for a in "rst")
+    return operator(op, arrays["G"].get()[:, elements], field, *tables)
 
 
 # }}}
@@ -740,6 +787,7 @@ FIELDS = (
     "platform",
     "platform_version",
     "driver",
+    "loopty",
     "loopy",
     "islpy",
     "pyopencl",
@@ -748,15 +796,22 @@ FIELDS = (
 )
 
 
-def _provenance(package: str) -> str:
-    """A package's version, and the commit it was installed from when it says."""
+def _provenance(package: str, version: str | None = None) -> str:
+    """A package's version, and the commit it was installed from when it says.
+
+    ``version`` is what the imported module says, used when the package is
+    imported without being installed (from a source tree on the path).
+    """
     import importlib.metadata as metadata
     import json
 
-    distribution = metadata.distribution(package)
+    try:
+        distribution = metadata.distribution(package)
+    except metadata.PackageNotFoundError:
+        return version or "?"
     found = distribution.read_text("direct_url.json")
     commit = json.loads(found).get("vcs_info", {}).get("commit_id") if found else None
-    return distribution.version + (f" at {commit[:7]}" if commit else "")
+    return (version or distribution.version) + (f" at {commit[:7]}" if commit else "")
 
 
 def _said(ndofs: int, timing: Timing) -> str:
@@ -845,9 +900,11 @@ def _time_order(
     """Every variant at one order, on that order's buffers."""
     ne = options.elements**3
     arrays = buffers(queue, demo, order, ne)
-    sample = slice(0, min(ne, 7))
+    # elements at the start, the middle and the end: a launch that maps a
+    # later work group wrong is caught too
+    checked = sample(ne)
     for name in options.operators:
-        expected = reference(arrays, name, sample)
+        expected = reference(arrays, name, checked)
         out = "grad" if name == "weak_grad" else "div"
         for variant, (build, shape) in variants(name).items():
             if options.only and not any(word in variant for word in options.only):
@@ -870,9 +927,9 @@ def _time_order(
             arrays[out].fill(0)
             call()
             got = (
-                arrays[out].get()[:, sample]
+                arrays[out].get()[:, checked]
                 if name == "weak_grad"
-                else arrays[out].get()[sample]
+                else arrays[out].get()[checked]
             )
             gap = float(np.abs(got - expected).max() / np.abs(expected).max())
             if not gap <= AGREEMENT:
@@ -1153,6 +1210,21 @@ def mode_agree(options: argparse.Namespace) -> None:
         np.abs(data["div_dense"] - data["div_factorized"]).max() / scale["weak_div"],
     )
     print(f"grudge's own dense against its sum-factorized: {dense_gap:.1e}")
+    # the comparison tells a wrong reading of grudge's arrays apart: the
+    # metric terms transposed (J dr_x/dx_d for J dr_d/dx_x), or each factor
+    # applied along the other end's axis
+    transposed = G.reshape(3, 3, *G.shape[1:]).swapaxes(0, 1).reshape(G.shape)
+    for what, metric, nine, three in (
+        ("the metric terms transposed", transposed, tables(9), tables(3)),
+        ("the factors along r and t swapped", G, tables(9)[::-1], tables(3)[::-1]),
+    ):
+        grad = operator("weak_grad", metric, u, *nine)
+        div = operator("weak_div", metric, f, *three)
+        print(
+            f"a wrong reading, {what}, disagrees: "
+            f"{np.abs(grad - expected['weak_grad']).max() / scale['weak_grad']:.1e}, "
+            f"{np.abs(div - expected['weak_div']).max() / scale['weak_div']:.1e}"
+        )
     for name, program in (
         ("weak_grad", demo["weak_grad"]),
         ("weak_div", demo["weak_div"]),
