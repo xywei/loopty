@@ -184,6 +184,48 @@ def lift_inward(
 # {{{ the kernels: the fluxes through the face maps, the volume, the lift
 
 
+@kernel
+def reference_velocity(
+    G: Arr[Fin[9], Fin[ne], Fin[n], Fin[n], Fin[n], Real],
+    v: Arr[Fin[3], Real],
+    V: Arr[Fin[3], Fin[ne], Fin[n], Fin[n], Fin[n], Real],
+):
+    """The velocity along each reference axis ``d``, times ``J``: ``J dr_d/dx . v``.
+
+    ``G[3 x + d]`` is grudge's metric term ``J dr_d/dx_x``, as
+    ``inverse_surface_metric_derivative_mat(times_area_element=True)`` gives it.
+    """
+    for d in V.dom:
+        for e in V.dom[d]:
+            for k in V.dom[d, e]:
+                for j in V.dom[d, e, k]:
+                    for i in V.dom[d, e, k, j]:
+                        V[d, e, k, j, i] = (
+                            G[d, e, k, j, i] * v[0]
+                            + G[3 + d, e, k, j, i] * v[1]
+                            + G[6 + d, e, k, j, i] * v[2]
+                        )
+
+
+@kernel
+def normal_velocity(
+    normal: Arr[Fin[3], Fin[ne], Fin[6], Fin[n], Fin[n], Real],
+    sJ: Arr[Fin[ne], Fin[6], Fin[n], Fin[n], Real],
+    v: Arr[Fin[3], Real],
+    vn: Arr[Fin[ne], Fin[6], Fin[n], Fin[n], Real],
+):
+    """``sJ v.n`` at every face node: the face's area element times ``v.n``."""
+    for e in vn.dom:
+        for f in vn.dom[e]:
+            for a in vn.dom[e, f]:
+                for b in vn.dom[e, f, a]:
+                    vn[e, f, a, b] = sJ[e, f, a, b] * (
+                        normal[0, e, f, a, b] * v[0]
+                        + normal[1, e, f, a, b] * v[1]
+                        + normal[2, e, f, a, b] * v[2]
+                    )
+
+
 def upwind_flux(vn, inside, outside):
     """The upwind flux, ``inside * vn`` where ``vn > 0`` and ``outside * vn`` elsewhere.
 
@@ -276,8 +318,22 @@ def lift(
 
 
 @program
-def advection_rhs(u, V, invJ, nbr, inside, outside, vn, D, L, rhs):
-    """grudge's ``WeakAdvectionOperator.operator``: the fluxes, the volume, the lift."""
+def advection_rhs(u, G, v, normal, sJ, invJ, nbr, inside, outside, D, L, rhs):
+    """grudge's ``WeakAdvectionOperator.operator``, from grudge's own geometry."""
+    nodes = D.dom.size
+    V = Arr.zeros((3, u.dom.size, nodes, nodes, nodes))
+    vn = Arr.zeros_like(sJ)
+    flux = Arr.zeros_like(sJ)
+    reference_velocity(G, v, V)
+    normal_velocity(normal, sJ, v, vn)
+    upwind(u, nbr, inside, outside, vn, flux)
+    volume(D, V, invJ, u, rhs)
+    lift(L, invJ, flux, rhs)
+
+
+@program
+def folded_rhs(u, V, invJ, nbr, inside, outside, vn, D, L, rhs):
+    """The same, the velocity folded into ``V`` and ``vn`` once per mesh."""
     flux = Arr.zeros_like(vn)
     upwind(u, nbr, inside, outside, vn, flux)
     volume(D, V, invJ, u, rhs)
@@ -289,10 +345,12 @@ def advection_rhs(u, V, invJ, nbr, inside, outside, vn, D, L, rhs):
 
 # {{{ the schedules
 
-#: The volume term and the lift at each node, on every loop; the fluxes with
-#: them on the element.
+#: The velocity computed where it is read; the volume term and the lift at
+#: each node, on every loop; the fluxes with them on the element.
 fused = (
     Schedule(advection_rhs)
+    .substitute("V")
+    .substitute("vn")
     .fuse("volume", "lift", loops=4)
     .fuse("upwind", "volume", loops=1)
 )
@@ -340,12 +398,16 @@ def on(schedule: Schedule, call: str, axes: tuple) -> Schedule:
 def launches(split: str = "one", target: str = "c") -> list[Schedule]:
     """The right-hand side as launches on a device, each a checked schedule.
 
-    ``"volume, surface"`` is libParanumal's split: the volume term, then the
-    fluxes computed where the lift reads them. ``"fluxes, volume"`` stores the
-    fluxes first, then computes the volume term where the lift reads it.
-    ``"three"`` stores both. ``"one"`` is one launch, as grudge runs it, both
-    computed where the lift reads them: a face's flux once per node of the
-    line through it.
+    The first four read the velocity folded into the geometry once per mesh,
+    ``V`` and ``vn`` (``folded_rhs``). ``"volume, surface"`` is libParanumal's
+    split: the volume term, then the fluxes computed where the lift reads
+    them. ``"fluxes, volume"`` stores the fluxes first, then computes the
+    volume term and the lift. ``"three"`` stores the fluxes and runs the
+    volume term and the lift apart. ``"one"`` is one launch, as grudge runs
+    it: a face's flux computed once per node of the line through it.
+    ``"one, from the metric"`` is one launch from grudge's own geometry, the
+    velocity computed where it is read, from the nine metric terms of a node
+    and the normal of a face node.
     """
     if split == "three":
         return [
@@ -365,13 +427,21 @@ def launches(split: str = "one", target: str = "c") -> list[Schedule]:
             on(both, "volume", NODES),
         ]
     if split == "one":
+        whole = Schedule(folded_rhs, target=target).substitute("flux")
+        return [on(whole.fuse("volume", "lift", loops=4), "volume", NODES)]
+    if split == "one, from the metric":
         whole = (
             Schedule(advection_rhs, target=target)
+            .substitute("V")
+            .substitute("vn")
             .substitute("flux")
-            .fuse("volume", "lift", loops=4)
         )
-        return [on(whole, "volume", NODES)]
+        return [on(whole.fuse("volume", "lift", loops=4), "volume", NODES)]
     raise ValueError(f"no split {split!r}")
+
+
+#: Every split :func:`launches` knows.
+SPLITS = ("volume, surface", "fluxes, volume", "three", "one", "one, from the metric")
 
 
 # }}}
@@ -482,12 +552,15 @@ def box(elements: int = ELEMENTS) -> np.ndarray:
 
 
 def inputs(elements: int = ELEMENTS, order: int = ORDER, mass: str = "exact") -> dict:
-    """A smooth field on the periodic box ``[-1, 1]^3``, its geometry and the tables."""
+    """A smooth field on the periodic box ``[-1, 1]^3``, its geometry and the tables.
+
+    The geometry is grudge's: the metric terms ``J dr_d/dx_x`` at every node,
+    and the unit normal and the area element ``sJ`` at every face node.
+    """
     n = order + 1
     E = elements
     h = 2.0 / E
     nodes, _ = gll(order)
-    v = np.array(VELOCITY)
     ne = E**3
     # node (i, j, k) of element (x, y, z), u[e, k, j, i]
     e = np.arange(ne)
@@ -497,25 +570,45 @@ def inputs(elements: int = ELEMENTS, order: int = ORDER, mass: str = "exact") ->
     Y = corner[:, 1, None, None, None] + ref[None, None, :, None]
     Z = corner[:, 2, None, None, None] + ref[None, :, None, None]
     u = np.sin(np.pi * X) * np.cos(np.pi * Y) + 0.3 * np.sin(np.pi * Z)
-    J = (h / 2) ** 3
     shape = (ne, n, n, n)
-    V = np.stack([np.full(shape, J * (2 / h) * v[d]) for d in range(3)])
-    vn = np.zeros((ne, 6, n, n))
+    # dr_d/dx_x is 2/h where d is x, and J is (h/2)**3
+    G = np.zeros((9, *shape))
+    for d in range(3):
+        G[3 * d + d] = (h / 2) ** 2
+    normal = np.zeros((3, ne, 6, n, n))
     for f, (axis, side) in enumerate(FACES):
-        vn[:, f] = (h / 2) ** 2 * side * v[axis]
+        normal[axis, :, f] = side
     inside, outside = face_maps(order)
     D, L = tables(order, mass)
     return {
         "u": Arr.from_numpy(u),
-        "V": Arr.from_numpy(V),
-        "invJ": Arr.from_numpy(np.full(shape, 1 / J)),
+        "G": Arr.from_numpy(G),
+        "v": Arr.from_numpy(np.array(VELOCITY)),
+        "normal": Arr.from_numpy(normal),
+        "sJ": Arr.from_numpy(np.full((ne, 6, n, n), (h / 2) ** 2)),
+        "invJ": Arr.from_numpy(np.full(shape, (2 / h) ** 3)),
         "nbr": Arr.from_numpy(box(E)),
         "inside": Arr.from_numpy(inside),
         "outside": Arr.from_numpy(outside),
-        "vn": Arr.from_numpy(vn),
         "D": Arr.from_numpy(D),
         "L": Arr.from_numpy(L),
         "rhs": Arr.zeros(shape),
+    }
+
+
+def folded(data: dict) -> dict:
+    """``folded_rhs``'s inputs: the velocity folded into the geometry by its kernels."""
+    G, v, normal, sJ = (data[name] for name in ("G", "v", "normal", "sJ"))
+    V = Arr.zeros((3, *data["u"].numpy().shape))
+    vn = Arr.zeros(sJ.numpy().shape)
+    reference_velocity(G, v, V)
+    normal_velocity(normal, sJ, v, vn)
+    kept = ("u", "invJ", "nbr", "inside", "outside", "D", "L")
+    return {
+        **{name: data[name] for name in kept},
+        "V": V,
+        "vn": vn,
+        "rhs": Arr.zeros(data["rhs"].numpy().shape),
     }
 
 
@@ -530,8 +623,9 @@ def dense(data: dict, order: int = ORDER) -> np.ndarray:
     n = order + 1
     inverse = np.linalg.inv(mass)
     u = data["u"].numpy()
-    V = data["V"].numpy()
-    vn = data["vn"].numpy()
+    v = data["v"].numpy()
+    V = np.einsum("x,xdekji->dekji", v, data["G"].numpy().reshape(3, 3, *u.shape))
+    vn = data["sJ"].numpy() * np.einsum("x,xefab->efab", v, data["normal"].numpy())
     nbr = data["nbr"].numpy()
     inside, outside = (data[name].numpy() for name in ("inside", "outside"))
     ne = u.shape[0]
@@ -570,16 +664,25 @@ def dense(data: dict, order: int = ORDER) -> np.ndarray:
 def example_inputs() -> dict:
     """The inputs ``loopty run`` gives each kernel, and the programs."""
     data = inputs()
-    u, V, invJ, nbr = (data[name] for name in ("u", "V", "invJ", "nbr"))
-    inside, outside, vn, D, L = (
-        data[name] for name in ("inside", "outside", "vn", "D", "L")
-    )
+    once = folded(inputs())
+    u, V, invJ, vn, D, L = (once[name] for name in ("u", "V", "invJ", "vn", "D", "L"))
     shape = u.numpy().shape
     rng = np.random.default_rng(1)
     volume_term = rng.normal(size=shape)
     flux = Arr.from_numpy(rng.normal(size=vn.numpy().shape))
-    faces = {"u": u, "nbr": nbr, "inside": inside, "outside": outside, "vn": vn}
+    faces = {name: once[name] for name in ("u", "nbr", "inside", "outside", "vn")}
     return {
+        "reference_velocity": {
+            "G": data["G"],
+            "v": data["v"],
+            "V": Arr.zeros(V.numpy().shape),
+        },
+        "normal_velocity": {
+            "normal": data["normal"],
+            "sJ": data["sJ"],
+            "v": data["v"],
+            "vn": Arr.zeros(vn.numpy().shape),
+        },
         "upwind": {**faces, "flux": Arr.zeros(vn.numpy().shape)},
         "volume": {"D": D, "V": V, "invJ": invJ, "u": u, "rhs": Arr.zeros(shape)},
         "lift": {
@@ -588,7 +691,8 @@ def example_inputs() -> dict:
             "flux": flux,
             "rhs": Arr.from_numpy(volume_term),
         },
-        "advection_rhs": inputs(),
+        "advection_rhs": data,
+        "folded_rhs": once,
         "surface": {**faces, "L": L, "invJ": invJ, "rhs": Arr.from_numpy(volume_term)},
         "volume_and_lift": {
             "D": D,
@@ -609,19 +713,23 @@ def main() -> int:
     """Natively against grudge's dense operators, the fusion and window, the device."""
     from loopty.executor import LoopyExecutor
 
-    stiffness_t, mass = factors()
+    _, mass = factors()
     inverse = bool(np.allclose(np.linalg.inv(mass) @ mass, np.eye(N), atol=1e-13))
     data = inputs()
     advection_rhs(**data)
     expected = dense(data)
-    got = data["rhs"].numpy()
+    once = folded(inputs())
+    folded_rhs(**once)
     scale = np.abs(expected).max()
-    gap = np.abs(got - expected).max() / scale
-    native = bool(gap <= 1e-13)
+    gap = max(
+        np.abs(data["rhs"].numpy() - expected).max(),
+        np.abs(once["rhs"].numpy() - expected).max(),
+    )
+    native = bool(gap <= 1e-13 * scale)
     print(
         f"order {ORDER}, {ELEMENTS}**3 periodic hexahedra: the right-hand side is "
-        f"grudge's, inverse mass and all: {native} (largest difference {gap:.0e} of "
-        f"the largest; M^-1 M is the identity: {inverse})"
+        f"grudge's, inverse mass and all: {native} (largest difference "
+        f"{gap / scale:.0e} of the largest; M^-1 M is the identity: {inverse})"
     )
     print()
 
@@ -643,14 +751,14 @@ def main() -> int:
         )
     print()
 
-    print("on a device, every split's launches, every node on a work item:")
+    print("on a device, each split's launches, every node on a work item:")
     legal = True
-    for split in ("volume, surface", "fluxes, volume", "three", "one"):
+    for split in SPLITS:
         for schedule in launches(split):
             cast = [fact for fact in schedule.facts() if fact.kind != "buildable"]
             legal = legal and all(fact.status.value == "decided" for fact in cast)
             print(
-                f"  {split}: {schedule.term.name}: {'.'.join(schedule.history)}: "
+                f"  {split}: {schedule.term.name}, {len(schedule.history)} steps: "
                 f"{len(cast)} facts, all {cast[0].status.value}"
             )
     return 0 if native and inverse and kept.status.value == "tested" and legal else 1

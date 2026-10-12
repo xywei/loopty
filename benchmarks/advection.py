@@ -98,13 +98,22 @@ def load_demo() -> dict[str, Any]:
     return runpy.run_path(str(DEMO), run_name="advection_demo")
 
 
-def required_bytes(order: int, elements: int) -> int:
+#: The variants that read grudge's geometry where they use it, and not the
+#: velocity folded into it once per mesh.
+FROM_THE_METRIC = "from the metric"
+
+
+def required_bytes(order: int, elements: int, variant: str = "") -> int:
     """The bytes the right-hand side cannot avoid moving on ``elements`` hexahedra.
 
-    At every node ``u`` read, ``rhs`` written, ``V`` (three) and ``1 / J``
-    read; at every face node ``sJ v.n`` read.
+    At every node ``u`` read and ``rhs`` written, and ``1 / J`` read; with the
+    velocity folded once per mesh, ``V`` (three) at every node and ``sJ v.n``
+    at every face node; from grudge's geometry, the nine metric terms at
+    every node and the normal (three) and ``sJ`` at every face node.
     """
     n = order + 1
+    if FROM_THE_METRIC in variant:
+        return ITEMSIZE * elements * (12 * n**3 + 24 * n**2)
     return ITEMSIZE * elements * (6 * n**3 + 6 * n**2)
 
 
@@ -195,8 +204,21 @@ SPLITS = {
     ),
     "one launch": (
         (
+            "folded_rhs",
+            (
+                ("substitute", ("flux",), {}),
+                ("fuse", ("volume", "lift"), {"loops": 4}),
+            ),
+            "volume",
+            "nodes",
+        ),
+    ),
+    f"one launch, {FROM_THE_METRIC}": (
+        (
             "advection_rhs",
             (
+                ("substitute", ("V",), {}),
+                ("substitute", ("vn",), {}),
                 ("substitute", ("flux",), {}),
                 ("fuse", ("volume", "lift"), {"loops": 4}),
             ),
@@ -251,12 +273,32 @@ upwind_flux(e, f, a, b) := 0.5 * (vn[e, f, a, b] * (uM(e, f, a, b) + uP(e, f, a,
 + abs(vn[e, f, a, b]) * (uM(e, f, a, b) - uP(e, f, a, b)))
 """
 
-_VOLUME = (
-    "invJ[e, k, j, i] * ("
-    "sum(a, D[i, a] * (V[0, e, k, j, a] * u[e, k, j, a]))"
-    " + sum(b, D[j, b] * (V[1, e, k, b, i] * u[e, k, b, i]))"
-    " + sum(c, D[k, c] * (V[2, e, c, j, i] * u[e, c, j, i])))"
-)
+#: The velocity from grudge's geometry where it is read, in plain loopy.
+_METRIC_RULES = """
+Vm(d, e, k, j, i) := G[d, e, k, j, i] * v[0] + G[3 + d, e, k, j, i] * v[1] \
++ G[6 + d, e, k, j, i] * v[2]
+vn_at(e, f, a, b) := sJ[e, f, a, b] * (normal[0, e, f, a, b] * v[0] \
++ normal[1, e, f, a, b] * v[1] + normal[2, e, f, a, b] * v[2])
+"""
+
+
+def _volume(V: str = "V") -> str:
+    """The volume term, the velocity read from the array or the rule ``V``."""
+
+    def at(d: int, k: str, j: str, i: str) -> str:
+        if V == "V":
+            return f"V[{d}, e, {k}, {j}, {i}]"
+        return f"{V}({d}, e, {k}, {j}, {i})"
+
+    return (
+        "invJ[e, k, j, i] * ("
+        f"sum(a, D[i, a] * ({at(0, 'k', 'j', 'a')} * u[e, k, j, a]))"
+        f" + sum(b, D[j, b] * ({at(1, 'k', 'b', 'i')} * u[e, k, b, i]))"
+        f" + sum(c, D[k, c] * ({at(2, 'c', 'j', 'i')} * u[e, c, j, i])))"
+    )
+
+
+_VOLUME = _volume()
 
 
 def _lift(flux: str) -> str:
@@ -310,9 +352,17 @@ PLAIN = {
         f"rhs[e, k, j, i] = {_lift('flux')} {{dep=volume}}",
         ("e", "k", "j", "i"),
     ),
-    "advection_rhs": (
+    "folded_rhs": (
         f"{{[e, k, j, i, a, b, c]: {_NODES} and 0 <= a, b, c < n}}",
         _RULES + f"rhs[e, k, j, i] = {_VOLUME} {{id=volume}}\n"
+        f"rhs[e, k, j, i] = {_lift('upwind')} {{dep=volume}}",
+        ("e", "k", "j", "i"),
+    ),
+    "advection_rhs": (
+        f"{{[e, k, j, i, a, b, c]: {_NODES} and 0 <= a, b, c < n}}",
+        _METRIC_RULES
+        + _RULES.replace("vn[e, f, a, b]", "vn_at(e, f, a, b)")
+        + f"rhs[e, k, j, i] = {_volume('Vm')} {{id=volume}}\n"
         f"rhs[e, k, j, i] = {_lift('upwind')} {{dep=volume}}",
         ("e", "k", "j", "i"),
     ),
@@ -333,6 +383,10 @@ _ARRAYS = {
     "L": ("2, n", np.float64),
     "flux": ("ne, 6, n, n", np.float64),
     "rhs": ("ne, n, n, n", np.float64),
+    "G": ("9, ne, n, n, n", np.float64),
+    "v": ("3", np.float64),
+    "normal": ("3, ne, 6, n, n", np.float64),
+    "sJ": ("ne, 6, n, n", np.float64),
 }
 
 
@@ -393,10 +447,24 @@ def variants() -> dict[str, tuple[Any, Shape]]:
 # {{{ the arrays, and the right-hand side in numpy
 
 
+def folded_geometry(host: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """``V`` and ``vn`` from grudge's geometry, in numpy: the velocity folded in."""
+    nodes = host["u"].shape
+    G = host["G"].reshape(3, 3, *nodes)  # [x, d]: J dr_d/dx_x
+    return {
+        "V": np.einsum("x,xdekji->dekji", host["v"], G),
+        "vn": host["sJ"] * np.einsum("x,xefab->efab", host["v"], host["normal"]),
+    }
+
+
 def host_arrays(demo: dict[str, Any], order: int, elements: int) -> dict[str, Any]:
-    """The demo's inputs on a periodic box of ``elements**3``, as numpy arrays."""
+    """The demo's inputs on a periodic box of ``elements**3``, as numpy arrays.
+
+    grudge's geometry, and the velocity folded into it, ``V`` and ``vn``.
+    """
     data = demo["inputs"](elements, order)
     out = {name: value.numpy() for name, value in data.items()}
+    out.update(folded_geometry(out))
     out["flux"] = np.zeros_like(out["vn"])
     return out
 
@@ -464,29 +532,43 @@ def mode_copy(options: argparse.Namespace) -> None:
         ),
     )
     for order in options.orders:
-        nbytes = required_bytes(order, options.elements**3)
-        # a copy reads and writes, so half the bytes, copied, move them all
-        timing = copy_seconds(queue, nbytes // 2, options.warmup, options.reps)
-        writer.writerow(
-            {
-                "operator": OPERATOR,
-                "order": order,
-                "elements": options.elements,
-                "bytes": nbytes,
-                "median_s": timing.median,
-                "min_s": timing.low,
-                "max_s": timing.high,
-                "bandwidth": nbytes / timing.median,
-                **meta,
-            }
-        )
-        handle.flush()
-        print(
-            f"copy order {order}: {nbytes / timing.median / 1e12:.3f} TB/s "
-            f"({nbytes / timing.high / 1e12:.3f} to {nbytes / timing.low / 1e12:.3f})",
-            flush=True,
-        )
+        for geometry in ("", FROM_THE_METRIC):
+            _copy_row(options, queue, meta, writer, order, geometry)
+            handle.flush()
     handle.close()
+
+
+def _copy_row(
+    options: argparse.Namespace,
+    queue: Any,
+    meta: dict[str, str],
+    writer: Any,
+    order: int,
+    geometry: str,
+) -> None:
+    """The copy of one order's required bytes, with one geometry."""
+    nbytes = required_bytes(order, options.elements**3, geometry)
+    # a copy reads and writes, so half the bytes, copied, move them all
+    timing = copy_seconds(queue, nbytes // 2, options.warmup, options.reps)
+    writer.writerow(
+        {
+            "operator": OPERATOR + (f", {geometry}" if geometry else ""),
+            "order": order,
+            "elements": options.elements,
+            "bytes": nbytes,
+            "median_s": timing.median,
+            "min_s": timing.low,
+            "max_s": timing.high,
+            "bandwidth": nbytes / timing.median,
+            **meta,
+        }
+    )
+    print(
+        f"copy order {order} {geometry or 'folded'}: "
+        f"{nbytes / timing.median / 1e12:.3f} TB/s "
+        f"({nbytes / timing.high / 1e12:.3f} to {nbytes / timing.low / 1e12:.3f})",
+        flush=True,
+    )
 
 
 def mode_loopty(options: argparse.Namespace) -> None:
@@ -794,24 +876,22 @@ def mode_fields(options: argparse.Namespace) -> None:
 
 
 def grudge_arrays(data: dict[str, np.ndarray], demo: dict[str, Any]) -> dict:
-    """The demo's arrays from grudge's: the velocity terms, the faces and their maps.
+    """The demo's arrays from grudge's: its geometry, the faces and their maps.
 
     grudge keeps node ``i + n j + n**2 k`` of an element at that position, so
-    a row reshaped is ``[k, j, i]``; its faces keep their nodes in the face's
-    own order, which is matched to ``inside[f, a, b]`` by the nodes' places.
+    a row reshaped is ``[k, j, i]``, and its metric terms as ``[x, d]``, so
+    ``3 x + d`` flat. Its faces keep their nodes in the face's own order,
+    which is matched to ``inside[f, a, b]`` by the nodes' places.
     """
     order = int(data["order"])
     n = order + 1
     ne = data["u"].shape[0]
     nodes = (ne, n, n, n)
-    G = data["G"].reshape(3, 3, *nodes)  # [x, d]: J dr_d/dx_x
-    V = np.einsum("x,xdekji->dekji", data["velocity"], G)
     inside, outside = demo["face_maps"](order)
     x = data["x"].reshape(3, *nodes)
     face_x = data["face_x"].reshape(3, 6, ne, n * n)
-    normal = data["normal"].reshape(3, 6, ne, n * n)
-    sJ = data["sJ"].reshape(6, ne, n * n)
-    vn = np.zeros((ne, 6, n, n))
+    normal = np.zeros((3, ne, 6, n, n))
+    sJ = np.zeros((ne, 6, n, n))
     for f in range(6):
         k, j, i = (inside[f, ..., p] for p in range(3))
         here = x[:, :, k, j, i]  # (3, ne, n, n)
@@ -821,19 +901,24 @@ def grudge_arrays(data: dict[str, np.ndarray], demo: dict[str, Any]) -> dict:
         )
         which = gap.argmin(axis=-1)
         assert np.take_along_axis(gap, which[..., None], -1).max() < 1e-12
-        flat = np.take_along_axis(
-            np.einsum("x,xem->em", data["velocity"], normal[:, f]) * sJ[f], which, 1
-        )
-        vn[:, f] = flat.reshape(ne, n, n)
-    return {
-        "V": V,
-        "invJ": 1 / data["J"].reshape(nodes),
+        for axis in range(3):
+            row = data["normal"].reshape(3, 6, ne, n * n)[axis, f]
+            normal[axis, :, f] = np.take_along_axis(row, which, 1).reshape(ne, n, n)
+        row = data["sJ"].reshape(6, ne, n * n)[f]
+        sJ[:, f] = np.take_along_axis(row, which, 1).reshape(ne, n, n)
+    host = {
         "u": data["u"].reshape(nodes),
+        "G": data["G"].reshape(9, *nodes),
+        "v": np.asarray(data["velocity"], dtype=np.float64),
+        "normal": normal,
+        "sJ": sJ,
+        "invJ": 1 / data["J"].reshape(nodes),
         "nbr": data["nbr"].astype(np.int32),
         "inside": inside,
         "outside": outside,
-        "vn": vn,
     }
+    host.update(folded_geometry(host))
+    return host
 
 
 def matching_faces(data: dict[str, np.ndarray], host: dict[str, np.ndarray]) -> float:
@@ -860,7 +945,7 @@ def matching_faces(data: dict[str, np.ndarray], host: dict[str, np.ndarray]) -> 
 
 
 def mode_agree(options: argparse.Namespace) -> None:
-    """loopty's program and launches on grudge's fields, against grudge's."""
+    """loopty's programs and launches on grudge's fields, against grudge's."""
     from loopty import Arr
     from loopty.executor import LoopyExecutor
 
@@ -888,27 +973,33 @@ def mode_agree(options: argparse.Namespace) -> None:
     def gap(got: Any) -> float:
         return float(np.abs(np.asarray(got) - expected).max() / scale)
 
-    def args(**changed: Any) -> dict[str, Any]:
-        out = {k: Arr.from_numpy(np.array(v)) for k, v in {**host, **changed}.items()}
+    def args(program: Any) -> dict[str, Any]:
+        names = program.term.param_names
+        out = {k: Arr.from_numpy(np.array(host[k])) for k in names if k != "rhs"}
         out["rhs"] = Arr.zeros((ne, n, n, n))
         return out
 
     every = np.arange(ne)
     print(f"numpy, grudge's where for the flux: {gap(reference(host, every)):.1e}")
-    native = args()
-    demo["advection_rhs"](**native)
-    print(f"loopty's program, native: {gap(native['rhs'].numpy()):.1e}")
-    compiled = LoopyExecutor().run(demo["advection_rhs"], **args())
-    print(f"loopty's program, compiled on C: {gap(compiled['rhs']):.1e}")
-    kept = LoopyExecutor().run(demo["contracted"], **args())
+    for name in ("advection_rhs", "folded_rhs"):
+        program = demo[name]
+        native = args(program)
+        program(**native)
+        compiled = LoopyExecutor().run(program, **args(program))
+        print(
+            f"loopty's {name}: native {gap(native['rhs'].numpy()):.1e}, "
+            f"compiled on C {gap(compiled['rhs']):.1e}"
+        )
+    kept = LoopyExecutor().run(demo["contracted"], **args(demo["advection_rhs"]))
     print(
         f"the fused schedule, the fluxes kept per element, on C: {gap(kept['rhs']):.1e}"
     )
     # the comparison tells a wrong reading of grudge's apart: the neighbor's
     # node on this side of the face, the flux from the downwind side, and the
     # metric terms transposed (J dr_x/dx_d for J dr_d/dx_x)
-    G = data["G"].reshape(3, 3, ne, n, n, n)
-    transposed = np.einsum("x,dxekji->dekji", data["velocity"], G)
+    transposed = folded_geometry(
+        {**host, "G": host["G"].reshape(3, 3, ne, n, n, n).swapaxes(0, 1)}
+    )["V"]
     for what, result in (
         (
             "the neighbor's node on this side",
@@ -944,7 +1035,12 @@ def mode_report(options: argparse.Namespace) -> None:
     copies: dict[tuple[str, ...], float] = {}
 
     def matched(row: dict[str, str]) -> tuple[str, ...]:
-        return tuple(row[key] for key in ("order", "elements", "device", "driver"))
+        # size-matched: the bytes of the variant's geometry, at its order and
+        # mesh, on its device
+        named = row["operator"] if "bandwidth" in row else row["variant"]
+        geometry = FROM_THE_METRIC if FROM_THE_METRIC in named else ""
+        keys = ("order", "elements", "device", "driver")
+        return (geometry, *(row[key] for key in keys))
 
     for path in options.files:
         with open(path, newline="") as handle:
@@ -983,9 +1079,10 @@ def mode_report(options: argparse.Namespace) -> None:
                 text = f"{rate:.2f}" if rate >= 0.1 else f"{rate:.2g}"
                 bandwidth = copies.get(matched(r))
                 if bandwidth:
-                    roof = required_bytes(int(order), int(r["elements"]) ** 3) / (
-                        bandwidth * seconds
+                    needed = required_bytes(
+                        int(order), int(r["elements"]) ** 3, r["variant"]
                     )
+                    roof = needed / (bandwidth * seconds)
                     text += (
                         f" ({100 * roof:.0f}%)"
                         if roof >= 0.01
