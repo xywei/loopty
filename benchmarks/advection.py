@@ -324,9 +324,9 @@ def _volume(V: str = "V") -> str:
 
     return (
         "invJ[e, k, j, i] * ("
-        f"sum(a, D[i, a] * ({at(0, 'k', 'j', 'a')} * u[e, k, j, a]))"
-        f" + sum(b, D[j, b] * ({at(1, 'k', 'b', 'i')} * u[e, k, b, i]))"
-        f" + sum(c, D[k, c] * ({at(2, 'c', 'j', 'i')} * u[e, c, j, i])))"
+        f"sum(a, D[i, a] * {at(0, 'k', 'j', 'a')} * u[e, k, j, a])"
+        f" + sum(b, D[j, b] * {at(1, 'k', 'b', 'i')} * u[e, k, b, i])"
+        f" + sum(c, D[k, c] * {at(2, 'c', 'j', 'i')} * u[e, c, j, i]))"
     )
 
 
@@ -347,9 +347,9 @@ def _lift(flux: str) -> str:
 
     return (
         "rhs[e, k, j, i] - invJ[e, k, j, i] * ("
-        f"(L[0, k] * {at(0, 'j', 'i')} + L[1, k] * {at(1, 'j', 'i')})"
-        f" + (L[0, i] * {at(2, 'k', 'j')} + L[1, i] * {at(3, 'k', 'j')})"
-        f" + (L[0, j] * {at(4, 'k', 'i')} + L[1, j] * {at(5, 'k', 'i')}))"
+        f"L[0, k] * {at(0, 'j', 'i')} + L[1, k] * {at(1, 'j', 'i')}"
+        f" + L[0, i] * {at(2, 'k', 'j')} + L[1, i] * {at(3, 'k', 'j')}"
+        f" + L[0, j] * {at(4, 'k', 'i')} + L[1, j] * {at(5, 'k', 'i')})"
     )
 
 

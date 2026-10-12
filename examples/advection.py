@@ -298,15 +298,15 @@ def volume(
                 for i in rhs.dom[e, k, j]:
                     rhs[e, k, j, i] = invJ[e, k, j, i] * (
                         reduce_sum(
-                            D[i, a] * (V[0, e, k, j, a] * u[e, k, j, a])
+                            D[i, a] * V[0, e, k, j, a] * u[e, k, j, a]
                             for a in D.dom[i]
                         )
                         + reduce_sum(
-                            D[j, b] * (V[1, e, k, b, i] * u[e, k, b, i])
+                            D[j, b] * V[1, e, k, b, i] * u[e, k, b, i]
                             for b in D.dom[j]
                         )
                         + reduce_sum(
-                            D[k, c] * (V[2, e, c, j, i] * u[e, c, j, i])
+                            D[k, c] * V[2, e, c, j, i] * u[e, c, j, i]
                             for c in D.dom[k]
                         )
                     )
@@ -325,12 +325,13 @@ def lift(
             for j in rhs.dom[e, k]:
                 for i in rhs.dom[e, k, j]:
                     rhs[e, k, j, i] = rhs[e, k, j, i] - invJ[e, k, j, i] * (
-                        # the faces t = -1 and t = +1, across k
-                        (L[0, k] * flux[e, 0, j, i] + L[1, k] * flux[e, 1, j, i])
-                        # r = -1 and r = +1, across i
-                        + (L[0, i] * flux[e, 2, k, j] + L[1, i] * flux[e, 3, k, j])
-                        # s = -1 and s = +1, across j
-                        + (L[0, j] * flux[e, 4, k, i] + L[1, j] * flux[e, 5, k, i])
+                        # the faces t = -1 and +1, across k; r across i; s across j
+                        L[0, k] * flux[e, 0, j, i]
+                        + L[1, k] * flux[e, 1, j, i]
+                        + L[0, i] * flux[e, 2, k, j]
+                        + L[1, i] * flux[e, 3, k, j]
+                        + L[0, j] * flux[e, 4, k, i]
+                        + L[1, j] * flux[e, 5, k, i]
                     )
 
 
