@@ -714,6 +714,19 @@ def _time_order(
             )
             continue
         timing = clock(queue, call, options.warmup, options.reps, options.batch)
+        if options.profile:
+            # each launch's device time in one call, the median of five
+            launch_times: dict[str, list[float]] = {}
+            for _ in range(5):
+                with KernelClock() as one:
+                    call()
+                for kname, (_count, seconds) in one.by_kernel().items():
+                    launch_times.setdefault(kname, []).append(seconds)
+            said = ", ".join(
+                f"{kname} {1e3 * sorted(times)[2]:.3f} ms"
+                for kname, times in launch_times.items()
+            )
+            print(f"    order {order} {variant}: {said}", flush=True)
         writer.writerow(
             {
                 "side": variant.split(",")[0],
@@ -1207,6 +1220,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="variants whose names contain one of these",
     )
     parser.add_argument("--grudge-modes", nargs="+", default=["eager", "one", "lazy"])
+    parser.add_argument(
+        "--profile", action="store_true", help="each launch's time, in loopty mode"
+    )
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--reps", type=int, default=7)
     parser.add_argument("--batch", type=int, default=5)
