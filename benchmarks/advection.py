@@ -743,6 +743,30 @@ def _time_order(
         )
 
 
+def _comparisons_on_pytato_arrays() -> None:
+    """``x > 0`` of a pytato array, as ``pytato.greater``, where pytato has none.
+
+    grudge's upwind flux is ``where(v_dot_n > 0, ...)``, and pytato at grudge
+    #418's pins defines no comparison operator on an array, so a lazy context
+    refuses the flux (``'>' not supported between instances of 'IndexLambda'
+    and 'int'``). The lazy runs define them as pytato's own functions.
+    """
+    import pytato as pt
+
+    array = pt.array.Array
+    for name, function in (
+        ("__gt__", "greater"),
+        ("__ge__", "greater_equal"),
+        ("__lt__", "less"),
+        ("__le__", "less_equal"),
+    ):
+        if getattr(array, name) is getattr(object, name) and hasattr(pt, function):
+            compare = getattr(pt, function)
+            setattr(
+                array, name, lambda self, other, compare=compare: compare(self, other)
+            )
+
+
 def _grudge_context(queue: Any, mode: str) -> Any:
     """grudge's array context: eager, lazy, or lazy as one kernel (MPMS off)."""
     from grudge.array_context import PyOpenCLArrayContext, PytatoPyOpenCLArrayContext
@@ -751,6 +775,7 @@ def _grudge_context(queue: Any, mode: str) -> Any:
     allocator = MemoryPool(ImmediateAllocator(queue))
     if mode == "eager":
         return PyOpenCLArrayContext(queue, allocator=allocator)
+    _comparisons_on_pytato_arrays()
     if mode == "lazy":
         return PytatoPyOpenCLArrayContext(queue, allocator=allocator)
 
