@@ -563,11 +563,12 @@ All notable changes to loopty are recorded here. The format follows
   `tests/kernels/program_domains.py`), the upstream test kernels
   (`tests/kernels/upstream.py`), and the windows, updates, layouts,
   postconditions decided from what kernels store and cited theorems above:
-  of 1303 facts isl decides in 30 files, Lean proves 1256 and confirms the
+  of 1319 facts isl decides in 30 files, Lean proves 1272 and confirms the
   counterexample of the 32 refuted ones. The 15 it leaves decided are claims
   about reals, which core Lean has no words for; with Mathlib it proves them
-  too, 1271 in all, and none stays decided. `examples/l2p.py` has 41: 40
-  proved with Mathlib, and its refused interchange, whose negation Lean
+  too, 1287 in all, and none stays decided. `examples/layer_potential.py`
+  has 31, its single and double layer, all proved. `examples/l2p.py` has 41:
+  40 proved with Mathlib, and its refused interchange, whose negation Lean
   proves.
 - A ledger gains a `definedness` row for each array a kernel reads only where
   it wrote it before (`scan`'s `off`, `p2p`'s `term`, `pairs`' `f`), and an

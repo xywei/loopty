@@ -1130,7 +1130,8 @@ $ uv run python examples/layer_potential.py
 pytential's starfish, QBX order 5, at 4 panels: 36 targets, 132 sources
   single_layer: compiled on C agrees with native to the approx tolerance: True -> tested
   double_layer: compiled on C agrees with native to the approx tolerance: True -> tested
-  sumpy's own kernel, as pytential calls it: agrees within 1e-12 of the largest value -> tested
+  single_layer: sumpy's own kernel, as pytential calls it: difference 6.42e-14 within 1.99e-06 (approx) -> tested
+  double_layer: sumpy's own kernel, as pytential calls it: difference 1.58e-12 within 2.88e-06 (approx) -> tested
 
 sumpy's tile, get_optimized_kernel(is_cpu=True): split(t, 16).tag(t_outer='g.0', t_inner='l.0').split(s, 256).prioritize(s_outer, t_inner)
   decided  isl  split(t, 16) renames the instances of single_layer one for one
@@ -1154,51 +1155,52 @@ accuracy at 30, 50, 70, 90 panels:
 
 ```console
 $ uv run lanky check examples/layer_potential.py
-STATUS   BY           WHERE                   OWNER              STATEMENT
--------  -----------  ----------------------  -----------------  ------------------------------------------------------------------------
-assumed  -            layer_potential.py:135  line_taylor        alpha : Complex, beta : Complex, c : Fn[Nat, Complex] | alpha != 0, a...
-tested   python       layer_potential.py:135  line_taylor        the term computes what the annotations compute
-decided  isl          layer_potential.py:204  single_layer       out[t] is in bounds for every instance of S0
-decided  isl          layer_potential.py:204  single_layer       w[s] is in bounds for every instance of S0
-decided  isl          layer_potential.py:204  single_layer       c[t] is in bounds for every instance of S0
-decided  isl          layer_potential.py:204  single_layer       y[s] is in bounds for every instance of S0
-decided  isl          layer_potential.py:204  single_layer       z[t] is in bounds for every instance of S0
-decided  isl          layer_potential.py:204  single_layer       distinct instances of S0 write distinct cells of out
-decided  isl          layer_potential.py:190  single_layer       the source order runs every dependence forward in time
-decided  type         layer_potential.py:204  single_layer       the accumulation into out[t] over s is approx
-tested   interpreter  layer_potential.py:190  single_layer       the traced term computes what the body computes
-decided  isl          layer_potential.py:204  single_layer       split(t, 16) renames the instances of single_layer one for one
-decided  isl          layer_potential.py:204  single_layer       the order after split(t, 16) runs every dependence of single_layer fo...
-decided  isl          layer_potential.py:204  single_layer       tag(t_inner='ilp') renames the instances of single_layer one for one
-decided  isl          layer_potential.py:204  single_layer       the order after tag(t_inner='ilp') runs every dependence of single_la...
-decided  isl          layer_potential.py:204  single_layer       split(s, 256) renames the instances of single_layer one for one
-decided  isl          layer_potential.py:204  single_layer       the order after split(s, 256) runs every dependence of single_layer f...
-decided  isl          layer_potential.py:204  single_layer       prioritize(s_outer, t_inner) renames the instances of single_layer on...
-decided  isl          layer_potential.py:204  single_layer       the order after prioritize(s_outer, t_inner) runs every dependence of...
-decided  isl          layer_potential.py:220  double_layer       out[t] is in bounds for every instance of S0
-decided  isl          layer_potential.py:220  double_layer       w[s] is in bounds for every instance of S0
-decided  isl          layer_potential.py:220  double_layer       n[s] is in bounds for every instance of S0
-decided  isl          layer_potential.py:220  double_layer       c[t] is in bounds for every instance of S0
-decided  isl          layer_potential.py:220  double_layer       y[s] is in bounds for every instance of S0
-decided  isl          layer_potential.py:220  double_layer       z[t] is in bounds for every instance of S0
-decided  isl          layer_potential.py:220  double_layer       distinct instances of S0 write distinct cells of out
-decided  isl          layer_potential.py:209  double_layer       the source order runs every dependence forward in time
-decided  type         layer_potential.py:220  double_layer       the accumulation into out[t] over s is approx
-tested   interpreter  layer_potential.py:209  double_layer       the traced term computes what the body computes
-decided  isl          layer_potential.py:220  double_layer       split(t, 16) renames the instances of double_layer one for one
-decided  isl          layer_potential.py:220  double_layer       the order after split(t, 16) runs every dependence of double_layer fo...
-decided  isl          layer_potential.py:220  double_layer       tag(t_inner='ilp') renames the instances of double_layer one for one
-decided  isl          layer_potential.py:220  double_layer       the order after tag(t_inner='ilp') runs every dependence of double_la...
-decided  isl          layer_potential.py:220  double_layer       split(s, 256) renames the instances of double_layer one for one
-decided  isl          layer_potential.py:220  double_layer       the order after split(s, 256) runs every dependence of double_layer f...
-decided  isl          layer_potential.py:220  double_layer       prioritize(s_outer, t_inner) renames the instances of double_layer on...
-decided  isl          layer_potential.py:220  double_layer       the order after prioritize(s_outer, t_inner) runs every dependence of...
-tested   run          layer_potential.py:388  agrees_with_sumpy  S and D agree with sumpy's LayerPotential on the example's starfish
-tested   run          layer_potential.py:482  green_identity     S(du/dn) - D(u) = u/2, Green's identity, at order 5 - 1.6 or faster
-tested   run          layer_potential.py:488  jump_S             S(+) - S(-) = 0: S is continuous, at order 5 - 1.6 or faster
-tested   run          layer_potential.py:494  jump_D             D(+) - D(-) = sigma: D jumps by the density, at order 5 - 1.6 or faster
+STATUS   BY           WHERE                   OWNER           STATEMENT
+-------  -----------  ----------------------  --------------  ------------------------------------------------------------------------
+assumed  -            layer_potential.py:137  line_taylor     alpha : Complex, beta : Complex, c : Fn[Nat, Complex] | alpha != 0, a...
+tested   python       layer_potential.py:137  line_taylor     the term computes what the annotations compute
+decided  isl          layer_potential.py:206  single_layer    out[t] is in bounds for every instance of S0
+decided  isl          layer_potential.py:206  single_layer    w[s] is in bounds for every instance of S0
+decided  isl          layer_potential.py:206  single_layer    c[t] is in bounds for every instance of S0
+decided  isl          layer_potential.py:206  single_layer    y[s] is in bounds for every instance of S0
+decided  isl          layer_potential.py:206  single_layer    z[t] is in bounds for every instance of S0
+decided  isl          layer_potential.py:206  single_layer    distinct instances of S0 write distinct cells of out
+decided  isl          layer_potential.py:192  single_layer    the source order runs every dependence forward in time
+decided  type         layer_potential.py:206  single_layer    the accumulation into out[t] over s is approx
+tested   interpreter  layer_potential.py:192  single_layer    the traced term computes what the body computes
+decided  isl          layer_potential.py:206  single_layer    split(t, 16) renames the instances of single_layer one for one
+decided  isl          layer_potential.py:206  single_layer    the order after split(t, 16) runs every dependence of single_layer fo...
+decided  isl          layer_potential.py:206  single_layer    tag(t_inner='ilp') renames the instances of single_layer one for one
+decided  isl          layer_potential.py:206  single_layer    the order after tag(t_inner='ilp') runs every dependence of single_la...
+decided  isl          layer_potential.py:206  single_layer    split(s, 256) renames the instances of single_layer one for one
+decided  isl          layer_potential.py:206  single_layer    the order after split(s, 256) runs every dependence of single_layer f...
+decided  isl          layer_potential.py:206  single_layer    prioritize(s_outer, t_inner) renames the instances of single_layer on...
+decided  isl          layer_potential.py:206  single_layer    the order after prioritize(s_outer, t_inner) runs every dependence of...
+decided  isl          layer_potential.py:222  double_layer    out[t] is in bounds for every instance of S0
+decided  isl          layer_potential.py:222  double_layer    w[s] is in bounds for every instance of S0
+decided  isl          layer_potential.py:222  double_layer    n[s] is in bounds for every instance of S0
+decided  isl          layer_potential.py:222  double_layer    c[t] is in bounds for every instance of S0
+decided  isl          layer_potential.py:222  double_layer    y[s] is in bounds for every instance of S0
+decided  isl          layer_potential.py:222  double_layer    z[t] is in bounds for every instance of S0
+decided  isl          layer_potential.py:222  double_layer    distinct instances of S0 write distinct cells of out
+decided  isl          layer_potential.py:211  double_layer    the source order runs every dependence forward in time
+decided  type         layer_potential.py:222  double_layer    the accumulation into out[t] over s is approx
+tested   interpreter  layer_potential.py:211  double_layer    the traced term computes what the body computes
+decided  isl          layer_potential.py:222  double_layer    split(t, 16) renames the instances of double_layer one for one
+decided  isl          layer_potential.py:222  double_layer    the order after split(t, 16) runs every dependence of double_layer fo...
+decided  isl          layer_potential.py:222  double_layer    tag(t_inner='ilp') renames the instances of double_layer one for one
+decided  isl          layer_potential.py:222  double_layer    the order after tag(t_inner='ilp') runs every dependence of double_la...
+decided  isl          layer_potential.py:222  double_layer    split(s, 256) renames the instances of double_layer one for one
+decided  isl          layer_potential.py:222  double_layer    the order after split(s, 256) runs every dependence of double_layer f...
+decided  isl          layer_potential.py:222  double_layer    prioritize(s_outer, t_inner) renames the instances of double_layer on...
+decided  isl          layer_potential.py:222  double_layer    the order after prioritize(s_outer, t_inner) runs every dependence of...
+tested   upstream     layer_potential.py:391  single_layer    the native run of single_layer agrees with sumpy_single_layer in out,...
+tested   upstream     layer_potential.py:397  double_layer    the native run of double_layer agrees with sumpy_double_layer in out,...
+tested   run          layer_potential.py:480  green_identity  S(du/dn) - D(u) = u/2, Green's identity, at order 5 - 1.6 or faster
+tested   run          layer_potential.py:486  jump_S          S(+) - S(-) = 0: S is continuous, at order 5 - 1.6 or faster
+tested   run          layer_potential.py:492  jump_D          D(+) - D(-) = sigma: D jumps by the density, at order 5 - 1.6 or faster
 
-41 facts: 1 assumed, 33 decided, 7 tested
+42 facts: 1 assumed, 33 decided, 8 tested
 ```
 
 With Lean, the 31 facts isl decided read `proved` by `lean`, the write fact
