@@ -1134,6 +1134,12 @@ class ExpressionLowerer(Mapper):
             and len(expr.parameters) == 1
         ):
             return self._conversion(CONVERSIONS[function.name], expr.parameters[0])
+        if (
+            isinstance(function, prim.Variable)
+            and function.name == "ipow"
+            and len(expr.parameters) == 2
+        ):
+            return self._integer_power(expr, *expr.parameters)
         return prim.Call(
             self.rec(expr.function), tuple(self.rec(p) for p in expr.parameters)
         )
@@ -1200,6 +1206,26 @@ class ExpressionLowerer(Mapper):
         if name in ("real", "conj"):
             return lowered
         return prim.Call(prim.Variable(name), (lowered,))
+
+    def _integer_power(self, expr: Any, base: Any, exponent: Any) -> prim.Expression:
+        """``ipow(x, n)`` of :mod:`loopty.math`: loopy's own integer power.
+
+        Written as the power it is, with the exponent left an integer, so that
+        loopy calls the ``loopy_pow_<base>_<exponent>`` it defines, which
+        multiplies as :func:`loopty.math.integer_power` does natively; ``x **
+        n`` would get a floating exponent and the C library's ``pow``
+        (:mod:`loopty.promotion`). The base is converted into numpy's type of
+        the result where the lowering computes it in another.
+        """
+        promotion = self.lowering.promotion
+        lowered = self.rec(base)
+        power = self.rec(exponent)
+        if promotion is not None:
+            compiled = promotion.types(base)[1]
+            target = promotion.types(expr)[1]
+            if compiled is not None and target is not None and compiled != target:
+                lowered = self._convert(lowered, target)
+        return prim.Power(lowered, power)
 
     def _absolute(self, expr: Any, operand: Any) -> prim.Expression:
         """``abs(operand)``: C's ``abs`` of a number, and numpy's of an integer.
@@ -3624,7 +3650,9 @@ def _power_preambles(term: Term, target: str | None) -> tuple[tuple[str, str], .
         for node in walk((stmt.assignee, stmt.expr, stmt.guard))
     ]
     if not any(
-        isinstance(node, prim.Power) and not _written_as_product(node)
+        isinstance(node, prim.Power)
+        and not _written_as_product(node)
+        or _integer_power_call(node)
         for node in nodes
     ):
         return ()
@@ -3638,6 +3666,20 @@ def _power_preambles(term: Term, target: str | None) -> tuple[tuple[str, str], .
     if complex_term:
         return ((_POWER_TAG, f"{POWER_INCLUDES}\n{_COMPLEX_INCLUDE}"),)
     return ((_POWER_TAG, POWER_INCLUDES),)
+
+
+def _integer_power_call(node: Any) -> bool:
+    """Whether ``node`` is ``ipow(x, n)``, which loopy writes as its own power."""
+    return (
+        isinstance(node, prim.Call)
+        and isinstance(node.function, prim.Variable)
+        and node.function.name == "ipow"
+        and not (
+            len(node.parameters) == 2
+            and isinstance(node.parameters[1], int | np.integer)
+            and node.parameters[1] in (0, 1, 2)
+        )
+    )
 
 
 def _written_as_product(power: prim.Power) -> bool:
@@ -4064,6 +4106,28 @@ def _arguments(
             free |= {name for name in _names_in(size)}
         return shape if free <= declared | scalars else None
 
+    def strides_of(typ: ArrType, ragged: bool) -> str | None:
+        """Row-major strides for an array whose shape cannot be declared.
+
+        An array of several axes whose first extent is a size the code never
+        mentions, ``coords: Arr[Fin[nv], Fin[2], Real]`` read only as
+        ``coords[cell[c, k], d]``, is declared without a shape (see
+        :func:`_used_names`), and loopy then indexes it in one dimension only.
+        Its strides need only the extents after the first, so where those are
+        declared, they are given instead: ``stride:2,stride:1``. ``None``
+        where they are not, or the array has one axis, or no box of axes.
+        """
+        if ragged or typ.domain is not None or len(typ.axes) < 2:
+            return None
+        trailing = [_plain(size) for size in typ.axes[1:]]
+        for size in trailing:
+            if not _names_in(size) <= declared | scalars:
+                return None
+        strides: list[Any] = [1]
+        for size in reversed(trailing):
+            strides.insert(0, size * strides[0] if strides[0] != 1 else size)
+        return ",".join(f"stride:{stride}" for stride in strides)
+
     for name, typ in term.params:
         if not isinstance(typ, ArrType):
             declare_value(name, numpy_dtype(typ))
@@ -4072,11 +4136,14 @@ def _arguments(
         ragged = builder.ragged_axis(name) is not None
         if ragged:
             builder.offsets_for(name)  # make sure the offsets argument exists
+        shape = shape_of(typ, ragged, name)
+        strides = strides_of(typ, ragged) if shape is None else None
         args.append(
             lp.GlobalArg(
                 name,
                 array_dtype(term, name, typ.dtype),
-                shape=shape_of(typ, ragged, name),
+                shape=shape,
+                dim_tags=strides,
                 is_input=True,
                 is_output=is_output,
             )

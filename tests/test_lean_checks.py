@@ -61,6 +61,36 @@ ROOT = Path(__file__).resolve().parent.parent
 EXAMPLES = ROOT / "examples"
 KERNELS = ROOT / "tests" / "kernels"
 
+#: The examples whose theorems index families at several indices,
+#: ``Fn[Nat, Nat, Real]`` applied as ``D[a, b]``, which lanky main has and the
+#: 0.2.0 release, which the released-lanky job installs, does not: they do
+#: not import there.
+NEEDS_SEVERAL_INDICES = frozenset({"l2p.py"})
+
+
+def _imports_here(path: Path) -> bool:
+    """Whether this lanky can import the file ``path``."""
+    from lanky.prelude import FnType
+
+    return not (
+        path.parent == EXAMPLES
+        and path.name in NEEDS_SEVERAL_INDICES
+        and not hasattr(FnType, "indices")
+    )
+
+
+def _files(*directories: Path) -> list[Any]:
+    """The ``.py`` files of ``directories``, those this lanky cannot import skipped."""
+    out: list[Any] = []
+    for directory in directories:
+        for path in sorted(directory.glob("*.py")):
+            if _imports_here(path):
+                out.append(path)
+            else:
+                reason = "its theorems index families at several indices (lanky main)"
+                out.append(pytest.param(path, marks=pytest.mark.skip(reason=reason)))
+    return out
+
 
 def load(path: Path) -> Any:
     """Import an example or a test kernel's file as a module of its own."""
@@ -207,7 +237,7 @@ def _domains(path: Path) -> Iterator[tuple[str, Any, Any]]:
 
 @pytest.mark.parametrize(
     "path",
-    [*sorted(EXAMPLES.glob("*.py")), *sorted(KERNELS.glob("*.py"))],
+    _files(EXAMPLES, KERNELS),
     ids=lambda path: f"{path.parent.name}/{path.name}",
 )
 def test_the_description_reads_back_as_isl_reads_it(path: Path) -> None:
@@ -581,6 +611,43 @@ def test_a_mixed_subscript_is_in_bounds_by_type_and_isl() -> None:
     assert "0 <= cell[c, k]" in text and "cell[c, k] < nv" in text
 
 
+@kernel
+def jacobian(
+    cell: Arr[Fin[nc], Fin[3], Fin[nv]],  # noqa: F821
+    X: Arr[Fin[nv], Fin[2], Real],  # noqa: F821
+    J: Arr[Fin[nc], Real],  # noqa: F821
+):
+    """Each cell's Jacobian determinant: the first corner is read twice per axis."""
+    for c in J.dom:
+        J[c] = (X[cell[c, 1], 0] - X[cell[c, 0], 0]) * (
+            X[cell[c, 2], 1] - X[cell[c, 0], 1]
+        ) - (X[cell[c, 2], 0] - X[cell[c, 0], 0]) * (
+            X[cell[c, 1], 1] - X[cell[c, 0], 1]
+        )
+
+
+def test_a_mixed_subscript_a_statement_reads_twice_is_one_place() -> None:
+    """``X[cell[c, 0], 0]`` twice in one statement is one access, decided by isl.
+
+    It was ``assumed``: the places of one access were one each only where the
+    statement read it once, and an inlined element kernel reads a corner for
+    two entries of its Jacobian.
+    """
+    from loopty.oracle import IslOracle
+
+    statement = (
+        "X[cell[c, 0], 0] is in bounds for every instance of S0 "
+        "(cell[c, 0] : Fin(nv), by type)"
+    )
+    (fact,) = [f for f in jacobian.facts() if f.statement == statement]
+    decided = IslOracle().establish(fact)
+    assert decided.status is Status.DECIDED and decided.decided_by == "isl"
+    assert not [
+        f for f in jacobian.facts() if f.kind == "in-bounds" and "X[" in f.statement
+        and "by type" not in f.statement
+    ]
+
+
 def test_an_array_the_kernel_reads_where_it_wrote_it_has_a_definedness_fact() -> None:
     spmv = load(EXAMPLES / "spmv.py")
     facts = [f for f in spmv.scan.facts() if f.kind == "definedness"]
@@ -666,7 +733,7 @@ def _cell_sets(path: Path) -> Iterator[tuple[str, Any]]:
 
 @pytest.mark.parametrize(
     "path",
-    [*sorted(EXAMPLES.glob("*.py")), *sorted(KERNELS.glob("*.py"))],
+    _files(EXAMPLES, KERNELS),
     ids=lambda path: f"{path.parent.name}/{path.name}",
 )
 def test_the_cells_an_access_is_checked_against_read_back_as_isl_reads_them(
@@ -739,6 +806,8 @@ def test_an_assumption_is_a_fact_the_casts_rest_on() -> None:
     (part, *_rest) = monotone.term.lean_obligation().parts
     assert "n % 4 == 0" in render(part.term)
     assert schedule.history == ("assume('n % 4 == 0')", "split(i, 4)")
+    # the casts' status names it shortly, ``decided under assume('n % 4 == 0')``
+    assert assumption.provenance["label"] == "assume('n % 4 == 0')"
 
 
 @pytest.mark.parametrize(
@@ -852,7 +921,7 @@ def test_lean_proves_the_windows_and_the_substitution_of_the_test_kernels(
     assert not unproved
 
 
-@pytest.mark.parametrize("path", sorted(EXAMPLES.glob("*.py")), ids=lambda p: p.name)
+@pytest.mark.parametrize("path", _files(EXAMPLES), ids=lambda p: p.name)
 def test_lean_proves_what_isl_decides_in_every_example(lean: Any, path: Path) -> None:
     unproved = []
     for fact in _isl_facts(path):
@@ -1477,6 +1546,8 @@ def test_every_hypothesis_set_isl_can_sample_is_not_vacuous_in_lean(lean: Any) -
     checked = 0
     arrays = 0
     for path in [*sorted(EXAMPLES.glob("*.py")), *sorted(KERNELS.glob("*.py"))]:
+        if not _imports_here(path):
+            continue
         # one Lean command per file, each theorem again alone to name a failure
         sources: list[tuple[str, str]] = []
         for fact in _isl_facts(path):

@@ -73,6 +73,7 @@ _EXPORTS = {
     "table": "loopty.table",
     "tested": "loopty.tested",
     "trace": "loopty.trace",
+    "upstream": "loopty.upstream",
     "when": "loopty.trace",
 }
 
@@ -110,6 +111,7 @@ __all__ = [
     "table",
     "tested",
     "trace",
+    "upstream",
     "when",
 ]
 
@@ -167,5 +169,6 @@ if TYPE_CHECKING:
     from loopty.tested import tested
     from loopty.trace import TraceError, trace, when
     from loopty.typing import facts_for
+    from loopty.upstream import upstream
 
     sum = reduce_sum

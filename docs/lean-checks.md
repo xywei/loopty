@@ -324,9 +324,9 @@ and test kernel to Lean, the casts each file's `rejected*` functions refuse
 included, from an empty proof cache. Its report, with Lean v4.29.1 (a
 file's time is Lean's on all its facts, a part's on one declaration):
 
-Of 1179 facts isl decides in 27 files (4 of them a theorem a kernel cites, applied to what isl decided), Lean proved 1138; 12 stay decided; 29 refuted facts have their negation proved at isl's counterexample. 422 more facts are not isl's to decide (by type, tested, assumed).
+Of 1303 facts isl decides in 30 files (5 of them a theorem a kernel cites, applied to what isl decided), Lean proved 1256; 15 stay decided; 32 refuted facts have their negation proved at isl's counterexample. 448 more facts are not isl's to decide (by type, tested, assumed).
 
-Not all of them are equally hard. The 161 `ordering` facts, that the source
+Not all of them are equally hard. The 172 `ordering` facts, that the source
 order runs every dependence forward, hold by the definition of a dependence
 (two instances that touch one cell, which the source runs in that order), and
 Lean's proof of them checks only that the printer states the source order the
@@ -335,60 +335,66 @@ time includes starting Lean.
 
 | file | isl facts | proved | decided, not proved | refuted, negation proved | Lean time |
 |---|---:|---:|---:|---:|---:|
-| `examples/assembly.py` | 17 | 17 | 0 | 0 | 3.0 s |
-| `examples/calls.py` | 44 | 44 | 0 | 0 | 1.4 s |
-| `examples/composition.py` | 10 | 10 | 0 | 0 | 0.3 s |
-| `examples/fusion.py` | 19 | 17 | 0 | 2 | 0.7 s |
-| `examples/layer_potential.py` | 31 | 31 | 0 | 0 | 3.4 s |
+| `examples/assembly.py` | 37 | 37 | 0 | 0 | 34.1 s |
+| `examples/calls.py` | 44 | 44 | 0 | 0 | 1.6 s |
+| `examples/composition.py` | 10 | 10 | 0 | 0 | 0.4 s |
+| `examples/fusion.py` | 19 | 17 | 0 | 2 | 0.8 s |
+| `examples/hexahedra.py` | 68 | 66 | 0 | 2 | 14.9 s |
+| `examples/l2p.py` | 41 | 37 | 3 | 1 | 7.4 s |
+| `examples/layer_potential.py` | 15 | 15 | 0 | 0 | 1.0 s |
 | `examples/p2p.py` | 19 | 19 | 0 | 0 | 1.7 s |
-| `examples/pairs.py` | 14 | 14 | 0 | 0 | 0.5 s |
-| `examples/quadrature.py` | 12 | 12 | 0 | 0 | 0.3 s |
-| `examples/reshape_layouts.py` | 16 | 16 | 0 | 0 | 0.9 s |
-| `examples/spmv.py` | 20 | 20 | 0 | 0 | 0.5 s |
+| `examples/pairs.py` | 14 | 14 | 0 | 0 | 0.6 s |
+| `examples/quadrature.py` | 12 | 12 | 0 | 0 | 0.8 s |
+| `examples/reshape_layouts.py` | 16 | 16 | 0 | 0 | 1.0 s |
+| `examples/spmv.py` | 20 | 20 | 0 | 0 | 0.6 s |
 | `examples/stencil_skew.py` | 10 | 9 | 0 | 1 | 1.7 s |
-| `examples/storage_layouts.py` | 18 | 18 | 0 | 0 | 2.2 s |
+| `examples/storage_layouts.py` | 18 | 18 | 0 | 0 | 1.9 s |
 | `examples/sum_factorization.py` | 16 | 15 | 0 | 1 | 1.4 s |
-| `examples/taylor_reconstruction.py` | 14 | 11 | 2 | 1 | 1.8 s |
-| `examples/travel.py` | 53 | 53 | 0 | 0 | 2.6 s |
+| `examples/taylor_reconstruction.py` | 14 | 11 | 2 | 1 | 1.6 s |
+| `examples/travel.py` | 53 | 53 | 0 | 0 | 2.9 s |
 | `examples/wavefront_acoustic.py` | 24 | 21 | 0 | 3 | 7.9 s |
-| `tests/kernels/axpy.py` | 4 | 4 | 0 | 0 | 0.0 s |
-| `tests/kernels/calls.py` | 151 | 144 | 0 | 7 | 4.4 s |
-| `tests/kernels/dataflow.py` | 219 | 209 | 10 | 0 | 12.3 s |
-| `tests/kernels/domains.py` | 90 | 89 | 0 | 1 | 5.5 s |
-| `tests/kernels/out_of_bounds.py` | 4 | 3 | 0 | 1 | 0.2 s |
-| `tests/kernels/program_domains.py` | 15 | 15 | 0 | 0 | 1.0 s |
+| `tests/kernels/axpy.py` | 4 | 4 | 0 | 0 | 0.1 s |
+| `tests/kernels/calls.py` | 151 | 144 | 0 | 7 | 6.9 s |
+| `tests/kernels/dataflow.py` | 219 | 209 | 10 | 0 | 9.7 s |
+| `tests/kernels/domains.py` | 90 | 89 | 0 | 1 | 3.5 s |
+| `tests/kernels/out_of_bounds.py` | 4 | 3 | 0 | 1 | 0.1 s |
+| `tests/kernels/program_domains.py` | 15 | 15 | 0 | 0 | 0.7 s |
 | `tests/kernels/spmv_min.py` | 16 | 16 | 0 | 0 | 0.0 s |
 | `tests/kernels/stencil.py` | 5 | 5 | 0 | 0 | 0.0 s |
-| `tests/kernels/travel.py` | 70 | 69 | 0 | 1 | 2.6 s |
-| `tests/kernels/travel_wrong.py` | 194 | 187 | 0 | 7 | 21.4 s |
-| `tests/kernels/windows.py` | 74 | 70 | 0 | 4 | 7.7 s |
+| `tests/kernels/travel.py` | 70 | 69 | 0 | 1 | 1.5 s |
+| `tests/kernels/travel_wrong.py` | 194 | 187 | 0 | 7 | 19.4 s |
+| `tests/kernels/upstream.py` | 11 | 11 | 0 | 0 | 0.1 s |
+| `tests/kernels/windows.py` | 74 | 70 | 0 | 4 | 7.3 s |
 
 By kind:
 
 | kind | isl facts | proved | decided, not proved | refuted, negation proved | parts | median s per part | slowest part |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| argument | 2 | 1 | 0 | 1 | 1 | 0.024 | 0.02 s |
-| bijective | 44 | 44 | 0 | 0 | 170 | 0.071 | 0.49 s |
-| by-theorem | 4 | 1 | 3 | 0 | 1 | 0.174 | 0.17 s |
-| definedness | 53 | 53 | 0 | 0 | 79 | 0.053 | 0.37 s |
-| disjoint-writes | 196 | 195 | 0 | 1 | 195 | 0.019 | 0.13 s |
-| distinct-arguments | 2 | 1 | 0 | 1 | 1 | 0.016 | 0.02 s |
-| element-sort | 28 | 20 | 0 | 8 | 20 | 0.046 | 0.07 s |
-| in-bounds | 509 | 504 | 0 | 5 | 640 | 0.030 | 1.10 s |
-| layout | 6 | 6 | 0 | 0 | 12 | 0.091 | 11.54 s |
-| layout-in-bounds | 4 | 4 | 0 | 0 | 5 | 0.062 | 0.11 s |
-| layout-one-for-one | 4 | 4 | 0 | 0 | 6 | 0.082 | 0.24 s |
-| layout-onto | 4 | 4 | 0 | 0 | 4 | 0.155 | 0.29 s |
-| layout-same | 1 | 1 | 0 | 0 | 1 | 0.117 | 0.12 s |
-| monotone | 53 | 44 | 0 | 9 | 315 | 0.071 | 0.58 s |
-| no-clobber | 14 | 10 | 0 | 4 | 21 | 0.124 | 0.26 s |
-| ordering | 161 | 161 | 0 | 0 | 416 | 0.017 | 0.08 s |
-| postcondition | 39 | 30 | 9 | 0 | 48 | 0.058 | 0.18 s |
-| requirement | 16 | 16 | 0 | 0 | 16 | 0.122 | 0.39 s |
-| single-assignment | 39 | 39 | 0 | 0 | 111 | 0.017 | 0.07 s |
+| argument | 2 | 1 | 0 | 1 | 1 | 0.027 | 0.03 s |
+| bijective | 44 | 44 | 0 | 0 | 206 | 0.086 | 0.50 s |
+| by-theorem | 5 | 1 | 4 | 0 | 1 | 0.130 | 0.13 s |
+| definedness | 66 | 66 | 0 | 0 | 96 | 0.069 | 0.39 s |
+| disjoint-writes | 210 | 209 | 0 | 1 | 209 | 0.013 | 0.08 s |
+| distinct-arguments | 2 | 1 | 0 | 1 | 1 | 0.017 | 0.02 s |
+| element-sort | 28 | 20 | 0 | 8 | 20 | 0.025 | 0.06 s |
+| in-bounds | 574 | 569 | 0 | 5 | 631 | 0.031 | 1.11 s |
+| layout | 6 | 6 | 0 | 0 | 12 | 0.079 | 11.64 s |
+| layout-in-bounds | 7 | 7 | 0 | 0 | 9 | 0.099 | 0.20 s |
+| layout-one-for-one | 7 | 7 | 0 | 0 | 11 | 0.122 | 0.35 s |
+| layout-onto | 7 | 7 | 0 | 0 | 7 | 0.199 | 0.30 s |
+| layout-same | 3 | 3 | 0 | 0 | 5 | 0.097 | 0.14 s |
+| monotone | 56 | 44 | 0 | 12 | 451 | 0.094 | 0.58 s |
+| no-clobber | 16 | 12 | 0 | 4 | 23 | 0.139 | 0.65 s |
+| ordering | 172 | 172 | 0 | 0 | 438 | 0.016 | 0.17 s |
+| postcondition | 41 | 30 | 11 | 0 | 48 | 0.058 | 0.12 s |
+| requirement | 16 | 16 | 0 | 0 | 16 | 0.075 | 0.26 s |
+| single-assignment | 41 | 41 | 0 | 0 | 119 | 0.011 | 0.10 s |
 
 Every fact Lean did not prove, and why:
 
+- `examples/l2p.py`, unpack: (forall i in Fin(nb). C[i, 0, 0] == coeffs[i, 0]) and (forall i in Fin(nb), a in Nat, b in Nat where a < 2 and a + b >= 1 and a + b <= 10. C[i, a, b] == coeffs[i, 2*(a + b) - 1 + a]). the claim is about real numbers, which core Lean does not have; where Mathlib is (LANKY_LEAN_MATHLIB), Lean checks it
+- `examples/l2p.py`, reconstruct: (forall i in Fin(nb), a in Nat, b in Nat where a < 2 and a + b <= 10. R[i, a, b] == C[i, a, b]) and (forall i in Fin(nb), a in Nat, b in Nat where a + b + 2 <= 10. R[i, a + 2, b] == -R[i, a, b + 2]). the claim is about real numbers, which core Lean does not have; where Mathlib is (LANKY_LEAN_MATHLIB), Lean checks it
+- `examples/l2p.py`, reconstruct: by on_every_triangle, for every D with pde and stored: forall i in Fin(nb), a in Nat, b in Nat where a + b <= 10. R[i, a, b] == D[i, a, b]. the claim is about real numbers, which core Lean does not have; where Mathlib is (LANKY_LEAN_MATHLIB), Lean checks it
 - `examples/taylor_reconstruction.py`, reconstruct: (forall a in Fin(p + 1), b in Fin(p + 1) where a < 2 and a + b <= p. R[a, b] == c[a, b]) and (forall a in Fin(p + 1), b in Fin(p + 1) where a + b + 2 <= p. R[a + 2, b] == -R[a, b + 2]). the claim is about real numbers, which core Lean does not have; where Mathlib is (LANKY_LEAN_MATHLIB), Lean checks it
 - `examples/taylor_reconstruction.py`, reconstruct: by on_the_triangle, for every D with pde and stored: forall a in Fin(p + 1), b in Fin(p + 1) where a + b <= p. R[a, b] == D(a)(b). the claim is about real numbers, which core Lean does not have; where Mathlib is (LANKY_LEAN_MATHLIB), Lean checks it
 - `tests/kernels/dataflow.py`, triangle: (forall a in Fin(p + 1), b in Fin(p + 1) where a < 2 and a + b <= p. R[a, b] == c[a, b]) and (forall a in Fin(p + 1), b in Fin(p + 1) where a + b + 2 <= p. R[a + 2, b] == -R[a, b + 2]). the claim is about real numbers, which core Lean does not have; where Mathlib is (LANKY_LEAN_MATHLIB), Lean checks it
@@ -410,19 +416,21 @@ no order, and what a kernel called inside another's loop owes there (its
 rows in bounds, its integral scalars in their sorts, two rows of one array
 apart), among them; a called kernel's statements are the caller's, so a
 window over them and the updates of a called kernel are stated as any
-statement's are (`tests/kernels/calls.py`). The 12 it did not are the claims
-about reals above, which core Lean has no words for. The 29 refuted facts
+statement's are (`tests/kernels/calls.py`). The 15 it did not are the claims
+about reals above, which core Lean has no words for. The 32 refuted facts
 are the casts and windows the files refuse on purpose (a window of two cells
 of the Burgers flux, inlined or not, one of three for a reader three cells
 back, a step after the window past the slot it reads, the loop run backwards
-after it, the reconstruction's interchange) and the claims the test kernels
+after it, the reconstruction's interchange, and the flagship's,
+`examples/l2p.py`, and the passes of `examples/hexahedra.py` fused one loop
+deeper than they allow, written two ways) and the claims the test kernels
 make false on purpose, and Lean proved each false at isl's counterexample.
 
-With Mathlib (`LANKY_LEAN_MATHLIB`), the twelve claims about reals,
-postconditions and the theorems applied to them, are proved too: 1150 proved,
-none left decided, and the same 29 refuted facts proved false. The slowest
-part about reals is a theorem's application, 0.3 s, and a postcondition's,
-0.4 s, by `linarith`.
+With Mathlib (`LANKY_LEAN_MATHLIB`), the fifteen claims about reals,
+postconditions and the theorems applied to them, are proved too: 1271 proved,
+none left decided, and the same 32 refuted facts proved false. The slowest
+part about reals is a theorem's application, 0.36 s, and a postcondition's,
+0.39 s, by `linarith`.
 
 ## What stays isl's
 

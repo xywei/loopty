@@ -1119,9 +1119,11 @@ class KernelTheory:
     each reduction, and the postcondition; then the ``trace-faithful`` fact,
     that the term computes what the body computes (:mod:`loopty.faithful`). A
     program's are its callees' postconditions restated, and its own
-    ``trace-faithful`` fact. A layout's are its own (:mod:`loopty.layout`). An
-    object this theory does not own gives an empty tuple, which is how several
-    theories share one ledger.
+    ``trace-faithful`` fact. A layout's are its own (:mod:`loopty.layout`), and
+    so are the agreement of a kernel with the code it mirrors
+    (:mod:`loopty.upstream`) and a claim settled by running it
+    (:mod:`loopty.tested`). An object this theory does not own gives an empty
+    tuple, which is how several theories share one ledger.
 
     After a kernel's or a program's facts come the casts of its schedules
     that its file holds at module level, as ``loopty run`` finds them
@@ -1151,8 +1153,9 @@ class KernelTheory:
             return (*own, *schedule_facts(obj, {fact.id for fact in own}))
         from loopty.layout import Layout, SameLayout
         from loopty.tested import Tested
+        from loopty.upstream import Upstream
 
-        if isinstance(obj, Layout | SameLayout | Tested):
+        if isinstance(obj, Layout | SameLayout | Tested | Upstream):
             return obj.facts()
         return ()
 
