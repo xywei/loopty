@@ -2863,6 +2863,21 @@ class Cast:
         return f"{self.kind} cast of {self.schedule._term.name}.{steps}"
 
 
+#: loopy's warning that it schedules a kernel with its first scheduler, which
+#: it does for every kernel with an ``ilp`` or ``vec`` loop (its second cannot
+#: schedule one). Expected where a schedule's own tag made such a loop, and
+#: noise in a run's output there, so :meth:`Schedule.tag` silences it.
+_V1_FALLBACK = "v1_scheduler_fallback"
+
+
+def _expecting_v1_scheduler(kernel: Any) -> Any:
+    """``kernel`` with loopy's :data:`_V1_FALLBACK` warning silenced."""
+    if isinstance(kernel, lp.TranslationUnit):
+        return kernel.with_kernel(_expecting_v1_scheduler(kernel.default_entrypoint))
+    silenced = frozenset({*kernel.silenced_warnings, _V1_FALLBACK})
+    return kernel.copy(silenced_warnings=silenced)
+
+
 def _transformed(kernel: Any, transform: Any, *args: Any, **kwargs: Any) -> Any:
     """``transform(kernel, ...)``, or ``None`` when there is no kernel left.
 
@@ -3391,6 +3406,8 @@ class Schedule:
             draft.reassoc.add(accumulated)
         draft.tags.update(inames)
         draft.kernel = _transformed(draft.kernel, lp.tag_inames, dict(inames))
+        if any(str(tag).split(".")[0] in ("ilp", "vec") for tag in inames.values()):
+            draft.kernel = _transformed(draft.kernel, _expecting_v1_scheduler)
         text = "tag(" + ", ".join(f"{k}={v!r}" for k, v in inames.items()) + ")"
         return self._commit(draft, text, ("tag", (), dict(inames)))
 
@@ -5757,6 +5774,8 @@ class Schedule:
                     "the caller's word, checked against the sizes of every call "
                     "the schedule runs"
                 ),
+                # how a cast that rests on it names it in the ledger's status
+                "label": f"assume({condition!r})",
             },
             where=self._term.stmts[0].where if self._term.stmts else "",
             owner=self._term.name,

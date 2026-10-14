@@ -666,4 +666,35 @@ def test_a_statement_spelling_a_row_length_instruction_id_is_refused() -> None:
         lower_generic(term)
 
 
+@kernel
+def corners(
+    cell: Arr[Fin[nc], Fin[3], Fin[nv]],  # noqa: F821
+    coords: Arr[Fin[nv], Fin[2], Real],  # noqa: F821
+    J: Arr[Fin[nc], Real],  # noqa: F821
+):
+    """Each cell's Jacobian determinant, read through the cell map only."""
+    for c in J.dom:
+        J[c] = (coords[cell[c, 1], 0] - coords[cell[c, 0], 0]) * (
+            coords[cell[c, 2], 1] - coords[cell[c, 0], 1]
+        ) - (coords[cell[c, 2], 0] - coords[cell[c, 0], 0]) * (
+            coords[cell[c, 1], 1] - coords[cell[c, 0], 1]
+        )
+
+
+def test_an_array_read_only_through_an_index_array_keeps_its_rows() -> None:
+    # nv is in no loop bound and no expression, so coords is declared without
+    # a shape (_used_names); its strides need only the 2 after the first axis,
+    # and without them loopy indexes it in one dimension and refuses the read.
+    code = code_for(corners.term)
+    assert "coords[2 * cell[1 + 3 * c] + 1]" in code
+    coords = np.array([[0.0, 0.0], [2.0, 0.0], [1.0, 1.0], [0.0, 1.5]])
+    cell = np.array([[0, 1, 3], [2, 3, 1]], dtype=np.int64)
+    out = run(corners.term, cell=cell, coords=coords, J=np.zeros(2))
+    x = coords[cell]
+    want = (x[:, 1, 0] - x[:, 0, 0]) * (x[:, 2, 1] - x[:, 0, 1]) - (
+        x[:, 2, 0] - x[:, 0, 0]
+    ) * (x[:, 1, 1] - x[:, 0, 1])
+    assert np.allclose(out["J"], want)
+
+
 # }}}

@@ -591,7 +591,12 @@ def _mixed_fact(
     rests on, the element-sort facts of the arrays its indices are read
     from. Lean states the whole access, with what the type says of each
     typed index as a hypothesis (:func:`loopty.obligations.mixed_in_bounds_obligation`).
+
+    An access a statement makes twice over one domain, ``x[0, 0]`` read for
+    two entries of a Jacobian once a called kernel is inlined, is one place;
+    an access over several domains is left to the rules after this one.
     """
+    places = _distinct_places(places)
     if len(places) != 1:
         return None
     (place_indices, inames, domain) = places[0]
@@ -652,6 +657,33 @@ def _mixed_fact(
         owner=owner,
         rests_on=rests_on,
     )
+
+
+def _distinct_places(
+    places: Sequence[tuple[tuple[Any, ...], tuple[str, ...], Any]],
+) -> list[tuple[tuple[Any, ...], tuple[str, ...], Any]]:
+    """``places`` without repeats: one access text over the same loops and domain.
+
+    The places of one access are gathered by its text, so their indices print
+    alike; two of them are one place when their loops are the same and isl
+    finds their domains equal.
+    """
+    distinct: list[tuple[tuple[Any, ...], tuple[str, ...], Any]] = []
+    for place in places:
+        _indices, inames, domain = place
+        repeated = False
+        for _seen, seen_inames, seen_domain in distinct:
+            if tuple(inames) != tuple(seen_inames):
+                continue
+            try:
+                repeated = bool(domain.is_equal(seen_domain))
+            except Exception:  # noqa: BLE001 - spaces isl cannot compare differ
+                repeated = False
+            if repeated:
+                break
+        if not repeated:
+            distinct.append(place)
+    return distinct
 
 
 def _access_text(array: str, indices: Sequence[Any]) -> str:
