@@ -37,7 +37,11 @@ Modes, each a separate process, since grudge needs loopy's main branch:
     Every variant, loopty's and plain loopy's, each checked against numpy
     first on elements at the start, the middle and the end of the mesh.
 ``python benchmarks/advection.py grudge --elements 16 --csv grudge.csv``
-    grudge's own right-hand side: eager, and lazy as one kernel (needs grudge).
+    grudge's own right-hand side, eager (needs grudge). ``--grudge-modes lazy
+    one`` adds the lazy context's single kernel and the same with nothing
+    materialized (MPMS off): at grudge #418's pins neither is transformed, so
+    the kernel runs on one work item, for minutes to hours per call at
+    ``16**3``, and the second's code generation may not finish.
 ``python benchmarks/advection.py fields --elements 4 --order 3 --npz fields.npz``
     grudge's right-hand side of a random field on a warped periodic mesh,
     with its geometry and its face maps (needs grudge).
@@ -1219,7 +1223,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         default=[],
         help="variants whose names contain one of these",
     )
-    parser.add_argument("--grudge-modes", nargs="+", default=["eager", "one", "lazy"])
+    parser.add_argument(
+        "--grudge-modes",
+        nargs="+",
+        choices=["eager", "lazy", "one"],
+        default=["eager"],
+        help="grudge's array contexts; lazy and one take hours per call untransformed",
+    )
     parser.add_argument(
         "--profile", action="store_true", help="each launch's time, in loopty mode"
     )
