@@ -532,16 +532,20 @@ All notable changes to loopty are recorded here. The format follows
   up to 32 of isl's instances of them, where it was given 16.
 - `substitute` refuses an array kept in a window, and `contract` one
   computed where it is read.
-- The coverage report in `docs/lean-checks.md` covers the four examples the
-  demo kernels added (`assembly.py`, `layer_potential.py`, `quadrature.py`,
-  `sum_factorization.py`), `storage_layouts.py`, `taylor_reconstruction.py`,
-  the calls in loops (`examples/calls.py`, `tests/kernels/calls.py`,
-  `tests/kernels/program_domains.py`), and the windows, updates, layouts,
+- The coverage report in `docs/lean-checks.md` covers the demos' examples
+  (`l2p.py`, the flagship, `assembly.py`, `hexahedra.py`,
+  `layer_potential.py`, `quadrature.py`, `sum_factorization.py`),
+  `storage_layouts.py`, `taylor_reconstruction.py`, the calls in loops
+  (`examples/calls.py`, `tests/kernels/calls.py`,
+  `tests/kernels/program_domains.py`), the upstream test kernels
+  (`tests/kernels/upstream.py`), and the windows, updates, layouts,
   postconditions decided from what kernels store and cited theorems above:
-  of 1163 facts isl decides in 27 files, Lean proves 1122 and confirms the
-  counterexample of the 29 refuted ones. The 12 it leaves decided are claims
+  of 1303 facts isl decides in 30 files, Lean proves 1256 and confirms the
+  counterexample of the 32 refuted ones. The 15 it leaves decided are claims
   about reals, which core Lean has no words for; with Mathlib it proves them
-  too, 1134 in all, and none stays decided.
+  too, 1271 in all, and none stays decided. `examples/l2p.py` has 41: 40
+  proved with Mathlib, and its refused interchange, whose negation Lean
+  proves.
 - A ledger gains a `definedness` row for each array a kernel reads only where
   it wrote it before (`scan`'s `off`, `p2p`'s `term`, `pairs`' `f`), and an
   access with mixed subscripts is decided where it was assumed; the
