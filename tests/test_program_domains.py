@@ -24,7 +24,7 @@ from loopty import Arr, Schedule, TraceError, kernel, program, reduce_sum, when
 from loopty.executor import LoopyExecutor
 from loopty.faithful import KIND
 from loopty.oracle import IslOracle
-from loopty.window import WindowError
+from loopty.schedule import IllegalCast
 
 K = importlib.import_module("kernels.program_domains")
 TRIANGLE, fill, rowsum, diagonal = K.TRIANGLE, K.fill, K.rowsum, K.diagonal
@@ -110,24 +110,37 @@ def test_an_array_of_a_declared_domain_takes_its_sizes_from_the_programs() -> No
     assert fact.status is Status.TESTED
 
 
-def test_a_window_of_an_array_over_a_domain_is_refused_with_the_fix() -> None:
-    # A placement takes a cell's indices to a slot axis by axis, and the cells
-    # of an array over a domain are its points: refused, before a placement
-    # is read, naming the two ways the array may be stored.
+def test_a_window_of_an_array_over_a_domain_keeps_one_row_of_it() -> None:
+    # A placement takes the domain's binders, and the cells it places are the
+    # domain's points (#244): fused on their rows, fill and rowsum keep one
+    # row of the triangle, n cells, found along the order or given.
     fused = Schedule(K.declared).fuse("fill", "rowsum", loops=1)
-    message = (
-        "contract('f'): f is over the domain Where[i: Fin(n), j: Fin(n), j < i], "
-        "whose cells a window does not place yet; keep it whole, or compute it "
-        "where it is read, substitute('f')"
+    windowed = fused.contract("f")
+    window = windowed.windows["f"]
+    assert repr(window.placement) == "lambda i, j: j"
+    assert [str(extent) for extent in window.extents] == ["n"]
+    assert [(f.kind, f.status) for f in windowed.facts()[-2:]] == [
+        ("definedness", Status.DECIDED),
+        ("no-clobber", Status.DECIDED),
+    ]
+    assert windowed.facts()[-1].statement == (
+        "no read of f sees its slot overwritten after contract('f', lambda i, j: "
+        "j): f kept in n cells, f[i, j] in slot j"
     )
-    with pytest.raises(WindowError) as caught:
-        fused.contract("f")
-    assert str(caught.value) == message
-    with pytest.raises(WindowError, match="whose cells a window does not place"):
-        fused.contract("f", lambda i, j: j)
-    substituted = fused.substitute("f")
-    fact = LoopyExecutor().differential(K.declared, substituted, _inputs())
+    fact = LoopyExecutor().differential(K.declared, windowed, _inputs())
     assert fact.status is Status.TESTED
+    # one cell for the row is too few, and the refusal names the window
+    with pytest.raises(IllegalCast) as caught:
+        fused.contract("f", lambda i, j: 0)
+    assert str(caught.value) == (
+        "contract('f', lambda i, j: 0) illegal: instance rowsum.S0[p=2] reads "
+        "f[2, 0], which fill.S0[i=2, j=0] stored in slot 0, after fill.S0[i=2, "
+        "j=1] stored f[2, 1] there (at n=3, isl's choice); contract('f') finds "
+        "the smallest window that keeps every read, lambda i, j: j"
+    )
+    # before the fusion every row is read after the last is stored
+    with pytest.raises(ValueError, match="no window is smaller than f"):
+        Schedule(K.declared).contract("f")
 
 
 def test_an_array_of_a_declared_dense_shape() -> None:

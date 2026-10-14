@@ -2300,14 +2300,7 @@ def _cast_classes(origin: Any, steps: Sequence[Any]) -> list[_Class]:
         window = step.window
         if window is None:
             continue
-        found = [
-            *win.accesses(term, window.array, [window.producer]),
-            *(
-                access
-                for access in win.accesses(term, window.array, window.readers)
-                if access.kind == "read"
-            ),
-        ]
+        found = win.window_accesses(term, window)
         for one in found:
             for other in found:
                 if one.kind == "read" and other.kind == "read":
@@ -2897,16 +2890,20 @@ def layout_same_obligation(first: Any, second: Any, verdict: Any) -> Any:
 def window_obligation(window: Any) -> Any:
     """The ``no-clobber`` fact of a :class:`loopty.schedule.Window`, for Lean.
 
-    One part per read of the array. Three instances, each in its domain and
-    through every step taken before the window: a read ``r``, the
-    producer's instance ``w`` that stored the cell it reads, and another of
-    its instances ``v`` that stored a different cell into the same slot,
-    after ``w``. Then ``v`` does not run before ``r``, in the order the
-    steps leave: their time vectors do not compare that way. The slot is
-    the placement, a term with ``%`` and ``//`` by numbers, which ``omega``
-    reads; the time vectors are those the checker's order has
-    (:func:`_time`). A refused window is stated with isl's triple, at which
-    Lean proves the part false.
+    One part per read of the array, and per two of its producers where
+    several store it. Three instances, each in its domain and through every
+    step taken before the window: a read ``r``, a producer's instance ``w``
+    that stored the cell it reads, and an instance ``v`` of a producer that
+    stored a different cell into the same slot, after ``w``. Then ``v`` does
+    not run before ``r``, in the order the steps leave: their time vectors
+    do not compare that way. The slot is the placement, a term with ``%``
+    and ``//`` by numbers, which ``omega`` reads; the time vectors are those
+    the checker's order has (:func:`_time`). A refused window is stated with
+    isl's triple, at which Lean proves the part false.
+
+    ``w`` is any instance that stored the cell, not only the last before
+    the read, which claims more than the window needs where a cell is stored
+    twice, and is what isl decided (:func:`loopty.window.clobbers`).
     """
     from loopty import window as win
 
@@ -2914,7 +2911,7 @@ def window_obligation(window: Any) -> Any:
     origin = window.schedule
     steps = tuple(window.steps)
     term = origin._term
-    producer = window.producer
+    producers = tuple(window.producers)
     placement = window.placement
     assumed = steps[-1].assumptions if steps else ()
     found = [
@@ -2925,50 +2922,61 @@ def window_obligation(window: Any) -> Any:
     parts = []
     try:
         for k, access in enumerate(found):
-            claim = Claim(term)
-            claim.hypotheses.extend(assumed)
-            chain_r = _chain(claim, origin, access.stmt, steps, "r")
-            chain_w = _chain(claim, origin, producer, steps, "w")
-            chain_v = _chain(claim, origin, producer, steps, "v")
-            at_r = _footprint_place(
-                claim,
-                access.stmt,
-                list(chain_r[0].values()),
-                access.inames,
-                access.domain,
-                "s",
-            )
-            read = [_renamed(i, access.inames, at_r) for i in access.indices]
-            stored = [
-                _renamed(i, producer.inames, list(chain_w[0].values()))
-                for i in producer.assignee.indices
-            ]
-            other = [
-                _renamed(i, producer.inames, list(chain_v[0].values()))
-                for i in producer.assignee.indices
-            ]
-            last = len(steps)
-            time_r = _stage_time(origin, steps, last, access.stmt.id, chain_r[-1])
-            time_w = _stage_time(origin, steps, last, producer.id, chain_w[-1])
-            time_v = _stage_time(origin, steps, last, producer.id, chain_v[-1])
-            claim.hypotheses += [
-                _equal(read, stored),
-                _equal(placement.at(other), placement.at(stored)),
-                LogicalNot(_equal(other, stored)),
-                lexicographically_before(time_w, time_v),
-            ]
-            overwritten = lexicographically_before(time_v, time_r)
-            goal = (
-                not overwritten
-                if isinstance(overwritten, bool)
-                else LogicalNot(overwritten)
-            )
-            cell = f"{window.array}[{', '.join(render(i) for i in access.indices)}]"
-            label = (
-                f"{access.stmt.id} reads {cell} before another cell is stored in "
-                f"its slot, {placement}"
-            )
-            parts.append(lanky.Part(f"read_{k}", label, claim.close(goal)))
+            for p, first in enumerate(producers):
+                for q, second in enumerate(producers):
+                    claim = Claim(term)
+                    claim.hypotheses.extend(assumed)
+                    chain_r = _chain(claim, origin, access.stmt, steps, "r")
+                    chain_w = _chain(claim, origin, first, steps, "w")
+                    chain_v = _chain(claim, origin, second, steps, "v")
+                    at_r = _footprint_place(
+                        claim,
+                        access.stmt,
+                        list(chain_r[0].values()),
+                        access.inames,
+                        access.domain,
+                        "s",
+                    )
+                    read = [_renamed(i, access.inames, at_r) for i in access.indices]
+                    stored = [
+                        _renamed(i, first.inames, list(chain_w[0].values()))
+                        for i in first.assignee.indices
+                    ]
+                    other = [
+                        _renamed(i, second.inames, list(chain_v[0].values()))
+                        for i in second.assignee.indices
+                    ]
+                    last = len(steps)
+                    time_r = _stage_time(
+                        origin, steps, last, access.stmt.id, chain_r[-1]
+                    )
+                    time_w = _stage_time(origin, steps, last, first.id, chain_w[-1])
+                    time_v = _stage_time(origin, steps, last, second.id, chain_v[-1])
+                    claim.hypotheses += [
+                        _equal(read, stored),
+                        _equal(placement.at(other), placement.at(stored)),
+                        LogicalNot(_equal(other, stored)),
+                        lexicographically_before(time_w, time_v),
+                    ]
+                    overwritten = lexicographically_before(time_v, time_r)
+                    goal = (
+                        not overwritten
+                        if isinstance(overwritten, bool)
+                        else LogicalNot(overwritten)
+                    )
+                    cell = (
+                        f"{window.array}"
+                        f"[{', '.join(render(i) for i in access.indices)}]"
+                    )
+                    label = (
+                        f"{access.stmt.id} reads {cell} before another cell is "
+                        f"stored in its slot, {placement}"
+                    )
+                    name = f"read_{k}"
+                    if len(producers) > 1:
+                        name = f"read_{k}_{p}_{q}"
+                        label += f", stored by {first.id}, then by {second.id}"
+                    parts.append(lanky.Part(name, label, claim.close(goal)))
     except Unstatable as exc:
         return _declined(str(exc))
     counterexample = None
@@ -2993,23 +3001,30 @@ def _window_refusal(
     if not triple or not 0 <= k < len(found) or found[k].part == "sum":
         return None
     access = found[k]
-    part = next((p for p in parts if p.name == f"read_{k}"), None)
+    (reader, at), (stored_by, stored), (written_by, other), params = triple
+    producers = {producer.id: producer for producer in window.producers}
+    if stored_by not in producers or written_by not in producers:
+        return None
+    name = f"read_{k}"
+    if len(producers) > 1:
+        ids = list(producers)
+        name = f"read_{k}_{ids.index(stored_by)}_{ids.index(written_by)}"
+    part = next((p for p in parts if p.name == name), None)
     if part is None:
         return None
-    (reader, at), (_, stored), (_, other), params = triple
     try:
         values = dict(params)
         for stmt, coords, tag in (
             (access.stmt, at, "r"),
-            (window.producer, stored, "w"),
-            (window.producer, other, "v"),
+            (producers[stored_by], stored, "w"),
+            (producers[written_by], other, "v"),
         ):
             values |= _stages(origin, stmt, steps, coords, params, tag, part)
     except (Unstatable, isl.Error, KeyError, ValueError):
         return None
     text = (
-        f"{reader}{_shown(at)}, {window.producer.id}{_shown(stored)} and "
-        f"{window.producer.id}{_shown(other)} at "
+        f"{reader}{_shown(at)}, {stored_by}{_shown(stored)} and "
+        f"{written_by}{_shown(other)} at "
         + ", ".join(f"{k}={v}" for k, v in params.items())
     )
     return _counterexample(part, values, text)

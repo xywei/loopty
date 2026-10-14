@@ -243,22 +243,39 @@ def test_a_placement_is_quasi_affine_in_the_indices(placement, error, words) -> 
 
 def test_a_tag_before_the_window_is_refused_and_one_after_is_checked() -> None:
     # A window is taken over an order, so a loop that runs its instances in
-    # none (ilp, here on the row of the first pass) refuses it. The elements
-    # of the passes are independent, but a window of one row shared by every
-    # element is not, and a group axis after it is refused with the pair.
+    # none (ilp, here on the row of the first pass) refuses it. A tag after
+    # it is checked against its slots: on C the row is each work item's own
+    # (#214), so the elements on a group axis keep one row each.
     example = load(ROOT / "examples" / "sum_factorization.py")
     fused = example.fused
     assert ("monotone", "decided") in facts(fused.tag(b="ilp"))[-3:]
     with pytest.raises(ValueError, match="b on ilp runs its instances in no order"):
         fused.tag(b="ilp").contract("v")
+    on_groups = fused.contract("v").tag(e="g.0")
+    (monotone,) = [f for f in on_groups.facts()[-3:] if f.kind == "monotone"]
+    assert monotone.status is Status.DECIDED
+    assert monotone.statement.endswith("forward, within one work item")
+
+
+def test_a_window_of_a_size_on_opencl_is_shared_and_a_group_axis_refused() -> None:
+    # A row of n cells is kept in global memory on OpenCL, one for every work
+    # item, so two elements on two work groups store into one slot of it.
+    pytest.importorskip("pyopencl")
+    example = load(ROOT / "examples" / "sum_factorization.py")
+    on_device = example.fused.retarget("opencl").contract("v")
+    assert not on_device.windows["v"].private
     with pytest.raises(IllegalCast) as caught:
-        fused.contract("v").tag(e="g.0")
-    # two elements store into one slot, and the group axis orders them not
+        on_device.tag(e="g.0")
+    message = str(caught.value)
     assert (
         "stores v[0, 0, 0] in slot 0 of the window lambda e, a, b: b, which "
         "along_r.S0[e=1, a=0, b=0]"
-    ) in str(caught.value)
-    assert "overwrite" in str(caught.value)
+    ) in message
+    assert message.endswith(
+        "; v is kept in a window over the order this tag drops, in global "
+        "memory, one for every work item, since its size is not a number; a "
+        "window of a number of cells is each work item's own"
+    )
 
 
 @kernel
@@ -508,6 +525,9 @@ def test_a_loop_run_backwards_takes_its_window_and_a_window_refuses_it() -> None
     [("c", "ilp"), ("opencl", "l.0"), ("opencl", "g.0"), ("opencl", "vec")],
 )
 def test_the_loop_of_a_window_on_a_parallel_axis_is_refused(target, tag) -> None:
+    # On a hardware axis the window is each work item's own, and the read of
+    # f[j - 2] is on another work item than its store; ilp and vec run the
+    # loop in one work item, in no order.
     if target == "opencl":
         pytest.importorskip("pyopencl")
     on_device = Schedule(WINDOWS.burgers, target=target, sizes={"n": 16}).fuse(
@@ -516,7 +536,10 @@ def test_the_loop_of_a_window_on_a_parallel_axis_is_refused(target, tag) -> None
     with pytest.raises(IllegalCast) as caught:
         on_device.contract("f").tag(j=tag)
     assert str(caught.value).endswith(
-        "; f is kept in a window over the order this tag drops"
+        "each work item keeps a window of f of its own, which no other work item "
+        "sees"
+        if tag in ("l.0", "g.0")
+        else "; f is kept in a window over the order this tag drops"
     )
     # so is the inner loop of a split of it
     with pytest.raises(IllegalCast):

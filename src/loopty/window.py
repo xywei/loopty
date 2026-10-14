@@ -12,31 +12,44 @@ and ``f[j]`` are all that has to be kept, and ``f`` can live in three slots,
 A *placement* says where each cell is kept: a function from the indices of a
 cell to the indices of its slot, written in Python, ``lambda j: j % 3``. It
 is quasi-affine, a sum of the indices times numbers with ``//`` and ``%`` by
-a number, so isl can state it, and so can Lean.
+a number, so isl can state it, and so can Lean. The cells of an array over a
+domain are the domain's points, and its placement takes the domain's
+binders: sumpy's L2P keeps one box's triangle of ``R`` over ``Where[i:
+Fin(nb), a: Fin(11), b: Fin(11), a + b <= 10]`` as ``lambda i, a, b: (a,
+b)``, in the 11 x 11 box the triangle spans.
 
-Whether a placement is safe is a question about the schedule as it stands,
-and isl decides it: *no read sees its slot overwritten*. A read of a cell
-``c``, stored by the producer's instance ``w``, is safe unless another
-instance ``w'`` of the producer stores a cell ``c' != c`` in the same slot
-after ``w`` and before the read. The question is the emptiness of
+The array may be stored by several statements (a copy where ``a < 2`` and a
+recurrence elsewhere), and a statement that stores it may read it, as the
+recurrence ``R[i, a, b] = -R[i, a - 2, b + 2]`` does. Whether a placement is
+safe is a question about the schedule as it stands, and isl decides it: *no
+read sees its slot overwritten*. A read of a cell ``c``, stored by an
+instance ``w``, is safe unless an instance ``w'`` stores a cell ``c' != c``
+in the same slot after ``w`` and before the read. The question is the
+emptiness of
 
     { (r, w') : exists w: r reads the cell w stores,
                 slot(cell(w')) = slot(cell(w)), cell(w') != cell(w),
                 w before w' before r }
 
-with "before" the order the schedule runs, and Lean states it from loopty's
-own description as a universal over three instances: their domains, the
-cells their accesses name, the placement, and the time vectors of the steps
-taken. Together with the strict definedness of the array (every cell read
-was stored by the producer before the read) it is what makes the window
-compute what the array did.
+with "before" the order the schedule runs and ``w`` and ``w'`` instances of
+any statement that stores the array, and Lean states it from loopty's own
+description as a universal over three instances: their domains, the cells
+their accesses name, the placement, and the time vectors of the steps taken.
+Together with the strict definedness of the array (every cell read was
+stored before the read) it is what makes the window compute what the array
+did.
 
 The window is kept safe by the steps that follow: the pairs of accesses that
 touch one slot, at least one of them a write, are dependences of the schedule
 from then on, in the order it ran them when the window was taken (see
 :func:`slot_dependences`). A later step that runs one of them backwards is
-refused with its pair, as every cast is, and one that puts two of them on two
-work items is refused too.
+refused with its pair, as every cast is. A window of a number of cells is
+each work item's own, as loopy keeps a private temporary, so two accesses
+on two work items touch two windows and need no order: the boxes of the L2P
+on a group axis each keep a triangle. A read is refused there where the
+store of its cell is on another work item. A window of a size, ``f_window[n]``, is
+one in global memory on OpenCL, for every work item, and a step that puts
+two accesses of one slot of it on two work items is refused with the pair.
 
 A window keeps a value stored once per cell. An update, ``f[j] += v`` or a
 scatter-add ``f[cell[c, k]] += v``, adds to the zeros the array was made
@@ -86,6 +99,7 @@ __all__ = [
     "infer",
     "live_pairs",
     "placement_of",
+    "window_accesses",
 ]
 
 
@@ -367,23 +381,46 @@ def accesses(term: Term, array: str, stmts: Sequence[Stmt]) -> list[Access]:
     return sorted(out, key=lambda access: access.kind != "write")
 
 
+def window_accesses(term: Term, window: Any) -> list[Access]:
+    """Every access of a window's array: its producers' stores, then the reads.
+
+    The reads are its readers', a producer that reads the array among them
+    (a recurrence, ``R[i, a, b] = -R[i, a - 2, b + 2]``), each read once.
+    """
+    return [
+        *(
+            access
+            for access in accesses(term, window.array, window.producers)
+            if access.kind == "write"
+        ),
+        *(
+            access
+            for access in accesses(term, window.array, window.readers)
+            if access.kind == "read"
+        ),
+    ]
+
+
 def preconditions(
     term: Term,
     array: str,
     gone: frozenset[str],
     text: str,
-) -> tuple[Stmt, list[Stmt]]:
-    """The producer and the readers of ``array``, or why it cannot be contracted.
+) -> tuple[list[Stmt], list[Stmt]]:
+    """The producers and the readers of ``array``, or why it cannot be contracted.
 
     The array is one the program made (``Arr.zeros_like``, ``Arr.zeros``),
-    which no caller sees; one statement stores it besides its zeros, once per cell
-    (``assign``, at indices isl reads exactly, under no guard isl cannot
-    state), and reads none of it: not an update, ``f[j] += v``, which adds
-    to the zeros a window drops; and every other statement that reads it
-    reads it in a value, at indices isl reads exactly, not in a guard or in
-    the subscript of what it stores, since a window is safe only where the
-    order of the reads is the instances'. Each is a :class:`WindowError`
-    naming what stands in the way.
+    which no caller sees. The statements that store it besides its zeros
+    are its producers, one or several (``R[i, a, b] = C[i, a, b]`` where
+    ``a < 2`` and the recurrence ``R[i, a, b] = -R[i, a - 2, b + 2]``
+    elsewhere), and each stores a value (``assign``, at indices isl reads
+    exactly, under no guard isl cannot state): not an update, ``f[j] +=
+    v``, which adds to the zeros a window drops. Every statement that reads
+    it, a producer of it included, reads it in a value, at indices isl reads
+    exactly, not in a guard or in the subscript of what it stores, since a
+    window is safe only where the order of the reads is the instances'.
+    Each is a :class:`WindowError` naming what stands in the way. A
+    producer that reads the array, a recurrence, is among the readers.
     """
     if array not in dict(term.temporaries) or array in dict(term.checks):
         what = (
@@ -404,56 +441,49 @@ def preconditions(
         if stmt.assignee.array == array and stmt.id not in gone
     ]
     producers = [stmt for stmt in writers if stmt.id != zeros]
-    if len(producers) != 1:
-        which = ", ".join(stmt.id for stmt in producers) or "no statement"
+    if not producers:
         raise WindowError(
-            f"{text}: {array} is written by {which}, and a window keeps the cells "
-            "one statement stores"
+            f"{text}: nothing in {term.name} stores {array} but its zeros, which a "
+            "window does not keep"
         )
-    (producer,) = producers
-    if producer.kind != "assign":
-        # An update, f[j] += v, starts from the zeros, which a window drops,
-        # and its slot holds another cell when the next cell's first update
-        # comes: the window would add to that cell's value (#213).
-        shown = ", ".join(str(index) for index in producer.assignee.indices)
-        cell = f"{array}[{shown}]"
-        fix = (
-            f"store each cell once, {cell} = ... (a reduce_sum where the updates "
-            f"run over a loop), or keep {array} whole"
-            if affine_indices(producer.assignee.indices)
-            else f"keep {array} whole"
-        )
-        raise WindowError(
-            f"{text}: {producer.id} updates {cell} in place, starting from the "
-            f"zeros {array} was made with, and a window keeps a value stored "
-            f"once, without them; {fix}"
-        )
-    if not affine_indices(producer.assignee.indices):
-        shown = ", ".join(str(index) for index in producer.assignee.indices)
-        raise WindowError(
-            f"{text}: {producer.id} stores {array}[{shown}], an index isl cannot "
-            "read, so which slot it stores into is not known"
-        )
-    if producer.unnarrowed:
-        conjuncts = ", ".join(conjunct for conjunct, _why in producer.unnarrowed)
-        raise WindowError(
-            f"{text}: {producer.id} stores {array} under a guard isl cannot state "
-            f"({conjuncts}), so which cells it stores is not known"
-        )
-    if any(access.kind == "read" for access in accesses(term, array, [producer])):
-        raise WindowError(
-            f"{text}: {producer.id} reads {array} as well as storing it, and a "
-            "window is taken of an edge between a writer and its readers"
-        )
+    for producer in producers:
+        if producer.kind != "assign":
+            # An update, f[j] += v, starts from the zeros, which a window drops,
+            # and its slot holds another cell when the next cell's first update
+            # comes: the window would add to that cell's value (#213).
+            shown = ", ".join(str(index) for index in producer.assignee.indices)
+            cell = f"{array}[{shown}]"
+            fix = (
+                f"store each cell once, {cell} = ... (a reduce_sum where the "
+                f"updates run over a loop), or keep {array} whole"
+                if affine_indices(producer.assignee.indices)
+                else f"keep {array} whole"
+            )
+            raise WindowError(
+                f"{text}: {producer.id} updates {cell} in place, starting from the "
+                f"zeros {array} was made with, and a window keeps a value stored "
+                f"once, without them; {fix}"
+            )
+        if not affine_indices(producer.assignee.indices):
+            shown = ", ".join(str(index) for index in producer.assignee.indices)
+            raise WindowError(
+                f"{text}: {producer.id} stores {array}[{shown}], an index isl "
+                "cannot read, so which slot it stores into is not known"
+            )
+        if producer.unnarrowed:
+            conjuncts = ", ".join(conjunct for conjunct, _why in producer.unnarrowed)
+            raise WindowError(
+                f"{text}: {producer.id} stores {array} under a guard isl cannot "
+                f"state ({conjuncts}), so which cells it stores is not known"
+            )
     readers = [
         stmt
         for stmt in term.stmts
         if stmt.id not in gone
-        and stmt is not producer
         and stmt.id != zeros
         and any(access.kind == "read" for access in accesses(term, array, [stmt]))
     ]
-    if not readers:
+    if all(any(reader is producer for producer in producers) for reader in readers):
         raise WindowError(f"{text}: nothing in {term.name} reads {array}")
     for reader in readers:
         if _in(reader.guard, array) or any(
@@ -471,7 +501,7 @@ def preconditions(
                     f"{text}: {reader.id} reads {array}[{shown}], an index isl "
                     "cannot read, so which slot it reads is not known"
                 )
-    return producer, readers
+    return producers, readers
 
 
 # }}}
@@ -716,7 +746,7 @@ def _offset(index: Any, loop: str) -> int | None:
 def register_plan(
     kernel: Any,
     array: str,
-    producer: str,
+    producers: Sequence[str],
     placement: Placement,
     skip: Sequence[str] = (),
     names: Mapping[str, str] | None = None,
@@ -725,12 +755,13 @@ def register_plan(
 
     A shift register keeps a window along one loop: the placement takes one
     axis modulo a number and drops the others, and every access of the array
-    in the kernel, at that axis, is the loop plus a number. The producer
-    stores the newest cell, the largest offset; the reads are at offsets no
-    larger, and the register count is the span of the offsets. The
-    instructions ``skip`` (the zeros the window drops) are not asked about.
-    ``names`` gives the statement each instruction is, for the reason.
-    Returns ``(loop, lowest offset, count)``, or the reason in words.
+    in the kernel, at that axis, is the loop plus a number. The producers
+    (their instructions) store the newest cell, the largest offset; the
+    reads are at offsets no larger, and the register count is the span of
+    the offsets. The instructions ``skip`` (the zeros the window drops) are
+    not asked about. ``names`` gives the statement each instruction is, for
+    the reason. Returns ``(loop, lowest offset, count)``, or the reason in
+    words.
     """
     shown = dict(names or {})
 
@@ -777,20 +808,25 @@ def register_plan(
             continue
         finder = _Find(insn)
         insn.with_transformed_expressions(lambda e, f=finder: (f(e), e)[1])
-    writes = [index for insn, index in found if insn.id == producer]
-    if not writes:
-        return f"{said(producer)} stores no cell of {array} the kernel can find"
-    loops = sorted(
-        loop
-        for loop in next(insn for insn, _ in found if insn.id == producer).within_inames
-        if _offset(writes[0][axis], loop) is not None
-    )
-    if len(loops) != 1:
-        return (
-            f"{said(producer)} stores {array} at no index that is a loop plus a "
-            "number, which is what a shift register shifts along"
+    stored_by = set(producers)
+    loop: str | None = None
+    for producer in producers:
+        writes = [index for insn, index in found if insn.id == producer]
+        if not writes:
+            return f"{said(producer)} stores no cell of {array} the kernel can find"
+        insn = next(insn for insn, _ in found if insn.id == producer)
+        loops = sorted(
+            name
+            for name in insn.within_inames
+            if _offset(writes[0][axis], name) is not None
         )
-    (loop,) = loops
+        if len(loops) != 1 or loop not in (None, loops[0]):
+            return (
+                f"{said(producer)} stores {array} at no index that is a loop plus a "
+                "number, which is what a shift register shifts along"
+            )
+        loop = loops[0]
+    assert loop is not None  # there is a producer
     offsets = []
     for insn, index in found:
         offset = _offset(index[axis], loop) if loop in insn.within_inames else None
@@ -800,14 +836,17 @@ def register_plan(
                 f"is not at {loop} plus a number, so its register would change "
                 "from step to step"
             )
-        offsets.append((insn.id == producer, offset))
+        offsets.append((insn.id in stored_by, offset))
     newest = max(offset for _, offset in offsets)
     stored = {offset for written, offset in offsets if written}
     if stored != {newest}:
-        return (
-            f"{said(producer)} stores a cell older than one it reads, and a "
-            "shift register's newest register is the one stored"
+        which = (
+            f"{said(producers[0])} stores a cell older than one it reads"
+            if len(producers) == 1
+            else f"{' and '.join(map(said, producers))} store a cell older than "
+            "one they read"
         )
+        return f"{which}, and a shift register's newest register is the one stored"
     lowest = min(offset for _, offset in offsets)
     count = newest - lowest + 1
     if count != modulus:
