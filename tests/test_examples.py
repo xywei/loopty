@@ -1339,6 +1339,11 @@ def test_the_l2p_demo_applies_its_theorem_to_what_reconstruct_stores() -> None:
     assert defined == [
         "every cell of C that reconstruct reads, unpack stored before it",
         "every cell of R that evaluate reads, reconstruct stored before it",
+        # and what each window keeps, the zeros the program made it with gone
+        "for contract('R'), every cell of R that l2p reads, reconstruct.S0 or "
+        "reconstruct.S1 has stored by the time it is read",
+        "for contract('C'), every cell of C that l2p reads, unpack.S0 or unpack.S1 "
+        "has stored by the time it is read",
     ]
 
 
@@ -1367,9 +1372,13 @@ def test_the_l2p_demo_refuses_the_interchange_and_fuses_box_by_box() -> None:
     result, _ = _invoke("l2p", "python")
     assert result.returncode == 0, result.stdout + result.stderr
     assert "largest error against the charges' potential: " in result.stdout
-    refusal = result.stdout.split("refused: ")[1].splitlines()[0]
-    assert refusal.startswith("interchange(b, a) illegal: instance S0[i=")
-    assert " writes R[" in refusal and " read by S1[i=" in refusal
+    refusals = [
+        line.split("refused: ")[1]
+        for line in result.stdout.splitlines()
+        if line.startswith("refused: ")
+    ]
+    assert refusals[0].startswith("interchange(b, a) illegal: instance S0[i=")
+    assert " writes R[" in refusals[0] and " read by S1[i=" in refusals[0]
     module = _module("l2p")
     steps = [fact.statement for fact in module.fused.facts()]
     assert steps == [
@@ -1382,18 +1391,46 @@ def test_the_l2p_demo_refuses_the_interchange_and_fuses_box_by_box() -> None:
         "of l2p forward",
     ]
     assert {fact.status.value for fact in module.fused.facts()} == {"decided"}
-    # one triangle per box is a window, not taken over an array over a domain
-    # (#244), and the substitution it would name is refused too: two
-    # statements store R
-    assert (
-        "refused: contract('R'): R is over the domain Where[i: Fin(nb), a: "
-        "Fin(11), b: Fin(11), a + b <= 10], whose cells a window does not place "
-        "yet; keep it whole\n"
-    ) in result.stdout
     assert "pot: difference 0 within" in result.stdout
 
 
-# }}}
+@needs_several_indices
+def test_the_l2p_demo_keeps_one_triangle_per_box_and_refuses_one_row() -> None:
+    # One box's triangle of R, over a domain (#244), stored by a copy and by
+    # the recurrence that reads it (#213): the window is found along the
+    # fused order, and one row of it is refused with the read it would break.
+    module = _module("l2p")
+    windows = module.contracted.windows
+    assert {name: repr(window.placement) for name, window in windows.items()} == {
+        "R": "lambda i, a, b: (a, b)",
+        "C": "lambda i, a, b: (a, b)",
+    }
+    assert windows["R"].extents == (11, 11) and windows["C"].extents == (2, 11)
+    added = module.contracted.facts()[len(module.fused.facts()) :]
+    assert [(fact.kind, fact.status.value) for fact in added] == [
+        ("definedness", "decided"),
+        ("no-clobber", "decided"),
+    ] * 2
+    assert [fact.statement for fact in added][:2] == [
+        "for contract('R'), every cell of R that l2p reads, reconstruct.S0 or "
+        "reconstruct.S1 has stored by the time it is read",
+        "no read of R sees its slot overwritten after contract('R', lambda i, a, "
+        "b: (a, b)): R kept in 121 cells, R[i, a, b] in slot (a, b)",
+    ]
+    result, _ = _invoke("l2p", "python")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (
+        "refused: contract('R', lambda i, a, b: b) illegal: instance "
+        "reconstruct.S1[i_0=0, a_0=9, b_0=0] reads R[0, 7, 2], which "
+        "reconstruct.S1[i_0=0, a_0=7, b_0=2] stored in slot 2, after "
+        "reconstruct.S1[i_0=0, a_0=8, b_0=2] stored R[0, 8, 2] there (at nb=1, "
+        "nl_cnt_i_1=0, isl's choice); contract('R') finds the smallest window "
+        "that keeps every read, lambda i, a, b: (a, b)\n"
+    ) in result.stdout
+    assert (
+        "on a device, each box a work group, as sumpy's own schedule: "
+        "tag(i='g.0'): 2 facts, all decided by isl\n"
+    ) in result.stdout
 
 
 # {{{ the QBX layer potential

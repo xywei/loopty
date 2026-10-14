@@ -423,7 +423,17 @@ def windows_and_arrays(target: str) -> list[tuple[Schedule, Schedule, dict]]:
             row_inputs(),
         ),
         (on(example.fused), on(example.contracted), example.inputs()),
+        (on(WINDOWS.boxed), on(WINDOWS.one_triangle), triangle_inputs()),
     ]
+    if target == "opencl":
+        # each box a work group, and its triangle the work item's own
+        out.append(
+            (
+                on(WINDOWS.boxed),
+                on(WINDOWS.one_triangle).tag(i="g.0"),
+                triangle_inputs(),
+            )
+        )
     return out
 
 
@@ -600,6 +610,91 @@ def test_a_window_and_a_substitution_through_it_are_refused_together() -> None:
         "contract('f'): substitute('g') computes g from f where g is read, so f "
         "is read there too, which a window is not taken over; keep f in a "
         "window or compute g where it is read, not both"
+    )
+
+
+# }}}
+
+
+# {{{ a triangle: over a domain, two writers, a recurrence, each work item's own
+
+
+def triangle_inputs(boxes: int = 3) -> dict:
+    rng = np.random.default_rng(0)
+    return {
+        "c": Arr.from_numpy(rng.random((boxes, 2, WINDOWS.Q))),
+        "s": Arr.zeros(boxes),
+    }
+
+
+def test_a_window_of_a_triangle_its_recurrence_reads_keeps_one_box() -> None:
+    # R is over Where[i, a, b, a + b <= P] (#244), stored by a copy of two
+    # rows and by the recurrence that reads the row two up (#213): fused on
+    # the boxes, one box's triangle is live at a time, in the 5 x 5 box it
+    # spans
+    windowed = WINDOWS.one_triangle
+    window = windowed.windows["R"]
+    assert repr(window.placement) == "lambda i, a, b: (a, b)"
+    assert window.extents == (5, 5) and window.private
+    assert [stmt.id for stmt in window.producers] == ["triangle.S0", "triangle.S1"]
+    assert [stmt.id for stmt in window.readers] == ["triangle.S1", "triangle_sums.S0"]
+    assert [(f.kind, f.status, f.statement) for f in windowed.facts()[-2:]] == [
+        (
+            "definedness",
+            Status.DECIDED,
+            "for contract('R'), every cell of R that triangles reads, triangle.S0 "
+            "or triangle.S1 has stored by the time it is read",
+        ),
+        (
+            "no-clobber",
+            Status.DECIDED,
+            "no read of R sees its slot overwritten after contract('R', lambda i, "
+            "a, b: (a, b)): R kept in 25 cells, R[i, a, b] in slot (a, b)",
+        ),
+    ]
+    assert "double R_window[5 * 5];" in emit_code(windowed)
+    agrees(WINDOWS.triangles, windowed, triangle_inputs())
+
+
+def test_a_window_the_recurrence_reads_past_is_refused_with_the_read() -> None:
+    assert WINDOWS.rejected_row() == (
+        "contract('R', lambda i, a, b: b) illegal: instance triangle.S1[i=2, a=3, "
+        "b=0] reads R[2, 1, 2], which triangle.S0[i=2, a=1, b=2] stored in slot "
+        "2, after triangle.S1[i=2, a=2, b=2] stored R[2, 2, 2] there (at nb=3, as "
+        "hinted); contract('R') finds the smallest window that keeps every read, "
+        "lambda i, a, b: (a, b)"
+    )
+    # before the fusion every box's triangle is read after the last is stored
+    with pytest.raises(ValueError) as caught:
+        Schedule(WINDOWS.triangles, sizes={"nb": 3}).contract("R")
+    assert str(caught.value).endswith(
+        "fuse its readers with triangle.S0 and triangle.S1 first, so that fewer "
+        "cells are live at once"
+    )
+    with pytest.raises(IllegalCast, match=r"stored in slot \(2, 2\), after"):
+        Schedule(WINDOWS.triangles, sizes={"nb": 3}).contract(
+            "R", lambda i, a, b: (a, b)
+        )
+
+
+def test_each_work_item_keeps_its_own_window_of_a_number_of_cells() -> None:
+    # each box a work group keeps its own triangle (#214), so two boxes'
+    # stores into one slot need no order
+    on_groups = WINDOWS.one_triangle.tag(i="g.0")
+    assert facts(on_groups)[-3:] == [
+        ("bijective", "decided"),
+        ("monotone", "decided"),
+        ("buildable", "refuted"),  # C has no work groups
+    ]
+    # but a read on another work item than its store does not see it
+    with pytest.raises(IllegalCast) as caught:
+        WINDOWS.one_triangle.tag(i="g.0", b="l.0")
+    assert str(caught.value) == (
+        "tag(i='g.0', b='l.0') illegal: instance triangle.S0[i=0, a=0, b=4] writes "
+        "R[0, 0, 4] read by triangle.S1[i=0, a=2, b=2] on another work item (at "
+        "nb=3, as hinted): the loop b on l.0 runs them on work items 4 and 2 of "
+        "it, and each work item keeps a window of R of its own, which no other "
+        "work item sees"
     )
 
 

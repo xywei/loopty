@@ -1006,6 +1006,10 @@ def _refused_casts() -> list[tuple[str, IllegalCast]]:
             "the loop run backwards after the window",
             lambda: windows.windowed.affine(windows.REVERSED),
         ),
+        (
+            "a row of the triangle, which the recurrence reads two rows up",
+            lambda: windows.boxed.contract("R", lambda i, a, b: b),
+        ),
     ]
     out = []
     for label, ask in asks:

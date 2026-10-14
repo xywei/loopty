@@ -6329,14 +6329,19 @@ class Schedule:
         """The reads of a cell of a work item's own window that its store is not on.
 
         ``dep`` is a read after a store of one cell of an array every work
-        item keeps a window of. The read sees the store only on one work item
-        with it: a store in no loop on the axis runs on every work item, its
-        reader's among them, and one in a loop on it runs on one. The pairs
-        that may be on two work items of ``axis``, for some start loopy cannot
-        say, are those it would not see.
+        item keeps a window of, and the read sees the store only on a work
+        item the store runs on too. A store in no loop on the axis runs on
+        every work item of it, and one in a loop on it on one, so a read on
+        every work item (in no loop on the axis) of a cell a loop on it
+        stored misses it on all work items but one. The pairs with a work
+        item of ``axis`` the read runs on and the store does not, for some
+        start loopy cannot say, are those the read would not see.
         """
-        shared = self._shared(dep, reindex, work, axis)
-        return self._some_start(dep.relation.subtract(shared), work).coalesce()
+        stores = reindex.apply_range(work.placed(dep.source_part, axis))
+        reads = reindex.apply_range(work.placed(dep.sink_part, axis))
+        elsewhere = isl.Map.universe(stores.get_space()).subtract(stores)
+        missed = elsewhere.apply_range(reads.reverse())
+        return self._some_start(dep.relation.intersect(missed), work).coalesce()
 
     def _first_violation(
         self, schedule: isl.Map, deps: Sequence[_Dep] | None = None
