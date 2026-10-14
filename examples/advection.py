@@ -32,7 +32,9 @@ theorems are that rearrangement, for every order; that ``M^-1`` is the
 mass's inverse is a property of the tables, which ``main`` checks. The same
 kernels take the tables of the GLL quadrature's mass, which Alvey-Blanco's
 matched right-hand side and libParanumal use: there ``L`` is a face node's
-own weight and nothing else.
+own weight and nothing else, and the lift adds each face node's flux into
+the node it sits on. A third theorem says that lift is the transpose of the
+face gather the flux reads through, and so keeps the total.
 
 What the right-hand side reads, per element ``e`` of a periodic mesh:
 
@@ -75,6 +77,8 @@ What is worth reading here
 *The face gather.* ``u[nbr[e, f], outside[f, a, b, 0], ...]`` reads the
 neighbor's node through the face maps, and every subscript is in bounds by
 type: ``nbr`` holds points of ``Fin[ne]``, ``outside`` points of ``Fin[n]``.
+Its transpose is the lift onto the face nodes, a theorem for every order
+(``lift_is_the_gather_transposed``) that ``main`` checks on these maps.
 
 *How deep the fusion goes.* The lift at node ``(k, j, i)`` reads the fluxes
 of the six faces through it, which the flux kernel stores at other ``(a,
@@ -192,6 +196,42 @@ def lift_inward(
     the inverse mass; the right side is the column ``M^-1 end`` along ``r``
     times ``M^-1 M`` on the face's two axes, which is ``lift``'s term for
     that face where ``M^-1`` is the mass's inverse.
+    """
+
+
+@theorem
+def lift_is_the_gather_transposed(
+    faces: Nat,
+    n: Nat,
+    nodes: Nat,
+    node: Fn[Fin[faces], Fin[n], Fin[n], Fin[nodes]],
+    g: Fn[Fin[faces], Fin[n], Fin[n], Real],
+    u: Fn[Fin[nodes], Real],
+) -> sum(
+    sum(
+        g[f, a, b]
+        for f in Fin[faces]
+        for a in Fin[n]
+        for b in Fin[n]
+        if node[f, a, b] == x
+    )
+    * u[x]
+    for x in Fin[nodes]
+) == sum(
+    g[f, a, b] * u[node[f, a, b]] for f in Fin[faces] for a in Fin[n] for b in Fin[n]
+):
+    """Lifting the faces' values onto the nodes is the transpose of reading them there.
+
+    ``node[f, a, b]`` is the element's node at face node ``(a, b)`` of face
+    ``f`` (``inside``, its three indices one node number, and ``faces`` six
+    on a hexahedron), ``g`` a value at
+    every face node and ``u`` a field. The inner sum is what the face nodes
+    at node ``x`` add into it, as ``lift_on_faces`` adds each face's flux;
+    the right side reads ``u`` at the face nodes, as ``upwind`` reads the
+    element's own values. Paired with any ``u``, the two agree, on every
+    element and at every order: the lift is the gather's transpose. With
+    ``u = 1`` it keeps the total, so what the faces lift onto an element is
+    what they hold.
     """
 
 
@@ -791,6 +831,27 @@ def main() -> int:
         f"grudge's, inverse mass and all, to 1e-13 of the largest value: {native} "
         f"(M^-1 M is the identity: {inverse})"
     )
+    # the third theorem on these face maps: with unit ends and no 1/J,
+    # lift_on_faces takes each face node's value from the node it sits on
+    rng = np.random.default_rng(0)
+    shape = data["u"].numpy().shape
+    values = rng.normal(size=data["sJ"].numpy().shape)
+    lifted = Arr.zeros(shape)
+    lift_on_faces(
+        Arr.from_numpy(np.ones(2)),
+        Arr.from_numpy(np.ones(shape)),
+        Arr.from_numpy(values),
+        lifted,
+    )
+    field = rng.normal(size=shape)
+    inside, _ = face_maps()
+    at_faces = field[:, inside[..., 0], inside[..., 1], inside[..., 2]]
+    paired = -(lifted.numpy() * field).sum()
+    transposed = bool(np.isclose(paired, (values * at_faces).sum(), rtol=1e-12))
+    print(
+        "the lift onto the face nodes is the transpose of the face gather on these "
+        f"maps: {transposed}"
+    )
     print()
 
     # one loop deeper than fused: the fluxes on the loops of the nodes
@@ -842,7 +903,8 @@ def main() -> int:
                 f"  {split}: {schedule.term.name}, {len(schedule.history)} steps: "
                 f"{len(cast)} facts, all {cast[0].status.value}"
             )
-    return 0 if native and inverse and kept.status.value == "tested" and legal else 1
+    good = native and inverse and transposed and legal
+    return 0 if good and kept.status.value == "tested" else 1
 
 
 if __name__ == "__main__":

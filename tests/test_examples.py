@@ -1271,6 +1271,7 @@ def test_the_advection_demo_refuses_the_deeper_fusion_and_runs_every_split() -> 
     out = result.stdout
     assert "inverse mass and all, to 1e-13 of the largest value: True" in out
     assert "M^-1 M is the identity: True" in out
+    assert "the transpose of the face gather on these maps: True" in out
     assert "refused: fuse(upwind, volume) illegal: instance upwind.S0" in out
     assert "fuse('upwind', 'volume', loops=1) runs every dependence" in out
     assert "flux kept in lambda" in out and "-> tested" in out
