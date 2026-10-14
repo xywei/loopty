@@ -52,15 +52,18 @@ NAMES = (
     "assembly",
     "storage_layouts",
     "l2p",
+    "hexahedra",
 )
 
 #: The families with several indices, ``Fn[Nat, Nat, Real]`` applied as
-#: ``D[a, b]``, that ``examples/l2p.py`` writes its theorems with, are lanky
-#: main's and not the 0.2.0 release's, which the released-lanky job installs.
+#: ``D[a, b]``, that ``examples/l2p.py`` writes its theorems with, and
+#: ``Fn[Fin[n], Fin[n], Real]`` applied as ``Fr[i, a]``, that
+#: ``examples/hexahedra.py`` writes its theorem with, are lanky main's and not
+#: the 0.2.0 release's, which the released-lanky job installs.
 SEVERAL_INDICES = hasattr(FnType, "indices")
 
 #: The demos that need them.
-NEEDS_SEVERAL_INDICES = {"l2p"}
+NEEDS_SEVERAL_INDICES = {"l2p", "hexahedra"}
 
 needs_several_indices = pytest.mark.skipif(
     not SEVERAL_INDICES,
@@ -184,9 +187,21 @@ KERNELS = {
     "layer_potential": {"single_layer"},
     "sum_factorization": {"along_r", "along_s", "weak_derivative"},
     "calls": {"dot", "matvec", "csr", "integrate", "element_mass", "mass_matrices"},
-    "assembly": {"mass_action"},
+    "assembly": {"mass_ffc", "mass_action"},
     "storage_layouts": {"stored_table", "unflatten"},
     "l2p": {"unpack", "reconstruct", "evaluate", "l2p"},
+    "hexahedra": {
+        "metric",
+        "contravariant",
+        "along_r",
+        "along_s",
+        "gradient_along_t",
+        "divergence_along_t",
+        "weak_grad",
+        "weak_div",
+        "metric_along_r",
+        "contravariant_along_r",
+    },
     "travel": {
         "number",
         "number_quiet",
@@ -966,6 +981,145 @@ def test_the_storage_layouts_demo_refutes_the_wrong_nesting() -> None:
 # }}}
 
 
+# {{{ hexahedra
+
+
+@needs_several_indices
+def test_the_hexahedra_demo_decides_its_layouts_and_its_programs() -> None:
+    result, facts = _invoke("hexahedra", "check")
+    assert result.returncode == 0, result.stdout + result.stderr
+    layouts = [
+        (fact["owner"], fact["kind"], fact["status"])
+        for fact in facts
+        if fact["kind"].startswith("layout")
+    ]
+    assert layouts == [
+        ("dof_array", "layout-in-bounds", "decided"),
+        ("dof_array", "layout-one-for-one", "decided"),
+        ("dof_array", "layout-onto", "decided"),
+        ("as_dim_tags", "layout-same", "decided"),
+        ("row_major", "layout-in-bounds", "decided"),
+        ("row_major", "layout-one-for-one", "decided"),
+        ("row_major", "layout-onto", "decided"),
+        ("as_row_major", "layout-same", "decided"),
+    ]
+    # every intermediate a program makes is read where its producer stored it
+    defined = [fact for fact in facts if fact["kind"] == "definedness"]
+    assert {fact["owner"] for fact in defined} == {
+        "weak_grad",
+        "weak_div",
+        "metric_along_r",
+        "contravariant_along_r",
+    }
+    assert all(fact["status"] == "decided" for fact in defined), defined
+    # nothing in the file is left to an assumption
+    assert "assumed" not in {fact["status"] for fact in facts}
+
+
+@needs_several_indices
+def test_the_hexahedra_layouts_are_loopys_strides_and_modepys_reshape() -> None:
+    # The layout facts are about loopty's reading of the dim_tags and of the
+    # DOFArray. This ties each reading to the code it stands for: the strides
+    # loopy itself computes for N3,N0,N1,N2, modepy's F-order reshape of an
+    # element's row, and numpy's row-major u[e, k, j, i].
+    import loopy as lp
+
+    module = _module("hexahedra")
+    n, ne = module.N, 3
+    kernel = lp.make_kernel(
+        f"{{[e, a, b, c]: 0 <= e < {ne} and 0 <= a, b, c < {n}}}",
+        "out[e, a, b, c] = 1",
+        [
+            lp.GlobalArg(
+                "out", np.float64, shape=(ne, n, n, n), dim_tags="N3,N0,N1,N2"
+            )
+        ],
+        target=lp.CTarget(),
+        lang_version=(2018, 2),
+    )
+    strides = [tag.stride for tag in kernel.default_entrypoint.arg_dict["out"].dim_tags]
+    address = " + ".join(f"{stride}*c{axis}" for axis, stride in enumerate(strides))
+    loopys = isl.Map(
+        f"[ne] -> {{ [c0, c1, c2, c3] -> [{address}] : "
+        f"0 <= c0 < ne and 0 <= c1, c2, c3 < {n} }}"
+    )
+    assert loopys.is_equal(module.as_dim_tags.second.relation()), strides
+    dof_array = np.arange(ne * n**3).reshape(ne, n**3)
+    row_major = np.arange(ne * n**3).reshape(ne, n, n, n)
+    for e, i, j, k in np.ndindex(ne, n, n, n):
+        stored = module.dof_array(e, i, j, k)
+        assert stored == dof_array[e].reshape(n, n, n, order="F")[i, j, k]
+        assert stored == row_major[e, k, j, i] == module.row_major(e, i, j, k)
+
+
+@needs_several_indices
+def test_the_hexahedra_theorem_holds_at_exact_matrices() -> None:
+    from fractions import Fraction
+
+    module = _module("hexahedra")
+    rng = np.random.default_rng(0)
+    n = 3
+
+    def exact(*shape: int) -> Any:
+        return np.vectorize(Fraction)(rng.integers(-4, 5, size=shape)).tolist()
+
+    Fr, Fs, Ft, u = exact(n, n), exact(n, n), exact(n, n), exact(n, n, n)
+    for k in range(n):
+        for j in range(n):
+            for i in range(n):
+                claim = module.sum_factorization(
+                    n=n, Fr=Fr, Fs=Fs, Ft=Ft, u=u, k=k, j=j, i=i
+                )
+                assert claim.holds, (k, j, i)
+
+
+@needs_several_indices
+@pytest.mark.parametrize("order", [1, 2, 3, 4, 5, 6])
+def test_the_hexahedra_factors_are_the_stiffness_and_the_mass(order: int) -> None:
+    # sum_j S^T[i, j] is the integral of the i-th basis function's derivative,
+    # its value at 1 minus its value at -1; the mass integrates 1 to 2
+    module = _module("hexahedra")
+    stiffness_t, mass = module.factors(order)
+    ends = np.zeros(order + 1)
+    ends[0], ends[-1] = -1.0, 1.0
+    assert np.allclose(stiffness_t.sum(axis=1), ends, atol=1e-12)
+    assert np.isclose(mass.sum(), 2.0)
+    assert np.allclose(mass, mass.T)
+    assert np.all(np.linalg.eigvalsh(mass) > 0)
+
+
+@needs_several_indices
+def test_the_hexahedra_demo_refuses_the_deeper_fusion_and_keeps_the_windows() -> None:
+    result, _ = _invoke("hexahedra", "python")
+    assert result.returncode == 0, result.stdout + result.stderr
+    out = result.stdout
+    assert "the passes are the dense Kronecker operators: True" in out
+    assert "refused: fuse(along_r, along_s) illegal: instance along_r.S0" in out
+    assert "fuse('along_r', 'along_s', loops=3) runs every dependence" in out
+    assert "w kept in n cells" in out
+    assert "v kept in n*n cells" in out
+    assert "grad: difference" in out and "-> tested" in out
+    assert out.count("all decided by isl") == 3
+
+
+@needs_several_indices
+def test_the_hexahedra_launches_are_legal_and_build_on_opencl(plain_opencl) -> None:
+    module = _module("hexahedra")
+    for operator in ("grad", "div"):
+        launches = module.passes_on_a_device(operator)
+        assert len(launches) == 3
+        for schedule in launches:
+            on_device = schedule.retarget("opencl")
+            assert on_device.buildable == (True, ""), on_device.buildable
+            statuses = {fact.status.value for fact in on_device.facts()}
+            assert statuses == {"decided"}, [
+                (fact.statement, fact.status.value) for fact in on_device.facts()
+            ]
+
+
+# }}}
+
+
 # {{{ travel
 
 
@@ -1077,11 +1231,14 @@ def test_the_assembly_demo_names_the_node_two_cells_share() -> None:
     result, _ = _invoke("assembly", "python")
     assert result.returncode == 0, result.stdout + result.stderr
     assert (
-        "PyOP2's two triangles: 2 cells, y agrees with the assembled matrix: True"
+        "PyOP2's two triangles: the cells' matrices sum to expected_matrix: True"
     ) in result.stdout
+    assert "and y is that matrix times u: True" in result.stdout
+    assert "y is the closed form: True" in result.stdout
+    assert "W3 and FE0 are the rule to 3.3e-16: True" in result.stdout
     assert (
-        "IllegalCast: tag(c_outer='g.0', c_inner='l.0') illegal: S1[c=0, k=2] and "
-        "S1[c=1, k=1] both update y[3] on example_inputs() (nc=2, nv=4), where "
+        "IllegalCast: tag(c_outer='g.0', c_inner='l.0') illegal: S1[c=0, a=2] and "
+        "S1[c=1, a=1] both update y[3] on example_inputs() (nc=2, nv=4), where "
         "cell[0, 2] = 3 and cell[1, 1] = 3"
     ) in result.stdout
     accepted = result.stdout.split("accepted: ")[1]
@@ -1092,22 +1249,53 @@ def test_the_assembly_demo_names_the_node_two_cells_share() -> None:
 
 def test_the_assembly_owes_its_sum_and_not_distinct_writes_of_y() -> None:
     _result, facts = _invoke("assembly", "check")
-    disjoint = [
-        fact["provenance"]["array"]
+    disjoint = {
+        (fact["owner"], fact["provenance"]["array"])
         for fact in facts
         if fact["kind"] == "disjoint-writes"
-    ]
-    assert disjoint == ["yl"]
-    # the kernel's own; the reassociation a schedule records has no op
+    }
+    assert disjoint == {("mass_ffc", "A"), ("mass_action", "Ae")}
     (update,) = [
         fact
         for fact in facts
-        if fact["kind"] == "exactness" and fact["provenance"].get("op") == "update"
+        # the kernel's own; the reassociation a schedule records has no op
+        if fact["kind"] == "exactness"
+        and fact["provenance"].get("op") == "update"
+        and fact["owner"] == "mass_action"
+        and "over c, a" in fact["statement"]
     ]
     assert update["statement"] == (
-        "the accumulation into y[cell[c, k]] over c, k is approx"
+        "the accumulation into y[cell[c, a]] over c, a is approx"
     )
     assert (update["status"], update["decided_by"]) == ("decided", "type")
+
+
+def test_the_assembly_calls_mass_ffc_per_cell_and_has_its_matrix_symmetric() -> None:
+    """The D3 form: the element kernel inlined per cell, its postcondition carried."""
+    _result, facts = _invoke("assembly", "check")
+    owned = [fact for fact in facts if fact["owner"] == "mass_action"]
+    (after,) = [
+        fact for fact in owned if fact["statement"].startswith("after each call")
+    ]
+    assert "mass_ffc(coords[cell[c]], Ae[c])" in after["statement"]
+    assert after["status"] == "decided"
+    # every read of the corners through the cell map is decided, none assumed
+    corners = [fact for fact in owned if fact["statement"].startswith("coords[")]
+    assert len(corners) == 6
+    assert {fact["status"] for fact in corners} == {"decided"}
+    # nothing is assumed but the schedule's assumption, nc a multiple of four
+    assumed = [fact for fact in facts if fact["status"] == "assumed"]
+    assert [fact["kind"] for fact in assumed] in ([], ["assumption"])
+
+
+def test_the_assembly_theorems_are_in_its_ledger() -> None:
+    """The rule, the element's mass and the scatter's total: proved with Mathlib."""
+    _result, facts = _invoke("assembly", "check")
+    claims = {
+        fact["owner"]: fact["status"] for fact in facts if fact["kind"] == "theorem"
+    }
+    assert set(claims) == {"exact_to_degree_two", "element_mass", "conservation"}
+    assert set(claims.values()) <= {"tested", "decided", "proved"}
 
 
 # }}}

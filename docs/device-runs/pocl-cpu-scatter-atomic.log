@@ -2,39 +2,42 @@ $ python -c "import pyopencl as cl; d = cl.create_some_context(interactive=False
 OpenCL 3.0 PoCL 7.0  Linux, Release, RELOC, SPIR-V, LLVM 19.1.7, SLEEF, CUDA, POCL_DEBUG | cpu-znver5-AMD EPYC 9335 32-Core Processor | ALL | CPU
 $ python docs/device-runs/scatter_atomic.py
 --- PyOP2's split, the updates not atomic
-  IllegalCast: tag(c_outer='g.0', c_inner='l.0') illegal: S1[c=0, k=2] and S1[c=1, k=1] both update y[3] on example_inputs() (nc=2, nv=4), where cell[0, 2] = 3 and cell[1, 1] = 3, and the loop c_inner on l.0 runs them on two work items, so one can overwrite what the other added; make the updates atomic, with atomic('y') before this step
+  IllegalCast: tag(c_outer='g.0', c_inner='l.0') illegal: S1[c=0, a=2] and S1[c=1, a=1] both update y[3] on example_inputs() (nc=2, nv=4), where cell[0, 2] = 3 and cell[1, 1] = 3, and the loop c_inner on l.0 runs them on two work items, so one can overwrite what the other added; make the updates atomic, with atomic('y') before this step
 --- PyOP2's split, atomic updates
-  Schedule(mass_action, target='opencl').atomic('y').split(c, 32).tag(c_outer='g.0', c_inner='l.0')
+  Schedule(mass_action, target='opencl').assume('nc >= 1').atomic('y').split(c, 32).tag(c_outer='g.0', c_inner='l.0')
   buildable: (True, '')
   PyOP2's two triangles: y differs by 0 within 1.13e-06 (approx) -> tested
   a square of 2 x 64 x 64 cells: y differs by 1.08e-19 within 1e-06 (approx) -> tested
   a square of 2 x 256 x 256 cells: y differs by 1.02e-20 within 1e-06 (approx) -> tested
 --- Sun et al.'s split, retargeted from C
-  Schedule(mass_action, target='opencl').atomic('y').split(c, 4).tag(c_inner='ilp')
+  Schedule(mass_action, target='opencl').assume('nc % 4 == 0').atomic('y').split(c, 4).tag(c_inner='ilp')
   buildable: (True, '')
-  PyOP2's two triangles: y differs by 0 within 1.13e-06 (approx) -> tested
   a square of 2 x 64 x 64 cells: y differs by 1.08e-19 within 1e-06 (approx) -> tested
-  a square of 2 x 256 x 256 cells: y differs by 1.02e-20 within 1e-06 (approx) -> tested
-  __kernel void __attribute__ ((reqd_work_group_size(32, 1, 1))) mass_action(int const nc, __global int const *__restrict__ cell, __global double const *__restrict__ X, __global double const *__restrict__ Y, __global double const *__restrict__ u, __global double *__restrict__ yl, __global volatile double *__restrict__ y)
-  while (atom_cmpxchg((__global long *) &(y[cell[3 * (32 * gid(0) + lid(0)) + k]]), *(long *) &loopy_old_val, *(long *) &loopy_new_val) != *(long *) &loopy_old_val);
+  a square of 2 x 256 x 256 cells: y differs by 6.78e-21 within 1e-06 (approx) -> tested
+  __kernel void __attribute__ ((reqd_work_group_size(32, 1, 1))) mass_action(int const nc, __global int const *__restrict__ cell, __global double const *__restrict__ coords, __global double const *__restrict__ u, __global double *__restrict__ Ae, __global volatile double *__restrict__ y)
+  while (atom_cmpxchg((__global long *) &(y[cell[3 * (32 * gid(0) + lid(0)) + a]]), *(long *) &loopy_old_val, *(long *) &loopy_new_val) != *(long *) &loopy_old_val);
 --- PyOP2's split compiled past the refusal, the updates racing
-  a square of 2 x 64 x 64 cells: largest error of y 0.000211, y at most 0.000481
-  a square of 2 x 256 x 256 cells: largest error of y 1.33e-05, y at most 3.04e-05
+  a square of 2 x 64 x 64 cells: largest error of y 0.000183, y at most 0.000481
+  a square of 2 x 256 x 256 cells: largest error of y 1.47e-05, y at most 3.04e-05
 ALL OK
 exit=0
 $ loopty run examples/assembly.py --target opencl
-mass_action: Schedule(mass_action, target='opencl').atomic('y').split(c, 4).tag(c_inner='ilp')
-  yl: difference 3.47e-18 within 1.01e-06 (approx) -> tested
-  y: difference 1.39e-17 within 1.07e-06 (approx) -> tested
+mass_action: Schedule(mass_action, target='opencl').assume('nc % 4 == 0').atomic('y').split(c, 4).tag(c_inner='ilp')
+  Ae: difference 0 within 1e-06 (approx) -> tested
+  y: difference 2.78e-17 within 1.09e-06 (approx) -> tested
+mass_ffc: Schedule(mass_ffc, target='opencl')
+  A: difference 0 within 1.13e-06 (approx) -> tested
 
-STATUS   BY     WHERE           OWNER        STATEMENT                                                               
--------  -----  --------------  -----------  ------------------------------------------------------------------------
-decided  isl    assembly.py:83  mass_action  split(c, 4) renames the instances of mass_action one for one
-decided  isl    assembly.py:83  mass_action  the order after split(c, 4) runs every dependence of mass_action forward
-decided  isl    assembly.py:83  mass_action  tag(c_inner='ilp') renames the instances of mass_action one for one
-decided  isl    assembly.py:83  mass_action  the order after tag(c_inner='ilp') runs every dependence of mass_acti...
-decided  isl    assembly.py:83  mass_action  atomic updates of y run at the same time after tag(c_inner='ilp'), so...
-tested   loopy  assembly.py:83  mass_action  the scheduled run of mass_action agrees with the native run to the ac...
+STATUS                               EFFECTIVE  BY     WHERE            OWNER        STATEMENT                                                               
+-----------------------------------  ---------  -----  ---------------  -----------  ------------------------------------------------------------------------
+assumed                              assumed    -      assembly.py:216  mass_action  nc % 4 == 0, which mass_action is scheduled assuming
+decided under assume('nc % 4 == 0')  assumed    isl    assembly.py:216  mass_action  split(c, 4) renames the instances of mass_action one for one
+decided under assume('nc % 4 == 0')  assumed    isl    assembly.py:216  mass_action  the order after split(c, 4) runs every dependence of mass_action forward
+decided under assume('nc % 4 == 0')  assumed    isl    assembly.py:216  mass_action  tag(c_inner='ilp') renames the instances of mass_action one for one
+decided under assume('nc % 4 == 0')  assumed    isl    assembly.py:216  mass_action  the order after tag(c_inner='ilp') runs every dependence of mass_acti...
+decided                              decided    isl    assembly.py:216  mass_action  atomic updates of y run at the same time after tag(c_inner='ilp'), so...
+tested                               tested     loopy  assembly.py:216  mass_action  the scheduled run of mass_action agrees with the native run to the ac...
+tested                               tested     loopy  assembly.py:216  mass_ffc     the scheduled run of mass_ffc agrees with the native run to the accur...
 
-6 facts: 5 decided, 1 tested
+8 facts: 1 assumed, 5 decided, 2 tested
 exit=0

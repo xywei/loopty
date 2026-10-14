@@ -358,7 +358,7 @@ time includes starting Lean.
 | `tests/kernels/domains.py` | 90 | 89 | 0 | 1 | 3.0 s |
 | `tests/kernels/out_of_bounds.py` | 4 | 3 | 0 | 1 | 0.1 s |
 | `tests/kernels/program_domains.py` | 15 | 15 | 0 | 0 | 0.5 s |
-| `tests/kernels/spmv_min.py` | 16 | 16 | 0 | 0 | 0.0 s |
+| `tests/kernels/spmv_min.py` | 16 | 16 | 0 | 0 | 0.1 s |
 | `tests/kernels/stencil.py` | 5 | 5 | 0 | 0 | 0.0 s |
 | `tests/kernels/travel.py` | 70 | 69 | 0 | 1 | 1.6 s |
 | `tests/kernels/travel_wrong.py` | 194 | 187 | 0 | 7 | 20.9 s |

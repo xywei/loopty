@@ -41,12 +41,6 @@ All notable changes to loopty are recorded here. The format follows
   (`-2**31`, `-2**63`), whose negation loopy's helper cannot take. `x ** n` of a real `x` stays numpy's power, the C
   library's `pow` in both runs; at the flagship's Taylor sum `ipow` is an
   order of magnitude faster on the C target (`benchmarks/l2p.py`).
-- The coverage report (`docs/lean-checks.md`) covers the flagship and the
-  upstream test kernels: of 1215 facts isl decides in 29 files, Lean proves
-  1170 in core Lean and confirms the counterexample of the 30 refuted ones;
-  the 15 left decided are claims about reals, and with Mathlib it proves
-  them too, 1185 in all. `examples/l2p.py` has 41: 40 proved with Mathlib,
-  and its refused interchange, whose negation Lean proves.
 - **`benchmarks/l2p.py`**, which times sumpy's own `E2PFromSingleBox`, the
   same algorithm written directly in plain loopy (loopy #970's L2P
   microkernel with the Laplace step put back, and variants that make
@@ -57,6 +51,26 @@ All notable changes to loopty are recorded here. The format follows
   alone), and each record names the flags it was built with. It also
   records sumpy's potential on the example's inputs, for the `upstream`
   row.
+- **The S3 demo: firedrake's PyOP2 assembly loop** (`examples/assembly.py`).
+  FFC's P1 mass kernel of firedrake's PyOP2 tests, `mass_ffc`, with its
+  15-digit tables as constant tables, is a kernel of its own, called inside
+  the loop over the cells as PyOP2 calls it, `mass_ffc(coords[cell[c]],
+  Ae[c])`, and the cell's matrix applied to `u` is added into the nodes,
+  `y[cell[c, a]] += ...`. The three identities the loop rests on are lanky
+  theorems in the same file, proved where Mathlib is installed: the 3-point
+  rule integrates every quadratic exactly, a cell's mass matrix is `|J| (1 +
+  delta_jk) / 24`, and the scatter keeps the total on every mesh. PyOP2's GPU
+  split is refused with the node its two test triangles share and accepted
+  once the updates are atomic, and both PyOP2 branches' schedules take the
+  assumptions their transforms make (`assume("nc >= 1")`, `assume("nc % 4
+  == 0")`). `benchmarks/assembly.py` times loopty's schedules against a
+  plain-loopy transcription of PyOP2's wrapper with Kulkarni's and Sun et
+  al.'s transforms applied, and with `--nested` against the transcription
+  given loopty's nesting of a cell's loops under the cell loop, which is
+  what decides where loopy puts the `ilp` loop of Sun et al.'s split
+  (interleaving the four cells, or running each whole); and
+  `benchmarks/assembly_agreement.py` compares
+  the example with firedrake's own assembly and PyOP2's own `par_loop`.
 
 - **A kernel's postcondition decided from what its statements store**
   (`loopty.dataflow`, #113). Where no cell of an array a kernel writes is
@@ -581,6 +595,21 @@ All notable changes to loopty are recorded here. The format follows
   `fill's loop n, inlined at ..., is n_0 here`.
 
 ### Fixed
+
+- A schedule's `ilp` or `vec` tag no longer has loopy warn, on every build,
+  that it falls back to its first scheduler, which it does for every kernel
+  with such a loop: the tag silences `v1_scheduler_fallback` on the kernel
+  it makes. The warning opened `python examples/assembly.py` and
+  `python examples/layer_potential.py` on a fresh checkout.
+- An array of several axes read only through an index array,
+  `coords[cell[c, k], d]` with `nv` in no loop bound, is declared with its
+  strides, `stride:2,stride:1`, so that loopy indexes its rows; it was
+  declared without a shape, and loopy refused the read.
+- An access with mixed subscripts that a statement reads twice over one
+  domain, `x[0, 0]` read for two entries of an inlined Jacobian, is one
+  place, decided by isl; it was `assumed`.
+- A schedule's assumption is named `assume('nc % 4 == 0')` in the status of
+  the casts that rest on it (with lanky's `label`), where its whole id was.
 
 - A write through a cell read from an array, `y[perm[i]] = x[i]`, no longer
   has its distinct writes refuted by isl with two instances that write no
