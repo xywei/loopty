@@ -28,7 +28,7 @@ marked with `...` is an excerpt and the lines it keeps are checked verbatim.
 | `travel.py` | facts that travel between a program's calls: a requirement decided under the postcondition of the call before, one checked by the compiled program between the calls, and a flat access in bounds where it follows the scan |
 | `fusion.py` | the program of `composition.py` with its two loops fused into one, a fusion one step too early refused with its pair, the intermediate computed where it is read instead of stored, and kept in the three cells live at once, a window of two refused with the read that sees its slot overwritten |
 | `quadrature.py` | firedrake's P1 mass kernel cell by cell, its quadrature rule and basis held in constant tables, read-only arrays written into the compiled code, and its gathers through the cell map in bounds by type |
-| `layer_potential.py` | pytential's QBX on its own curve: the line-Taylor theorem the kernels add the terms of, the single and double layer over complex points, sumpy's CPU tile checked and the write sumpy silences a fact, and the agreement with sumpy's own kernel, pytential's Green identity and the jump relations as tested rows |
+| `layer_potential.py` | pytential's QBX on its own curve: the line-Taylor theorem the kernels add the terms of, the single and double layer over complex points, sumpy's CPU tile checked and the write sumpy silences a fact, each kernel's agreement with sumpy's own as an `upstream` row, and pytential's Green identity and the jump relations as tested rows |
 | `sum_factorization.py` | grudge's two passes of a sum-factorized operator, fused on the element and the row and no deeper: the deeper fusion refused with its pair, the fusion of fewer loops it names, and what passes between them kept one row at a time |
 | `storage_layouts.py` | where cells are stored, as checked maps: sumpy's compressed-Taylor storage index in two pieces, one for one onto its buffer, and grudge's `dim_tags` `N3,N0,N1,N2` the same layout as modepy's reshape of the DOFArray, a wrong nesting refuted with a cell; two kernels read through them |
 | `assembly.py` | firedrake's PyOP2 assembly loop with FFC's P1 mass kernel called per cell and the cell's matrix added into the nodes, `y[cell[c, a]] += ...`: the rule's exactness, the element's mass and the scatter's total as theorems, an update that owes the class of its sum and not distinct writes, PyOP2's GPU split refused with the node its two triangles share, and accepted once the updates are atomic |
@@ -1107,16 +1107,17 @@ log|alpha| + Re( c(1) + ... + c(5) ),   c(k) = -(-beta / alpha)**k / k
   `write_race(write_lpot*)` on this kernel; the fact in its place is
   `distinct instances of S0 write distinct cells of out`, decided by isl and,
   with Lean, proved.
-- `agrees_with_sumpy` compares both kernels with what sumpy's own
+- `sumpy_single_layer` and `sumpy_double_layer` are what sumpy's own
   `LayerPotential` returned on the same inputs, called as pytential calls it,
   recorded with the commits it ran at in `layer_potential_sumpy.json` (sumpy
-  needs a newer loopy than loopty's, so it is not run here): a `tested` row
-  (`loopty.tested`).
+  needs a newer loopy than loopty's, so it is not run here). Each is
+  `@upstream` of its kernel, as `examples/l2p.py`'s `sumpy_l2p` is, and its
+  row, `tested` by `upstream`, compares the kernel's native run with it.
 - `green_identity`, `jump_S` and `jump_D` are pytential's identity test case
   on the starfish and the jump relations, evaluated directly
   (`fmm_order=False`) with the compiled kernels at 30 to 90 panels of this
   file's own discretization: each a `tested` row, the order the errors fall at
-  above the QBX order less 1.6, as pytential's test asks.
+  above the QBX order less 1.6, as pytential's test asks (`loopty.tested`).
 
 `benchmarks/qbx_layer_potential.py` records sumpy's results, runs the kernels
 on what pytential itself hands sumpy on its refined starfish, and times them

@@ -1418,14 +1418,20 @@ def test_the_qbx_demo_states_the_fact_sumpy_silences_for_both_layers() -> None:
 
 def test_the_qbx_demo_agrees_with_what_sumpy_returned_at_the_pinned_commit() -> None:
     _result, facts = _invoke("layer_potential", "check")
-    (row,) = [fact for fact in facts if fact["owner"] == "agrees_with_sumpy"]
-    assert (row["kind"], row["status"], row["decided_by"]) == (
-        "tested",
-        "tested",
-        "run",
-    ), row
-    measured = row["provenance"]["measured"]
-    assert float(measured.split("difference ", 1)[1].split()[0]) < 1e-12, measured
+    rows = {fact["owner"]: fact for fact in facts if fact["kind"] == "upstream"}
+    assert set(rows) == {"single_layer", "double_layer"}
+    for owner, row in rows.items():
+        assert (row["status"], row["decided_by"]) == ("tested", "upstream"), row
+        assert row["statement"] == (
+            f"the native run of {owner} agrees with sumpy_{owner} in out, on its "
+            "example inputs"
+        )
+        assert row["provenance"]["uncompared"] == []
+        detail = row["provenance"]["outputs"]["out"]
+        assert detail["agree"] and detail["exactness"] == "approx", detail
+        # round-off of two orders of summation and two arithmetics, real and
+        # complex, far inside the class's allowance
+        assert detail["difference"] < 1e-12 * detail["largest"], detail
     # the recording is of the sumpy the docstring cites, on loopy main
     module = _module("layer_potential")
     recorded = json.loads(module.RECORDED.read_text(encoding="utf-8"))
@@ -1438,11 +1444,7 @@ def test_the_qbx_demo_agrees_with_what_sumpy_returned_at_the_pinned_commit() -> 
 
 def test_the_qbx_demo_measures_pytentials_identity_and_the_jumps() -> None:
     _result, facts = _invoke("layer_potential", "check")
-    rows = {
-        fact["owner"]: fact
-        for fact in facts
-        if fact["kind"] == "tested" and fact["owner"] != "agrees_with_sumpy"
-    }
+    rows = {fact["owner"]: fact for fact in facts if fact["kind"] == "tested"}
     assert set(rows) == {"green_identity", "jump_S", "jump_D"}
     for fact in rows.values():
         assert (fact["status"], fact["decided_by"]) == ("tested", "run"), fact
@@ -1512,8 +1514,13 @@ def test_the_qbx_demo_prints_the_tile_the_fact_and_the_rows() -> None:
         ".tag(t_outer='g.0', t_inner='l.0').split(s, 256)"
         ".prioritize(s_outer, t_inner)"
     ) in out
-    (line,) = [line for line in out.splitlines() if "sumpy's own kernel" in line]
-    assert line.endswith("agrees within 1e-12 of the largest value -> tested"), line
+    lines = [line for line in out.splitlines() if "sumpy's own kernel" in line]
+    assert [line.split(":")[0].strip() for line in lines] == [
+        "single_layer",
+        "double_layer",
+    ]
+    for line in lines:
+        assert " (approx) -> tested" in line and "difference " in line, line
     for name in ("green_identity", "jump_S", "jump_D"):
         (line,) = [line for line in out.splitlines() if line.strip().startswith(name)]
         assert line.endswith("-> tested"), line

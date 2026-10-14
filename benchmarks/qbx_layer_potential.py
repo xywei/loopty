@@ -58,7 +58,8 @@ those arguments and reports the difference. ``write-race`` asks loopy whether
 sumpy's kernel races once its ``write_race(write_lpot*)`` silence is lifted.
 ``record`` keeps what sumpy returns on saved inputs; at 36 targets and 132
 sources those are the example's own, and the recording is the one its
-``agrees_with_sumpy`` row compares with.
+``upstream`` rows, ``sumpy_single_layer`` and ``sumpy_double_layer``, compare
+with.
 
 The tables of the demonstration are, on one device and one host, for each
 size (``inputs``) and each of ``--contraction on`` and ``off``: ``time`` of
@@ -614,7 +615,7 @@ def run_capture(options: Any) -> int:
 def run_record(options: Any) -> int:
     """``record``: sumpy's LayerPotential on saved inputs, called as pytential calls it.
 
-    The example's ``agrees_with_sumpy`` row compares its kernels with this
+    The example's ``upstream`` rows compare its kernels with this
     recording. sumpy is called through its own ``__call__`` with an array
     context of its own, so it picks its schedule as pytential's calls do
     (``is_cpu`` from the device), with the points as object arrays of their

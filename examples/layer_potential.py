@@ -29,12 +29,14 @@ One file holds the three layers of it:
   ``write_race(write_lpot*)`` warning on this kernel; here the ledger has the
   fact that stands in its place, ``distinct instances of S0 write distinct
   cells of out``, decided by isl and, with Lean, proved.
-- **The agreement and the accuracy.** ``agrees_with_sumpy`` compares both
-  kernels with what sumpy's own ``LayerPotential`` returns on the same inputs,
-  called as pytential calls it. pytential's identity test case, Green's
-  identity ``S(du/dn) - D(u) - u/2 == 0`` on the five-armed starfish, and the
-  jump relations its integral equations rest on are measured with the
-  compiled kernels at 30 to 90 panels. Each is a ``tested`` row.
+- **The agreement and the accuracy.** ``sumpy_single_layer`` and
+  ``sumpy_double_layer`` are what sumpy's own ``LayerPotential`` returns on
+  the same inputs, called as pytential calls it, and each kernel's
+  ``upstream`` row compares its native run with them. pytential's identity
+  test case, Green's identity ``S(du/dn) - D(u) - u/2 == 0`` on the
+  five-armed starfish, and the jump relations its integral equations rest on
+  are measured with the compiled kernels at 30 to 90 panels, each a
+  ``tested`` row decided by the run.
 
 Run this file three ways.
 
@@ -49,8 +51,8 @@ Run this file three ways.
     table over ``Nat``. Each kernel's accesses are in bounds and its writes
     distinct, and each cast of its tile on C keeps every dependence, decided
     by isl (proved by Lean where it is installed); its trace is faithful to
-    its body, and the agreement with sumpy and the three accuracy rows are
-    ``tested``.
+    its body, its agreement with sumpy is ``tested`` by ``upstream``, and the
+    three accuracy rows are ``tested`` by their run.
 
 ``loopty run examples/layer_potential.py``
     Both kernels on their tile, compiled on the C target and compared with
@@ -111,7 +113,7 @@ import numpy as np
 from lanky import theorem
 from lanky.prelude import Complex, Fn, Nat, Real
 
-from loopty import Arr, Fin, Schedule, kernel, reduce_sum, tested
+from loopty import Arr, Fin, Schedule, kernel, reduce_sum, tested, upstream
 from loopty.math import conj, log, real
 
 #: pytential's QBX order in its identity test.
@@ -380,26 +382,22 @@ tiled_double = (
 #: pytential calls it (``benchmarks/qbx_layer_potential.py record``).
 RECORDED = Path(__file__).with_name("layer_potential_sumpy.json")
 
-#: How close is agreement: relative to the largest value, well above the
-#: rounding of two orders of summation and two arithmetics, real and complex.
-AGREEMENT = 1e-12
+
+def recorded(layer: str) -> list[float]:
+    """What sumpy returned for ``single_layer`` or ``double_layer``."""
+    return json.loads(RECORDED.read_text(encoding="utf-8"))[layer]
 
 
-@tested
-def agrees_with_sumpy():
-    """S and D agree with sumpy's LayerPotential on the example's starfish."""
-    recorded = json.loads(RECORDED.read_text(encoding="utf-8"))
-    inputs = example_inputs()
-    worst = 0.0
-    for kern in (single_layer, double_layer):
-        args = inputs[kern.__name__]
-        kern(**args)
-        mine, theirs = args["out"].numpy(), np.array(recorded[kern.__name__])
-        worst = max(worst, np.abs(mine - theirs).max() / np.abs(theirs).max())
-    return bool(worst < AGREEMENT), (
-        f"largest difference {worst:.1e} of the largest value, "
-        f"sumpy {recorded['sumpy'][:7]}"
-    )
+@upstream(single_layer)
+def sumpy_single_layer(z, c, y, w, out):
+    """sumpy's own LayerPotential at 13a48a0 for S, as pytential calls it, recorded."""
+    return {"out": recorded("single_layer")}
+
+
+@upstream(double_layer)
+def sumpy_double_layer(z, c, y, n, w, out):
+    """sumpy's own LayerPotential at 13a48a0 for D, as pytential calls it, recorded."""
+    return {"out": recorded("double_layer")}
 
 
 # }}}
@@ -520,12 +518,20 @@ def main() -> int:
         )
         ok = ok and fact.status.value == "tested"
 
-    held, _ = agrees_with_sumpy()
-    print(
-        f"  sumpy's own kernel, as pytential calls it: agrees within {AGREEMENT:.0e} "
-        f"of the largest value -> {'tested' if held else 'REFUTED'}"
-    )
-    ok = ok and held
+    for agreement in (sumpy_single_layer, sumpy_double_layer):
+        (fact,) = agreement.facts()
+        detail = fact.provenance.get("outputs", {}).get("out")
+        measured = (
+            f"difference {detail['difference']:.3g} within {detail['tolerance']:.3g} "
+            f"({detail['exactness']})"
+            if detail
+            else fact.provenance.get("reason", "")
+        )
+        print(
+            f"  {agreement.kernel.__name__}: sumpy's own kernel, as pytential calls "
+            f"it: {measured} -> {fact.status.value}"
+        )
+        ok = ok and fact.status.value == "tested"
 
     print()
     tile = sumpy_tile("c")
