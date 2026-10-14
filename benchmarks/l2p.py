@@ -35,6 +35,10 @@ three can run where their dependencies are:
     the kernels of ``examples/l2p.py``, written out at the order of the
     inputs (the example fixes its order as sumpy fixes a kernel's), lowered
     and compiled by loopty, then called as the loopy kernel they are.
+    ``--variant windowed`` is the example's ``contracted``, each box's
+    triangle and table kept in windows of the box, as plain loopy keeps them
+    in a temporary of the box; ``fused`` keeps every box's in the arrays the
+    program makes.
 ``compare``
     the largest difference between the potentials of several runs, and
     against the direct sum.
@@ -737,7 +741,7 @@ def loopty_arguments(inputs: dict) -> dict:
 
 
 #: The schedules of ``examples/l2p.py`` that ``loopty --variant`` names.
-VARIANTS = ("fused", "unrolled", "unfused")
+VARIANTS = ("fused", "unrolled", "unfused", "windowed", "unrolled_windowed")
 
 
 def unrolled(schedule: Any) -> Any:
@@ -769,8 +773,10 @@ def loopty_schedule(example: Any, variant: str, target: str) -> Any:
 
     ``fused`` is the example's own: each box's triangle, then its targets.
     ``unfused`` is the program as written: every triangle, then every target.
-    On a device each box is a work group (``g.0``), as in sumpy's
-    ``get_optimized_kernel``.
+    ``windowed`` is ``fused`` with each box's triangle and table kept in a
+    window of the box, the example's ``contracted``. On a device each box is
+    a work group (``g.0``), as in sumpy's ``get_optimized_kernel``, which
+    keeps its windows in private memory.
     """
     from loopty import Schedule
 
@@ -778,13 +784,18 @@ def loopty_schedule(example: Any, variant: str, target: str) -> Any:
         schedule = example.fused
     elif variant == "unrolled":
         schedule = unrolled(example.fused)
+    elif variant == "windowed":
+        schedule = example.contracted
+    elif variant == "unrolled_windowed":
+        schedule = unrolled(example.contracted)
     elif variant == "unfused":
         schedule = Schedule(example.l2p, target="c")
     else:
         raise SystemExit(f"--variant is one of {', '.join(VARIANTS)}, not {variant!r}")
     if target == "opencl":
         # every loop over the boxes: the outermost loop of each statement, the
-        # calls' and those that zero the arrays the program makes
+        # calls' and those that zero the arrays the program makes (a window
+        # has none)
         order = schedule.order
         entry = schedule.kernel.default_entrypoint
         rank = {name: k for k, name in enumerate(order)}

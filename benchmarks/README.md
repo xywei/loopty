@@ -20,7 +20,11 @@ tree, one set of coefficients and one device:
   `-fwrapv` beside loopy's own, which changes the code GCC makes; `--no-wrapv`
   builds it with loopy's flags alone;
 - loopty's schedules of the example, written out at the order asked for,
-  lowered by loopty and called as the loopy kernel they are.
+  lowered by loopty and called as the loopy kernel they are: `fused`, which
+  keeps every box's triangle in the array the program makes, and
+  `windowed`, which keeps one box's in a window, as plain loopy's temporary
+  of the box does (`unrolled` and `unrolled_windowed` unroll the triangle's
+  loops).
 
 ```console
 $ python benchmarks/l2p.py inputs --order 10 --level 6 --out in.npz
