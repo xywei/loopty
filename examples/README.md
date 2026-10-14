@@ -1130,8 +1130,8 @@ $ uv run python examples/layer_potential.py
 pytential's starfish, QBX order 5, at 4 panels: 36 targets, 132 sources
   single_layer: compiled on C agrees with native to the approx tolerance: True -> tested
   double_layer: compiled on C agrees with native to the approx tolerance: True -> tested
-  single_layer: sumpy's own kernel, as pytential calls it: difference 6.42e-14 within 1.99e-06 (approx) -> tested
-  double_layer: sumpy's own kernel, as pytential calls it: difference 1.58e-12 within 2.88e-06 (approx) -> tested
+  single_layer: agrees with sumpy's own kernel, as pytential calls it, to the approx tolerance -> tested
+  double_layer: agrees with sumpy's own kernel, as pytential calls it, to the approx tolerance -> tested
 
 sumpy's tile, get_optimized_kernel(is_cpu=True): split(t, 16).tag(t_outer='g.0', t_inner='l.0').split(s, 256).prioritize(s_outer, t_inner)
   decided  isl  split(t, 16) renames the instances of single_layer one for one

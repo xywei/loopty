@@ -1520,7 +1520,7 @@ def test_the_qbx_demo_prints_the_tile_the_fact_and_the_rows() -> None:
         "double_layer",
     ]
     for line in lines:
-        assert " (approx) -> tested" in line and "difference " in line, line
+        assert line.endswith(", to the approx tolerance -> tested"), line
     for name in ("green_identity", "jump_S", "jump_D"):
         (line,) = [line for line in out.splitlines() if line.strip().startswith(name)]
         assert line.endswith("-> tested"), line

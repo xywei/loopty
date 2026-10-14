@@ -519,17 +519,18 @@ def main() -> int:
         ok = ok and fact.status.value == "tested"
 
     for agreement in (sumpy_single_layer, sumpy_double_layer):
+        # the verdict and the class, not the difference, whose last digits are
+        # the platform's
         (fact,) = agreement.facts()
         detail = fact.provenance.get("outputs", {}).get("out")
         measured = (
-            f"difference {detail['difference']:.3g} within {detail['tolerance']:.3g} "
-            f"({detail['exactness']})"
+            f"to the {detail['exactness']} tolerance"
             if detail
             else fact.provenance.get("reason", "")
         )
         print(
-            f"  {agreement.kernel.__name__}: sumpy's own kernel, as pytential calls "
-            f"it: {measured} -> {fact.status.value}"
+            f"  {agreement.kernel.__name__}: agrees with sumpy's own kernel, as "
+            f"pytential calls it, {measured} -> {fact.status.value}"
         )
         ok = ok and fact.status.value == "tested"
 
