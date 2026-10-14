@@ -167,6 +167,19 @@ def pythons_sqrt(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
 
 
 @kernel
+def complex_powers(
+    z: Arr[Fin[n], np.complex128],  # noqa: F821
+    w: Arr[Fin[n], Fin[4], np.complex128],  # noqa: F821
+):
+    """Powers of a complex number by 1, 3, 5 and 7, as a written-out series has them."""
+    for i in z.dom:
+        w[i, 0] = z[i] ** 1
+        w[i, 1] = z[i] ** 3
+        w[i, 2] = z[i] ** 5
+        w[i, 3] = z[i] ** 7
+
+
+@kernel
 def real_part(
     z: Arr[Fin[n], np.complex128],  # noqa: F821
     y: Arr[Fin[n], Real],  # noqa: F821
@@ -313,6 +326,38 @@ def test_opencl_code_calls_pyopencls_complex_functions() -> None:
         ).device_code()
     for name in ("cdouble_sqrt", "cdouble_log", "cdouble_real", "cdouble_conj"):
         assert f"{name}(" in code, name
+
+
+@pytest.mark.parametrize("exponent", range(1, 13))
+def test_a_complex_power_by_a_natural_number_is_numpys_products(exponent) -> None:
+    # The products the OpenCL lowering writes, evaluated in numpy's complex
+    # arithmetic, are numpy's own power by an integer, to the bit.
+    from pymbolic import evaluate
+
+    from loopty.lower import _natural_power
+
+    rng = np.random.default_rng(exponent)
+    for value in rng.normal(size=8) + 1j * rng.normal(size=8):
+        z = np.complex128(value)
+        product = evaluate(_natural_power(prim.Variable("z"), exponent), {"z": z})
+        assert product == z**exponent, (z, exponent)
+
+
+def test_opencl_code_writes_a_complex_power_as_products() -> None:
+    # loopy writes a complex power by 1, 5 or 7 as cdouble_powr, exp(n log z),
+    # and only 2 to 4 as products; loopty writes every natural one as products.
+    pytest.importorskip("pyopencl")
+    import loopy as lp
+
+    from loopty.isl_reading import declining
+
+    with lp.CacheMode(False), declining():
+        code = lp.generate_code_v2(
+            Schedule(complex_powers, target="opencl").kernel
+        ).device_code()
+    body = code[code.index("__kernel") :]
+    assert "powr" not in body and "cdouble_pow(" not in body
+    assert "cdouble_mul(" in body
 
 
 def test_on_an_opencl_device_complex_functions_agree_with_numpy() -> None:

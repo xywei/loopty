@@ -8,6 +8,29 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Added
 
+- **Claims settled by running them** (`loopty.tested`): `@tested` on a
+  function that takes nothing and returns whether its claim held, alone or
+  with what it measured, puts the claim in the ledger as a `tested` row,
+  decided by `run`, the docstring's first line its statement; `refuted` with
+  the reason when it returns false, raises, or returns something that is not
+  a verdict. A run is evidence about its inputs, so nothing here reads more
+  than `tested`. `examples/layer_potential.py` measures pytential's Green
+  identity and the two jump relations this way.
+- **S2 of the demonstration** (`examples/layer_potential.py`): pytential's
+  QBX on its own curve. The line-Taylor theorem, for every order, in the same
+  file as the kernels that add its closed form, `coefficient(ratio, k)`;
+  pytential's single and double layer on the five-armed starfish over complex
+  points; sumpy's CPU tile (`sumpy_tile()`), its casts decided, with the
+  write sumpy silences (`write_race(write_lpot*)`) the fact `distinct
+  instances of S0 write distinct cells of out`, proved by Lean where it is
+  installed; each kernel's agreement with what sumpy's own `LayerPotential`
+  returned on the example's inputs (recorded at sumpy's commit,
+  `layer_potential_sumpy.json`), an `upstream` row; and, as tested rows,
+  pytential's identity test case and the jump relations, the errors falling
+  faster than the QBX order less 1.6.
+  `benchmarks/qbx_layer_potential.py` times the kernel against plain loopy
+  and sumpy's own on one OpenCL device, records sumpy's results, and runs
+  the kernels on the arguments pytential itself hands sumpy.
 - **The demo's flagship, `examples/l2p.py`**: sumpy's L2P for the 2-D
   Laplace kernel (`E2PFromSingleBox` with the compressed Taylor expansion),
   in one file and one ledger. The claim sumpy's reconstruction rests on,
@@ -540,11 +563,12 @@ All notable changes to loopty are recorded here. The format follows
   `tests/kernels/program_domains.py`), the upstream test kernels
   (`tests/kernels/upstream.py`), and the windows, updates, layouts,
   postconditions decided from what kernels store and cited theorems above:
-  of 1303 facts isl decides in 30 files, Lean proves 1256 and confirms the
+  of 1319 facts isl decides in 30 files, Lean proves 1272 and confirms the
   counterexample of the 32 refuted ones. The 15 it leaves decided are claims
   about reals, which core Lean has no words for; with Mathlib it proves them
-  too, 1271 in all, and none stays decided. `examples/l2p.py` has 41: 40
-  proved with Mathlib, and its refused interchange, whose negation Lean
+  too, 1287 in all, and none stays decided. `examples/layer_potential.py`
+  has 31, its single and double layer, all proved. `examples/l2p.py` has 41:
+  40 proved with Mathlib, and its refused interchange, whose negation Lean
   proves.
 - A ledger gains a `definedness` row for each array a kernel reads only where
   it wrote it before (`scan`'s `off`, `p2p`'s `term`, `pairs`' `f`), and an
@@ -600,6 +624,11 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Fixed
 
+- On OpenCL, a complex number to a natural power below 100 is the products
+  numpy's power by an integer takes (`z * ((z * z) * (z * z))` for 5), never
+  pyopencl's `cdouble_powr`. loopy writes only the powers by 2, 3 and 4 as
+  products, and by 1 or 5, which a written-out series has, `exp(n log z)`:
+  a logarithm and an exponential for each, and not exact for `z**1`.
 - A schedule's `ilp` or `vec` tag no longer has loopy warn, on every build,
   that it falls back to its first scheduler, which it does for every kernel
   with such a loop: the tag silences `v1_scheduler_fallback` on the kernel
