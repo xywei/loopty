@@ -614,6 +614,43 @@ def test_a_mixed_subscript_read_twice_in_a_statement_is_one_place() -> None:
     assert "face[f, k] < n" in render(part.term)
 
 
+@kernel
+def jacobian(
+    cell: Arr[Fin[nc], Fin[3], Fin[nv]],  # noqa: F821
+    X: Arr[Fin[nv], Fin[2], Real],  # noqa: F821
+    J: Arr[Fin[nc], Real],  # noqa: F821
+):
+    """Each cell's Jacobian determinant: the first corner is read twice per axis."""
+    for c in J.dom:
+        J[c] = (X[cell[c, 1], 0] - X[cell[c, 0], 0]) * (
+            X[cell[c, 2], 1] - X[cell[c, 0], 1]
+        ) - (X[cell[c, 2], 0] - X[cell[c, 0], 0]) * (
+            X[cell[c, 1], 1] - X[cell[c, 0], 1]
+        )
+
+
+def test_a_mixed_subscript_a_statement_reads_twice_is_one_place() -> None:
+    """``X[cell[c, 0], 0]`` twice in one statement is one access, decided by isl.
+
+    It was ``assumed``: the places of one access were one each only where the
+    statement read it once, and an inlined element kernel reads a corner for
+    two entries of its Jacobian.
+    """
+    from loopty.oracle import IslOracle
+
+    statement = (
+        "X[cell[c, 0], 0] is in bounds for every instance of S0 "
+        "(cell[c, 0] : Fin(nv), by type)"
+    )
+    (fact,) = [f for f in jacobian.facts() if f.statement == statement]
+    decided = IslOracle().establish(fact)
+    assert decided.status is Status.DECIDED and decided.decided_by == "isl"
+    assert not [
+        f for f in jacobian.facts() if f.kind == "in-bounds" and "X[" in f.statement
+        and "by type" not in f.statement
+    ]
+
+
 def test_an_array_the_kernel_reads_where_it_wrote_it_has_a_definedness_fact() -> None:
     spmv = load(EXAMPLES / "spmv.py")
     facts = [f for f in spmv.scan.facts() if f.kind == "definedness"]
@@ -772,6 +809,8 @@ def test_an_assumption_is_a_fact_the_casts_rest_on() -> None:
     (part, *_rest) = monotone.term.lean_obligation().parts
     assert "n % 4 == 0" in render(part.term)
     assert schedule.history == ("assume('n % 4 == 0')", "split(i, 4)")
+    # the casts' status names it shortly, ``decided under assume('n % 4 == 0')``
+    assert assumption.provenance["label"] == "assume('n % 4 == 0')"
 
 
 @pytest.mark.parametrize(

@@ -4013,6 +4013,28 @@ def _arguments(
             free |= {name for name in _names_in(size)}
         return shape if free <= declared | scalars else None
 
+    def strides_of(typ: ArrType, ragged: bool) -> str | None:
+        """Row-major strides for an array whose shape cannot be declared.
+
+        An array of several axes whose first extent is a size the code never
+        mentions, ``coords: Arr[Fin[nv], Fin[2], Real]`` read only as
+        ``coords[cell[c, k], d]``, is declared without a shape (see
+        :func:`_used_names`), and loopy then indexes it in one dimension only.
+        Its strides need only the extents after the first, so where those are
+        declared, they are given instead: ``stride:2,stride:1``. ``None``
+        where they are not, or the array has one axis, or no box of axes.
+        """
+        if ragged or typ.domain is not None or len(typ.axes) < 2:
+            return None
+        trailing = [_plain(size) for size in typ.axes[1:]]
+        for size in trailing:
+            if not _names_in(size) <= declared | scalars:
+                return None
+        strides: list[Any] = [1]
+        for size in reversed(trailing):
+            strides.insert(0, size * strides[0] if strides[0] != 1 else size)
+        return ",".join(f"stride:{stride}" for stride in strides)
+
     for name, typ in term.params:
         if not isinstance(typ, ArrType):
             declare_value(name, numpy_dtype(typ))
@@ -4021,11 +4043,14 @@ def _arguments(
         ragged = builder.ragged_axis(name) is not None
         if ragged:
             builder.offsets_for(name)  # make sure the offsets argument exists
+        shape = shape_of(typ, ragged, name)
+        strides = strides_of(typ, ragged) if shape is None else None
         args.append(
             lp.GlobalArg(
                 name,
                 array_dtype(term, name, typ.dtype),
-                shape=shape_of(typ, ragged, name),
+                shape=shape,
+                dim_tags=strides,
                 is_input=True,
                 is_output=is_output,
             )

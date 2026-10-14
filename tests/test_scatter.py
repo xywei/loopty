@@ -788,6 +788,28 @@ def test_atomic_then_ilp_on_c_names_the_atomic_updates() -> None:
     assert [kind for kind, _ in rows].count("bijective") == 2  # split, tag
 
 
+def test_an_ilp_tag_keeps_loopys_note_on_its_scheduler_out_of_a_run() -> None:
+    # loopy schedules a kernel with an ilp loop with its first scheduler and
+    # warns that it does, on every build. The tag is the schedule's own, so
+    # the fallback is expected: the kernel silences the warning, and the code
+    # is generated without it.
+    import warnings
+
+    schedule = Schedule(scatter).atomic("y").split("c", 4).tag(c_inner="ilp")
+    silenced = schedule.kernel.default_entrypoint.silenced_warnings
+    assert "v1_scheduler_fallback" in silenced
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        emit_code(schedule)
+    assert not [w for w in caught if "slow scheduler" in str(w.message)]
+    # a tag on a hardware axis leaves loopy's warnings as they were
+    serial = Schedule(scatter).atomic("y").split("c", 32)
+    tagged = serial.tag(c_outer="g.0", c_inner="l.0")
+    assert "v1_scheduler_fallback" not in (
+        tagged.kernel.default_entrypoint.silenced_warnings
+    )
+
+
 @kernel
 def twice_into(y: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):  # noqa: F821
     """Twice each cell of y."""

@@ -592,17 +592,14 @@ def _mixed_fact(
     from. Lean states the whole access, with what the type says of each
     typed index as a hypothesis (:func:`loopty.obligations.mixed_in_bounds_obligation`).
 
-    An access the statement makes twice over one domain, ``u[e, m[f]]`` in
-    ``u[e, m[f]] + u[e, m[f]] * w[f]``, is one place: it reaches the same
-    cells each time.
+    An access a statement makes twice over one domain, ``x[0, 0]`` read for
+    two entries of a Jacobian once a called kernel is inlined, is one place;
+    an access over several domains is left to the rules after this one.
     """
-    distinct: list[tuple[tuple[Any, ...], tuple[str, ...], Any]] = []
-    for place in places:
-        if not any(_same_place(place, other) for other in distinct):
-            distinct.append(place)
-    if len(distinct) != 1:
+    places = _distinct_places(places)
+    if len(places) != 1:
         return None
-    (place_indices, inames, domain) = distinct[0]
+    (place_indices, inames, domain) = places[0]
     found = _mixed_axes(place_indices, arrtype, types)
     if found is None:
         return None
@@ -662,22 +659,31 @@ def _mixed_fact(
     )
 
 
-def _same_place(
-    one: tuple[tuple[Any, ...], tuple[str, ...], Any],
-    other: tuple[tuple[Any, ...], tuple[str, ...], Any],
-) -> bool:
-    """Whether two places of an access are the same indices over the same loops."""
-    (indices, inames, domain), (indices2, inames2, domain2) = one, other
-    if tuple(inames) != tuple(inames2) or len(indices) != len(indices2):
-        return False
-    if not all(structurally_equal(a, b) for a, b in zip(indices, indices2)):
-        return False
-    if domain is domain2:
-        return True
-    try:
-        return bool(domain.is_equal(domain2))
-    except Exception:  # noqa: BLE001 - two sets isl cannot compare are two places
-        return False
+def _distinct_places(
+    places: Sequence[tuple[tuple[Any, ...], tuple[str, ...], Any]],
+) -> list[tuple[tuple[Any, ...], tuple[str, ...], Any]]:
+    """``places`` without repeats: one access text over the same loops and domain.
+
+    The places of one access are gathered by its text, so their indices print
+    alike; two of them are one place when their loops are the same and isl
+    finds their domains equal.
+    """
+    distinct: list[tuple[tuple[Any, ...], tuple[str, ...], Any]] = []
+    for place in places:
+        _indices, inames, domain = place
+        repeated = False
+        for _seen, seen_inames, seen_domain in distinct:
+            if tuple(inames) != tuple(seen_inames):
+                continue
+            try:
+                repeated = bool(domain.is_equal(seen_domain))
+            except Exception:  # noqa: BLE001 - spaces isl cannot compare differ
+                repeated = False
+            if repeated:
+                break
+        if not repeated:
+            distinct.append(place)
+    return distinct
 
 
 def _access_text(array: str, indices: Sequence[Any]) -> str:
