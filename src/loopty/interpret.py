@@ -75,6 +75,7 @@ from loopty.contract import (
     resolve_sizes,
 )
 from loopty.flow import bounds_dimension
+from loopty.math import integer_power
 from loopty.names import check_names, rename
 from loopty.term import (
     Access,
@@ -144,6 +145,8 @@ _FUNCTIONS = {
     "real": np.real,
     "imag": np.imag,
     "conj": np.conj,
+    # loopty.math's integer power, multiplied out as loopy multiplies it.
+    "ipow": integer_power,
     # A scalar a called kernel converts into its sort's storage, as its
     # contract does natively (loopty.calls): np.float32 and the rest.
     **{

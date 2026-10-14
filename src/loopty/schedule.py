@@ -4925,11 +4925,24 @@ class Schedule:
             and array in dict(term.temporaries)
         ):
             # A placement takes a cell's indices to its slot, axis by axis, and
-            # the cells of an array over a domain are its points (#74).
+            # the cells of an array over a domain are its points (#74, #244).
+            # A substitution is the other way not to keep it, where one
+            # statement stores it, which is what substitute() computes again.
+            stores = [
+                stmt
+                for stmt in term.stmts
+                if stmt.assignee.array == array
+                and stmt.id != f"{array}.zeros"
+                and stmt.id not in self._gone
+            ]
+            fix = (
+                f"keep it whole, or compute it where it is read, substitute({array!r})"
+                if len(stores) == 1
+                else "keep it whole"
+            )
             raise win.WindowError(
                 f"{head}: {array} is over the domain {arrtype.domain}, whose "
-                "cells a window does not place yet; keep it whole, or compute "
-                f"it where it is read, substitute({array!r})"
+                f"cells a window does not place yet; {fix}"
             )
         given = (
             None

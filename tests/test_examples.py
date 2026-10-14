@@ -51,17 +51,19 @@ NAMES = (
     "calls",
     "assembly",
     "storage_layouts",
+    "l2p",
     "hexahedra",
 )
 
-#: The families with several indices, ``Fn[Fin[n], Fin[n], Real]`` applied as
-#: ``Fr[i, a]``, that ``examples/hexahedra.py`` writes its theorem with, are
-#: lanky main's and not the 0.2.0 release's, which the released-lanky job
-#: installs.
+#: The families with several indices, ``Fn[Nat, Nat, Real]`` applied as
+#: ``D[a, b]``, that ``examples/l2p.py`` writes its theorems with, and
+#: ``Fn[Fin[n], Fin[n], Real]`` applied as ``Fr[i, a]``, that
+#: ``examples/hexahedra.py`` writes its theorem with, are lanky main's and not
+#: the 0.2.0 release's, which the released-lanky job installs.
 SEVERAL_INDICES = hasattr(FnType, "indices")
 
 #: The demos that need them.
-NEEDS_SEVERAL_INDICES = {"hexahedra"}
+NEEDS_SEVERAL_INDICES = {"l2p", "hexahedra"}
 
 needs_several_indices = pytest.mark.skipif(
     not SEVERAL_INDICES,
@@ -187,6 +189,7 @@ KERNELS = {
     "calls": {"dot", "matvec", "csr", "integrate", "element_mass", "mass_matrices"},
     "assembly": {"mass_ffc", "mass_action"},
     "storage_layouts": {"stored_table", "unflatten"},
+    "l2p": {"unpack", "reconstruct", "evaluate", "l2p"},
     "hexahedra": {
         "metric",
         "contravariant",
@@ -1293,6 +1296,101 @@ def test_the_assembly_theorems_are_in_its_ledger() -> None:
     }
     assert set(claims) == {"exact_to_degree_two", "element_mass", "conservation"}
     assert set(claims.values()) <= {"tested", "decided", "proved"}
+
+
+# }}}
+
+
+# {{{ l2p
+
+
+@needs_several_indices
+def test_the_l2p_demo_applies_its_theorem_to_what_reconstruct_stores() -> None:
+    """The postcondition decided from the stores, and the theorem applied to it."""
+    _result, facts = _invoke("l2p", "check")
+    owned = {(fact["owner"], fact["kind"]): fact for fact in facts}
+    post = owned[("reconstruct", "postcondition")]
+    assert (post["status"], post["decided_by"]) == ("decided", "isl")
+    applied = [fact for fact in facts if fact["kind"] == "by-theorem"]
+    assert [(fact["owner"], fact["decided_by"]) for fact in applied] == [
+        ("reconstruct", "theorem")
+    ]
+    assert applied[0]["statement"].startswith(
+        "by on_every_triangle, for every D with pde and stored: "
+    )
+    assert owned[("reconstruct", "single-assignment")]["status"] == "decided"
+    # the table the theorem's hypothesis is about holds sumpy's coefficients
+    # in sumpy's storage order, decided from what unpack stores
+    stored = owned[("unpack", "postcondition")]
+    assert (stored["status"], stored["decided_by"]) == ("decided", "isl")
+    assert "C[i, a, b] == coeffs[i, 2*(a + b) - 1 + a]" in stored["statement"]
+    # sumpy's storage index is one for one onto its 2P + 1 addresses
+    layout = [fact for fact in facts if fact["owner"] == "storage_index"]
+    assert len(layout) == 3
+    assert {(fact["status"], fact["decided_by"]) for fact in layout} == {
+        ("decided", "isl")
+    }
+    # what each call reads, the call before it stored
+    defined = [
+        fact["statement"]
+        for fact in facts
+        if fact["owner"] == "l2p" and fact["kind"] == "definedness"
+    ]
+    assert defined == [
+        "every cell of C that reconstruct reads, unpack stored before it",
+        "every cell of R that evaluate reads, reconstruct stored before it",
+    ]
+
+
+@needs_several_indices
+def test_the_l2p_demo_agrees_with_sumpys_own_kernel() -> None:
+    """The row the recording of sumpy's E2PFromSingleBox gives, tested."""
+    _result, facts = _invoke("l2p", "check")
+    (row,) = [fact for fact in facts if fact["kind"] == "upstream"]
+    assert (row["status"], row["decided_by"], row["owner"]) == (
+        "tested",
+        "upstream",
+        "l2p",
+    )
+    assert row["statement"] == (
+        "the native run of l2p agrees with sumpy_l2p in pot, on its example inputs"
+    )
+    assert row["provenance"]["uncompared"] == []
+    detail = row["provenance"]["outputs"]["pot"]
+    assert detail["agree"] and detail["exactness"] == "approx"
+    # round-off, far inside the class's allowance
+    assert detail["difference"] < 1e-14 * detail["largest"]
+
+
+@needs_several_indices
+def test_the_l2p_demo_refuses_the_interchange_and_fuses_box_by_box() -> None:
+    result, _ = _invoke("l2p", "python")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "largest error against the charges' potential: " in result.stdout
+    refusal = result.stdout.split("refused: ")[1].splitlines()[0]
+    assert refusal.startswith("interchange(b, a) illegal: instance S0[i=")
+    assert " writes R[" in refusal and " read by S1[i=" in refusal
+    module = _module("l2p")
+    steps = [fact.statement for fact in module.fused.facts()]
+    assert steps == [
+        "fuse(unpack, reconstruct, loops=1) renames the instances of l2p one for one",
+        "the order after fuse(unpack, reconstruct, loops=1) runs every dependence "
+        "of l2p forward",
+        "fuse(reconstruct, evaluate, loops=1) renames the instances of l2p one for "
+        "one",
+        "the order after fuse(reconstruct, evaluate, loops=1) runs every dependence "
+        "of l2p forward",
+    ]
+    assert {fact.status.value for fact in module.fused.facts()} == {"decided"}
+    # one triangle per box is a window, not taken over an array over a domain
+    # (#244), and the substitution it would name is refused too: two
+    # statements store R
+    assert (
+        "refused: contract('R'): R is over the domain Where[i: Fin(nb), a: "
+        "Fin(11), b: Fin(11), a + b <= 10], whose cells a window does not place "
+        "yet; keep it whole\n"
+    ) in result.stdout
+    assert "pot: difference 0 within" in result.stdout
 
 
 # }}}

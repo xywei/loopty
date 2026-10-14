@@ -23,7 +23,7 @@ from lanky.prelude import Int, Real
 from loopty import Arr, Fin, Schedule, TraceError, kernel, reduce_sum, when
 from loopty.executor import LoopyExecutor, emit_code
 from loopty.faithful import KIND
-from loopty.math import conj, cos, exp, imag, log, real, sin, sqrt
+from loopty.math import conj, cos, exp, imag, ipow, log, real, sin, sqrt
 
 pytest.importorskip("loopy")
 
@@ -394,3 +394,137 @@ def test_numpy_and_pythons_math_name_loopty_math_when_traced(
     # attribute 'real'".
     with pytest.raises(TraceError, match=message):
         kern.trace()
+
+
+# {{{ ipow: an integer power, multiplied out as loopy does it
+
+
+@kernel
+def powers(x: Arr[Fin[n], Real], y: Arr[Fin[n], Fin[9], Real]):  # noqa: F821
+    """``x[i]`` to the powers ``-2`` to ``6`` by loop variable, the last a literal."""
+    for i in y.dom:
+        for j in y.dom[i]:
+            with when(j < 8):
+                y[i, j] = ipow(x[i], j - 2)
+            with when(j == 8):
+                y[i, j] = ipow(x[i], 11)
+
+
+@kernel
+def powers32(x: Arr[Fin[n], np.float32], y: Arr[Fin[n], Fin[6], np.float32]):  # noqa: F821
+    """The same in single precision, which stays single."""
+    for i in y.dom:
+        for j in y.dom[i]:
+            y[i, j] = ipow(x[i], j)
+
+
+def test_natively_ipow_is_loopys_integer_power() -> None:
+    # loopy's loopy_pow_<base>_<exponent>: by squaring, the odd factors taken
+    # along, each product rounded
+    x = np.float64(1.1)
+    y, base, k = np.float64(1.0), x, 11
+    while k > 1:
+        if k % 2:
+            y = base * y
+        base = base * base
+        k //= 2
+    assert ipow(x, 11) == base * y
+    assert ipow(2.0, 10) == 1024.0 and ipow(2.0, 0) == 1.0 and ipow(2.0, -2) == 0.25
+    assert isinstance(ipow(np.float32(1.5), 3), np.float32)
+    # not numpy's power: the C library's pow rounds once, and they can differ
+    samples = np.random.default_rng(0).uniform(0.5, 2.0, 200)
+    assert any(ipow(s, 13) != s**13 for s in samples)
+
+
+@pytest.mark.parametrize(
+    ("x", "k", "message"),
+    [
+        (2, 3, r"a real base of a floating type, not 2: for an integer"),
+        (2.0, 1.5, r"an integer power, not 1.5"),
+        (Arr.from_numpy(np.ones(3)), 2, r"ipow\(x\[i\], k\), and not an array"),
+    ],
+)
+def test_ipow_takes_a_real_base_and_an_integer_power(x, k, message: str) -> None:
+    with pytest.raises(TypeError, match=message):
+        ipow(x, k)
+
+
+@pytest.mark.parametrize(
+    "k", [np.int64(-(2**63)), np.int32(-(2**31)), -(2**31), -(2**63)]
+)
+def test_ipow_refuses_the_power_whose_negation_its_type_does_not_hold(k) -> None:
+    # loopy's helper negates a negative power in its own type, and the
+    # smallest one stays negative there, so its loop computes another power
+    # than the native one (Codex on #248)
+    with pytest.raises(ValueError, match=r"cannot take the power -\d+"):
+        ipow(1.5, k)
+    assert ipow(1.0, np.int64(-(2**63) + 1)) == 1.0
+
+
+@kernel
+def integer_base(k: Arr[Fin[n], Int], y: Arr[Fin[n], Int]):  # noqa: F821
+    """An integer to a power: natively refused, so traced too."""
+    for i in y.dom:
+        y[i] = ipow(k[i], 2)
+
+
+@kernel
+def real_power(x: Arr[Fin[n], Real], e: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """A real exponent: natively refused, so traced too."""
+    for i in y.dom:
+        y[i] = ipow(x[i], e[i])
+
+
+@pytest.mark.parametrize(
+    ("kern", "message"),
+    [
+        (
+            integer_base,
+            r"ipow\(k\[i\], 2\) at test_math.py:\d+: loopty.math.ipow takes a real "
+            r"base of a floating type, and k\[i\] is an int64; for an integer",
+        ),
+        (
+            real_power,
+            r"ipow\(x\[i\], e\[i\]\) at test_math.py:\d+: loopty.math.ipow takes an "
+            r"integer power, and e\[i\] is a float64; x \*\* n is the power",
+        ),
+    ],
+)
+def test_ipow_of_traced_values_of_other_sorts_is_refused_as_natively(
+    kern, message: str
+) -> None:
+    # Natively ipow refuses an integer base and a real power; traced, its
+    # operands are terms, and the call was built all the same, so that the
+    # compiled run computed a power the native run refuses (Codex on #248).
+    with pytest.raises(TraceError, match=message):
+        kern.trace()
+
+
+def test_ipow_agrees_bit_for_bit_and_calls_no_pow() -> None:
+    x = np.array([0.3, 1.1, 2.7, -1.9, 1e-3])
+    agrees(powers, {"x": Arr.from_numpy(x), "y": Arr.zeros((5, 9))})
+    native = {"x": Arr.from_numpy(x), "y": Arr.zeros((5, 9))}
+    powers(**native)
+    compiled = LoopyExecutor().run(powers, x=x, y=np.zeros((5, 9)))["y"]
+    assert np.array_equal(compiled, native["y"].numpy())
+    code = emit_code(powers)
+    assert "loopy_pow_float64_int32(x[i], j + -2)" in code
+    # loopy writes the literal in the double's context, 11.0, which C converts
+    # into the helper's int32_t
+    assert "loopy_pow_float64_int32(x[i], 11" in code
+    assert "pow(" not in code.replace("loopy_pow_", "")
+    (stmt, *_rest) = powers.term.stmts
+    assert stmt.expr.function.name == "ipow"
+
+
+def test_ipow_of_a_single_stays_single_and_agrees() -> None:
+    x = np.array([0.5, 1.25, 3.0], np.float32)
+    agrees(powers32, {"x": Arr.from_numpy(x), "y": Arr.zeros((3, 6), np.float32)})
+    native = {"x": Arr.from_numpy(x), "y": Arr.zeros((3, 6), np.float32)}
+    powers32(**native)
+    compiled = LoopyExecutor().run(powers32, x=x, y=np.zeros((3, 6), np.float32))
+    assert np.array_equal(compiled["y"], native["y"].numpy())
+    assert "loopy_pow_float32_int32(" in emit_code(powers32)
+
+
+# }}}
