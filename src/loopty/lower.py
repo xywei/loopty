@@ -492,6 +492,57 @@ class _OpenCLExpressions(NumpyArithmetic, ExpressionToPyOpenCLCExpressionMapper)
             return prim.LogicalAnd(compared)
         return prim.LogicalOr(compared)
 
+    def map_power(self, expr: Any, type_context: Any) -> Any:
+        """A complex number to a small natural power, as numpy multiplies it.
+
+        loopy writes a complex power by 2, 3 or 4 as products, and by any
+        other exponent, 1 and 5 included, as pyopencl's ``cdouble_powr``,
+        which is ``exp(n log z)``: a logarithm and an exponential where numpy
+        multiplies, and not exact even for ``z**1``. A line-Taylor series
+        written ``(-beta / alpha) ** k``, whose terms a constant sum writes
+        out, paid that for its first and fifth terms on every pair. A power by
+        an integer ``n`` with ``0 < n < 100`` is numpy's products here
+        (:func:`_natural_power`); any other is loopy's.
+        """
+        exponent = expr.exponent
+        if (
+            isinstance(exponent, int | np.integer)
+            and not isinstance(exponent, bool)
+            and 0 < exponent < _PRODUCT_POWERS
+            and self.infer_type(expr.base).is_complex()
+        ):
+            return self.rec(_natural_power(expr.base, int(exponent)), type_context)
+        return super().map_power(expr, type_context)
+
+
+#: The exponents below which a complex power is written as products, as numpy
+#: computes one (``npy_cpow``), which multiplies for ``|n| < 100``.
+_PRODUCT_POWERS = 100
+
+
+def _natural_power(base: Any, n: int) -> Any:
+    """``base ** n`` as the products numpy's complex power by an integer takes.
+
+    ``z`` for 1, ``z * z``, and ``z * (z * z)`` for 3; from 4 on, by squaring,
+    multiplying in the square for each bit of ``n`` from the lowest, so that
+    ``z**5`` is ``z * ((z * z) * (z * z))``. Each product is one multiply of
+    the target, so the rounding is numpy's wherever a complex product is.
+    """
+    if n == 1:
+        return base
+    if n == 2:
+        return prim.Product((base, base))
+    if n == 3:
+        return prim.Product((base, prim.Product((base, base))))
+    result, square, mask = None, base, 1
+    while True:
+        if n & mask:
+            result = square if result is None else prim.Product((result, square))
+        mask <<= 1
+        if n < mask:
+            return result
+        square = prim.Product((square, square))
+
 
 class _OpenCLCode(PyOpenCLCASTBuilder):
     """The kernel code of :class:`InKernelOpenCLTarget`; see :class:`_CCode`."""
@@ -1083,6 +1134,12 @@ class ExpressionLowerer(Mapper):
             and len(expr.parameters) == 1
         ):
             return self._conversion(CONVERSIONS[function.name], expr.parameters[0])
+        if (
+            isinstance(function, prim.Variable)
+            and function.name == "ipow"
+            and len(expr.parameters) == 2
+        ):
+            return self._integer_power(expr, *expr.parameters)
         return prim.Call(
             self.rec(expr.function), tuple(self.rec(p) for p in expr.parameters)
         )
@@ -1149,6 +1206,26 @@ class ExpressionLowerer(Mapper):
         if name in ("real", "conj"):
             return lowered
         return prim.Call(prim.Variable(name), (lowered,))
+
+    def _integer_power(self, expr: Any, base: Any, exponent: Any) -> prim.Expression:
+        """``ipow(x, n)`` of :mod:`loopty.math`: loopy's own integer power.
+
+        Written as the power it is, with the exponent left an integer, so that
+        loopy calls the ``loopy_pow_<base>_<exponent>`` it defines, which
+        multiplies as :func:`loopty.math.integer_power` does natively; ``x **
+        n`` would get a floating exponent and the C library's ``pow``
+        (:mod:`loopty.promotion`). The base is converted into numpy's type of
+        the result where the lowering computes it in another.
+        """
+        promotion = self.lowering.promotion
+        lowered = self.rec(base)
+        power = self.rec(exponent)
+        if promotion is not None:
+            compiled = promotion.types(base)[1]
+            target = promotion.types(expr)[1]
+            if compiled is not None and target is not None and compiled != target:
+                lowered = self._convert(lowered, target)
+        return prim.Power(lowered, power)
 
     def _absolute(self, expr: Any, operand: Any) -> prim.Expression:
         """``abs(operand)``: C's ``abs`` of a number, and numpy's of an integer.
@@ -3573,7 +3650,9 @@ def _power_preambles(term: Term, target: str | None) -> tuple[tuple[str, str], .
         for node in walk((stmt.assignee, stmt.expr, stmt.guard))
     ]
     if not any(
-        isinstance(node, prim.Power) and not _written_as_product(node)
+        isinstance(node, prim.Power)
+        and not _written_as_product(node)
+        or _integer_power_call(node)
         for node in nodes
     ):
         return ()
@@ -3587,6 +3666,20 @@ def _power_preambles(term: Term, target: str | None) -> tuple[tuple[str, str], .
     if complex_term:
         return ((_POWER_TAG, f"{POWER_INCLUDES}\n{_COMPLEX_INCLUDE}"),)
     return ((_POWER_TAG, POWER_INCLUDES),)
+
+
+def _integer_power_call(node: Any) -> bool:
+    """Whether ``node`` is ``ipow(x, n)``, which loopy writes as its own power."""
+    return (
+        isinstance(node, prim.Call)
+        and isinstance(node.function, prim.Variable)
+        and node.function.name == "ipow"
+        and not (
+            len(node.parameters) == 2
+            and isinstance(node.parameters[1], int | np.integer)
+            and node.parameters[1] in (0, 1, 2)
+        )
+    )
 
 
 def _written_as_product(power: prim.Power) -> bool:

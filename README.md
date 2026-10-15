@@ -613,7 +613,8 @@ release; the CHANGELOG says when one does.
   sum still adds its terms in order, the loops it runs outside of order
   none of their instances, and loopy keeps the order where it keeps an
   accumulator per instance, on a hardware axis or an `ilp` loop, which the
-  `buildable` fact asks (`examples/layer_potential.py`). A split sum adds
+  `buildable` fact asks (`examples/layer_potential.py` runs sumpy's tile on
+  C with an `ilp` loop for its work items). A split sum adds
   its terms in order, outer loop first. A tag belongs to a loop, so
   `split`, `tile` and `affine` refuse a loop that carries one, and the loops
   they make are tagged after them. `affine(map)` takes an isl map from loops to the loops that
@@ -729,7 +730,20 @@ release; the CHANGELOG says when one does.
   `when(sqrt(x[i]) > 1.5)`, and numpy's own `np.sqrt`, Python's
   `math.sqrt` and `z[i].real` are refused when traced, naming the function
   of `loopty.math` to write. `examples/layer_potential.py` is pytential's QBX
-  single layer over complex points.
+  single and double layer over complex points. `ipow(x, n)` is `x` to an
+  integer power multiplied out as loopy multiplies one, by squaring, in both
+  runs, so they agree bit for bit and the compiled kernel calls loopy's own
+  `loopy_pow_float64_int32`; `x ** n` of a real `x` is numpy's power, the C
+  library's `pow`, in both. In `examples/l2p.py`'s Taylor sum that call was
+  the whole cost on the C target.
+- Agreement with the code a kernel mirrors, `@upstream(kernel)`
+  (`loopty.upstream`): a function that computes, on the file's example
+  inputs, what the upstream code computes there, and a ledger row under the
+  kernel that compares it with the native run at the accuracy the kernel's
+  types claim, `tested` by `upstream`, `refuted` with the cell, or `assumed`
+  where the function cannot run (its package or its recording is not
+  there). `examples/l2p.py` compares its program with sumpy's own
+  `E2PFromSingleBox`, recorded on its inputs.
 - Constant tables, `loopty.table`: `W = table([1 / 6, 1 / 6, 1 / 6])`
   next to the kernel, read by the body as an array is (`W[q]`, `W.dom`). A
   table is a read-only copy of its values; its reads are in bounds over its
@@ -740,6 +754,15 @@ release; the CHANGELOG says when one does.
   a table is read as an array is, and it is no argument: an array of its
   values is passed instead, `Arr.from_numpy(W.values.copy())`.
   `examples/quadrature.py` is firedrake's P1 mass kernel.
+- Claims settled by running them, `loopty.tested`: a function that takes
+  nothing and returns whether its claim held, alone or with what it
+  measured, decorated `@tested`, is a row of the ledger, `tested` by `run`
+  with its docstring's first line for statement, or `refuted` with the
+  reason. It is for what no oracle reads, an accuracy that converges at its
+  order say, and it never reads more than `tested`; the agreement with the
+  code a kernel mirrors is `@upstream`'s row. `examples/layer_potential.py`
+  measures pytential's Green identity and the jump relations this way, and
+  compares both its kernels with sumpy's own through `@upstream`.
 - Updates and atomics. A statement that adds to the cell it writes a value
   that reads nothing else of the array, `y[cell[c, k]] += yl[c, k]` or `y[r]
   += v[r, j]`, is an update. Its sum has the class of what it adds, as a
@@ -1002,7 +1025,10 @@ release; the CHANGELOG says when one does.
   program, names its binders and sizes as lanky variables, `i, j, n =
   Var("i"), Var("j"), Var("n")` (#210). A program's array over a domain is
   not kept in a window: `contract` refuses it, naming the fix, keep it whole
-  or `substitute` it (#244).
+  or, where one statement stores it, `substitute` it (#244). So the flagship's
+  triangles, `examples/l2p.py`, are kept whole where sumpy keeps a box's
+  in registers; a window of an array its producer reads, a recurrence, or that
+  several statements store, is #213.
 - `loopty.math` has eight functions (#184), and numpy's own functions on a
   traced value are refused rather than read as them (#195). A function
   only a guard calls is refused when lowered: loopy resolves a function by

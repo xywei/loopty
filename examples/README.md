@@ -28,12 +28,13 @@ marked with `...` is an excerpt and the lines it keeps are checked verbatim.
 | `travel.py` | facts that travel between a program's calls: a requirement decided under the postcondition of the call before, one checked by the compiled program between the calls, and a flat access in bounds where it follows the scan |
 | `fusion.py` | the program of `composition.py` with its two loops fused into one, a fusion one step too early refused with its pair, the intermediate computed where it is read instead of stored, and kept in the three cells live at once, a window of two refused with the read that sees its slot overwritten |
 | `quadrature.py` | firedrake's P1 mass kernel cell by cell, its quadrature rule and basis held in constant tables, read-only arrays written into the compiled code, and its gathers through the cell map in bounds by type |
-| `layer_potential.py` | pytential's QBX single layer over complex points with `real` and `log` from `loopty.math`, scheduled as sumpy's CPU tile, the sources' loop outside the targets', and the same order on a loop loopy cannot keep it on |
+| `layer_potential.py` | pytential's QBX on its own curve: the line-Taylor theorem the kernels add the terms of, the single and double layer over complex points, sumpy's CPU tile checked and the write sumpy silences a fact, each kernel's agreement with sumpy's own as an `upstream` row, and pytential's Green identity and the jump relations as tested rows |
 | `sum_factorization.py` | grudge's two passes of a sum-factorized operator, fused on the element and the row and no deeper: the deeper fusion refused with its pair, the fusion of fewer loops it names, and what passes between them kept one row at a time |
 | `storage_layouts.py` | where cells are stored, as checked maps: sumpy's compressed-Taylor storage index in two pieces, one for one onto its buffer, and grudge's `dim_tags` `N3,N0,N1,N2` the same layout as modepy's reshape of the DOFArray, a wrong nesting refuted with a cell; two kernels read through them |
 | `assembly.py` | firedrake's PyOP2 assembly loop with FFC's P1 mass kernel called per cell and the cell's matrix added into the nodes, `y[cell[c, a]] += ...`: the rule's exactness, the element's mass and the scatter's total as theorems, an update that owes the class of its sum and not distinct writes, PyOP2's GPU split refused with the node its two triangles share, and accepted once the updates are atomic |
 | `calls.py` | kernels calling kernels inside their loops: a rule with a loop of its own (`dot`, loopy #1044) in a matrix-vector and a sparse product, and firedrake's P1 quadrature rule applied per element through a rule that takes the integrand (#1043), each call inlined with binders of its own and owing the caller what the callee's contract checks |
 | `taylor_reconstruction.py` | sumpy's compressed Taylor reconstruction in one file, theorem, kernel and schedule: the theorem proved for every order, the kernel's postcondition decided from what it stores, the theorem applied to it, and the schedule's casts, in one ledger |
+| `l2p.py` | the demo's flagship, sumpy's L2P for the 2-D Laplace kernel (`E2PFromSingleBox`): the compressed Taylor theorem proved for every order and its form box by box, sumpy's storage index a checked layout, the kernel that reconstructs each box's triangle with the theorem applied to its postcondition, the interchange of the triangle's loops refused with its pair, the three calls fused box by box, and a row that compares the program with sumpy's own kernel |
 | `hexahedra.py` | grudge #418's weak gradient and weak divergence on hexahedra, the kernels for every order: the metric product, a pass per reference axis and the three directions summed, each a kernel and together a program; the Kronecker theorem the passes rest on, for every `n`; the DOFArray's layout at order 3, the same as #418's `dim_tags` `N3,N0,N1,N2` and as the kernels' row-major arrays; the passes fused as deep as each pair allows, one loop deeper refused with its pair, and what passes between them kept a row and a slab at a time; and the three launches a device runs, every node on a work item, which `benchmarks/hexahedra.py` times |
 | `advection.py` | grudge #418's weak advection right-hand side on hexahedra, from grudge's own geometry: the upwind flux at every face node, the neighbor's value gathered through the face maps and in bounds by type; the volume term and the lift with the inverse mass pushed inward, the rearrangement two theorems state for every order, and a third that the lift onto the face nodes is the face gather's transpose; the kernels fused on the element and one loop deeper refused with its pair, the fluxes kept an element at a time; every split a device runs (libParanumal's volume and surface, the fluxes first, three launches, one, one from the metric terms) checked before it runs; and libParanumal's lift onto the face nodes, refused without its barriers with the edge node two faces update, and accepted atomic. `benchmarks/advection.py` times them |
 
@@ -1078,75 +1079,147 @@ tested   loopy  quadrature.py:78  mass_action  the scheduled run of mass_action 
 
 ## layer_potential.py
 
-The QBX single layer pytential evaluates at a target on a curve, through the
-line-Taylor expansion of `log` about a center just off the curve, written over
-complex points with `real` and `log` from `loopty.math`. On the unit circle,
-for the density `cos(theta)`, the answer is `cos(theta) / 2`.
+pytential's QBX on its own curve, the demonstration of three layers in one
+file. pytential evaluates a layer potential at the points of a curve by
+expanding the kernel about a center just off the curve; with no FMM that is
+sumpy's `LayerPotential` with a line-Taylor expansion, the kernel along the
+line from the center through the target. Read the points as complex numbers,
+with `alpha = c - y` and `beta = z - c`, and its terms are
 
-The schedule is sumpy's CPU tile, `LayerPotential.get_optimized_kernel`: the
-targets split by 16, the sources by 256, and the sources' outer loop outside
-the targets' inner loop, `.prioritize("s_outer", "t_inner")`. Each target's
-sum still adds its sources in order. On the C target the 16 targets are an
-`ilp` loop, which gives each an accumulator of its own; the same order on a
-target loop in sequence is one loopy cannot keep, and the schedule's
-`buildable` fact says so with the tag that fixes it.
+```text
+log|alpha| + Re( c(1) + ... + c(5) ),   c(k) = -(-beta / alpha)**k / k
+```
+
+- `line_taylor` is the theorem behind these terms, for every order: lanky's
+  `examples/line_taylor.py`, here in the same file. A table that satisfies
+  what `(alpha + tau * beta) f'(tau) == beta` says about its coefficients is
+  `c(k)`; that the Taylor coefficients of `log(alpha + tau * beta)` satisfy
+  that equation is cited, not proved. With Mathlib, Lean proves it; without,
+  it is `assumed`, since the property tester draws no table over `Nat`. The
+  kernels add `coefficient(ratio, k)`, the same function the theorem's
+  conclusion is written with; no row of the ledger links the two yet.
+- `single_layer` and `double_layer` are pytential's `S` and `D` on the
+  five-armed starfish, as sumpy computes them, over complex points.
+  `sumpy_tile()` is sumpy's CPU schedule, `get_optimized_kernel(is_cpu=True)`:
+  16 targets to a work group, the sources 256 at a time, the sources' loop
+  outside the targets'. Its casts are decided, and on the C target it does not
+  build, since C has no hardware axes; `tiled` is the same tile on C, with an
+  `ilp` loop for the work items. sumpy silences loopy's
+  `write_race(write_lpot*)` on this kernel; the fact in its place is
+  `distinct instances of S0 write distinct cells of out`, decided by isl and,
+  with Lean, proved.
+- `sumpy_single_layer` and `sumpy_double_layer` are what sumpy's own
+  `LayerPotential` returned on the same inputs, called as pytential calls it,
+  recorded with the commits it ran at in `layer_potential_sumpy.json` (sumpy
+  needs a newer loopy than loopty's, so it is not run here). Each is
+  `@upstream` of its kernel, as `examples/l2p.py`'s `sumpy_l2p` is, and its
+  row, `tested` by `upstream`, compares the kernel's native run with it.
+- `green_identity`, `jump_S` and `jump_D` are pytential's identity test case
+  on the starfish and the jump relations, evaluated directly
+  (`fmm_order=False`) with the compiled kernels at 30 to 90 panels of this
+  file's own discretization: each a `tested` row, the order the errors fall at
+  above the QBX order less 1.6, as pytential's test asks (`loopty.tested`).
+
+`benchmarks/qbx_layer_potential.py` records sumpy's results, runs the kernels
+on what pytential itself hands sumpy on its refined starfish, and times them
+beside sumpy's own kernel and plain loopy.
 
 ### python examples/layer_potential.py
 
 ```console
 $ uv run python examples/layer_potential.py
-32 targets, 512 sources, order 4
-largest error against cos(theta) / 2: 3.0e-10
+pytential's starfish, QBX order 5, at 4 panels: 36 targets, 132 sources
+  single_layer: compiled on C agrees with native to the approx tolerance: True -> tested
+  double_layer: compiled on C agrees with native to the approx tolerance: True -> tested
+  single_layer: agrees with sumpy's own kernel, as pytential calls it, to the approx tolerance -> tested
+  double_layer: agrees with sumpy's own kernel, as pytential calls it, to the approx tolerance -> tested
 
-schedule: Schedule(single_layer, target='c').split(t, 16).tag(t_inner='ilp').split(s, 256).prioritize(s_outer, t_inner)
+sumpy's tile, get_optimized_kernel(is_cpu=True): split(t, 16).tag(t_outer='g.0', t_inner='l.0').split(s, 256).prioritize(s_outer, t_inner)
   decided  isl  split(t, 16) renames the instances of single_layer one for one
   decided  isl  the order after split(t, 16) runs every dependence of single_layer forward
-  decided  isl  tag(t_inner='ilp') renames the instances of single_layer one for one
-  decided  isl  the order after tag(t_inner='ilp') runs every dependence of single_layer forward
+  decided  isl  tag(t_outer='g.0', t_inner='l.0') renames the instances of single_layer one for one
+  decided  isl  the order after tag(t_outer='g.0', t_inner='l.0') runs every dependence of single_layer forward, within one work item
   decided  isl  split(s, 256) renames the instances of single_layer one for one
-  decided  isl  the order after split(s, 256) runs every dependence of single_layer forward
+  decided  isl  the order after split(s, 256) runs every dependence of single_layer forward, within one work item
   decided  isl  prioritize(s_outer, t_inner) renames the instances of single_layer one for one
-  decided  isl  the order after prioritize(s_outer, t_inner) runs every dependence of single_layer forward
-  out: the compiled run agrees with the native run to the approx tolerance: True -> tested
+  decided  isl  the order after prioritize(s_outer, t_inner) runs every dependence of single_layer forward, within one work item
+  decided  isl  distinct instances of S0 write distinct cells of out
+  on C, an ilp loop for the work items: split(t, 16).tag(t_inner='ilp').split(s, 256).prioritize(s_outer, t_inner)
 
-schedule: Schedule(single_layer, target='c').split(t, 16).split(s, 256).prioritize(s_outer, t_inner)
-  buildable: False
-  reason: the loop s_outer of the sum over s_outer, s_inner in S0 is ordered outside t_inner, which runs in sequence: loopy keeps one accumulator for the sum, so it would run the sum inside every loop of S0 anyway, in another order than the one this schedule's facts were checked for. Tag t_inner 'ilp', tag(t_inner='ilp'), which gives each of its iterations an accumulator of its own, or on a device put it on a hardware axis, tag(t_inner='l.0')
+accuracy at 30, 50, 70, 90 panels:
+  green_identity  errors 1.4e-04, 3.5e-05, 9.1e-06, 2.8e-06: order 3.51 -> tested
+  jump_S          errors 5.4e-04, 9.4e-05, 2.3e-05, 7.2e-06: order 3.91 -> tested
+  jump_D          errors 4.2e-03, 1.0e-03, 2.4e-04, 6.6e-05: order 3.75 -> tested
 ```
 
 ### lanky check examples/layer_potential.py
 
 ```console
 $ uv run lanky check examples/layer_potential.py
-STATUS   BY           WHERE                  OWNER         STATEMENT
--------  -----------  ---------------------  ------------  ------------------------------------------------------------------------
-decided  isl          layer_potential.py:88  single_layer  out[t] is in bounds for every instance of S0
-decided  isl          layer_potential.py:88  single_layer  w[s] is in bounds for every instance of S0
-decided  isl          layer_potential.py:88  single_layer  c[t] is in bounds for every instance of S0
-decided  isl          layer_potential.py:88  single_layer  y[s] is in bounds for every instance of S0
-decided  isl          layer_potential.py:88  single_layer  z[t] is in bounds for every instance of S0
-decided  isl          layer_potential.py:88  single_layer  distinct instances of S0 write distinct cells of out
-decided  isl          layer_potential.py:78  single_layer  the source order runs every dependence forward in time
-decided  type         layer_potential.py:88  single_layer  the accumulation into out[t] over s is approx
-tested   interpreter  layer_potential.py:78  single_layer  the traced term computes what the body computes
-decided  isl          layer_potential.py:88  single_layer  split(t, 16) renames the instances of single_layer one for one
-decided  isl          layer_potential.py:88  single_layer  the order after split(t, 16) runs every dependence of single_layer fo...
-decided  isl          layer_potential.py:88  single_layer  tag(t_inner='ilp') renames the instances of single_layer one for one
-decided  isl          layer_potential.py:88  single_layer  the order after tag(t_inner='ilp') runs every dependence of single_la...
-decided  isl          layer_potential.py:88  single_layer  split(s, 256) renames the instances of single_layer one for one
-decided  isl          layer_potential.py:88  single_layer  the order after split(s, 256) runs every dependence of single_layer f...
-decided  isl          layer_potential.py:88  single_layer  prioritize(s_outer, t_inner) renames the instances of single_layer on...
-decided  isl          layer_potential.py:88  single_layer  the order after prioritize(s_outer, t_inner) runs every dependence of...
+STATUS   BY           WHERE                   OWNER           STATEMENT
+-------  -----------  ----------------------  --------------  ------------------------------------------------------------------------
+assumed  -            layer_potential.py:137  line_taylor     alpha : Complex, beta : Complex, c : Fn[Nat, Complex] | alpha != 0, a...
+tested   python       layer_potential.py:137  line_taylor     the term computes what the annotations compute
+decided  isl          layer_potential.py:206  single_layer    out[t] is in bounds for every instance of S0
+decided  isl          layer_potential.py:206  single_layer    w[s] is in bounds for every instance of S0
+decided  isl          layer_potential.py:206  single_layer    c[t] is in bounds for every instance of S0
+decided  isl          layer_potential.py:206  single_layer    y[s] is in bounds for every instance of S0
+decided  isl          layer_potential.py:206  single_layer    z[t] is in bounds for every instance of S0
+decided  isl          layer_potential.py:206  single_layer    distinct instances of S0 write distinct cells of out
+decided  isl          layer_potential.py:192  single_layer    the source order runs every dependence forward in time
+decided  type         layer_potential.py:206  single_layer    the accumulation into out[t] over s is approx
+tested   interpreter  layer_potential.py:192  single_layer    the traced term computes what the body computes
+decided  isl          layer_potential.py:206  single_layer    split(t, 16) renames the instances of single_layer one for one
+decided  isl          layer_potential.py:206  single_layer    the order after split(t, 16) runs every dependence of single_layer fo...
+decided  isl          layer_potential.py:206  single_layer    tag(t_inner='ilp') renames the instances of single_layer one for one
+decided  isl          layer_potential.py:206  single_layer    the order after tag(t_inner='ilp') runs every dependence of single_la...
+decided  isl          layer_potential.py:206  single_layer    split(s, 256) renames the instances of single_layer one for one
+decided  isl          layer_potential.py:206  single_layer    the order after split(s, 256) runs every dependence of single_layer f...
+decided  isl          layer_potential.py:206  single_layer    prioritize(s_outer, t_inner) renames the instances of single_layer on...
+decided  isl          layer_potential.py:206  single_layer    the order after prioritize(s_outer, t_inner) runs every dependence of...
+decided  isl          layer_potential.py:222  double_layer    out[t] is in bounds for every instance of S0
+decided  isl          layer_potential.py:222  double_layer    w[s] is in bounds for every instance of S0
+decided  isl          layer_potential.py:222  double_layer    n[s] is in bounds for every instance of S0
+decided  isl          layer_potential.py:222  double_layer    c[t] is in bounds for every instance of S0
+decided  isl          layer_potential.py:222  double_layer    y[s] is in bounds for every instance of S0
+decided  isl          layer_potential.py:222  double_layer    z[t] is in bounds for every instance of S0
+decided  isl          layer_potential.py:222  double_layer    distinct instances of S0 write distinct cells of out
+decided  isl          layer_potential.py:211  double_layer    the source order runs every dependence forward in time
+decided  type         layer_potential.py:222  double_layer    the accumulation into out[t] over s is approx
+tested   interpreter  layer_potential.py:211  double_layer    the traced term computes what the body computes
+decided  isl          layer_potential.py:222  double_layer    split(t, 16) renames the instances of double_layer one for one
+decided  isl          layer_potential.py:222  double_layer    the order after split(t, 16) runs every dependence of double_layer fo...
+decided  isl          layer_potential.py:222  double_layer    tag(t_inner='ilp') renames the instances of double_layer one for one
+decided  isl          layer_potential.py:222  double_layer    the order after tag(t_inner='ilp') runs every dependence of double_la...
+decided  isl          layer_potential.py:222  double_layer    split(s, 256) renames the instances of double_layer one for one
+decided  isl          layer_potential.py:222  double_layer    the order after split(s, 256) runs every dependence of double_layer f...
+decided  isl          layer_potential.py:222  double_layer    prioritize(s_outer, t_inner) renames the instances of double_layer on...
+decided  isl          layer_potential.py:222  double_layer    the order after prioritize(s_outer, t_inner) runs every dependence of...
+tested   upstream     layer_potential.py:391  single_layer    the native run of single_layer agrees with sumpy_single_layer in out,...
+tested   upstream     layer_potential.py:397  double_layer    the native run of double_layer agrees with sumpy_double_layer in out,...
+tested   run          layer_potential.py:480  green_identity  S(du/dn) - D(u) = u/2, Green's identity, at order 5 - 1.6 or faster
+tested   run          layer_potential.py:486  jump_S          S(+) - S(-) = 0: S is continuous, at order 5 - 1.6 or faster
+tested   run          layer_potential.py:492  jump_D          D(+) - D(-) = sigma: D jumps by the density, at order 5 - 1.6 or faster
 
-17 facts: 16 decided, 1 tested
+42 facts: 1 assumed, 33 decided, 8 tested
 ```
+
+With Lean, the 31 facts isl decided read `proved` by `lean`, the write fact
+sumpy silences and the tile's casts among them (`41 facts: 1 assumed, 2
+decided, 31 proved, 7 tested`). With Mathlib too, `line_taylor` reads `proved`
+by `lean`, by induction two orders at a time with the linear combinations
+Python found, and is worth `tested`: what the theorem rests on includes the
+reading of its annotations, which lanky checks by running them (the second
+row).
 
 ### loopty run examples/layer_potential.py
 
-`uv run loopty run examples/layer_potential.py` compiles the tile on the C
-target and compares it with the native run, as for every demo. Its transcript
-is not kept here: the difference it prints is one of `log`'s last bits,
-numpy's against the C library's, which can differ from machine to machine.
+`uv run loopty run examples/layer_potential.py` compiles `tiled` and
+`tiled_double` on the C target and compares each with the native run, and
+with Lean proves their casts. Its transcript is not kept here: the difference
+it prints is in the last bits of `log`, numpy's against the C library's,
+which can differ from machine to machine. `--target opencl` runs both on an
+OpenCL device; sumpy's own tags are `sumpy_tile()`, which the benchmark runs.
 
 ## sum_factorization.py
 
@@ -2101,10 +2174,171 @@ tested                               tested     loopy  assembly.py:224  mass_ffc
 8 facts: 1 assumed, 5 decided, 2 tested
 ```
 
+## l2p.py
+
+The demo's flagship: sumpy's L2P for the 2-D Laplace kernel, the evaluation of
+each leaf box's local expansion at the targets the box owns, in one file and
+one ledger, from the theorem about the expansion to the kernels that compute
+it to the schedule that runs them. The file is read top to bottom, and its
+docstring has the long form and the permalinks into sumpy at the commit it
+mirrors.
+
+- `compressed_taylor` is the claim sumpy's compressed Taylor expansion rests
+  on (lanky#86): a table that agrees with the derivatives where sumpy stores
+  them, `a < 2`, and follows `R[a + 2, b] == -R[a, b + 2]` everywhere else is
+  the table of derivatives, for any table that satisfies Laplace's equation.
+  `on_every_triangle` is its form box by box on the triangle `a + b <= p`,
+  which a kernel of order `p` cites. Lean proves both for every order, with
+  Mathlib; without it, the rows are `assumed`.
+- `storage_index` is sumpy's `get_storage_index`, a layout of two pieces whose
+  three facts say it stores the `2p + 1` derivatives one for one onto their
+  addresses. `unpack` reads each box's coefficients through it into the
+  table the theorem's `stored` is about, and its postcondition, decided from
+  what it stores, is sumpy's storage order: `C[i, a, b] == coeffs[i, 2*(a +
+  b) - 1 + a]` after the value at the centre.
+- `reconstruct` fills each box's triangle. Its postcondition, the copies and
+  the recurrence, is decided by isl from what its statements store, and it
+  is the theorem's hypotheses about the kernel, so the theorem applies: the
+  row `by on_every_triangle, for every D with pde and stored` says the
+  triangle is the table of derivatives of any harmonic `D` whose entries
+  the stored table holds. `evaluate` sums the Taylor polynomial at each
+  target, and the program `l2p` runs the three, the stored table and the
+  triangles arrays it makes, each read only where the call before it stored.
+- Running `b` outside `a` is refused with the pair of instances it would
+  reorder. `fused` runs the three calls box by box, as sumpy does, two casts
+  isl decides and Lean proves.
+- `sumpy_l2p` is sumpy's own `E2PFromSingleBox`, on this file's inputs: what
+  it computed is recorded beside the file (`l2p_sumpy.json`, written by
+  `benchmarks/l2p.py` in an environment with sumpy main and loopy main), and
+  the `upstream` row compares the native run of `l2p` with it. They agree to
+  round-off.
+
+### python examples/l2p.py
+
+```console
+$ uv run python examples/l2p.py
+order 10: 16 boxes, 97 targets, 21 coefficients stored per box, 66 on its triangle
+largest error against the charges' potential: 4.1e-13
+
+refused: interchange(b, a) illegal: instance S0[i=0, a=1, b=9] writes R[0, 1, 9] read by S1[i=0, a=3, b=7] scheduled earlier (at nb=1, isl's choice)
+
+schedule: Schedule(l2p, target='c').fuse(unpack, reconstruct, loops=1).fuse(reconstruct, evaluate, loops=1)
+  decided  isl  fuse(unpack, reconstruct, loops=1) renames the instances of l2p one for one
+  decided  isl  the order after fuse(unpack, reconstruct, loops=1) runs every dependence of l2p forward
+  decided  isl  fuse(reconstruct, evaluate, loops=1) renames the instances of l2p one for one
+  decided  isl  the order after fuse(reconstruct, evaluate, loops=1) runs every dependence of l2p forward
+  refused: contract('R'): R is over the domain Where[i: Fin(nb), a: Fin(11), b: Fin(11), a + b <= 10], whose cells a window does not place yet; keep it whole
+  pot: difference 0 within 1.1e-06 (approx) -> tested
+```
+
+### lanky check examples/l2p.py
+
+Without Lean, the two theorems are `assumed` and the application is
+`decided` by `theorem`, worth what the theorem is. With Lean and Mathlib
+(`LANKY_LEAN_MATHLIB`, and lanky's `cas` extra, whose sympy finds the
+induction's steps), every row isl decided is `proved` by Lean, and so are
+both theorems and the application: `52 facts: 3 decided, 42 proved, 7
+tested`, the three left decided being the class of the Taylor sum, by type,
+and the two postconditions restated after their calls, by the call. That
+takes Lean about two minutes from an empty proof cache. `lanky check
+examples/l2p.py --show-lean compressed_taylor` prints the induction Lean
+checked: on `a`, two at a time, each step a `linear_combination` of the
+recurrence, the PDE and the hypothesis at `(a, b + 2)`, whose multipliers
+Python found. The table cuts each statement to fit; `lanky check --verbose`
+prints them whole.
+
+```console
+$ uv run lanky check examples/l2p.py
+STATUS                           EFFECTIVE  BY           WHERE       OWNER              STATEMENT
+-------------------------------  ---------  -----------  ----------  -----------------  ------------------------------------------------------------------------
+assumed                          assumed    -            l2p.py:121  compressed_taylor  D : Fn[Nat, Nat, Real], R : Fn[Nat, Nat, Real] | forall a in Nat, b i...
+tested                           tested     python       l2p.py:121  compressed_taylor  the term computes what the annotations compute
+assumed                          assumed    -            l2p.py:139  on_every_triangle  n : Nat, p : Nat, c : Fn[Nat, Nat, Nat, Real], D : Fn[Nat, Nat, Nat, ...
+tested                           tested     python       l2p.py:139  on_every_triangle  the term computes what the annotations compute
+decided                          decided    isl          l2p.py:190  storage_index      storage_index stores every cell at an address of Fin(21)
+decided                          decided    isl          l2p.py:190  storage_index      storage_index stores no two cells at one address
+decided                          decided    isl          l2p.py:190  storage_index      storage_index stores a cell at every address of Fin(21)
+decided                          decided    isl          l2p.py:235  unpack             C[i, a, b] is in bounds for every instance of S0
+decided                          decided    isl          l2p.py:235  unpack             coeffs[i, 0] is in bounds for every instance of S0
+decided                          decided    isl          l2p.py:237  unpack             C[i, a, b] is in bounds for every instance of S1
+decided                          decided    isl          l2p.py:237  unpack             coeffs[i, 2*(a + b) - 1 + a] is in bounds for every instance of S1
+decided                          decided    isl          l2p.py:235  unpack             distinct instances of S0 write distinct cells of C
+decided                          decided    isl          l2p.py:237  unpack             distinct instances of S1 write distinct cells of C
+decided                          decided    isl          l2p.py:213  unpack             the source order runs every dependence forward in time
+decided                          decided    isl          l2p.py:235  unpack             no cell of C is stored twice, or read before its store
+decided                          decided    isl          l2p.py:213  unpack             (forall i in Fin(nb). C[i, 0, 0] == coeffs[i, 0]) and (forall i in Fi...
+tested                           tested     interpreter  l2p.py:213  unpack             the traced term computes what the body computes
+decided                          decided    isl          l2p.py:267  reconstruct        R[i, a, b] is in bounds for every instance of S0
+decided                          decided    isl          l2p.py:267  reconstruct        C[i, a, b] is in bounds for every instance of S0
+decided                          decided    isl          l2p.py:269  reconstruct        R[i, a, b] is in bounds for every instance of S1
+decided                          decided    isl          l2p.py:269  reconstruct        R[i, a - 2, b + 2] is in bounds for every instance of S1
+decided                          decided    isl          l2p.py:267  reconstruct        distinct instances of S0 write distinct cells of R
+decided                          decided    isl          l2p.py:269  reconstruct        distinct instances of S1 write distinct cells of R
+decided                          decided    isl          l2p.py:269  reconstruct        every cell of R that S1 reads, S0 or S1 wrote before the read
+decided                          decided    isl          l2p.py:240  reconstruct        the source order runs every dependence forward in time
+decided                          decided    isl          l2p.py:267  reconstruct        no cell of R is stored twice, or read before its store
+decided                          decided    isl          l2p.py:240  reconstruct        (forall i in Fin(nb), a in Nat, b in Nat where a < 2 and a + b <= 10....
+decided under on_every_triangle  assumed    theorem      l2p.py:240  reconstruct        by on_every_triangle, for every D with pde and stored: forall i in Fi...
+tested                           tested     interpreter  l2p.py:240  reconstruct        the traced term computes what the body computes
+decided                          decided    isl          l2p.py:300  evaluate           pot[i, t] is in bounds for every instance of S0
+decided                          decided    isl          l2p.py:300  evaluate           R[i, a, b] is in bounds for every instance of S0
+decided                          decided    isl          l2p.py:300  evaluate           tx[i, t] is in bounds for every instance of S0
+decided                          decided    isl          l2p.py:300  evaluate           cx[i] is in bounds for every instance of S0
+decided                          decided    isl          l2p.py:300  evaluate           ty[i, t] is in bounds for every instance of S0
+decided                          decided    isl          l2p.py:300  evaluate           cy[i] is in bounds for every instance of S0
+decided                          decided    isl          l2p.py:300  evaluate           INV_FACT[a] is in bounds for every instance of S0
+decided                          decided    isl          l2p.py:300  evaluate           INV_FACT[b] is in bounds for every instance of S0
+decided                          decided    isl          l2p.py:300  evaluate           cnt[i], the length of row i that bounds the loop over t, is in bounds...
+decided                          decided    isl          l2p.py:300  evaluate           distinct instances of S0 write distinct cells of pot
+decided                          decided    isl          l2p.py:279  evaluate           the source order runs every dependence forward in time
+decided                          decided    type         l2p.py:300  evaluate           the accumulation into pot[i, t] over a, b is approx
+tested                           tested     interpreter  l2p.py:279  evaluate           the traced term computes what the body computes
+decided                          decided    call         l2p.py:307  l2p                after unpack(...) in l2p: (forall i in Fin(nb). C[i, 0, 0] == coeffs[...
+decided                          decided    call         l2p.py:307  l2p                after reconstruct(...) in l2p: (forall i in Fin(nb), a in Nat, b in N...
+decided                          decided    isl          l2p.py:313  l2p                every cell of C that reconstruct reads, unpack stored before it
+decided                          decided    isl          l2p.py:314  l2p                every cell of R that evaluate reads, reconstruct stored before it
+tested                           tested     interpreter  l2p.py:307  l2p                the traced term computes what the body computes
+decided                          decided    isl          l2p.py:310  l2p                fuse(unpack, reconstruct, loops=1) renames the instances of l2p one f...
+decided                          decided    isl          l2p.py:310  l2p                the order after fuse(unpack, reconstruct, loops=1) runs every depende...
+decided                          decided    isl          l2p.py:310  l2p                fuse(reconstruct, evaluate, loops=1) renames the instances of l2p one...
+decided                          decided    isl          l2p.py:310  l2p                the order after fuse(reconstruct, evaluate, loops=1) runs every depen...
+tested                           tested     upstream     l2p.py:431  l2p                the native run of l2p agrees with sumpy_l2p in pot, on its example in...
+
+52 facts: 2 assumed, 43 decided, 7 tested
+```
+
+### loopty run examples/l2p.py
+
+```console
+$ uv run loopty run examples/l2p.py
+l2p: Schedule(l2p, target='c').fuse(unpack, reconstruct, loops=1).fuse(reconstruct, evaluate, loops=1)
+  pot: difference 0 within 1.1e-06 (approx) -> tested
+unpack: Schedule(unpack, target='c')
+  C: difference 0 within 1e-06 (approx) -> tested
+reconstruct: Schedule(reconstruct, target='c')
+  R: difference 0 within 1e-06 (approx) -> tested
+evaluate: Schedule(evaluate, target='c')
+  pot: difference 0 within 1e-06 (approx) -> tested
+
+STATUS   BY     WHERE       OWNER        STATEMENT
+-------  -----  ----------  -----------  ------------------------------------------------------------------------
+decided  isl    l2p.py:310  l2p          fuse(unpack, reconstruct, loops=1) renames the instances of l2p one f...
+decided  isl    l2p.py:310  l2p          the order after fuse(unpack, reconstruct, loops=1) runs every depende...
+decided  isl    l2p.py:310  l2p          fuse(reconstruct, evaluate, loops=1) renames the instances of l2p one...
+decided  isl    l2p.py:310  l2p          the order after fuse(reconstruct, evaluate, loops=1) runs every depen...
+tested   loopy  l2p.py:307  l2p          the scheduled run of l2p agrees with the native run to the accuracy i...
+tested   loopy  l2p.py:235  unpack       the scheduled run of unpack agrees with the native run to the accurac...
+tested   loopy  l2p.py:267  reconstruct  the scheduled run of reconstruct agrees with the native run to the ac...
+tested   loopy  l2p.py:300  evaluate     the scheduled run of evaluate agrees with the native run to the accur...
+
+8 facts: 4 decided, 4 tested
+```
+
 ## taylor_reconstruction.py
 
-The seed of the demo's flagship: sumpy's compressed Taylor reconstruction for
-the 2-D Laplace kernel, in one file and one ledger, from the theorem about the
+The seed of the demo's flagship, `l2p.py`: sumpy's compressed Taylor
+reconstruction for the 2-D Laplace kernel, on one triangle, in one file and
+one ledger, from the theorem about the
 expansion to the kernel that computes it to the schedule that runs it.
 
 - `on_the_triangle` is a lanky theorem: a table `R` that copies the table `c`

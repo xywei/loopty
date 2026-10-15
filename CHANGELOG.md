@@ -8,6 +8,72 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Added
 
+- **Claims settled by running them** (`loopty.tested`): `@tested` on a
+  function that takes nothing and returns whether its claim held, alone or
+  with what it measured, puts the claim in the ledger as a `tested` row,
+  decided by `run`, the docstring's first line its statement; `refuted` with
+  the reason when it returns false, raises, or returns something that is not
+  a verdict. A run is evidence about its inputs, so nothing here reads more
+  than `tested`. `examples/layer_potential.py` measures pytential's Green
+  identity and the two jump relations this way.
+- **S2 of the demonstration** (`examples/layer_potential.py`): pytential's
+  QBX on its own curve. The line-Taylor theorem, for every order, in the same
+  file as the kernels that add its closed form, `coefficient(ratio, k)`;
+  pytential's single and double layer on the five-armed starfish over complex
+  points; sumpy's CPU tile (`sumpy_tile()`), its casts decided, with the
+  write sumpy silences (`write_race(write_lpot*)`) the fact `distinct
+  instances of S0 write distinct cells of out`, proved by Lean where it is
+  installed; each kernel's agreement with what sumpy's own `LayerPotential`
+  returned on the example's inputs (recorded at sumpy's commit,
+  `layer_potential_sumpy.json`), an `upstream` row; and, as tested rows,
+  pytential's identity test case and the jump relations, the errors falling
+  faster than the QBX order less 1.6.
+  `benchmarks/qbx_layer_potential.py` times the kernel against plain loopy
+  and sumpy's own on one OpenCL device, records sumpy's results, and runs
+  the kernels on the arguments pytential itself hands sumpy.
+- **The demo's flagship, `examples/l2p.py`**: sumpy's L2P for the 2-D
+  Laplace kernel (`E2PFromSingleBox` with the compressed Taylor expansion),
+  in one file and one ledger. The claim sumpy's reconstruction rests on,
+  for every order (lanky#86), and its form box by box on the triangle `a + b
+  <= p`, both proved by Lean with Mathlib; sumpy's storage index as a
+  checked layout; `unpack`, whose postcondition, decided from what it
+  stores, is sumpy's storage order, `reconstruct`, whose postcondition is
+  decided from what it stores and is the theorem's hypotheses, so the
+  theorem applies, and `evaluate`, composed by the program `l2p` and fused
+  box by box; the interchange of the triangle's loops refused with isl's
+  pair, and the window of the triangles refused with the reason (#244,
+  #213). The program agrees with sumpy's own kernel on the file's inputs to
+  round-off (`upstream`, below), and with the charges' potential to `4e-13`
+  at order 10.
+- **Agreement with the code a kernel mirrors**, `@upstream(kernel)`
+  (`loopty.upstream`). The decorated function computes, on the file's
+  example inputs, what the code the kernel is written after computes there;
+  `lanky check` runs the kernel natively on the same inputs and compares,
+  output by output, at the accuracy the kernel's types claim, a dense
+  output in its own shape. The row is `tested` by `upstream`, `refuted`
+  with the cell and both values (or both shapes), or `assumed` with why
+  where the function cannot run: its package is not installed, or its
+  recording is not there.
+- **`loopty.math.ipow(x, n)`**, `x` to an integer power multiplied out as
+  loopy multiplies one, by squaring, rounded at every product, in both runs:
+  natively by the same loop (`loopty.math.integer_power`), compiled as
+  loopy's `loopy_pow_<base>_<exponent>`. The two runs agree bit for bit, in
+  single precision too. An integer base or a real power is refused, natively
+  from the values and traced from the operands' types, and so is the
+  smallest power of the type the compiled kernel holds the power in
+  (`-2**31`, `-2**63`), whose negation loopy's helper cannot take. `x ** n` of a real `x` stays numpy's power, the C
+  library's `pow` in both runs; at the flagship's Taylor sum `ipow` is an
+  order of magnitude faster on the C target (`benchmarks/l2p.py`).
+- **`benchmarks/l2p.py`**, which times sumpy's own `E2PFromSingleBox`, the
+  same algorithm written directly in plain loopy (loopy #970's L2P
+  microkernel with the Laplace step put back, and variants that make
+  loopty's choices), and loopty's schedules of `examples/l2p.py`, on one
+  tree and one device, and compares their potentials with each other and
+  with the direct sum. On the C target plain loopy is built with the flags
+  loopty builds its kernels with (`-fwrapv`; `--no-wrapv` for loopy's
+  alone), and each record names the flags it was built with. It also
+  records sumpy's potential on the example's inputs, for the `upstream`
+  row.
 - **The S3 demo: firedrake's PyOP2 assembly loop** (`examples/assembly.py`).
   FFC's P1 mass kernel of firedrake's PyOP2 tests, `mass_ffc`, with its
   15-digit tables as constant tables, is a kernel of its own, called inside
@@ -483,6 +549,11 @@ All notable changes to loopty are recorded here. The format follows
   (`examples/advection.py`). A chain through an array something writes is
   refused as before.
 
+- `contract` of a program's array over a domain names `substitute` as the
+  other fix only where one statement stores the array, which is what a
+  substitution computes again; the flagship's triangles, which two
+  statements store, are refused with `keep it whole`.
+
 - A kernel's postcondition that its statements' stores decide reads
   `decided isl` where it read `tested native`, after a new `single-assignment`
   row, and the restatements of it in programs are worth `decided`; the
@@ -513,16 +584,21 @@ All notable changes to loopty are recorded here. The format follows
   up to 32 of isl's instances of them, where it was given 16.
 - `substitute` refuses an array kept in a window, and `contract` one
   computed where it is read.
-- The coverage report in `docs/lean-checks.md` covers the four examples the
-  demo kernels added (`assembly.py`, `layer_potential.py`, `quadrature.py`,
-  `sum_factorization.py`), `storage_layouts.py`, `taylor_reconstruction.py`,
-  the calls in loops (`examples/calls.py`, `tests/kernels/calls.py`,
-  `tests/kernels/program_domains.py`), and the windows, updates, layouts,
+- The coverage report in `docs/lean-checks.md` covers the demos' examples
+  (`l2p.py`, the flagship, `assembly.py`, `hexahedra.py`,
+  `layer_potential.py`, `quadrature.py`, `sum_factorization.py`),
+  `storage_layouts.py`, `taylor_reconstruction.py`, the calls in loops
+  (`examples/calls.py`, `tests/kernels/calls.py`,
+  `tests/kernels/program_domains.py`), the upstream test kernels
+  (`tests/kernels/upstream.py`), and the windows, updates, layouts,
   postconditions decided from what kernels store and cited theorems above:
-  of 1163 facts isl decides in 27 files, Lean proves 1122 and confirms the
-  counterexample of the 29 refuted ones. The 12 it leaves decided are claims
+  of 1319 facts isl decides in 30 files, Lean proves 1272 and confirms the
+  counterexample of the 32 refuted ones. The 15 it leaves decided are claims
   about reals, which core Lean has no words for; with Mathlib it proves them
-  too, 1134 in all, and none stays decided.
+  too, 1287 in all, and none stays decided. `examples/layer_potential.py`
+  has 31, its single and double layer, all proved. `examples/l2p.py` has 41:
+  40 proved with Mathlib, and its refused interchange, whose negation Lean
+  proves.
 - A ledger gains a `definedness` row for each array a kernel reads only where
   it wrote it before (`scan`'s `off`, `p2p`'s `term`, `pairs`' `f`), and an
   access with mixed subscripts is decided where it was assumed; the
@@ -577,6 +653,11 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Fixed
 
+- On OpenCL, a complex number to a natural power below 100 is the products
+  numpy's power by an integer takes (`z * ((z * z) * (z * z))` for 5), never
+  pyopencl's `cdouble_powr`. loopy writes only the powers by 2, 3 and 4 as
+  products, and by 1 or 5, which a written-out series has, `exp(n log z)`:
+  a logarithm and an exponential for each, and not exact for `z**1`.
 - A schedule's `ilp` or `vec` tag no longer has loopy warn, on every build,
   that it falls back to its first scheduler, which it does for every kernel
   with such a loop: the tag silences `v1_scheduler_fallback` on the kernel

@@ -29,6 +29,15 @@ trace names ``sqrt(1.0 * k[i])``, a double.
 
 A function of a value is what these take, ``sqrt(x[i])``; an array whole,
 ``sqrt(x)``, is refused natively as it is when traced.
+
+``ipow(x, n)`` is ``x`` to the integer power ``n``, multiplied out as loopy
+computes an integer power: by squaring, ``x * x`` and the odd factors taken
+along, rounded at every product. ``x ** n`` of a real ``x`` is numpy's, the C
+library's ``pow``, which the compiled kernel calls too, so that both runs
+round alike; ``ipow`` is the same multiplications in both runs, so they still
+agree bit for bit, and the compiled one costs a few products where ``pow``
+costs a library call. It is not ``x ** n``: the two can differ in the last
+bits, which is why it has a name of its own.
 """
 
 from __future__ import annotations
@@ -39,11 +48,59 @@ from typing import Any
 import numpy as np
 import pymbolic.primitives as prim
 
-__all__ = ["conj", "cos", "exp", "imag", "log", "real", "sin", "sqrt"]
+__all__ = ["conj", "cos", "exp", "imag", "integer_power", "ipow", "log", "real", "sin",
+           "sqrt"]
+
+def integer_power(x: Any, n: Any) -> Any:
+    """``x`` to the integer power ``n``, by squaring, as loopy's C does it.
+
+    loopy defines ``loopy_pow_<base>_<exponent>`` for a power with an
+    integer exponent (``loopy.target.c``): ``1`` at ``n == 0``; for a
+    negative ``n``, ``x`` replaced by ``1 / x`` and ``n`` by ``-n``; then,
+    while ``n > 1``, the odd factor multiplied into ``y`` and ``x`` squared;
+    and ``x * y`` at the end. This is that loop, in ``x``'s own type, so the
+    native run and the compiled one multiply the same numbers in the same
+    order.
+
+    The one power it cannot match is the smallest of the integer type the
+    compiled kernel holds ``n`` in, whose negation that type does not hold:
+    there loopy's ``-n`` stays negative and its loop computes another power.
+    So it is refused, ``-2**31`` and ``-2**63`` of a Python integer, and the
+    smallest value of a numpy one.
+    """
+    smallest = (
+        {int(np.iinfo(n.dtype).min)}
+        if isinstance(n, np.signedinteger)
+        else {-(2**31), -(2**63)}
+        if isinstance(n, int) and not isinstance(n, bool)
+        else set()
+    )
+    if int(n) in smallest:
+        raise ValueError(
+            f"loopty.math.ipow cannot take the power {int(n)}: the compiled kernel "
+            "holds it in an integer type that has no -n, and loopy's integer "
+            "power computes another power there"
+        )
+    x = np.float64(x) if isinstance(x, float) else x
+    n = int(n)
+    one = x.dtype.type(1) if isinstance(x, np.generic) else 1.0
+    if n == 0:
+        return one
+    if n < 0:
+        x = one / x
+        n = -n
+    y = one
+    while n > 1:
+        if n % 2:
+            y = x * y
+        x = x * x
+        n = n // 2
+    return x * y
+
 
 #: The functions of this module, by the name a term's call gives each, and
 #: the numpy function that computes it natively and in the interpreter.
-FUNCTIONS: dict[str, Callable[[Any], Any]] = {
+FUNCTIONS: dict[str, Callable[..., Any]] = {
     "sqrt": np.sqrt,
     "exp": np.exp,
     "log": np.log,
@@ -52,6 +109,7 @@ FUNCTIONS: dict[str, Callable[[Any], Any]] = {
     "real": np.real,
     "imag": np.imag,
     "conj": np.conj,
+    "ipow": integer_power,
 }
 
 
@@ -114,3 +172,41 @@ def imag(x: Any) -> Any:
 def conj(x: Any) -> Any:
     """The complex conjugate, ``numpy.conj``: of a real number, itself."""
     return _applied("conj", x)
+
+
+def ipow(x: Any, n: Any) -> Any:
+    """``x`` to the integer power ``n``, multiplied out as loopy does it.
+
+    See the module: the same products natively and compiled, where ``x **
+    n`` is the C library's ``pow`` in both. ``x`` is a real number, of a
+    floating type, and ``n`` an integer, a loop variable, an integral cell or
+    a literal; ``ipow(x[i], k)`` and ``ipow(x[i], 3)``.
+    """
+    from lanky.terms import Call, Var
+
+    from loopty.arr import Arr
+
+    for value, what in ((x, "x"), (n, "n")):
+        if isinstance(value, Arr) or isinstance(value, np.ndarray) and value.ndim:
+            raise TypeError(
+                f"loopty.math.ipow takes one value for {what}, such as "
+                "ipow(x[i], k), and not an array: a kernel computes cell by cell"
+            )
+    if isinstance(n, float | np.floating | complex | np.complexfloating) or (
+        isinstance(n, bool | np.bool_)
+    ):
+        raise TypeError(
+            f"loopty.math.ipow takes an integer power, not {n!r}; x ** n is the "
+            "power of a real exponent"
+        )
+    if isinstance(x, bool | int | np.integer | np.bool_) or (
+        isinstance(x, complex | np.complexfloating)
+    ):
+        raise TypeError(
+            f"loopty.math.ipow takes a real base of a floating type, not {x!r}: "
+            "for an integer or a complex number, write x ** n"
+        )
+    if isinstance(x, prim.ExpressionNode) or isinstance(n, prim.ExpressionNode):
+        return Call(Var("ipow"), (x, n))
+    return integer_power(x, n)
+
