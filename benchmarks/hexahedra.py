@@ -24,6 +24,10 @@ environments (grudge #418 needs loopy's main branch):
 ``python benchmarks/hexahedra.py loopty --elements 48 --csv loopty.csv``
     Every variant of every operator, loopty's launches beside the same
     kernels written in plain loopy, each checked against numpy first.
+``python benchmarks/hexahedra.py c --elements 16 --csv c.csv``
+    What fusing and contracting the passes buys on a CPU: the weak gradient
+    as the demo's programs on the C target, one thread, the passes one after
+    another, ``fused`` and ``contracted``, built with the same flags.
 ``python benchmarks/hexahedra.py grudge --elements 48 --csv grudge.csv``
     grudge's own operators, eager and lazy (needs grudge).
 ``python benchmarks/hexahedra.py fields --elements 4 --order 3 --npz fields.npz``
@@ -36,8 +40,11 @@ environments (grudge #418 needs loopy's main branch):
 The device is the one ``PYOPENCL_CTX`` names; nothing chooses one. A time is
 the median over ``--reps`` repetitions of a batch of ``--batch`` calls after
 ``--warmup`` calls, measured between two markers on the device's queue, and
-the minimum and the maximum go beside it. Each row records the device, the
-driver and the versions it ran with; nothing here names the machine.
+the minimum and the maximum go beside it. On the C target it is the wall
+time of the batch, and the programs take their batches in turn, so that a
+change in the machine's load falls on all of them. Each row records the
+device, the driver and the versions it ran with; nothing here names the
+machine.
 """
 
 from __future__ import annotations
@@ -783,6 +790,8 @@ FIELDS = (
     "kernel_s",
     "agree",
     "contraction",
+    "flags",
+    "load",
     "device",
     "platform",
     "platform_version",
@@ -978,6 +987,222 @@ def _time_order(
                 f"agrees to {gap:.1e}",
                 flush=True,
             )
+
+
+# {{{ on a CPU: the weak gradient's programs on the C target
+
+
+def c_programs(demo: dict[str, Any]) -> dict[str, Any]:
+    """The weak gradient as the demo's programs, by name, each a checked schedule.
+
+    The passes one after another, each storing its field whole before the
+    next reads it; the passes fused as deep as each pair allows, ``fused``,
+    which still stores ``w`` and ``v`` whole; and ``contracted``, which keeps
+    ``w`` a row at a time and ``v`` a slab at a time. So the first two differ
+    by the order the passes run in, and the last two by the memory ``w`` and
+    ``v`` take, and the zeroing a program gives each array it makes.
+    """
+    from loopty import Schedule
+
+    return {
+        "passes one after another": Schedule(demo["weak_grad"]),
+        "fused": demo["fused"],
+        "fused and contracted": demo["contracted"],
+    }
+
+
+def c_call(
+    schedule: Any, order: int, ne: int, flags: Sequence[str]
+) -> tuple[Callable[[dict[str, Any]], None], dict[str, tuple[Any, Any]], list[str]]:
+    """``schedule`` compiled for the C target with every size fixed.
+
+    Returns the call, which takes the arrays by name, the arrays the program
+    makes, which a call on the C target is passed (see
+    :func:`loopty.lower.heap_temporaries`) and which are allocated once, as a
+    code that calls the program again and again keeps them, and the flags it
+    is built with: loopty's for the program, then ``flags``, after loopy's
+    own ``-std=c99 -O3 -fPIC``.
+    """
+    import loopy as lp
+
+    from loopty.isl_reading import declining
+    from loopty.lower import heap_temporaries
+
+    sizes = {"n": order + 1, "ne": ne}
+    kernel, made = heap_temporaries(schedule.kernel, schedule.term, sizes)
+    built = [*(kernel.default_entrypoint.options.build_options or []), *flags]
+    kernel = lp.set_options(fixed(kernel, True, **sizes), build_options=built)
+    names = [arg.name for arg in kernel.default_entrypoint.args]
+    with declining():
+        run = kernel.executor()
+
+    def call(arrays: dict[str, Any]) -> None:
+        with declining():
+            run(**{name: arrays[name] for name in names})
+
+    return call, made, built
+
+
+def describe_c() -> dict[str, str]:
+    """The processor and the software a C row was measured with."""
+    import subprocess
+
+    import islpy
+    import loopy
+
+    cpu = "?"
+    try:
+        for line in Path("/proc/cpuinfo").read_text().splitlines():
+            if line.startswith("model name"):
+                cpu = line.split(":", 1)[1].strip()
+                break
+    except OSError:
+        pass
+    try:
+        compiler = subprocess.run(
+            ["gcc", "--version"], capture_output=True, text=True, check=True
+        ).stdout.splitlines()[0]
+    except (OSError, IndexError, subprocess.CalledProcessError):
+        compiler = "?"
+    return {
+        "device": cpu,
+        "platform": "C target, one thread",
+        "platform_version": "",
+        "driver": compiler,
+        "loopty": _checkout(),
+        "loopy": _provenance("loopy", ".".join(map(str, loopy.VERSION))),
+        "islpy": _provenance("islpy", islpy.__version__),
+        "pyopencl": "",
+        "numpy": np.__version__,
+        "python": sys.version.split()[0],
+    }
+
+
+def mode_c(options: argparse.Namespace) -> None:
+    """The weak gradient's programs on the C target, each with the same flags."""
+    meta = describe_c()
+    demo = load_demo()
+    handle, writer = _rows_writer(options.csv, FIELDS)
+    for order in options.orders:
+        # one order's arrays at a time: they are freed when it returns
+        _time_order_c(options, demo, order, meta, writer, handle)
+    handle.close()
+
+
+def _time_order_c(
+    options: argparse.Namespace,
+    demo: dict[str, Any],
+    order: int,
+    meta: dict[str, str],
+    writer: Any,
+    handle: Any,
+) -> None:
+    """Every program at one order, each checked against numpy, then timed in turn."""
+    ne = options.elements**3
+    n = order + 1
+    nodes = (ne, n, n, n)
+    rng = np.random.default_rng(0)
+    stiffness_t, mass = demo["factors"](order)
+    Fr, Fs, Ft = (
+        np.stack([stiffness_t if q % 3 == axis else mass for q in range(9)])
+        for axis in range(3)
+    )
+    host = {
+        "G": rng.standard_normal((9, *nodes)),
+        "u": rng.standard_normal(nodes),
+        "Fr": Fr,
+        "Fs": Fs,
+        "Ft": Ft,
+    }
+    checked = sample(ne)
+    expected = operator(
+        "weak_grad", host["G"][:, checked], host["u"][checked], Fr, Fs, Ft
+    )
+    ready: dict[str, tuple[Callable[[dict[str, Any]], None], dict[str, Any]]] = {}
+    built: dict[str, list[str]] = {}
+    for name, schedule in c_programs(demo).items():
+        variant = f"loopty on C, {name}"
+        if options.only and not any(word in variant for word in options.only):
+            continue
+        try:
+            call, made, built[name] = c_call(
+                schedule, order, ne, options.cflags.split()
+            )
+        except Exception as exc:  # noqa: BLE001 - a program that does not build
+            print(
+                f"weak_grad order {order} {variant}: does not build: "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            continue
+        arrays = {
+            **host,
+            "grad": np.zeros((3, *nodes)),
+            **{
+                array: np.zeros(shape, dtype=dtype)
+                for array, (shape, dtype) in made.items()
+            },
+        }
+        call(arrays)
+        got = arrays["grad"][:, checked]
+        gap = float(np.abs(got - expected).max() / np.abs(expected).max())
+        if not gap <= AGREEMENT:
+            print(
+                f"weak_grad order {order} {variant}: DISAGREES with numpy by "
+                f"{gap:.1e} of the largest value, so it is not timed",
+                flush=True,
+            )
+            continue
+        ready[name] = (call, arrays)
+    if len({tuple(flags) for flags in built.values()}) > 1:
+        raise SystemExit(f"the programs are built with different flags: {built}")
+    for _ in range(options.warmup):
+        for call, arrays in ready.values():
+            call(arrays)
+    spans: dict[str, list[float]] = {name: [] for name in ready}
+    load = f"{os.getloadavg()[0]:.1f}"
+    for _ in range(options.reps):
+        for name, (call, arrays) in ready.items():
+            start = time.perf_counter()
+            for _ in range(options.batch):
+                call(arrays)
+            spans[name].append((time.perf_counter() - start) / options.batch)
+    load += f" to {os.getloadavg()[0]:.1f}"
+    ndofs = ne * n**3
+    for name, (call, arrays) in ready.items():
+        timing = Timing.of(spans[name])
+        gap = float(
+            np.abs(arrays["grad"][:, checked] - expected).max()
+            / np.abs(expected).max()
+        )
+        row = {
+            "side": "loopty",
+            "operator": "weak_grad",
+            "variant": f"loopty on C, {name}",
+            "order": order,
+            "elements": options.elements,
+            "ndofs": ndofs,
+            "launches": 1,
+            "median_s": timing.median,
+            "min_s": timing.low,
+            "max_s": timing.high,
+            "kernel_s": "",
+            "agree": f"{gap:.1e}",
+            "contraction": "compiler default",
+            "flags": " ".join(["-std=c99 -O3 -fPIC", *built[name]]),
+            "load": load,
+            **meta,
+        }
+        writer.writerow(row)
+        handle.flush()
+        print(
+            f"weak_grad order {order} loopty on C, {name}: {_said(ndofs, timing)}, "
+            f"agrees to {gap:.1e}",
+            flush=True,
+        )
+
+
+# }}}
 
 
 def _grudge_setup(
@@ -1371,10 +1596,21 @@ def mode_report(options: argparse.Namespace) -> None:
 def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument(
-        "mode", choices=["copy", "loopty", "grudge", "fields", "agree", "report"]
+        "mode", choices=["copy", "loopty", "c", "grudge", "fields", "agree", "report"]
     )
     parser.add_argument("files", nargs="*", help="the CSV files to report")
-    parser.add_argument("--elements", type=int, default=48, help="hexahedra per axis")
+    parser.add_argument(
+        "--elements",
+        type=int,
+        default=None,
+        help="hexahedra per axis: 48 on a device, 16 on the C target",
+    )
+    parser.add_argument(
+        "--cflags",
+        default="",
+        help="C target: flags after loopty's, the same for every program, "
+        "written with '=' (--cflags=-march=native)",
+    )
     parser.add_argument("--orders", type=int, nargs="+", default=[3, 4, 5, 6])
     parser.add_argument(
         "--order", type=int, default=3, help="the order of fields/agree"
@@ -1405,6 +1641,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--csv", default="hexahedra.csv")
     parser.add_argument("--npz", default="fields.npz")
     options = parser.parse_args(argv)
+    if options.elements is None:
+        options.elements = 16 if options.mode == "c" else 48
     started = time.perf_counter()
     globals()[f"mode_{options.mode}"](options)
     print(f"({options.mode}: {time.perf_counter() - started:.0f} s)", file=sys.stderr)

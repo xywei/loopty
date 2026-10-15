@@ -126,6 +126,48 @@ def test_the_report_matches_copies_by_mesh_and_device_and_drops_wrong_rows(
     assert "4**3 hexahedra on a GPU" in out
 
 
+def test_the_c_mode_times_the_three_programs_with_one_set_of_flags(
+    tmp_path, capsys
+) -> None:
+    # The weak gradient's passes one after another, fused, and fused and
+    # contracted, each checked against numpy before it is timed, all built
+    # with loopty's flags and the same extra ones.
+    import csv
+
+    driver = _driver()
+    out = tmp_path / "c.csv"
+    driver["main"](
+        [
+            "c",
+            "--elements",
+            "2",
+            "--orders",
+            "3",
+            "--warmup",
+            "0",
+            "--reps",
+            "1",
+            "--batch",
+            "1",
+            "--cflags=-O2",
+            "--csv",
+            str(out),
+        ]
+    )
+    with out.open(newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert [row["variant"] for row in rows] == [
+        "loopty on C, passes one after another",
+        "loopty on C, fused",
+        "loopty on C, fused and contracted",
+    ]
+    assert all(float(row["agree"]) <= driver["AGREEMENT"] for row in rows)
+    assert {row["flags"] for row in rows} == {"-std=c99 -O3 -fPIC -fwrapv -O2"}
+    assert {row["platform"] for row in rows} == {"C target, one thread"}
+    driver["main"](["report", str(out)])
+    assert "| loopty on C, fused and contracted | " in capsys.readouterr().out
+
+
 # {{{ the advection right-hand side
 
 ADVECTION = Path(__file__).resolve().parent.parent / "benchmarks" / "advection.py"
