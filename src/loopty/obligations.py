@@ -2836,6 +2836,23 @@ def _is_one(term: Any) -> bool:
     return isinstance(term, int) and not isinstance(term, bool) and term == 1
 
 
+def _multiplies() -> bool:
+    """Whether lanky takes the hints of arithmetic where unknowns multiply.
+
+    A lanky before them gets none, and Lean, given no steps, leaves a layout
+    at every size where isl did, ``tested``.
+    """
+    lanky = _lanky_obligations()
+    fields = getattr(lanky.Hints, "__dataclass_fields__", {})
+    return hasattr(lanky, "Product") and "ring" in fields
+
+
+def _ring() -> Any:
+    """The hint that multiplies the arithmetic out, where lanky takes it."""
+    lanky = _lanky_obligations()
+    return lanky.Hints(ring=True) if _multiplies() else lanky.Hints()
+
+
 def _product_of(factors: Sequence[Any]) -> Any:
     """``a * b * c``, nested from the left, as a stride is."""
     out = factors[0]
@@ -2871,8 +2888,8 @@ def _radix_bounds_hints(layout: Any, coords: Sequence[Any]) -> Any:
     """The steps of a mixed radix's in-bounds part (see above)."""
     lanky = _lanky_obligations()
     levels = layout.radix()
-    if levels is None:
-        return lanky.Hints(ring=True)
+    if levels is None or not _multiplies():
+        return _ring()
     cell = dict(zip(layout.pieces[0].names, coords, strict=True))
     return lanky.Hints(
         products=(*_stride_products(levels), *_digit_products(levels, cell)),
@@ -2886,8 +2903,8 @@ def _radix_injective_hints(
     """The steps of a mixed radix's one-for-one part, split from the outermost digit."""
     lanky = _lanky_obligations()
     levels = layout.radix()
-    if levels is None:
-        return lanky.Hints(ring=True)
+    if levels is None or not _multiplies():
+        return _ring()
     names = layout.pieces[0].names
     c = dict(zip(names, one, strict=True))
     d = dict(zip(names, other, strict=True))
@@ -2931,8 +2948,8 @@ def _radix_onto_hints(layout: Any, address: Any) -> Any:
     """
     lanky = _lanky_obligations()
     levels = layout.radix()
-    if levels is None:
-        return lanky.Hints(ring=True)
+    if levels is None or not _multiplies():
+        return _ring()
     quotients: list[Any] = [address]
     for level in levels[:-1]:
         quotients.append(prim.FloorDiv(quotients[-1], level.extent))
@@ -3190,7 +3207,7 @@ def layout_same_obligation(first: Any, second: Any, verdict: Any) -> Any:
     """
     lanky = _lanky_obligations()
     parts = []
-    ring = lanky.Hints(ring=True) if first.polynomial or second.polynomial else None
+    ring = _ring() if first.polynomial or second.polynomial else None
     try:
         for i, one in enumerate(first.pieces):
             for j, other in enumerate(second.pieces):

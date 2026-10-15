@@ -88,7 +88,10 @@ a global barrier, and so is a sum that reads the cell its own statement
 writes, which is one instance (see :func:`_within_instances`). ``ilp`` and
 ``vec`` loops run inside one work item, and only lose their order. A refusal
 names the dependence and the two work items: ``S0[t=0, i=1] writes u[1, 1]
-read by S0[t=1, i=2] on another work item``.
+read by S0[t=1, i=2] on another work item``. Lean is asked the same, from the
+work items each step records (:attr:`Step.work`): each dependence class's two
+instances on one work item of every axis
+(:func:`loopty.obligations.cast_obligation`).
 
 Legal is not the same as buildable
 ----------------------------------
@@ -7181,8 +7184,7 @@ def _subscript_text(dep: _Dep) -> str:
 #: time is not stated for Lean.
 UPDATES_ISL_ONLY = (
     "the updates a step runs at the same time are read off its order and its "
-    "work items, which loopty states for isl only, as it does a dependence "
-    "between two work items"
+    "work items, from sets isl computes, which loopty states for isl only"
 )
 
 

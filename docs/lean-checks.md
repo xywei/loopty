@@ -135,11 +135,12 @@ its own, in parallel.
 | no read sees its slot overwritten (a window) | read of the array | three instances, the read, the producer's that stored the cell it reads, and another of the producer's that stored a different cell into the same slot after it: that one does not run before the read, in the order the steps leave; the slot is the placement, `j % 3` |
 | a rewritten layout, by the row starts | statement that writes the offsets | where the offsets start at 0 and step by the counts, as the contract checks on entry, the value written is the value the cell holds: the induction step, its base case the contract's check |
 | a rewritten layout, by induction | statement that writes the layout | the rows in order before the write imply them in order after it, at the cells the write reads |
-| a declared layout | piece, or pair of pieces | every cell's address is in the buffer; two cells at one address are one cell; and every address of the buffer has a cell (an existential) |
-| two layouts the same | pair of pieces | a cell of both is stored at one address by each, and a cell of one is a cell of the other |
+| a declared layout | piece, or pair of pieces | every cell's address is in the buffer; two cells at one address are one cell; and every address of the buffer has a cell (an existential); at every size, `n**3 * e + (i + n * j + n**2 * k)`, as the layout writes it (below) |
+| two layouts the same | pair of pieces | a cell of both is stored at one address by each, and a cell of one is a cell of the other; at every size a polynomial identity |
 | the source order | pair of accesses | the source runs the pair in the order the dependence says, which is its definition |
 | a cast is bijective | statement the step moves | every instance has an image (an existential), one only, and no two share one |
 | a cast is monotone | dependence class, a pair of accesses (two updates of one cell, `y[cell[c, k]] += v`, are none: either order gives the sum) | two instances that touch one cell, in the source's order, keep it after every step: their time vectors compare as the source's do |
+| a cast on a hardware axis (`g.*`, `l.*`) | dependence class, and a statement's sum that reads what its own instruction writes | besides the order, the two instances run on one work item of every axis: each one's loop on the axis, counted from where loopy starts it (`0`, mostly); an access that runs on every work item of an axis (a statement with no loop on it, the body of a sum on it) shares one with no other, so the two never touch one cell |
 | a cast after a substitution | class of a read it computes again and a write of what it reads | the instance of the producer that stored the cell read, before or after the write in the source's order, puts the read on that side of the write after every step |
 | a cast after a window | pair of accesses to one slot | two instances that touch one slot, in the order the window was taken in, keep it after every step |
 | what a program's call may assume | requirement, or flat access | the claim at every point of its domain, under the hypotheses isl used (a callee's postcondition, a theorem the program cites, a type the contract checks) |
@@ -256,6 +257,20 @@ stays `decided`.
 - **Case splits,** for what `omega` lacks: it has no dark or grey shadows, and
   a split by the rational bounds isl knows rescues it. None of the examples
   needs one.
+- **The steps of a layout at every size,** where isl has nothing to give.
+  `n * j` is an atom to `omega`, and to isl not a set it can state, so isl
+  decides the layout's facts at `n` from 1 to 6 and loopty gives Lean the
+  steps of a mixed radix (each index times the product of the extents nested
+  inside it, as loopy's `dim_tags` make it) from the layout's own strides:
+  the products that bound each digit's term, `0 ≤ n * (n - 1 - j)` by
+  `Int.mul_nonneg`; for one for one, a case split on the first digit, from
+  the outermost, two cells differ in; for onto, the digits of an address by
+  division, `c % n`, `c // n % n` and so on, which is the inverse isl gives
+  at a number, with what Lean knows of `Int.fdiv` and `Int.fmod`; and the
+  arithmetic multiplied out, so each product of unknowns is one atom.
+  `examples/hexahedra.py`'s DOFArray is proved so in core Lean, and its two
+  layouts the same, `n**3 * e + (i + n * j + n**2 * k)` and `((e * n + k) *
+  n + j) * n + i`, by multiplying out alone.
 - **The counterexample of a refuted fact,** which Lean proves false by
   `decide`, evaluating the statement at the point in the kernel.
 
@@ -438,10 +453,6 @@ Facts loopty states for isl alone, from sets isl computes, which Lean is not
 asked about, and claims core Lean has no words for; each says so with
 `--verbose`, and the coverage report lists them.
 
-- **Work items:** a cast that puts a loop on a hardware axis also claims that
-  no dependence joins two work items, which is stated for isl only; the cast
-  is then left `decided` as a whole; none of the examples has one; issue
-  [#188](https://github.com/xywei/loopty/issues/188).
 - **A claim about reals, in core Lean:** a kernel's postcondition over a
   `Real` array, and a theorem applied to it, are stated with Mathlib's `ℝ`;
   without Mathlib they stay `decided`, saying why, and with it Lean proves
