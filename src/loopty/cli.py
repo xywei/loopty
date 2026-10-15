@@ -724,10 +724,13 @@ class RunVerb:
 
         if len(ledger):
             print()
-            print(ledger.render())
+            print(_rendered(ledger))
         report_proved, report_unproved, report_lean = _lean_reports()
         if report_proved is not None:
             report_proved(ledger)
+            report_missing = _missing_report()
+            if report_missing is not None:
+                report_missing(ledger)
             report_unproved(ledger, verbose=getattr(args, "verbose", False))
         show_lean = getattr(args, "show_lean", None)
         if show_lean is not None and report_lean is not None:
@@ -759,6 +762,30 @@ def _lean_reports() -> tuple[Any, Any, Any]:
     except ImportError:  # a lanky from before them
         return None, None, None
     return report_proved, report_unproved, report_lean
+
+
+def _missing_report() -> Any:
+    """lanky's ``WITHOUT LEAN`` lines, what a row lacks to be proved, if it has them."""
+    try:
+        from lanky.cli import report_missing
+    except ImportError:  # a lanky from before them
+        return None
+    return report_missing
+
+
+def _rendered(ledger: Any) -> str:
+    """The ledger's table as ``lanky check`` prints it: in a terminal, as wide as it.
+
+    Written to a file or a pipe, the statement column is lanky's default
+    width, so a transcript does not depend on the window it was made in. A
+    lanky from before the column fitted the terminal prints it at that
+    width everywhere.
+    """
+    try:
+        from lanky.cli import terminal_columns
+    except ImportError:  # a lanky from before it
+        return ledger.render()
+    return ledger.render(columns=terminal_columns())
 
 
 def build_parser() -> argparse.ArgumentParser:
