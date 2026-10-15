@@ -828,7 +828,9 @@ def _said(ndofs: int, timing: Timing) -> str:
     rate = ndofs / timing.median / 1e9
     spread = f"{timing.low * 1e3:.3f} to {timing.high * 1e3:.3f}"
     kernels = "" if timing.kernel is None else f"; in kernels {timing.kernel * 1e3:.3f}"
-    return f"{rate:7.2f} GDOFs/s ({timing.median * 1e3:.3f} ms, {spread}{kernels})"
+    # three figures below one, where a core of a CPU is
+    shown = f"{rate:7.2f}" if rate >= 1 else f"{rate:7.3g}"
+    return f"{shown} GDOFs/s ({timing.median * 1e3:.3f} ms, {spread}{kernels})"
 
 
 def mode_copy(options: argparse.Namespace) -> None:
