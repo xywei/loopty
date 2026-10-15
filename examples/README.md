@@ -2219,7 +2219,7 @@ schedule: Schedule(mass_action, target='c').assume('nc % 4 == 0').atomic('y').sp
 $ uv run lanky check examples/assembly.py
 STATUS                               EFFECTIVE  BY             WHERE            OWNER                STATEMENT
 -----------------------------------  ---------  -------------  ---------------  -------------------  ---------------------------------------------------------------------------------------------------
-decided (heuristic)                  tested     cas            assembly.py:147  exact_to_degree_two  a : Real, b : Real, c : Real, d : Real, e : Real, f : Real
+tested                               tested     property-test  assembly.py:147  exact_to_degree_two  a : Real, b : Real, c : Real, d : Real, e : Real, f : Real
                                                                                                      |- (a + b*(1/6) + c*(1/6) + d*(1/6)*(1/6) + e*(1/6)*(1/6) + f*(1/6)*(1/6) + a + b*(1/6) + c*(2/3) +
                                                                                                            d*(1/6)*(1/6) + e*(1/6)*(2/3) + f*(2/3)*(2/3) + a + b*(2/3) + c*(1/6) + d*(2/3)*(2/3) +
                                                                                                            e*(2/3)*(1/6) + f*(1/6)*(1/6)) / 6 == a / 2 + b / 6 + c / 6 + d / 12 + e / 24 + f / 12
@@ -2299,7 +2299,7 @@ decided under assume('nc % 4 == 0')  assumed    isl            assembly.py:224  
 decided                              decided    isl            assembly.py:224  mass_action          atomic updates of y run at the same time after tag(c_inner='ilp'), so their sum is reassociated
                                                                                                        and compared at 'reassoc'
 
-56 facts: 1 assumed, 47 decided, 8 tested
+56 facts: 1 assumed, 46 decided, 9 tested
 
 WITHOUT LEAN: exact_to_degree_two, element_mass, conservation and 37 more rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
 WITHOUT MATHLIB: exact_to_degree_two, element_mass and conservation are not proved, since only Lean with Mathlib can state them. To have Lean prove them: python -m lanky.mathlib ~/mathlib (about 7 GB), then export LANKY_LEAN_MATHLIB=~/mathlib.
