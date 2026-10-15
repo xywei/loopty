@@ -730,12 +730,13 @@ def test_realize_answers_for_every_reduction_writing_the_array() -> None:
 def test_the_facts_name_the_term_the_oracle_and_the_dependence_source() -> None:
     schedule = Schedule(ht.transpose_term()).split("i", 4)
     facts = schedule.facts()
-    steps = "[c].split('i', 4, inner='i_inner', outer='i_outer')"
-    assert schedule.key == f"transpose{steps}"
-    # A term has no definition behind it, and is named by its name.
+    split = "split('i', 4, inner='i_inner', outer='i_outer')"
+    assert schedule.key == f"transpose[c].{split}"
+    # A term has no definition behind it, and is named by its name; a cast by
+    # its steps, which mean the same on every target.
     assert [fact.id for fact in facts] == [
-        f"cast:transpose:{steps}:bijective",
-        f"cast:transpose:{steps}:monotone",
+        f"cast:transpose:{split}:bijective",
+        f"cast:transpose:{split}:monotone",
     ]
     for fact in facts:
         assert fact.decided_by == "isl"
@@ -777,13 +778,28 @@ def test_two_schedules_of_one_kernel_keep_their_facts_apart() -> None:
     assert len(ledger) == 8
 
 
-def test_the_target_is_part_of_the_key(plain_opencl) -> None:
+def test_the_target_is_part_of_the_key_and_not_of_a_casts_facts(
+    plain_opencl,
+) -> None:
     term = ht.transpose_term()
     assert Schedule(term).key == "transpose[c]"
     on_c = Schedule(term).split("i", 4)
     on_device = Schedule(term, target="opencl").split("i", 4)
     assert on_device.key.startswith("transpose[opencl].split(")
-    assert not {f.id for f in on_c.facts()} & {f.id for f in on_device.facts()}
+    assert on_c.fact_id("agreement") != on_device.fact_id("agreement")
+    # What the split means is the same on both targets: one claim, one id,
+    # so a file with both lists it once, as it lists a retargeted schedule's.
+    assert [f.id for f in on_c.facts()] == [f.id for f in on_device.facts()]
+    assert [f.id for f in on_c.retarget("opencl").facts()] == [
+        f.id for f in on_c.facts()
+    ]
+    # What the target builds is not: a work group on C is a fact of C's.
+    grouped = on_c.tag(i_outer="g.0")
+    (buildable,) = [f for f in grouped.facts() if f.kind == "buildable"]
+    assert "[c]." in buildable.id
+    assert not [
+        f for f in on_device.tag(i_outer="g.0").facts() if f.kind == "buildable"
+    ]
 
 
 def two_accumulations(

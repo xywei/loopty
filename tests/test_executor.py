@@ -49,6 +49,32 @@ def test_importing_and_running_never_imports_pyopencl() -> None:
     assert "pyopencl" not in sys.modules
 
 
+def test_a_device_schedule_is_checked_without_pyopencl_and_not_run(
+    monkeypatch,
+) -> None:
+    # Where pyopencl is not installed, a schedule for "opencl" is built on
+    # loopy's plain OpenCL target: its facts are its own, and generating or
+    # running its code, pyopencl's, is refused with the reason.
+    from loopty import lower
+
+    installed = lower.pyopencl_installed()
+    monkeypatch.setattr(lower, "pyopencl_installed", lambda: False)
+    schedule = Schedule(ht.axpy_term(), target="opencl").split("i", 2)
+    on_device = schedule.tag(i_outer="g.0")
+    assert isinstance(on_device.kernel.target, lower.CheckedOpenCLTarget)
+    assert {fact.status.value for fact in on_device.facts()} == {"decided"}
+    assert on_device.buildable == (True, "")
+    x = np.arange(4, dtype=np.float64)
+    for attempt in (
+        lambda: emit_code(on_device),
+        lambda: executor().run(on_device, a=1.0, x=x, y=x, z=np.zeros(4)),
+    ):
+        with pytest.raises(ImportError, match="needs pyopencl, which is not"):
+            attempt()
+    if not installed:
+        assert "pyopencl" not in sys.modules
+
+
 def test_the_executor_names_itself_and_its_trust_class() -> None:
     assert executor().name == "loopy"
     assert executor().trust_class() == "test"
@@ -253,8 +279,8 @@ def test_a_schedule_of_a_schedule_names_the_kernel_by_its_definition() -> None:
     # name the kernel behind it, as the first schedule's do, and not the
     # term's name, which two kernels can share (#75).
     split = Schedule(Schedule(doubled)).split("i", 2)
-    steps = "[c].split('i', 2, inner='i_inner', outer='i_outer')"
-    assert split.fact_id("agreement") == f"agreement:{doubled.definition}:{steps}"
+    steps = "split('i', 2, inner='i_inner', outer='i_outer')"
+    assert split.fact_id("agreement") == f"agreement:{doubled.definition}:[c].{steps}"
     assert [fact.id for fact in split.facts()] == [
         f"cast:{doubled.definition}:{steps}:bijective",
         f"cast:{doubled.definition}:{steps}:monotone",

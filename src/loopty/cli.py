@@ -243,6 +243,7 @@ def _retargeted(schedules: list, target: str) -> tuple[list, int]:
     generate the code, so a schedule that only works on one target is refused
     here, by name, rather than quietly run on the target it was written for.
     """
+    from loopty.lower import pyopencl_installed
     from loopty.schedule import IllegalCast, UnbuildableSchedule
 
     out: list = []
@@ -252,6 +253,12 @@ def _retargeted(schedules: list, target: str) -> tuple[list, int]:
             out.append(schedule)
             continue
         try:
+            if target == "opencl" and not pyopencl_installed():
+                # A schedule for a device is checked without pyopencl, and run
+                # with it, which is what --target opencl asks for.
+                raise ImportError(
+                    "running on a device needs pyopencl, which is not installed"
+                )
             out.append(schedule.retarget(target))
         except (
             UnbuildableSchedule,
@@ -574,6 +581,7 @@ class RunVerb:
         from lanky.plugins import registry
 
         from loopty.executor import LoopyExecutor, emit_code
+        from loopty.lower import pyopencl_installed
         from loopty.oracle import IslOracle
         from loopty.schedule import Schedule, definition_of
         from loopty.trace import TraceError
@@ -601,6 +609,10 @@ class RunVerb:
                 )
                 continue
             try:
+                if target == "opencl" and not pyopencl_installed():
+                    raise ImportError(
+                        "running on a device needs pyopencl, which is not installed"
+                    )
                 schedules.append(Schedule(kernel, target=target or "c"))
             except (TypeError, ValueError, ImportError, TraceError) as exc:
                 # ImportError is `--target opencl` with no pyopencl installed,
@@ -654,6 +666,15 @@ class RunVerb:
             ok, reason = schedule.buildable
             if not ok:
                 print(f"  not buildable for the {schedule.target} target: {reason}")
+                continue
+            if schedule.target == "opencl" and not pyopencl_installed():
+                # The file's own device schedule, where pyopencl is not
+                # installed: its facts are checked all the same, and are in
+                # the ledger below; the run is made where pyopencl is.
+                print(
+                    "  not run here: running on a device needs pyopencl, which "
+                    "is not installed; its facts are checked all the same"
+                )
                 continue
             try:
                 if args.emit_code:

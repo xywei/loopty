@@ -121,6 +121,7 @@ __all__ = [
     "RESERVED_PREFIX",
     "RESERVED_WORDS",
     "WRAP_FLAG",
+    "CheckedOpenCLTarget",
     "ExpressionLowerer",
     "InKernelOpenCLTarget",
     "InProcessCTarget",
@@ -137,6 +138,8 @@ __all__ = [
     "lower",
     "lower_generic",
     "numpy_dtype",
+    "pyopencl_installed",
+    "require_pyopencl",
     "target_for",
 ]
 
@@ -582,6 +585,41 @@ class InKernelOpenCLTarget(_ReadDeclining, lp.PyOpenCLTarget):
         return _OpenCLCode(self)
 
 
+class CheckedOpenCLTarget(_ReadDeclining, lp.OpenCLTarget):
+    """The ``opencl`` target where pyopencl is not installed: checked, not built.
+
+    What a schedule for a device claims (the order of its loops, which work
+    item runs each instance, whether loopy can build it) is read off the
+    kernel's loops and accesses (:class:`loopty.schedule.Schedule`), and
+    needs neither pyopencl nor a device. loopy's PyOpenCL target imports
+    pyopencl when it is built; its plain OpenCL target has the same kernels
+    and imports nothing. So where pyopencl is not installed, a schedule for
+    ``"opencl"`` is built on this one, and its facts are the ones it has
+    where pyopencl is: a file keeps its device schedules beside the others,
+    ``python file.py`` and ``lanky check file.py`` run anywhere, and the
+    ledger lists their facts. Generating their code and running them are
+    pyopencl's, and are refused here, saying so (:func:`require_pyopencl`).
+    """
+
+
+@functools.cache
+def pyopencl_installed() -> bool:
+    """Whether pyopencl is installed, asked without importing it."""
+    import importlib.util
+
+    return importlib.util.find_spec("pyopencl") is not None
+
+
+def require_pyopencl(kernel: Any) -> None:
+    """Refuse to generate or run code for a :class:`CheckedOpenCLTarget` kernel."""
+    if isinstance(kernel.target, CheckedOpenCLTarget):
+        raise ImportError(
+            "generating and running OpenCL code needs pyopencl, which is not "
+            "installed here; the schedule's facts are checked without it. "
+            "Install loopty's opencl extra where the device is"
+        )
+
+
 def target_for(target: str = "c") -> Any:
     """The loopy target named by ``target``.
 
@@ -592,15 +630,18 @@ def target_for(target: str = "c") -> Any:
     ``"opencl"`` is :class:`InKernelOpenCLTarget`, ``lp.PyOpenCLTarget`` with
     every condition in the kernel, and pyopencl is imported when it is built,
     here and nowhere else, inside the branch, so that importing loopty on a
-    machine without a device costs nothing and can never fail. All three
-    write ``//``, ``%``, ``<<`` and ``>>`` as numpy computes them
-    (:mod:`loopty.operations`).
+    machine without a device costs nothing and can never fail; where
+    pyopencl is not installed, it is :class:`CheckedOpenCLTarget`, whose
+    schedules are checked and not built. All of them write ``//``, ``%``,
+    ``<<`` and ``>>`` as numpy computes them (:mod:`loopty.operations`).
     """
     if target in ("c", None):
         return InProcessCTarget()
     if target == "c-source":
         return SourceCTarget()
     if target == "opencl":
+        if not pyopencl_installed():
+            return CheckedOpenCLTarget()
         return InKernelOpenCLTarget()
     raise LoweringError(f"unknown target {target!r}; expected 'c' or 'opencl'")
 
@@ -2543,6 +2584,29 @@ class _Builder:
             seen: dict[tuple[str, ...], list[tuple[isl.Set, tuple[str, ...]]]] = {}
             self._plan_in(stmt.id, stmt.expr, {}, owner, seen, taken)
 
+    def _loops_left_out(self, stmt_id: str, domain: isl.Set) -> isl.Set:
+        """A reduction's ``domain`` without the loops of its statement it ignores.
+
+        See :func:`_without_loops_ignored`; the loops are those of statement
+        ``stmt_id``, over its domain, the points its instruction runs at: an
+        affine ``when`` narrows the domain, and the rest of a guard is the
+        instruction's predicate. The names a domain may name besides them are
+        the ones a call fixes, its sizes and its scalars, and the binders of
+        the statement's sums.
+        """
+        stmt = next(s for s in self.term.stmts if s.id == stmt_id)
+        binders = {
+            name
+            for reduction in reductions_of(stmt.expr)
+            for name in reduction.inames
+        }
+        binders |= self.extra_inames
+        return _without_loops_ignored(
+            domain,
+            _domain_over(stmt.domain, stmt.inames),
+            known={*self.term.sizes, *self.scalar_types, *binders},
+        )
+
     def _plan_in(
         self,
         stmt_id: str,
@@ -2562,7 +2626,10 @@ class _Builder:
         """
         for reduction in _outermost_reductions(expr):
             names = tuple(reduction.inames)
-            domain = _rename_params(_domain_over(reduction.domain, names), renaming)
+            domain = self._loops_left_out(
+                stmt_id,
+                _rename_params(_domain_over(reduction.domain, names), renaming),
+            )
             known = seen.setdefault(names, [])
             chosen: tuple[str, ...] | None = None
             if all(owner.get(name, stmt_id) == stmt_id for name in names):
@@ -2847,6 +2914,84 @@ def _rename_params(domain: isl.Set, renaming: Mapping[str, str]) -> isl.Set:
     if not wanted:
         return domain
     return rename(domain, wanted, what="a nested sum's domain, its binders renamed")
+
+
+def _without_loops_ignored(
+    domain: isl.Set, nest: isl.Set, known: set[str] | frozenset[str]
+) -> isl.Set:
+    """``domain``, a sum's, with the loops its points do not depend on left out.
+
+    A sum's domain names every loop around its statement as a parameter (see
+    :func:`_domain_over`), and loopy reads a domain that names a loop as one
+    defined inside that loop: it opens the sum's loop inside it. For a loop it
+    runs in sequence that is where the sum runs anyway. For a loop tagged
+    ``ilp`` it is not: loopy then opens one loop of the sum per lane and runs
+    the lanes one after another, where a sum over the same box beside the
+    lanes, as plain loopy writes it, runs them interleaved in one loop, each
+    lane with an accumulator of its own (#264).
+
+    So a loop is left out when the sum's points do not depend on it: within
+    ``nest``, the statement's loops over its loop variables, isl's gist of
+    ``domain`` names it in no constraint. ``gist`` keeps the domain the same
+    set wherever ``nest`` holds, which is wherever loopy runs the sum's update,
+    since the update carries the statement's own predicates. A loop a bound
+    reads (a triangle's ``j < i``, a clause the sum is narrowed by, ``if k ==
+    j``) stays, and so does the nesting it makes. The result is checked to be
+    that same set, and bounded where ``domain`` is; a domain isl does not
+    simplify so is kept as it was, and so is one whose statement never runs,
+    within which any set is the same.
+
+    ``known`` names the parameters other than the loops that a domain may name
+    and still lose them: the sizes, the scalars and the binders of sums, which
+    nothing in the kernel assigns. A domain that names anything else keeps
+    every loop, as it was. That is a ragged row's length, ``cnt_r`` or
+    ``nl_cnt_r``, which is assigned inside the row's loop, and only a domain
+    that names the row's loop is nested where it is assigned.
+    """
+    loops = set(nest.get_var_names(isl.dim_type.set))
+    named = set(_domain_params(domain))
+    present = named & loops
+    if not present or not named - loops <= set(known):
+        return domain
+    # the nest, its loops as parameters: the points the sum runs at
+    context = nest.move_dims(
+        isl.dim_type.param,
+        nest.dim(isl.dim_type.param),
+        isl.dim_type.set,
+        0,
+        nest.dim(isl.dim_type.set),
+    ).params()
+    if context.is_empty():
+        return domain
+    simpler = domain.gist_params(context)
+    ignored = {name for name in present if not _names_param(simpler, name)}
+    if not ignored:
+        return domain
+    # gist states the result over the context's parameters too; a loop left
+    # out, or one the domain never named, must not come back as a parameter,
+    # since loopy nests a domain inside every loop it names
+    kept = named - ignored
+    for name in _domain_params(simpler):
+        if name in kept:
+            continue
+        if _names_param(simpler, name):  # pragma: no cover - gist added a bound
+            return domain
+        simpler = simpler.remove_dims(
+            isl.dim_type.param, simpler.find_dim_by_name(isl.dim_type.param, name), 1
+        )
+    same = _same_set(
+        simpler.align_params(domain.get_space()).intersect_params(context),
+        domain.intersect_params(context),
+    )
+    if not same or (domain.is_bounded() and not simpler.is_bounded()):
+        return domain  # pragma: no cover - gist is that set within the context
+    return check_names(simpler, "a sum's domain, with the loops it ignores left out")
+
+
+def _names_param(domain: isl.Set, name: str) -> bool:
+    """Does a constraint of ``domain`` name its parameter ``name``?"""
+    position = domain.find_dim_by_name(isl.dim_type.param, name)
+    return position >= 0 and domain.involves_dims(isl.dim_type.param, position, 1)
 
 
 def _outermost_reductions(expr: Any) -> tuple[Reduction, ...]:
