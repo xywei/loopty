@@ -26,6 +26,7 @@ from typing import Any
 import islpy as isl
 import numpy as np
 import pytest
+from lanky import terms as lanky_terms
 from lanky.prelude import FnType
 
 pytest.importorskip("loopy")
@@ -72,11 +73,27 @@ needs_several_indices = pytest.mark.skipif(
     reason="the demo's theorems index families at several indices (lanky main)",
 )
 
+#: ``examples/hexahedra.py``'s operators claim over ``x in Fin[3]`` beside
+#: ``e in Fin[ne]``, which lanky reads as two binders since lanky#144.
+LITERAL_BINDERS = hasattr(lanky_terms, "literal_binders")
+
+#: The demos that need that.
+NEEDS_LITERAL_BINDERS = {"hexahedra"}
+
+needs_literal_binders = pytest.mark.skipif(
+    not LITERAL_BINDERS,
+    reason="the demo's claims put a literal domain beside a symbolic one (lanky main)",
+)
+
 #: Every demo, as a parameter: those that need lanky main skip without it.
 DEMOS = [
-    pytest.param(name, marks=needs_several_indices)
-    if name in NEEDS_SEVERAL_INDICES
-    else name
+    pytest.param(
+        name,
+        marks=[
+            *([needs_several_indices] if name in NEEDS_SEVERAL_INDICES else []),
+            *([needs_literal_binders] if name in NEEDS_LITERAL_BINDERS else []),
+        ],
+    )
     for name in NAMES
 ]
 
@@ -999,6 +1016,7 @@ def test_the_storage_layouts_demo_refutes_the_wrong_nesting() -> None:
 
 
 @needs_several_indices
+@needs_literal_binders
 def test_the_hexahedra_demo_decides_its_layouts_and_its_programs() -> None:
     result, facts = _invoke("hexahedra", "check")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -1059,6 +1077,7 @@ def test_the_hexahedra_demo_decides_its_layouts_and_its_programs() -> None:
 
 
 @needs_several_indices
+@needs_literal_binders
 def test_the_hexahedra_layouts_are_loopys_strides_and_modepys_reshape() -> None:
     # The layout facts are about loopty's reading of the dim_tags and of the
     # DOFArray. This ties each reading to the code it stands for: the strides
@@ -1095,6 +1114,7 @@ def test_the_hexahedra_layouts_are_loopys_strides_and_modepys_reshape() -> None:
 
 
 @needs_several_indices
+@needs_literal_binders
 def test_the_hexahedra_theorem_holds_at_exact_matrices() -> None:
     from fractions import Fraction
 
@@ -1131,6 +1151,7 @@ def test_the_hexahedra_factors_are_the_stiffness_and_the_mass(order: int) -> Non
 
 
 @needs_several_indices
+@needs_literal_binders
 def test_the_hexahedra_demo_refuses_the_deeper_fusion_and_keeps_the_windows() -> None:
     result, _ = _invoke("hexahedra", "python")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -1145,6 +1166,7 @@ def test_the_hexahedra_demo_refuses_the_deeper_fusion_and_keeps_the_windows() ->
 
 
 @needs_several_indices
+@needs_literal_binders
 def test_the_hexahedra_launches_are_legal_and_build_on_opencl(plain_opencl) -> None:
     module = _module("hexahedra")
     for operator in ("grad", "div"):

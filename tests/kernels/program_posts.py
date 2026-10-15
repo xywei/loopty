@@ -95,15 +95,20 @@ def misnamed(a, c) -> all(c[i] == 3 * a[i] for i in Fin[m]):
 @theorem
 def two_passes(
     n: Nat,
-    A: Fn[Fin[n], Fin[n], Real],
-    B: Fn[Fin[n], Fin[n], Real],
-    h: Fn[Fin[n], Fin[n], Real],
+    A: Fn[Fin[n], Fn[Fin[n], Real]],
+    B: Fn[Fin[n], Fn[Fin[n], Real]],
+    h: Fn[Fin[n], Fn[Fin[n], Real]],
     k: Fin[n],
     j: Fin[n],
-) -> sum(A[k, b] * B[j, a] * h[b, a] for b in Fin[n] for a in Fin[n]) == sum(
-    A[k, b] * sum(B[j, a] * h[b, a] for a in Fin[n]) for b in Fin[n]
+) -> sum(A(k)(b) * B(j)(a) * h(b)(a) for b in Fin[n] for a in Fin[n]) == sum(
+    A(k)(b) * sum(B(j)(a) * h(b)(a) for a in Fin[n]) for b in Fin[n]
 ):
-    """The operator ``A (x) B`` at a node is two passes, one along each axis."""
+    """The operator ``A (x) B`` at a node is two passes, one along each axis.
+
+    Its families are applied an index at a time, as the released lanky
+    writes them; a family applied so stands for an array at a section, as one
+    applied at several indices does.
+    """
 
 
 @kernel
