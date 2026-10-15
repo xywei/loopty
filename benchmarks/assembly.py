@@ -207,18 +207,25 @@ def nested(t_unit, iname: str = "c"):
     This variant gives the transcription loopty's nesting, and nothing else:
     the domains an instruction uses together are joined (loopy's domain tree
     does not branch), and each is made a child of the cell loop's.
+
+    loopy main keeps a kernel's domains as namedisl sets (loopy #1023,
+    ``docs/loopy-main.md``): they are joined here as islpy sets and given
+    back as namedisl ones. Not through :mod:`loopty.named`, which would
+    import loopty, as ``--baseline-only`` does not.
     """
     from functools import reduce
 
     import islpy as isl
 
     kernel = t_unit.default_entrypoint
+    named = any(hasattr(domain, "as_isl") for domain in kernel.domains)
+    current = [domain.as_isl() if named else domain for domain in kernel.domains]
 
     def names(domain) -> set[str]:
         return set(domain.get_var_names(isl.dim_type.set))
 
-    (cell,) = [domain for domain in kernel.domains if iname in names(domain)]
-    others = [domain for domain in kernel.domains if iname not in names(domain)]
+    (cell,) = [domain for domain in current if iname in names(domain)]
+    others = [domain for domain in current if iname not in names(domain)]
     groups = [{i} for i in range(len(others))]
     for insn in kernel.instructions:
         used = set(insn.within_inames) | set(insn.reduction_inames())
@@ -234,6 +241,14 @@ def nested(t_unit, iname: str = "c"):
             isl.dim_type.param, 0, iname
         )
         domains.append(domain)
+    if named:
+        import namedisl
+
+        domains = [namedisl.to_named(domain) for domain in domains]
+        domains = [
+            domain.as_set() if isinstance(domain, namedisl.BasicSet) else domain
+            for domain in domains
+        ]
     return t_unit.with_kernel(kernel.copy(domains=domains))
 
 

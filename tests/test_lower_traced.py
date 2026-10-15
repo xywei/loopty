@@ -1342,7 +1342,7 @@ def _domain_of(term, iname: str) -> isl.Set:
     """The loopy domain that defines ``iname`` in the lowered ``term``."""
     from loopty.lower import lower_generic
 
-    for domain in lower_generic(term, "c").kernel.default_entrypoint.domains:
+    for domain in domains_of(lower_generic(term, "c").kernel.default_entrypoint):
         if iname in domain.get_var_names(isl.dim_type.set):
             return domain
     raise AssertionError(f"no domain defines {iname}")
