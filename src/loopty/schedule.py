@@ -4661,7 +4661,11 @@ class Schedule:
         gone, and the reads that replace them are there. The kernel's
         instructions are ordered by those too
         (:meth:`_ordered_by_dependences`). A substitution through two arrays,
-        one computed from the other, is refused. Keeping an array in the
+        one computed from the other, is refused, unless the first is computed
+        from arrays nothing in the term writes: then its value at a cell is
+        the same wherever it is computed, and nothing is carried through it
+        (grudge's ``v.n`` from the normals, read by the flux, read by the
+        lift, in ``examples/advection.py``). Keeping an array in the
         window of cells that are live at once (:meth:`contract`) is the other
         way of storing it less, and an array is stored one way or the other.
         """
@@ -4734,11 +4738,16 @@ class Schedule:
         # substitution took out reads nothing, and an array it computes is
         # read through what its own producer reads. Both are refused.
         taken = [stmt.id for stmt in readers if stmt.id in self._gone]
+        # Through an array computed where it is read from arrays nothing in
+        # the term writes, there is nothing to carry over: its value at a
+        # cell is the same wherever it is computed.
         through = sorted(
             {
                 name
                 for kind, name, _indices, _part in _accesses(producer, term)
-                if kind == "read" and name in self._substituted
+                if kind == "read"
+                and name in self._substituted
+                and not self._computed_from_inputs(name)
             }
         )
         if taken or through:
@@ -5598,6 +5607,25 @@ class Schedule:
             ),
         )
 
+    def _computed_from_inputs(self, array: str) -> bool:
+        """Whether ``array``, computed where it is read, reads only what nothing writes.
+
+        Its statement no longer runs, and the dependences of what it read
+        were carried over to the statements that read ``array``. Where those
+        are arrays no statement of the term writes, such as the program's
+        inputs, there were none, and a later substitution through ``array``
+        drops nothing.
+        """
+        term = self._term
+        written = {stmt.assignee.array for stmt in term.stmts}
+        return all(
+            name not in written
+            for stmt in term.stmts
+            if stmt.id in self._gone and stmt.assignee.array == array
+            for kind, name, _indices, _part in _accesses(stmt, term)
+            if kind == "read"
+        )
+
     def _carried_over(
         self, producer: Stmt, gone: set[str], readers: Sequence[Stmt], array: str
     ) -> tuple[tuple[_Dep, ...], tuple[_Dep, ...]]:
@@ -5912,6 +5940,12 @@ class Schedule:
         if draft.target not in _C_TARGETS:
             ids = {self._lowering.insn_ids[stmt.id] for stmt in updates}
             draft.kernel = _transformed(draft.kernel, _atomic_kernel, array, ids)
+            # Two statements that update one cell are ordered by no
+            # dependence once their updates are atomic, so the order the
+            # lowering gave them goes: loopy would otherwise ask for a global
+            # barrier between two work items that update one cell.
+            if len(updates) > 1 and draft.kernel is not None:
+                draft.kernel = self._ordered_by_dependences(draft)
         return self._commit(draft, text, ("atomic", (array,), {}), cast=False)
 
     @property
