@@ -216,6 +216,16 @@ def chained(u, rhs):
 
 
 @program
+def chained_in_place(u):
+    """Two arrays computed one from the other, then a step that writes ``u``."""
+    f = Arr.zeros_like(u)
+    g = Arr.zeros_like(u)
+    flux(u, f)
+    doubled(f, g)
+    update(g, u)
+
+
+@program
 def between(u, rhs):
     """A call between the two fused that the second reads only by array."""
     f = Arr.zeros_like(u)
@@ -1505,16 +1515,25 @@ def test_what_a_substitution_cannot_take_is_named(
         Schedule(prog).substitute(array)
 
 
-def test_a_substitution_through_two_arrays_is_refused_either_way() -> None:
+def test_a_substitution_through_two_arrays_is_refused_where_it_drops_a_dependence():
     # The dependences carried over are those of what the producer reads, and
     # through two arrays that is what the first producer reads, which the
-    # second step does not see: refused, whichever comes first.
-    with pytest.raises(ValueError, match="doubled.S0 reads f, which is computed"):
-        Schedule(chained).substitute("f").substitute("g")
+    # second step does not see. Where the first is computed from what nothing
+    # writes, u, there is nothing to see, and the chain is substituted.
+    both = Schedule(chained).substitute("f").substitute("g")
+    agrees(chained, both, burgers_inputs(7))
+    ids = {insn.id for insn in both.kernel.default_entrypoint.instructions}
+    assert "divergence_S0" in ids and not ids & {"flux_S0", "doubled_S0"}
+    # The other way round, the reader of f is gone already.
     with pytest.raises(ValueError, match="doubled.S0 reads f and runs no more"):
         Schedule(chained).substitute("g").substitute("f")
     for array in ("f", "g"):
         agrees(chained, Schedule(chained).substitute(array), burgers_inputs(7))
+    # Where something writes what the first read, the chain is refused: the
+    # update reads g[i - 1] after it wrote u[i - 1], and g computed there
+    # would be computed from the new u.
+    with pytest.raises(ValueError, match="doubled.S0 reads f, which is computed"):
+        Schedule(chained_in_place).substitute("f").substitute("g")
 
 
 def test_a_statement_taken_out_leaves_no_loop_to_name() -> None:
