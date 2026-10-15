@@ -35,7 +35,7 @@ marked with `...` is an excerpt and the lines it keeps are checked verbatim.
 | `calls.py` | kernels calling kernels inside their loops: a rule with a loop of its own (`dot`, loopy #1044) in a matrix-vector and a sparse product, and firedrake's P1 quadrature rule applied per element through a rule that takes the integrand (#1043), each call inlined with binders of its own and owing the caller what the callee's contract checks |
 | `taylor_reconstruction.py` | sumpy's compressed Taylor reconstruction in one file, theorem, kernel and schedule: the theorem proved for every order, the kernel's postcondition decided from what it stores, the theorem applied to it, and the schedule's casts, in one ledger |
 | `l2p.py` | the demo's flagship, sumpy's L2P for the 2-D Laplace kernel (`E2PFromSingleBox`): the compressed Taylor theorem proved for every order and its form box by box, sumpy's storage index a checked layout, the kernel that reconstructs each box's triangle with the theorem applied to its postcondition, the interchange of the triangle's loops refused with its pair, the three calls fused box by box, and a row that compares the program with sumpy's own kernel |
-| `hexahedra.py` | grudge #418's weak gradient and weak divergence on hexahedra, the kernels for every order: the metric product, a pass per reference axis and the three directions summed, each a kernel and together a program; the Kronecker theorem the passes rest on, for every `n`; the DOFArray's layout at order 3, the same as #418's `dim_tags` `N3,N0,N1,N2` and as the kernels' row-major arrays; the passes fused as deep as each pair allows, one loop deeper refused with its pair, and what passes between them kept a row and a slab at a time; and the three launches a device runs, every node on a work item, which `benchmarks/hexahedra.py` times |
+| `hexahedra.py` | grudge #418's weak gradient and weak divergence on hexahedra, the kernels for every order: the metric product, a pass per reference axis and the three directions summed, each a kernel and together a program; the Kronecker theorem the passes rest on, for every `n`; the DOFArray's layout at every order, the same as #418's `dim_tags` `N3,N0,N1,N2` and as the kernels' row-major arrays; the passes fused as deep as each pair allows, one loop deeper refused with its pair, and what passes between them kept a row and a slab at a time; and the three launches a device runs, every node on a work item, which `benchmarks/hexahedra.py` times |
 | `advection.py` | grudge #418's weak advection right-hand side on hexahedra, from grudge's own geometry: the upwind flux at every face node, the neighbor's value gathered through the face maps and in bounds by type; the volume term and the lift with the inverse mass pushed inward, the rearrangement two theorems state for every order, and a third that the lift onto the face nodes is the face gather's transpose; the kernels fused on the element and one loop deeper refused with its pair, the fluxes kept an element at a time; every split a device runs (libParanumal's volume and surface, the fluxes first, three launches, one, one from the metric terms) checked before it runs; and libParanumal's lift onto the face nodes, refused without its barriers with the edge node two faces update, and accepted atomic. `benchmarks/advection.py` times them |
 
 Run them with `uv run` from the repository root:
@@ -1408,8 +1408,9 @@ tested  loopy  storage_layouts.py:114  unflatten     the scheduled run of unflat
 
 grudge's weak gradient and divergence on hexahedra (grudge PR #418, as of
 a-alveyblanc/grudge 4d103bb), written for `n` nodes per axis, so every fact
-about the kernels and their schedules holds at every order; the layouts are
-decided at order 3, since `N**3 * e` is linear only when `N` is a number.
+about the kernels and their schedules holds at every order; so do the
+layouts, which isl tests at `n` from 1 to 6, since `n * j` is not linear,
+and Lean proves for every `n`.
 Each weak derivative is the field times the metric
 terms `J dr_d/dx_x`, then a pass per reference axis with the factors
 `make_stiffness_t_operator` builds, `S^T` on the derivative's axis and the
@@ -1441,8 +1442,10 @@ Fused so, `w` is read a row at a time and `v` a slab at a time, and
 `contract` keeps them in `n` and `n * n` cells. On a device, a program is one
 kernel and nothing orders two work items of it, so the passes are three
 launches of their own, the element a work group and its nodes the work
-items, each a schedule loopty checks: `passes_on_a_device`, which
-`benchmarks/hexahedra.py` times beside the same kernels in plain loopy.
+items, each a schedule loopty checks, that no dependence joins two work
+items included, which Lean proves where it is installed:
+`passes_on_a_device`, which `benchmarks/hexahedra.py` times beside the same
+kernels in plain loopy.
 
 ### python examples/hexahedra.py
 
@@ -1479,14 +1482,14 @@ STATUS   BY             WHERE             OWNER                  STATEMENT
 -------  -------------  ----------------  ---------------------  ------------------------------------------------------------------------
 tested   property-test  hexahedra.py:116  sum_factorization      n : Nat, Fr : Fn[Fin(n), Fin(n), Real], Fs : Fn[Fin(n), Fin(n), Real]...
 tested   python         hexahedra.py:116  sum_factorization      the term computes what the annotations compute
-decided  isl            hexahedra.py:151  dof_array              dof_array stores every cell at an address of Fin(ne*64)
-decided  isl            hexahedra.py:151  dof_array              dof_array stores no two cells at one address
-decided  isl            hexahedra.py:151  dof_array              dof_array stores a cell at every address of Fin(ne*64)
-decided  isl            hexahedra.py:158  as_dim_tags            dof_array stores every cell where dim_tags N3,N0,N1,N2 does
-decided  isl            hexahedra.py:161  row_major              row_major stores every cell at an address of Fin(ne*64)
-decided  isl            hexahedra.py:161  row_major              row_major stores no two cells at one address
-decided  isl            hexahedra.py:161  row_major              row_major stores a cell at every address of Fin(ne*64)
-decided  isl            hexahedra.py:168  as_row_major           dof_array stores every cell where row_major does
+tested   isl            hexahedra.py:151  dof_array              dof_array stores every cell at an address of Fin(ne*n**3)
+tested   isl            hexahedra.py:151  dof_array              dof_array stores no two cells at one address
+tested   isl            hexahedra.py:151  dof_array              dof_array stores a cell at every address of Fin(ne*n**3)
+tested   isl            hexahedra.py:158  as_dim_tags            dof_array stores every cell where dim_tags N3,N0,N1,N2 does
+tested   isl            hexahedra.py:161  row_major              row_major stores every cell at an address of Fin(ne*n**3)
+tested   isl            hexahedra.py:161  row_major              row_major stores no two cells at one address
+tested   isl            hexahedra.py:161  row_major              row_major stores a cell at every address of Fin(ne*n**3)
+tested   isl            hexahedra.py:168  as_row_major           dof_array stores every cell where row_major does
 decided  isl            hexahedra.py:189  metric                 w[q, e, k, j, i] is in bounds for every instance of S0
 decided  isl            hexahedra.py:189  metric                 G[q, e, k, j, i] is in bounds for every instance of S0
 decided  isl            hexahedra.py:189  metric                 u[e, k, j, i] is in bounds for every instance of S0
@@ -1574,7 +1577,7 @@ tested   interpreter    hexahedra.py:369  metric_along_r         the traced term
 decided  isl            hexahedra.py:382  contravariant_along_r  every cell of w that along_r reads, contravariant stored before it
 tested   interpreter    hexahedra.py:377  contravariant_along_r  the traced term computes what the body computes
 
-96 facts: 82 decided, 14 tested
+96 facts: 74 decided, 22 tested
 ```
 
 ### loopty run examples/hexahedra.py

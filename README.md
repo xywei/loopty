@@ -243,8 +243,10 @@ table of row starts. Both compiled runs agree with the native one.
   is a fact isl decides and Lean proves, as is that two layouts store every
   cell alike: sumpy's compressed-Taylor storage index, and grudge's
   `dim_tags` `N3,N0,N1,N2` against modepy's reshape of the DOFArray
-  (`examples/storage_layouts.py`). loopy's shaped arrays (loopy #1053) take a
-  layout's injectivity on trust.
+  (`examples/storage_layouts.py`), at every order in
+  `examples/hexahedra.py`, where isl tests it at a few orders and Lean proves
+  it for every one. loopy's shaped arrays (loopy #1053) take a layout's
+  injectivity on trust.
 - **What isl decides, Lean proves.** isl decides a fact in milliseconds and
   gives no proof. Where Lean is installed, every fact isl decides, an access in
   bounds, two writes apart, a definedness, a cast's legality one dependence
@@ -427,7 +429,14 @@ release; the CHANGELOG says when one does.
   Lean is isl's inverse, with `//` and `%`), and `same_as` one more, and a
   kernel reads through the layout's own function. A wrong nesting,
   `N3,N2,N1,N0`, is refuted with the cell it moves
-  (`examples/storage_layouts.py`).
+  (`examples/storage_layouts.py`). A layout's body may compute with a size,
+  `n**3 * e + (i + n * j + n**2 * k)` over `Fin[n]` for every order: isl
+  cannot state `n * j`, so it decides each fact at `n` from 1 to 6, which
+  reads `tested`, and Lean proves it for every `n`, given the steps `omega`
+  lacks (the products that bound each digit, the digits of an address by
+  division); two such layouts the same is a polynomial identity Lean
+  multiplies out (`examples/hexahedra.py`). A call gives the size by name,
+  `dof_array(e, i, j, k, n=4)`.
 - Tracing a body to a typed term: accesses, statements, reductions, ragged
   fibers, `when` guards, source locations, and a `TraceError` that names the fix
   when a Python `if` is used on a computed value, when a Python name, a
@@ -1283,10 +1292,9 @@ on the inputs it runs.
   is computed from arrays nothing in the program writes (grudge's `v.n`
   from the normals, in `examples/advection.py`): substitute one of them.
 - **Some facts are isl's alone** ([docs/lean-checks.md](https://github.com/xywei/loopty/blob/main/docs/lean-checks.md#what-stays-isls)).
-  Where Lean is installed, a cast that puts a loop on a hardware axis and a
-  cast through the part of a tile isl computes stay `decided isl`: loopty
-  states them for isl only, and `lanky check --verbose` or `loopty run
-  --verbose` says so. A cast refused through a substitution's carried read,
+  Where Lean is installed, a cast through the part of a tile isl computes
+  stays `decided isl`: loopty states it for isl only, and `lanky check
+  --verbose` or `loopty run --verbose` says so. A cast refused through a substitution's carried read,
   or a window refused at a read in a sum, is refuted by isl with no
   counterexample stated for Lean
   ([#215](https://github.com/xywei/loopty/issues/215)).

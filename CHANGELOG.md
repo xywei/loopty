@@ -8,6 +8,36 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Added
 
+- **A layout at every size** (`loopty.layout`, #263). A layout's body may
+  compute with a size its annotations name, so grudge's DOFArray is one
+  layout for every order, `n**3 * e + (i + n * j + n**2 * k)` over
+  `Fin[ne] x Fin[n]**3`, and so is loopy's `dim_tags` `N3,N0,N1,N2` of it,
+  each stride the product of the extents nested inside it. isl cannot state
+  `n * j`, so it decides each fact at `n` from 1 to 6 and the fact reads
+  `tested`, saying why; Lean proves it for every `n`, given the steps
+  `omega` lacks (lanky's products, quotients and multiplying out): the
+  products that bound each digit's term, a case split on the first digit
+  two cells differ in, and an address's digits by division as the cell it
+  stores. Two layouts the same is a polynomial identity Lean multiplies
+  out. All in core Lean. A refuted one names the size isl found it at,
+  `padded stores (i=0, j=1) and (i=0, j=0) both at 0 (at m=2, n=1)`. A call
+  gives the size by name, `dof_array(e, i, j, k, n=4)`.
+  `examples/hexahedra.py` declares its three layouts at a symbolic order, so
+  its claim that the DOFArray, #418's `dim_tags` and the kernels' row-major
+  arrays are one layout holds for every order, where it held at order 3 and
+  `as_dim_tags` read `x = x` in Lean.
+- **A device cast proved whole** (#188). A cast that puts a loop on a
+  hardware axis claims besides its order that no dependence joins two work
+  items, which was stated for isl only, so the cast stayed `decided` where
+  Lean is installed. Lean is now asked it too: for each dependence class,
+  that the two instances run on one work item of every axis, each one's loop
+  counted from where loopy starts it, and for a statement's sum that reads
+  what its own instruction writes, that the two never touch one cell where
+  they run apart. S1's three device launches, sumpy's tile in S2, Kulkarni's
+  split in S3 and the advection right-hand side's launches of every split
+  read `proved` by Lean, and the four demo drivers offer their casts to Lean
+  where it is installed (`python examples/hexahedra.py`: `along_s: tag(...):
+  2 facts, all proved by lean`).
 - **A program's postcondition** (`loopty.unfolding`,
   `loopty.dataflow.program_stores`). A `@program`'s return annotation is a
   claim about what it leaves in its parameters, written in their names and

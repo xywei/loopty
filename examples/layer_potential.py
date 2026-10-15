@@ -532,6 +532,7 @@ def jump_D():
 def main() -> int:
     """Run both layers, show sumpy's tile, and measure the identity and the jumps."""
     from loopty.executor import LoopyExecutor
+    from loopty.obligations import prove
     from loopty.oracle import IslOracle
 
     curve = starfish(4)
@@ -580,6 +581,9 @@ def main() -> int:
     for fact in [*tile.facts(), *writes]:
         if fact.kind == "buildable":
             continue
+        # Lean, where it is installed, proves each cast, that no dependence
+        # joins two work items included, and the writes; isl decides the rest
+        fact = prove(fact)
         if fact.status.value == "assumed":
             fact = oracle.establish(fact) or fact
         print(f"  {fact.status.value:8} {fact.decided_by or '-':4} {fact.statement}")

@@ -406,6 +406,7 @@ def example_inputs() -> dict:
 def main() -> int:
     """Run natively on both meshes, then the refused and the accepted schedules."""
     from loopty.executor import LoopyExecutor
+    from loopty.obligations import prove
 
     coords, cells = pyop2_mesh()
     data = inputs_on((coords, cells))
@@ -443,6 +444,9 @@ def main() -> int:
     print(f"accepted: {accepted!r}")
     for fact in accepted.facts():
         if fact.kind != "buildable":
+            # Lean, where it is installed, proves each cast, that no
+            # dependence joins two work items included
+            fact = prove(fact)
             status, by = fact.status.value, fact.decided_by or "-"
             print(f"  {status:8} {by:4} {fact.statement}")
     buildable, reason = accepted.buildable

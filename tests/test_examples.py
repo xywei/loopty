@@ -1038,15 +1038,17 @@ def test_the_hexahedra_demo_decides_its_layouts_and_its_programs() -> None:
         for fact in facts
         if fact["kind"].startswith("layout")
     ]
+    # at every order: isl decides each at n from 1 to 6, and without Lean
+    # that is what the fact is, tested
     assert layouts == [
-        ("dof_array", "layout-in-bounds", "decided"),
-        ("dof_array", "layout-one-for-one", "decided"),
-        ("dof_array", "layout-onto", "decided"),
-        ("as_dim_tags", "layout-same", "decided"),
-        ("row_major", "layout-in-bounds", "decided"),
-        ("row_major", "layout-one-for-one", "decided"),
-        ("row_major", "layout-onto", "decided"),
-        ("as_row_major", "layout-same", "decided"),
+        ("dof_array", "layout-in-bounds", "tested"),
+        ("dof_array", "layout-one-for-one", "tested"),
+        ("dof_array", "layout-onto", "tested"),
+        ("as_dim_tags", "layout-same", "tested"),
+        ("row_major", "layout-in-bounds", "tested"),
+        ("row_major", "layout-one-for-one", "tested"),
+        ("row_major", "layout-onto", "tested"),
+        ("as_row_major", "layout-same", "tested"),
     ]
     # every intermediate a program makes is read where its producer stored it
     defined = [fact for fact in facts if fact["kind"] == "definedness"]
@@ -1095,35 +1097,38 @@ def test_the_hexahedra_layouts_are_loopys_strides_and_modepys_reshape() -> None:
     # The layout facts are about loopty's reading of the dim_tags and of the
     # DOFArray. This ties each reading to the code it stands for: the strides
     # loopy itself computes for N3,N0,N1,N2, modepy's F-order reshape of an
-    # element's row, and numpy's row-major u[e, k, j, i].
+    # element's row, and numpy's row-major u[e, k, j, i], at several orders.
     import loopy as lp
 
     module = _module("hexahedra")
-    n, ne = module.N, 3
-    kernel = lp.make_kernel(
-        f"{{[e, a, b, c]: 0 <= e < {ne} and 0 <= a, b, c < {n}}}",
-        "out[e, a, b, c] = 1",
-        [
-            lp.GlobalArg(
-                "out", np.float64, shape=(ne, n, n, n), dim_tags="N3,N0,N1,N2"
-            )
-        ],
-        target=lp.CTarget(),
-        lang_version=(2018, 2),
-    )
-    strides = [tag.stride for tag in kernel.default_entrypoint.arg_dict["out"].dim_tags]
-    address = " + ".join(f"{stride}*c{axis}" for axis, stride in enumerate(strides))
-    loopys = isl.Map(
-        f"[ne] -> {{ [c0, c1, c2, c3] -> [{address}] : "
-        f"0 <= c0 < ne and 0 <= c1, c2, c3 < {n} }}"
-    )
-    assert loopys.is_equal(module.as_dim_tags.second.relation()), strides
-    dof_array = np.arange(ne * n**3).reshape(ne, n**3)
-    row_major = np.arange(ne * n**3).reshape(ne, n, n, n)
-    for e, i, j, k in np.ndindex(ne, n, n, n):
-        stored = module.dof_array(e, i, j, k)
-        assert stored == dof_array[e].reshape(n, n, n, order="F")[i, j, k]
-        assert stored == row_major[e, k, j, i] == module.row_major(e, i, j, k)
+    ne = 3
+    for n in (2, module.N, 5):
+        kernel = lp.make_kernel(
+            f"{{[e, a, b, c]: 0 <= e < {ne} and 0 <= a, b, c < {n}}}",
+            "out[e, a, b, c] = 1",
+            [
+                lp.GlobalArg(
+                    "out", np.float64, shape=(ne, n, n, n), dim_tags="N3,N0,N1,N2"
+                )
+            ],
+            target=lp.CTarget(),
+            lang_version=(2018, 2),
+        )
+        tags = kernel.default_entrypoint.arg_dict["out"].dim_tags
+        strides = [tag.stride for tag in tags]
+        address = " + ".join(f"{stride}*c{axis}" for axis, stride in enumerate(strides))
+        loopys = isl.Map(
+            f"[ne] -> {{ [c0, c1, c2, c3] -> [{address}] : "
+            f"0 <= c0 < ne and 0 <= c1, c2, c3 < {n} }}"
+        )
+        ours = module.as_dim_tags.second.at(n=n).relation()
+        assert loopys.is_equal(ours), strides
+        dof_array = np.arange(ne * n**3).reshape(ne, n**3)
+        row_major = np.arange(ne * n**3).reshape(ne, n, n, n)
+        for e, i, j, k in np.ndindex(ne, n, n, n):
+            stored = module.dof_array(e, i, j, k, n=n)
+            assert stored == dof_array[e].reshape(n, n, n, order="F")[i, j, k]
+            assert stored == row_major[e, k, j, i] == module.row_major(e, i, j, k, n=n)
 
 
 @needs_several_indices
