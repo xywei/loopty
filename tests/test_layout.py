@@ -247,6 +247,22 @@ def test_a_layout_at_every_size_is_tested_by_isl_at_a_few() -> None:
         every.relation()
 
 
+def test_products_that_cancel_leave_a_layout_isl_states() -> None:
+    # Codex: n * i - n * i + i was taken for a layout at every size, which
+    # sampled no size and then asked isl a question it cannot state
+    def cancelling(i: Fin[n]) -> Fin[n]:  # noqa: F821
+        return n * i - n * i + i  # noqa: F821
+
+    checked = layout(cancelling)
+    assert not checked.polynomial
+    assert [status for status, _ in reasons(checked)] == ["decided"] * 3
+    assert checked(2, n=3) == 2
+    # traced, the body's term is the same address multiplied out
+    from lanky.terms import Var
+
+    assert checked(Var("i"), n=Var("n")) is not None
+
+
 def test_a_layout_at_every_size_is_refuted_at_the_size_isl_finds() -> None:
     def padded(i: Fin[n], j: Fin[m]) -> Fin[n * m]:  # noqa: F821
         return i + (n - 1) * j  # noqa: F821

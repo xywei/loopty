@@ -163,6 +163,10 @@ class Piece:
         address = substitute(self.address, sizes) if sizes else self.address
         if structurally_equal(_plain(now), _plain(address)):
             return None
+        mine = polynomial(now)
+        if mine is not None and mine == polynomial(address):
+            # the same address multiplied out (see _normal)
+            return None
         return f"{render(now)}, where its facts say {render(address)}"
 
     def at(self, values: dict[str, int]) -> Piece:
@@ -331,6 +335,21 @@ def _folded(expr: Any, values: dict[str, int]) -> Any:
     return _term(found)
 
 
+def _normal(expr: Any) -> Any:
+    """``expr`` multiplied out where its products of unknowns cancel, else itself.
+
+    ``n * i - n * i + i`` is ``i``, which isl states; a layout whose address
+    or buffer reads so is one isl decides at every size.
+    """
+    if isinstance(expr, bool) or _affine(expr):
+        return expr
+    found = polynomial(expr)
+    if found is None:
+        return expr
+    term = _term(found)
+    return term if _affine(term) else expr
+
+
 def _linear_in(found: Polynomial, names: Sequence[str]) -> bool:
     """Whether each monomial of ``found`` has at most one of ``names``, once."""
     for key in found:
@@ -408,6 +427,8 @@ def _piece(fn: Any) -> Piece:
                 f"{type(exc).__name__}: {exc}; write it with +, -, * by a number "
                 "or a size, // and % by a number"
             ) from None
+    # products that cancel, n * i - n * i + i, leave what isl reads
+    address = _normal(address)
     found = None
     if not isinstance(address, bool) and not _affine(address):
         found = polynomial(address)
@@ -421,8 +442,10 @@ def _piece(fn: Any) -> Piece:
         )
     packed = len(params) == 1 and index_domain(annotations.get(params[0])) is not None
     extents = () if packed else tuple(annotations[p].bound for p in params)
-    used = tuple(sorted(name for name in sizes if name in _sizes(address, names)))
-    return Piece(fn, names, cells, address, buffer.bound, packed, used, extents)
+    # every size the body read, which a call has to give it to run
+    used = tuple(sorted(sizes))
+    bound = _normal(buffer.bound)
+    return Piece(fn, names, cells, address, bound, packed, used, extents)
 
 
 def _owner(obj: Any, fn: Any) -> str:
