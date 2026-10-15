@@ -87,7 +87,7 @@ wheels = [
 
 [[package]]
 name = "lanky"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "../lanky" }
 dependencies = [
     { name = "numpy" },
@@ -111,7 +111,7 @@ dev = [
 
 [[package]]
 name = "loopty"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "islpy" },
