@@ -2001,8 +2001,10 @@ def cast_obligation(cast: Any) -> Any:
     in that order, keep that order after every step: the time vectors of the
     last step's order (its parallel loops left out) compare as the source's
     do. A cast whose tags put a loop on a hardware axis claims besides that no
-    dependence joins two work items, which is not stated here yet, and the
-    cast is left to isl with that reason.
+    dependence joins two work items: one more part per dependence class, that
+    the two instances run on one work item of every axis (see
+    :func:`_work_item_goal`), and one per read a statement's sum makes of the
+    array its own instruction writes, on an axis where the two run apart.
 
     ``bijective``: three parts per statement the last step moves, over the
     instances as the steps before it left them: every instance has an image
@@ -2022,17 +2024,6 @@ def cast_obligation(cast: Any) -> Any:
         if cast.kind == "bijective":
             parts = _bijective_parts(origin, steps)
         else:
-            hardware = sorted(
-                name
-                for name, tag in steps[-1].tags.items()
-                if tag.startswith(("g.", "l."))
-            )
-            if hardware:
-                return _declined(
-                    f"the loops {', '.join(hardware)} are on hardware axes, and the "
-                    "claim that no dependence joins two work items is stated for "
-                    "isl only"
-                )
             parts = _monotone_parts(origin, steps)
     except Unstatable as exc:
         return _declined(str(exc))
@@ -2047,6 +2038,7 @@ def _monotone_parts(origin: Any, steps: Sequence[Any]) -> list[Any]:
     term = origin._term
     parts = []
     assumed = steps[-1].assumptions if steps else ()
+    work = steps[-1].work if steps else None
     for found in _cast_classes(origin, steps):
         claim = Claim(term)
         claim.hypotheses.extend(assumed)
@@ -2150,6 +2142,22 @@ def _monotone_parts(origin: Any, steps: Sequence[Any]) -> list[Any]:
             _stage_time(origin, steps, len(steps), b.id, chain_b[-1]),
         )
         parts.append(lanky.Part(found.name, found.label, claim.close(goal)))
+        if work is not None:
+            together = _work_item_goal(
+                claim,
+                work,
+                (a.id, found.first[3], chain_a[-1]),
+                (b.id, found.second[3], chain_b[-1]),
+            )
+            parts.append(
+                lanky.Part(
+                    f"{found.name}_work_item",
+                    f"{found.label}, on one work item",
+                    claim.close(together),
+                )
+            )
+    if work is not None:
+        parts += _within_parts(origin, steps, work)
     if not parts:
         # no two accesses a dependence can join: there is nothing to reverse
         parts.append(
@@ -2159,6 +2167,120 @@ def _monotone_parts(origin: Any, steps: Sequence[Any]) -> list[Any]:
                 Claim(term).close(True),
             )
         )
+    return parts
+
+
+def _work_item_goal(
+    claim: Claim,
+    work: Any,
+    one: tuple[str, str, Mapping[str, Any]],
+    other: tuple[str, str, Mapping[str, Any]],
+) -> Any:
+    """Two instances run on one work item of every hardware axis, as a proposition.
+
+    ``one`` and ``other`` are each a statement, where in it the access is
+    made (:func:`loopty.schedule._accesses`'s part) and the instance's loops
+    after the last step. An instance's work item along an axis is its loop
+    on the axis less where loopy starts that loop, as
+    :func:`loopty.schedule._work_items` reads it: the start loopy's code
+    generation gives (``0`` mostly), or a variable of its own where loopy
+    gives none. A statement's instruction whose sum is on the axis, and no
+    loop of it, runs on one work item of it, the same for every such
+    statement, which is a variable of the claim's; and an access that runs
+    on every work item of the axis, a statement with no loop on it, or the
+    body of a sum on it, shares a work item with nothing, so the claim is
+    that no two such instances touch one cell: ``False``.
+    """
+    starts: dict[str, Any] = {}
+    results: dict[str, Any] = {}
+
+    def start(loop: str) -> Any:
+        if loop not in starts:
+            known = work.starts.get(loop)
+            starts[loop] = (
+                claim.fresh(f"start_{loop}") if known is None else plain(known)
+            )
+        return starts[loop]
+
+    def at(end: tuple[str, str, Mapping[str, Any]], axis: str) -> Any:
+        stmt_id, part, values = end
+        loop = work.loops[stmt_id].get(axis)
+        if loop is not None:
+            begins = start(loop)
+            if isinstance(begins, int) and not isinstance(begins, bool) and not begins:
+                # loopy counts the work items from 0, as it mostly does
+                return values[loop]
+            return values[loop] - begins
+        if part == "" and axis in work.summed[stmt_id]:
+            if axis not in results:
+                name = "".join(c if c.isalnum() else "_" for c in axis)
+                results[axis] = claim.fresh(f"result_{name}")
+            return results[axis]
+        return None
+
+    equal = []
+    for axis in work.axes:
+        first, second = at(one, axis), at(other, axis)
+        if first is None or second is None:
+            return False
+        equal.append(Comparison(first, "==", second))
+    return conjunction(equal)
+
+
+def _within_parts(origin: Any, steps: Sequence[Any], work: Any) -> list[Any]:
+    """A statement's sum reading a cell its own instruction writes, apart.
+
+    One instance makes both accesses, so the pair is no dependence class, and
+    needs no order; on a device the two can run on two work items, the body
+    of a sum on a local axis on every one of them and the instruction on one
+    (:func:`loopty.schedule._within_instances`). Where the statement has no
+    loop on an axis, the two are apart there, and the claim is that they
+    never touch one cell. The read's subscripts can name the sum's own
+    loops, which are not stated, so the cell is compared on the other axes
+    alone, the wider claim.
+    """
+    lanky = _lanky_obligations()
+    schedule = _schedule_module()
+    term = origin._term
+    gone: set[str] = set()
+    for step in steps:
+        gone |= set(step.gone)
+    assumed = steps[-1].assumptions
+    parts = []
+    count = 0
+    for stmt in term.stmts:
+        if stmt.id in gone:
+            continue
+        loops = work.loops[stmt.id]
+        apart = [axis for axis in work.axes if loops.get(axis) is None]
+        if not apart:
+            continue
+        accesses = schedule._accesses(stmt, term)
+        for read in accesses:
+            if read[0] != "read" or read[3] != "sum":
+                continue
+            for write in accesses:
+                if write[0] != "write" or write[3] != "" or write[1] != read[1]:
+                    continue
+                if len(write[2]) != len(read[2]):
+                    continue
+                claim = Claim(term)
+                claim.hypotheses.extend(assumed)
+                chain = _chain(claim, origin, stmt, steps, "a")
+                same = _same_cell(
+                    origin, stmt, stmt, read[2], write[2], chain[0], chain[0]
+                )
+                claim.hypotheses.append(same)
+                cell = f"{write[1]}[{', '.join(render(i) for i in write[2])}]"
+                parts.append(
+                    lanky.Part(
+                        f"within_{count}",
+                        f"the sum of {stmt.id} reads {cell}, which its instruction "
+                        f"writes, on another work item of {', '.join(apart)}",
+                        claim.close(False),
+                    )
+                )
+                count += 1
     return parts
 
 

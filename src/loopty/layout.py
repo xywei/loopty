@@ -708,6 +708,7 @@ class Layout:
         out.module = self.module
         out._facts = None
         out._shown = self.name
+        out._written = self.buffer
         return out
 
     def same_as(self, other: Any) -> SameLayout:
@@ -1064,7 +1065,8 @@ def _explained(layout: Layout, kind: str, verdict: Any) -> str | None:
     witness = verdict.witness
     params = dict(verdict.parameters or {})
     at = _sizes_words(params)
-    buffer = f"Fin({layout.buffer})"
+    # a layout at a size (Layout.at) says the buffer as it was written
+    buffer = f"Fin({getattr(layout, '_written', layout.buffer)})"
     name = layout.name
     try:
         if kind == "one-for-one":

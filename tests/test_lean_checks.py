@@ -430,6 +430,41 @@ def test_a_cast_is_stated_one_part_per_dependence_class() -> None:
     ]
 
 
+def _device_launches() -> list[tuple[str, Any]]:
+    """The demos' casts that put loops on hardware axes, each with its schedule."""
+    hexahedra = load(EXAMPLES / "hexahedra.py")
+    qbx = load(EXAMPLES / "layer_potential.py")
+    assembly = load(EXAMPLES / "assembly.py")
+    out = [
+        (f"{operator} {schedule.term.name}", schedule)
+        for operator in ("grad", "div")
+        for schedule in hexahedra.passes_on_a_device(operator)
+    ]
+    out.append(("sumpy's tile", qbx.sumpy_tile("c")))
+    out.append(("Kulkarni's split", assembly.kulkarni(atomic=True)))
+    return out
+
+
+def test_a_cast_on_a_hardware_axis_keeps_each_class_on_one_work_item() -> None:
+    hexahedra = load(EXAMPLES / "hexahedra.py")
+    _first, along_s, _last = hexahedra.passes_on_a_device()
+    (monotone,) = [fact for fact in along_s.facts() if fact.kind == "monotone"]
+    assert monotone.statement.endswith("forward, within one work item")
+    obligation = monotone.term.lean_obligation()
+    assert not obligation.declined
+    names = [part.name for part in obligation.parts]
+    assert names == ["dependence_0", "dependence_0_work_item"]
+    together = obligation.parts[1]
+    assert together.label == (
+        "vs[q, e, k, j, i] written again by S0 after vs[q, e, k, j, i] is written "
+        "by S0, on one work item"
+    )
+    # each axis's loop, less where loopy starts it, is the work item
+    assert render(together.term.body) == (
+        "e_a1 == e_b1 and i_a1 == i_b1 and j_a1 == j_b1 and k_a1 == k_b1"
+    )
+
+
 def test_a_refused_cast_is_stated_with_isls_pair() -> None:
     module = stencil()
     with pytest.raises(IllegalCast) as refused:
@@ -1109,16 +1144,63 @@ def test_lean_confirms_a_layouts_refutation_at_isls_cell(lean: Any) -> None:
 
     layouts = load(EXAMPLES / "storage_layouts.py")
     (wrong,) = layouts.dof_array.same_as("N3,N2,N1,N0").facts()
+    # the element innermost makes ne a stride: a layout at every size, which
+    # isl refutes at ne = 2, and Lean there
+    (inside,) = layouts.dof_array.same_as("N0,N1,N2,N3").facts()
 
     def folded(i: Fin[4]) -> Fin[2]:  # noqa: F821
         return i // 2
 
     _bounds, injective, _onto = layout(folded).facts()
-    for fact in (wrong, injective):
+    for fact in (wrong, inside, injective):
         refuted = IslOracle().establish(fact)
         assert refuted.status is Status.REFUTED, fact.statement
         said = lean.establish(refuted).provenance.get("lean_counterexample", "")
         assert said.startswith("Lean confirmed the counterexample"), said
+
+
+def test_lean_proves_the_device_launches_of_the_demos(lean: Any) -> None:
+    # every cast that puts a loop on a hardware axis: S1's three launches of
+    # each operator, sumpy's tile in S2, Kulkarni's split in S3
+    unproved = []
+    for label, schedule in _device_launches():
+        for fact in schedule.facts():
+            if fact.kind not in ("bijective", "monotone"):
+                continue
+            result = lean.establish(fact)
+            if result.status is not Status.PROVED:
+                unproved.append((label, fact.statement, result.provenance))
+    assert not unproved
+
+
+def test_lean_fails_where_a_dependence_joins_two_work_items(lean: Any) -> None:
+    # jacobi with i on g.0 reads at t + 1 what the next group wrote at t: isl
+    # refuses it. Stated as if isl had found it legal, Lean proves the order
+    # of every class and fails on the work items of exactly the two that join
+    # two of them, u[t, i - 1] and u[t, i + 1] read after the write; the
+    # classes of a write after those reads are empty.
+    from dataclasses import replace
+
+    from lanky.ledger import Fact
+
+    with pytest.raises(IllegalCast) as refused:
+        Schedule(stencil().jacobi, sizes={"nt": 8, "nx": 8}).tag(i="g.0")
+    planted = replace(refused.value.fact.term, refuted=False, refusal=None)
+    parts = planted.lean_obligation().parts
+    result = lean.establish(
+        Fact(
+            id="planted",
+            kind="monotone",
+            statement="i on g.0, taken to be legal",
+            term=_Planted(parts),
+            status=Status.DECIDED,
+            decided_by="isl",
+            where="stencil.py:1",
+            owner="jacobi",
+        )
+    )
+    failed = [r["name"] for r in result.provenance["lean_parts"] if not r["proved"]]
+    assert failed == ["dependence_1_work_item", "dependence_2_work_item"]
 
 
 class _Planted:
