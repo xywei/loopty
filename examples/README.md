@@ -1456,14 +1456,14 @@ STATUS   BY             WHERE             OWNER                  STATEMENT
 -------  -------------  ----------------  ---------------------  ------------------------------------------------------------------------
 tested   property-test  hexahedra.py:106  sum_factorization      n : Nat, Fr : Fn[Fin(n), Fin(n), Real], Fs : Fn[Fin(n), Fin(n), Real]...
 tested   python         hexahedra.py:106  sum_factorization      the term computes what the annotations compute
-decided  isl            hexahedra.py:141  dof_array              dof_array stores every cell at an address of Fin(ne*64)
-decided  isl            hexahedra.py:141  dof_array              dof_array stores no two cells at one address
-decided  isl            hexahedra.py:141  dof_array              dof_array stores a cell at every address of Fin(ne*64)
-decided  isl            hexahedra.py:148  as_dim_tags            dof_array stores every cell where dim_tags N3,N0,N1,N2 does
-decided  isl            hexahedra.py:151  row_major              row_major stores every cell at an address of Fin(ne*64)
-decided  isl            hexahedra.py:151  row_major              row_major stores no two cells at one address
-decided  isl            hexahedra.py:151  row_major              row_major stores a cell at every address of Fin(ne*64)
-decided  isl            hexahedra.py:158  as_row_major           dof_array stores every cell where row_major does
+tested   isl            hexahedra.py:141  dof_array              dof_array stores every cell at an address of Fin(ne*n**3)
+tested   isl            hexahedra.py:141  dof_array              dof_array stores no two cells at one address
+tested   isl            hexahedra.py:141  dof_array              dof_array stores a cell at every address of Fin(ne*n**3)
+tested   isl            hexahedra.py:148  as_dim_tags            dof_array stores every cell where dim_tags N3,N0,N1,N2 does
+tested   isl            hexahedra.py:151  row_major              row_major stores every cell at an address of Fin(ne*n**3)
+tested   isl            hexahedra.py:151  row_major              row_major stores no two cells at one address
+tested   isl            hexahedra.py:151  row_major              row_major stores a cell at every address of Fin(ne*n**3)
+tested   isl            hexahedra.py:158  as_row_major           dof_array stores every cell where row_major does
 decided  isl            hexahedra.py:179  metric                 w[q, e, k, j, i] is in bounds for every instance of S0
 decided  isl            hexahedra.py:179  metric                 G[q, e, k, j, i] is in bounds for every instance of S0
 decided  isl            hexahedra.py:179  metric                 u[e, k, j, i] is in bounds for every instance of S0
@@ -1541,7 +1541,7 @@ tested   interpreter    hexahedra.py:314  metric_along_r         the traced term
 decided  isl            hexahedra.py:327  contravariant_along_r  every cell of w that along_r reads, contravariant stored before it
 tested   interpreter    hexahedra.py:322  contravariant_along_r  the traced term computes what the body computes
 
-86 facts: 74 decided, 12 tested
+86 facts: 66 decided, 20 tested
 ```
 
 ### loopty run examples/hexahedra.py

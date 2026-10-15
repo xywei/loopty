@@ -64,11 +64,9 @@ What is worth reading here
 --------------------------
 
 *Every order at once.* The kernels are written for ``n`` nodes per axis, so
-each fact about them and their schedules is decided for every order, and
-the theorem that three passes are the Kronecker operator is proved for every
-``n``. So are the layouts: ``n * j`` is not linear, so isl tests them at ``n``
-from 1 to 6 and Lean proves them for every ``n``, the two layouts the same
-as a polynomial identity it multiplies out.
+each fact about them and their schedules is decided for every order, the
+Kronecker theorem is proved for every ``n``, and so are the layouts: isl tests
+them at ``n`` from 1 to 6, as ``n * j`` is not linear, and Lean proves them.
 
 *How deep each fusion goes.* ``along_s`` reads a whole column of what
 ``along_r`` stored in the same ``k``-slab, so the two fuse on ``(q, e, k)``
