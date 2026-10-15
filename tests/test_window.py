@@ -174,6 +174,23 @@ def test_a_shift_register_keeps_every_access_at_a_constant_index() -> None:
         agrees(WINDOWS.burgers, WINDOWS.registers, burgers_inputs(n))
 
 
+def test_a_recurrence_along_the_loop_is_a_shift_register_too() -> None:
+    # running.S1 reads f[j - 1] as well as storing f[j]: only its store is
+    # the newest register, and its read is the one before
+    schedule = WINDOWS.running_registers
+    assert repr(schedule.windows["f"].placement) == "lambda j: j % 2"
+    code = emit_code(schedule)
+    assert "f_window[0] = f_window[1];" in code
+    assert "f_window[1] = f_window[0] + u[j];" in code
+    assert "%" not in code.split("{", 1)[1]
+    for n in (1, 2, 16):
+        agrees(
+            WINDOWS.running_differences,
+            schedule,
+            {"u": Arr.from_numpy(velocity(n)), "y": Arr.zeros(n)},
+        )
+
+
 def test_registers_where_the_window_is_not_one_along_a_loop_are_refused() -> None:
     with pytest.raises(ValueError, match="the accesses span 3 cells of f along j"):
         WINDOWS.fused.contract("f", lambda j: j % 4, registers=True)

@@ -757,11 +757,12 @@ def register_plan(
     axis modulo a number and drops the others, and every access of the array
     in the kernel, at that axis, is the loop plus a number. The producers
     (their instructions) store the newest cell, the largest offset; the
-    reads are at offsets no larger, and the register count is the span of
-    the offsets. The instructions ``skip`` (the zeros the window drops) are
-    not asked about. ``names`` gives the statement each instruction is, for
-    the reason. Returns ``(loop, lowest offset, count)``, or the reason in
-    words.
+    reads are at offsets no larger, a producer's own reads among them (a
+    recurrence, ``f[j] = f[j - 1] + u[j]``, stores at 0 and reads at -1),
+    and the register count is the span of the offsets. The instructions
+    ``skip`` (the zeros the window drops) are not asked about. ``names``
+    gives the statement each instruction is, for the reason. Returns
+    ``(loop, lowest offset, count)``, or the reason in words.
     """
     shown = dict(names or {})
 
@@ -785,36 +786,58 @@ def register_plan(
     axis = placement.names.index(slot.numerator.name)
     modulus = slot.denominator
     entry = kernel.default_entrypoint
-    found: list[tuple[Any, Any]] = []
+    # (instruction, index, whether the access is the instruction's store)
+    found: list[tuple[Any, Any, bool]] = []
 
     from loopy.symbolic import WalkMapper
 
-    class _Find(WalkMapper):
+    def indices_of(expr: Any) -> tuple[Any, ...] | None:
+        """The index of ``expr`` if it is a subscript of the array."""
+        if (
+            isinstance(expr, prim.Subscript)
+            and isinstance(expr.aggregate, prim.Variable)
+            and expr.aggregate.name == array
+        ):
+            return expr.index if isinstance(expr.index, tuple) else (expr.index,)
+        return None
+
+    class _Reads(WalkMapper):
         def __init__(self, insn: Any) -> None:
             super().__init__()
             self.insn = insn
 
         def map_subscript(self, expr: Any, *args: Any, **kwargs: Any) -> None:
-            if (
-                isinstance(expr.aggregate, prim.Variable)
-                and expr.aggregate.name == array
-            ):
-                index = expr.index if isinstance(expr.index, tuple) else (expr.index,)
-                found.append((self.insn, index))
+            index = indices_of(expr)
+            if index is not None:
+                found.append((self.insn, index, False))
             super().map_subscript(expr, *args, **kwargs)
 
     for insn in entry.instructions:
         if insn.id in skip:
             continue
-        finder = _Find(insn)
-        insn.with_transformed_expressions(lambda e, f=finder: (f(e), e)[1])
+        # an instruction stores its assignees and reads everything else in
+        # it, the subscripts of what it stores among them
+        reads = _Reads(insn)
+        for assignee in getattr(insn, "assignees", ()):
+            index = indices_of(assignee)
+            if index is not None:
+                found.append((insn, index, True))
+            if isinstance(assignee, prim.Subscript):
+                inner = assignee.index
+                for part in inner if isinstance(inner, tuple) else (inner,):
+                    reads(part)
+        for expr in (getattr(insn, "expression", None), *insn.predicates):
+            if expr is not None:
+                reads(expr)
     stored_by = set(producers)
     loop: str | None = None
     for producer in producers:
-        writes = [index for insn, index in found if insn.id == producer]
+        writes = [
+            index for insn, index, stores in found if insn.id == producer and stores
+        ]
         if not writes:
             return f"{said(producer)} stores no cell of {array} the kernel can find"
-        insn = next(insn for insn, _ in found if insn.id == producer)
+        insn = next(insn for insn, _, _ in found if insn.id == producer)
         loops = sorted(
             name
             for name in insn.within_inames
@@ -828,15 +851,15 @@ def register_plan(
         loop = loops[0]
     assert loop is not None  # there is a producer
     offsets = []
-    for insn, index in found:
+    for insn, index, stores in found:
         offset = _offset(index[axis], loop) if loop in insn.within_inames else None
         if offset is None:
             return (
-                f"{said(insn.id)} reads {array}[{', '.join(map(str, index))}], which "
-                f"is not at {loop} plus a number, so its register would change "
-                "from step to step"
+                f"{said(insn.id)} {'stores' if stores else 'reads'} "
+                f"{array}[{', '.join(map(str, index))}], which is not at {loop} "
+                "plus a number, so its register would change from step to step"
             )
-        offsets.append((insn.id in stored_by, offset))
+        offsets.append((stores and insn.id in stored_by, offset))
     newest = max(offset for _, offset in offsets)
     stored = {offset for written, offset in offsets if written}
     if stored != {newest}:

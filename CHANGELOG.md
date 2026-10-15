@@ -25,7 +25,10 @@ All notable changes to loopty are recorded here. The format follows
   accesses on two work items need no order, and a read on a work item its
   cell's store is not on is refused with the pair; the boxes on `g.0`,
   sumpy's own schedule, each keep their triangle. A window of a size,
-  `f_window[n]`, is still one for every work item. `examples/l2p.py` now
+  `f_window[n]`, is still one for every work item. A recurrence along a
+  loop, `f[j] = f[j - 1] + u[j]`, is a shift register too
+  (`registers=True`, the default on OpenCL): its store is the newest
+  register and its read the one before. `examples/l2p.py` now
   runs `contracted`, its fused program with the triangle and the table kept
   one box at a time, refuses the row with its read, and checks sumpy's
   schedule on a device; `benchmarks/l2p.py --variant windowed` (and

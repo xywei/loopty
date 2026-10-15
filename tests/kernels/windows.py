@@ -27,6 +27,10 @@ an array over a domain (#244), stored by a copy of two rows and by the
 recurrence that reads the row two up (#213), then summed box by box. Fused
 on the boxes, it is kept one box's triangle at a time, ``lambda i, a, b:
 (a, b)``, which each work item keeps its own of on a device.
+
+And a running sum, ``f[j] = f[j - 1] + u[j]``, whose differences are read
+step by step: a recurrence along the loop, kept in a shift register of the
+two cells live at once.
 """
 
 from __future__ import annotations
@@ -297,3 +301,38 @@ def rejected_row() -> str:
     except IllegalCast as refused:
         return str(refused)
     raise AssertionError("the recurrence reads the row two up, which a row lost")
+
+
+@kernel
+def running(u: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):  # noqa: F821
+    """The running sum of u: its first cell, then each the one before plus u."""
+    for j in f.dom:
+        with when(j == 0):
+            f[j] = u[j]
+        with when(j >= 1):
+            f[j] = f[j - 1] + u[j]
+
+
+@kernel
+def differences(f: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """Each cell of f less the one before it."""
+    for k in y.dom:
+        with when(k >= 1):
+            y[k] = f[k] - f[k - 1]
+
+
+@program
+def running_differences(u, y):
+    """The running sum into an array of the program's own, then its differences."""
+    f = Arr.zeros_like(u)
+    running(u, f)
+    differences(f, y)
+
+
+#: The running sum and its differences step by step, the two cells live at
+#: once kept in a shift register: ``lambda j: j % 2``, found.
+running_registers = (
+    Schedule(running_differences, sizes=SIZES)
+    .fuse("running", "differences")
+    .contract("f", registers=True)
+)
