@@ -123,7 +123,8 @@ class Stores:
     """What a kernel's statements store, as equations about what it leaves.
 
     ``facts`` are the ``single-assignment`` facts of the arrays whose
-    statements store final values, one per array, by array; ``equations``
+    statements store final values, one per array, by array (a program's,
+    one per array a call stores, by the fact's id); ``equations``
     the value equations of those statements (:class:`~loopty.term.Hypothesis`,
     each resting on the facts it needs); ``why`` says, for each array the
     kernel writes that has none, why.
