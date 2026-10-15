@@ -2657,9 +2657,7 @@ def _layout_claim(layout: Any, *others: Any) -> Claim:
     """A claim over a layout's cells: its sizes are not negative."""
     sizes: set[str] = set()
     for one in (layout, *others):
-        for piece in one.pieces:
-            sizes |= set(piece.cells.get_var_names(isl.dim_type.param))
-        sizes |= set(one.addresses().get_var_names(isl.dim_type.param))
+        sizes |= set(one.size_names())
     return Claim(None, sizes=frozenset(sizes))
 
 
@@ -2676,21 +2674,239 @@ def _address(piece: Any, coords: Sequence[Any]) -> Any:
     return _renamed(plain(piece.address), piece.names, coords)
 
 
+def _in_buffer(layout: Any, address: Any) -> Any:
+    """``0 <= address < k``: an address of the layout's buffer, ``Fin[k]``.
+
+    As isl was given it for a layout isl states, and as the annotation writes
+    it for one at every size, ``Fin[ne * n**3]``, whose bound isl cannot read.
+    """
+    if not layout.polynomial:
+        buffer = _described(layout.addresses(), "the addresses of the buffer")
+        return buffer.predicate([address])
+    return conjunction(
+        [Comparison(0, "<=", address), Comparison(address, "<", plain(layout.buffer))]
+    )
+
+
+# {{{ a layout at every size: the steps omega lacks
+
+# A layout whose address multiplies an index by a size, ``n**3 * e + (i + n * j
+# + n**2 * k)``, is one omega reads with each product an atom it knows nothing
+# of. Where it is a mixed radix (:meth:`loopty.layout.Layout.radix`), each digit
+# times the product of the extents nested inside it, the facts follow by a few
+# steps on the digits, which Lean is given (:mod:`lanky.obligations`):
+#
+# - every stride and every digit's term is not negative, and a digit's term is
+#   at most the next stride less its own, ``n * (n - 1 - j)``: in bounds;
+# - two cells at one address agree on the first digit, from the outermost, on
+#   which they would differ, since a larger digit there outweighs every digit
+#   inside it: one for one, by a case split from the outermost digit;
+# - an address's digits are its remainders by the extents, from the innermost,
+#   ``c % n``, ``c // n % n``: onto, with each quotient's equation multiplied
+#   by its stride, and the case of an extent that is zero, where the buffer is
+#   empty.
+#
+# The arithmetic is multiplied out before ``omega`` reads it, so that each
+# product of unknowns is one atom however it is written.
+
+
+def _is_one(term: Any) -> bool:
+    return isinstance(term, int) and not isinstance(term, bool) and term == 1
+
+
+def _product_of(factors: Sequence[Any]) -> Any:
+    """``a * b * c``, nested from the left, as a stride is."""
+    out = factors[0]
+    for factor in factors[1:]:
+        out = prim.Product((out, factor))
+    return out
+
+
+def _stride_products(levels: Sequence[Any]) -> list[Any]:
+    """Every stride that is a product of extents is not negative: ``0 ≤ n * n``."""
+    lanky = _lanky_obligations()
+    out = []
+    for before, level in zip(levels, levels[1:]):
+        if not _is_one(before.stride):
+            out.append(lanky.Product(before.stride, before.extent))
+    return out
+
+
+def _digit_products(levels: Sequence[Any], cell: Mapping[str, Any]) -> list[Any]:
+    """Each digit's term between ``0`` and the next stride less its own."""
+    lanky = _lanky_obligations()
+    out = []
+    for level in levels:
+        if _is_one(level.stride):
+            continue
+        digit = cell[level.name]
+        out.append(lanky.Product(level.stride, digit))
+        out.append(lanky.Product(level.stride, level.extent - 1 - digit))
+    return out
+
+
+def _radix_bounds_hints(layout: Any, coords: Sequence[Any]) -> Any:
+    """The steps of a mixed radix's in-bounds part (see above)."""
+    lanky = _lanky_obligations()
+    levels = layout.radix()
+    if levels is None:
+        return lanky.Hints(ring=True)
+    cell = dict(zip(layout.pieces[0].names, coords, strict=True))
+    return lanky.Hints(
+        products=(*_stride_products(levels), *_digit_products(levels, cell)),
+        ring=True,
+    )
+
+
+def _radix_injective_hints(
+    layout: Any, one: Sequence[Any], other: Sequence[Any]
+) -> Any:
+    """The steps of a mixed radix's one-for-one part, split from the outermost digit."""
+    lanky = _lanky_obligations()
+    levels = layout.radix()
+    if levels is None:
+        return lanky.Hints(ring=True)
+    names = layout.pieces[0].names
+    c = dict(zip(names, one, strict=True))
+    d = dict(zip(names, other, strict=True))
+    products = [
+        *_stride_products(levels),
+        *_digit_products(levels, c),
+        *_digit_products(levels, d),
+    ]
+    cases: list[Any] = []
+    equal: list[Any] = []
+    for level in reversed(levels[1:]):
+        x, y = c[level.name], d[level.name]
+        cases.append(conjunction([*equal, Comparison(x, "<", y)]))
+        cases.append(conjunction([*equal, Comparison(y, "<", x)]))
+        equal.append(Comparison(x, "==", y))
+        stride = level.stride
+        products += [
+            lanky.Product(stride, y - x - 1, in_cases=True),
+            lanky.Product(stride, x - y - 1, in_cases=True),
+            lanky.Product(stride, x - y, in_cases=True),
+            lanky.Product(stride, y - x, in_cases=True),
+        ]
+    splits = ()
+    if cases:
+        cases.append(conjunction(equal))
+        splits = (disjunction(cases),)
+    return lanky.Hints(products=tuple(products), splits=splits, ring=True)
+
+
+def _radix_onto_hints(layout: Any, address: Any) -> Any:
+    """The steps of a mixed radix's onto part: the digits by division, the witness.
+
+    ``q0 = c``, ``q[d + 1] = q[d] // X[d]``; the digit of level ``d`` is
+    ``q[d] % X[d]``, and the outermost's is its quotient. Lean is told what it
+    knows of each quotient by an extent that is no number, each equation
+    ``q[d] = q[d] % X[d] + q[d] // X[d] * X[d]`` multiplied by the stride of
+    level ``d``, each digit's term not negative, and, in the case of an extent
+    that is zero, the buffer not positive: there is no address to find a cell
+    for. A case split on the outermost digit leaves the address below the
+    buffer only where it is inside its extent.
+    """
+    lanky = _lanky_obligations()
+    levels = layout.radix()
+    if levels is None:
+        return lanky.Hints(ring=True)
+    quotients: list[Any] = [address]
+    for level in levels[:-1]:
+        quotients.append(prim.FloorDiv(quotients[-1], level.extent))
+    digits = {
+        level.name: prim.Remainder(quotients[d], level.extent)
+        for d, level in enumerate(levels[:-1])
+    }
+    top = levels[-1]
+    digits[top.name] = quotients[-1]
+    witness = tuple(digits[name] for name in layout.pieces[0].names)
+
+    def literal(term: Any) -> bool:
+        return isinstance(term, int) and not isinstance(term, bool) and term > 0
+
+    divisors: list[Any] = []
+    for level in levels[:-1]:
+        if not literal(level.extent) and all(
+            render(level.extent) != render(other) for other in divisors
+        ):
+            divisors.append(level.extent)
+    extents = [level.extent for level in levels]
+    everywhere = list(_stride_products(levels))
+    in_cases = []
+    splits = [
+        LogicalOr((Comparison(divisor, "<=", 0), Comparison(divisor, ">", 0)))
+        for divisor in divisors
+    ]
+    for divisor in divisors:
+        # an extent of zero leaves the buffer empty: its product is not positive
+        rest = list(extents)
+        rest.pop(next(k for k, e in enumerate(rest) if render(e) == render(divisor)))
+        if rest:
+            for k in range(1, len(rest)):
+                everywhere.append(lanky.Product(_product_of(rest[:k]), rest[k]))
+            in_cases.append(
+                lanky.Product(0 - divisor, _product_of(rest), in_cases=True)
+            )
+    splits.append(
+        LogicalOr(
+            (
+                Comparison(quotients[-1], "<", top.extent),
+                Comparison(top.extent, "<=", quotients[-1]),
+            )
+        )
+    )
+    for d, level in enumerate(levels[:-1]):
+        if d == 0:
+            continue
+        stride = level.stride
+        q, nxt = quotients[d], quotients[d + 1]
+        written = prim.Remainder(q, level.extent) + nxt * level.extent
+        in_cases += [
+            lanky.Product(stride, q - written, in_cases=True),
+            lanky.Product(stride, written - q, in_cases=True),
+            lanky.Product(stride, digits[level.name], in_cases=True),
+        ]
+    if not _is_one(top.stride):
+        in_cases += [
+            lanky.Product(top.stride, quotients[-1], in_cases=True),
+            lanky.Product(top.stride, quotients[-1] - top.extent, in_cases=True),
+        ]
+    return lanky.Hints(
+        witness=(lanky.Piece(witness),),
+        splits=tuple(splits),
+        products=(*everywhere, *in_cases),
+        quotients=tuple(
+            lanky.Quotient(quotients[d], level.extent)
+            for d, level in enumerate(levels[:-1])
+        ),
+        ring=True,
+    )
+
+
+# }}}
+
+
 def layout_bounds_obligation(layout: Any, verdict: Any) -> Any:
     """Every cell of a layout is at an address of its buffer: a part per piece."""
     lanky = _lanky_obligations()
     parts = []
     try:
-        buffer = _described(layout.addresses(), "the addresses of the buffer")
         for k, piece in enumerate(layout.pieces):
             claim = _layout_claim(layout)
             coords = _piece_place(claim, piece)
-            goal = buffer.predicate([_address(piece, coords)])
+            goal = _in_buffer(layout, _address(piece, coords))
+            hints = (
+                _radix_bounds_hints(layout, coords)
+                if layout.polynomial
+                else lanky.Hints()
+            )
             parts.append(
                 lanky.Part(
                     f"in_bounds_{k}",
                     f"the address of a cell of {piece.label}",
                     claim.close(goal),
+                    hints,
                 )
             )
     except Unstatable as exc:
@@ -2718,12 +2934,18 @@ def layout_injective_obligation(layout: Any, verdict: Any) -> Any:
                 claim.hypotheses.append(
                     Comparison(_address(first, one), "==", _address(second, other))
                 )
+                hints = (
+                    _radix_injective_hints(layout, one, other)
+                    if layout.polynomial
+                    else lanky.Hints()
+                )
                 parts.append(
                     lanky.Part(
                         f"one_for_one_{i}_{j}",
                         f"a cell of {first.label} and one of {second.label} at one "
                         "address",
                         claim.close(_equal(one, other)),
+                        hints,
                     )
                 )
     except Unstatable as exc:
@@ -2749,17 +2971,18 @@ def layout_onto_obligation(layout: Any, verdict: Any) -> Any:
     disjunction of existentials, one per piece. The witness is isl's
     inverse of the layout, piece by piece, as ``lexmin`` gives it: the
     region of addresses each piece stores at, after the ones before it, and
-    the cell there, with ``//`` and ``%`` by numbers.
+    the cell there, with ``//`` and ``%`` by numbers. A layout at every size
+    has no inverse isl can compute; where it is a mixed radix, the witness
+    is its digits, ``c % n`` and ``c // n``, the inverse isl gives at a
+    number (see above).
     """
     from lanky.terms import Exists
 
     lanky = _lanky_obligations()
     try:
-        buffer = layout.addresses()
-        described = _described(buffer, "the addresses of the buffer")
         claim = _layout_claim(layout)
         (x,) = claim.coordinates(("address",))
-        claim.hypotheses.append(described.predicate([x]))
+        claim.hypotheses.append(_in_buffer(layout, x))
         options = []
         for piece in layout.pieces:
             ys = claim.fresh_all(piece.names, "cell")
@@ -2775,44 +2998,10 @@ def layout_onto_obligation(layout: Any, verdict: Any) -> Any:
                 Exists(tuple((ys[name], Int) for name in piece.names), body)
             )
         goal = disjunction(options) if len(options) > 1 else options[0]
-        pieces: list[Any] = []
-        taken = None
-        multiple = len(layout.pieces) > 1
-        for index, piece in enumerate(layout.pieces):
-            inverse = piece.relation().reverse()
-            inverse, space = inverse.align_params(buffer.get_space()), buffer
-            space = space.align_params(inverse.get_space())
-            inverse = inverse.intersect_domain(space)
-            region = inverse.domain()
-            if taken is not None:
-                region, earlier = _both(region, taken)
-                region = region.subtract(earlier)
-            if region.is_empty():
-                continue
-            params = {
-                name: Var(name) for name in inverse.get_var_names(isl.dim_type.param)
-            }
-            best = isl.PwMultiAff.from_map(inverse.intersect_domain(region).lexmin())
-            found: list[tuple[Any, Any]] = []
-            best.foreach_piece(lambda where, value: found.append((where, value)))
-            for where, value in found:
-                pieces.append(
-                    lanky.Piece(
-                        tuple(
-                            _aff_term(value.get_at(k), [x], params)
-                            for k in range(value.dim(isl.dim_type.out))
-                        ),
-                        _set_term(where, [x], params),
-                        index if multiple else None,
-                    )
-                )
-            taken = region if taken is None else _both(taken, region)[0].union(
-                _both(region, taken)[0]
-            )
-        if pieces:
-            last = pieces[-1]
-            pieces[-1] = lanky.Piece(last.values, None, last.disjunct)
-        hints = lanky.Hints(witness=tuple(pieces)) if pieces else lanky.Hints()
+        if layout.polynomial:
+            hints = _radix_onto_hints(layout, x)
+        else:
+            hints = _isl_inverse(layout, x)
         part = lanky.Part(
             "onto",
             f"a cell at every address of Fin({layout.buffer})",
@@ -2824,16 +3013,62 @@ def layout_onto_obligation(layout: Any, verdict: Any) -> Any:
     return _obligation([part], refuted=verdict.ok is False)
 
 
+def _isl_inverse(layout: Any, x: Any) -> Any:
+    """isl's inverse of a layout, piece by piece, as the witness of its onto part."""
+    lanky = _lanky_obligations()
+    buffer = layout.addresses()
+    pieces: list[Any] = []
+    taken = None
+    multiple = len(layout.pieces) > 1
+    for index, piece in enumerate(layout.pieces):
+        inverse = piece.relation().reverse()
+        inverse, space = inverse.align_params(buffer.get_space()), buffer
+        space = space.align_params(inverse.get_space())
+        inverse = inverse.intersect_domain(space)
+        region = inverse.domain()
+        if taken is not None:
+            region, earlier = _both(region, taken)
+            region = region.subtract(earlier)
+        if region.is_empty():
+            continue
+        params = {
+            name: Var(name) for name in inverse.get_var_names(isl.dim_type.param)
+        }
+        best = isl.PwMultiAff.from_map(inverse.intersect_domain(region).lexmin())
+        found: list[tuple[Any, Any]] = []
+        best.foreach_piece(lambda where, value: found.append((where, value)))
+        for where, value in found:
+            pieces.append(
+                lanky.Piece(
+                    tuple(
+                        _aff_term(value.get_at(k), [x], params)
+                        for k in range(value.dim(isl.dim_type.out))
+                    ),
+                    _set_term(where, [x], params),
+                    index if multiple else None,
+                )
+            )
+        taken = region if taken is None else _both(taken, region)[0].union(
+            _both(region, taken)[0]
+        )
+    if pieces:
+        last = pieces[-1]
+        pieces[-1] = lanky.Piece(last.values, None, last.disjunct)
+    return lanky.Hints(witness=tuple(pieces)) if pieces else lanky.Hints()
+
+
 def layout_same_obligation(first: Any, second: Any, verdict: Any) -> Any:
     """Two layouts store every cell at one address: a part per pair of pieces.
 
     A cell of a piece of each is stored at one address by both; and every
     cell of each is a cell of the other, a part per piece, when their pieces
     are not the same cells. A refuted one is stated with isl's cell when both
-    have one piece.
+    have one piece. Where a size multiplies an index in either, the first
+    claim is a polynomial identity, which Lean multiplies out.
     """
     lanky = _lanky_obligations()
     parts = []
+    ring = lanky.Hints(ring=True) if first.polynomial or second.polynomial else None
     try:
         for i, one in enumerate(first.pieces):
             for j, other in enumerate(second.pieces):
@@ -2849,6 +3084,7 @@ def layout_same_obligation(first: Any, second: Any, verdict: Any) -> Any:
                         f"same_{i}_{j}",
                         f"a cell of {one.label} and of {other.label}",
                         claim.close(goal),
+                        ring or lanky.Hints(),
                     )
                 )
         for mine, theirs, which in ((first, second, "a"), (second, first, "b")):

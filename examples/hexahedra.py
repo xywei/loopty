@@ -40,9 +40,9 @@ tags its passes' outputs with loopy's ``dim_tags`` ``N3,N0,N1,N2`` to say so
 <https://github.com/a-alveyblanc/grudge/blob/4d103bbbb31bfdb175f8997ae53a76a6cb8c14dc/grudge/array_context.py#L129-L151>`__).
 loopty's arrays are row-major, so the kernels below read node ``(i, j, k)``
 of element ``e`` as ``u[e, k, j, i]``: the same buffer, the reference axes
-written slowest first. That the three are one layout is a fact, decided and
-proved (``dof_array``), at order 3: ``N**3 * e`` is linear in ``e`` only
-when ``N`` is a number.
+written slowest first. That the three are one layout is a fact for every
+order (``dof_array``): isl, which cannot multiply an index by an unknown
+order, decides it at ``n`` from 1 to 6, and Lean proves it for every ``n``.
 
 Run this file three ways.
 
@@ -66,7 +66,9 @@ What is worth reading here
 *Every order at once.* The kernels are written for ``n`` nodes per axis, so
 each fact about them and their schedules is decided for every order, and
 the theorem that three passes are the Kronecker operator is proved for every
-``n``. The layouts are the exception: they are decided at order 3.
+``n``. So are the layouts: ``n * j`` is not linear, so isl tests them at ``n``
+from 1 to 6 and Lean proves them for every ``n``, the two layouts the same
+as a polynomial identity it multiplies out.
 
 *How deep each fusion goes.* ``along_s`` reads a whole column of what
 ``along_r`` stored in the same ``k``-slab, so the two fuse on ``(q, e, k)``
@@ -139,9 +141,9 @@ def sum_factorization(
 
 
 @layout
-def dof_array(e: Fin[ne], i: Fin[N], j: Fin[N], k: Fin[N]) -> Fin[ne * N**3]:
+def dof_array(e: Fin[ne], i: Fin[n], j: Fin[n], k: Fin[n]) -> Fin[ne * n**3]:
     """grudge's DOFArray: a row per element, its nodes reshaped by modepy in F order."""
-    return N**3 * e + (i + N * j + N**2 * k)
+    return n**3 * e + (i + n * j + n**2 * k)
 
 
 #: grudge #418 writes the same layout as loopy's dim_tags on (e, i, j, k).
@@ -149,9 +151,9 @@ as_dim_tags = dof_array.same_as("N3,N0,N1,N2")
 
 
 @layout
-def row_major(e: Fin[ne], i: Fin[N], j: Fin[N], k: Fin[N]) -> Fin[ne * N**3]:
+def row_major(e: Fin[ne], i: Fin[n], j: Fin[n], k: Fin[n]) -> Fin[ne * n**3]:
     """loopty's ``u[e, k, j, i]``: row-major, the reference axes slowest first."""
-    return ((e * N + k) * N + j) * N + i
+    return ((e * n + k) * n + j) * n + i
 
 
 #: The kernels' arrays are grudge's DOFArray.
@@ -498,9 +500,24 @@ def example_inputs() -> dict:
 # }}}
 
 
+def _settled(facts: list) -> str:
+    """``all decided by isl``, or ``4 proved by lean, 1 decided by isl``."""
+    counts: dict[tuple[str, str], int] = {}
+    for fact in facts:
+        key = (fact.status.value, fact.decided_by)
+        counts[key] = counts.get(key, 0) + 1
+    if len(counts) == 1:
+        ((status, by),) = counts
+        return f"all {status} by {by}"
+    return ", ".join(
+        f"{count} {status} by {by}" for (status, by), count in counts.items()
+    )
+
+
 def main() -> int:
     """Natively against the dense operators, the fusions and windows, and the device."""
     from loopty.executor import LoopyExecutor
+    from loopty.obligations import prove
 
     data = inputs()
     weak_grad(**data["weak_grad"])
@@ -543,12 +560,15 @@ def main() -> int:
     legal = True
     for schedule in passes_on_a_device():
         # built for C here, which has no work items; the timing driver
-        # retargets them onto OpenCL, where they build
-        cast = [fact for fact in schedule.facts() if fact.kind != "buildable"]
-        legal = legal and all(fact.status.value == "decided" for fact in cast)
+        # retargets them onto OpenCL, where they build. Where Lean is
+        # installed it proves each cast, that no dependence joins two work
+        # items included
+        cast = [prove(fact) for fact in schedule.facts() if fact.kind != "buildable"]
+        settled = ("decided", "proved")
+        legal = legal and all(fact.status.value in settled for fact in cast)
         print(
             f"  {schedule.term.name}: {'.'.join(schedule.history)}: "
-            f"{len(cast)} facts, all {cast[0].status.value} by {cast[0].decided_by}"
+            f"{len(cast)} facts, {_settled(cast)}"
         )
     return 0 if native and kept.status.value == "tested" and legal else 1
 
