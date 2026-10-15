@@ -299,6 +299,22 @@ class Stmt:
     assignment, for any other read-modify-write (``y[i] = 2 * y[i]``), and
     for an update that does not commute: an integral array updated by a
     value that is not, whose every partial sum is truncated when stored.
+
+    ``text`` is the statement as the source writes it, on one line and
+    shortened where it is long (:func:`loopty.trace.statement_text`), and
+    ``spelled`` the names the source gives the loops of ``inames``, in the
+    same order: ``q`` where a program calling the kernel renamed its loop
+    ``q_0``. A message that names an instance names it by both, ``R[i, a,
+    b] = -R[i, a - 2, b + 2] (l2p.py:269) at i=0, a=3, b=7``, rather than
+    by ``id``. Both are empty for a term written by hand, which is then
+    named by ``id``.
+
+    ``unrolled`` lists the sums over a ``Fin`` of a number whose terms the
+    statement adds one by one, each as ``(binder, count)``:
+    ``reduce_sum(... for d in Fin[3])`` is traced as its three terms, since
+    lanky walks a ``Fin`` of a number as ``range``. The ledger states the
+    facts of the terms' accesses once, over the binder
+    (:func:`loopty.typing.in_bounds_facts`), as the source writes them.
     """
 
     id: str
@@ -313,6 +329,9 @@ class Stmt:
     loop_domain: isl.Set | None = None
     unnarrowed: tuple[tuple[str, str], ...] = ()
     exactness: str | None = None
+    text: str = ""
+    spelled: tuple[str, ...] = ()
+    unrolled: tuple[tuple[str, int], ...] = ()
 
     def __post_init__(self) -> None:
         _check_domains(self.domain, self.loop_domain, f"statement {self.id}")

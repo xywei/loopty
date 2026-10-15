@@ -31,6 +31,25 @@ All notable changes to loopty are recorded here. The format follows
   `benchmarks/qbx_layer_potential.py` times the kernel against plain loopy
   and sumpy's own on one OpenCL device, records sumpy's results, and runs
   the kernels on the arguments pytential itself hands sumpy.
+- **S1 of the demonstration** (`examples/hexahedra.py`, #253): grudge
+  #418's sum-factorized weak gradient and weak divergence on hexahedra, the
+  kernels written for `n` nodes per axis, so that their facts hold at every
+  order. The metric product (`metric`, or `contravariant`, which sums the
+  metric terms first, three operator applications where grudge makes
+  nine), a pass per reference axis (`along_r`, `along_s`) and the last pass
+  with the three directions summed (`gradient_along_t`,
+  `divergence_along_t`), chained by the programs `weak_grad` and
+  `weak_div`. The Kronecker theorem the passes rest on,
+  `sum_factorization`, for every `n`, proved by Lean with Mathlib and tested
+  without it; the DOFArray's layout, at order 3, the same as #418's
+  `dim_tags` `N3,N0,N1,N2` and as the kernels' row-major arrays, each a
+  fact. The passes fused as deep as each pair allows, one loop deeper
+  refused with its pair and the fusion of fewer loops named, and what
+  passes between them kept a row (`w`) and a slab (`v`) at a time; on a
+  device, three launches, every node on a work item
+  (`passes_on_a_device`). It agrees with grudge's own operators to `3e-15`.
+  `benchmarks/hexahedra.py` times the variants against the same kernels in
+  plain loopy and against grudge on one device.
 - **The demo's flagship, `examples/l2p.py`**: sumpy's L2P for the 2-D
   Laplace kernel (`E2PFromSingleBox` with the compressed Taylor expansion),
   in one file and one ledger. The claim sumpy's reconstruction rests on,
@@ -520,6 +539,37 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Changed
 
+- A refusal names each instance of its pair by the statement as the source
+  writes it, the line it is on, and its coordinates by the names the source
+  gives its loops (#260). The flagship's interchange reads `R[i, a, b] =
+  C[i, a, b] (l2p.py:267) at i=0, a=1, b=9 writes R[0, 1, 9], read by R[i,
+  a, b] = -R[i, a - 2, b + 2] (l2p.py:269) at i=0, a=3, b=7, scheduled
+  earlier`, where it read `instance S0[i=0, a=1, b=9] writes R[0, 1, 9]
+  read by S1[i=0, a=3, b=7] scheduled earlier`; S3's race, `y[cell[c, a]]
+  += reduce_sum(...) (assembly.py:241) at c=0, a=2 and at c=1, a=1 both
+  update y[3]`. A long statement keeps what it writes into and shortens the
+  calls on its right, `reduce_sum(...)`; an instance of the statement just
+  named is `the same statement at t=1, i=7`. The same holds for every
+  refusal that names a pair (`tile`, `interchange`, `skew`, `affine`,
+  `fuse`, `tag`, `contract`, `substitute`, `atomic`), and the fix each
+  names is kept. A fact's `witness` keeps the ids, `S0[t=0, i=8]`, and so
+  does a term written by hand, which has no source.
+- A schedule's facts are at the line of the step that made them, the
+  `.split(...)` or the `.assume(...)` of a chain, and its run at the line
+  the schedule is finished, its last step (#259). They were all at the
+  kernel's first statement, which for S3's `mass_action`, whose first
+  statement is the one of `mass_ffc` it calls, was a line in `mass_ffc`.
+  The run of a kernel the file does not schedule is at the kernel's
+  definition.
+- A sum over a `Fin` of a number, which the trace adds up term by term, has
+  the facts of its terms' accesses stated once, over its binder, as the
+  source writes the access (#181, #223): S1's `contravariant` reads
+  `G[3*x + d, e, k, j, i] is in bounds for every instance of S0 and every x
+  in Fin(3)`, where it listed `G[0 + d, ...]`, `G[3 + d, ...]` and `G[6 +
+  d, ...]`, and the three sums over `c` of `gradient_along_t` are one
+  exactness row, `for every d in Fin(3)`. The term, and the code, still
+  add the terms one by one. S1's ledger is 70 facts where it was 86, with
+  the same verdicts.
 - `contract` of a program's array over a domain names `substitute` as the
   other fix only where one statement stores the array, which is what a
   substitution computes again; the flagship's triangles, which two

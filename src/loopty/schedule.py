@@ -253,9 +253,14 @@ once, is not done.
 
 from __future__ import annotations
 
+import contextvars
 import dataclasses
+import functools
 import itertools
+import os
 import re
+import sys
+import sysconfig
 from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -306,6 +311,92 @@ PARALLEL_TAG_PREFIXES = ("g.", "l.", "ilp", "vec")
 def parallel_tag(tag: str) -> bool:
     """Does ``tag`` mark an iname as carrying no order?"""
     return any(tag.startswith(prefix) for prefix in PARALLEL_TAG_PREFIXES)
+
+
+# {{{ where a schedule and its steps are written
+
+#: The line a step being replayed was first taken at (see :func:`_replaying`):
+#: its facts stay at that line, not at the code that replays it.
+_REPLAYED_AT: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "loopty_replayed_at", default=None
+)
+
+
+def _called_at() -> str:
+    """``file:line`` of the code that called into loopty, or ``""``.
+
+    The innermost frame outside this module that is no part of the standard
+    library or an installed package: the line of the step, ``.split("c",
+    4)``, which in a chain written over several lines is a line of its own,
+    or of ``Schedule(...)``. A step being replayed is at the line it was
+    first taken at (:func:`_replaying`). ``""`` where loopty or lanky made
+    the call, as ``loopty run`` makes a schedule for a kernel the file
+    schedules nowhere, or where no code of the user's calls: whoever asked
+    places its facts at the kernel then.
+    """
+    replayed = _REPLAYED_AT.get()
+    if replayed is not None:
+        return replayed
+    frame: Any = sys._getframe(1)
+    while frame is not None and frame.f_globals.get("__name__") == __name__:
+        frame = frame.f_back
+    while frame is not None:
+        module = str(frame.f_globals.get("__name__", ""))
+        if module.split(".", 1)[0] in ("loopty", "lanky"):
+            return ""
+        filename = frame.f_code.co_filename
+        if not _library_file(filename):
+            return f"{os.path.basename(filename)}:{frame.f_lineno}"
+        frame = frame.f_back
+    return ""
+
+
+@functools.lru_cache(maxsize=256)
+def _library_file(filename: str) -> bool:
+    """Whether ``filename`` is code of no user's: the standard library's, a package's.
+
+    A body made by ``exec`` (``<string>``) counts as one, since no line of
+    a file names it.
+    """
+    if not filename or filename.startswith("<"):
+        return True
+    return os.path.realpath(filename).startswith(_library_roots())
+
+
+_LIBRARY_ROOTS: tuple[str, ...] = ()
+
+
+def _library_roots() -> tuple[str, ...]:
+    """The directories the standard library and installed packages are in."""
+    global _LIBRARY_ROOTS  # noqa: PLW0603 - computed once, on first use
+    if not _LIBRARY_ROOTS:
+        paths = sysconfig.get_paths()
+        roots = {
+            paths[key]
+            for key in ("stdlib", "platstdlib", "purelib", "platlib")
+            if key in paths
+        }
+        roots |= {sys.prefix, sys.base_prefix, sys.exec_prefix}
+        _LIBRARY_ROOTS = tuple(
+            sorted({os.path.join(os.path.realpath(root), "") for root in roots})
+        )
+    return _LIBRARY_ROOTS
+
+
+def _replaying(
+    schedule: Schedule, steps: Sequence[tuple[str, tuple, dict]], at: Sequence[str]
+) -> Schedule:
+    """``schedule`` with ``steps`` taken again, each at the line ``at`` gives it."""
+    for (method, args, kwargs), line in zip(steps, at, strict=True):
+        token = _REPLAYED_AT.set(line)
+        try:
+            schedule = getattr(schedule, method)(*args, **kwargs)
+        finally:
+            _REPLAYED_AT.reset(token)
+    return schedule
+
+
+# }}}
 
 
 class IllegalCast(TypeError):
@@ -2934,6 +3025,8 @@ class Schedule:
             target = "c"
         self._source = kernel
         self._term = _term_of(kernel)
+        #: Where the schedule was made, ``Schedule(...)``; see :attr:`where`.
+        self._made_at = _called_at()
         #: What the ids of the schedule's facts name the kernel by; see
         #: :meth:`fact_id`.
         self._definition = definition_of(kernel, self._term)
@@ -3024,6 +3117,8 @@ class Schedule:
         #: Each step as ``(method, args, kwargs)``, so that :meth:`retarget` can
         #: replay it against another target and have every cast checked again.
         self._steps: tuple[tuple[str, tuple, dict], ...] = ()
+        #: The line each step was taken at, which its facts are placed at.
+        self._steps_at: tuple[str, ...] = ()
         self._facts: tuple[Any, ...] = ()
         self._unbuildable: str | None = None
         self._examples: dict[str, Any] | None = None
@@ -3092,8 +3187,7 @@ class Schedule:
             target=schedule._target if target is None else target,
             sizes=dict(schedule._sizes) if sizes is None else sizes,
         )
-        for method, args, kwargs in schedule._steps:
-            out = getattr(out, method)(*args, **kwargs)
+        out = _replaying(out, schedule._steps, schedule._steps_at)
         if schedule._examples is not None:
             out = out.example(**schedule._examples)
         self.__dict__.update(out.__dict__)
@@ -3125,6 +3219,30 @@ class Schedule:
     def term(self) -> Term:
         """The term being scheduled."""
         return self._term
+
+    @property
+    def where(self) -> str:
+        """``file:line`` the schedule is written at, which its run is placed at.
+
+        The line of its last step, ``.tag(c_inner="ilp")``, or of
+        ``Schedule(...)`` before any: where the schedule that runs is
+        finished. Each fact of a step is at the step's own line, and an
+        assumption at its ``.assume(...)``. A schedule made where no code of
+        the user's calls (``loopty run`` schedules a kernel the file does
+        not) is at its kernel's definition.
+        """
+        for at in reversed(self._steps_at):
+            if at:
+                return at
+        return self._made_at or self._kernel_where()
+
+    def _kernel_where(self) -> str:
+        """``file:line`` of the kernel's definition, or of its first statement."""
+        return (
+            getattr(self._source, "where", "")
+            or self._term.where
+            or (self._term.stmts[0].where if self._term.stmts else "")
+        )
 
     @property
     def source(self) -> Any:
@@ -3249,8 +3367,8 @@ class Schedule:
         if target == self._target:
             return self
         out = Schedule(self._source, target=target, sizes=dict(self._sizes))
-        for method, args, kwargs in self._steps:
-            out = getattr(out, method)(*args, **kwargs)
+        out._made_at = self._made_at
+        out = _replaying(out, self._steps, self._steps_at)
         if self._examples is not None:
             out = out.example(**self._examples)
         return out
@@ -4606,10 +4724,11 @@ class Schedule:
         out = Schedule(
             self._source, target=self._target, sizes=self._sizes, _layouts=layouts
         )
-        for method, args, kwargs in self._steps:
-            out = getattr(out, method)(*args, **kwargs)
+        out._made_at = self._made_at
+        out = _replaying(out, self._steps, self._steps_at)
         out = out._clone()
         out._steps = (*out._steps, ("pack", tuple(arrays), {}))
+        out._steps_at = (*out._steps_at, _called_at())
         out._history = (*out._history, f"pack({', '.join(arrays)})")
         out._examples = None if self._examples is None else dict(self._examples)
         return out
@@ -5301,10 +5420,12 @@ class Schedule:
                 slot = "slot " + ", ".join(str(value) for value in found_slot)
             except Exception:  # noqa: BLE001 - the slot is said in words then
                 pass
+            reading, storing, overwriting = self._named(
+                (reader, at), (producer.id, stored), (writer, other)
+            )
             message = (
-                f"{text} illegal: instance {_instance_text(reader, at)} reads "
-                f"{window.array}[{cell}], which {_instance_text(producer.id, stored)} "
-                f"stored in {slot}, after {_instance_text(writer, other)} stored "
+                f"{text} illegal: {reading} reads {window.array}[{cell}], which "
+                f"{storing} stored in {slot}, after {overwriting} stored "
                 f"{window.array}[{theirs}] there"
                 f"{_sizes_text(params, self._sizes)}"
             )
@@ -5494,6 +5615,7 @@ class Schedule:
         earlier = self._buildable_into(other, draft, text, recipe, facts)
         other._history = (*self._history, text)
         other._steps = (*self._steps, recipe)
+        other._steps_at = (*self._steps_at, _called_at())
         other._records = (*self._records, record)
         other._facts = (*earlier, *facts)
         return other
@@ -5564,10 +5686,12 @@ class Schedule:
                 (reader, coords), (_, stored), params = witness
                 cell = _cell_text(early.source_indices, coords, params)
                 detail = f"{reader} reads {array} before {producer.id} stores it"
+                reading, storing = self._named(
+                    (reader, coords), (producer.id, stored)
+                )
                 message = (
-                    f"{text} illegal: instance {_instance_text(reader, coords)} "
-                    f"reads {array}[{cell}] before "
-                    f"{_instance_text(producer.id, stored)} stores it"
+                    f"{text} illegal: {reading} reads {array}[{cell}] before "
+                    f"{storing} stores it"
                     f"{_sizes_text(params, self._sizes)}, so the read sees the "
                     f"zeros the array was made with, and {losing}"
                 )
@@ -5790,13 +5914,14 @@ class Schedule:
                 # how a cast that rests on it names it in the ledger's status
                 "label": f"assume({condition!r})",
             },
-            where=self._term.stmts[0].where if self._term.stmts else "",
+            where=_called_at() or self._kernel_where(),
             owner=self._term.name,
         )
         other._assumptions = (*self._assumptions, expr)
         other._assumption_ids = (*self._assumption_ids, fact.id)
         other._facts = (*self._facts, fact)
         other._steps = (*self._steps, recipe)
+        other._steps_at = (*self._steps_at, _called_at())
         other._history = (*self._history, f"assume({condition!r})")
         return other
 
@@ -6162,6 +6287,7 @@ class Schedule:
             ]
         other._history = (*self._history, text)
         other._steps = (*self._steps, recipe)
+        other._steps_at = (*self._steps_at, _called_at())
         other._records = records
         other._facts = (*earlier, *facts)
         return other
@@ -6406,9 +6532,15 @@ class Schedule:
                 f"{' and '.join(names) or 'of the statements'} on {axis} "
                 f"{'runs' if len(names) == 1 else 'run'} them on two work items"
             )
+        first, second = self._named(
+            (source_id, source_coords), (sink_id, sink_coords)
+        )
+        if second.startswith("the same statement at "):
+            # one statement's two instances: R[...] = ... (f.py:3) at c=0
+            # and at c=1
+            second = second.removeprefix("the same statement ")
         message = (
-            f"{text} illegal: {_instance_text(source_id, source_coords)} and "
-            f"{_instance_text(sink_id, sink_coords)} both update {cell}{at}, and "
+            f"{text} illegal: {first} and {second} both update {cell}{at}, and "
             f"{how}, so one can overwrite what the other added; make the "
             f"updates atomic, with atomic({dep.array!r}) before this step{note}"
         )
@@ -6581,6 +6713,14 @@ class Schedule:
         sink = point[n_params + n_in :]
         return (self._name_instance(source), self._name_instance(sink), params)
 
+    def _statements(self) -> dict[str, Stmt]:
+        """The term's statements by id, which a refusal names its instances by."""
+        return {stmt.id: stmt for stmt in self._term.stmts}
+
+    def _named(self, *instances: tuple[str, dict[str, int]]) -> list[str]:
+        """Instances as a refusal names them; see :func:`_instances_text`."""
+        return _instances_text(self._statements(), *instances)
+
     def _name_instance(self, point: Sequence[int]) -> tuple[str, dict[str, int]]:
         """A uniform-space point read back as ``(statement id, coordinates)``."""
         stmt_id = self._origin_layout.stmt_ids[int(point[0])]
@@ -6616,7 +6756,7 @@ class Schedule:
         if dep.window is not None:
             # a window's pair, and the fix: take the window after the step,
             # which a tag that drops the order it is kept over has none of
-            pair = _slot_pair_text(dep, witness, now=True)
+            pair = _slot_pair_text(dep, witness, self._statements(), now=True)
             fix = (
                 f"{dep.array} is kept in a window over the order this tag drops"
                 if step == "tag"
@@ -6624,10 +6764,12 @@ class Schedule:
                 "this step"
             )
             return f"{text} illegal: {pair}{at}; {fix}"
+        first, second = self._named(
+            (source_id, source_coords), (sink_id, sink_coords)
+        )
         return (
-            f"{text} illegal: instance {_instance_text(source_id, source_coords)} "
-            f"{source_verb} {cell} {sink_verb} by "
-            f"{_instance_text(sink_id, sink_coords)} scheduled earlier{at}{note}"
+            f"{text} illegal: {first} {source_verb} {cell}, {sink_verb} by "
+            f"{second}, scheduled earlier{at}{note}"
         )
 
     def _cell_and_sizes(
@@ -6839,43 +6981,42 @@ class Schedule:
         source_loop = work.loops[source_id][axis]
         sink_loop = work.loops[sink_id][axis]
         if source_loop is None or sink_loop is None:
-            active = {
-                "raw": ("writes", "reads"),
-                "war": ("reads", "writes"),
-                "waw": ("writes", "writes"),
+            # each access by what it does, as the pair named them: "the
+            # write is in a sum", where the pair said who writes and where
+            roles = {
+                "raw": ("the write", "the read"),
+                "war": ("the read", "the write"),
+                "waw": ("the first write", "the second write"),
             }[dep.kind]
             everywhere: list[str] = []
             parts: list[str] = []
-            for stmt_id, loop, part, verb in (
-                (source_id, source_loop, dep.source_part, active[0]),
-                (sink_id, sink_loop, dep.sink_part, active[1]),
+            for stmt_id, loop, part, role in (
+                (source_id, source_loop, dep.source_part, roles[0]),
+                (sink_id, sink_loop, dep.sink_part, roles[1]),
             ):
                 if loop is not None:
                     continue
                 if axis not in work.summed[stmt_id]:
                     if not everywhere:
                         parts.append("")
-                    if stmt_id not in everywhere:
-                        everywhere.append(stmt_id)
+                    everywhere.append(role)
                 elif part == "":
                     parts.append(
-                        f"{stmt_id} {verb} it on one work item of {axis}, once "
-                        f"its sum on {axis} is done"
+                        f"{role} is on one work item of {axis}, once its sum on "
+                        f"{axis} is done"
                     )
                 elif part == "sum":
-                    parts.append(
-                        f"{stmt_id} {verb} it in a sum, on every work item of {axis}"
-                    )
+                    parts.append(f"{role} is in a sum, on every work item of {axis}")
                 else:
                     parts.append(
-                        f"{stmt_id} {verb} it for the length of a row, on every "
-                        f"work item of {axis}"
+                        f"{role} is for the length of a row, on every work item "
+                        f"of {axis}"
                     )
             if everywhere:
-                verb = "runs" if len(everywhere) == 1 else "run"
+                both = len(everywhere) > 1
                 parts[parts.index("")] = (
-                    f"{' and '.join(everywhere)} {verb} in no loop on {axis}, so "
-                    "on every work item of it"
+                    f"{' and '.join(everywhere)} {'are' if both else 'is'} in no "
+                    f"loop on {axis}, so on every work item of it"
                 )
             how = "; ".join(parts)
         else:
@@ -6893,14 +7034,13 @@ class Schedule:
         source_verb, sink_verb = dep.verbs()
         cell, at, note = self._cell_and_sizes(dep, source_coords, params, found)
         if dep.window is None:
-            pair = (
-                f"instance {_instance_text(source_id, source_coords)} "
-                f"{source_verb} {cell} {sink_verb} by "
-                f"{_instance_text(sink_id, sink_coords)}"
+            first, second = self._named(
+                (source_id, source_coords), (sink_id, sink_coords)
             )
+            pair = f"{first} {source_verb} {cell}, {sink_verb} by {second}"
             why = "nothing in a kernel orders two work items through global memory"
         else:
-            pair = _slot_pair_text(dep, witness)
+            pair = _slot_pair_text(dep, witness, self._statements())
             why = (
                 "a window is one for every work item, so its slots are shared "
                 "by them, which nothing orders (#214)"
@@ -7001,7 +7141,7 @@ class Schedule:
             ),
             decided_by=None if status == "assumed" else oracle,
             provenance=provenance,
-            where=self._term.stmts[0].where if self._term.stmts else "",
+            where=_called_at() or self._kernel_where(),
             owner=self._term.name,
             rests_on=rests_on,
         )
@@ -7170,9 +7310,61 @@ UPDATES_ISL_ONLY = (
 
 
 def _instance_text(stmt_id: str, coords: dict[str, int]) -> str:
-    """``S[t=0, i=8]``."""
+    """``S0[t=0, i=8]``: an instance by its statement's id, as a witness records it."""
     inner = ", ".join(f"{name}={value}" for name, value in coords.items())
     return f"{stmt_id}[{inner}]"
+
+
+def _instances_text(
+    stmts: Mapping[str, Stmt], *instances: tuple[str, dict[str, int]]
+) -> list[str]:
+    """Instances as one message names them, in the order it names them.
+
+    Each is the statement as the source writes it, the line it is on, and
+    the instance's coordinates by the names the source gives its loops:
+    ``R[i, a, b] = C[i, a, b] (l2p.py:267) at i=0, a=1, b=9``. An instance
+    of the statement named just before it is ``the same statement at i=0,
+    a=3, b=7``, and two statements of one text and one line, the same
+    kernel's statement in two of a program's calls, are told apart by the
+    call: ``(hexahedra.py:211, along_r@2)``. A statement with no source
+    text, of a term written by hand, is named by its id, ``S1[i=0, a=3,
+    b=7]``, as the witness in a fact's provenance names it.
+    """
+    places = {}
+    for stmt_id, _ in instances:
+        stmt = stmts.get(stmt_id)
+        if stmt is not None and stmt.text:
+            places.setdefault((stmt.text, stmt.where), set()).add(stmt_id)
+    out = []
+    previous = None
+    for stmt_id, coords in instances:
+        stmt = stmts.get(stmt_id)
+        if stmt is None or not stmt.text:
+            out.append(_instance_text(stmt_id, coords))
+            previous = stmt_id
+            continue
+        at = _at_coords(stmt, coords)
+        if stmt_id == previous:
+            out.append(f"the same statement{at}")
+            continue
+        where = stmt.where
+        if len(places[stmt.text, stmt.where]) > 1:
+            where = f"{where}, {stmt_id.rsplit('.', 1)[0]}"
+        out.append(f"{stmt.text} ({where}){at}")
+        previous = stmt_id
+    return out
+
+
+def _at_coords(stmt: Stmt, coords: dict[str, int]) -> str:
+    """`` at i=0, a=3, b=7``: an instance's coordinates, by the source's names.
+
+    Empty for a statement in no loop, whose one instance needs none.
+    """
+    spelled = dict(zip(stmt.inames, stmt.spelled, strict=False))
+    inner = ", ".join(
+        f"{spelled.get(name, name)}={value}" for name, value in coords.items()
+    )
+    return f" at {inner}" if inner else ""
 
 
 def _cell_text(
@@ -7223,19 +7415,23 @@ def _element_exactness(term: Term, name: str) -> str:
     return "approx"
 
 
-def _slot_pair_text(dep: _Dep, witness: tuple, now: bool = False) -> str:
+def _slot_pair_text(
+    dep: _Dep, witness: tuple, stmts: Mapping[str, Stmt], now: bool = False
+) -> str:
     """Two accesses to one slot of a window, in words, ``source`` first.
 
-    ``instance divergence.S0[i=1] reads f[0] from slot 0 of the window
-    lambda j: j % 3, which flux.S0[j=3] overwrites with f[3]``. With ``now``,
-    the second is what a step would run first: ``which flux.S0[j=3] would
-    now overwrite with f[3] first``.
+    ``div[i] = f[i + 1] - f[i] (fusion.py:40) at i=1 reads f[0] from slot 0
+    of the window lambda j: j % 3, which f[j] = ... (fusion.py:31) at j=3
+    overwrites with f[3]``, each instance named as :func:`_instances_text`
+    names it. With ``now``, the second is what a step would run first:
+    ``which ... would now overwrite with f[3] first``.
     """
     (source_id, source_coords), (sink_id, sink_coords), params = witness
     mine = _cell_text(dep.source_indices, source_coords, params)
     theirs = _cell_text(dep.sink_indices, sink_coords, params)
-    source = _instance_text(source_id, source_coords)
-    sink = _instance_text(sink_id, sink_coords)
+    source, sink = _instances_text(
+        stmts, (source_id, source_coords), (sink_id, sink_coords)
+    )
     slot = _slot_text(dep, source_coords, params)
     window = f"{slot} of the window {dep.window}"
     if dep.kind == "raw":
@@ -7245,8 +7441,8 @@ def _slot_pair_text(dep: _Dep, witness: tuple, now: bool = False) -> str:
             else f"reads {dep.array}[{theirs}]"
         )
         return (
-            f"instance {source} stores {dep.array}[{mine}] in {window}, from "
-            f"which {sink} {later}"
+            f"{source} stores {dep.array}[{mine}] in {window}, from which "
+            f"{sink} {later}"
         )
     later = (
         f"would now overwrite with {dep.array}[{theirs}] first"
@@ -7255,7 +7451,7 @@ def _slot_pair_text(dep: _Dep, witness: tuple, now: bool = False) -> str:
     )
     verb, where = ("reads", "from") if dep.kind == "war" else ("stores", "in")
     return (
-        f"instance {source} {verb} {dep.array}[{mine}] {where} {window}, which "
+        f"{source} {verb} {dep.array}[{mine}] {where} {window}, which "
         f"{sink} {later}"
     )
 
