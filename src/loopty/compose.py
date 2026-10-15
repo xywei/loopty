@@ -119,8 +119,13 @@ anybody sees. A callee with an array over a polyhedral domain
 (:mod:`loopty.domain`) is refused too, since a domain's sizes are not unified
 across calls.
 
-The term has no postcondition. Each callee's stays its own, and
-:meth:`loopty.kernel.Program.facts` restates it in the program's scope. What
+Each callee's postcondition stays its own, and
+:meth:`loopty.kernel.Program.facts` restates it in the program's scope. The
+term's own postcondition is the program's return annotation, a claim about
+what the program leaves in its parameters (``-> all(grad[x, e, k, j, i] ==
+... for x in Fin[3] ...)``), written in the sizes the kernels it calls name;
+:meth:`loopty.kernel.Program.facts` tests it on the program's native runs
+and decides it from what the calls store (:mod:`loopty.unfolding`). What
 the body does with a placeholder is all the term can see, and a body can tell
 one from an array without touching it (``isinstance(x, Arr)``), so the term
 can leave out calls the native run makes. That is what the program's
@@ -1168,6 +1173,9 @@ class _Composer:
     def __init__(self, recorder: _Recorder, program: Any = None) -> None:
         self.recorder = recorder
         self.program = recorder.name
+        #: The decorated program, whose return annotation is the term's
+        #: postcondition.
+        self.declared = program
         #: What keys the program's facts: its qualified name, module and line.
         self.owner = {
             "owner": getattr(program, "qualname", recorder.name),
@@ -2306,7 +2314,7 @@ class _Composer:
             params=tuple((name, _rename_type(t, {}, resolved)) for name, t in params),
             sizes=tuple(sorted(self.sizes)),
             stmts=tuple(self.resolved_stmt(stmt) for stmt in stmts),
-            post=None,
+            post=self.postcondition(),
             reflected=tuple(
                 (name, self.resolve(expr)) for name, expr in self.reflected
             ),
@@ -2322,6 +2330,21 @@ class _Composer:
             deferred_offsets=tuple(self.deferred),
             tables=tuple(self.tables.items()),
         )
+
+    def postcondition(self) -> Any:
+        """The program's return annotation, in the sizes still standing, or ``None``.
+
+        It is a claim about the program's parameters once the body has run,
+        written in their names and in the sizes the kernels it calls name,
+        ``n`` and ``ne``; a size unification eliminated is put in as what it
+        turned out to be. :meth:`loopty.kernel.Program.facts` states it, and
+        says so when it names anything else.
+        """
+        annotations = getattr(self.declared, "annotations", None) or {}
+        claim = annotations.get("return")
+        if claim is None:
+            return None
+        return self.resolve_claim(claim)
 
     # {{{ facts that travel
 

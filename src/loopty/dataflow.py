@@ -99,6 +99,7 @@ __all__ = [
     "Decision",
     "Stores",
     "decide_postcondition",
+    "program_stores",
     "single_assignment_id",
     "stores",
 ]
@@ -139,10 +140,81 @@ def stores(
     """The ``single-assignment`` facts of a kernel's arrays and its value equations.
 
     A program's term is not a kernel's (its calls are one after another, and
-    its arrays pass between them), and gets none.
+    its arrays pass between them), and gets none here; see
+    :func:`program_stores`.
     """
     if term.scopes or term.temporaries:
         return Stores()
+    return _stored(term, owner, module=module, line=line)
+
+
+def program_stores(
+    term: Term, owner: str, *, module: str | None = None, line: int | None = None
+) -> Stores:
+    """What each call of a program stores, as equations about what the program leaves.
+
+    A program's calls run one after another, so each call's statements are
+    read as a kernel's are, on their own: where the call stores no cell of
+    an array twice, and reads none before its store, a fact of kind
+    ``single-assignment`` of the program's says so for that call, and each
+    of its statements that stores into the array is an equation about what
+    the call leaves. The zeros an ``Arr.zeros_like`` starts an array with
+    are no call's, and a call that stores every cell of the array leaves
+    them nowhere.
+
+    An equation of a call holds after it until a later statement of the
+    program writes an array it names, the stored one or one it reads, as a
+    callee's postcondition does (:meth:`loopty.compose._Composer.travel`);
+    those that hold when the program returns are the ones kept, each resting
+    on the facts of the call's arrays it needs. ``why`` says, for each array
+    a call writes that has no fact, why, keyed ``array in call``.
+    """
+    from dataclasses import replace
+
+    position = {stmt.id: k for k, stmt in enumerate(term.stmts)}
+    facts: dict[str, Fact] = {}
+    equations: list[Hypothesis] = []
+    why: dict[str, str] = {}
+    for scope in term.scopes:
+        statements = set(scope.statements)
+        mine = [stmt for stmt in term.stmts if stmt.id in statements]
+        if not mine:
+            continue
+        last = max(position[stmt.id] for stmt in mine)
+        later = {stmt.assignee.array for stmt in term.stmts[last + 1 :]}
+        found = _stored(
+            replace(term, stmts=tuple(mine)),
+            owner,
+            module=module,
+            line=line,
+            call=scope.call,
+        )
+        for array, reason in found.why.items():
+            why[f"{array} in {scope.call}"] = reason
+        by_id = {fact.id: fact for fact in found.facts.values()}
+        for equation in found.equations:
+            if equation.mentions & later:
+                continue
+            equations.append(equation)
+            for identifier in equation.rests_on:
+                facts.setdefault(identifier, by_id[identifier])
+    return Stores(facts, tuple(equations), why)
+
+
+def _stored(
+    term: Term,
+    owner: str,
+    *,
+    module: str | None = None,
+    line: int | None = None,
+    call: str | None = None,
+) -> Stores:
+    """:func:`stores` of ``term``'s statements, or of one call's, with ``call``.
+
+    For a call, the facts are the program's, named after the call as well
+    as the array, and an equation mentions every array it names, since a
+    later call that writes one it only reads retires it as surely.
+    """
     from loopty.obligations import Stated, single_assignment_obligation
 
     written = list(dict.fromkeys(stmt.assignee.array for stmt in term.stmts))
@@ -155,10 +227,21 @@ def stores(
             continue
         question, writers, places = found
         readers = list(dict.fromkeys(stmt.id for stmt, *_ in places))
+        if call is None:
+            identifier = single_assignment_id(owner, array, module=module, line=line)
+            statement = f"no cell of {array} is stored twice, or read before its store"
+        else:
+            identifier = single_assignment_id(
+                owner, f"{call}:{array}", module=module, line=line
+            )
+            statement = (
+                f"{call} stores no cell of {array} twice, and reads none before "
+                "its store"
+            )
         facts[array] = Fact(
-            id=single_assignment_id(owner, array, module=module, line=line),
+            id=identifier,
             kind=KIND,
-            statement=f"no cell of {array} is stored twice, or read before its store",
+            statement=statement,
             term=Empty(
                 question,
                 description=(
@@ -183,6 +266,7 @@ def stores(
                 "array": array,
                 "writers": [writer.id for writer in writers],
                 "readers": readers,
+                **({"call": call} if call is not None else {}),
             },
             where=writers[0].where,
             owner=owner,
@@ -192,11 +276,15 @@ def stores(
         array = stmt.assignee.array
         if array not in facts:
             continue
-        reads = {
-            name
+        accessed = {
+            name: kind
             for name, _indices, kind, _inames, _domain in flow.statement_accesses(
                 stmt, term
             )
+        }
+        reads = {
+            name
+            for name, kind in accessed.items()
             if kind == "read" and name in written
         }
         if not reads <= set(facts):
@@ -206,12 +294,15 @@ def stores(
         if equation is None:
             continue
         needs = [array, *sorted(reads - {array})]
+        mentions = {array, *reads}
+        if call is not None:
+            mentions |= set(accessed)
         equations.append(
             Hypothesis(
                 claim=equation,
                 source=f"what {stmt.id} stores in {array} at {stmt.where}",
                 rests_on=tuple(facts[name].id for name in needs),
-                mentions=frozenset({array, *reads}),
+                mentions=frozenset(mentions),
             )
         )
     return Stores(facts, tuple(equations), why)

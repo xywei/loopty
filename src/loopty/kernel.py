@@ -1098,13 +1098,151 @@ class Program(_Decorated):
             out.extend(rules.scoped_in_bounds_facts(term, self.qualname, **key))
             out.extend(rules.layout_facts(term, self.qualname, **key))
             out.extend(rules.definedness_facts(term, self.qualname, **key))
-            out.append(
-                faithfulness_fact(
-                    self, term, owner=self.qualname, where=self.where, **key
-                )
+            observed: list[Any] | None = None if term.post is None else []
+            faithful = faithfulness_fact(
+                self,
+                term,
+                owner=self.qualname,
+                where=self.where,
+                observed=observed,
+                **key,
             )
+            out.extend(self._postcondition(term, observed or []))
+            out.append(faithful)
         self._facts = tuple(out)
         return self._facts
+
+    def _postcondition(self, term: Term, observed: list[Any]) -> list[Fact]:
+        """The program's postcondition: tested on its runs, decided or stated for Lean.
+
+        The return annotation is a claim about what the program leaves in its
+        parameters, ``weak_grad``'s that ``grad`` is the weak gradient of
+        ``u`` as the dense operators compute it. A fact of kind
+        ``postcondition``, keyed as a kernel's is:
+
+        - ``tested`` on the program's native runs, the runs its
+          ``trace-faithful`` fact makes, an equation that reads an output
+          compared at that output's class (``approx`` for reals), since the
+          calls sum in an order of their own
+          (:func:`loopty.faithful.postcondition_fact`); ``refuted`` where a
+          run leaves it false;
+        - ``decided`` by isl where what the calls store decides it, as a
+          kernel's postcondition is decided under what its statements store,
+          with the theorems the program cites (:func:`loopty.dataflow.program_stores`,
+          :func:`loopty.dataflow.decide_postcondition`), each equation an atom;
+        - otherwise stated for Lean from the same equations and theorems,
+          unfolded a call at a time (:mod:`loopty.unfolding`), and left as the
+          runs found it: Lean, with Mathlib for a claim about reals, proves
+          it, and the proof rests on the ``single-assignment`` facts the
+          equations need and on the theorems it takes.
+
+        The ``single-assignment`` facts come first, the program's own, one for
+        each array a call stores that the claim needs. A claim that names
+        anything but the program's parameters and the sizes its kernels name
+        is ``assumed``, and says so.
+        """
+        import dataclasses
+
+        from lanky.terms import render
+
+        from loopty.dataflow import decide_postcondition, program_stores
+        from loopty.faithful import postcondition_fact
+        from loopty.hypotheses import free_in
+        from loopty.unfolding import unfolded
+
+        if term.post is None:
+            return []
+        key = {"module": self.module, "line": self.line}
+        known = (
+            {name for name, _ in term.params}
+            | set(term.sizes)
+            | {name for name, _ in term.reflected}
+        )
+        unknown = sorted(free_in(term.post) - known)
+        if unknown:
+            sizes = " and ".join(term.sizes) if term.sizes else "none"
+            return [
+                Fact(
+                    id=rules.postcondition_id(self.qualname, **key),
+                    kind="postcondition",
+                    statement=render(term.post),
+                    term=rules.AfterCall(term.name, term.post),
+                    status=Status.ASSUMED,
+                    provenance={
+                        "kernel": term.name,
+                        "reason": (
+                            f"the postcondition of {self.__name__} names "
+                            f"{', '.join(unknown)}, which is none of its "
+                            f"parameters and none of its sizes ({sizes}, as the "
+                            "kernels it calls name them)"
+                        ),
+                    },
+                    where=self.where,
+                    owner=self.qualname,
+                )
+            ]
+        tested = postcondition_fact(
+            self,
+            term,
+            observed,
+            owner=self.qualname,
+            where=self.where,
+            at_class=True,
+            **key,
+        )
+        if tested.status is Status.REFUTED:
+            return [tested]
+        try:
+            stored = program_stores(term, self.qualname, **key)
+        except Exception as exc:  # noqa: BLE001 - the runs' verdict stands, with why
+            return [tested.with_status(tested.status, undecided=f"{exc}")]
+        try:
+            decision = decide_postcondition(term, stored.equations, theorems=self.uses)
+        except Exception as exc:  # noqa: BLE001 - stated for Lean instead, below
+            decision = f"{type(exc).__name__}: {exc}"
+        if not isinstance(decision, str):
+            needed = [
+                fact for fact in stored.facts.values() if fact.id in decision.rests_on
+            ]
+            decided = Fact(
+                id=tested.id,
+                kind=tested.kind,
+                statement=tested.statement,
+                term=decision.question,
+                status=Status.DECIDED,
+                decided_by="isl",
+                provenance={
+                    **tested.provenance,
+                    "native": tested.status.value,
+                    "used": [hypothesis.source for hypothesis in decision.used],
+                    "rule": "decided under what the calls store",
+                },
+                where=tested.where,
+                owner=tested.owner,
+                rests_on=decision.rests_on,
+            )
+            return [*needed, decided]
+        try:
+            found = unfolded(term, stored.equations, self.uses)
+        except Exception as exc:  # noqa: BLE001 - the runs' verdict stands, with why
+            found = f"{type(exc).__name__}: {exc}"
+        if isinstance(found, str):
+            return [tested.with_status(tested.status, undecided=f"{decision}; {found}")]
+        stated, used, words = found
+        needed = [fact for fact in stored.facts.values() if fact.id in stated.rests_on]
+        return [
+            *needed,
+            dataclasses.replace(
+                tested,
+                term=stated,
+                provenance={
+                    **tested.provenance,
+                    "undecided": decision,
+                    "lean": words,
+                    "used": [hypothesis.source for hypothesis in used],
+                },
+            ),
+        ]
 
     def __repr__(self) -> str:
         return f"<program {self.__name__} at {self.where}>"
