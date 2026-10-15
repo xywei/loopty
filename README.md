@@ -392,18 +392,24 @@ release; the CHANGELOG says when one does.
 
   A placement is a Python function from a cell's indices to its slot, given
   or found axis by axis along the order as it stands (one row of the
-  sum-factorized passes' `v`, `lambda e, a, b: b`). The step is legal when
-  every read is of a cell the producer stored before it, the `definedness`
-  fact, and no read sees its slot overwritten between that store and the
-  read, the `no-clobber` fact, decided by isl over the schedule's order and
-  proved by Lean, and refuted with the read, the cell and the instance that
-  overwrote its slot. From then on every pair of accesses to one slot is a
-  dependence of the schedule, so a later step that breaks the window, or
-  puts its slots on two work items, is refused with its pair. It lowers to
-  `double f_window[3]` with modulo addressing, or, with `registers=True`
-  (the default on OpenCL), to a shift register whose every access has a
-  constant index, `f_window[0] = f_window[1]` at each step.
-  `examples/fusion.py` is the Burgers flux and divergence of
+  sum-factorized passes' `v`, `lambda e, a, b: b`); an array over a domain
+  is placed by the domain's binders (one box's triangle of sumpy's L2P,
+  `lambda i, a, b: (a, b)`, in `examples/l2p.py`). The array may be stored
+  by several statements, and read by one of them, a recurrence. The step
+  is legal when every read is of a cell stored before it, the
+  `definedness` fact, and no read sees its slot overwritten between that
+  store and the read, the `no-clobber` fact, decided by isl over the
+  schedule's order and proved by Lean, and refuted with the read, the cell
+  and the instance that overwrote its slot. From then on every pair of
+  accesses to one slot is a dependence of the schedule, so a later step
+  that breaks the window is refused with its pair. A window of a number of
+  cells is each work item's own, so the boxes of the L2P on `g.0` each keep
+  their triangle, and a read on a work item its cell's store is not on is
+  refused; a window of a size, `f_window[n]`, is one for every work item
+  (in global memory on OpenCL). It lowers to `double f_window[3]` with
+  modulo addressing, or, with `registers=True` (the default on OpenCL), to
+  a shift register whose every access has a constant index, `f_window[0] =
+  f_window[1]` at each step. `examples/fusion.py` is the Burgers flux and divergence of
   `examples/composition.py`, fused, then substituted, or kept in a window,
   each compiled run compared with the native one.
 - Declared layouts, checked (`loopty.layout`). A layout is a function from a
@@ -926,9 +932,9 @@ release; the CHANGELOG says when one does.
   takes that are not the outer loops of their domain leave the casts
   decided and the kernel unbuildable. Only a pointwise
   producer is substituted (one cell per instance, at its loop variables, no
-  sum, no guard isl cannot state). A window is taken of an array one
-  statement stores, once per cell, and reads none of, which the others read
-  in values, before any of their loops is tagged (#213, #214).
+  sum, no guard isl cannot state). A window is taken of an array its
+  statements store a value in, not update, which they read in values,
+  before any of their loops is tagged (#213).
   Every read gets the value as the store converted it, a read in a
   subscript included (`y[(int16_t) (t[i])]`), and a conversion inside the
   value stays (`(t[j] + 1) % n` of a 32-bit `Fin[m]` entry, computed in 64
@@ -1073,12 +1079,9 @@ release; the CHANGELOG says when one does.
   compile (#220). A domain
   declared outside an annotation, for `Arr.zeros(TRIANGLE, ...)` in a
   program, names its binders and sizes as lanky variables, `i, j, n =
-  Var("i"), Var("j"), Var("n")` (#210). A program's array over a domain is
-  not kept in a window: `contract` refuses it, naming the fix, keep it whole
-  or, where one statement stores it, `substitute` it (#244). So the flagship's
-  triangles, `examples/l2p.py`, are kept whole where sumpy keeps a box's
-  in registers; a window of an array its producer reads, a recurrence, or that
-  several statements store, is #213.
+  Var("i"), Var("j"), Var("n")` (#210). A program's array over a domain
+  kept in a window is kept in the box its placement's slots span, `11 x 11`
+  for a triangle of 66 cells, as plain loopy keeps one in a temporary.
 - `loopty.math` has eight functions (#184), and numpy's own functions on a
   traced value are refused rather than read as them (#195). A function
   only a guard calls is refused when lowered: loopy resolves a function by
@@ -1273,18 +1276,20 @@ on the inputs it runs.
   after it have written their outputs, where natively the program stopped
   inside that call. After the error, do not trust the arrays, and pass copies
   if you need them as they were.
-- **A window is an edge's, between one writer and its readers**
+- **A window keeps values stored, not updated**
   ([#213](https://github.com/xywei/loopty/issues/213),
   [#214](https://github.com/xywei/loopty/issues/214),
   [#229](https://github.com/xywei/loopty/issues/229),
   [#133](https://github.com/xywei/loopty/issues/133)). `Schedule.contract`
-  refuses an array its producer reads (a recurrence) or updates (`f[j] +=
-  v` adds to the zeros a window drops: store each cell once, or keep the
-  array whole), or that two statements store, and a loop tagged with no
-  order before it; an update of another array may read a window, and
-  `atomic` does not lift the order of its slots. A window that drops a
-  loop is shared by its every value, so putting that loop on a hardware axis
-  after it is refused, where one window per work item would do. An array
+  refuses an array a statement updates (`f[j] += v` adds to the zeros a
+  window drops: store each cell once, or keep the array whole), and a loop
+  tagged with no order before it; an update of another array may read a
+  window, and `atomic` does not lift the order of its slots. A cell stored
+  twice is asked about at both stores, not only at the last before the
+  read, so a window that is safe can be refused there. A window of a size, `f_window[n]`, is one
+  for every work item (in global memory on OpenCL), so a loop it drops
+  cannot go on a hardware axis after it; a window of a number of cells is
+  each work item's own. An array
   kept in a window, and another computed from it where it is read, are
   refused together, in either order: `substitute` moves the reads of the
   window to where the other is read. A substitution through two

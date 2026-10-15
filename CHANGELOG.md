@@ -8,6 +8,31 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Added
 
+- **A window of an array over a domain, of several writers and of a
+  recurrence** (`Schedule.contract`, #244, #213). A placement over an array
+  over a domain takes the domain's binders, and the window is the box its
+  slots span: sumpy's L2P, fused box by box, keeps one box's triangle,
+  `contract("R")` finds `lambda i, a, b: (a, b)`, 121 cells for the 66 of a
+  triangle of order 10, as plain loopy's temporary of the box. The array may
+  be stored by several statements, and read by one of them: the copy of
+  the stored rows and the recurrence `R[i, a, b] = -R[i, a - 2, b + 2]`. The
+  `definedness` fact asks that every read is of a cell one of them stored
+  before it, and the `no-clobber` fact is asked of every pair of them,
+  decided by isl and proved by Lean; a window too small, one row of the
+  triangle, is refused with the read the recurrence makes, the cell and the
+  instance that overwrote its slot. A window of a number of cells is each
+  work item's own, as loopy keeps a private temporary, so two of its
+  accesses on two work items need no order, and a read on a work item its
+  cell's store is not on is refused with the pair; the boxes on `g.0`,
+  sumpy's own schedule, each keep their triangle. A window of a size,
+  `f_window[n]`, is still one for every work item. A recurrence along a
+  loop, `f[j] = f[j - 1] + u[j]`, is a shift register too
+  (`registers=True`, the default on OpenCL): its store is the newest
+  register and its read the one before. `examples/l2p.py` now
+  runs `contracted`, its fused program with the triangle and the table kept
+  one box at a time, refuses the row with its read, and checks sumpy's
+  schedule on a device; `benchmarks/l2p.py --variant windowed` (and
+  `unrolled_windowed`) times it.
 - **A layout at every size** (`loopty.layout`, #263). A layout's body may
   compute with a size its annotations name, so grudge's DOFArray is one
   layout for every order, `n**3 * e + (i + n * j + n**2 * k)` over
@@ -138,8 +163,7 @@ All notable changes to loopty are recorded here. The format follows
   decided from what it stores and is the theorem's hypotheses, so the
   theorem applies, and `evaluate`, composed by the program `l2p` and fused
   box by box; the interchange of the triangle's loops refused with isl's
-  pair, and the window of the triangles refused with the reason (#244,
-  #213). The program agrees with sumpy's own kernel on the file's inputs to
+  pair, and each box's triangle kept in a window (above). The program agrees with sumpy's own kernel on the file's inputs to
   round-off (`upstream`, below), and with the charges' potential to `4e-13`
   at order 10.
 - **Agreement with the code a kernel mirrors**, `@upstream(kernel)`

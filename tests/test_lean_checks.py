@@ -1088,6 +1088,10 @@ def _refused_casts() -> list[tuple[str, IllegalCast]]:
             "the loop run backwards after the window",
             lambda: windows.windowed.affine(windows.REVERSED),
         ),
+        (
+            "a row of the triangle, which the recurrence reads two rows up",
+            lambda: windows.boxed.contract("R", lambda i, a, b: b),
+        ),
     ]
     out = []
     for label, ask in asks:
@@ -1427,13 +1431,13 @@ def test_lean_fails_on_exactly_the_classes_isl_finds_reversed(
     reversed_by_isl: dict[str, list] = {}
     first_violation = Scheduled._first_violation
 
-    def recording(self: Any, schedule: Any) -> Any:
+    def recording(self: Any, schedule: Any, deps: Any = None) -> Any:
         reversed_by_isl["deps"] = [
             dep
-            for dep in self._deps
+            for dep in (self._deps if deps is None else deps)
             if not isl_oracle.is_monotone(schedule, dep.relation).ok
         ]
-        return first_violation(self, schedule)
+        return first_violation(self, schedule, deps)
 
     monkeypatch.setattr(Scheduled, "_first_violation", recording)
     kinds = {

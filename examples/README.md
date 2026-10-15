@@ -2255,7 +2255,16 @@ mirrors.
   triangles arrays it makes, each read only where the call before it stored.
 - Running `b` outside `a` is refused with the pair of instances it would
   reorder. `fused` runs the three calls box by box, as sumpy does, two casts
-  isl decides and Lean proves.
+  isl decides and Lean proves. `contracted` then keeps only the box at
+  hand's triangle and table, as sumpy keeps them in registers: `contract`
+  finds the window `lambda i, a, b: (a, b)` along the fused order, the
+  11 x 11 box the triangle spans, and its two facts, that every read is of
+  a cell the copy or the recurrence stored and that no read sees its slot
+  overwritten, are decided by isl and proved by Lean. One row of the
+  triangle, `lambda i, a, b: b`, is refused with the read of the
+  recurrence it would break. Each box a work group, `tag(i="g.0")`, as
+  sumpy's own schedule has it, is legal: each work item keeps its own
+  windows.
 - `sumpy_l2p` is sumpy's own `E2PFromSingleBox`, on this file's inputs: what
   it computed is recorded beside the file (`l2p_sumpy.json`, written by
   `benchmarks/l2p.py` in an environment with sumpy main and loopy main), and
@@ -2271,13 +2280,20 @@ largest error against the charges' potential: 4.1e-13
 
 refused: interchange(b, a) illegal: instance S0[i=0, a=1, b=9] writes R[0, 1, 9] read by S1[i=0, a=3, b=7] scheduled earlier (at nb=1, isl's choice)
 
-schedule: Schedule(l2p, target='c').fuse(unpack, reconstruct, loops=1).fuse(reconstruct, evaluate, loops=1)
+refused: contract('R', lambda i, a, b: b) illegal: instance reconstruct.S1[i_0=0, a_0=9, b_0=0] reads R[0, 7, 2], which reconstruct.S1[i_0=0, a_0=7, b_0=2] stored in slot 2, after reconstruct.S1[i_0=0, a_0=8, b_0=2] stored R[0, 8, 2] there (at nb=1, isl's choice); contract('R') finds the smallest window that keeps every read, lambda i, a, b: (a, b)
+
+schedule: Schedule(l2p, target='c').fuse(unpack, reconstruct, loops=1).fuse(reconstruct, evaluate, loops=1).contract('R', lambda i, a, b: (a, b)).contract('C', lambda i, a, b: (a, b))
   decided  isl  fuse(unpack, reconstruct, loops=1) renames the instances of l2p one for one
   decided  isl  the order after fuse(unpack, reconstruct, loops=1) runs every dependence of l2p forward
   decided  isl  fuse(reconstruct, evaluate, loops=1) renames the instances of l2p one for one
   decided  isl  the order after fuse(reconstruct, evaluate, loops=1) runs every dependence of l2p forward
-  refused: contract('R'): R is over the domain Where[i: Fin(nb), a: Fin(11), b: Fin(11), a + b <= 10], whose cells a window does not place yet; keep it whole
+  decided  isl  for contract('R'), every cell of R that l2p reads, reconstruct.S0 or reconstruct.S1 has stored by the time it is read
+  decided  isl  no read of R sees its slot overwritten after contract('R', lambda i, a, b: (a, b)): R kept in 121 cells, R[i, a, b] in slot (a, b)
+  decided  isl  for contract('C'), every cell of C that l2p reads, unpack.S0 or unpack.S1 has stored by the time it is read
+  decided  isl  no read of C sees its slot overwritten after contract('C', lambda i, a, b: (a, b)): C kept in 22 cells, C[i, a, b] in slot (a, b)
   pot: difference 0 within 1.1e-06 (approx) -> tested
+
+on a device, each box a work group, as sumpy's own schedule: tag(i='g.0'): 2 facts, all decided by isl
 ```
 
 ### lanky check examples/l2p.py
@@ -2286,7 +2302,7 @@ Without Lean, the two theorems are `assumed` and the application is
 `decided` by `theorem`, worth what the theorem is. With Lean and Mathlib
 (`LANKY_LEAN_MATHLIB`, and lanky's `cas` extra, whose sympy finds the
 induction's steps), every row isl decided is `proved` by Lean, and so are
-both theorems and the application: `52 facts: 3 decided, 42 proved, 7
+both theorems and the application: `56 facts: 3 decided, 46 proved, 7
 tested`, the three left decided being the class of the Taylor sum, by type,
 and the two postconditions restated after their calls, by the call. That
 takes Lean about two minutes from an empty proof cache. `lanky check
@@ -2300,60 +2316,64 @@ prints them whole.
 $ uv run lanky check examples/l2p.py
 STATUS                           EFFECTIVE  BY           WHERE       OWNER              STATEMENT
 -------------------------------  ---------  -----------  ----------  -----------------  ------------------------------------------------------------------------
-assumed                          assumed    -            l2p.py:121  compressed_taylor  D : Fn[Nat, Nat, Real], R : Fn[Nat, Nat, Real] | forall a in Nat, b i...
-tested                           tested     python       l2p.py:121  compressed_taylor  the term computes what the annotations compute
-assumed                          assumed    -            l2p.py:139  on_every_triangle  n : Nat, p : Nat, c : Fn[Nat, Nat, Nat, Real], D : Fn[Nat, Nat, Nat, ...
-tested                           tested     python       l2p.py:139  on_every_triangle  the term computes what the annotations compute
-decided                          decided    isl          l2p.py:190  storage_index      storage_index stores every cell at an address of Fin(21)
-decided                          decided    isl          l2p.py:190  storage_index      storage_index stores no two cells at one address
-decided                          decided    isl          l2p.py:190  storage_index      storage_index stores a cell at every address of Fin(21)
-decided                          decided    isl          l2p.py:235  unpack             C[i, a, b] is in bounds for every instance of S0
-decided                          decided    isl          l2p.py:235  unpack             coeffs[i, 0] is in bounds for every instance of S0
-decided                          decided    isl          l2p.py:237  unpack             C[i, a, b] is in bounds for every instance of S1
-decided                          decided    isl          l2p.py:237  unpack             coeffs[i, 2*(a + b) - 1 + a] is in bounds for every instance of S1
-decided                          decided    isl          l2p.py:235  unpack             distinct instances of S0 write distinct cells of C
-decided                          decided    isl          l2p.py:237  unpack             distinct instances of S1 write distinct cells of C
-decided                          decided    isl          l2p.py:213  unpack             the source order runs every dependence forward in time
-decided                          decided    isl          l2p.py:235  unpack             no cell of C is stored twice, or read before its store
-decided                          decided    isl          l2p.py:213  unpack             (forall i in Fin(nb). C[i, 0, 0] == coeffs[i, 0]) and (forall i in Fi...
-tested                           tested     interpreter  l2p.py:213  unpack             the traced term computes what the body computes
-decided                          decided    isl          l2p.py:267  reconstruct        R[i, a, b] is in bounds for every instance of S0
-decided                          decided    isl          l2p.py:267  reconstruct        C[i, a, b] is in bounds for every instance of S0
-decided                          decided    isl          l2p.py:269  reconstruct        R[i, a, b] is in bounds for every instance of S1
-decided                          decided    isl          l2p.py:269  reconstruct        R[i, a - 2, b + 2] is in bounds for every instance of S1
-decided                          decided    isl          l2p.py:267  reconstruct        distinct instances of S0 write distinct cells of R
-decided                          decided    isl          l2p.py:269  reconstruct        distinct instances of S1 write distinct cells of R
-decided                          decided    isl          l2p.py:269  reconstruct        every cell of R that S1 reads, S0 or S1 wrote before the read
-decided                          decided    isl          l2p.py:240  reconstruct        the source order runs every dependence forward in time
-decided                          decided    isl          l2p.py:267  reconstruct        no cell of R is stored twice, or read before its store
-decided                          decided    isl          l2p.py:240  reconstruct        (forall i in Fin(nb), a in Nat, b in Nat where a < 2 and a + b <= 10....
-decided under on_every_triangle  assumed    theorem      l2p.py:240  reconstruct        by on_every_triangle, for every D with pde and stored: forall i in Fi...
-tested                           tested     interpreter  l2p.py:240  reconstruct        the traced term computes what the body computes
-decided                          decided    isl          l2p.py:300  evaluate           pot[i, t] is in bounds for every instance of S0
-decided                          decided    isl          l2p.py:300  evaluate           R[i, a, b] is in bounds for every instance of S0
-decided                          decided    isl          l2p.py:300  evaluate           tx[i, t] is in bounds for every instance of S0
-decided                          decided    isl          l2p.py:300  evaluate           cx[i] is in bounds for every instance of S0
-decided                          decided    isl          l2p.py:300  evaluate           ty[i, t] is in bounds for every instance of S0
-decided                          decided    isl          l2p.py:300  evaluate           cy[i] is in bounds for every instance of S0
-decided                          decided    isl          l2p.py:300  evaluate           INV_FACT[a] is in bounds for every instance of S0
-decided                          decided    isl          l2p.py:300  evaluate           INV_FACT[b] is in bounds for every instance of S0
-decided                          decided    isl          l2p.py:300  evaluate           cnt[i], the length of row i that bounds the loop over t, is in bounds...
-decided                          decided    isl          l2p.py:300  evaluate           distinct instances of S0 write distinct cells of pot
-decided                          decided    isl          l2p.py:279  evaluate           the source order runs every dependence forward in time
-decided                          decided    type         l2p.py:300  evaluate           the accumulation into pot[i, t] over a, b is approx
-tested                           tested     interpreter  l2p.py:279  evaluate           the traced term computes what the body computes
-decided                          decided    call         l2p.py:307  l2p                after unpack(...) in l2p: (forall i in Fin(nb). C[i, 0, 0] == coeffs[...
-decided                          decided    call         l2p.py:307  l2p                after reconstruct(...) in l2p: (forall i in Fin(nb), a in Nat, b in N...
-decided                          decided    isl          l2p.py:313  l2p                every cell of C that reconstruct reads, unpack stored before it
-decided                          decided    isl          l2p.py:314  l2p                every cell of R that evaluate reads, reconstruct stored before it
-tested                           tested     interpreter  l2p.py:307  l2p                the traced term computes what the body computes
-decided                          decided    isl          l2p.py:310  l2p                fuse(unpack, reconstruct, loops=1) renames the instances of l2p one f...
-decided                          decided    isl          l2p.py:310  l2p                the order after fuse(unpack, reconstruct, loops=1) runs every depende...
-decided                          decided    isl          l2p.py:310  l2p                fuse(reconstruct, evaluate, loops=1) renames the instances of l2p one...
-decided                          decided    isl          l2p.py:310  l2p                the order after fuse(reconstruct, evaluate, loops=1) runs every depen...
-tested                           tested     upstream     l2p.py:431  l2p                the native run of l2p agrees with sumpy_l2p in pot, on its example in...
+assumed                          assumed    -            l2p.py:126  compressed_taylor  D : Fn[Nat, Nat, Real], R : Fn[Nat, Nat, Real] | forall a in Nat, b i...
+tested                           tested     python       l2p.py:126  compressed_taylor  the term computes what the annotations compute
+assumed                          assumed    -            l2p.py:144  on_every_triangle  n : Nat, p : Nat, c : Fn[Nat, Nat, Nat, Real], D : Fn[Nat, Nat, Nat, ...
+tested                           tested     python       l2p.py:144  on_every_triangle  the term computes what the annotations compute
+decided                          decided    isl          l2p.py:195  storage_index      storage_index stores every cell at an address of Fin(21)
+decided                          decided    isl          l2p.py:195  storage_index      storage_index stores no two cells at one address
+decided                          decided    isl          l2p.py:195  storage_index      storage_index stores a cell at every address of Fin(21)
+decided                          decided    isl          l2p.py:240  unpack             C[i, a, b] is in bounds for every instance of S0
+decided                          decided    isl          l2p.py:240  unpack             coeffs[i, 0] is in bounds for every instance of S0
+decided                          decided    isl          l2p.py:242  unpack             C[i, a, b] is in bounds for every instance of S1
+decided                          decided    isl          l2p.py:242  unpack             coeffs[i, 2*(a + b) - 1 + a] is in bounds for every instance of S1
+decided                          decided    isl          l2p.py:240  unpack             distinct instances of S0 write distinct cells of C
+decided                          decided    isl          l2p.py:242  unpack             distinct instances of S1 write distinct cells of C
+decided                          decided    isl          l2p.py:218  unpack             the source order runs every dependence forward in time
+decided                          decided    isl          l2p.py:240  unpack             no cell of C is stored twice, or read before its store
+decided                          decided    isl          l2p.py:218  unpack             (forall i in Fin(nb). C[i, 0, 0] == coeffs[i, 0]) and (forall i in Fi...
+tested                           tested     interpreter  l2p.py:218  unpack             the traced term computes what the body computes
+decided                          decided    isl          l2p.py:272  reconstruct        R[i, a, b] is in bounds for every instance of S0
+decided                          decided    isl          l2p.py:272  reconstruct        C[i, a, b] is in bounds for every instance of S0
+decided                          decided    isl          l2p.py:274  reconstruct        R[i, a, b] is in bounds for every instance of S1
+decided                          decided    isl          l2p.py:274  reconstruct        R[i, a - 2, b + 2] is in bounds for every instance of S1
+decided                          decided    isl          l2p.py:272  reconstruct        distinct instances of S0 write distinct cells of R
+decided                          decided    isl          l2p.py:274  reconstruct        distinct instances of S1 write distinct cells of R
+decided                          decided    isl          l2p.py:274  reconstruct        every cell of R that S1 reads, S0 or S1 wrote before the read
+decided                          decided    isl          l2p.py:245  reconstruct        the source order runs every dependence forward in time
+decided                          decided    isl          l2p.py:272  reconstruct        no cell of R is stored twice, or read before its store
+decided                          decided    isl          l2p.py:245  reconstruct        (forall i in Fin(nb), a in Nat, b in Nat where a < 2 and a + b <= 10....
+decided under on_every_triangle  assumed    theorem      l2p.py:245  reconstruct        by on_every_triangle, for every D with pde and stored: forall i in Fi...
+tested                           tested     interpreter  l2p.py:245  reconstruct        the traced term computes what the body computes
+decided                          decided    isl          l2p.py:305  evaluate           pot[i, t] is in bounds for every instance of S0
+decided                          decided    isl          l2p.py:305  evaluate           R[i, a, b] is in bounds for every instance of S0
+decided                          decided    isl          l2p.py:305  evaluate           tx[i, t] is in bounds for every instance of S0
+decided                          decided    isl          l2p.py:305  evaluate           cx[i] is in bounds for every instance of S0
+decided                          decided    isl          l2p.py:305  evaluate           ty[i, t] is in bounds for every instance of S0
+decided                          decided    isl          l2p.py:305  evaluate           cy[i] is in bounds for every instance of S0
+decided                          decided    isl          l2p.py:305  evaluate           INV_FACT[a] is in bounds for every instance of S0
+decided                          decided    isl          l2p.py:305  evaluate           INV_FACT[b] is in bounds for every instance of S0
+decided                          decided    isl          l2p.py:305  evaluate           cnt[i], the length of row i that bounds the loop over t, is in bounds...
+decided                          decided    isl          l2p.py:305  evaluate           distinct instances of S0 write distinct cells of pot
+decided                          decided    isl          l2p.py:284  evaluate           the source order runs every dependence forward in time
+decided                          decided    type         l2p.py:305  evaluate           the accumulation into pot[i, t] over a, b is approx
+tested                           tested     interpreter  l2p.py:284  evaluate           the traced term computes what the body computes
+decided                          decided    call         l2p.py:312  l2p                after unpack(...) in l2p: (forall i in Fin(nb). C[i, 0, 0] == coeffs[...
+decided                          decided    call         l2p.py:312  l2p                after reconstruct(...) in l2p: (forall i in Fin(nb), a in Nat, b in N...
+decided                          decided    isl          l2p.py:318  l2p                every cell of C that reconstruct reads, unpack stored before it
+decided                          decided    isl          l2p.py:319  l2p                every cell of R that evaluate reads, reconstruct stored before it
+tested                           tested     interpreter  l2p.py:312  l2p                the traced term computes what the body computes
+decided                          decided    isl          l2p.py:315  l2p                fuse(unpack, reconstruct, loops=1) renames the instances of l2p one f...
+decided                          decided    isl          l2p.py:315  l2p                the order after fuse(unpack, reconstruct, loops=1) runs every depende...
+decided                          decided    isl          l2p.py:315  l2p                fuse(reconstruct, evaluate, loops=1) renames the instances of l2p one...
+decided                          decided    isl          l2p.py:315  l2p                the order after fuse(reconstruct, evaluate, loops=1) runs every depen...
+decided                          decided    isl          l2p.py:315  l2p                for contract('R'), every cell of R that l2p reads, reconstruct.S0 or ...
+decided                          decided    isl          l2p.py:315  l2p                no read of R sees its slot overwritten after contract('R', lambda i, ...
+decided                          decided    isl          l2p.py:315  l2p                for contract('C'), every cell of C that l2p reads, unpack.S0 or unpac...
+decided                          decided    isl          l2p.py:315  l2p                no read of C sees its slot overwritten after contract('C', lambda i, ...
+tested                           tested     upstream     l2p.py:456  l2p                the native run of l2p agrees with sumpy_l2p in pot, on its example in...
 
-52 facts: 2 assumed, 43 decided, 7 tested
+56 facts: 2 assumed, 47 decided, 7 tested
 ```
 
 ### loopty run examples/l2p.py
@@ -2361,6 +2381,8 @@ tested                           tested     upstream     l2p.py:431  l2p        
 ```console
 $ uv run loopty run examples/l2p.py
 l2p: Schedule(l2p, target='c').fuse(unpack, reconstruct, loops=1).fuse(reconstruct, evaluate, loops=1)
+  pot: difference 0 within 1.1e-06 (approx) -> tested
+l2p: Schedule(l2p, target='c').fuse(unpack, reconstruct, loops=1).fuse(reconstruct, evaluate, loops=1).contract('R', lambda i, a, b: (a, b)).contract('C', lambda i, a, b: (a, b))
   pot: difference 0 within 1.1e-06 (approx) -> tested
 unpack: Schedule(unpack, target='c')
   C: difference 0 within 1e-06 (approx) -> tested
@@ -2371,16 +2393,21 @@ evaluate: Schedule(evaluate, target='c')
 
 STATUS   BY     WHERE       OWNER        STATEMENT
 -------  -----  ----------  -----------  ------------------------------------------------------------------------
-decided  isl    l2p.py:310  l2p          fuse(unpack, reconstruct, loops=1) renames the instances of l2p one f...
-decided  isl    l2p.py:310  l2p          the order after fuse(unpack, reconstruct, loops=1) runs every depende...
-decided  isl    l2p.py:310  l2p          fuse(reconstruct, evaluate, loops=1) renames the instances of l2p one...
-decided  isl    l2p.py:310  l2p          the order after fuse(reconstruct, evaluate, loops=1) runs every depen...
-tested   loopy  l2p.py:307  l2p          the scheduled run of l2p agrees with the native run to the accuracy i...
-tested   loopy  l2p.py:235  unpack       the scheduled run of unpack agrees with the native run to the accurac...
-tested   loopy  l2p.py:267  reconstruct  the scheduled run of reconstruct agrees with the native run to the ac...
-tested   loopy  l2p.py:300  evaluate     the scheduled run of evaluate agrees with the native run to the accur...
+decided  isl    l2p.py:315  l2p          fuse(unpack, reconstruct, loops=1) renames the instances of l2p one f...
+decided  isl    l2p.py:315  l2p          the order after fuse(unpack, reconstruct, loops=1) runs every depende...
+decided  isl    l2p.py:315  l2p          fuse(reconstruct, evaluate, loops=1) renames the instances of l2p one...
+decided  isl    l2p.py:315  l2p          the order after fuse(reconstruct, evaluate, loops=1) runs every depen...
+tested   loopy  l2p.py:312  l2p          the scheduled run of l2p agrees with the native run to the accuracy i...
+decided  isl    l2p.py:315  l2p          for contract('R'), every cell of R that l2p reads, reconstruct.S0 or ...
+decided  isl    l2p.py:315  l2p          no read of R sees its slot overwritten after contract('R', lambda i, ...
+decided  isl    l2p.py:315  l2p          for contract('C'), every cell of C that l2p reads, unpack.S0 or unpac...
+decided  isl    l2p.py:315  l2p          no read of C sees its slot overwritten after contract('C', lambda i, ...
+tested   loopy  l2p.py:312  l2p          the scheduled run of l2p agrees with the native run to the accuracy i...
+tested   loopy  l2p.py:240  unpack       the scheduled run of unpack agrees with the native run to the accurac...
+tested   loopy  l2p.py:272  reconstruct  the scheduled run of reconstruct agrees with the native run to the ac...
+tested   loopy  l2p.py:305  evaluate     the scheduled run of evaluate agrees with the native run to the accur...
 
-8 facts: 4 decided, 4 tested
+13 facts: 8 decided, 5 tested
 ```
 
 ## taylor_reconstruction.py

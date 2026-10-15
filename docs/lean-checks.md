@@ -131,8 +131,8 @@ its own, in parallel.
 | distinct writes | statement | two instances that differ write cells that differ |
 | element sort | statement | the value written is a point of the sort |
 | definedness | read | some statement wrote the cell read, before the read: a disjunction of existentials, one per writer; a write under a guard isl cannot state is no writer, since its domain is wider than where it stores |
-| definedness of a substitution or a window | read of the array | the producer, and only it, stored the cell read before the read, in the program's order |
-| no read sees its slot overwritten (a window) | read of the array | three instances, the read, the producer's that stored the cell it reads, and another of the producer's that stored a different cell into the same slot after it: that one does not run before the read, in the order the steps leave; the slot is the placement, `j % 3` |
+| definedness of a substitution or a window | read of the array | the producer, or one of a window's producers (the copy and the recurrence of a triangle), stored the cell read before the read, in the program's order |
+| no read sees its slot overwritten (a window) | read of the array, and pair of producers | three instances, the read, a producer's that stored the cell it reads, and a producer's that stored a different cell into the same slot after it: that one does not run before the read, in the order the steps leave; the slot is the placement, `j % 3`, or `(a, b)` for one box's triangle `R[i, a, b]` |
 | a rewritten layout, by the row starts | statement that writes the offsets | where the offsets start at 0 and step by the counts, as the contract checks on entry, the value written is the value the cell holds: the induction step, its base case the contract's check |
 | a rewritten layout, by induction | statement that writes the layout | the rows in order before the write imply them in order after it, at the cells the write reads |
 | a declared layout | piece, or pair of pieces | every cell's address is in the buffer; two cells at one address are one cell; and every address of the buffer has a cell (an existential); at every size, `n**3 * e + (i + n * j + n**2 * k)`, as the layout writes it (below) |
@@ -495,6 +495,15 @@ asked about, and claims core Lean has no words for; each says so with
   so has `tests/kernels/windows.py` a split after a window whose reader is a
   scatter-add, `y[node[i]] += ...`: the window's classes, and none of two
   updates.
+- **A device cast on a window each work item keeps:** a window of a number of
+  cells is each work item's own, so isl asks only the pairs of its accesses
+  that run on one work item to keep their order; Lean's statement of a cast
+  that puts a loop on a hardware axis claims that every pair runs on one,
+  which two boxes storing into one slot of their own windows do not, so the
+  cast is not proved and stays `decided`. `examples/l2p.py` checks such a
+  schedule, `on_a_device()`, with isl, and keeps the one in its ledger,
+  `on_a_gpu`, without windows; issue
+  [#295](https://github.com/xywei/loopty/issues/295).
 - **A part of a tile isl computed:** a statement in one of two tiled loops is
   split by the part of the tile's map over its loop, which isl computes; a
   cast with such a step is left `decided`; none of the examples has one;
