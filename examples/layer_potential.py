@@ -23,7 +23,8 @@ One file holds the three layers of it:
   computed by the conjugate, ``-beta * conj(alpha) / |alpha|**2``, which
   ``by_the_conjugate`` proves is ``-beta / alpha``. ``single_layer`` cites
   both, and its ledger has the row that links them: ``single_layer adds
-  line_taylor's c(n) for n in 1..5``, read over the complex numbers.
+  line_taylor's c(n) for n in 1..5``, about the term it evaluates read over
+  the complex numbers, not about the floats it produces.
 - **The kernels and their transforms.** ``single_layer`` and ``double_layer``
   are pytential's ``S`` and ``D`` as sumpy computes them, over complex points.
   ``sumpy_tile()`` is sumpy's CPU schedule, as ``get_optimized_kernel`` writes
@@ -36,11 +37,10 @@ One file holds the three layers of it:
   the same inputs, called as pytential calls it, and each kernel's
   ``upstream`` row compares its native run with them, within ``1e-12`` of
   the largest value, which is round-off between two orders of summation.
-  pytential's identity
-  test case, Green's identity ``S(du/dn) - D(u) - u/2 == 0`` on the
-  five-armed starfish, and the jump relations its integral equations rest on
-  are measured with the compiled kernels at 30 to 90 panels, each a
-  ``tested`` row decided by the run.
+  pytential's identity test case, Green's identity ``S(du/dn) - D(u) - u/2
+  == 0`` on the five-armed starfish, and the jump relations its integral
+  equations rest on are measured with the compiled kernels at 30 to 90
+  panels, each a ``tested`` row decided by the run.
 
 Run this file three ways.
 
