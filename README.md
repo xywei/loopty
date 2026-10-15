@@ -219,8 +219,9 @@ Lean. [Install](#install) has the rest.
 
 ## A first kernel, row by row
 
-The ledgers from here on are what CI prints, without Lean: where Lean is
-installed, each `decided isl` below reads `proved lean`.
+The ledgers from here on are what CI prints, without Lean. Where Lean is
+installed, the rows below that read `decided isl` read `proved lean`, but
+for the few facts that stay isl's alone (Known limits).
 
 A loopty kernel is a Python function. Run it under plain `python` and it computes
 on numpy. Trace it and you get a typed term whose obligations go into a ledger.
