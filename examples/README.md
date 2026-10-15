@@ -1445,7 +1445,8 @@ launches of their own, the element a work group and its nodes the work
 items, each a schedule loopty checks, that no dependence joins two work
 items included, which Lean proves where it is installed:
 `passes_on_a_device`, which `benchmarks/hexahedra.py` times beside the same
-kernels in plain loopy.
+kernels in plain loopy. Its `c` mode times `fused` and `contracted` against
+the passes one after another on the C target, with the same flags.
 
 ### python examples/hexahedra.py
 
