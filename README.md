@@ -197,8 +197,9 @@ Lean. [Install](#install) has the rest.
   the code loopy and the compiler generate, which the comparison of the
   compiled run with the native one covers by sampling
   ([docs/lean-checks.md](https://github.com/xywei/loopty/blob/main/docs/lean-checks.md#what-stays-trusted)).
-  A theorem's annotations are read by running them, so a proved theorem is
-  worth `tested` in the `EFFECTIVE` column.
+  lanky checks its reading of a theorem's annotations by running them at
+  drawn points, so a proved theorem is worth `tested` in the `EFFECTIVE`
+  column.
 - **A proof about reals is about the reals.** A theorem, or a postcondition
   Lean proves with Mathlib, is about the kernel's term read over the real or
   complex numbers, not about the floats it computes, and the row says so
@@ -217,6 +218,9 @@ Lean. [Install](#install) has the rest.
   meet, each with what to do about it.
 
 ## A first kernel, row by row
+
+The ledgers from here on are what CI prints, without Lean: where Lean is
+installed, each `decided isl` below reads `proved lean`.
 
 A loopty kernel is a Python function. Run it under plain `python` and it computes
 on numpy. Trace it and you get a typed term whose obligations go into a ledger.
