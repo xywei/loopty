@@ -8,6 +8,44 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Added
 
+- **A theorem tied to the terms a kernel adds** (`loopty.summands`, #252). A
+  cited theorem that concludes `all(c(n) == E for n in Nat if ...)` gives a
+  `by-theorem` row where a sum in the kernel's term adds `E` at whole
+  numbers `n`, with the theorem's variables bound to the kernel's
+  expressions of the sorts it takes them at (a theorem about reals says
+  nothing of complex numbers), and an identity the kernel cites, `L == R`,
+  rewrites `R` in `E` into the kernel's `L` first; the row names the
+  identity's premises that are not the theorem's. `examples/layer_potential.py`'s `single_layer` cites
+  `line_taylor` and the new `by_the_conjugate`, `ratio(alpha, beta) == -beta
+  / alpha`, the kernels' ratio by the conjugate, and its ledger reads
+  `single_layer adds line_taylor's c(n) for n in 1..5, for every c with away,
+  first and ode, read over the complex numbers`: `decided` by `theorem`,
+  resting on both theorems, and proved by Lean with Mathlib, the identity
+  rewritten and the theorem applied a term at a time. A theorem's annotation
+  that calls `loopty.math`'s `conj`, `real`, `exp` and the rest, itself or
+  through a helper the kernel calls too, reads them as lanky's functions
+  (needs lanky with `real`, `imag` and `conj`), and a kernel's postcondition
+  keeps the calls its trace makes (`loopty.math.as_traced`, `as_stated`).
+- **A postcondition's equations of reals at their class** (`loopty.reals`,
+  #254). An equation that rounds is compared after each native run within
+  the tolerance of the class of what it reads, as the compiled run is with
+  the native one, `|a - b| <= 1e-6 (|b| + 1)` for `approx`, and the
+  statement says so (`..., to the approx tolerance`); one that rounds
+  nothing, one of integers and one of an `exact` class are compared bit for
+  bit as before. Where its cells are stored once, by statements whose sums
+  run over concrete bounds, Lean proves it with Mathlib over the reals from
+  what they store, the tables at the values they hold, resting on the
+  `single-assignment` facts and on the `trace-faithful` fact.
+  `examples/assembly.py`'s `mass_ffc` now promises the element's mass,
+  `|J| (1 + delta_jk) / 24`, in place of a symmetric matrix: `tested` on its
+  runs, `proved` with Mathlib, and restated of every cell after its call.
+- **`@upstream(kernel, within=1e-12)`** (#268): the agreement with the code a
+  kernel mirrors, compared within the stated fraction of the largest value
+  of each output computed in floating point, and the row says so (`... in
+  out within 1e-12 of the largest value, on its example inputs`); an `exact`
+  output is still compared bit for bit. `examples/layer_potential.py`'s two
+  rows state it, where the bound was in a test only.
+
 - **Claims settled by running them** (`loopty.tested`): `@tested` on a
   function that takes nothing and returns whether its claim held, alone or
   with what it measured, puts the claim in the ledger as a `tested` row,

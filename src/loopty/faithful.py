@@ -325,7 +325,10 @@ def postcondition_fact(
     oracle mistakes for a closed proposition.
 
     A call of a function of :mod:`loopty.math` in it is numpy's, as in the
-    body: ``-> all(y[i] == sqrt(x[i]) for i in Fin[n])``.
+    body: ``-> all(y[i] == sqrt(x[i]) for i in Fin[n])``. An equation of
+    reals that rounds is compared within its class's tolerance, as the
+    compiled run is compared with the native one (:mod:`loopty.reals`), and
+    the statement says so.
 
     It is ``tested`` only when it held after every run: one after which it
     cannot be evaluated (it reads a cell the run's arrays do not have, or a
@@ -337,16 +340,19 @@ def postcondition_fact(
 
     from loopty.contract import resolve_sizes
     from loopty.math import FUNCTIONS as MATH
+    from loopty.reals import at_the_class, statement, tolerance_words
     from loopty.typing import AfterCall, postcondition_id
 
     post = term.post
+    # an equation of reals that rounds, compared within its class's tolerance
+    judged = at_the_class(term, post)
     inputs: list[dict[str, Any]] = []
 
     def fact(status: Status, **provenance: Any) -> Fact:
         return Fact(
             id=postcondition_id(owner, module=module, line=line),
             kind="postcondition",
-            statement=render(post),
+            statement=statement(term, post),
             term=AfterCall(term.name, post),
             status=status,
             decided_by="native" if status is not Status.ASSUMED else None,
@@ -382,7 +388,7 @@ def postcondition_fact(
         try:
             with np.errstate(all="ignore"), warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                holds = truth_value(evaluate(post, context), post)
+                holds = truth_value(evaluate(judged, context), judged)
         except Exception as exc:  # noqa: BLE001 - said in the provenance
             inputs.append(
                 {
@@ -399,7 +405,8 @@ def postcondition_fact(
                 counterexample={"input": label},
                 reason=(
                     f"on {label}, the body run natively leaves {render(post)} "
-                    f"false, so {term.name} does not establish its postcondition"
+                    f"false{tolerance_words(term, post)}, so {term.name} does not "
+                    "establish its postcondition"
                 ),
                 **extra,
             )

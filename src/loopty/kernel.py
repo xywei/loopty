@@ -43,7 +43,7 @@ import numpy as np
 from lanky.check import module_name
 from lanky.ledger import Fact, Status, fact_id
 from lanky.plugins import registry
-from lanky.terms import evaluate_annotations
+from lanky.terms import evaluate_annotations, render
 
 from loopty import typing as rules
 from loopty.arr import Arr, ArrSpec
@@ -128,8 +128,18 @@ class _Decorated:
 
     @property
     def annotations(self) -> dict[str, Any]:
-        """The annotations, evaluated in a scope that invents unknown names."""
-        return evaluate_annotations(self.fn)
+        """The annotations, evaluated in a scope that invents unknown names.
+
+        The return annotation, the postcondition, is in the spelling of the
+        body's trace: a call of :mod:`loopty.math` in it is the call the body
+        makes (:func:`loopty.math.as_traced`).
+        """
+        from loopty.math import as_traced
+
+        evaluated = evaluate_annotations(self.fn)
+        if "return" in evaluated:
+            evaluated["return"] = as_traced(evaluated["return"])
+        return evaluated
 
 
 def _code_objects(code: Any) -> list[Any]:
@@ -766,18 +776,30 @@ class Kernel(_Decorated):
         kind ``by-theorem`` resting on the theorem and the postcondition
         (:func:`loopty.dataflow.application_facts`). A refuted postcondition
         gives nothing.
+
+        A theorem about a series whose terms the kernel adds gives a row of
+        the same kind after the others, the terms it adds read as the
+        theorem's, with the identities the kernel cites to read them so
+        (:mod:`loopty.summands`).
         """
         from lanky.ledger import Status
 
         from loopty.dataflow import application_facts
+        from loopty.summands import series_facts
 
         if not self.uses:
             return facts
+        try:
+            series = series_facts(
+                term, self.uses, self.qualname, module=self.module, line=self.line
+            )
+        except Exception:  # noqa: BLE001 - a theorem that does not apply gives nothing
+            series = []
         at = next(
             (k for k, fact in enumerate(facts) if fact.kind == "postcondition"), None
         )
         if at is None or facts[at].status is Status.REFUTED:
-            return facts
+            return [*facts, *series]
         try:
             applied = application_facts(
                 term,
@@ -789,7 +811,7 @@ class Kernel(_Decorated):
             )
         except Exception:  # noqa: BLE001 - a theorem that does not apply gives nothing
             applied = []
-        return [*facts[: at + 1], *applied, *facts[at + 1 :]]
+        return [*facts[: at + 1], *applied, *facts[at + 1 :], *series]
 
     def _decided(self, term: Term, facts: list[Fact]) -> list[Fact]:
         """``facts`` with the postcondition decided from the term, where it can be.
@@ -830,6 +852,21 @@ class Kernel(_Decorated):
                     f"{array}: {why}" for array, why in stored.why.items()
                 )
             facts[at] = post.with_status(post.status, undecided=reason)
+            # an equation of reals at its class, which Lean proves over the
+            # reals from what the statements store (loopty.reals)
+            from loopty.faithful import KIND as FAITHFUL
+            from loopty.reals import proved_over_the_reals
+
+            found = None
+            if stored is not None:
+                faithful = fact_id(FAITHFUL, self.qualname, **key)
+                try:
+                    found = proved_over_the_reals(term, facts[at], stored, faithful)
+                except Exception:  # noqa: BLE001 - the runs' verdict stands
+                    found = None
+            if found is not None:
+                over, needed = found
+                return [*facts[:at], *needed, over, *facts[at + 1 :]]
             return facts
         assert stored is not None
         needed = [
@@ -838,7 +875,9 @@ class Kernel(_Decorated):
         decided = Fact(
             id=post.id,
             kind=post.kind,
-            statement=post.statement,
+            # what isl decided is the claim as written, exactly, which says
+            # more than the runs' comparison at its class (loopty.reals)
+            statement=render(term.post),
             term=decision.question,
             status=Status.DECIDED,
             decided_by="isl",
@@ -1043,8 +1082,6 @@ class Program(_Decorated):
                 continue
             if post is None:
                 continue
-            from lanky.terms import render
-
             out.append(
                 Fact(
                     id=rules.restatement_id(
@@ -1056,7 +1093,7 @@ class Program(_Decorated):
                     kind="postcondition-in-scope",
                     statement=(
                         f"after {callee.__name__}(...) in {self.__name__}: "
-                        f"{render(post)}"
+                        f"{rules.postcondition_statement(callee.term, post)}"
                     ),
                     term=rules.AfterCall(callee.__name__, post),
                     status=Status.DECIDED,

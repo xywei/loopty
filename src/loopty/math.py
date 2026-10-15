@@ -30,6 +30,17 @@ trace names ``sqrt(1.0 * k[i])``, a double.
 A function of a value is what these take, ``sqrt(x[i])``; an array whole,
 ``sqrt(x)``, is refused natively as it is when traced.
 
+A theorem may call them too, directly or through a helper the kernel calls:
+``ratio(alpha, beta)``, which a kernel's body computes with ``conj`` and
+``real``, is in a theorem's annotation the same expression over the
+theorem's variables, in lanky's own functions (:class:`lanky.terms.Elementary`),
+which every oracle reads: ``conj(alpha)`` there is the conjugate, and not a
+family named ``conj``; where lanky runs the annotation again at numbers, the
+numbers are Python's, as lanky computes them. A kernel's own annotations,
+its postcondition, keep the kernel's spelling (:func:`as_traced`), which is
+what its body's trace compares them with, and :func:`as_stated` puts a
+kernel's term in a theorem's.
+
 ``ipow(x, n)`` is ``x`` to the integer power ``n``, multiplied out as loopy
 computes an integer power: by squaring, ``x * x`` and the odd factors taken
 along, rounded at every product. ``x ** n`` of a real ``x`` is numpy's, the C
@@ -48,8 +59,8 @@ from typing import Any
 import numpy as np
 import pymbolic.primitives as prim
 
-__all__ = ["conj", "cos", "exp", "imag", "integer_power", "ipow", "log", "real", "sin",
-           "sqrt"]
+__all__ = ["as_stated", "as_traced", "conj", "cos", "exp", "imag", "integer_power",
+           "ipow", "log", "real", "sin", "sqrt"]
 
 def integer_power(x: Any, n: Any) -> Any:
     """``x`` to the integer power ``n``, by squaring, as loopy's C does it.
@@ -129,9 +140,117 @@ def _applied(name: str, value: Any) -> Any:
             f"loopty.math.{name} takes one value, such as {name}(x[i]), and not "
             "an array: a kernel computes cell by cell"
         )
+    stated = _statements_function(name, value)
+    if stated is not None:
+        return stated(value)
     if isinstance(value, prim.ExpressionNode):
         return Call(Var(name), (value,))
     return FUNCTIONS[name](value)
+
+
+def _statements_function(name: str, value: Any) -> Any:
+    """lanky's ``name`` where a statement's annotation is read or rerun, or ``None``.
+
+    A theorem's annotation that calls ``conj(alpha)``, itself or through a
+    helper, means the conjugate, which lanky's oracles read as
+    :class:`lanky.terms.Elementary`; a kernel's body is traced outside any
+    annotation, and keeps the call its lowering knows. Where lanky runs the
+    annotation again at numbers, to check that its term computes what it
+    computes (:mod:`lanky.faithful`), the numbers are Python's, as lanky's
+    functions compute them, so that ``1 / real(0j)`` stops as Python stops
+    where numpy's would be ``inf``. A lanky without the functions, or that
+    cannot say whether an annotation is read, gets numpy's and the call.
+    """
+    try:
+        from lanky import terms
+    except ImportError:  # pragma: no cover - lanky is a dependency
+        return None
+    if name not in getattr(terms, "ELEMENTARY_FUNCTIONS", ()):
+        return None
+    if isinstance(value, prim.ExpressionNode):
+        asked = getattr(terms, "reading_annotation", None)
+    else:
+        asked = getattr(terms, "rerunning", None)
+    if asked is None or not asked():
+        return None
+    return getattr(terms, name, None)
+
+
+def _mapped(expr: Any, leaf: Callable[[Any], Any]) -> Any:
+    """``expr`` with each node ``leaf`` rewrites rewritten, and the rest as it was.
+
+    A kernel's sum (:class:`loopty.term.Reduction`) is no pymbolic node, and
+    its body is rewritten too.
+    """
+    import dataclasses
+
+    from lanky.terms import init_args
+
+    from loopty.term import Reduction
+
+    found = leaf(expr)
+    if found is not None:
+        return found
+    if isinstance(expr, Reduction):
+        body = _mapped(expr.body, leaf)
+        return expr if body is expr.body else dataclasses.replace(expr, body=body)
+    if isinstance(expr, tuple):
+        mapped = tuple(_mapped(item, leaf) for item in expr)
+        same = all(a is b for a, b in zip(mapped, expr, strict=True))
+        return expr if same else mapped
+    if isinstance(expr, prim.ExpressionNode):
+        args = init_args(expr)
+        mapped = tuple(_mapped(arg, leaf) for arg in args)
+        if all(a is b for a, b in zip(mapped, args, strict=True)):
+            return expr
+        return type(expr)(*mapped)
+    return expr
+
+
+def as_traced(expr: Any) -> Any:
+    """``expr`` with lanky's functions of this module's names as a kernel's calls.
+
+    A kernel's postcondition is read as an annotation, where ``sqrt(x[i])``
+    is lanky's :class:`~lanky.terms.Elementary`; its body's trace records
+    the call ``sqrt(x[i])``, and the two are compared, by isl's atoms and
+    natively, so the postcondition is put in the trace's spelling. Anything
+    else is left as it is.
+    """
+    from lanky.terms import Call, Elementary, Var
+
+    def leaf(node: Any) -> Any:
+        if isinstance(node, Elementary) and node.function in FUNCTIONS:
+            return Call(Var(node.function), (as_traced(node.argument),))
+        return None
+
+    return _mapped(expr, leaf)
+
+
+def as_stated(expr: Any) -> Any:
+    """``expr`` with this module's calls as lanky's functions, as a theorem states them.
+
+    The converse of :func:`as_traced`: a kernel's term records ``conj(alpha)``
+    as a call, and a theorem the kernel cites has the conjugate, lanky's
+    :class:`~lanky.terms.Elementary`, so a term is put in the theorem's
+    spelling before the two are matched, and before Lean is shown it. A
+    call of a function lanky has no node for, ``sin``, is left a call.
+    """
+    from lanky import terms
+
+    stated = getattr(terms, "ELEMENTARY_FUNCTIONS", ())
+
+    def leaf(node: Any) -> Any:
+        if (
+            isinstance(node, prim.Call)
+            and isinstance(node.function, prim.Variable)
+            and node.function.name in FUNCTIONS
+            and node.function.name in stated
+            and len(node.parameters) == 1
+        ):
+            return terms.Elementary(node.function.name, as_stated(node.parameters[0]))
+        return None
+
+    return _mapped(expr, leaf)
 
 
 def sqrt(x: Any) -> Any:

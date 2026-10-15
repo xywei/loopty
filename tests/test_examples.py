@@ -26,6 +26,7 @@ from typing import Any
 import islpy as isl
 import numpy as np
 import pytest
+from lanky import terms as lanky_terms
 from lanky.prelude import FnType
 
 pytest.importorskip("loopy")
@@ -72,10 +73,21 @@ needs_several_indices = pytest.mark.skipif(
     reason="the demo's theorems index families at several indices (lanky main)",
 )
 
+#: The parts of a complex number, ``real``, ``imag`` and ``conj``, that
+#: ``examples/layer_potential.py``'s identity is written with, are lanky
+#: main's and not the 0.2.0 release's.
+PARTS = "conj" in getattr(lanky_terms, "ELEMENTARY_FUNCTIONS", ())
+
+needs_parts = pytest.mark.skipif(
+    not PARTS, reason="the demo's identity takes complex numbers apart (lanky main)"
+)
+
 #: Every demo, as a parameter: those that need lanky main skip without it.
 DEMOS = [
     pytest.param(name, marks=needs_several_indices)
     if name in NEEDS_SEVERAL_INDICES
+    else pytest.param(name, marks=needs_parts)
+    if name == "layer_potential"
     else name
     for name in NAMES
 ]
@@ -1422,6 +1434,10 @@ def test_the_assembly_demo_names_the_node_two_cells_share() -> None:
     assert "y is the closed form: True" in result.stdout
     assert "W3 and FE0 are the rule to 3.3e-16: True" in result.stdout
     assert (
+        "mass_ffc's postcondition, its matrix |J| (1 + delta_jk) / 24 to the "
+        "approx tolerance -> tested"
+    ) in result.stdout
+    assert (
         "IllegalCast: tag(c_outer='g.0', c_inner='l.0') illegal: S1[c=0, a=2] and "
         "S1[c=1, a=1] both update y[3] on example_inputs() (nc=2, nv=4), where "
         "cell[0, 2] = 3 and cell[1, 1] = 3"
@@ -1455,7 +1471,30 @@ def test_the_assembly_owes_its_sum_and_not_distinct_writes_of_y() -> None:
     assert (update["status"], update["decided_by"]) == ("decided", "type")
 
 
-def test_the_assembly_calls_mass_ffc_per_cell_and_has_its_matrix_symmetric() -> None:
+def test_the_element_mass_is_mass_ffcs_postcondition_to_the_approx_tolerance() -> None:
+    """``|J| (1 + delta_jk) / 24`` from FFC's 15-digit tables: to round-off (#254).
+
+    Tested on the runs at the approx tolerance; with Mathlib, proved over the
+    reals from what the kernel stores, resting on that and on its trace.
+    """
+    _result, facts = _invoke("assembly", "check")
+    owned = [fact for fact in facts if fact["owner"] == "mass_ffc"]
+    (post,) = [fact for fact in owned if fact["kind"] == "postcondition"]
+    assert post["statement"].startswith(
+        "(A[0, 0] == abs((x[1, 0] - x[0, 0])*(x[2, 1] - x[0, 1]) - (x[2, 0] - "
+        "x[0, 0])*(x[1, 1] - x[0, 1])) / 12 and "
+    )
+    assert post["statement"].endswith(") / 24), to the approx tolerance")
+    assert (post["status"], post["decided_by"]) in (
+        ("tested", "native"),
+        ("proved", "lean"),
+    )
+    (stored,) = [fact for fact in owned if fact["kind"] == "single-assignment"]
+    (faithful,) = [fact for fact in owned if fact["kind"] == "trace-faithful"]
+    assert set(post["rests_on"]) >= {stored["id"], faithful["id"]}
+
+
+def test_the_assembly_calls_mass_ffc_per_cell_and_has_its_element_mass() -> None:
     """The D3 form: the element kernel inlined per cell, its postcondition carried."""
     _result, facts = _invoke("assembly", "check")
     owned = [fact for fact in facts if fact["owner"] == "mass_action"]
@@ -1463,6 +1502,8 @@ def test_the_assembly_calls_mass_ffc_per_cell_and_has_its_matrix_symmetric() -> 
         fact for fact in owned if fact["statement"].startswith("after each call")
     ]
     assert "mass_ffc(coords[cell[c]], Ae[c])" in after["statement"]
+    assert "Ae[c, 0, 0] == abs((coords[cell[c, 1], 0] - " in after["statement"]
+    assert after["statement"].endswith(", to the approx tolerance")
     assert after["status"] == "decided"
     # every read of the corners through the cell map is decided, none assumed
     corners = [fact for fact in owned if fact["statement"].startswith("coords[")]
@@ -1584,6 +1625,7 @@ def test_the_l2p_demo_refuses_the_interchange_and_fuses_box_by_box() -> None:
 # {{{ the QBX layer potential
 
 
+@needs_parts
 def test_the_qbx_demo_states_the_fact_sumpy_silences_for_both_layers() -> None:
     # sumpy silences loopy's write_race(write_lpot*) on its LayerPotential;
     # the fact in its place is that each target's cell is written once.
@@ -1601,22 +1643,25 @@ def test_the_qbx_demo_states_the_fact_sumpy_silences_for_both_layers() -> None:
         assert writes["decided_by"] in ("isl", "lean"), writes
 
 
+@needs_parts
 def test_the_qbx_demo_agrees_with_what_sumpy_returned_at_the_pinned_commit() -> None:
     _result, facts = _invoke("layer_potential", "check")
     rows = {fact["owner"]: fact for fact in facts if fact["kind"] == "upstream"}
     assert set(rows) == {"single_layer", "double_layer"}
     for owner, row in rows.items():
         assert (row["status"], row["decided_by"]) == ("tested", "upstream"), row
+        # round-off of two orders of summation and two arithmetics, real and
+        # complex, far inside the class's allowance: the row states its own
         assert row["statement"] == (
-            f"the native run of {owner} agrees with sumpy_{owner} in out, on its "
-            "example inputs"
+            f"the native run of {owner} agrees with sumpy_{owner} in out within "
+            "1e-12 of the largest value, on its example inputs"
         )
         assert row["provenance"]["uncompared"] == []
         detail = row["provenance"]["outputs"]["out"]
         assert detail["agree"] and detail["exactness"] == "approx", detail
-        # round-off of two orders of summation and two arithmetics, real and
-        # complex, far inside the class's allowance
-        assert detail["difference"] < 1e-12 * detail["largest"], detail
+        assert detail["within"] == 1e-12
+        assert detail["tolerance"] == 1e-12 * detail["largest"], detail
+        assert detail["difference"] <= detail["tolerance"], detail
     # the recording is of the sumpy the docstring cites, on loopy main
     module = _module("layer_potential")
     recorded = json.loads(module.RECORDED.read_text(encoding="utf-8"))
@@ -1627,6 +1672,7 @@ def test_the_qbx_demo_agrees_with_what_sumpy_returned_at_the_pinned_commit() -> 
     assert len(recorded["single_layer"]) == len(recorded["double_layer"]) == size
 
 
+@needs_parts
 def test_the_qbx_demo_measures_pytentials_identity_and_the_jumps() -> None:
     _result, facts = _invoke("layer_potential", "check")
     rows = {fact["owner"]: fact for fact in facts if fact["kind"] == "tested"}
@@ -1638,6 +1684,7 @@ def test_the_qbx_demo_measures_pytentials_identity_and_the_jumps() -> None:
         assert order > 5 - 1.6, fact
 
 
+@needs_parts
 def test_the_line_taylor_theorem_is_in_the_qbx_ledger_and_not_refuted() -> None:
     _result, facts = _invoke("layer_potential", "check")
     statuses = {
@@ -1648,6 +1695,45 @@ def test_the_line_taylor_theorem_is_in_the_qbx_ledger_and_not_refuted() -> None:
     assert statuses <= {"assumed", "tested", "proved"}
 
 
+@needs_parts
+def test_the_qbx_ledger_says_single_layer_adds_line_taylors_terms() -> None:
+    """The theorem and the kernel in one row: its terms are line_taylor's c(n) (#252).
+
+    The kernel's ratio is by the conjugate, and ``by_the_conjugate`` says it
+    is the theorem's ``-beta / alpha``: a theorem of its own, tested by the
+    property tester and, with Mathlib, proved.
+    """
+    _result, facts = _invoke("layer_potential", "check")
+    (identity,) = [
+        fact
+        for fact in facts
+        if fact["owner"] == "by_the_conjugate" and fact["kind"] == "theorem"
+    ]
+    assert identity["status"] in ("tested", "proved"), identity
+    (row,) = [fact for fact in facts if fact["kind"] == "by-theorem"]
+    assert row["owner"] == "single_layer"
+    assert row["statement"] == (
+        "single_layer adds line_taylor's c(n) for n in 1..5, for every c with "
+        "away, first and ode, read over the complex numbers"
+    )
+    assert row["status"] in ("decided", "proved"), row
+    assert row["decided_by"] in ("theorem", "lean"), row
+    provenance = row["provenance"]
+    assert provenance["bindings"] == "alpha = c[t] - y[s], beta = z[t] - c[t]"
+    assert provenance["orders"] == [1, 2, 3, 4, 5]
+    module = _module("layer_potential")
+    assert set(row["rests_on"]) >= {
+        module.line_taylor.fact_id,
+        module.by_the_conjugate.fact_id,
+    }
+    # where the statement is that adds them
+    line = int(row["where"].rsplit(":", 1)[1])
+    source = _path("layer_potential").read_text(encoding="utf-8").splitlines()
+    assert source[line - 1].strip() == "out[t] = SCALE * reduce_sum("
+    assert "single(c[t] - y[s], z[t] - c[t])" in source[line]
+
+
+@needs_parts
 def test_the_kernels_ratio_is_the_theorems() -> None:
     # The kernels add coefficient(ratio, k) with the ratio multiplied out by
     # the conjugate; the theorem's is -beta / alpha. They agree to rounding,
@@ -1659,8 +1745,7 @@ def test_the_kernels_ratio_is_the_theorems() -> None:
         0.3 * (rng.normal(size=20) + 1j * rng.normal(size=20)),
         strict=True,
     ):
-        r2 = (alpha * np.conj(alpha)).real
-        ratio = -beta * np.conj(alpha) * (1 / r2)
+        ratio = module.ratio(alpha, beta)
         assert abs(ratio - (-beta / alpha)) <= 1e-15 * abs(beta / alpha) * 4
         closed = sum(
             module.coefficient(-beta / alpha, k) for k in range(1, module.ORDER + 1)
@@ -1672,6 +1757,7 @@ def test_the_kernels_ratio_is_the_theorems() -> None:
             assert abs(series - np.log(abs(alpha + beta))) <= truncation
 
 
+@needs_parts
 def test_sumpys_tile_is_legal_and_c_cannot_build_its_axes() -> None:
     module = _module("layer_potential")
     tile = module.sumpy_tile("c")
@@ -1683,6 +1769,7 @@ def test_sumpys_tile_is_legal_and_c_cannot_build_its_axes() -> None:
     assert "puts a loop on a hardware axis, and the C target has none" in reason
 
 
+@needs_parts
 def test_the_qbx_demo_prints_the_tile_the_fact_and_the_rows() -> None:
     result, _ = _invoke("layer_potential", "python")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -1705,7 +1792,11 @@ def test_the_qbx_demo_prints_the_tile_the_fact_and_the_rows() -> None:
         "double_layer",
     ]
     for line in lines:
-        assert line.endswith(", to the approx tolerance -> tested"), line
+        assert line.endswith(", within 1e-12 of the largest value -> tested"), line
+    assert (
+        "  single_layer adds line_taylor's c(n) for n in 1..5, for every c with "
+        "away, first and ode, read over the complex numbers -> decided"
+    ) in out.splitlines()
     for name in ("green_identity", "jump_S", "jump_D"):
         (line,) = [line for line in out.splitlines() if line.strip().startswith(name)]
         assert line.endswith("-> tested"), line
