@@ -708,6 +708,13 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Changed
 
+- **The README opens with a front page**: what loopty is to someone who
+  writes loopy kernels, the flagship `examples/l2p.py` in its three layers
+  with its refusals and six rows of its ledger with Lean and Mathlib, the
+  five demos in a table (what each is written after, what its ledger has,
+  how it compares), how to run them from `main`, and where the limits are.
+  The reference below it is as it was, the spmv walk-through under its own
+  heading and the paragraphs the front page now says shortened.
 - **The interpreter finds a sum's points once, not at every instance**
   (lanky #125). The faithful check runs each kernel's term through
   `loopty.interpret`, and a reduction asked isl for its points at every

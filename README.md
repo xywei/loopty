@@ -1,6 +1,222 @@
 # loopty
 
-loopy, with types.
+loopy, with types: the algorithm's theorem, the kernel and its transforms in
+one Python file, and one ledger that says how each of their claims is known.
+
+If you write loopy kernels, this is what changes. A kernel is a typed Python
+function, which runs on numpy as it stands. A schedule is a chain of the
+transforms you already use, `split`, `tag`, `prioritize`, `fuse`, with
+`contract` to keep what passes between fused loops in a window. The theorem the algorithm
+rests on is a [lanky](https://github.com/xywei/lanky) claim in the same file,
+written as a Python annotation. Then one command prints every claim the file
+makes and what settled it:
+
+- **isl decides** that every access is in bounds, that no two instances write
+  one cell, and that every transform keeps every dependence, and refuses an
+  illegal transform with the two instances it would reorder;
+- **Lean checks**: each fact isl decided is stated again as a Lean theorem,
+  from loopty's own description of the kernel and not from what isl
+  computed, and proved there, with isl's hints checked rather than trusted;
+  with Mathlib, Lean also proves the algorithm's theorems, and checks each
+  where a kernel cites it, against what the kernel stores;
+- **the runs are compared**: the compiled run with the native one, and the
+  native one with the upstream code the kernel was written after.
+
+You write no Lean, no isl and no loopy kernel. `--show-lean` prints the
+Lean, and `loopty run --emit-code` the generated code, for whoever wants to
+read them.
+
+## One file: sumpy's L2P
+
+`examples/l2p.py` is sumpy's L2P for the 2-D Laplace kernel
+(`E2PFromSingleBox`), abridged here to its three layers: the theorem sumpy's
+compressed Taylor expansion rests on (lanky#86), the kernel that rebuilds
+each box's triangle of derivatives and cites it, and the schedules.
+
+```python
+@theorem
+def compressed_taylor(
+    D: Fn[Nat, Nat, Real],
+    R: Fn[Nat, Nat, Real],
+    pde: all(D[a + 2, b] + D[a, b + 2] == 0 for a in Nat for b in Nat),
+    stored: all(R[a, b] == D[a, b] for a in Nat for b in Nat if a < 2),
+    recurrence: all(R[a + 2, b] == -R[a, b + 2] for a in Nat for b in Nat),
+) -> all(R[a, b] == D[a, b] for a in Nat for b in Nat):
+    """What sumpy stores of a harmonic table, reconstructed, is the table."""
+
+
+@kernel(uses=[on_every_triangle])  # compressed_taylor, box by box on a + b <= P
+def reconstruct(
+    C: Arr[Where[i: Fin[nb], a: Fin[2], b: Fin[Q], a + b <= P], Real],
+    R: Arr[Where[i: Fin[nb], a: Fin[Q], b: Fin[Q], a + b <= P], Real],
+) -> ...:  # the copies and the recurrence: two of the theorem's hypotheses
+    for i in R.dom:
+        for a in R.dom[i]:
+            for b in R.dom[i, a]:
+                with when(a < 2):
+                    R[i, a, b] = C[i, a, b]
+                with when(a >= 2):
+                    R[i, a, b] = -R[i, a - 2, b + 2]
+
+
+# ... unpack, which reads sumpy's coefficients through its storage index,
+# evaluate, the Taylor sum at each target, and the program l2p that runs the three
+
+fused = (
+    Schedule(l2p, target="c")
+    .fuse("unpack", "reconstruct", loops=1)
+    .fuse("reconstruct", "evaluate", loops=1)
+)
+contracted = fused.contract("R").contract("C")  # one box's triangle at a time
+on_a_gpu = fused.retarget("opencl").tag(i="g.0")  # sumpy's own GPU schedule
+```
+
+`python examples/l2p.py` runs it on numpy, refuses the interchange of the
+triangle's loops with the pair of instances it would reorder, refuses a
+window of one row with the read it would break, finds the window that keeps
+one box's triangle, and runs the schedule compiled:
+
+```console
+$ python examples/l2p.py
+...
+refused: interchange(b, a) illegal: R[i, a, b] = C[i, a, b] (l2p.py:276) at i=0, a=1, b=9 writes R[0, 1, 9], read by R[i, a, b] = -R[i, a - 2, b + 2] (l2p.py:278) at i=0, a=3, b=7, scheduled earlier (at nb=1, isl's choice)
+
+refused: contract('R', lambda i, a, b: b) illegal: R[i, a, b] = -R[i, a - 2, b + 2] (l2p.py:278) at i=0, a=9, b=0 reads R[0, 7, 2], which the same statement at i=0, a=7, b=2 stored in slot 2, after the same statement at i=0, a=8, b=2 stored R[0, 8, 2] there (at nb=1, isl's choice); contract('R') finds the smallest window that keeps every read, lambda i, a, b: (a, b)
+
+schedule: Schedule(l2p, target='c').fuse(unpack, reconstruct, loops=1).fuse(reconstruct, evaluate, loops=1).contract('R', lambda i, a, b: (a, b)).contract('C', lambda i, a, b: (a, b))
+...
+  decided  isl  no read of R sees its slot overwritten after contract('R', lambda i, a, b: (a, b)): R kept in 121 cells, R[i, a, b] in slot (a, b)
+...
+  pot: difference 0 within 1.1e-06 (approx) -> tested
+...
+```
+
+`lanky check examples/l2p.py`, on a machine with Lean and Mathlib, says
+how each claim is known and who settled it. Six of its 58 rows:
+
+```text
+$ lanky check examples/l2p.py
+STATUS   EFFECTIVE  BY           WHERE       OWNER              STATEMENT
+-------  ---------  -----------  ----------  -----------------  -------------------------------------------------------------------------------------------------
+proved   tested     lean         l2p.py:130  compressed_taylor  D : Fn[Nat, Nat, Real], R : Fn[Nat, Nat, Real]
+                                                                | pde: forall a in Nat, b in Nat. D[a + 2, b] + D[a, b + 2] == 0
+                                                                | stored: forall a in Nat, b in Nat where a < 2. R[a, b] == D[a, b]
+                                                                | recurrence: forall a in Nat, b in Nat. R[a + 2, b] == -R[a, b + 2]
+                                                                |- forall a in Nat, b in Nat. R[a, b] == D[a, b]
+...
+proved   proved     lean         l2p.py:199  storage_index      storage_index stores a cell at every address of Fin(21)
+...
+proved   tested     lean         l2p.py:249  reconstruct        by on_every_triangle, for every D with pde and stored:
+                                                                  forall i in Fin(nb), a in Nat, b in Nat where a + b <= 10. R[i, a, b] == D[i, a, b]
+...
+proved   proved     lean         l2p.py:341  l2p                no read of R sees its slot overwritten after contract('R', lambda i, a, b: (a, b)):
+                                                                  R kept in 121 cells, R[i, a, b] in slot (a, b)
+...
+proved   proved     lean         l2p.py:348  l2p                the order after tag(i='g.0') runs every dependence of l2p forward, within one work item
+tested   tested     upstream     l2p.py:470  l2p                the native run of l2p agrees with sumpy_l2p in pot, on its example inputs
+
+58 facts: 3 decided, 48 proved, 7 tested
+
+LEAN proved all 46 facts isl decided. Lean's statements are loopty's, from its own description, not isl's results, and isl's hints were checked, not trusted. --show-lean prints the Lean.
+```
+
+`STATUS` is how a claim was settled, and `EFFECTIVE` what it is worth given
+what it rests on. The theorem is proved for every order, by an induction
+whose steps sympy found and Lean checked, and is worth `tested` because
+lanky reads its annotations by running them. The application rests on the
+theorem and on `reconstruct`'s postcondition, which isl decided from what
+the kernel stores and Lean proved again. The window's fact and the GPU
+schedule's cast rest on nothing weaker, and are worth `proved`. The last row
+is the agreement with sumpy's own kernel. The three rows left `decided` are
+the class of the Taylor sum, by type, and two postconditions restated after
+their calls, by the call.
+
+Without Lean the same file reads `decided isl` where this reads `proved
+lean`, and the theorems read `assumed`, with a line under the table for
+each piece that is missing and the command that installs it. That ledger,
+which CI checks, is in
+[examples/README.md](https://github.com/xywei/loopty/blob/main/examples/README.md#l2ppy).
+
+## The demos
+
+Five files, each written after a kernel of sumpy, pytential, grudge or
+firedrake, codes whose kernels loopy generates. Each runs three ways,
+`python FILE`, `lanky check FILE` and `loopty run FILE`, and
+[examples/README.md](https://github.com/xywei/loopty/blob/main/examples/README.md)
+has what each prints. "Proved" below is with Lean and Mathlib.
+
+| file | written after | what its ledger has | how it compares |
+|---|---|---|---|
+| `l2p.py` | sumpy's L2P for the 2-D Laplace kernel, `E2PFromSingleBox`, and its schedule for a GPU | the compressed Taylor recurrence proved for every order and applied to the kernel's postcondition; sumpy's storage index one for one; the interchange refused with its pair; each box's triangle in a window that no read sees overwritten | the potential sumpy's own kernel computes, to round-off (an `upstream` row); unrolled, the checked schedule times as plain loopy's, and looped, as plain loopy given the same expression ([#270](https://github.com/xywei/loopty/issues/270)) |
+| `hexahedra.py` | grudge PR #418's sum-factorized weak gradient and divergence on hexahedra | the programs' postconditions, the dense Kronecker operators, proved for every order from what the passes store and `sum_factorization`; the DOFArray the same layout as #418's `dim_tags`, for every order; a fusion one loop too deep refused with its pair; the intermediates kept a row and a slab at a time | #418's own `weak_local_grad` and `weak_local_div`, to 5e-15 of the largest value; each device launch times as the same launch in plain loopy, within 1% at the median and 8% at worst, where loopty keeps the program's rounding order |
+| `advection.py` | grudge #418's weak advection right-hand side, upwind flux, lift and inverse mass, and libParanumal's split of it | the inverse mass pushed inward, and the lift the face gather's transpose, proved for every order; five device splits checked before they run; libParanumal's lift onto the face nodes, without its barriers, refused with the edge node two faces update | grudge's `WeakAdvectionOperator`, to 7e-15; the launches time as plain loopy's, within 1% at the median and 13% at worst, for the same reason |
+| `layer_potential.py` | pytential's direct QBX: sumpy's `LayerPotential` with a line-Taylor expansion, and its CPU tile | the line-Taylor coefficients from their recurrence, proved for every order (that a logarithm's satisfy it is cited), and tied by a row to the terms `single_layer` adds; sumpy's tile checked cast by cast; the write race sumpy silences, a proved fact | sumpy's kernel as pytential calls it, within 1e-12 of the largest value (`upstream` rows); pytential's Green identity and jump relations converge at order 3.5 to 3.9, above the 3.4 its test asks; times as plain loopy given the same expression |
+| `assembly.py` | PyOP2's assembly loop around FFC's P1 mass kernel, from firedrake's tests | the element mass `abs(J) (1 + delta_jk) / 24` as `mass_ffc`'s postcondition, proved over the reals; the rule exact on quadratics; the scatter keeps the total; PyOP2's GPU split refused with the node its two triangles share, and accepted once the updates are atomic | PyOP2's own `par_loop` and firedrake's `assemble`, to 5e-15; times as plain loopy given the same transforms and loop nesting, within a few percent |
+
+The timings are `benchmarks/`'s drivers, run on a GPU and on CPUs beside
+the upstream code; their numbers describe the machines, so they are not
+kept here ([benchmarks/README.md](https://github.com/xywei/loopty/blob/main/benchmarks/README.md)).
+
+## Run it
+
+The demos need lanky's and loopty's `main` branches; the 0.2.0 releases on
+PyPI came before them. From a clone, on Python 3.12 or 3.13 with a C
+compiler:
+
+```sh
+git clone https://github.com/xywei/loopty.git && cd loopty
+python3.13 -m venv .venv && . .venv/bin/activate
+pip install "lanky[lean,cas] @ git+https://github.com/xywei/lanky.git" -e .
+python examples/l2p.py
+lanky check examples/l2p.py
+loopty run examples/l2p.py
+```
+
+That much runs without Lean, and the ledger says what is missing, with the
+command for each piece. Lean comes from [elan](https://github.com/leanprover/elan#installation),
+at the version the Lean REPL supports, and Mathlib, for the theorems about
+real numbers, is one command that fetches its compiled files:
+
+```sh
+elan default leanprover/lean4:v4.29.1
+python -m lanky.mathlib ~/mathlib    # about 7 GB
+export LANKY_LEAN_MATHLIB=~/mathlib
+```
+
+The first check with Lean builds Lean's REPL, which takes about a minute and
+the network. A check after it reads Lean's answers from a cache and starts no
+Lean. [Install](#install) has the rest.
+
+## Where the limits are
+
+- **loopty checks the kernels it traces.** A loopy kernel built elsewhere,
+  sumpy's or TSFC's, is not checked, nor a transform applied to one. What
+  ties a demo to the upstream code is a tested agreement row, not a proof.
+- **Some steps stay trusted**: the printer from loopty's description to
+  Lean, the Lean kernel and `omega`, and the step from the checked model to
+  the code loopy and the compiler generate, which the comparison of the
+  compiled run with the native one covers by sampling
+  ([docs/lean-checks.md](https://github.com/xywei/loopty/blob/main/docs/lean-checks.md#what-stays-trusted)).
+  A theorem's annotations are read by running them, so a proved theorem is
+  worth `tested` in the `EFFECTIVE` column.
+- **A proof about reals is about the reals.** A theorem, or a postcondition
+  Lean proves with Mathlib, is about the kernel's term read over the real or
+  complex numbers, not about the floats it computes, and the row says so
+  ([#282](https://github.com/xywei/loopty/issues/282)). Without Mathlib,
+  about 7 GB, those rows read `assumed` or `tested`.
+- **On a device, no local memory or barriers yet**
+  ([#256](https://github.com/xywei/loopty/issues/256)), so a kernel that
+  stages passes in a work group's local memory, as the fastest
+  sum-factorized and libParanumal kernels do, cannot be written. A window
+  each work item keeps is decided by isl and not yet proved by Lean
+  ([#295](https://github.com/xywei/loopty/issues/295)). CI runs no device.
+- **loopy 2025.2.** loopty is held to the loopy release it is tested with.
+  Its port to loopy `main`, on namedisl, is a draft
+  ([#180](https://github.com/xywei/loopty/pull/180)) until loopy releases it.
+- [Known limits](#known-limits) lists the open issues you are most likely to
+  meet, each with what to do about it.
+
+## A first kernel, row by row
 
 A loopty kernel is a Python function. Run it under plain `python` and it computes
 on numpy. Trace it and you get a typed term whose obligations go into a ledger.
@@ -28,7 +244,7 @@ a dependent sum rather than a rectangle, and `val.dom[r]` is the fiber over that
 row. Nothing in the kernel mentions offsets or flat storage; that is layout, and
 layout is the compiler's business.
 
-Three commands, all of them working today:
+Its three commands:
 
 ```console
 $ python examples/spmv.py            # runs natively on numpy; the theorem is tested
@@ -253,16 +469,9 @@ table of row starts. Both compiled runs agree with the native one.
   `examples/hexahedra.py`, where isl tests it at a few orders and Lean proves
   it for every one. loopy's shaped arrays (loopy #1053) take a layout's
   injectivity on trust.
-- **What isl decides, Lean proves.** isl decides a fact in milliseconds and
-  gives no proof. Where Lean is installed, every fact isl decides, an access in
-  bounds, two writes apart, a definedness, a cast's legality one dependence
-  class at a time, is also stated as a Lean theorem and proved by `omega`, so
-  the ledger reads `proved lean` and not `decided isl`. The theorem is built
-  from loopty's own description of the kernel, its loops, guards and
-  subscripts and each step's maps as written, and never from a set isl
-  computed, so the two answers are independent; isl's work comes in as hints
-  Lean checks (the witness of an existential, a counterexample to prove
-  false). `--show-lean` prints the Lean, and
+- **What isl decides, Lean proves**, one dependence class or one place at a
+  time, from loopty's description of the kernel and never from a set isl
+  computed, so the two answers are independent (the top of this page);
   [docs/lean-checks.md](https://github.com/xywei/loopty/blob/main/docs/lean-checks.md)
   has the details and the coverage.
 - **A kernel is a rule with a domain of its own.** A kernel body calls a
@@ -1358,7 +1567,8 @@ The Partial and Not yet lists under Status have the rest, and the
 pip install loopty
 ```
 
-loopty runs on Python 3.12 and 3.13: the islpy it is held to has no wheels for
+That is the 0.2.0 release, from before the five demos at the top of this
+page, which need lanky's and loopty's `main` ([Run it](#run-it)). loopty runs on Python 3.12 and 3.13: the islpy it is held to has no wheels for
 3.14. CI, and every run this README reports, is on Linux. In a uv project,
 `uv add loopty`, and the same for the extra below. The install pulls in:
 
@@ -1389,9 +1599,13 @@ pip install "loopty[opencl]"
 ```
 
 lanky's Lean oracle is an extra of *lanky*, so a ledger that says `proved lean`
-needs `pip install "lanky[lean]"` and a Lean toolchain in the same environment
-(lanky's README has the details). Without it the same theorem reads
-`tested property-test`, and every other row is unchanged.
+needs `pip install "lanky[lean]"` and a Lean toolchain in the same environment,
+and a theorem about real numbers needs Mathlib too (lanky's README has the
+details). The induction steps of a theorem for every order are found by
+sympy, lanky's `cas` extra. Without them a fact isl decided reads `decided
+isl`, a theorem `tested` or `assumed`, and a `WITHOUT LEAN`, `WITHOUT
+MATHLIB` or `WITHOUT SYMPY` line under the table names the rows each piece
+would prove and the command that installs it.
 
 The examples and the documentation are in the repository and not in the
 package; clone it to follow them.
