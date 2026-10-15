@@ -42,11 +42,11 @@ and `loopty run` proves the casts of every schedule it runs:
 ```console
 $ loopty run examples/stencil_skew.py
 ...
-proved  lean   stencil_skew.py:62  jacobi  skew(i, by='t') renames the instances of jacobi one for one
-proved  lean   stencil_skew.py:62  jacobi  the order after skew(i, by='t') runs every dependence of jacobi forward
-proved  lean   stencil_skew.py:62  jacobi  tile(t,i,8,8) renames the instances of jacobi one for one
-proved  lean   stencil_skew.py:62  jacobi  the order after tile(t,i,8,8) runs every dependence of jacobi forward
-tested  loopy  stencil_skew.py:62  jacobi  the scheduled run of jacobi agrees with the native run to the accurac...
+proved  lean   stencil_skew.py:116  jacobi  skew(i, by='t') renames the instances of jacobi one for one
+proved  lean   stencil_skew.py:116  jacobi  the order after skew(i, by='t') runs every dependence of jacobi forward
+proved  lean   stencil_skew.py:117  jacobi  tile(t,i,8,8) renames the instances of jacobi one for one
+proved  lean   stencil_skew.py:117  jacobi  the order after tile(t,i,8,8) runs every dependence of jacobi forward
+tested  loopy  stencil_skew.py:117  jacobi  the scheduled run of jacobi agrees with the native run to the accurac...
 
 5 facts: 4 proved, 1 tested
 

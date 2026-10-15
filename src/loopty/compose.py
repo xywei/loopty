@@ -1596,6 +1596,9 @@ class _Composer:
                     ),
                     unnarrowed=stmt.unnarrowed,
                     exactness=stmt.exactness,
+                    text=stmt.text,
+                    spelled=stmt.spelled or stmt.inames,
+                    unrolled=stmt.unrolled,
                 )
             )
         self.blocks += top

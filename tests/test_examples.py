@@ -29,6 +29,8 @@ import pytest
 from lanky import terms as lanky_terms
 from lanky.prelude import FnType
 
+from lines import where
+
 pytest.importorskip("loopy")
 
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
@@ -949,15 +951,17 @@ def test_the_fusion_demo_prints_the_refusals_and_three_kernels() -> None:
     result, _ = _invoke("fusion", "python")
     assert result.returncode == 0, result.stdout + result.stderr
     assert (
-        "refused: fuse(flux, divergence) illegal: instance flux.S0[j=2] writes "
-        "f[2] read by divergence.S0[i=1] scheduled earlier (at n=16, as hinted); "
-        "fuse('flux', 'divergence', shift=1) runs every dependence between them "
-        "forward"
+        "refused: fuse(flux, divergence) illegal: f[j] = 0.5 * u[j] * u[j] "
+        "(fusion.py:81) at j=2 writes f[2], read by rhs[i] = -(f[i + 1] - "
+        "f[i - 1]) / 2 (fusion.py:89) at i=1, scheduled earlier (at n=16, as "
+        "hinted); fuse('flux', 'divergence', shift=1) runs every dependence "
+        "between them forward"
     ) in result.stdout
     assert (
-        "refused: contract('f', lambda j: j % 2) illegal: instance "
-        "divergence.S0[i=14] reads f[13], which flux.S0[j=13] stored in slot 1, "
-        "after flux.S0[j=15] stored f[15] there (at n=16, as hinted)"
+        "refused: contract('f', lambda j: j % 2) illegal: rhs[i] = -(f[i + 1] - "
+        "f[i - 1]) / 2 (fusion.py:89) at i=14 reads f[13], which f[j] = 0.5 * "
+        "u[j] * u[j] (fusion.py:81) at j=13 stored in slot 1, after the same "
+        "statement at j=15 stored f[15] there (at n=16, as hinted)"
     ) in result.stdout
     fused, substituted, windowed = result.stdout.split("accepted: ")[1:]
     # Fused, f is stored, and the executor allocates it (#62); substituted,
@@ -1089,6 +1093,27 @@ def test_the_hexahedra_demo_decides_its_layouts_and_its_programs() -> None:
     ]
     # nothing in the file is left to an assumption
     assert "assumed" not in {fact["status"] for fact in facts}
+    # the sums over Fin[3] are stated once over their binder, as written
+    # (#181): one row for each access and one for the sums over c
+    along_t = [
+        fact["statement"] for fact in facts if fact["owner"] == "gradient_along_t"
+    ]
+    assert (
+        "Ft[3*x + d, k, c] is in bounds for every d in Fin(3) and every instance "
+        "of S0"
+    ) in along_t
+    assert not [line for line in along_t if "3*x + 0" in line]
+    assert [line for line in along_t if line.startswith("the accumulation")] == [
+        "the accumulation into grad[x, e, k, j, i] over c is approx for every d "
+        "in Fin(3)"
+    ]
+    contravariant = [
+        fact["statement"] for fact in facts if fact["owner"] == "contravariant"
+    ]
+    assert (
+        "G[3*x + d, e, k, j, i] is in bounds for every x in Fin(3) and every "
+        "instance of S0"
+    ) in contravariant
 
 
 @needs_several_indices
@@ -1175,7 +1200,15 @@ def test_the_hexahedra_demo_refuses_the_deeper_fusion_and_keeps_the_windows() ->
     assert result.returncode == 0, result.stdout + result.stderr
     out = result.stdout
     assert "the passes are the dense Kronecker operators: True" in out
-    assert "refused: fuse(along_r, along_s) illegal: instance along_r.S0" in out
+    # each pass's statement by its text and line, at the names its loops have
+    module = _module("hexahedra")
+    along_r = where(module.along_r, "v[q, e, k, j, i] = reduce_sum(")
+    along_s = where(module.along_s, "vs[q, e, k, j, i] = reduce_sum(")
+    assert (
+        "refused: fuse(along_r, along_s) illegal: v[q, e, k, j, i] = "
+        f"reduce_sum(...) ({along_r}) at q="
+    ) in out
+    assert f"read by vs[q, e, k, j, i] = reduce_sum(...) ({along_s}) at q=" in out
     assert "fuse('along_r', 'along_s', loops=3) runs every dependence" in out
     assert "w kept in n cells" in out
     assert "v kept in n*n cells" in out
@@ -1344,12 +1377,17 @@ def test_the_advection_demo_refuses_the_deeper_fusion_and_runs_every_split() -> 
     assert "inverse mass and all, to 1e-13 of the largest value: True" in out
     assert "M^-1 M is the identity: True" in out
     assert "the transpose of the face gather on these maps: True" in out
-    assert "refused: fuse(upwind, volume) illegal: instance upwind.S0" in out
+    assert (
+        "refused: fuse(upwind, volume) illegal: flux[e, f, a, b] = upwind_flux(...) "
+        "(advection.py:"
+    ) in out
     assert "fuse('upwind', 'volume', loops=1) runs every dependence" in out
     assert "flux kept in lambda" in out and "-> tested" in out
     # libParanumal's lift onto the face nodes races on an edge without its
     # barriers, and is legal once the updates are atomic
-    assert "refused: tag(e='g.0', a='l.1', b='l.0') illegal: S" in out
+    # each update by its statement, shortened to what it writes into
+    assert "refused: tag(e='g.0', a='l.1', b='l.0') illegal: rhs[e, " in out
+    assert " -= ... (advection.py:" in out
     assert "both update rhs[" in out and "atomic('rhs')" in out
     assert "accepted: atomic('rhs').tag(" in out
     for split in _module("advection").SPLITS:
@@ -1493,10 +1531,12 @@ def test_the_assembly_demo_names_the_node_two_cells_share() -> None:
         "mass_ffc's postcondition, its matrix |J| (1 + delta_jk) / 24 to the "
         "approx tolerance -> tested"
     ) in result.stdout
+    scatter = where(_module("assembly").mass_action, "y[cell[c, a]] += reduce_sum(")
     assert (
-        "IllegalCast: tag(c_outer='g.0', c_inner='l.0') illegal: S1[c=0, a=2] and "
-        "S1[c=1, a=1] both update y[3] on example_inputs() (nc=2, nv=4), where "
-        "cell[0, 2] = 3 and cell[1, 1] = 3"
+        f"IllegalCast: tag(c_outer='g.0', c_inner='l.0') illegal: y[cell[c, a]] "
+        f"+= reduce_sum(...) ({scatter}) at c=0, a=2 and at c=1, a=1 both "
+        "update y[3] on example_inputs() (nc=2, nv=4), where cell[0, 2] = 3 and "
+        "cell[1, 1] = 3"
     ) in result.stdout
     accepted = result.stdout.split("accepted: ")[1]
     assert "atomic updates of y run at the same time after tag(" in accepted
@@ -1568,6 +1608,38 @@ def test_the_assembly_calls_mass_ffc_per_cell_and_has_its_element_mass() -> None
     # nothing is assumed but the schedule's assumption, nc a multiple of four
     assumed = [fact for fact in facts if fact["status"] == "assumed"]
     assert [fact["kind"] for fact in assumed] in ([], ["assumption"])
+
+
+def test_the_assembly_schedules_facts_are_at_the_lines_of_its_steps() -> None:
+    """Each at the step that made it, and not in mass_ffc (#259).
+
+    mass_action's first statement is the one of mass_ffc it calls, and the
+    facts of a schedule of it were placed there, inside the element kernel.
+    """
+    _result, facts = _invoke("assembly", "check")
+    lines = _path("assembly").read_text(encoding="utf-8").splitlines()
+
+    def line_of(step: str) -> str:
+        (found,) = [k for k, line in enumerate(lines, 1) if line.strip() == step]
+        return f"assembly.py:{found}"
+
+    placed = {
+        fact["statement"]: fact["where"]
+        for fact in facts
+        if fact["owner"] == "mass_action"
+        and fact["kind"] in ("assumption", "bijective")
+    }
+    assert placed == {
+        "nc % 4 == 0, which mass_action is scheduled assuming": line_of(
+            '.assume("nc % 4 == 0")'
+        ),
+        "split(c, 4) renames the instances of mass_action one for one": line_of(
+            '.split("c", 4)'
+        ),
+        "tag(c_inner='ilp') renames the instances of mass_action one for one": (
+            line_of('.tag(c_inner="ilp")')
+        ),
+    }
 
 
 def test_the_assembly_theorems_are_in_its_ledger() -> None:
@@ -1654,13 +1726,16 @@ def test_the_l2p_demo_refuses_the_interchange_and_fuses_box_by_box() -> None:
     result, _ = _invoke("l2p", "python")
     assert result.returncode == 0, result.stdout + result.stderr
     assert "largest error against the charges' potential: " in result.stdout
-    refusals = [
-        line.split("refused: ")[1]
-        for line in result.stdout.splitlines()
-        if line.startswith("refused: ")
-    ]
-    assert refusals[0].startswith("interchange(b, a) illegal: instance S0[i=")
-    assert " writes R[" in refusals[0] and " read by S1[i=" in refusals[0]
+    refusal = result.stdout.split("refused: ")[1].splitlines()[0]
+    # the copy and the recurrence, each by its text and line
+    reconstruct = _module("l2p").reconstruct
+    copy = where(reconstruct, "R[i, a, b] = C[i, a, b]")
+    recurrence = where(reconstruct, "R[i, a, b] = -R[i, a - 2, b + 2]")
+    assert refusal.startswith(
+        f"interchange(b, a) illegal: R[i, a, b] = C[i, a, b] ({copy}) at i="
+    )
+    assert " writes R[" in refusal
+    assert f" read by R[i, a, b] = -R[i, a - 2, b + 2] ({recurrence}) at i=" in refusal
     module = _module("l2p")
     steps = [fact.statement for fact in module.fused.facts()]
     assert steps == [
@@ -1709,13 +1784,14 @@ def test_the_l2p_demo_keeps_one_triangle_per_box_and_refuses_one_row() -> None:
     ]
     result, _ = _invoke("l2p", "python")
     assert result.returncode == 0, result.stdout + result.stderr
+    recurrence = where(module.reconstruct, "R[i, a, b] = -R[i, a - 2, b + 2]")
     assert (
-        "refused: contract('R', lambda i, a, b: b) illegal: instance "
-        "reconstruct.S1[i_0=0, a_0=9, b_0=0] reads R[0, 7, 2], which "
-        "reconstruct.S1[i_0=0, a_0=7, b_0=2] stored in slot 2, after "
-        "reconstruct.S1[i_0=0, a_0=8, b_0=2] stored R[0, 8, 2] there (at nb=1, "
-        "isl's choice); contract('R') finds the smallest window that keeps every "
-        "read, lambda i, a, b: (a, b)\n"
+        "refused: contract('R', lambda i, a, b: b) illegal: R[i, a, b] = -R[i, a "
+        f"- 2, b + 2] ({recurrence}) at i=0, a=9, b=0 reads R[0, 7, 2], which the "
+        "same statement at i=0, a=7, b=2 stored in slot 2, after the same "
+        "statement at i=0, a=8, b=2 stored R[0, 8, 2] there (at nb=1, isl's "
+        "choice); contract('R') finds the smallest window that keeps every read, "
+        "lambda i, a, b: (a, b)\n"
     ) in result.stdout
     assert (
         "on a device, each box a work group keeping its windows: tag(i='g.0'): 2 "

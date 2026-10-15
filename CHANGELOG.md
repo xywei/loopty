@@ -6,27 +6,6 @@ All notable changes to loopty are recorded here. The format follows
 
 ## [Unreleased]
 
-### Changed
-
-- **The interpreter finds a sum's points once, not at every instance**
-  (lanky #125). The faithful check runs each kernel's term through
-  `loopty.interpret`, and a reduction asked isl for its points at every
-  statement instance: it fixed the loop variables, the domain's parameters
-  and enumerated. Now a reduction's domain is enumerated once per run at
-  the values of its parameters, its points kept by the loop variables each
-  instance fixes, and where it is the loops' points times the sum's (a sum
-  over `Fin[n]` in a loop nest), as its two factors. Each instance reads its
-  own points, in the same order, and the work limit is checked on them by
-  their bounding box as before. The rule for a node is found once per type.
-  `lanky check examples/hexahedra.py` spends 7 s in the interpreter where it
-  spent 31, and takes 12 s of CPU where it took 38 without Lean; every
-  example's ledger, JSON included, is what it was.
-- **`loopty run` says what a row lacks to be proved**, with lanky's
-  `WITHOUT LEAN` and `WITHOUT MATHLIB` lines under its table, and sizes the
-  table's statement column to the terminal, as `lanky check` does, where the
-  lanky it runs with has them. The transcripts show each statement whole,
-  wrapped under its row.
-
 ### Added
 
 - **What fusing and contracting S1's passes buys on a CPU**,
@@ -201,6 +180,28 @@ All notable changes to loopty are recorded here. The format follows
   `benchmarks/qbx_layer_potential.py` times the kernel against plain loopy
   and sumpy's own on one OpenCL device, records sumpy's results, and runs
   the kernels on the arguments pytential itself hands sumpy.
+- **S1 of the demonstration** (`examples/hexahedra.py`, #253): grudge
+  #418's sum-factorized weak gradient and weak divergence on hexahedra, the
+  kernels written for `n` nodes per axis, so that their facts hold at every
+  order. The metric product (`metric`, or `contravariant`, which sums the
+  metric terms first, three operator applications where grudge makes
+  nine), a pass per reference axis (`along_r`, `along_s`) and the last pass
+  with the three directions summed (`gradient_along_t`,
+  `divergence_along_t`), chained by the programs `weak_grad` and
+  `weak_div`. The Kronecker theorem the passes rest on,
+  `sum_factorization`, for every `n`, proved by Lean with Mathlib and tested
+  without it; the DOFArray's layout, at order 3, the same as #418's
+  `dim_tags` `N3,N0,N1,N2` and as the kernels' row-major arrays, each a
+  fact. The passes fused as deep as each pair allows, one loop deeper
+  refused with its pair and the fusion of fewer loops named, and what
+  passes between them kept a row (`w`) and a slab (`v`) at a time; on a
+  device, three launches, every node on a work item
+  (`passes_on_a_device`). `benchmarks/hexahedra.py` times the variants
+  against the same kernels in plain loopy and against grudge on one device,
+  and compares them with #418's own `weak_local_grad` and `weak_local_div`
+  (`agree`): on a warped mesh at orders 3 to 6 they agree to `3e-15` to
+  `5e-15`, natively, compiled, fused and contracted, and as the device
+  launches.
 - **The demo's flagship, `examples/l2p.py`**: sumpy's L2P for the 2-D
   Laplace kernel (`E2PFromSingleBox` with the compressed Taylor expansion),
   in one file and one ledger. The claim sumpy's reconstruction rests on,
@@ -707,6 +708,58 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Changed
 
+- **The interpreter finds a sum's points once, not at every instance**
+  (lanky #125). The faithful check runs each kernel's term through
+  `loopty.interpret`, and a reduction asked isl for its points at every
+  statement instance: it fixed the loop variables, the domain's parameters
+  and enumerated. Now a reduction's domain is enumerated once per run at
+  the values of its parameters, its points kept by the loop variables each
+  instance fixes, and where it is the loops' points times the sum's (a sum
+  over `Fin[n]` in a loop nest), as its two factors. Each instance reads its
+  own points, in the same order, and the work limit is checked on them by
+  their bounding box as before. The rule for a node is found once per type.
+  `lanky check examples/hexahedra.py` spends 7 s in the interpreter where it
+  spent 31, and takes 12 s of CPU where it took 38 without Lean; every
+  example's ledger, JSON included, is what it was.
+- **`loopty run` says what a row lacks to be proved**, with lanky's
+  `WITHOUT LEAN` and `WITHOUT MATHLIB` lines under its table, and sizes the
+  table's statement column to the terminal, as `lanky check` does, where the
+  lanky it runs with has them. The transcripts show each statement whole,
+  wrapped under its row.
+- A refusal names each instance of its pair by the statement as the source
+  writes it, the line it is on, and its coordinates by the names the source
+  gives its loops (#260). The flagship's interchange reads `R[i, a, b] =
+  C[i, a, b] (l2p.py:276) at i=0, a=1, b=9 writes R[0, 1, 9], read by R[i,
+  a, b] = -R[i, a - 2, b + 2] (l2p.py:278) at i=0, a=3, b=7, scheduled
+  earlier`, where it read `instance S0[i=0, a=1, b=9] writes R[0, 1, 9]
+  read by S1[i=0, a=3, b=7] scheduled earlier`; S3's race, `y[cell[c, a]]
+  += reduce_sum(...) (assembly.py:269) at c=0, a=2 and at c=1, a=1 both
+  update y[3]`. A long statement keeps what it writes into and shortens the
+  calls on its right, `reduce_sum(...)`; an instance of the statement just
+  named is `the same statement at t=1, i=7`. The same holds for every
+  refusal that names a pair (of `tile`, `interchange`, `skew`, `affine`,
+  `fuse`, `tag`, `contract`, `substitute`), and for a disjoint-writes fact
+  refuted on an input, and the fix each names is kept. A pair on two work
+  items says where each access runs by what it does, `the write is in a
+  sum, on every work item of l.0`, where it named the statement a second
+  time. A fact's `witness` keeps the ids, `S0[t=0, i=8]`, and so does a
+  term written by hand, which has no source.
+- A schedule's facts are at the line of the step that made them, the
+  `.split(...)` or the `.assume(...)` of a chain, and its run at the line
+  the schedule is finished, its last step (#259). They were all at the
+  kernel's first statement, which for S3's `mass_action`, whose first
+  statement is the one of `mass_ffc` it calls, was a line in `mass_ffc`.
+  The run of a kernel the file does not schedule is at the kernel's
+  definition.
+- A sum over a `Fin` of a number, which the trace adds up term by term, has
+  the facts of its terms' accesses stated once, over its binder, as the
+  source writes the access (#181, #223): S1's `contravariant` reads
+  `G[3*x + d, e, k, j, i] is in bounds for every x in Fin(3) and every
+  instance of S0`, where it listed `G[0 + d, ...]`, `G[3 + d, ...]` and `G[6 +
+  d, ...]`, and the three sums over `c` of `gradient_along_t` are one
+  exactness row, `for every d in Fin(3)`. The term, and the code, still
+  add the terms one by one. S1's ledger is 80 facts where it was 96, with
+  the same verdicts.
 - **A cast's fact id leaves out the target.** What a step means is the same
   on every target, so the id of a cast's facts is the kernel's definition and
   the steps (`cast:spmv.spmv@102:split('j', 2, ...):bijective`), and a

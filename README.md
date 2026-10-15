@@ -57,7 +57,7 @@ decided  type           spmv.py:112  spmv           x[col[r, j]] is in bounds by
 decided  isl            spmv.py:112  spmv           distinct instances of S0 write distinct cells of y
 decided  type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
 tested   interpreter    spmv.py:102  spmv           the traced term computes what the body computes
-decided  isl            spmv.py:112  spmv           the order after split(j, 2) runs every dependence of spmv forward
+decided  isl            spmv.py:193  spmv           the order after split(j, 2) runs every dependence of spmv forward
 decided  call           spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
 ...
 29 facts: 24 decided, 5 tested
@@ -111,7 +111,7 @@ And a transformation is a cast, checked before it is applied:
 $ python examples/stencil_skew.py
 ...
 Schedule(jacobi).tile('t', 'i', 8, 8) ->
-  IllegalCast: tile(t,i,8,8) illegal: instance S0[t=0, i=8] writes u[1, 8] read by S0[t=1, i=7] scheduled earlier (at nt=16, nx=16, as hinted)
+  IllegalCast: tile(t,i,8,8) illegal: u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:62) at t=0, i=8 writes u[1, 8], read by the same statement at t=1, i=7, scheduled earlier (at nt=16, nx=16, as hinted)
 ...
 accepted: Schedule(jacobi, target='c').skew(i, by='t').tile(t,i,8,8)
   loop nest: t_outer i_outer t_inner i_inner
@@ -123,8 +123,9 @@ accepted: Schedule(jacobi, target='c').skew(i, by='t').tile(t,i,8,8)
 ```
 
 The rejection names two real instances of the kernel, not an empty set or a
-failed pattern match. It is the pair a person would find by hand, at sizes the
-message states, because which violating pair isl picks depends on them.
+failed pattern match: the statement as the file writes it, its line, and each
+instance's loop variables. It is the pair a person would find by hand, at sizes
+the message states, because which violating pair isl picks depends on them.
 
 And an array's index set need not be a box. One value per pair of particles is
 an array over the lower triangle, and the triangle is its type:

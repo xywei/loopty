@@ -151,11 +151,11 @@ decided  isl            spmv.py:112  spmv           distinct instances of S0 wri
 decided  isl            spmv.py:102  spmv           the source order runs every dependence forward in time
 decided  type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
 tested   interpreter    spmv.py:102  spmv           the traced term computes what the body computes
-decided  isl            spmv.py:112  spmv           split(j, 2) renames the instances of spmv one for one
-decided  isl            spmv.py:112  spmv           the order after split(j, 2) runs every dependence of spmv forward
-decided  isl            spmv.py:112  spmv           realize('y', tree=True) renames the instances of spmv one for one
-decided  isl            spmv.py:112  spmv           the order after realize('y', tree=True) runs every dependence of spmv forward
-decided  isl            spmv.py:112  spmv           the accumulation into y is reassociated by realize('y', tree=True),
+decided  isl            spmv.py:193  spmv           split(j, 2) renames the instances of spmv one for one
+decided  isl            spmv.py:193  spmv           the order after split(j, 2) runs every dependence of spmv forward
+decided  isl            spmv.py:194  spmv           realize('y', tree=True) renames the instances of spmv one for one
+decided  isl            spmv.py:194  spmv           the order after realize('y', tree=True) runs every dependence of spmv forward
+decided  isl            spmv.py:194  spmv           the accumulation into y is reassociated by realize('y', tree=True),
                                                       so its result is compared at 'reassoc'
 decided  call           spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
 tested   interpreter    spmv.py:115  solve          the traced term computes what the body computes
@@ -230,14 +230,14 @@ solve: Schedule(solve, target='c')
 
 STATUS   BY     WHERE        OWNER  STATEMENT
 -------  -----  -----------  -----  -------------------------------------------------------------------------------------
-decided  isl    spmv.py:112  spmv   split(j, 2) renames the instances of spmv one for one
-decided  isl    spmv.py:112  spmv   the order after split(j, 2) runs every dependence of spmv forward
-decided  isl    spmv.py:112  spmv   realize('y', tree=True) renames the instances of spmv one for one
-decided  isl    spmv.py:112  spmv   the order after realize('y', tree=True) runs every dependence of spmv forward
-decided  isl    spmv.py:112  spmv   the accumulation into y is reassociated by realize('y', tree=True),
+decided  isl    spmv.py:193  spmv   split(j, 2) renames the instances of spmv one for one
+decided  isl    spmv.py:193  spmv   the order after split(j, 2) runs every dependence of spmv forward
+decided  isl    spmv.py:194  spmv   realize('y', tree=True) renames the instances of spmv one for one
+decided  isl    spmv.py:194  spmv   the order after realize('y', tree=True) runs every dependence of spmv forward
+decided  isl    spmv.py:194  spmv   the accumulation into y is reassociated by realize('y', tree=True),
                                       so its result is compared at 'reassoc'
-tested   loopy  spmv.py:112  spmv   the scheduled run of spmv agrees with the native run to the accuracy its types state
-tested   loopy  spmv.py:79   scan   the scheduled run of scan agrees with the native run to the accuracy its types state
+tested   loopy  spmv.py:194  spmv   the scheduled run of spmv agrees with the native run to the accuracy its types state
+tested   loopy  spmv.py:69   scan   the scheduled run of scan agrees with the native run to the accuracy its types state
 tested   loopy  spmv.py:115  solve  the scheduled run of solve agrees with the native run to the accuracy its types state
 
 8 facts: 5 decided, 3 tested
@@ -334,7 +334,7 @@ native, the 16 by 16 array (first six levels around the spike):
  [0.156 0.    0.312 0.    0.312 0.    0.156]]
 
 Schedule(jacobi).tile('t', 'i', 8, 8) ->
-  IllegalCast: tile(t,i,8,8) illegal: instance S0[t=0, i=8] writes u[1, 8] read by S0[t=1, i=7] scheduled earlier (at nt=16, nx=16, as hinted)
+  IllegalCast: tile(t,i,8,8) illegal: u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:62) at t=0, i=8 writes u[1, 8], read by the same statement at t=1, i=7, scheduled earlier (at nt=16, nx=16, as hinted)
   witness: S0{'t': 0, 'i': 8} runs before S0{'t': 1, 'i': 7} at {'nt': 16, 'nx': 16}
 
 accepted: Schedule(jacobi, target='c').skew(i, by='t').tile(t,i,8,8)
@@ -348,11 +348,13 @@ accepted: Schedule(jacobi, target='c').skew(i, by='t').tile(t,i,8,8)
   the native run matches the hand-written sweep: True
 ```
 
-The witness is the whole point. `S0[t=0, i=8]` writes `u[1, 8]`, and
-`S0[t=1, i=7]` reads it; the tiling runs the second one first, because
-`i = 7` is in the first tile column and `i = 8` is in the second. That is a pair
-of real instances of this kernel at these sizes, produced by pulling an isl
-solution back from time space into instance space. No code was generated, and
+The pair is the whole point. The statement on line 62 writes `u[1, 8]` at
+`t=0, i=8`, and the same statement reads it at `t=1, i=7`; the tiling runs the
+second one first, because `i = 7` is in the first tile column and `i = 8` is in
+the second. That is a pair of real instances of this kernel at these sizes,
+produced by pulling an isl solution back from time space into instance space.
+The `witness` under it is the same pair as the ledger records it, by the
+statement's id, `S0`. No code was generated, and
 the schedule the cast was asked of is unchanged, so the demo can go on and ask
 for a legal one.
 
@@ -364,18 +366,18 @@ Checking and running the file behave the same way as the sparse product:
 
 ```console
 $ uv run lanky check examples/stencil_skew.py
-STATUS   BY           WHERE               OWNER   STATEMENT
--------  -----------  ------------------  ------  -----------------------------------------------------------------------
-decided  isl          stencil_skew.py:62  jacobi  u[t + 1, i] is in bounds for every instance of S0
-decided  isl          stencil_skew.py:62  jacobi  u[t, i - 1] is in bounds for every instance of S0
-decided  isl          stencil_skew.py:62  jacobi  u[t, i + 1] is in bounds for every instance of S0
-decided  isl          stencil_skew.py:62  jacobi  distinct instances of S0 write distinct cells of u
-decided  isl          stencil_skew.py:54  jacobi  the source order runs every dependence forward in time
-tested   interpreter  stencil_skew.py:54  jacobi  the traced term computes what the body computes
-decided  isl          stencil_skew.py:62  jacobi  skew(i, by='t') renames the instances of jacobi one for one
-decided  isl          stencil_skew.py:62  jacobi  the order after skew(i, by='t') runs every dependence of jacobi forward
-decided  isl          stencil_skew.py:62  jacobi  tile(t,i,8,8) renames the instances of jacobi one for one
-decided  isl          stencil_skew.py:62  jacobi  the order after tile(t,i,8,8) runs every dependence of jacobi forward
+STATUS   BY           WHERE                OWNER   STATEMENT
+-------  -----------  -------------------  ------  -----------------------------------------------------------------------
+decided  isl          stencil_skew.py:62   jacobi  u[t + 1, i] is in bounds for every instance of S0
+decided  isl          stencil_skew.py:62   jacobi  u[t, i - 1] is in bounds for every instance of S0
+decided  isl          stencil_skew.py:62   jacobi  u[t, i + 1] is in bounds for every instance of S0
+decided  isl          stencil_skew.py:62   jacobi  distinct instances of S0 write distinct cells of u
+decided  isl          stencil_skew.py:54   jacobi  the source order runs every dependence forward in time
+tested   interpreter  stencil_skew.py:54   jacobi  the traced term computes what the body computes
+decided  isl          stencil_skew.py:116  jacobi  skew(i, by='t') renames the instances of jacobi one for one
+decided  isl          stencil_skew.py:116  jacobi  the order after skew(i, by='t') runs every dependence of jacobi forward
+decided  isl          stencil_skew.py:117  jacobi  tile(t,i,8,8) renames the instances of jacobi one for one
+decided  isl          stencil_skew.py:117  jacobi  the order after tile(t,i,8,8) runs every dependence of jacobi forward
 
 10 facts: 9 decided, 1 tested
 

@@ -18,6 +18,7 @@ import pytest
 from lanky.ledger import Status
 from lanky.prelude import Int, Real
 
+from lines import where
 from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum, when
 from loopty.executor import LoopyExecutor, emit_code
 from loopty.flow import dependences
@@ -375,10 +376,12 @@ def test_a_write_through_a_map_is_refuted_with_two_cells_of_the_mesh() -> None:
     assert disjoint.status is Status.REFUTED
     assert disjoint.decided_by == "native"
     assert disjoint.provenance["witness"] == "S0[c=0, k=2] and S0[c=1, k=1]"
+    # the witness keeps the ids; the reason names the statement as written
     assert disjoint.provenance["reason"] == (
-        "S0[c=0, k=2] and S0[c=1, k=1] both write y[3] on example_inputs() "
-        "(nc=2, nv=4), where cell[0, 2] = 3 and cell[1, 1] = 3, so the later "
-        "write overwrites the earlier one"
+        f"y[cell[c, k]] = yl[c, k] ({where(overwrite, '] = yl')}) at c=0, k=2 and "
+        "at c=1, k=1 both write y[3] on example_inputs() (nc=2, nv=4), where "
+        "cell[0, 2] = 3 and cell[1, 1] = 3, so the later write overwrites the "
+        "earlier one"
     )
 
 
@@ -422,11 +425,12 @@ def test_the_cells_split_onto_work_items_are_refused_with_a_shared_node() -> Non
     with pytest.raises(IllegalCast) as caught:
         schedule.tag(c_outer="g.0", c_inner="l.0")
     assert str(caught.value) == (
-        "tag(c_outer='g.0', c_inner='l.0') illegal: S0[c=0, k=2] and S0[c=1, "
-        "k=1] both update y[3] on example_inputs() (nc=2, nv=4), where cell[0, "
-        "2] = 3 and cell[1, 1] = 3, and the loop c_inner on l.0 runs them on "
-        "two work items, so one can overwrite what the other added; make the "
-        "updates atomic, with atomic('y') before this step"
+        "tag(c_outer='g.0', c_inner='l.0') illegal: y[cell[c, k]] += yl[c, k] "
+        f"({where(scatter, '+=')}) at c=0, k=2 and at c=1, k=1 both update y[3] on "
+        "example_inputs() (nc=2, nv=4), where cell[0, 2] = 3 and cell[1, 1] = "
+        "3, and the loop c_inner on l.0 runs them on two work items, so one can "
+        "overwrite what the other added; make the updates atomic, with "
+        "atomic('y') before this step"
     )
     fact = caught.value.fact
     assert fact.kind == "disjoint-writes" and fact.status is Status.REFUTED
@@ -447,8 +451,9 @@ def test_a_schedules_own_example_inputs_are_read_first() -> None:
     with pytest.raises(IllegalCast) as caught:
         schedule.tag(c_outer="g.0", c_inner="l.0")
     assert (
-        "S0[c=0, k=0] and S0[c=1, k=2] both update y[0] on the schedule's "
-        "example inputs (nc=2, nv=5), where cell[0, 0] = 0 and cell[1, 2] = 0"
+        f"({where(scatter, '+=')}) at c=0, k=0 and at c=1, k=2 both update y[0] on "
+        "the schedule's example inputs (nc=2, nv=5), where cell[0, 0] = 0 and "
+        "cell[1, 2] = 0"
     ) in str(caught.value)
 
 
@@ -537,7 +542,9 @@ def test_updates_in_no_order_are_refused_until_atomic_on_c() -> None:
     with pytest.raises(IllegalCast) as caught:
         Schedule(rowsum).tag(j="ilp")
     message = str(caught.value)
-    assert message.startswith("tag(j='ilp') illegal: S0[r=")
+    assert message.startswith(
+        f"tag(j='ilp') illegal: y[r] += v[r, j] ({where(rowsum, '+=')}) at r="
+    )
     assert "both update y[" in message
     assert "the loop j (ilp) leaves them in no order" in message
     assert caught.value.fact.decided_by == "isl"
@@ -580,7 +587,10 @@ def test_an_exact_update_keeps_its_order_and_names_cells_of_the_mesh() -> None:
     with pytest.raises(IllegalCast) as caught:
         Schedule(count).tag(c="g.0")
     message = str(caught.value)
-    assert "writes m[3] also written by" in message
+    assert f"m[cell[c, k]] += 1 ({where(count, '+=')}) at c=0, k=2 writes m[3]" in (
+        message
+    )
+    assert "also written by the same statement at c=1, k=1" in message
     assert (
         "on example_inputs() (nc=2, nv=4), where cell[0, 2] = 3 and cell[1, 1] = 3"
     ) in message
@@ -590,9 +600,10 @@ def test_a_write_through_a_map_on_two_work_items_names_cells_of_the_mesh() -> No
     with pytest.raises(IllegalCast) as caught:
         Schedule(overwrite).tag(c="g.0")
     assert str(caught.value).startswith(
-        "tag(c='g.0') illegal: instance S0[c=0, k=2] writes y[3] also written by "
-        "S0[c=1, k=1] scheduled earlier on example_inputs() (nc=2, nv=4), where "
-        "cell[0, 2] = 3 and cell[1, 1] = 3"
+        "tag(c='g.0') illegal: y[cell[c, k]] = yl[c, k] "
+        f"({where(overwrite, '] = yl')}) at c=0, k=2 writes y[3], also written by "
+        "the same statement at c=1, k=1, scheduled earlier on example_inputs() "
+        "(nc=2, nv=4), where cell[0, 2] = 3 and cell[1, 1] = 3"
     )
 
 
@@ -631,7 +642,11 @@ def test_every_access_to_an_atomic_array_is_atomic_on_opencl(plain_opencl) -> No
     # items the zeroing and the sum, in no loop on the axis, would run on
     # every one of them, which is refused: a kernel has no barrier between
     # groups.)
-    with pytest.raises(IllegalCast, match="S0 runs in no loop on g.0"):
+    with pytest.raises(
+        IllegalCast,
+        match=rf"y.i. = 0.0 .{where(zeroed_then_assembled, '= 0.0')}. at i=.*: the "
+        "first write is in no loop on g.0, so on every work item of it",
+    ):
         Schedule(zeroed_then_assembled, target="opencl").atomic("y").split(
             "c", 32
         ).tag(c_outer="g.0", c_inner="l.0")
@@ -663,19 +678,21 @@ def test_a_writer_that_reads_an_atomic_array_reads_it_as_its_dtype(
 
 
 @pytest.mark.parametrize(
-    ("kern", "array", "why"),
+    ("kern", "array", "why", "text"),
     [
         (
             scaled,
             "y",
             "S0 writes y[cell[c, k]] = y[cell[c, k]]*yl[c, k], which is not "
             "y[cell[c, k]] plus a value that reads nothing else of y",
+            f"y[cell[c, k]] = y[cell[c, k]] * yl[c, k] ({where(scaled, '=')})",
         ),
         (
             reflected,
             "y",
             "S0 writes y[cell[c, k]] = yl[c, k] - y[cell[c, k]], which is not "
             "y[cell[c, k]] plus a value that reads nothing else of y",
+            f"y[cell[c, k]] = yl[c, k] - y[cell[c, k]] ({where(reflected, '=')})",
         ),
         (
             halves,
@@ -684,11 +701,12 @@ def test_a_writer_that_reads_an_atomic_array_reads_it_as_its_dtype(
             "that is not an integer to an integer array: each partial sum is "
             "truncated when it is stored, so the order of the updates changes "
             "the result",
+            f"m[cell[c, k]] += 0.5 ({where(halves, '+=')})",
         ),
     ],
 )
 def test_what_does_not_commute_is_refused_atomic_and_keeps_its_order(
-    kern, array, why
+    kern, array, why, text
 ) -> None:
     (stmt,) = kern.term.stmts
     assert stmt.kind == "accumulate" and stmt.exactness is None
@@ -700,9 +718,10 @@ def test_what_does_not_commute_is_refused_atomic_and_keeps_its_order(
     with pytest.raises(IllegalCast) as caught:
         Schedule(kern).split("c", 32).tag(c_outer="g.0", c_inner="l.0")
     assert str(caught.value).startswith(
-        "tag(c_outer='g.0', c_inner='l.0') illegal: instance S0[c=0, k=2] "
-        f"writes {array}[3] also written by S0[c=1, k=1] scheduled earlier on "
-        "example_inputs() (nc=2, nv=4), where cell[0, 2] = 3 and cell[1, 1] = 3"
+        f"tag(c_outer='g.0', c_inner='l.0') illegal: {text} at c=0, k=2 writes "
+        f"{array}[3], also written by the same statement at c=1, k=1, scheduled "
+        "earlier on example_inputs() (nc=2, nv=4), where cell[0, 2] = 3 and "
+        "cell[1, 1] = 3"
     )
 
 
@@ -714,9 +733,11 @@ def test_a_read_beside_the_updates_is_refused_on_work_items_even_atomic() -> Non
             c_outer="g.0", c_inner="l.0"
         )
     assert str(caught.value).startswith(
-        "tag(c_outer='g.0', c_inner='l.0') illegal: instance S0[c=0, k=2] writes "
-        "y[3] read by S1[c=1, k=1] scheduled earlier on example_inputs() (nc=2, "
-        "nv=4), where cell[0, 2] = 3 and cell[1, 1] = 3"
+        "tag(c_outer='g.0', c_inner='l.0') illegal: y[cell[c, k]] += yl[c, k] "
+        f"({where(read_back, '+=')}) at c=0, k=2 writes y[3], read by z[c, k] = "
+        f"y[cell[c, k]] ({where(read_back, 'z[c, k] =')}) at c=1, k=1, scheduled "
+        "earlier on "
+        "example_inputs() (nc=2, nv=4), where cell[0, 2] = 3 and cell[1, 1] = 3"
     )
 
 
@@ -727,9 +748,12 @@ def test_updates_of_two_statements_commute_and_race_on_work_items() -> None:
     # S0 meets no other cell's S0 on the example, and the pair is not drawn:
     # S1 of cell 0 and S0 of cell 1 both add into node 3 there.
     assert str(caught.value).startswith(
-        "tag(c_outer='g.0', c_inner='l.0') illegal: S1[c=0] and S0[c=1] both "
-        "update y[3] on example_inputs() (nc=2, nv=4), where cell[0, 1] = 3 and "
-        "cell[1, 0] = 3, and the loop c_inner on l.0 runs them on two work items"
+        "tag(c_outer='g.0', c_inner='l.0') illegal: y[cell[c, 1]] += b[c] "
+        f"({where(two_updates, '+= b[c]')}) at c=0 and y[cell[c, 0]] += a[c] "
+        f"({where(two_updates, '+= a[c]')}) at c=1 both update y[3] on "
+        "example_inputs() "
+        "(nc=2, nv=4), where cell[0, 1] = 3 and cell[1, 0] = 3, and the loop "
+        "c_inner on l.0 runs them on two work items"
     )
     assert caught.value.fact.decided_by == "native"
     Schedule(two_updates).atomic("y").split("c", 32).tag(
@@ -754,10 +778,11 @@ def test_a_refusal_names_the_first_pair_of_a_large_example() -> None:
     with pytest.raises(IllegalCast) as caught:
         schedule.split("c", 32).tag(c_outer="g.0", c_inner="l.0")
     assert str(caught.value).startswith(
-        "tag(c_outer='g.0', c_inner='l.0') illegal: S0[c=0, k=0] and S0[c=1, "
-        "k=0] both update y[0] on the schedule's example inputs (nc=1800, "
-        "nv=961), where cell[0, 0] = 0 and cell[1, 0] = 0, and the loop c_inner "
-        "on l.0 runs them on two work items"
+        "tag(c_outer='g.0', c_inner='l.0') illegal: y[cell[c, k]] += yl[c, k] "
+        f"({where(scatter, '+=')}) at c=0, k=0 and at c=1, k=0 both update y[0] on "
+        "the schedule's example inputs (nc=1800, nv=961), where cell[0, 0] = 0 "
+        "and cell[1, 0] = 0, and the loop c_inner on l.0 runs them on two work "
+        "items"
     )
 
 
@@ -845,9 +870,10 @@ def test_a_substitution_read_before_the_updates_names_isls_pair_as_isls() -> Non
     with pytest.raises(IllegalCast) as caught:
         Schedule(twice_and_added_back, sizes={"n": 8}).substitute("f")
     assert str(caught.value) == (
-        "substitute('f') illegal: instance added_back.S0[i_0=1] reads y[1] "
-        "overwritten by added_back.S0[i_0=0] scheduled earlier (at n=8, as "
-        "hinted). The pair is isl's: the cell y[node[i_0]] is read from an "
+        f"substitute('f') illegal: y[node[i]] += f[i] ({where(added_back, '+=')}) at "
+        "i=1 reads y[1], overwritten by the same statement at i=0, scheduled "
+        "earlier (at n=8, as hinted). The pair is isl's: the cell y[node[i_0]] "
+        "is read from an "
         "array, which isl cannot follow, and substitute('f') reads y where f "
         "was read, which no run of an input shows"
     )

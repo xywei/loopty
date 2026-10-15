@@ -20,6 +20,7 @@ import pytest
 from lanky.ledger import Status
 from lanky.prelude import Fin, Real
 
+from lines import where
 from loopty import Arr, Schedule, TraceError, kernel, program, reduce_sum, when
 from loopty.executor import LoopyExecutor
 from loopty.faithful import KIND
@@ -136,11 +137,14 @@ def test_a_window_of_an_array_over_a_domain_keeps_one_row_of_it() -> None:
     # one cell for the row is too few, and the refusal names the window
     with pytest.raises(IllegalCast) as caught:
         fused.contract("f", lambda i, j: 0)
+    rowsum = where(K.rowsum, "e[p] = reduce_sum(")
+    fill = where(K.fill, "f[i, j] = x[i] * x[j]")
     assert str(caught.value) == (
-        "contract('f', lambda i, j: 0) illegal: instance rowsum.S0[p=2] reads "
-        "f[2, 0], which fill.S0[i=2, j=0] stored in slot 0, after fill.S0[i=2, "
-        "j=1] stored f[2, 1] there (at n=3, isl's choice); contract('f') finds "
-        "the smallest window that keeps every read, lambda i, j: j"
+        "contract('f', lambda i, j: 0) illegal: e[p] = reduce_sum(f[p, q] for q "
+        f"in f.dom[p]) ({rowsum}) at p=2 reads f[2, 0], which f[i, j] = x[i] * "
+        f"x[j] ({fill}) at i=2, j=0 stored in slot 0, after the same statement at "
+        "i=2, j=1 stored f[2, 1] there (at n=3, isl's choice); contract('f') "
+        "finds the smallest window that keeps every read, lambda i, j: j"
     )
     # before the fusion every row is read after the last is stored
     with pytest.raises(ValueError, match="no window is smaller than f"):

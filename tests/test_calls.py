@@ -16,6 +16,7 @@ The kernels shared with the Lean checks and the coverage report are in
 from __future__ import annotations
 
 import importlib
+import sys
 
 import islpy as isl
 import numpy as np
@@ -24,6 +25,7 @@ from lanky.ledger import Status
 from lanky.prelude import Bool, Fn, Int, Nat, Real
 from lanky.terms import render
 
+from lines import where
 from loopty import (
     Arr,
     Fin,
@@ -1362,15 +1364,30 @@ def test_a_callees_update_is_an_update_of_the_caller() -> None:
     assert fact.status is Status.TESTED
 
 
+def test_a_schedule_of_a_kernel_that_calls_first_is_at_its_own_line() -> None:
+    # The first statement of assemble is add_local's, in calls.py, and a
+    # schedule's facts and its run were placed there, in the callee (#259).
+    # They are at the line of the step that made them.
+    here = sys._getframe().f_lineno
+    split = Schedule(calls.assemble).split("c", 4)
+    assert {fact.where for fact in split.facts()} == {f"test_calls.py:{here + 1}"}
+    fact = LoopyExecutor().differential(calls.assemble, split, _mesh_inputs())
+    assert fact.status is Status.TESTED
+    assert fact.where == f"test_calls.py:{here + 1}"
+
+
 def test_a_callees_updates_race_with_a_pair_of_both_loops_until_atomic() -> None:
     # The pair is read off the schedule's example inputs: the caller's c and
     # the callee's k, which the call nests inside it.
     split = Schedule(calls.assemble).example(**_mesh_inputs()).split("c", 32)
     with pytest.raises(IllegalCast) as caught:
         split.tag(c_outer="g.0", c_inner="l.0")
+    # the callee's statement, at the caller's c and the callee's k
     assert str(caught.value) == (
-        "tag(c_outer='g.0', c_inner='l.0') illegal: S0[c=0, k=2] and S0[c=1, "
-        "k=1] both update y[3] on the schedule's example inputs (nc=2, nv=4), "
+        "tag(c_outer='g.0', c_inner='l.0') illegal: y[cell[k]] += yl[k] "
+        f"({where(calls.add_local, 'y[cell[k]] +=')}) at c=0, k=2 and at c=1, k=1 both "
+        "update y[3] on the "
+        "schedule's example inputs (nc=2, nv=4), "
         "where cell[0, 2] = 3 and cell[1, 1] = 3, and the loop c_inner on l.0 "
         "runs them on two work items, so one can overwrite what the other "
         "added; make the updates atomic, with atomic('y') before this step"
@@ -1443,10 +1460,14 @@ def test_a_window_of_an_array_called_kernels_store_and_read() -> None:
         "no read of f sees its slot overwritten after contract('f', lambda e, j: "
         "j % 3): f kept in 3 cells, f[e, j] in slot j % 3"
     )
+    # each callee's statement, at the program's loop over the rows, which
+    # the second call names e_0, by the name the source gives it
     assert calls.rejected_window_of_two_rows().startswith(
-        "contract('f', lambda e, j: j % 2) illegal: instance "
-        "row_divergences.S0[e_0=0, i=1] reads f[0, 0], which row_fluxes.S0[e=0, "
-        "j=0] stored in slot 0, after row_fluxes.S0[e=0, j=2] stored f[0, 2] there"
+        "contract('f', lambda e, j: j % 2) illegal: rhs[i] = -(f[i + 1] - "
+        f"f[i - 1]) / 2 ({where(calls.centred, 'rhs[i] =')}) at e=0, i=1 reads "
+        f"f[0, 0], which f[j] = 0.5 * u[j] * u[j] ({where(calls.half_square, '= 0.5')})"
+        " at e=0, j=0 stored in slot 0, after the same statement at e=0, j=2 "
+        "stored f[0, 2] there"
     )
     registers = calls.fused_rows.contract("f", registers=True)
     for schedule in (calls.windowed_rows, registers):

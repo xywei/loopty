@@ -926,16 +926,21 @@ def _agreement_fact(
     without a schedule is named by its definition and the target alone, and a
     term by its name and the target.
 
-    It is placed at the term's first statement, or at the term's own
-    :attr:`~loopty.term.Term.where` when it has one: a program's term does,
-    since its first statement is some kernel's, perhaps in another file.
+    It is placed where the schedule is written
+    (:attr:`~loopty.schedule.Schedule.where`), the line of its last step;
+    without a schedule, at the term's own :attr:`~loopty.term.Term.where`
+    when it has one (a program's term does, since its first statement is
+    some kernel's, perhaps in another file), and else at its first
+    statement.
     """
     from lanky.ledger import Fact, Status, fact_id
 
     from loopty.schedule import Schedule, definition_of
 
+    where = term.where or (term.stmts[0].where if term.stmts else "")
     if isinstance(schedule, Schedule):
         identifier = schedule.fact_id("agreement")
+        where = schedule.where or where
     else:
         identifier = fact_id(
             "agreement",
@@ -953,7 +958,7 @@ def _agreement_fact(
         status=Status.TESTED if ok else Status.REFUTED,
         decided_by="loopy",
         provenance=provenance,
-        where=term.where or (term.stmts[0].where if term.stmts else ""),
+        where=where,
         owner=term.name,
     )
 

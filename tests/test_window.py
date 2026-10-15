@@ -21,6 +21,7 @@ import pytest
 from lanky.ledger import Status
 from lanky.prelude import Real
 
+from lines import where
 from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum, when
 from loopty.executor import LoopyExecutor, emit_code
 from loopty.schedule import IllegalCast
@@ -143,11 +144,14 @@ def test_a_placement_the_author_gives_is_checked_as_given() -> None:
 def test_a_window_too_small_is_refused_with_the_read_and_the_overwrite() -> None:
     with pytest.raises(IllegalCast) as caught:
         WINDOWS.fused.contract("f", lambda j: j % 2)
+    # the reader, the producer and the producer's later instance
     assert str(caught.value) == (
-        "contract('f', lambda j: j % 2) illegal: instance divergence.S0[i=14] "
-        "reads f[13], which flux.S0[j=13] stored in slot 1, after "
-        "flux.S0[j=15] stored f[15] there (at n=16, as hinted); contract('f') "
-        "finds the smallest window that keeps every read, lambda j: j % 3"
+        "contract('f', lambda j: j % 2) illegal: rhs[i] = -(f[i + 1] - f[i - 1]) "
+        f"/ 2 ({where(WINDOWS.divergence, 'rhs[i] =')}) at i=14 reads f[13], "
+        f"which f[j] = 0.5 * u[j] * u[j] ({where(WINDOWS.flux, 'f[j] =')}) at "
+        "j=13 stored in slot 1, after the same statement at j=15 stored f[15] "
+        "there (at n=16, as hinted); contract('f') finds the smallest window "
+        "that keeps every read, lambda j: j % 3"
     )
     fact = caught.value.fact
     assert (fact.kind, fact.status) == ("no-clobber", Status.REFUTED)
@@ -274,7 +278,7 @@ def test_a_tag_before_the_window_is_refused_and_one_after_is_checked() -> None:
         fused.contract("v").tag(e="g.0")
     assert (
         "stores v[0, 0, 0] in slot 0 of the window lambda e, a, b: b, which "
-        "along_r.S0[e=1, a=0, b=0]"
+        "the same statement at e=1, a=0, b=0"
     ) in str(caught.value)
     assert str(caught.value).endswith(
         "v is kept in a window over the order this tag drops, one for every "
@@ -335,8 +339,10 @@ def test_a_step_after_the_window_keeps_the_order_of_every_slot() -> None:
     agrees(WINDOWS.burgers, WINDOWS.split_after, burgers_inputs())
     assert WINDOWS.rejected_after_window() == (
         "affine({ flux_S0[j] -> [k = j]; divergence_S0[j] -> [k = 1 + j] }) "
-        "illegal: instance divergence.S0[i=1] reads f[0] from slot 0 of the "
-        "window lambda j: j % 3, which flux.S0[j=3] would now overwrite with "
+        "illegal: rhs[i] = -(f[i + 1] - f[i - 1]) / 2 "
+        f"({where(WINDOWS.divergence, 'rhs[i] =')}) at i=1 reads f[0] from slot "
+        "0 of the window lambda j: j % 3, which f[j] = 0.5 * u[j] * u[j] "
+        f"({where(WINDOWS.flux, 'f[j] =')}) at j=3 would now overwrite with "
         "f[3] first (at n=16, as hinted); a window keeps the order it was "
         "taken in, so take it after this step"
     )
@@ -492,10 +498,13 @@ def test_a_window_one_short_is_refused_with_the_window_that_fits() -> None:
         )
     with pytest.raises(IllegalCast) as caught:
         sized.contract("v", lambda e, a, b: b % 3)
+    # each pass's statement, shortened, at the names the source gives its loops
     assert (
-        "instance along_s.S0[e_0=0, a_0=0, b_0=0] reads v[0, 0, 0], which "
-        "along_r.S0[e=0, a=0, b=0] stored in slot 0, after along_r.S0[e=0, a=0, "
-        "b=3] stored v[0, 0, 3] there"
+        f"w[e, a, b] = reduce_sum(...) ({where(example.along_s, 'w[e, a, b] =')}) "
+        "at e=0, a=0, b=0 reads v[0, 0, 0], which v[e, a, b] = reduce_sum(...) "
+        f"({where(example.along_r, 'v[e, a, b] =')}) at e=0, a=0, b=0 stored in "
+        "slot 0, after the same statement at e=0, a=0, b=3 stored v[0, 0, 3] "
+        "there"
     ) in str(caught.value)
 
 
@@ -507,8 +516,8 @@ def test_a_second_reader_further_back_widens_the_window() -> None:
     with pytest.raises(IllegalCast) as caught:
         fused.contract("f", lambda j: j % 3)
     assert str(caught.value).startswith(
-        "contract('f', lambda j: j % 3) illegal: instance "
-        "divergence_and_lag.S1[i=14] reads f[12]"
+        "contract('f', lambda j: j % 3) illegal: z[i] = f[i - 2] + 0.25 * f[i] "
+        f"({where(WINDOWS.divergence_and_lag, 'z[i] =')}) at i=14 reads f[12]"
     )
     assert str(caught.value).endswith("keeps every read, lambda j: j % 4")
 
@@ -537,7 +546,9 @@ def test_a_reader_after_the_fused_loop_leaves_no_window() -> None:
         fused.contract("f")
     with pytest.raises(IllegalCast) as caught:
         fused.contract("f", lambda j: j % 3)
-    assert "instance doubled.S0[k=0] reads f[0]" in str(caught.value)
+    assert f"y[k] = 2.0 * f[k] ({where(doubled, 'y[k] =')}) at k=0 reads f[0]" in str(
+        caught.value
+    )
     assert str(caught.value).endswith(
         "; no window of f is smaller than f in the order as it stands"
     )
@@ -548,8 +559,11 @@ def test_a_loop_run_backwards_takes_its_window_and_a_window_refuses_it() -> None
     agrees(WINDOWS.burgers, WINDOWS.reversed_window, burgers_inputs())
     with pytest.raises(IllegalCast) as caught:
         WINDOWS.windowed.affine(WINDOWS.REVERSED)
-    assert "of the window lambda j: j % 3, which flux.S0[j=3] would now" in str(
-        caught.value
+    assert str(caught.value).startswith(
+        "affine({ flux_S0[j] -> [k = -j]; divergence_S0[j] -> [k = 2 - j] }) "
+        f"illegal: f[j] = 0.5 * u[j] * u[j] ({where(WINDOWS.flux, 'f[j] =')}) at "
+        "j=0 stores f[0] in slot 0 of the window lambda j: j % 3, which the same "
+        "statement at j=3 would now overwrite with f[3] first"
     )
     # a shift register shifts along a loop over increasing cells
     with pytest.raises(ValueError, match="flux.S0 stores f at no index"):
@@ -683,12 +697,15 @@ def test_a_window_of_a_triangle_its_recurrence_reads_keeps_one_box() -> None:
 
 
 def test_a_window_the_recurrence_reads_past_is_refused_with_the_read() -> None:
+    copy = where(WINDOWS.triangle, "R[i, a, b] = c[i, a, b]")
+    recurrence = where(WINDOWS.triangle, "R[i, a, b] = -R[i, a - 2, b + 2]")
     assert WINDOWS.rejected_row() == (
-        "contract('R', lambda i, a, b: b) illegal: instance triangle.S1[i=2, a=3, "
-        "b=0] reads R[2, 1, 2], which triangle.S0[i=2, a=1, b=2] stored in slot "
-        "2, after triangle.S1[i=2, a=2, b=2] stored R[2, 2, 2] there (at nb=3, as "
-        "hinted); contract('R') finds the smallest window that keeps every read, "
-        "lambda i, a, b: (a, b)"
+        "contract('R', lambda i, a, b: b) illegal: R[i, a, b] = -R[i, a - 2, b + "
+        f"2] ({recurrence}) at i=2, a=3, b=0 reads R[2, 1, 2], which R[i, a, b] = "
+        f"c[i, a, b] ({copy}) at i=2, a=1, b=2 stored in slot 2, after R[i, a, b] "
+        f"= -R[i, a - 2, b + 2] ({recurrence}) at i=2, a=2, b=2 stored R[2, 2, 2] "
+        "there (at nb=3, as hinted); contract('R') finds the smallest window that "
+        "keeps every read, lambda i, a, b: (a, b)"
     )
     # before the fusion every box's triangle is read after the last is stored
     with pytest.raises(ValueError) as caught:
@@ -715,12 +732,15 @@ def test_each_work_item_keeps_its_own_window_of_a_number_of_cells() -> None:
     # but a read on another work item than its store does not see it
     with pytest.raises(IllegalCast) as caught:
         WINDOWS.one_triangle.tag(i="g.0", b="l.0")
+    copy = where(WINDOWS.triangle, "R[i, a, b] = c[i, a, b]")
+    recurrence = where(WINDOWS.triangle, "R[i, a, b] = -R[i, a - 2, b + 2]")
     assert str(caught.value) == (
-        "tag(i='g.0', b='l.0') illegal: instance triangle.S0[i=0, a=0, b=4] writes "
-        "R[0, 0, 4] read by triangle.S1[i=0, a=2, b=2] on another work item (at "
-        "nb=3, as hinted): the loop b on l.0 runs them on work items 4 and 2 of "
-        "it, and each work item keeps a window of R of its own, which no other "
-        "work item sees"
+        f"tag(i='g.0', b='l.0') illegal: R[i, a, b] = c[i, a, b] ({copy}) at i=0, "
+        "a=0, b=4 writes R[0, 0, 4], read by R[i, a, b] = -R[i, a - 2, b + 2] "
+        f"({recurrence}) at i=0, a=2, b=2 on another work item (at nb=3, as "
+        "hinted): the loop b on l.0 runs them on work items 4 and 2 of it, and "
+        "each work item keeps a window of R of its own, which no other work item "
+        "sees"
     )
 
 
