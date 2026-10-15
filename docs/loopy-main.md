@@ -133,20 +133,25 @@ Each takes an object already on its side as it is. A domain comes back as an
 
 `loopty run FILE --emit-code` for each example, against `main`:
 
-- `composition`, `fusion`, `pairs`, `spmv`, `sum_factorization`, `travel`:
-  the same text.
-- `assembly`, `calls`, `layer_potential`, `p2p`, `quadrature`,
-  `reshape_layouts`, `stencil_skew`, `storage_layouts`,
+- `composition`, `fusion`, `hexahedra`, `pairs`, `spmv`,
+  `sum_factorization`, `travel`: the same text.
+- `advection`, `assembly`, `calls`, `l2p`, `layer_potential`, `p2p`,
+  `quadrature`, `reshape_layouts`, `stencil_skew`, `storage_layouts`,
   `taylor_reconstruction`, `wavefront_acoustic`:
   - the terms of an affine expression in another order, `x[-1 + n + -1 * i]`
-    for `x[-1 + -1 * i + n]` and `cnt[t_in + 4 * t_out]` for
-    `cnt[4 * t_out + t_in]`, which is how loopy main prints an affine
-    expression over namedisl's order of names;
+    for `x[-1 + -1 * i + n]`, `cnt[t_in + 4 * t_out]` for
+    `cnt[4 * t_out + t_in]` and `R[11 * a + b + 121 * i]` for
+    `R[121 * i + 11 * a + b]`, which is how loopy main prints an affine
+    expression over namedisl's order of names. It is the only difference in
+    `advection` (`L[n + k_0]` for `L[k_0 + n]`), `l2p` and
+    `storage_layouts`;
   - and, where a split or a tile divides a size, plain division in place of
     loopy's floor-division helper, `(3 + n) / 4` for
     `loopy_floor_div_pos_b_int32(3 + n, 4)`, with the helper's definition
     gone: loopy simplifies with `n >= 0` (item 3). With no assumption on the
-    sizes, loopy main writes the helper as 2025.2 does;
+    sizes, loopy main writes the helper as 2025.2 does. Eight of the twelve,
+    all but `advection`, `assembly`, `l2p` and `storage_layouts`, which
+    divide no size;
   - and, in `wavefront_acoustic`'s tiled diamond only, the bounds of the two
     inner loops in other pieces, without the conditions the loops around
     them already imply (`-3 + nx >= 0` inside `if (-2 + nt >= 0 && -3 + nx
@@ -161,9 +166,11 @@ Each takes an object already on its side as it is. A domain comes back as an
     values are the same.
 
 The ledgers (`lanky check --json`, `loopty run --json`) are the same for all
-sixteen examples, and so is everything `python FILE`, `lanky check FILE` and
-`loopty run FILE` print. Every transcript in the documentation is the same
-on both.
+nineteen examples, and so is everything `python FILE`, `lanky check FILE` and
+`loopty run FILE` print, on standard output and on standard error. (The JSON
+of `l2p` prints a set inside a program's term in the order of the process's
+hash seed, on either loopy: #298.) Every transcript in the documentation is
+the same on both.
 
 ## Keeping the branch
 
@@ -185,6 +192,21 @@ caller's statements, with binders of their own, as before. A program's own
 array over a domain is a loopy temporary whose shape is the domain's box.
 Before a compiled run, `contract.made_extents` refuses sizes that would give
 an array the program makes a negative length, as numpy does natively.
+
+Nor, in `src/`, did the examples `l2p`, `hexahedra`, `advection`,
+`layer_potential` and `assembly` and what came with them. A sum's domain
+over only the loops its bounds read (`lower._without_loops_ignored`, note 32
+of [loopy-notes.md](loopy-notes.md)) is loopty's own islpy set, and reaches
+`lp.make_kernel` through `to_named_set` with the others. The zeros a device
+program distributes over its work items are tagged from the kernel's
+instructions, their assignees and loops. `CheckedOpenCLTarget` is loopy's
+plain `OpenCLTarget` with loopty's readings, as the other targets are, and
+the first scheduler's warning is silenced through `silenced_warnings`. The
+work-item check's new relations are loopty's analysis. What did read loopy's
+domains came with the tests and a benchmark: the tests of #264 read a lowered
+kernel's domains through `domains_of`, as the other tests do, and
+`benchmarks/assembly.py`'s `nested` takes them as islpy and gives them back
+as namedisl sets itself, since `--baseline-only` imports no loopty.
 
 When loopy releases with namedisl, the branch drops the Git sources, sets the
 floors to the releases, and merges.
