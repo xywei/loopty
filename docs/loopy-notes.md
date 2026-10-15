@@ -1657,17 +1657,21 @@ and `q_inner`. A loop that runs in sequence holds the sum anyway, so nothing
 showed until a loop that is not a loop, an `ilp` lane, was named: loopy
 opens the sum's loop inside each lane it unrolls.
 
-**Local fix.** `_Builder._loops_left_out` states a sum's domain over the
-loops its bounds read and no others. isl's gist of the domain against its
-statement's loop nest drops what the nest already says, and a loop the gist
-no longer names is left out (`_without_loops_ignored`); the result is checked
-to be the same set wherever the nest holds, which is wherever loopy runs the
-sum's update, since the update carries the statement's own predicates
-(`realize_reduction` gives it `insn.predicates`). Over a box, `b` is
-`[n] -> { [b] : 0 <= b < n }` and its loop holds every lane. A bound that
-reads a loop keeps it: a triangle's `j < i + 1`, or a clause the sum is
+**Local fix.** `_Builder._loops_left_out` states a sum's domain over the loops
+its bounds read and no others. isl's gist of the domain against its
+statement's domain drops what the statement's loops already say, and a loop
+the gist no longer names is left out (`_without_loops_ignored`); the result is
+checked to be the same set wherever the statement's domain holds, which is
+wherever loopy runs the sum's update, since the update carries the statement's
+own predicates (`realize_reduction` gives it `insn.predicates`). Over a box,
+`b` is `[n] -> { [b] : 0 <= b < n }` and its loop holds every lane. So does a
+sum under an affine `when` on its row, which narrows the statement's domain,
+and one bounded by a scalar, which a call fixes as it fixes a size. A bound
+that reads a loop keeps it: a triangle's `j < i + 1`, or a clause the sum is
 narrowed by, keeps the sum nested in that loop, a loop of the sum per lane
 where the loop is an `ilp` one. A domain that names a ragged row's length,
-which is assigned inside the row's loop, keeps every loop, as before. The
-facts are those of the term, and the device code of every other shape the
-S1 driver times is the same as before.
+which is assigned inside the row's loop, keeps every loop, as before, and so
+does the sum of a statement that never runs (a `when` that holds nowhere):
+within an empty set every set is the same one, and the gist would make the
+domain unbounded. The facts are those of the term, and the device code of
+every other shape the S1 driver times is the same as before.
