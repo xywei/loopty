@@ -243,6 +243,7 @@ def _retargeted(schedules: list, target: str) -> tuple[list, int]:
     generate the code, so a schedule that only works on one target is refused
     here, by name, rather than quietly run on the target it was written for.
     """
+    from loopty.lower import pyopencl_installed
     from loopty.schedule import IllegalCast, UnbuildableSchedule
 
     out: list = []
@@ -252,6 +253,12 @@ def _retargeted(schedules: list, target: str) -> tuple[list, int]:
             out.append(schedule)
             continue
         try:
+            if target == "opencl" and not pyopencl_installed():
+                # A schedule for a device is checked without pyopencl, and run
+                # with it, which is what --target opencl asks for.
+                raise ImportError(
+                    "running on a device needs pyopencl, which is not installed"
+                )
             out.append(schedule.retarget(target))
         except (
             UnbuildableSchedule,
@@ -574,6 +581,7 @@ class RunVerb:
         from lanky.plugins import registry
 
         from loopty.executor import LoopyExecutor, emit_code
+        from loopty.lower import pyopencl_installed
         from loopty.oracle import IslOracle
         from loopty.schedule import Schedule, definition_of
         from loopty.trace import TraceError
@@ -601,6 +609,10 @@ class RunVerb:
                 )
                 continue
             try:
+                if target == "opencl" and not pyopencl_installed():
+                    raise ImportError(
+                        "running on a device needs pyopencl, which is not installed"
+                    )
                 schedules.append(Schedule(kernel, target=target or "c"))
             except (TypeError, ValueError, ImportError, TraceError) as exc:
                 # ImportError is `--target opencl` with no pyopencl installed,
@@ -655,6 +667,15 @@ class RunVerb:
             if not ok:
                 print(f"  not buildable for the {schedule.target} target: {reason}")
                 continue
+            if schedule.target == "opencl" and not pyopencl_installed():
+                # The file's own device schedule, where pyopencl is not
+                # installed: its facts are checked all the same, and are in
+                # the ledger below; the run is made where pyopencl is.
+                print(
+                    "  not run here: running on a device needs pyopencl, which "
+                    "is not installed; its facts are checked all the same"
+                )
+                continue
             try:
                 if args.emit_code:
                     print(emit_code(schedule))
@@ -703,10 +724,13 @@ class RunVerb:
 
         if len(ledger):
             print()
-            print(ledger.render())
+            print(_rendered(ledger))
         report_proved, report_unproved, report_lean = _lean_reports()
         if report_proved is not None:
             report_proved(ledger)
+            report_missing = _missing_report()
+            if report_missing is not None:
+                report_missing(ledger)
             report_unproved(ledger, verbose=getattr(args, "verbose", False))
         show_lean = getattr(args, "show_lean", None)
         if show_lean is not None and report_lean is not None:
@@ -738,6 +762,30 @@ def _lean_reports() -> tuple[Any, Any, Any]:
     except ImportError:  # a lanky from before them
         return None, None, None
     return report_proved, report_unproved, report_lean
+
+
+def _missing_report() -> Any:
+    """lanky's ``WITHOUT LEAN`` lines, what a row lacks to be proved, if it has them."""
+    try:
+        from lanky.cli import report_missing
+    except ImportError:  # a lanky from before them
+        return None
+    return report_missing
+
+
+def _rendered(ledger: Any) -> str:
+    """The ledger's table as ``lanky check`` prints it: in a terminal, as wide as it.
+
+    Written to a file or a pipe, the statement column is lanky's default
+    width, so a transcript does not depend on the window it was made in. A
+    lanky from before the column fitted the terminal prints it at that
+    width everywhere.
+    """
+    try:
+        from lanky.cli import terminal_columns
+    except ImportError:  # a lanky from before it
+        return ledger.render()
+    return ledger.render(columns=terminal_columns())
 
 
 def build_parser() -> argparse.ArgumentParser:

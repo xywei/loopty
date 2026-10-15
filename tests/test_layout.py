@@ -38,6 +38,19 @@ def load(path: Path):
 
 EXAMPLE = load(ROOT / "examples" / "storage_layouts.py")
 
+#: A layout at every size that pads its rows: at n = 1 it stores every row at 0.
+PADDED = [
+    ("tested", None),
+    ("refuted", "padded stores (i=0, j=1) and (i=0, j=0) both at 0 (at m=2, n=1)"),
+    ("refuted", "padded stores no cell at 1 of Fin(n*m) (at m=2, n=1)"),
+]
+
+#: The DOFArray with the element innermost, which makes ne a stride.
+NESTING = (
+    "dof_array stores (e=1, a=1, b=2, c=2) at 52, and dim_tags N0,N1,N2,N3 at 51 "
+    "(at ne=2)"
+)
+
 
 def decided(obj) -> list[tuple[str, str, str]]:
     oracle = IslOracle()
@@ -84,6 +97,14 @@ def test_grudges_dim_tags_store_every_cell_where_the_dof_array_does() -> None:
         )
     ]
     assert EXAMPLE.as_dim_tags.facts()[0].where == "storage_layouts.py:101"
+
+
+def test_a_nesting_with_a_size_inside_is_refuted_at_a_size() -> None:
+    # e innermost makes ne a stride, so isl asks the claim at ne from 1 to 6
+    (fact,) = EXAMPLE.dof_array.same_as("N0,N1,N2,N3").facts()
+    result = IslOracle().establish(fact)
+    assert result.status is Status.REFUTED
+    assert result.provenance["reason"] == NESTING
 
 
 def test_a_wrong_nesting_is_refuted_with_the_cell_it_moves() -> None:
@@ -178,17 +199,78 @@ def test_a_quasi_affine_layout_is_decided_one_for_one_or_refuted() -> None:
     )
 
 
-def test_a_size_in_a_layouts_body_is_said_to_be_one() -> None:
+def test_a_size_in_a_layouts_body_is_the_size_and_a_call_gives_it() -> None:
     def backwards(i: Fin[n]) -> Fin[n]:  # noqa: F821
         return n - 1 - i  # noqa: F821
 
+    checked = layout(backwards)
+    # n - 1 - i is affine, so isl decides it for every n
+    assert [status for status, _ in reasons(checked)] == ["decided"] * 3
+    assert checked(1, n=4) == 2
     with pytest.raises(LayoutError) as caught:
-        layout(backwards)
+        checked(1)
     assert str(caught.value) == (
-        "backwards: the address reads the size n, which a layout cannot know: it "
-        "is called with a cell's indices alone, in a kernel too; make the sizes "
-        "it computes with module constants, N = 8 and Fin[N] for Fin[n]"
+        "backwards computes with the size n, which a call gives by name: "
+        "backwards(i, n=...)"
     )
+
+
+def dof_array(e: Fin[ne], i: Fin[n], j: Fin[n], k: Fin[n]) -> Fin[ne * n**3]:  # noqa: F821
+    """grudge's DOFArray at every order, as ``examples/hexahedra.py`` declares it."""
+    return n**3 * e + (i + n * j + n**2 * k)  # noqa: F821
+
+
+def test_a_layout_at_every_size_is_tested_by_isl_at_a_few() -> None:
+    every = layout(dof_array)
+    assert every.polynomial and every.sampled() == ("n",)
+    oracle = IslOracle()
+    for fact in every.facts():
+        result = oracle.establish(fact)
+        assert result.status is Status.TESTED, fact.statement
+        assert result.provenance["detail"] == (
+            "decided by isl at n = 1 to 6; n multiplies an index in the address "
+            "of dof_array, which isl cannot state for every n; Lean proves it "
+            "for every n"
+        )
+    assert [fact.statement for fact in every.facts()] == [
+        "dof_array stores every cell at an address of Fin(ne*n**3)",
+        "dof_array stores no two cells at one address",
+        "dof_array stores a cell at every address of Fin(ne*n**3)",
+    ]
+    # loopy's dim_tags at every order too, the strides products of extents
+    (same,) = every.same_as("N3,N0,N1,N2").facts()
+    assert oracle.establish(same).status is Status.TESTED
+    # at a size, the layout is one isl states
+    assert [status for status, _ in reasons(every.at(n=3))] == ["decided"] * 3
+    assert every(1, 2, 0, 1, n=3) == 27 + 2 + 9
+    # a dim_tags layout computes its own address, from its strides (Codex)
+    assert every.same_as("N3,N0,N1,N2").second(1, 2, 0, 1, n=3) == 27 + 2 + 9
+    assert every.same_as("N3,N2,N1,N0").second(0, 1, 0, 2, n=3) == 9 + 2
+    with pytest.raises(LayoutError, match=r"isl cannot state; .*dof_array.at\(n=4\)"):
+        every.relation()
+
+
+def test_products_that_cancel_leave_a_layout_isl_states() -> None:
+    # Codex: n * i - n * i + i was taken for a layout at every size, which
+    # sampled no size and then asked isl a question it cannot state
+    def cancelling(i: Fin[n]) -> Fin[n]:  # noqa: F821
+        return n * i - n * i + i  # noqa: F821
+
+    checked = layout(cancelling)
+    assert not checked.polynomial
+    assert [status for status, _ in reasons(checked)] == ["decided"] * 3
+    assert checked(2, n=3) == 2
+    # traced, the body's term is the same address multiplied out
+    from lanky.terms import Var
+
+    assert checked(Var("i"), n=Var("n")) is not None
+
+
+def test_a_layout_at_every_size_is_refuted_at_the_size_isl_finds() -> None:
+    def padded(i: Fin[n], j: Fin[m]) -> Fin[n * m]:  # noqa: F821
+        return i + (n - 1) * j  # noqa: F821
+
+    assert [result for result in reasons(layout(padded))] == PADDED
 
 
 #: Module constants a layout computes with, directly and through a helper.
@@ -272,10 +354,6 @@ def test_lanky_check_collects_the_layouts_of_a_file() -> None:
             "give 3 levels for the 4 axes",
         ),
         (lambda: EXAMPLE.dof_array.same_as("N3,M0,N1,N2"), "'M0' is no nesting"),
-        (
-            lambda: EXAMPLE.dof_array.same_as("N0,N1,N2,N3"),
-            "the axis e of dof_array has the extent ne, which is not a number",
-        ),
     ],
 )
 def test_a_layout_is_written_as_a_function_of_its_cells(fn, words) -> None:

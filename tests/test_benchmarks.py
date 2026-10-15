@@ -14,15 +14,18 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from lanky import terms as lanky_terms
 from lanky.prelude import FnType
 
 pytest.importorskip("loopy")
 
 #: ``examples/hexahedra.py`` writes its theorem with families of several
-#: indices, which are lanky main's and not the 0.2.0 release's.
+#: indices, which are lanky main's and not the 0.2.0 release's, and its
+#: operators' claims put a literal domain beside a symbolic one (lanky#144).
 pytestmark = pytest.mark.skipif(
-    not hasattr(FnType, "indices"),
-    reason="the demo's theorems index families at several indices (lanky main)",
+    not (hasattr(FnType, "indices") and hasattr(lanky_terms, "literal_binders")),
+    reason="the demo's theorems index families at several indices, and its claims "
+    "put a literal domain beside a symbolic one (lanky main)",
 )
 
 DRIVER = Path(__file__).resolve().parent.parent / "benchmarks" / "hexahedra.py"
@@ -124,6 +127,56 @@ def test_the_report_matches_copies_by_mesh_and_device_and_drops_wrong_rows(
     # the other mesh is another measurement, in a table of its own
     assert out.count("weak_grad: GDOFs/s") == 2
     assert "4**3 hexahedra on a GPU" in out
+
+
+def test_the_c_mode_times_the_three_programs_with_one_set_of_flags(
+    tmp_path, capsys
+) -> None:
+    # The weak gradient's passes one after another, fused, and fused and
+    # contracted, each checked against numpy before it is timed, all built
+    # with loopty's flags and the same extra ones.
+    import csv
+
+    driver = _driver()
+    paths = []
+    for flags in ("-O2", "-O1"):
+        out = tmp_path / f"c{flags}.csv"
+        paths.append(str(out))
+        driver["main"](
+            [
+                "c",
+                "--elements",
+                "2",
+                "--orders",
+                "3",
+                "--warmup",
+                "0",
+                "--reps",
+                "1",
+                "--batch",
+                "1",
+                f"--cflags={flags}",
+                "--csv",
+                str(out),
+            ]
+        )
+        with out.open(newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        assert [row["variant"] for row in rows] == [
+            "loopty on C, passes one after another",
+            "loopty on C, fused",
+            "loopty on C, fused and contracted",
+        ]
+        assert all(float(row["agree"]) <= driver["AGREEMENT"] for row in rows)
+        assert {row["flags"] for row in rows} == {f"-std=c99 -O3 -fPIC -fwrapv {flags}"}
+        assert {row["platform"] for row in rows} == {"C target, one thread"}
+    capsys.readouterr()
+    # two sets of flags are two measurements, each in a table of its own
+    driver["main"](["report", *paths])
+    out = capsys.readouterr().out
+    assert out.count("weak_grad: GDOFs/s") == 2
+    assert "built with -std=c99 -O3 -fPIC -fwrapv -O1" in out
+    assert out.count("| loopty on C, fused and contracted | ") == 2
 
 
 # {{{ the advection right-hand side

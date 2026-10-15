@@ -178,6 +178,23 @@ def test_a_shift_register_keeps_every_access_at_a_constant_index() -> None:
         agrees(WINDOWS.burgers, WINDOWS.registers, burgers_inputs(n))
 
 
+def test_a_recurrence_along_the_loop_is_a_shift_register_too() -> None:
+    # running.S1 reads f[j - 1] as well as storing f[j]: only its store is
+    # the newest register, and its read is the one before
+    schedule = WINDOWS.running_registers
+    assert repr(schedule.windows["f"].placement) == "lambda j: j % 2"
+    code = emit_code(schedule)
+    assert "f_window[0] = f_window[1];" in code
+    assert "f_window[1] = f_window[0] + u[j];" in code
+    assert "%" not in code.split("{", 1)[1]
+    for n in (1, 2, 16):
+        agrees(
+            WINDOWS.running_differences,
+            schedule,
+            {"u": Arr.from_numpy(velocity(n)), "y": Arr.zeros(n)},
+        )
+
+
 def test_registers_where_the_window_is_not_one_along_a_loop_are_refused() -> None:
     with pytest.raises(ValueError, match="the accesses span 3 cells of f along j"):
         WINDOWS.fused.contract("f", lambda j: j % 4, registers=True)
@@ -247,22 +264,48 @@ def test_a_placement_is_quasi_affine_in_the_indices(placement, error, words) -> 
 
 def test_a_tag_before_the_window_is_refused_and_one_after_is_checked() -> None:
     # A window is taken over an order, so a loop that runs its instances in
-    # none (ilp, here on the row of the first pass) refuses it. The elements
-    # of the passes are independent, but a window of one row shared by every
-    # element is not, and a group axis after it is refused with the pair.
+    # none (ilp, here on the row of the first pass) refuses it. A tag after
+    # it is checked against its slots: a row of n cells is one for every
+    # work item, on C as once retargeted, so two elements on two work groups
+    # store into one slot of it, and the group axis is refused with the pair.
     example = load(ROOT / "examples" / "sum_factorization.py")
     fused = example.fused
     assert ("monotone", "decided") in facts(fused.tag(b="ilp"))[-3:]
     with pytest.raises(ValueError, match="b on ilp runs its instances in no order"):
         fused.tag(b="ilp").contract("v")
+    assert not fused.contract("v").windows["v"].private
     with pytest.raises(IllegalCast) as caught:
         fused.contract("v").tag(e="g.0")
-    # two elements store into one slot, and the group axis orders them not
     assert (
         "stores v[0, 0, 0] in slot 0 of the window lambda e, a, b: b, which "
         "the same statement at e=1, a=0, b=0"
     ) in str(caught.value)
-    assert "overwrite" in str(caught.value)
+    assert str(caught.value).endswith(
+        "v is kept in a window over the order this tag drops, one for every "
+        "work item since its size is not a number (in global memory on "
+        "OpenCL); a window of a number of cells is each work item's own"
+    )
+
+
+def test_a_window_of_a_size_on_opencl_is_shared_and_a_group_axis_refused() -> None:
+    # A row of n cells is kept in global memory on OpenCL, one for every work
+    # item, so two elements on two work groups store into one slot of it.
+    pytest.importorskip("pyopencl")
+    example = load(ROOT / "examples" / "sum_factorization.py")
+    on_device = example.fused.retarget("opencl").contract("v")
+    assert not on_device.windows["v"].private
+    with pytest.raises(IllegalCast) as caught:
+        on_device.tag(e="g.0")
+    message = str(caught.value)
+    assert (
+        "stores v[0, 0, 0] in slot 0 of the window lambda e, a, b: b, which "
+        "along_r.S0[e=1, a=0, b=0]"
+    ) in message
+    assert message.endswith(
+        "; v is kept in a window over the order this tag drops, one for every "
+        "work item since its size is not a number (in global memory on "
+        "OpenCL); a window of a number of cells is each work item's own"
+    )
 
 
 @kernel
@@ -412,7 +455,17 @@ def windows_and_arrays(target: str) -> list[tuple[Schedule, Schedule, dict]]:
             row_inputs(),
         ),
         (on(example.fused), on(example.contracted), example.inputs()),
+        (on(WINDOWS.boxed), on(WINDOWS.one_triangle), triangle_inputs()),
     ]
+    if target == "opencl":
+        # each box a work group, and its triangle the work item's own
+        out.append(
+            (
+                on(WINDOWS.boxed),
+                on(WINDOWS.one_triangle).tag(i="g.0"),
+                triangle_inputs(),
+            )
+        )
     return out
 
 
@@ -522,6 +575,9 @@ def test_a_loop_run_backwards_takes_its_window_and_a_window_refuses_it() -> None
     [("c", "ilp"), ("opencl", "l.0"), ("opencl", "g.0"), ("opencl", "vec")],
 )
 def test_the_loop_of_a_window_on_a_parallel_axis_is_refused(target, tag) -> None:
+    # On a hardware axis the window is each work item's own, and the read of
+    # f[j - 2] is on another work item than its store; ilp and vec run the
+    # loop in one work item, in no order.
     if target == "opencl":
         pytest.importorskip("pyopencl")
     on_device = Schedule(WINDOWS.burgers, target=target, sizes={"n": 16}).fuse(
@@ -530,7 +586,10 @@ def test_the_loop_of_a_window_on_a_parallel_axis_is_refused(target, tag) -> None
     with pytest.raises(IllegalCast) as caught:
         on_device.contract("f").tag(j=tag)
     assert str(caught.value).endswith(
-        "; f is kept in a window over the order this tag drops"
+        "each work item keeps a window of f of its own, which no other work item "
+        "sees"
+        if tag in ("l.0", "g.0")
+        else "; f is kept in a window over the order this tag drops"
     )
     # so is the inner loop of a split of it
     with pytest.raises(IllegalCast):
@@ -591,6 +650,97 @@ def test_a_window_and_a_substitution_through_it_are_refused_together() -> None:
         "contract('f'): substitute('g') computes g from f where g is read, so f "
         "is read there too, which a window is not taken over; keep f in a "
         "window or compute g where it is read, not both"
+    )
+
+
+# }}}
+
+
+# {{{ a triangle: over a domain, two writers, a recurrence, each work item's own
+
+
+def triangle_inputs(boxes: int = 3) -> dict:
+    rng = np.random.default_rng(0)
+    return {
+        "c": Arr.from_numpy(rng.random((boxes, 2, WINDOWS.Q))),
+        "s": Arr.zeros(boxes),
+    }
+
+
+def test_a_window_of_a_triangle_its_recurrence_reads_keeps_one_box() -> None:
+    # R is over Where[i, a, b, a + b <= P] (#244), stored by a copy of two
+    # rows and by the recurrence that reads the row two up (#213): fused on
+    # the boxes, one box's triangle is live at a time, in the 5 x 5 box it
+    # spans
+    windowed = WINDOWS.one_triangle
+    window = windowed.windows["R"]
+    assert repr(window.placement) == "lambda i, a, b: (a, b)"
+    assert window.extents == (5, 5) and window.private
+    assert [stmt.id for stmt in window.producers] == ["triangle.S0", "triangle.S1"]
+    assert [stmt.id for stmt in window.readers] == ["triangle.S1", "triangle_sums.S0"]
+    assert [(f.kind, f.status, f.statement) for f in windowed.facts()[-2:]] == [
+        (
+            "definedness",
+            Status.DECIDED,
+            "for contract('R'), every cell of R that triangles reads, triangle.S0 "
+            "or triangle.S1 has stored by the time it is read",
+        ),
+        (
+            "no-clobber",
+            Status.DECIDED,
+            "no read of R sees its slot overwritten after contract('R', lambda i, "
+            "a, b: (a, b)): R kept in 25 cells, R[i, a, b] in slot (a, b)",
+        ),
+    ]
+    assert "double R_window[5 * 5];" in emit_code(windowed)
+    agrees(WINDOWS.triangles, windowed, triangle_inputs())
+
+
+def test_a_window_the_recurrence_reads_past_is_refused_with_the_read() -> None:
+    copy = where(WINDOWS.triangle, "R[i, a, b] = c[i, a, b]")
+    recurrence = where(WINDOWS.triangle, "R[i, a, b] = -R[i, a - 2, b + 2]")
+    assert WINDOWS.rejected_row() == (
+        "contract('R', lambda i, a, b: b) illegal: R[i, a, b] = -R[i, a - 2, b + "
+        f"2] ({recurrence}) at i=2, a=3, b=0 reads R[2, 1, 2], which R[i, a, b] = "
+        f"c[i, a, b] ({copy}) at i=2, a=1, b=2 stored in slot 2, after R[i, a, b] "
+        f"= -R[i, a - 2, b + 2] ({recurrence}) at i=2, a=2, b=2 stored R[2, 2, 2] "
+        "there (at nb=3, as hinted); contract('R') finds the smallest window that "
+        "keeps every read, lambda i, a, b: (a, b)"
+    )
+    # before the fusion every box's triangle is read after the last is stored
+    with pytest.raises(ValueError) as caught:
+        Schedule(WINDOWS.triangles, sizes={"nb": 3}).contract("R")
+    assert str(caught.value).endswith(
+        "fuse its readers with triangle.S0 and triangle.S1 first, so that fewer "
+        "cells are live at once"
+    )
+    with pytest.raises(IllegalCast, match=r"stored in slot \(2, 2\), after"):
+        Schedule(WINDOWS.triangles, sizes={"nb": 3}).contract(
+            "R", lambda i, a, b: (a, b)
+        )
+
+
+def test_each_work_item_keeps_its_own_window_of_a_number_of_cells() -> None:
+    # each box a work group keeps its own triangle (#214), so two boxes'
+    # stores into one slot need no order
+    on_groups = WINDOWS.one_triangle.tag(i="g.0")
+    assert facts(on_groups)[-3:] == [
+        ("bijective", "decided"),
+        ("monotone", "decided"),
+        ("buildable", "refuted"),  # C has no work groups
+    ]
+    # but a read on another work item than its store does not see it
+    with pytest.raises(IllegalCast) as caught:
+        WINDOWS.one_triangle.tag(i="g.0", b="l.0")
+    copy = where(WINDOWS.triangle, "R[i, a, b] = c[i, a, b]")
+    recurrence = where(WINDOWS.triangle, "R[i, a, b] = -R[i, a - 2, b + 2]")
+    assert str(caught.value) == (
+        f"tag(i='g.0', b='l.0') illegal: R[i, a, b] = c[i, a, b] ({copy}) at i=0, "
+        "a=0, b=4 writes R[0, 0, 4], read by R[i, a, b] = -R[i, a - 2, b + 2] "
+        f"({recurrence}) at i=0, a=2, b=2 on another work item (at nb=3, as "
+        "hinted): the loop b on l.0 runs them on work items 4 and 2 of it, and "
+        "each work item keeps a window of R of its own, which no other work item "
+        "sees"
     )
 
 

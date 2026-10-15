@@ -94,15 +94,21 @@ def _resolve(obj: Any, target: str | None = None) -> tuple[Term, Any, Lowering, 
         # Asked before loopy is, so that an accepted-but-unbuildable schedule
         # names the limit it hits instead of throwing from code generation.
         obj.require_buildable()
+        # A device schedule built where pyopencl is not installed is checked,
+        # and its code is generated and run where pyopencl is.
+        from loopty.lower import require_pyopencl
+
+        require_pyopencl(obj.kernel)
         return obj.term, obj.kernel, obj.lowering, obj.target
     term = obj if isinstance(obj, Term) else getattr(obj, "term", None)
     if term is None and hasattr(obj, "trace"):
         term = obj.trace()
     if not isinstance(term, Term):
         raise TypeError(f"{obj!r} is neither a kernel, a schedule, nor a term")
-    from loopty.lower import lower_generic
+    from loopty.lower import lower_generic, require_pyopencl
 
     lowering = lower_generic(term, target or "c")
+    require_pyopencl(lowering.kernel)
     return term, lowering.kernel, lowering, target or "c"
 
 

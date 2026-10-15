@@ -473,6 +473,38 @@ def fill_half(s: Real, R: Arr[Fin[n], Real]) -> all(R[i] == s for i in Fin[n]) &
         R[i] = s
 
 
+@theorem
+def constant_table(
+    n: Nat, k: Real, R: Fn[Nat, Real], h: all(R(i) == k for i in Fin[n])
+) -> all(R(i) == R(j) for i in Fin[n] for j in Fin[n]):
+    """A table of one real ``k`` holds it everywhere, so any two cells agree."""
+
+
+@kernel(uses=[constant_table])
+def fill_real(s: Real, R: Arr[Fin[n], Real]) -> all(R[i] == s for i in Fin[n]):
+    """Fills ``R`` with a real ``s``, which the theorem's real ``k`` stands for."""
+    for i in R.dom:
+        R[i] = s
+
+
+@kernel(uses=[constant_table])
+def fill_agrees(s: Real, R: Arr[Fin[n], Real]) -> all(R[i] == s for i in Fin[n]) & all(
+    R[i] == R[j] for i in Fin[n] for j in Fin[n]
+):
+    """Claims what the theorem gives at ``k = s``: decided by its instance."""
+    for i in R.dom:
+        R[i] = s
+
+
+@kernel(uses=[constant_table])
+def fill_shifted(s: Real, R: Arr[Fin[n], Real]) -> all(
+    R[i] == s + 0.1 for i in Fin[n]
+):
+    """A real computed from ``s`` rounds: the theorem's ``k`` does not stand for it."""
+    for i in R.dom:
+        R[i] = s + 0.1
+
+
 # }}}
 
 

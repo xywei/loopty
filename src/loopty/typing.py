@@ -162,6 +162,7 @@ __all__ = [
     "ordering_facts",
     "postcondition_facts",
     "postcondition_id",
+    "postcondition_statement",
     "reduction_facts",
     "render_instance",
     "requirement_facts",
@@ -2499,6 +2500,16 @@ class AfterCall:
         return render(self.claim)
 
 
+def postcondition_statement(term: Term, claim: Any) -> str:
+    """A postcondition as the ledger says it, and the tolerance its reals are taken to.
+
+    See :mod:`loopty.reals`.
+    """
+    from loopty.reals import statement
+
+    return statement(term, claim)
+
+
 def postcondition_facts(
     term: Term,
     owner: str,
@@ -2514,7 +2525,7 @@ def postcondition_facts(
         Fact(
             id=postcondition_id(owner, module=module, line=line),
             kind="postcondition",
-            statement=render(term.post),
+            statement=postcondition_statement(term, term.post),
             term=AfterCall(term.name, term.post),
             status=Status.ASSUMED,
             provenance={"kernel": term.name},
@@ -3252,7 +3263,7 @@ def _call_facts(
                 kind="postcondition-in-scope",
                 statement=(
                     f"after each call {_call_text(call)} at {call.where}: "
-                    f"{render(call.post)}"
+                    f"{postcondition_statement(term, call.post)}"
                 ),
                 term=AfterCall(call.callee, call.post),
                 status=Status.DECIDED,

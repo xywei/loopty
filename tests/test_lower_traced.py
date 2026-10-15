@@ -1319,6 +1319,135 @@ def test_a_reduction_object_two_statements_share_is_planned_in_each() -> None:
 # }}}
 
 
+# {{{ a sum's domain names the loops its bounds read, and no others (#264)
+
+
+@kernel
+def along_rows(
+    F: Arr[Fin[nq], Fin[n], Fin[n], Real],  # noqa: F821
+    v: Arr[Fin[nq], Fin[ne], Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[nq], Fin[ne], Fin[n], Real],  # noqa: F821
+):
+    """Each field's own matrix applied to each element's row, as along_s is."""
+    for q in y.dom:
+        for e in y.dom[q]:
+            for j in y.dom[q, e]:
+                y[q, e, j] = reduce_sum(F[q, j, b] * v[q, e, b] for b in F.dom[q, j])
+
+
+def _domain_of(term, iname: str) -> isl.Set:
+    """The loopy domain that defines ``iname`` in the lowered ``term``."""
+    from loopty.lower import lower_generic
+
+    for domain in lower_generic(term, "c").kernel.default_entrypoint.domains:
+        if iname in domain.get_var_names(isl.dim_type.set):
+            return domain
+    raise AssertionError(f"no domain defines {iname}")
+
+
+def test_a_sum_over_a_box_names_no_loop_of_its_statement() -> None:
+    # The bound of b is n, whatever q and j are, so b's domain is a box of its
+    # own, as plain loopy writes it, and not one nested in q, e and j.
+    params = set(_domain_of(along_rows.trace(), "b").get_var_names(isl.dim_type.param))
+    assert not params & {"q", "e", "j"}, params
+
+
+def test_a_sum_whose_bound_reads_a_loop_stays_nested_in_it() -> None:
+    # The bound of j is i + 1: its domain names i, and loopy opens the loop
+    # over j inside the one over i.
+    domain = _domain_of(triangle_rows.trace(), "j")
+    assert "i" in domain.get_var_names(isl.dim_type.param)
+    t = np.arange(16.0).reshape(4, 4)
+    out = run(triangle_rows.trace(), a=t, y=np.zeros(4))
+    assert np.allclose(out["y"], np.tril(t).sum(axis=1))
+
+
+def test_an_ilp_split_runs_its_lanes_in_one_loop_of_the_sum() -> None:
+    # The fields three at a time: each lane has an accumulator of its own, and
+    # the three are updated in one loop over b, which is the instruction-level
+    # parallelism the tag asks for. With b's domain nested in q, loopy opened
+    # a loop over b per lane and ran the lanes one after another.
+    from loopty.executor import emit_code
+    from loopty.schedule import Schedule
+
+    schedule = Schedule(along_rows).split("q", 3).tag(q_inner="ilp")
+    assert {fact.status.value for fact in schedule.facts()} == {"decided"}
+    code = emit_code(schedule)
+    assert code.count("for (int32_t b = ") == 1, code
+    rng = np.random.default_rng(0)
+    for nq in (3, 5):  # a multiple of the split, and not
+        F = rng.standard_normal((nq, 4, 4))
+        v = rng.standard_normal((nq, 2, 4))
+        out = run(schedule, F=F, v=v, y=np.zeros((nq, 2, 4)))
+        assert np.allclose(out["y"], np.einsum("qjb,qeb->qej", F, v)), nq
+
+
+@kernel
+def added_up(m: Nat, x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """Each cell added up m times: a sum bounded by a scalar."""
+    for i in y.dom:
+        y[i] = reduce_sum(x[i] for j in Fin[m])
+
+
+@kernel
+def first_rows(x: Arr[Fin[n], Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """The first three rows summed, under a guard on the row."""
+    for i in y.dom:
+        with when(i < 3):
+            y[i] = reduce_sum(x[i, j] for j in x.dom[i])
+
+
+def test_a_sum_bounded_by_a_scalar_or_under_a_guard_names_no_loop() -> None:
+    # A scalar is fixed for the call, as a size is; the guard's i < 3 is the
+    # statement's own domain, which the sum's update runs within. So both
+    # sums' loops hold every lane of an ilp split.
+    from loopty.executor import emit_code
+    from loopty.schedule import Schedule
+
+    for each in (added_up, first_rows):
+        params = set(_domain_of(each.trace(), "j").get_var_names(isl.dim_type.param))
+        assert "i" not in params, (each, params)
+    x = np.arange(25.0).reshape(5, 5)
+    schedule = Schedule(first_rows).split("i", 2).tag(i_inner="ilp")
+    assert emit_code(schedule).count("for (int32_t j = ") == 1
+    out = run(schedule, x=x, y=np.zeros(5))
+    assert np.allclose(out["y"], np.where(np.arange(5) < 3, x.sum(axis=1), 0.0))
+    schedule = Schedule(added_up).split("i", 2).tag(i_inner="ilp")
+    assert emit_code(schedule).count("for (int32_t j = ") == 1
+    out = run(schedule, m=3, x=np.arange(5.0), y=np.zeros(5))
+    assert np.allclose(out["y"], 3.0 * np.arange(5.0))
+
+
+@kernel
+def never_summed(x: Arr[Fin[n], Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """A sum under a guard that holds nowhere."""
+    for i in y.dom:
+        with when(i < 0):
+            y[i] = reduce_sum(x[i, j] for j in x.dom[i])
+
+
+def test_a_sum_whose_statement_never_runs_keeps_its_bounds() -> None:
+    # Within an empty nest every set is the same one, and gist made j's
+    # domain the whole line; it is kept as it was, bounded.
+    assert _domain_of(never_summed.trace(), "j").is_bounded()
+    out = run(never_summed.trace(), x=np.arange(16.0).reshape(4, 4), y=np.ones(4))
+    assert np.array_equal(out["y"], np.ones(4))
+
+
+def test_an_ilp_split_around_a_triangle_runs_each_lane_in_turn() -> None:
+    # Here the bound of j reads the lane's row, so each lane has its own loop
+    # over j, and the result is the same.
+    from loopty.schedule import Schedule
+
+    schedule = Schedule(triangle_rows).split("i", 2).tag(i_inner="ilp")
+    t = np.arange(25.0).reshape(5, 5)
+    out = run(schedule, a=t, y=np.zeros(5))
+    assert np.allclose(out["y"], np.tril(t).sum(axis=1))
+
+
+# }}}
+
+
 # {{{ names the generated code cannot use
 
 
