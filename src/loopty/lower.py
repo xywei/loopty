@@ -2547,12 +2547,13 @@ class _Builder:
         """A reduction's ``domain`` without the loops of its statement it ignores.
 
         See :func:`_without_loops_ignored`; the loops are those of statement
-        ``stmt_id``, over its loop nest before a guard narrowed it, and the
-        names a domain may name besides them are the sizes and the binders of
+        ``stmt_id``, over its domain, the points its instruction runs at: an
+        affine ``when`` narrows the domain, and the rest of a guard is the
+        instruction's predicate. The names a domain may name besides them are
+        the ones a call fixes, its sizes and its scalars, and the binders of
         the statement's sums.
         """
         stmt = next(s for s in self.term.stmts if s.id == stmt_id)
-        nest = stmt.domain if stmt.loop_domain is None else stmt.loop_domain
         binders = {
             name
             for reduction in reductions_of(stmt.expr)
@@ -2561,8 +2562,8 @@ class _Builder:
         binders |= self.extra_inames
         return _without_loops_ignored(
             domain,
-            _domain_over(nest, stmt.inames),
-            known={*self.term.sizes, *binders},
+            _domain_over(stmt.domain, stmt.inames),
+            known={*self.term.sizes, *self.scalar_types, *binders},
         )
 
     def _plan_in(
@@ -2893,12 +2894,13 @@ def _without_loops_ignored(
     ``domain`` names it in no constraint. ``gist`` keeps the domain the same
     set wherever ``nest`` holds, which is wherever loopy runs the sum's update,
     since the update carries the statement's own predicates. A loop a bound
-    reads (a triangle's ``j < i``, a ``when`` the sum is narrowed by) stays,
-    and so does the nesting it makes. The result is checked to be that same
-    set, and a domain isl does not simplify so is kept as it was.
+    reads (a triangle's ``j < i``, a clause the sum is narrowed by, ``if k ==
+    j``) stays, and so does the nesting it makes. The result is checked to be
+    that same set, and a domain isl does not simplify so is kept as it was.
 
     ``known`` names the parameters other than the loops that a domain may name
-    and still lose them: the sizes and the binders of sums. A domain that names
+    and still lose them: the sizes, the scalars and the binders of sums, which
+    nothing in the kernel assigns. A domain that names
     anything else keeps every loop, as it was. That is a ragged row's length,
     ``cnt_r`` or ``nl_cnt_r``, which is assigned inside the row's loop, and
     only a domain that names the row's loop is nested where it is assigned.

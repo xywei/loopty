@@ -1382,6 +1382,42 @@ def test_an_ilp_split_runs_its_lanes_in_one_loop_of_the_sum() -> None:
         assert np.allclose(out["y"], np.einsum("qjb,qeb->qej", F, v)), nq
 
 
+@kernel
+def added_up(m: Nat, x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """Each cell added up m times: a sum bounded by a scalar."""
+    for i in y.dom:
+        y[i] = reduce_sum(x[i] for j in Fin[m])
+
+
+@kernel
+def first_rows(x: Arr[Fin[n], Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """The first three rows summed, under a guard on the row."""
+    for i in y.dom:
+        with when(i < 3):
+            y[i] = reduce_sum(x[i, j] for j in x.dom[i])
+
+
+def test_a_sum_bounded_by_a_scalar_or_under_a_guard_names_no_loop() -> None:
+    # A scalar is fixed for the call, as a size is; the guard's i < 3 is the
+    # statement's own domain, which the sum's update runs within. So both
+    # sums' loops hold every lane of an ilp split.
+    from loopty.executor import emit_code
+    from loopty.schedule import Schedule
+
+    for each in (added_up, first_rows):
+        params = set(_domain_of(each.trace(), "j").get_var_names(isl.dim_type.param))
+        assert "i" not in params, (each, params)
+    x = np.arange(25.0).reshape(5, 5)
+    schedule = Schedule(first_rows).split("i", 2).tag(i_inner="ilp")
+    assert emit_code(schedule).count("for (int32_t j = ") == 1
+    out = run(schedule, x=x, y=np.zeros(5))
+    assert np.allclose(out["y"], np.where(np.arange(5) < 3, x.sum(axis=1), 0.0))
+    schedule = Schedule(added_up).split("i", 2).tag(i_inner="ilp")
+    assert emit_code(schedule).count("for (int32_t j = ") == 1
+    out = run(schedule, m=3, x=np.arange(5.0), y=np.zeros(5))
+    assert np.allclose(out["y"], 3.0 * np.arange(5.0))
+
+
 def test_an_ilp_split_around_a_triangle_runs_each_lane_in_turn() -> None:
     # Here the bound of j reads the lane's row, so each lane has its own loop
     # over j, and the result is the same.
