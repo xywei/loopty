@@ -235,17 +235,19 @@ def as_stated(expr: Any) -> Any:
     spelling before the two are matched, and before Lean is shown it. A
     call of a function lanky has no node for, ``sin``, is left a call.
     """
-    from lanky.terms import ELEMENTARY_FUNCTIONS, Elementary
+    from lanky import terms
+
+    stated = getattr(terms, "ELEMENTARY_FUNCTIONS", ())
 
     def leaf(node: Any) -> Any:
         if (
             isinstance(node, prim.Call)
             and isinstance(node.function, prim.Variable)
             and node.function.name in FUNCTIONS
-            and node.function.name in ELEMENTARY_FUNCTIONS
+            and node.function.name in stated
             and len(node.parameters) == 1
         ):
-            return Elementary(node.function.name, as_stated(node.parameters[0]))
+            return terms.Elementary(node.function.name, as_stated(node.parameters[0]))
         return None
 
     return _mapped(expr, leaf)
