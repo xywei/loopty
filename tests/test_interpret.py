@@ -129,9 +129,13 @@ def test_a_reduction_adds_in_the_order_the_native_sum_does() -> None:
 
 
 @kernel
-def rows(a: Arr[Fin[n], Fin[m], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+def rows(
+    a: Arr[Fin[n], Fin[m], Real],  # noqa: F821
+    w: Arr[Fin[m], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
     for i in y.dom:
-        y[i] = reduce_sum(a[i, j] * 2.0 for j in Fin[m])  # noqa: F821
+        y[i] = reduce_sum(a[i, j] * w[j] for j in w.dom)
 
 
 @kernel
@@ -168,6 +172,7 @@ def test_a_sum_over_a_box_is_enumerated_once_not_at_each_instance(monkeypatch) -
     for count in (3, 30):
         arguments = {
             "a": Arr.from_numpy(rng.standard_normal((count, 7))),
+            "w": Arr.from_numpy(rng.standard_normal(7)),
             "y": Arr.zeros(count),
         }
         calls.clear()
