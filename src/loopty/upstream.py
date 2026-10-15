@@ -372,7 +372,11 @@ def _within(
     of summation is measured against. A cell whose two values match (are
     equal, or are both NaN) agrees, and one that is not finite on either side
     otherwise does not, as :func:`loopty.tolerance.disagreement` has it.
+    Arrays of two shapes do not agree, as :func:`loopty.executor._compare`
+    has it, and their cells are not compared.
     """
+    if got.shape != want.shape:
+        return False, float("inf"), 0.0
     common = np.result_type(got, want)
     got = got.astype(common, copy=False)
     want = want.astype(common, copy=False)

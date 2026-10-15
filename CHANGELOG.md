@@ -14,7 +14,8 @@ All notable changes to loopty are recorded here. The format follows
   numbers `n`, with the theorem's variables bound to the kernel's
   expressions of the sorts it takes them at (a theorem about reals says
   nothing of complex numbers), and an identity the kernel cites, `L == R`,
-  rewrites `R` in `E` into the kernel's `L` first. `examples/layer_potential.py`'s `single_layer` cites
+  rewrites `R` in `E` into the kernel's `L` first; the row names the
+  identity's premises that are not the theorem's. `examples/layer_potential.py`'s `single_layer` cites
   `line_taylor` and the new `by_the_conjugate`, `ratio(alpha, beta) == -beta
   / alpha`, the kernels' ratio by the conjugate, and its ledger reads
   `single_layer adds line_taylor's c(n) for n in 1..5, for every c with away,

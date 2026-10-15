@@ -493,12 +493,38 @@ def _orders_text(orders: Sequence[int]) -> str:
     return ", ".join(str(order) for order in orders)
 
 
+def _premises(series: Series) -> list[str]:
+    """What the row assumes, by name: the theorem's hypotheses, then the identities'.
+
+    An identity's hypothesis is a premise of each part Lean is handed, as the
+    theorem's are, so the row names it too, as ``by_the_conjugate's away``,
+    unless at its values it is one of the theorem's at the bindings, as
+    ``by_the_conjugate``'s ``alpha != 0`` is ``line_taylor``'s ``away``.
+    """
+    from loopty.hypotheses import structural_key, substitute
+
+    bound = dict(series.bindings)
+    names: list[str] = []
+    seen: set[Any] = set()
+    for name, prop in getattr(series.theorem, "hypotheses", ()):
+        names.append(name)
+        seen.add(structural_key(substitute(prop, bound)))
+    for identity, values in series.rewrites:
+        own = getattr(identity.theorem, "__name__", "an identity")
+        for name, prop in getattr(identity.theorem, "hypotheses", ()):
+            key = structural_key(substitute(prop, dict(values)))
+            if key not in seen:
+                seen.add(key)
+                names.append(f"{own}'s {name}")
+    return names
+
+
 def series_statement(owner: str, term: Term, series: Series) -> str:
     """The ledger's words for a row: the kernel, the theorem's terms, for what."""
     theorem = getattr(series.theorem, "__name__", "theorem")
     bound = {name for name, _ in series.bindings}
     free = [name for name, _ in series.theorem.variables if name not in bound]
-    hypotheses = [name for name, _ in getattr(series.theorem, "hypotheses", ())]
+    hypotheses = _premises(series)
     words = (
         f"{owner} adds {theorem}'s {series.family}({series.binder}) for "
         f"{series.binder} in {_orders_text(series.orders)}"

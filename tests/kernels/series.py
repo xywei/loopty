@@ -7,7 +7,8 @@ about, and ``tail_sum`` starts at the zeroth power, which ``from_one``
 leaves out. ``inverse_square`` divides by a power ``halves`` is about,
 which it does not add, and ``complex_sum`` adds the powers of half of a
 complex number, which a theorem about reals says nothing of.
-tests/test_summands.py reads them.
+``premised_sum`` adds ``power_sum``'s powers through ``halved_from_zero``,
+whose premise its row names. tests/test_summands.py reads them.
 """
 
 from __future__ import annotations
@@ -35,6 +36,11 @@ def halves(
 @theorem
 def halved(x: Real) -> x * 0.5 == x / 2:
     """Half of ``x``, by a product: what the kernel computes."""
+
+
+@theorem
+def halved_from_zero(x: Real, nonnegative: x >= 0) -> x * 0.5 == x / 2:
+    """``halved``, for a nonnegative ``x`` only: a premise ``halves`` does not have."""
 
 
 @theorem
@@ -78,5 +84,12 @@ def inverse_square(x: Arr[Fin[m], Real], y: Arr[Fin[m], Real]):
 @kernel(uses=[halves, halved])
 def complex_sum(x: Arr[Fin[m], np.complex128], y: Arr[Fin[m], np.complex128]):
     """The powers of half of a complex ``x[i]``, which ``halves`` is not about."""
+    for i in y.dom:
+        y[i] = reduce_sum((x[i] * 0.5) ** k for k in Fin[ORDER + 1])
+
+
+@kernel(uses=[halves, halved_from_zero])
+def premised_sum(x: Arr[Fin[m], Real], y: Arr[Fin[m], Real]):
+    """``power_sum``'s powers, through an identity with a premise of its own."""
     for i in y.dom:
         y[i] = reduce_sum((x[i] * 0.5) ** k for k in Fin[ORDER + 1])

@@ -226,6 +226,33 @@ def test_an_output_of_another_shape_is_refuted_with_both_shapes(tmp_path) -> Non
     )
 
 
+def test_an_output_of_another_length_is_refuted_within_an_allowance(tmp_path) -> None:
+    # within= compares cell by cell, and 5 cells against 4 is no comparison:
+    # refuted with both shapes, not a broadcasting error (Codex)
+    source = tmp_path / "short.py"
+    source.write_text(
+        "from __future__ import annotations\n"
+        "import numpy as np\n"
+        "from lanky.prelude import Fin, Real\n"
+        "from loopty import Arr, kernel, upstream\n"
+        "@kernel\n"
+        "def copy(x: Arr[Fin[m], Real], y: Arr[Fin[m], Real]):\n"
+        "    for i in y.dom:\n"
+        "        y[i] = x[i]\n"
+        "def example_inputs():\n"
+        "    x = Arr.from_numpy(np.arange(5.0))\n"
+        "    return {'copy': {'x': x, 'y': Arr.zeros((5,))}}\n"
+        "@upstream(copy, within=1e-12)\n"
+        "def short(x, y):\n"
+        "    return {'y': x.numpy()[:4]}\n"
+    )
+    ledger = check_path(source)
+    (row,) = [fact for fact in ledger if fact.kind == KIND]
+    assert row.status is Status.REFUTED
+    assert row.provenance["outputs"]["y"]["shapes"] == [[5], [4]]
+    assert row.provenance["reason"] == "y: [5] cells natively, [4] from short"
+
+
 def test_upstream_takes_a_kernel() -> None:
     with pytest.raises(TypeError, match=r"@upstream\(l2p\)"):
         upstream(len)(lambda: None)

@@ -84,6 +84,16 @@ def test_a_theorem_about_reals_is_not_applied_to_complex_numbers() -> None:
     assert rows(kernels.complex_sum) == []
 
 
+def test_an_identitys_premise_is_named_in_the_row() -> None:
+    """Lean is handed ``halved_from_zero``'s premise, so the row says it (Codex)."""
+    (row,) = rows(kernels.premised_sum)
+    assert row.statement == (
+        "premised_sum adds halves's c(n) for n in 0..3, for every c with first, "
+        "step and halved_from_zero's nonnegative, read over the reals"
+    )
+    assert row.rests_on == (kernels.halves.fact_id, kernels.halved_from_zero.fact_id)
+
+
 def test_a_term_the_theorems_guard_leaves_out_is_not_claimed() -> None:
     """``from_one`` is about ``n >= 1``, so ``x[i] ** 0`` is no term of its."""
     (row,) = rows(kernels.tail_sum)
