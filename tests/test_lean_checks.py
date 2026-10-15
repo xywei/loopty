@@ -1241,13 +1241,13 @@ def test_lean_fails_on_exactly_the_classes_isl_finds_reversed(
     reversed_by_isl: dict[str, list] = {}
     first_violation = Scheduled._first_violation
 
-    def recording(self: Any, schedule: Any) -> Any:
+    def recording(self: Any, schedule: Any, deps: Any = None) -> Any:
         reversed_by_isl["deps"] = [
             dep
-            for dep in self._deps
+            for dep in (self._deps if deps is None else deps)
             if not isl_oracle.is_monotone(schedule, dep.relation).ok
         ]
-        return first_violation(self, schedule)
+        return first_violation(self, schedule, deps)
 
     monkeypatch.setattr(Scheduled, "_first_violation", recording)
     kinds = {
