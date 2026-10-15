@@ -268,22 +268,22 @@ row verbatim, and checked by `scripts/refresh_example_outputs.py`):
 $ lanky check examples/spmv.py
 STATUS   BY             WHERE        OWNER          STATEMENT
 -------  -------------  -----------  -------------  ----------------------------------------------------------------------------------------------
-decided  isl            spmv.py:79   scan           off[0] is in bounds for every instance of S0
-decided  isl            spmv.py:81   scan           off[r + 1] is in bounds for every instance of S1
-decided  isl            spmv.py:79   scan           distinct instances of S0 write distinct cells of off
-decided  isl            spmv.py:79   scan           no cell of off is stored twice, or read before its store
-decided  isl            spmv.py:69   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
-tested   property-test  spmv.py:84   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat]
+decided  isl            spmv.py:81   scan           off[0] is in bounds for every instance of S0
+decided  isl            spmv.py:83   scan           off[r + 1] is in bounds for every instance of S1
+decided  isl            spmv.py:81   scan           distinct instances of S0 write distinct cells of off
+decided  isl            spmv.py:81   scan           no cell of off is stored twice, or read before its store
+decided  isl            spmv.py:71   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+tested   property-test  spmv.py:86   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat]
                                                     | h0: off(0) == 0
                                                     | hs: forall r in Fin(n). off(r + 1) == off(r) + cnt(r)
                                                     |- forall a in Fin(n + 1), b in Fin(n + 1) where a <= b. off(a) <= off(b)
-decided  isl            spmv.py:112  spmv           y[r] is in bounds for every instance of S0
-decided  type           spmv.py:112  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
-decided  isl            spmv.py:112  spmv           distinct instances of S0 write distinct cells of y
-decided  type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
-tested   interpreter    spmv.py:102  spmv           the traced term computes what the body computes
-decided  isl            spmv.py:193  spmv           the order after split(j, 2) runs every dependence of spmv forward
-decided  call           spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+decided  isl            spmv.py:114  spmv           y[r] is in bounds for every instance of S0
+decided  type           spmv.py:114  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
+decided  isl            spmv.py:114  spmv           distinct instances of S0 write distinct cells of y
+decided  type           spmv.py:114  spmv           the accumulation into y[r] over j is approx
+tested   interpreter    spmv.py:104  spmv           the traced term computes what the body computes
+decided  isl            spmv.py:195  spmv           the order after split(spmv.j, 2) runs every dependence of spmv forward
+decided  call           spmv.py:117  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
 ...
 29 facts: 24 decided, 5 tested
 
@@ -335,15 +335,15 @@ And a transformation is a cast, checked before it is applied:
 ```console
 $ python examples/stencil_skew.py
 ...
-Schedule(jacobi).tile('t', 'i', 8, 8) ->
-  IllegalCast: tile(t,i,8,8) illegal: u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:62) at t=0, i=8 writes u[1, 8], read by the same statement at t=1, i=7, scheduled earlier (at nt=16, nx=16, as hinted)
+Schedule(jacobi).tile(jacobi.t, jacobi.i, 8, 8) ->
+  IllegalCast: tile(jacobi.t, jacobi.i, 8, 8) illegal: u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:62) at t=0, i=8 writes u[1, 8], read by the same statement at t=1, i=7, scheduled earlier (at nt=16, nx=16, as hinted)
 ...
-accepted: Schedule(jacobi, target='c').skew(i, by='t').tile(t,i,8,8)
-  loop nest: t_outer i_outer t_inner i_inner
-  decided  isl  skew(i, by='t') renames the instances of jacobi one for one
-  decided  isl  the order after skew(i, by='t') runs every dependence of jacobi forward
-  decided  isl  tile(t,i,8,8) renames the instances of jacobi one for one
-  decided  isl  the order after tile(t,i,8,8) runs every dependence of jacobi forward
+accepted: Schedule(jacobi, target='c').skew(jacobi.i, by=jacobi.t).tile(jacobi.t, jacobi.i, 8, 8)
+  loop nest: jacobi.t.outer jacobi.i.outer jacobi.t.inner jacobi.i.inner
+  decided  isl  skew(jacobi.i, by=jacobi.t) renames the instances of jacobi one for one
+  decided  isl  the order after skew(jacobi.i, by=jacobi.t) runs every dependence of jacobi forward
+  decided  isl  tile(jacobi.t, jacobi.i, 8, 8) renames the instances of jacobi one for one
+  decided  isl  the order after tile(jacobi.t, jacobi.i, 8, 8) runs every dependence of jacobi forward
 ...
 ```
 
@@ -426,7 +426,7 @@ table of row starts. Both compiled runs agree with the native one.
   at once, with a checked fact that no read sees its slot overwritten.
 - **Reassociation is visible in the type.** Splitting an accumulation and summing
   the pieces is not free on floating point. A trace reads the accumulation's
-  class off what it sums, `realize("y", tree=True)` is what lowers it to
+  class off what it sums, `realize(spmv.y, tree=True)` is what lowers it to
   `reassoc`, and the differential comparison against the native run widens its
   tolerance because of that fact and not because someone chose a number. The
   tolerance is per element and local: `exact` is bitwise, and `reassoc` and

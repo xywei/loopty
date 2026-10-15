@@ -6,6 +6,98 @@ All notable changes to loopty are recorded here. The format follows
 
 ## [Unreleased]
 
+A schedule names what it moves by where the file defines it. Every step
+takes handles, paths from the kernel or program it schedules, and no step
+takes a string any more: `l2p.R` is the table the program `l2p` makes,
+`l2p.unpack.box` the loop over boxes of the kernel `unpack` where `l2p`
+calls it, `reconstruct.b` a loop of `reconstruct` itself, and
+`mass_action.nc` one of its sizes. A handle is checked when it is written,
+against the traced kernel, and each step resolves it through what the steps
+before it did, so a loop a split replaced, a fusion merged or a substitution
+took out is refused with that step. Everything a schedule prints names loops
+and arrays by these paths: its repr, its steps in the facts' statements and
+the ledger, the refusals and the fixes they suggest, and `loopty run`.
+
+### Breaking
+
+- **Every step takes handles, and a string is a `TypeError`** that writes
+  the handle for it, computed from the schedule: `contract('R')` is refused
+  with "contract() takes an array handle such as l2p.R, not the string
+  'R'". The step's text is part of a fact's id, so the ids of every
+  schedule's facts change; the kernels' and programs' own facts keep
+  theirs. The migration, step by step, with `k` a kernel and `p` a program:
+
+  | 0.3 | 0.4 |
+  |---|---|
+  | `tag(i="g.0")` | `tag(k.i, "g.0")`, or `on_groups(k.i)` |
+  | `tag(i="l.0")` | `tag(k.i, "l.0")`, or `on_items(k.i)` |
+  | `tag(i_outer="g.0", i_inner="l.0")` | `tag({k.i.outer: "g.0", k.i.inner: "l.0"})`, or `on_groups(k.i.outer).on_items(k.i.inner)` |
+  | `tag(q_inner="ilp")` | `tag(k.q.inner, "ilp")` |
+  | `split("i", 4)` | `split(k.i, 4)`; its loops are `k.i.outer` and `k.i.inner` |
+  | `split("j", 32, inner="j_in", outer="j_out")` | `split(k.j, 32)`: the halves are named by the handle, `inner=` and `outer=` are gone, and loopy's names for them are `j_inner` and `j_outer` |
+  | `interchange("b", "a")` | `interchange(k.b, k.a)` |
+  | `interchange("i_out", "j", "i_in")` | `interchange(k.i.outer, k.j, k.i.inner)` |
+  | `prioritize("s_outer", "t_inner")` | `prioritize(k.s.outer, k.t.inner)` |
+  | `tile("t", "i", 8, 8)` | `tile(k.t, k.i, 8, 8)`; the tiles are `k.t.outer`, `k.i.outer`, `k.t.inner` and `k.i.inner` |
+  | `skew("i", by="t")` | `skew(k.i, by=k.t)` |
+  | `affine("{ [t, i] -> [a, b] : ... }")` | unchanged; the loops the map makes, which no line of the file binds, are `k.loops.a` and `k.loops.b` |
+  | `fuse("flux", "divergence", shift=1)` | `fuse(p.flux.j, p.divergence.i, shift=1)`: a loop of each call, not the call |
+  | `fuse("unpack", "reconstruct", loops=1).fuse("reconstruct", "evaluate", loops=1)` | `fuse(p.unpack.box, p.reconstruct.box, p.evaluate.box)`: one step for any number of calls |
+  | `fuse("along_r", "along_s", loops=2)` | `fuse(k.along_r.a, k.along_s.a)`: the loops are fused from the outermost down to the one named, at the same depth in each call; `loops=` is gone |
+  | `substitute("f")` | `substitute(p.f)` |
+  | `contract("R")`, `contract("v", lambda e, a, b: b)` | `contract(p.R)`, `contract(k.v, lambda e, a, b: b)` |
+  | `realize("y", tree=True)` | `realize(k.y, tree=True)` |
+  | `pack("f")` | `pack(k.f)` |
+  | `atomic("y")` | `atomic(k.y)` |
+  | `assume("nc % 4 == 0")`, `assume("nc >= 1")` | `assume(k.nc % 4 == 0)`, `assume(k.nc >= 1)`: a condition of the sizes' handles, several joined with `&` |
+  | `retarget("opencl")`, `example(...)` | unchanged |
+
+- **A fusion with a program's checked point** is not expressible any more:
+  a checked point is no call and has no loop to name. The fusions of
+  calls are, and a program with a checked point between two calls keeps
+  them apart.
+- **A kernel parameter or loop with the name of an attribute of `Kernel` or
+  `Program`** (`term`, `facts`, `sizes`, ...) is reached by its long form,
+  `k.arrays.term` or `k.loops.sizes`, and its definition warns with
+  `ShadowedName`, naming the long form. `examples/p2p.py`'s `term` is
+  `contribution` for this reason.
+
+### Added
+
+- **Handles** (`loopty.handles`). A kernel's and a program's attributes are
+  its loops, arrays, sizes and calls, made from the traced body: `for` and
+  `sum` binders, array parameters, the arrays a program makes, calls, and
+  calls inside a kernel's loop, each with the line that defines it. The long
+  forms, `k.loops.i`, `k.arrays.f`, `k.calls.flux` and `k.sizes.n`, say
+  what kind of name they are, and a short name that is two kinds at once is
+  refused with both long forms. A kernel called twice is `p.scale[0]` and
+  `p.scale[1]`, and a second `for i` in one body `k.i[1]`; the bare name is
+  refused, listing both with their lines. A split's halves are `.outer` and
+  `.inner`. `loopty.scope(term)` gives the same for a term written by hand,
+  and `dir` lists a scope's names.
+- **`Schedule.on_groups(loop, axis=0)` and `Schedule.on_items(loop,
+  axis=0)`**, `tag` with `"g.<axis>"` and `"l.<axis>"` in words; `tag`
+  takes a dictionary of handles for several tags in one step.
+- **`Schedule.loops` and `Schedule.nest`**: the schedule's loops as handles,
+  and the loop nest by their paths, `l2p.unpack.box` or `jacobi.t.outer`.
+- **The term records where its names come from** (`loopty.term.Binder`,
+  `loopty.term.Callsite`): each binder's name, its line and the calls it is
+  in, and each call's labels, kernel, line and arrays.
+
+### Changed
+
+- Every printed loop, array and statement of a schedule is its path. The
+  zeros a program makes an array with are `the zeros of l2p.R`, with the
+  line that makes it, and not `R.zeros[i_1=0]`, a loop the program made for
+  them is `l2p.R.zeros[0]`, by its axis, and a statement of a call is the call,
+  `l2p.reconstruct`, where its id was printed. A refusal's suggestion is a
+  call the person can paste: `fuse(burgers_rhs.flux.j,
+  burgers_rhs.divergence.i, shift=1) runs every dependence between them
+  forward`.
+- `examples/l2p.py` names its boxes `box` where it named them `i`, and its
+  three calls fuse in one step, so `fused` has two cast facts where it had
+  four.
+
 ## [0.3.0] - 2026-10-15
 
 The third release, on lanky 0.3.0. Five demos, each written after a kernel

@@ -5119,7 +5119,7 @@ class Schedule:
         outermost down to and including the named one, which has to be at
         the same depth in every call::
 
-            fuse(l2p.unpack.i, l2p.reconstruct.i, l2p.evaluate.i)
+            fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box)
 
         runs each box's stored coefficients, its triangle and its targets
         before the next box's. The calls run in the order the program calls

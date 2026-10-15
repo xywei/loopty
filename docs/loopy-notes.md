@@ -158,11 +158,11 @@ statement that another statement leaves has its domain cut after the loops
 around it (note 10), which then names them too. That nesting is a constraint,
 and when the priority disagrees with it loopy warns "Cannot satisfy constraint
 that iname 'r_inner' must be nested within 'j_outer'", drops the priority, and
-generates a nest of its own choosing. `tile("r", "j", 2, 2)` on a ragged
+generates a nest of its own choosing. `tile(k.r, k.j, 2, 2)` on a ragged
 recurrence `w[r + 1, j] = w[r, j] + val[r, j]` asks for `r_outer j_outer
 r_inner j_inner`, which runs the dependence forward, and loopy generated
 `r_inner r_outer j_inner j_outer`, which does not: the compiled `w` disagreed
-with the body's while every cast fact was `decided`. `interchange("j", "r")` on
+with the body's while every cast fact was `decided`. `interchange(k.j, k.r)` on
 the same kernel reaches the same place.
 
 The domains are not the whole of it. loopy also nests a loop inside another
@@ -172,7 +172,7 @@ keep to). A statement loop `k` over a row's cells, with a ragged reduction in
 its body, `w[r + 1, k] = w[r, k] + reduce_sum(val[r, j] for j in val.dom[r])`,
 shares the domain `{ [r, k] }` with the row, and is still nested in `r`,
 because the row length is assigned in `r` and outside `k`. There
-`tile("r", "k", 2, 2)` warned the same way, loopy generated `r_inner r_outer
+`tile(k.r, k.k, 2, 2)` warned the same way, loopy generated `r_inner r_outer
 k_inner k_outer`, and the compiled `w` disagreed with the body's.
 
 **Local fix.** `schedule._nest_reason` reads the nesting after each step with
@@ -180,7 +180,7 @@ loopy's own `find_loop_nest_around_map` (and the loops those loops are nested
 in, in turn) and refuses as unbuildable an order that puts a loop outside a
 loop loopy nests it inside, naming the two, why loopy nests one in the other,
 and the interchange that would put them right. Buildability is asked of the
-schedule as it stands, so a later `interchange("r_inner", "j_outer")` makes the
+schedule as it stands, so a later `interchange(k.r.inner, k.j.outer)` makes the
 tiled schedule buildable again, and it runs the tiles in the order that was
 checked. Checking loopy's own linearized nest against the order would be the
 complete answer, and would cost a scheduling pass per step.
@@ -526,7 +526,7 @@ together, so the instances and their order are the ones the checker approved,
 and isl confirms for each loop that the new domain maps back onto the old one.
 It is done on the kernel code is made from and not on the one later steps
 transform, so a tile splits the loop the checker knows, and the loop counted
-after `affine(...).tile("a", "b", 4, 4)` is `b_inner`. `Schedule.strides` names
+after `affine(...).tile(k.loops.a, k.loops.b, 4, 4)` is `b_inner`. `Schedule.strides` names
 each loop replaced and its expression. A loop with a tag, the loop of a
 reduction, a loop another domain names as a parameter, and a loop whose offset
 involves a loop that does not run around all its instructions keep loopy's
@@ -581,7 +581,7 @@ only running it shows: the `ilp` row below builds, and its run crashed.
 | a loop on `g.*` or `l.*`, target `"c"` | "plain C does not have local hw axes" (or group) | refused: the C target has none |
 | a sum's loop on `l.0`, target `"c"` | `NotImplementedError` | refused, the same |
 | `unr`, `ilp` or `vec` on a loop over `Fin[n]`, `n` free | `isl.Error`: "unbounded optimum" | refused: the loop needs a numeric length |
-| the same after `split("i", 4)`, on the inner half | builds | buildable |
+| the same after `split(k.i, 4)`, on the inner half | builds | buildable |
 | `unr` on `j` in `Fin[i + 1]`, `i` in `Fin[8]` | builds | buildable: at most 8 |
 | `l.1` with no loop on `l.0` (or `g.1`) | "local axis 0 unused" | refused: axes are numbered from 0 |
 | two loops of one statement on `l.0` (or `g.0`, or `vec`) | "instruction 'S0' has multiple inames tagged 'l.0'" | refused |
@@ -1615,7 +1615,7 @@ declared for atomics to declare its atomicity. And loopy types an
 expression of an atomic array as atomic: a sum's accumulator, typed by its
 body, is declared for atomics, and its start is a plain assignment.
 
-**Local fix.** `Schedule.atomic("y")` changes the kernel on OpenCL only.
+**Local fix.** `Schedule.atomic(k.y)` changes the kernel on OpenCL only.
 `y` is declared for atomics; each update becomes `AtomicUpdate`, any other
 write `AtomicInit` and any read `AtomicLoad`; and a read is cast to the
 array's own dtype, `(double) (y[i_0])`, so that nothing computed from it is
@@ -1627,7 +1627,7 @@ dtype is a `buildable` fact refuted on OpenCL, naming the four.
 
 ## 32. A sum's domain that names a loop puts the sum inside it, an `ilp` lane included
 
-**Symptom.** `Schedule(along_s).split("q", 3).tag(q_inner="ilp")`, with
+**Symptom.** `Schedule(along_s).split(along_s.q, 3).tag(along_s.q.inner, "ilp")`, with
 `along_s` of `examples/hexahedra.py` summing `Fs[q, j, b] * v[q, e, k, b, i]`
 over `b in Fs.dom[q, j]`, generated three loops over `b`, one per lane, each
 updating its own accumulator and storing it before the next began:

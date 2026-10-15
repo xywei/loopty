@@ -508,7 +508,7 @@ asked about, and claims core Lean has no words for; each says so with
   equation of floats means at a `NaN`.
 - **Two updates of one cell at the same time:** a step that runs two updates
   of one cell of `y` on two work items or in no order, without
-  `atomic("y")`, is refused with a `disjoint-writes` fact of the step, which
+  `atomic(k.y)`, is refused with a `disjoint-writes` fact of the step, which
   is read off the step's order and its work items, as a crossing is, and is
   stated for isl only; where the cell is read from an array the pair is read
   off an example input, and the fact is the native run's, not isl's; issue
