@@ -8,6 +8,23 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Added
 
+- **sumpy's GPU schedule in the flagship's ledger** (`examples/l2p.py`):
+  `on_a_gpu = fused.retarget("opencl").tag(i="g.0")`, `E2PFromSingleBox`'s
+  own, each box a work group, written with the file's names. Its tag's two
+  facts are rows of `lanky check` (the fusions' are `fused`'s), the python
+  run lists them, and `loopty run` runs it on a device where pyopencl is
+  installed and compares it with the native run; it agreed exactly on PoCL
+  on a CPU and on an H200.
+- **A schedule for a device, checked where pyopencl is not installed**
+  (`loopty.lower.CheckedOpenCLTarget`). A schedule for `"opencl"` is built
+  on loopy's plain OpenCL target there, which has the same kernel and
+  imports nothing, so a file keeps its device schedules at module level and
+  `python`, `lanky check` and `loopty run` read them on any machine.
+  Generating or running their code is refused with the reason
+  (`ImportError: generating and running OpenCL code needs pyopencl, ...`),
+  and `loopty run` says `not run here: running on a device needs pyopencl,
+  which is not installed; its facts are checked all the same`, which is no
+  failure. `--target opencl` without pyopencl is refused by name, as before.
 - **Claims settled by running them** (`loopty.tested`): `@tested` on a
   function that takes nothing and returns whether its claim held, alone or
   with what it measured, puts the claim in the ledger as a `tested` row,
@@ -538,6 +555,13 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Changed
 
+- **A cast's fact id leaves out the target.** What a step means is the same
+  on every target, so the id of a cast's facts is the kernel's definition and
+  the steps (`cast:spmv.spmv@102:split('j', 2, ...):bijective`), and a
+  schedule retargeted (`fused.retarget("opencl").tag(i="g.0")`) shares the
+  facts of the steps it replays with the one it came from: a ledger lists
+  each fusion once. A `buildable` fact and a run's agreement keep the
+  target (`agreement:...:[c].split(...)`).
 - **A substitution through an array computed from inputs alone.**
   `Schedule.substitute` computes an array where it is read from what its
   producer read, and refused one whose producer reads an array an earlier
@@ -653,6 +677,20 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Fixed
 
+- **A program's zeros on a device** (#255, #261). A program zeroes each array
+  it makes in a statement of its own, in loops the lowering names (`i_2`,
+  `i_5`), which ran on every work item: `fused.tag(i="g.0")` was refused at
+  `C.zeros`, and the schedule that was timed tagged `i_2` and `i_5`, names the
+  file never wrote. The zeros' loop along an axis of the array now goes on
+  the axis of the loop that every statement storing the array stores it
+  along, so each work item zeroes the cells it stores, before it stores them,
+  and the work-item check asks about the zeros as about any statement.
+  Where a crossing is a call's and the zeros', the call's is named. Zeros
+  that cannot follow (the array stored along a split loop, or along loops on
+  two axes) stay on every work item, and the refusal says why and that
+  `contract` or `substitute` drops them. grudge's weak gradient in one launch,
+  every node on a work item of its own, is now refused for the row the pass
+  along `r` reads from other work items, not for the zeros of `w`.
 - On OpenCL, a complex number to a natural power below 100 is the products
   numpy's power by an integer takes (`z * ((z * z) * (z * z))` for 5), never
   pyopencl's `cdouble_powr`. loopy writes only the powers by 2, 3 and 4 as

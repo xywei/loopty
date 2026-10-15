@@ -635,7 +635,12 @@ release; the CHANGELOG says when one does.
   so the `monotone` cast also refuses any dependence between instances on two
   work items, with the dependence and the two work items as the witness (the
   stencil's `jacobi` with `i` on `g.0`, the acoustic pair likewise). A
-  statement with no loop on the axis runs on every work item of it. A sum on
+  statement with no loop on the axis runs on every work item of it. The
+  zeros a program makes an array with run where the array is stored: their
+  loop along an axis of the array goes on the axis of the loop that every
+  statement storing the array stores it along, so `examples/l2p.py`'s
+  `fused.tag(i="g.0")`, sumpy's schedule for a GPU, names only the file's
+  loops, and each box's work item zeroes the cells it stores. A sum on
   a local axis stays allowed, since loopy synchronizes its partial sums; its
   body reads on every work item, and its statement stores the result from
   one, so a sum whose body reads what another sum's statement stored is
@@ -1112,6 +1117,12 @@ release; the CHANGELOG says when one does.
   are coarser than the check could be, and refuse more. Without a kernel to
   read a loop's start off (after an `affine` step the kernel rewrite could
   not write), only two instances of one loop are taken to share a work item.
+- The zeros of a program's array follow a loop that stores the array, and
+  not a split of one: after `split("i", 4).tag(i_outer="g.0",
+  i_inner="l.0")`, a statement stores `f[4*i_outer + i_inner]`, along no loop
+  of its own, so the zeros stay on every work item and the tag is refused,
+  saying so. Keeping the array in a window (`contract`) or computing it where
+  it is read (`substitute`) drops the zeros.
 - A kernel called with a zero-length *shape-bearing* argument (a matrix with no
   rows at all) cannot run on the C target: loopy cannot pass an empty array, and
   the workaround that rescues the empty flat buffer of a ragged axis cannot be
@@ -1257,8 +1268,11 @@ on the inputs it runs.
 - **The OpenCL target is not run in CI**
   ([#174](https://github.com/xywei/loopty/issues/174)). `--target opencl`,
   with the `opencl` extra, generates OpenCL and runs it through pyopencl, and
-  nothing in CI runs a device. The demos were run on two device classes by
-  hand, and
+  nothing in CI runs a device. A schedule for `"opencl"` is checked anywhere:
+  where pyopencl is not installed it is built on loopy's plain OpenCL target,
+  its facts are in the ledger, and `loopty run` says it ran none
+  (`examples/l2p.py`'s `on_a_gpu`). The demos were run on two device classes
+  by hand, and
   [docs/device-runs.md](https://github.com/xywei/loopty/blob/main/docs/device-runs.md)
   has the commands and the transcripts. Signed integer overflow is undefined
   in OpenCL C, which has no `-fwrapv`, so a signed integer sum that
