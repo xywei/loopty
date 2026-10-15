@@ -114,6 +114,17 @@ def test_a_difference_inside_the_class_and_beyond_the_claim_refutes_it() -> None
     )
 
 
+def test_a_complex_nan_matches_only_part_by_part() -> None:
+    """``nan + 1j`` and ``nan + 2j`` differ in a part both have (Codex)."""
+    import numpy as np
+
+    from loopty.upstream import _beyond
+
+    got = np.array([complex(np.nan, 1.0), complex(np.nan, 1.0), 1.0 + 1j])
+    want = np.array([complex(np.nan, 2.0), complex(np.nan, 1.0), 1.0 + 1j])
+    assert _beyond(got, want, 1e-12).tolist() == [True, False, False]
+
+
 @pytest.mark.parametrize(
     ("within", "error", "message"),
     [

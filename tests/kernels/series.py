@@ -4,11 +4,15 @@
 ``(x[i] * 0.5) ** k``, which the identity ``halved`` says is the same.
 ``quarter_sum`` adds the powers of ``x[i] * 0.25``, which no theorem here is
 about, and ``tail_sum`` starts at the zeroth power, which ``from_one``
-leaves out. tests/test_summands.py reads them.
+leaves out. ``inverse_square`` divides by a power ``halves`` is about,
+which it does not add, and ``complex_sum`` adds the powers of half of a
+complex number, which a theorem about reals says nothing of.
+tests/test_summands.py reads them.
 """
 
 from __future__ import annotations
 
+import numpy as np
 from lanky import theorem
 from lanky.prelude import Fn, Nat, Real
 
@@ -62,3 +66,17 @@ def tail_sum(x: Arr[Fin[m], Real], y: Arr[Fin[m], Real]):
     """The powers of ``x[i]`` from the zeroth, which ``from_one`` does not cover."""
     for i in y.dom:
         y[i] = reduce_sum(x[i] ** k for k in Fin[ORDER + 1])
+
+
+@kernel(uses=[halves, halved])
+def inverse_square(x: Arr[Fin[m], Real], y: Arr[Fin[m], Real]):
+    """One over the square of half of ``x[i]``: a power it divides by, not adds."""
+    for i in y.dom:
+        y[i] = 1 / ((x[i] * 0.5) ** 2)
+
+
+@kernel(uses=[halves, halved])
+def complex_sum(x: Arr[Fin[m], np.complex128], y: Arr[Fin[m], np.complex128]):
+    """The powers of half of a complex ``x[i]``, which ``halves`` is not about."""
+    for i in y.dom:
+        y[i] = reduce_sum((x[i] * 0.5) ** k for k in Fin[ORDER + 1])

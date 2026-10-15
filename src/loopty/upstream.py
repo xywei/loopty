@@ -392,9 +392,23 @@ def _within(
 
 
 def _beyond(got: np.ndarray, want: np.ndarray, allowance: float) -> np.ndarray:
-    """The cells at which ``got`` is not within ``allowance`` of ``want``, as a mask."""
+    """The cells at which ``got`` is not within ``allowance`` of ``want``, as a mask.
+
+    Two values match when they are equal or both NaN, a complex one part by
+    part, as :func:`loopty.tolerance.disagreement` has it: ``nan + 1j`` and
+    ``nan + 2j`` do not.
+    """
+    parts = [
+        np.stack([side.real, side.imag], axis=-1)
+        if side.dtype.kind == "c"
+        else side[..., np.newaxis]
+        for side in (got, want)
+    ]
     with np.errstate(invalid="ignore", over="ignore"):
-        matched = (got == want) | (np.isnan(got) & np.isnan(want))
+        matched = np.all(
+            (parts[0] == parts[1]) | (np.isnan(parts[0]) & np.isnan(parts[1])),
+            axis=-1,
+        )
         near = np.isfinite(want) & (np.abs(got - want) <= allowance)
     return ~(matched | near)
 

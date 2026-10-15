@@ -74,6 +74,16 @@ def test_a_kernel_that_adds_other_terms_gets_no_row() -> None:
     assert rows(kernels.quarter_sum) == []
 
 
+def test_a_term_inside_another_is_not_one_the_kernel_adds() -> None:
+    """``1 / (x[i] * 0.5) ** 2`` divides by ``c(2)`` and adds nothing (Codex)."""
+    assert rows(kernels.inverse_square) == []
+
+
+def test_a_theorem_about_reals_is_not_applied_to_complex_numbers() -> None:
+    """The same powers of a complex ``x[i]`` match the term, not the sort (Codex)."""
+    assert rows(kernels.complex_sum) == []
+
+
 def test_a_term_the_theorems_guard_leaves_out_is_not_claimed() -> None:
     """``from_one`` is about ``n >= 1``, so ``x[i] ** 0`` is no term of its."""
     (row,) = rows(kernels.tail_sum)

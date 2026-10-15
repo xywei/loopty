@@ -23,13 +23,18 @@ of scalar variables is an identity. ``E`` is rewritten by each identity whose
 right side it holds, right to left: ``-beta / alpha`` in it becomes
 ``ratio(alpha, beta)``, the kernel's way.
 
-*The terms.* The kernel's statements, put in the theorems' spelling
-(:func:`loopty.math.as_stated`), are searched for the rewritten ``E``
-(:class:`loopty.hypotheses._Matcher`). A match binds the theorem's scalar
-variables to expressions of the kernel and ``n`` to a whole number the term
-writes: the trace writes a sum over ``Fin[ORDER + 1]`` out, term by term.
-The number has to be a point of ``n``'s sort that the conclusion's guard
-admits. The matches in one statement at the same bindings are one row.
+*The terms.* The terms of each sum in the kernel's statements, put in the
+theorems' spelling (:func:`loopty.math.as_stated`), are matched with the
+rewritten ``E`` (:class:`loopty.hypotheses._Matcher`): a term of an
+addition anywhere in the statement, its sign and factors included, or the
+body of a kernel's sum. A node that is no term of a sum, ``(x * 0.5) ** 2``
+in ``1 / (x * 0.5) ** 2``, is not one the kernel adds. A match binds the
+theorem's scalar variables to expressions of the kernel and ``n`` to a whole
+number the term writes: the trace writes a sum over ``Fin[ORDER + 1]`` out,
+term by term. The number has to be a point of ``n``'s sort that the
+conclusion's guard admits, and each binding of the sort the theorem, or the
+identity, takes it at: a theorem about reals says nothing of complex
+numbers. The matches in one statement at the same bindings are one row.
 
 *The claim.* For every value of the family and of each variable nothing
 bound, under the theorem's hypotheses and the identities' at the bindings,
@@ -199,6 +204,95 @@ def _nodes(expr: Any) -> list[Any]:
     return out
 
 
+def _addends(expr: Any) -> list[Any]:
+    """What ``expr`` adds: each term of a sum in it, outermost first.
+
+    A term of an addition, ``t`` in ``a + t``, its sign and its factors
+    included (``a - t`` adds ``-t``), and the body of a kernel's sum, at any
+    depth: ``single_layer``'s series is a sum inside ``real(...)``. A node
+    that is no term of a sum, ``(x * 0.5) ** 2`` in ``1 / (x * 0.5) ** 2``,
+    is no term the kernel adds, and no row says it is.
+    """
+    from loopty.term import Reduction
+
+    out: list[Any] = []
+    stack = [expr]
+    seen = 0
+    while stack and seen < _MOST_NODES:
+        node = stack.pop()
+        if isinstance(node, tuple | list):
+            stack.extend(reversed(node))
+            continue
+        if isinstance(node, Reduction):
+            if node.op == "sum":
+                out.append(node.body)
+            stack.append(node.body)
+            continue
+        if not isinstance(node, prim.ExpressionNode):
+            continue
+        seen += 1
+        if isinstance(node, prim.Sum):
+            out.extend(node.children)
+        stack.extend(reversed(init_args(node)))
+    return out
+
+
+def _kernel_sorts(term: Term) -> dict[str, Any]:
+    """Each of the kernel's arrays and scalars as Lean reads it, of numbers."""
+    from lanky.prelude import Int
+
+    from loopty.obligations import _array_sort
+
+    out: dict[str, Any] = {}
+    for name, typ in term.params:
+        sort = _number_sort(typ) or Int
+        out[name] = _array_sort(typ.ndim, sort) if isinstance(typ, ArrType) else sort
+    return out
+
+
+def _kind(expr: Any, types: dict[str, Any]) -> str | None:
+    """``ℂ``, ``ℝ`` or ``Int``: what ``expr`` is a number of, in ``types``."""
+    from lanky.lean import number_type
+
+    try:
+        return number_type(expr, types, mathlib=True)
+    except Exception:  # noqa: BLE001 - what cannot be read is of no kind
+        return None
+
+
+def _of_its_sorts(
+    series: _SeriesTheorem,
+    sigma: dict[str, Any],
+    used: Sequence[tuple[_Identity, dict[str, Any]]],
+    added: Any,
+    types: dict[str, Any],
+) -> bool:
+    """Whether each binding is of the sort the theorem takes it at.
+
+    A theorem about reals says nothing of complex numbers, and one about
+    complex numbers is applied by Lean only to complex ones: each of the
+    theorem's scalars and each identity's is bound to an expression of its
+    own sort, and the term the kernel adds is of the family's values.
+    """
+    from loopty.hypotheses import substitute
+
+    def same(ours: Any, name: Any, scope: dict[str, Any]) -> bool:
+        # a side whose kind cannot be read is not known to be the same
+        kind = _kind(ours, types)
+        return kind is not None and kind == _kind(name, scope)
+
+    theirs = dict(series.theorem.variables)
+    for name, value in sigma.items():
+        if not same(value, Var(name), theirs):
+            return False
+    for identity, values in used:
+        own = dict(identity.theorem.variables)
+        for name, value in values.items():
+            if not same(substitute(value, sigma), Var(name), own):
+                return False
+    return same(added, Call(Var(series.family), (0,)), theirs)
+
+
 def _replaced(expr: Any, found: Any, by: Any) -> Any:
     """``expr`` with the node ``found``, that one object, replaced by ``by``."""
     if expr is found:
@@ -288,13 +382,14 @@ def series_applications(term: Term, theorems: Sequence[Any]) -> list[Series]:
 
     series_theorems = [found for t in theorems if (found := _series_theorem(t))]
     identities = [found for t in theorems if (found := _identity(t))]
+    types = _kernel_sorts(term)
     out: list[Series] = []
     for series in series_theorems:
         scalars = _scalars(series.theorem) | {series.binder.name}
         matcher = _Matcher(set(), scalars)
         patterns = _patterns(series, identities)
         for stmt in term.stmts:
-            nodes = _nodes(as_stated(stmt.expr))
+            nodes = _addends(as_stated(stmt.expr))
             groups: dict[Any, dict[str, Any]] = {}
             for position, (pattern, used) in enumerate(patterns):
                 for node in nodes:
@@ -303,6 +398,8 @@ def series_applications(term: Term, theorems: Sequence[Any]) -> list[Series]:
                         continue
                     order = _order(sigma.pop(series.binder.name, None), series)
                     if order is None:
+                        continue
+                    if not _of_its_sorts(series, sigma, used, node, types):
                         continue
                     key = (
                         position,

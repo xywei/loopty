@@ -10,10 +10,11 @@ All notable changes to loopty are recorded here. The format follows
 
 - **A theorem tied to the terms a kernel adds** (`loopty.summands`, #252). A
   cited theorem that concludes `all(c(n) == E for n in Nat if ...)` gives a
-  `by-theorem` row where the kernel's term adds `E` at whole numbers `n`,
-  with the theorem's variables bound to the kernel's expressions, and an
-  identity the kernel cites, `L == R`, rewrites `R` in `E` into the kernel's
-  `L` first. `examples/layer_potential.py`'s `single_layer` cites
+  `by-theorem` row where a sum in the kernel's term adds `E` at whole
+  numbers `n`, with the theorem's variables bound to the kernel's
+  expressions of the sorts it takes them at (a theorem about reals says
+  nothing of complex numbers), and an identity the kernel cites, `L == R`,
+  rewrites `R` in `E` into the kernel's `L` first. `examples/layer_potential.py`'s `single_layer` cites
   `line_taylor` and the new `by_the_conjugate`, `ratio(alpha, beta) == -beta
   / alpha`, the kernels' ratio by the conjugate, and its ledger reads
   `single_layer adds line_taylor's c(n) for n in 1..5, for every c with away,
