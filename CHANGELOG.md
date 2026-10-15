@@ -13,8 +13,8 @@ All notable changes to loopty are recorded here. The format follows
   own, each box a work group, written with the file's names. Its tag's two
   facts are rows of `lanky check` (the fusions' are `fused`'s), the python
   run lists them, and `loopty run` runs it on a device where pyopencl is
-  installed and compares it with the native run; it agreed exactly on PoCL
-  on a CPU and on an H200.
+  installed and compares it with the native run; on a GPU and on a CPU
+  through PoCL the two agreed exactly, up to 4,096 boxes.
 - **A schedule for a device, checked where pyopencl is not installed**
   (`loopty.lower.CheckedOpenCLTarget`). A schedule for `"opencl"` is built
   on loopy's plain OpenCL target there, which has the same kernel and
