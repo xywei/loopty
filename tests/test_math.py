@@ -405,9 +405,6 @@ def test_a_theorem_reads_them_as_the_functions_they_are() -> None:
     A family named ``conj`` would make the claim about any function at all.
     Natively, and in a kernel's trace, they are numpy's and a call.
     """
-    lanky = pytest.importorskip("lanky.terms")
-    if "conj" not in getattr(lanky, "ELEMENTARY_FUNCTIONS", ()):
-        pytest.skip("this lanky has no parts of a complex number (lanky main)")
     from lanky import theorem
     from lanky.plugins import registry
     from lanky.prelude import Complex

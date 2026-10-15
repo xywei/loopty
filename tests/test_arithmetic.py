@@ -2919,8 +2919,8 @@ def test_abs_of_an_element_is_compared_on_either_side():
     # with it on the left, a guard when(abs(k[i]) > 2) failed to trace with
     # "expressions don't have an order", and 127 == abs(c[i]) was pymbolic's
     # structural equality, False while the body was traced, so the term held
-    # 0 where the body compares. It is lanky's Abs from lanky 0.2.0, loopty's
-    # floor, and the trace lowers it.
+    # 0 where the body compares. It is lanky's Abs since lanky 0.2.0, and the
+    # trace lowers it.
 
     @kernel
     def absolute_first(

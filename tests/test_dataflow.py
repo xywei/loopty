@@ -114,7 +114,6 @@ def test_a_postcondition_about_reals_is_decided_with_each_equation_an_atom() -> 
 
 def test_a_statement_without_loops_is_stated_for_lean_as_storing_once() -> None:
     """One instance, so no two that differ: a part, its hypothesis ``False``."""
-    pytest.importorskip("lanky.obligations", reason="this lanky states no obligations")
     (fact,) = facts(kernels.one_cell, KIND)
     assert fact.status is Status.DECIDED
     obligation = fact.term.lean_obligation()
@@ -769,7 +768,6 @@ def _without_lean(reason: str) -> None:
 @pytest.fixture(scope="module")
 def lean(tmp_path_factory: pytest.TempPathFactory) -> Any:
     """A Lean oracle with an open session and a proof cache of its own."""
-    pytest.importorskip("lanky.obligations", reason="this lanky states no obligations")
     from lanky.oracles.lean import LeanOracle, ProofCache
 
     if os.environ.get("LANKY_LEAN_DISABLE"):

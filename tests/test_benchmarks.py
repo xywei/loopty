@@ -14,19 +14,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from lanky import terms as lanky_terms
-from lanky.prelude import FnType
 
 pytest.importorskip("loopy")
-
-#: ``examples/hexahedra.py`` writes its theorem with families of several
-#: indices, which are lanky main's and not the 0.2.0 release's, and its
-#: operators' claims put a literal domain beside a symbolic one (lanky#144).
-pytestmark = pytest.mark.skipif(
-    not (hasattr(FnType, "indices") and hasattr(lanky_terms, "literal_binders")),
-    reason="the demo's theorems index families at several indices, and its claims "
-    "put a literal domain beside a symbolic one (lanky main)",
-)
 
 DRIVER = Path(__file__).resolve().parent.parent / "benchmarks" / "hexahedra.py"
 
