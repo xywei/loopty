@@ -21,13 +21,23 @@ window's loop inside the rows' (a shift register shifted in each row).
 And a window read by an update: the divergence added into the node each
 point names, ``y[node[i]] += ...``, a scatter-add, whose updates are made
 atomic after the window, and the loop split after both.
+
+And the triangle of sumpy's L2P, small: each box's triangle ``a + b <= P``,
+an array over a domain (#244), stored by a copy of two rows and by the
+recurrence that reads the row two up (#213), then summed box by box. Fused
+on the boxes, it is kept one box's triangle at a time, ``lambda i, a, b:
+(a, b)``, which each work item keeps its own of on a device.
+
+And a running sum, ``f[j] = f[j - 1] + u[j]``, whose differences are read
+step by step: a recurrence along the loop, kept in a shift register of the
+two cells live at once.
 """
 
 from __future__ import annotations
 
 from lanky.prelude import Real
 
-from loopty import Arr, Fin, Schedule, kernel, program, when
+from loopty import Arr, Fin, Schedule, Where, kernel, program, reduce_sum, when
 
 
 @kernel
@@ -231,3 +241,98 @@ def rejected_reversal_after_window() -> str:
     except IllegalCast as refused:
         return str(refused)
     raise AssertionError("a window keeps the order it was taken in")
+
+
+#: The order of the small triangle, and its rows.
+P = 4
+Q = P + 1
+
+
+@kernel
+def triangle(
+    c: Arr[Fin[nb], Fin[2], Fin[Q], Real],  # noqa: F821
+    R: Arr[Where[i: Fin[nb], a: Fin[Q], b: Fin[Q], a + b <= P], Real],  # noqa: F821
+):
+    """Each box's triangle: two rows copied, each later one the row two up, negated."""
+    for i in R.dom:
+        for a in R.dom[i]:
+            for b in R.dom[i, a]:
+                with when(a < 2):
+                    R[i, a, b] = c[i, a, b]
+                with when(a >= 2):
+                    R[i, a, b] = -R[i, a - 2, b + 2]
+
+
+@kernel
+def triangle_sums(
+    R: Arr[Where[i: Fin[nb], a: Fin[Q], b: Fin[Q], a + b <= P], Real],  # noqa: F821
+    s: Arr[Fin[nb], Real],  # noqa: F821
+):
+    """Each box's triangle, summed."""
+    for i in s.dom:
+        s[i] = reduce_sum(R[i, a, b] for a in R.dom[i] for b in R.dom[i, a])
+
+
+#: Every box's triangle ``a + b <= P``.
+TRIANGLES = triangle.arg_types["R"].domain
+
+
+@program
+def triangles(c, s):
+    """Every box's triangle, into an array of the program's own, then summed."""
+    R = Arr.zeros(TRIANGLES, nb=s.dom.size)
+    triangle(c, R)
+    triangle_sums(R, s)
+
+
+#: Box by box: a box's triangle, then its sum.
+boxed = Schedule(triangles, sizes={"nb": 3}).fuse("triangle", "triangle_sums", loops=1)
+
+#: One box's triangle at a time: ``lambda i, a, b: (a, b)``, found.
+one_triangle = boxed.contract("R")
+
+
+def rejected_row() -> str:
+    """One row of the triangle: the recurrence reads one its slot lost."""
+    from loopty.schedule import IllegalCast
+
+    try:
+        boxed.contract("R", lambda i, a, b: b)
+    except IllegalCast as refused:
+        return str(refused)
+    raise AssertionError("the recurrence reads the row two up, which a row lost")
+
+
+@kernel
+def running(u: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):  # noqa: F821
+    """The running sum of u: its first cell, then each the one before plus u."""
+    for j in f.dom:
+        with when(j == 0):
+            f[j] = u[j]
+        with when(j >= 1):
+            f[j] = f[j - 1] + u[j]
+
+
+@kernel
+def differences(f: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """Each cell of f less the one before it."""
+    for k in y.dom:
+        with when(k >= 1):
+            y[k] = f[k] - f[k - 1]
+
+
+@program
+def running_differences(u, y):
+    """The running sum into an array of the program's own, then its differences."""
+    f = Arr.zeros_like(u)
+    running(u, f)
+    differences(f, y)
+
+
+#: The running sum and its differences step by step, the two cells live at
+#: once kept in a shift register: ``lambda j: j % 2``, found.
+running_registers = (
+    Schedule(running_differences, sizes=SIZES)
+    .fuse("running", "differences")
+    .contract("f", registers=True)
+)

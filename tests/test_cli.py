@@ -302,6 +302,34 @@ def test_target_c_on_a_device_schedule_says_c_has_no_hardware_axes(
     assert "difference" not in out
 
 
+def test_a_files_device_schedule_is_checked_where_pyopencl_is_not_installed(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    """``loopty run`` lists a device schedule's facts, and says why it ran none.
+
+    A file keeps its schedule for a device beside the others: where pyopencl
+    is not installed it is checked on loopy's plain OpenCL target, and its
+    run is left to a machine that has pyopencl, which is not a failure.
+    """
+    from loopty import lower
+
+    monkeypatch.setattr(lower, "pyopencl_installed", lambda: False)
+    path = write_fixture(tmp_path, DEVICE)
+    code = main(["run", str(path)])
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert (
+        "scale: Schedule(scale, target='opencl').tag(i='g.0')\n"
+        "  not run here: running on a device needs pyopencl, which is not "
+        "installed; its facts are checked all the same\n"
+    ) in out
+    assert "difference" not in out
+    assert "tag(i='g.0') renames the instances of scale one for one" in out
+    # --target opencl keeps it, and says the same
+    assert main(["run", str(path), "--target", "opencl"]) == 0
+    assert "not run here" in capsys.readouterr().out
+
+
 def test_without_target_a_schedule_keeps_the_one_it_was_written_for(
     tmp_path, capsys
 ) -> None:
@@ -646,7 +674,8 @@ def test_two_kernels_of_one_name_keep_their_schedules_facts_apart(tmp_path) -> N
     ids = [fact["id"] for fact in facts]
     assert len(set(ids)) == len(ids) == 6
     assert not [identifier for identifier in ids if "#" in identifier]
-    steps = "[c].split('i', 2, inner='i_inner', outer='i_outer')"
+    split = "split('i', 2, inner='i_inner', outer='i_outer')"
+    steps = f"[c].{split}"
     by_where = {}
     for fact in facts:
         by_where.setdefault(fact["where"].split(":")[0], []).append(fact["id"])
@@ -655,10 +684,11 @@ def test_two_kernels_of_one_name_keep_their_schedules_facts_apart(tmp_path) -> N
         module = where.removesuffix(".py")
         line = 11 if module == "twice" else 9
         definition = f"{module}.double@{line}"
+        # a cast is keyed by its steps alone, a run by its target too
         assert sorted(mine) == [
             f"agreement:{definition}:{steps}",
-            f"cast:{definition}:{steps}:bijective",
-            f"cast:{definition}:{steps}:monotone",
+            f"cast:{definition}:{split}:bijective",
+            f"cast:{definition}:{split}:monotone",
         ]
 
 
@@ -720,7 +750,8 @@ def test_two_kernels_one_factory_makes_are_refused_as_lanky_check_refuses_them(
     assert out.count("  y: difference 0 ") == 3
     facts = json.loads(out_path.read_text(encoding="utf-8"))
     definition = "fixture.make.<locals>.double@11"
-    steps = "[c].split('i', 2, inner='i_inner', outer='i_outer')"
+    split = "split('i', 2, inner='i_inner', outer='i_outer')"
+    steps = f"[c].{split}"
     bijective = "split(i, 2) renames the instances of double one for one"
     monotone = "the order after split(i, 2) runs every dependence of double forward"
     (agreement,) = {
@@ -729,8 +760,8 @@ def test_two_kernels_one_factory_makes_are_refused_as_lanky_check_refuses_them(
     assert [
         (fact["id"], fact["provenance"].get("duplicate_claims")) for fact in facts
     ] == [
-        (f"cast:{definition}:{steps}:bijective", [bijective]),
-        (f"cast:{definition}:{steps}:monotone", [monotone]),
+        (f"cast:{definition}:{split}:bijective", [bijective]),
+        (f"cast:{definition}:{split}:monotone", [monotone]),
         (f"agreement:{definition}:{steps}", [agreement]),
         (f"agreement:{definition}:{steps}#2", None),
     ]
@@ -738,10 +769,10 @@ def test_two_kernels_one_factory_makes_are_refused_as_lanky_check_refuses_them(
     assert block == [
         "DUPLICATE double at fixture.py:14: several claims have each of the 3 "
         "ids below",
-        f"  cast:{definition}:{steps}:bijective",
+        f"  cast:{definition}:{split}:bijective",
         f"    in the table: {bijective}",
         f"    not in the table: {bijective}",
-        f"  cast:{definition}:{steps}:monotone",
+        f"  cast:{definition}:{split}:monotone",
         f"    in the table: {monotone}",
         f"    not in the table: {monotone}",
         f"  agreement:{definition}:{steps}",

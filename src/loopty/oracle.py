@@ -35,6 +35,7 @@ from lanky.ledger import Status
 
 __all__ = [
     "TRUST_CLASS",
+    "AtSizes",
     "Bijective",
     "Empty",
     "IslOracle",
@@ -401,8 +402,75 @@ class Monotone(_Stated):
     explain: Any = field(default=None, compare=False, repr=False)
 
 
+@dataclass(frozen=True, eq=False)
+class AtSizes(_Stated):
+    """A question isl cannot ask at every size, asked at each of a few.
+
+    The shape of a layout's facts where a size multiplies an index,
+    ``n**3 * e + (i + n * j + n**2 * k)``, which isl cannot state for every
+    ``n`` (:mod:`loopty.layout`). ``sizes`` are the sizes fixed, ``samples``
+    the values they are fixed at, and ``ask`` the question isl answers at one
+    of them. Held at every sample, the claim is ``tested`` there, and Lean is
+    asked about every size; failing at one, it is refuted by that sample's
+    witness, read at the sizes it failed at. ``why`` says in words why isl
+    asks so.
+    """
+
+    sizes: tuple[str, ...]
+    samples: tuple[dict[str, int], ...]
+    ask: Any = field(compare=False, repr=False)
+    why: str = ""
+    labels: tuple[str, ...] = ()
+    lean: Any = field(default=None, compare=False, repr=False)
+    explain: Any = field(default=None, compare=False, repr=False)
+    #: isl's verdict, asked once (see :func:`decide`).
+    answered: list = field(default_factory=list, compare=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.explain is None:
+            # the sample's own words, which decide() keeps in the detail
+            object.__setattr__(self, "explain", lambda verdict: verdict.detail)
+
+
+def _sampled_words(samples: Any) -> str:
+    """``n = 1 to 6``, or the samples listed: where isl asked a question."""
+    names = sorted({name for sample in samples for name in sample})
+    if len(names) == 1:
+        (name,) = names
+        values = sorted(sample[name] for sample in samples)
+        if values == list(range(values[0], values[-1] + 1)) and len(values) > 2:
+            return f"{name} = {values[0]} to {values[-1]}"
+        return f"{name} = " + ", ".join(str(value) for value in values)
+    return "; ".join(
+        ", ".join(f"{name}={sample[name]}" for name in names) for sample in samples
+    )
+
+
+def _decide_at_sizes(question: AtSizes) -> Verdict:
+    """:func:`decide` of an :class:`AtSizes`: each sample in turn, the first failure."""
+    if question.answered:
+        return question.answered[0]
+    where = _sampled_words(question.samples)
+    verdict = Verdict(True, None, f"decided by isl at {where}")
+    for sample in question.samples:
+        asked = question.ask(sample)
+        found = decide(asked)
+        if found.ok:
+            continue
+        parameters = {**sample, **dict(found.parameters or {})}
+        verdict = Verdict(
+            False,
+            found.witness,
+            _refutation(asked, Verdict(False, found.witness, found.detail, parameters)),
+            parameters,
+        )
+        break
+    question.answered.append(verdict)
+    return verdict
+
+
 #: The questions :class:`IslOracle` answers.
-IslQuestion = Empty | Subset | Bijective | Monotone
+IslQuestion = Empty | Subset | Bijective | Monotone | AtSizes
 
 
 def label_witness(witness: Any, labels: tuple[str, ...]) -> str:
@@ -434,6 +502,8 @@ def decide(question: IslQuestion) -> Verdict:
         return is_bijective(question.map)
     if isinstance(question, Monotone):
         return is_monotone(question.schedule, question.deps)
+    if isinstance(question, AtSizes):
+        return _decide_at_sizes(question)
     if isinstance(question, Empty):
         obj = question.obj
         if obj.is_empty():
@@ -558,6 +628,14 @@ class IslOracle:
         if not isinstance(question, IslQuestion):
             return None
         verdict = decide(question)
+        if verdict.ok and isinstance(question, AtSizes):
+            # decided at a few sizes is tested at every size
+            return fact.with_status(
+                Status.TESTED,
+                self.name,
+                detail=f"{verdict.detail}; {question.why}",
+                question="at-sizes",
+            )
         if verdict.ok:
             return fact.with_status(
                 Status.DECIDED,
