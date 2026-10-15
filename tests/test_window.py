@@ -244,17 +244,26 @@ def test_a_placement_is_quasi_affine_in_the_indices(placement, error, words) -> 
 def test_a_tag_before_the_window_is_refused_and_one_after_is_checked() -> None:
     # A window is taken over an order, so a loop that runs its instances in
     # none (ilp, here on the row of the first pass) refuses it. A tag after
-    # it is checked against its slots: on C the row is each work item's own
-    # (#214), so the elements on a group axis keep one row each.
+    # it is checked against its slots: a row of n cells is one for every
+    # work item, on C as once retargeted, so two elements on two work groups
+    # store into one slot of it, and the group axis is refused with the pair.
     example = load(ROOT / "examples" / "sum_factorization.py")
     fused = example.fused
     assert ("monotone", "decided") in facts(fused.tag(b="ilp"))[-3:]
     with pytest.raises(ValueError, match="b on ilp runs its instances in no order"):
         fused.tag(b="ilp").contract("v")
-    on_groups = fused.contract("v").tag(e="g.0")
-    (monotone,) = [f for f in on_groups.facts()[-3:] if f.kind == "monotone"]
-    assert monotone.status is Status.DECIDED
-    assert monotone.statement.endswith("forward, within one work item")
+    assert not fused.contract("v").windows["v"].private
+    with pytest.raises(IllegalCast) as caught:
+        fused.contract("v").tag(e="g.0")
+    assert (
+        "stores v[0, 0, 0] in slot 0 of the window lambda e, a, b: b, which "
+        "along_r.S0[e=1, a=0, b=0]"
+    ) in str(caught.value)
+    assert str(caught.value).endswith(
+        "v is kept in a window over the order this tag drops, one for every "
+        "work item since its size is not a number (in global memory on "
+        "OpenCL); a window of a number of cells is each work item's own"
+    )
 
 
 def test_a_window_of_a_size_on_opencl_is_shared_and_a_group_axis_refused() -> None:
@@ -272,9 +281,9 @@ def test_a_window_of_a_size_on_opencl_is_shared_and_a_group_axis_refused() -> No
         "along_r.S0[e=1, a=0, b=0]"
     ) in message
     assert message.endswith(
-        "; v is kept in a window over the order this tag drops, in global "
-        "memory, one for every work item, since its size is not a number; a "
-        "window of a number of cells is each work item's own"
+        "; v is kept in a window over the order this tag drops, one for every "
+        "work item since its size is not a number (in global memory on "
+        "OpenCL); a window of a number of cells is each work item's own"
     )
 
 

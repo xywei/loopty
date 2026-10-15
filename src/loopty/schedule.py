@@ -2747,12 +2747,13 @@ class Window:
     (:func:`loopty.obligations.window_obligation`).
 
     ``private`` says that every work item keeps a window of its own, as
-    loopy keeps a private temporary: a window of a number of cells, on
-    every target, and any window on C. Then two accesses on two work items
-    touch two windows, and only those on one work item have to keep the
-    order of their slot (see :meth:`Schedule._per_work_item`). A window of
-    a size, ``f_window[n]``, is kept in global memory on OpenCL, one for
-    every work item.
+    loopy keeps a private temporary: a window of a number of cells. Then
+    two accesses on two work items touch two windows, and only those on one
+    work item have to keep the order of their slot (see
+    :meth:`Schedule._per_work_item`). A window of a size, ``f_window[n]``,
+    is one for every work item, kept in global memory on OpenCL; it is
+    taken to be one on C too, which has no work items, so that a schedule's
+    casts answer on C as they do once it is retargeted.
     """
 
     array: str
@@ -5115,7 +5116,7 @@ class Schedule:
             readers=tuple(readers),
             schedule=self._first(),
             steps=self._records,
-            private=self._target != "opencl" or literal,
+            private=literal,
         )
         clobbered = self._clobbered(window, found, reads, writes, before, shown)
         if clobbered is not None and given is not None:
@@ -5211,12 +5212,13 @@ class Schedule:
             removed = [ids[stmt_id] for stmt_id in sorted(gone)]
             entry = draft.kernel.default_entrypoint
             name = win.window_name(array, set(entry.all_variable_names()))
-            # a window of a size is one for every work item on OpenCL; one of
-            # numbers is each work item's own, as on C (see Window.private)
+            # a window of numbers is each work item's own (see Window.private),
+            # and one of a size is one in global memory for every work item on
+            # OpenCL; on C, which has no work items, a temporary of the kernel
             space = (
-                lp.AddressSpace.PRIVATE
-                if window.private
-                else lp.AddressSpace.GLOBAL
+                lp.AddressSpace.GLOBAL
+                if self._target == "opencl" and not window.private
+                else lp.AddressSpace.PRIVATE
             )
             register = None
             if registers or (registers is None and self._target == "opencl"):
@@ -5343,7 +5345,7 @@ class Schedule:
                 f"{window.array}[{cell}], which {_instance_text(producer.id, stored)} "
                 f"stored in {slot}, after {_instance_text(writer, other)} stored "
                 f"{window.array}[{theirs}] there"
-                f"{_sizes_text(params, self._sizes)}"
+                f"{self._sizes_shown(params)}"
             )
             return k, triple, message
         return None
@@ -5601,7 +5603,7 @@ class Schedule:
                     f"{text} illegal: instance {_instance_text(reader, coords)} "
                     f"reads {array}[{cell}] before "
                     f"{_instance_text(writer, stored)} stores it"
-                    f"{_sizes_text(params, self._sizes)}, so the read sees the "
+                    f"{self._sizes_shown(params)}, so the read sees the "
                     f"zeros the array was made with, and {losing}"
                 )
         return self._fact(
@@ -6754,9 +6756,9 @@ class Schedule:
                 else f"{dep.array} is kept in a window over the order this tag drops"
                 if window is None or window.private
                 else f"{dep.array} is kept in a window over the order this tag "
-                "drops, in global memory, one for every work item, since its size "
-                "is not a number; a window of a number of cells is each work "
-                "item's own"
+                "drops, one for every work item since its size is not a number "
+                "(in global memory on OpenCL); a window of a number of cells is "
+                "each work item's own"
             )
             return f"{text} illegal: {pair}{at}; {fix}"
         return (
@@ -6778,7 +6780,7 @@ class Schedule:
         if found is not None:
             return found.cell_text, f" on {found.at}{found.where}", ""
         cell = f"{dep.array}[{_cell_text(dep.source_indices, coords, params)}]"
-        at = _sizes_text(params, self._sizes)
+        at = self._sizes_shown(params)
         note = ""
         if _widened(dep):
             why = (
@@ -6792,6 +6794,14 @@ class Schedule:
                 f"from an array, which isl cannot follow, and {why}"
             )
         return cell, at, note
+
+    def _sizes_shown(self, params: dict[str, int]) -> str:
+        """`` (at nb=1, isl's choice)``: the sizes a pair was read off at.
+
+        The parameters that stand for an array's cell, a row's length, are
+        left out: they are no size of the user's.
+        """
+        return _sizes_text(params, self._sizes, dict(self._term.reflected))
 
     def _at_hint(self, obj: Any) -> Any:
         """``obj`` with the sizes fixed at the hint, if it has a point there.
@@ -7065,10 +7075,10 @@ class Schedule:
         else:
             pair = _slot_pair_text(dep, witness)
             why = (
-                f"a window of {dep.array} whose size is not a number is kept in "
-                "global memory, one for every work item, so its slots are shared "
-                "by them, which nothing orders; a window of a number of cells is "
-                "each work item's own"
+                f"a window of {dep.array} whose size is not a number is one for "
+                "every work item (in global memory on OpenCL), so its slots are "
+                "shared by them, which nothing orders; a window of a number of "
+                "cells is each work item's own"
             )
         message = (
             f"{text} illegal: {pair} on another work item{at}: {how}, and {why}"
@@ -7251,8 +7261,17 @@ def _call_text(step: tuple[str, tuple, dict]) -> str:
     return f"{method}({', '.join(parts)})"
 
 
-def _sizes_text(params: dict[str, int], hint: dict[str, int]) -> str:
-    """`` at n=16, nx=16`` (`` hinted``), or nothing when there are no sizes."""
+def _sizes_text(
+    params: dict[str, int], hint: dict[str, int], hidden: Iterable[str] = ()
+) -> str:
+    """`` at n=16, nx=16`` (`` hinted``), or nothing when there are no sizes.
+
+    ``hidden`` are parameters that are no size of the user's: those that
+    stand for an array's cell, ``nl_cnt_i`` for the row length ``cnt[i]``
+    (see :class:`loopty.idx.Reflections`), whose value isl picked for a
+    row the pair need not be in.
+    """
+    params = {name: value for name, value in params.items() if name not in hidden}
     if not params:
         return ""
     inner = ", ".join(f"{name}={value}" for name, value in sorted(params.items()))

@@ -131,8 +131,8 @@ its own, in parallel.
 | distinct writes | statement | two instances that differ write cells that differ |
 | element sort | statement | the value written is a point of the sort |
 | definedness | read | some statement wrote the cell read, before the read: a disjunction of existentials, one per writer; a write under a guard isl cannot state is no writer, since its domain is wider than where it stores |
-| definedness of a substitution or a window | read of the array | the producer, and only it, stored the cell read before the read, in the program's order |
-| no read sees its slot overwritten (a window) | read of the array | three instances, the read, the producer's that stored the cell it reads, and another of the producer's that stored a different cell into the same slot after it: that one does not run before the read, in the order the steps leave; the slot is the placement, `j % 3` |
+| definedness of a substitution or a window | read of the array | the producer, or one of a window's producers (the copy and the recurrence of a triangle), stored the cell read before the read, in the program's order |
+| no read sees its slot overwritten (a window) | read of the array, and pair of producers | three instances, the read, a producer's that stored the cell it reads, and a producer's that stored a different cell into the same slot after it: that one does not run before the read, in the order the steps leave; the slot is the placement, `j % 3`, or `(a, b)` for one box's triangle `R[i, a, b]` |
 | a rewritten layout, by the row starts | statement that writes the offsets | where the offsets start at 0 and step by the counts, as the contract checks on entry, the value written is the value the cell holds: the induction step, its base case the contract's check |
 | a rewritten layout, by induction | statement that writes the layout | the rows in order before the write imply them in order after it, at the cells the write reads |
 | a declared layout | piece, or pair of pieces | every cell's address is in the buffer; two cells at one address are one cell; and every address of the buffer has a cell (an existential) |
@@ -440,8 +440,12 @@ asked about, and claims core Lean has no words for; each says so with
 
 - **Work items:** a cast that puts a loop on a hardware axis also claims that
   no dependence joins two work items, which is stated for isl only; the cast
-  is then left `decided` as a whole; none of the examples has one; issue
-  [#188](https://github.com/xywei/loopty/issues/188).
+  is then left `decided` as a whole; none of the examples' schedules has one
+  (`examples/l2p.py` checks sumpy's, each box a work group, in its python
+  run); issue [#188](https://github.com/xywei/loopty/issues/188). A window of
+  a number of cells is each work item's own, so two of its accesses on two
+  work items need no order, and the claim is then that every read is on a
+  work item that stored its cell.
 - **A claim about reals, in core Lean:** a kernel's postcondition over a
   `Real` array, and a theorem applied to it, are stated with Mathlib's `ℝ`;
   without Mathlib they stay `decided`, saying why, and with it Lean proves

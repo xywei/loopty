@@ -129,6 +129,10 @@ def test_a_window_of_an_array_over_a_domain_keeps_one_row_of_it() -> None:
     )
     fact = LoopyExecutor().differential(K.declared, windowed, _inputs())
     assert fact.status is Status.TESTED
+    # one statement stores f, so computing it where it is read is the other way
+    substituted = fused.substitute("f")
+    fact = LoopyExecutor().differential(K.declared, substituted, _inputs())
+    assert fact.status is Status.TESTED
     # one cell for the row is too few, and the refusal names the window
     with pytest.raises(IllegalCast) as caught:
         fused.contract("f", lambda i, j: 0)

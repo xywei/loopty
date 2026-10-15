@@ -1424,8 +1424,8 @@ def test_the_l2p_demo_keeps_one_triangle_per_box_and_refuses_one_row() -> None:
         "reconstruct.S1[i_0=0, a_0=9, b_0=0] reads R[0, 7, 2], which "
         "reconstruct.S1[i_0=0, a_0=7, b_0=2] stored in slot 2, after "
         "reconstruct.S1[i_0=0, a_0=8, b_0=2] stored R[0, 8, 2] there (at nb=1, "
-        "nl_cnt_i_1=0, isl's choice); contract('R') finds the smallest window "
-        "that keeps every read, lambda i, a, b: (a, b)\n"
+        "isl's choice); contract('R') finds the smallest window that keeps every "
+        "read, lambda i, a, b: (a, b)\n"
     ) in result.stdout
     assert (
         "on a device, each box a work group, as sumpy's own schedule: "
