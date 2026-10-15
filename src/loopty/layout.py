@@ -119,7 +119,23 @@ class Piece:
         return not _affine(self.address)
 
     def run(self, args: Sequence[Any], sizes: dict[str, Any] | None = None) -> Any:
-        """The function called with ``args``, ``sizes`` the sizes it computes with."""
+        """The function called with ``args``, ``sizes`` the sizes it computes with.
+
+        A layout loopy's dim_tags make (:func:`dim_tags`) has no function of
+        its own: its address is the term built from the strides, evaluated
+        at the cell.
+        """
+        if isinstance(self.fn, _Named):
+            from pymbolic import evaluate
+
+            from loopty.hypotheses import substitute
+            from loopty.lower import _plain
+
+            values = {**(sizes or {}), **dict(zip(self.names, args, strict=True))}
+            at = substitute(self.address, values)
+            if all(isinstance(value, int) for value in values.values()):
+                return evaluate(_plain(at), {})
+            return at
         fn = _with_sizes(self.fn, sizes or {}) if self.sizes else self.fn
         return fn(*args)
 

@@ -243,6 +243,9 @@ def test_a_layout_at_every_size_is_tested_by_isl_at_a_few() -> None:
     # at a size, the layout is one isl states
     assert [status for status, _ in reasons(every.at(n=3))] == ["decided"] * 3
     assert every(1, 2, 0, 1, n=3) == 27 + 2 + 9
+    # a dim_tags layout computes its own address, from its strides (Codex)
+    assert every.same_as("N3,N0,N1,N2").second(1, 2, 0, 1, n=3) == 27 + 2 + 9
+    assert every.same_as("N3,N2,N1,N0").second(0, 1, 0, 2, n=3) == 9 + 2
     with pytest.raises(LayoutError, match=r"isl cannot state; .*dof_array.at\(n=4\)"):
         every.relation()
 

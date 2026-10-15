@@ -2235,9 +2235,12 @@ def _within_parts(origin: Any, steps: Sequence[Any], work: Any) -> list[Any]:
     of a sum on a local axis on every one of them and the instruction on one
     (:func:`loopty.schedule._within_instances`). Where the statement has no
     loop on an axis, the two are apart there, and the claim is that they
-    never touch one cell. The read's subscripts can name the sum's own
-    loops, which are not stated, so the cell is compared on the other axes
-    alone, the wider claim.
+    never touch one cell. After a substitution a reader's sum reads what the
+    producer read, at the cell the producer stored, as
+    :meth:`loopty.schedule.Schedule._carried_over` reads it, and those reads
+    are pairs too. A read's subscripts can name the sum's own loops, which
+    are not stated, so the cell is compared on the other axes alone, the
+    wider claim.
     """
     lanky = _lanky_obligations()
     schedule = _schedule_module()
@@ -2245,42 +2248,67 @@ def _within_parts(origin: Any, steps: Sequence[Any], work: Any) -> list[Any]:
     gone: set[str] = set()
     for step in steps:
         gone |= set(step.gone)
-    assumed = steps[-1].assumptions
-    parts = []
-    count = 0
+    # (statement, the cell its sum reads, its instruction's write)
+    pairs: list[tuple[Stmt, tuple, tuple]] = []
     for stmt in term.stmts:
         if stmt.id in gone:
-            continue
-        loops = work.loops[stmt.id]
-        apart = [axis for axis in work.axes if loops.get(axis) is None]
-        if not apart:
             continue
         accesses = schedule._accesses(stmt, term)
         for read in accesses:
             if read[0] != "read" or read[3] != "sum":
                 continue
             for write in accesses:
-                if write[0] != "write" or write[3] != "" or write[1] != read[1]:
+                if write[0] == "write" and write[3] == "" and write[1] == read[1]:
+                    pairs.append((stmt, tuple(read[2]), write))
+    for step in steps:
+        if step.substituted is None:
+            continue
+        array, producer, readers = step.substituted
+        stored = producer.assignee.indices
+        reads = [
+            (name, indices)
+            for kind, name, indices, _part in schedule._accesses(producer, term)
+            if kind == "read"
+        ]
+        for reader in readers:
+            if reader.id in gone:
+                continue
+            accesses = schedule._accesses(reader, term)
+            for kind, name, at, part in accesses:
+                if kind != "read" or name != array or part != "sum":
                     continue
-                if len(write[2]) != len(read[2]):
-                    continue
-                claim = Claim(term)
-                claim.hypotheses.extend(assumed)
-                chain = _chain(claim, origin, stmt, steps, "a")
-                same = _same_cell(
-                    origin, stmt, stmt, read[2], write[2], chain[0], chain[0]
-                )
-                claim.hypotheses.append(same)
-                cell = f"{write[1]}[{', '.join(render(i) for i in write[2])}]"
-                parts.append(
-                    lanky.Part(
-                        f"within_{count}",
-                        f"the sum of {stmt.id} reads {cell}, which its instruction "
-                        f"writes, on another work item of {', '.join(apart)}",
-                        claim.close(False),
-                    )
-                )
-                count += 1
+                renaming = {
+                    index.name: plain(value)
+                    for index, value in zip(stored, at, strict=True)
+                }
+                for read, indices in reads:
+                    moved = tuple(substitute(plain(i), renaming) for i in indices)
+                    for write in accesses:
+                        if write[0] == "write" and write[3] == "" and write[1] == read:
+                            pairs.append((reader, moved, write))
+    assumed = steps[-1].assumptions
+    parts = []
+    for count, (stmt, cell, write) in enumerate(
+        pair for pair in pairs if len(pair[1]) == len(pair[2][2])
+    ):
+        loops = work.loops[stmt.id]
+        apart = [axis for axis in work.axes if loops.get(axis) is None]
+        if not apart:
+            continue
+        claim = Claim(term)
+        claim.hypotheses.extend(assumed)
+        chain = _chain(claim, origin, stmt, steps, "a")
+        same = _same_cell(origin, stmt, stmt, cell, write[2], chain[0], chain[0])
+        claim.hypotheses.append(same)
+        written = f"{write[1]}[{', '.join(render(i) for i in write[2])}]"
+        parts.append(
+            lanky.Part(
+                f"within_{count}",
+                f"the sum of {stmt.id} reads {written}, which its instruction "
+                f"writes, on another work item of {', '.join(apart)}",
+                claim.close(False),
+            )
+        )
     return parts
 
 

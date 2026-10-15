@@ -42,7 +42,7 @@ from lanky.ledger import Status  # noqa: E402
 from lanky.prelude import Int, Real  # noqa: E402
 from lanky.terms import Var, evaluate, render  # noqa: E402
 
-from loopty import Arr, Fin, Schedule, kernel  # noqa: E402
+from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum  # noqa: E402
 from loopty.description import (  # noqa: E402
     Unstatable,
     description_of,
@@ -1249,6 +1249,66 @@ def test_lean_fails_where_a_dependence_joins_two_work_items(lean: Any) -> None:
     )
     failed = [r["name"] for r in result.provenance["lean_parts"] if not r["proved"]]
     assert failed == ["dependence_1_work_item", "dependence_2_work_item"]
+
+
+@kernel
+def doubled(x: Arr[Fin[n], Real], w: Arr[Fin[n], Real]):  # noqa: F821
+    """``w`` twice ``x``, which a substitution computes where it is read."""
+    for i in w.dom:
+        w[i] = 2 * x[i]
+
+
+@kernel
+def scaled_in_place(
+    w: Arr[Fin[n], Real],  # noqa: F821
+    c: Arr[Fin[m], Real],  # noqa: F821
+    x: Arr[Fin[n], Real],  # noqa: F821
+):
+    """``x[i]`` from a sum that reads ``w[i]``, which is ``2 x[i]`` substituted."""
+    for i in x.dom:
+        x[i] = reduce_sum(w[i] * c[j] for j in c.dom)
+
+
+@program
+def doubled_then_scaled(x, c):
+    w = Arr.zeros_like(x)
+    doubled(x, w)
+    scaled_in_place(w, c, x)
+
+
+def test_a_substituted_sum_reading_its_own_write_is_caught_apart(lean: Any) -> None:
+    # Codex: after substitute('w') the sum of scaled_in_place reads x[i], which
+    # its own instruction writes, and the Lean parts did not see the read the
+    # substitution moved there. With the sum on l.0 it reads on every work
+    # item and the write is on one: isl refuses. Stated as if isl had found
+    # it legal, Lean fails on exactly that pair.
+    from dataclasses import replace
+
+    from lanky.ledger import Fact
+
+    substituted = Schedule(doubled_then_scaled, sizes={"n": 8, "m": 4}).substitute("w")
+    with pytest.raises(IllegalCast) as refused:
+        substituted.tag(j="l.0")
+    planted = replace(refused.value.fact.term, refuted=False, refusal=None)
+    parts = planted.lean_obligation().parts
+    assert parts[-1].label == (
+        "the sum of scaled_in_place.S0 reads x[i_0], which its instruction writes, "
+        "on another work item of l.0"
+    )
+    result = lean.establish(
+        Fact(
+            id="planted-within",
+            kind="monotone",
+            statement="the sum on l.0, taken to be legal",
+            term=_Planted(parts),
+            status=Status.DECIDED,
+            decided_by="isl",
+            where="test_lean_checks.py:1",
+            owner="doubled_then_scaled",
+        )
+    )
+    failed = [r["name"] for r in result.provenance["lean_parts"] if not r["proved"]]
+    assert failed == ["within_0"]
 
 
 class _Planted:
