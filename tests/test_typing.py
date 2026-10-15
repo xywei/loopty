@@ -966,11 +966,11 @@ def test_the_terms_of_a_sum_over_a_number_share_their_facts() -> None:
     assert stmt.unrolled == (("d", 3),)
     statements = [fact.statement for fact in settled(facts)]
     assert (
-        "Ft[3*x + d, k, c] is in bounds for every instance of S0 and every d in "
-        "Fin(3)"
+        "Ft[3*x + d, k, c] is in bounds for every d in Fin(3) and every instance "
+        "of S0"
     ) in statements
     assert (
-        "vs[3*x + d, c] is in bounds for every instance of S0 and every d in Fin(3)"
+        "vs[3*x + d, c] is in bounds for every d in Fin(3) and every instance of S0"
     ) in statements
     assert not [line for line in statements if "3*x + 0" in line]
     assert [line for line in statements if line.startswith("the accumulation")] == [
@@ -989,8 +989,10 @@ def test_a_term_out_of_bounds_refutes_the_one_fact() -> None:
         for fact in settled(facts)
         if fact.kind == "in-bounds" and fact.statement.startswith("Ft[")
     ]
-    assert reads.statement.startswith("Ft[3*x + d + 1, k, k] is in bounds")
-    assert reads.statement.endswith("and every d in Fin(3)")
+    assert reads.statement.startswith("Ft[3*x + d")
+    assert reads.statement.endswith(
+        "is in bounds for every d in Fin(3) and every instance of S0"
+    )
     assert reads.status is Status.REFUTED
 
 

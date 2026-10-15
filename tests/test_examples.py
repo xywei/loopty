@@ -1022,8 +1022,8 @@ def test_the_hexahedra_demo_decides_its_layouts_and_its_programs() -> None:
         fact["statement"] for fact in facts if fact["owner"] == "gradient_along_t"
     ]
     assert (
-        "Ft[3*x + d, k, c] is in bounds for every instance of S0 and every d in "
-        "Fin(3)"
+        "Ft[3*x + d, k, c] is in bounds for every d in Fin(3) and every instance "
+        "of S0"
     ) in along_t
     assert not [line for line in along_t if "3*x + 0" in line]
     assert [line for line in along_t if line.startswith("the accumulation")] == [
@@ -1034,8 +1034,8 @@ def test_the_hexahedra_demo_decides_its_layouts_and_its_programs() -> None:
         fact["statement"] for fact in facts if fact["owner"] == "contravariant"
     ]
     assert (
-        "G[3*x + d, e, k, j, i] is in bounds for every instance of S0 and every x "
-        "in Fin(3)"
+        "G[3*x + d, e, k, j, i] is in bounds for every x in Fin(3) and every "
+        "instance of S0"
     ) in contravariant
 
 

@@ -337,8 +337,8 @@ def in_bounds_facts(
     ``reduce_sum(Ft[3 * x + d, k, c] * ... for d in Fin[3])`` reads
     ``Ft[3*x + 0, k, c]``, ``Ft[3*x + 1, k, c]`` and ``Ft[3*x + 2, k, c]``.
     Those are gathered into the access the source writes, with one fact,
-    ``Ft[3*x + d, k, c] is in bounds for every instance of S0 and every d in
-    Fin(3)``, about the cells all three reach (:func:`_gathered_over_unrolled`).
+    ``Ft[3*x + d, k, c] is in bounds for every d in Fin(3) and every instance
+    of S0``, about the cells all three reach (:func:`_gathered_over_unrolled`).
     """
     from loopty.table import table_type
 
@@ -515,8 +515,8 @@ def in_bounds_facts(
                     id=identifier,
                     kind="in-bounds",
                     statement=(
-                        f"{subject} is in bounds for every instance of {stmt.id}"
-                        + each.replace(" for every ", " and every ", 1)
+                        f"{subject} is in bounds{each}"
+                        f"{' and' if each else ' for'} every instance of {stmt.id}"
                     ),
                     term=Subset(
                         reached,

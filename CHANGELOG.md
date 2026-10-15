@@ -47,9 +47,12 @@ All notable changes to loopty are recorded here. The format follows
   refused with its pair and the fusion of fewer loops named, and what
   passes between them kept a row (`w`) and a slab (`v`) at a time; on a
   device, three launches, every node on a work item
-  (`passes_on_a_device`). It agrees with grudge's own operators to `3e-15`.
-  `benchmarks/hexahedra.py` times the variants against the same kernels in
-  plain loopy and against grudge on one device.
+  (`passes_on_a_device`). `benchmarks/hexahedra.py` times the variants
+  against the same kernels in plain loopy and against grudge on one device,
+  and compares them with #418's own `weak_local_grad` and `weak_local_div`
+  (`agree`): on a warped mesh at orders 3 to 6 they agree to `3e-15` to
+  `5e-15`, natively, compiled, fused and contracted, and as the device
+  launches.
 - **The demo's flagship, `examples/l2p.py`**: sumpy's L2P for the 2-D
   Laplace kernel (`E2PFromSingleBox` with the compressed Taylor expansion),
   in one file and one ledger. The claim sumpy's reconstruction rests on,
@@ -550,10 +553,13 @@ All notable changes to loopty are recorded here. The format follows
   update y[3]`. A long statement keeps what it writes into and shortens the
   calls on its right, `reduce_sum(...)`; an instance of the statement just
   named is `the same statement at t=1, i=7`. The same holds for every
-  refusal that names a pair (`tile`, `interchange`, `skew`, `affine`,
-  `fuse`, `tag`, `contract`, `substitute`, `atomic`), and the fix each
-  names is kept. A fact's `witness` keeps the ids, `S0[t=0, i=8]`, and so
-  does a term written by hand, which has no source.
+  refusal that names a pair (of `tile`, `interchange`, `skew`, `affine`,
+  `fuse`, `tag`, `contract`, `substitute`), and for a disjoint-writes fact
+  refuted on an input, and the fix each names is kept. A pair on two work
+  items says where each access runs by what it does, `the write is in a
+  sum, on every work item of l.0`, where it named the statement a second
+  time. A fact's `witness` keeps the ids, `S0[t=0, i=8]`, and so does a
+  term written by hand, which has no source.
 - A schedule's facts are at the line of the step that made them, the
   `.split(...)` or the `.assume(...)` of a chain, and its run at the line
   the schedule is finished, its last step (#259). They were all at the
@@ -564,8 +570,8 @@ All notable changes to loopty are recorded here. The format follows
 - A sum over a `Fin` of a number, which the trace adds up term by term, has
   the facts of its terms' accesses stated once, over its binder, as the
   source writes the access (#181, #223): S1's `contravariant` reads
-  `G[3*x + d, e, k, j, i] is in bounds for every instance of S0 and every x
-  in Fin(3)`, where it listed `G[0 + d, ...]`, `G[3 + d, ...]` and `G[6 +
+  `G[3*x + d, e, k, j, i] is in bounds for every x in Fin(3) and every
+  instance of S0`, where it listed `G[0 + d, ...]`, `G[3 + d, ...]` and `G[6 +
   d, ...]`, and the three sums over `c` of `gradient_along_t` are one
   exactness row, `for every d in Fin(3)`. The term, and the code, still
   add the terms one by one. S1's ledger is 70 facts where it was 86, with

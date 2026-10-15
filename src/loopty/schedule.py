@@ -87,8 +87,10 @@ the same sum at a later step, it is refused, as loopy refuses it for want of
 a global barrier, and so is a sum that reads the cell its own statement
 writes, which is one instance (see :func:`_within_instances`). ``ilp`` and
 ``vec`` loops run inside one work item, and only lose their order. A refusal
-names the dependence and the two work items: ``S0[t=0, i=1] writes u[1, 1]
-read by S0[t=1, i=2] on another work item``.
+names the dependence and the two work items: ``u[t + 1, i] = (u[t, i - 1] +
+u[t, i + 1]) / 2 (stencil_skew.py:62) at t=0, i=1 writes u[1, 1], read by the
+same statement at t=1, i=2 on another work item``, each instance by the
+statement as the source writes it (:func:`loopty.source.instances_text`).
 
 Legal is not the same as buildable
 ----------------------------------
@@ -227,8 +229,9 @@ dependence names, where there is one, a pair that does on an input: the
 schedule's example inputs, the module's ``example_inputs()``, then inputs
 drawn from the types, each interpreted with a log of the cells it touched
 (:meth:`Schedule._real_pair`, :func:`loopty.interpret.interpret`), with what
-the subscript read there: ``S1[c=0, k=2] and S1[c=1, k=1] both update y[3]
-on example_inputs() (nc=2, nv=4), where cell[0, 2] = 3 and cell[1, 1] = 3``.
+the subscript read there: ``y[cell[c, a]] += reduce_sum(...) (assembly.py:241)
+at c=0, a=2 and at c=1, a=1 both update y[3] on example_inputs() (nc=2,
+nv=4), where cell[0, 2] = 3 and cell[1, 1] = 3``.
 Where none has one, the message says the pair is isl's.
 
 Storing less
