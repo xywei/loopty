@@ -458,9 +458,12 @@ def run_sumpy(inputs: dict, args: argparse.Namespace) -> tuple[dict, np.ndarray]
 #: (loopty's ``ipow`` multiplies as loopy does); ``global``, ``unrolled_global``
 #: and ``pow_global`` keep every box's triangle in one array of the kernel's,
 #: zeroed first, as loopty's program keeps an array it makes, where loopy keeps
-#: one box's in a temporary of the box.
+#: one box's in a temporary of the box; ``inline`` writes ``x`` and ``y`` into
+#: the sum, computed again at every term, as loopty's code of the example has
+#: them, where loopy computes them once per target.
 LOOPY_VARIANTS = (
     "loop", "unrolled", "global", "unrolled_global", "pow", "pow_global",
+    "inline",
 )
 
 
@@ -498,6 +501,11 @@ def plain_loopy_kernel(
     power = "x**(1.0*ia) * y**(1.0*ib)" if variant.startswith("pow") else (
         "x**ia * y**ib"
     )
+    if variant == "inline":
+        power = (
+            "((targets[0, itgt] - centers[0, ibox]) / rscale)**ia"
+            " * ((targets[1, itgt] - centers[1, ibox]) / rscale)**ib"
+        )
     whole = variant.endswith("global")
     keep = "R[ibox, {}]" if whole else "R[{}]"
     zero = (
@@ -510,6 +518,12 @@ def plain_loopy_kernel(
         else ""
     )
     centre = "id=centre, dep=zero" if whole else "id=centre"
+    scaled = (
+        ""
+        if variant == "inline"
+        else """<> x = (targets[0, itgt] - centers[0, ibox]) / rscale
+                <> y = (targets[1, itgt] - centers[1, ibox]) / rscale"""
+    )
     knl = lp.make_kernel(
         [
             "{[ibox]: 0 <= ibox < nboxes}",
@@ -541,8 +555,7 @@ def plain_loopy_kernel(
                 end
             end
             for itgt
-                <> x = (targets[0, itgt] - centers[0, ibox]) / rscale
-                <> y = (targets[1, itgt] - centers[1, ibox]) / rscale
+                {scaled}
                 result[itgt] = {SCALING!r} * sum((ia, ib),
                     {keep.format("ia, ib")} * {power} * inv_fact[ia] * inv_fact[ib]
                     ) {{id=evaluate, dep=recurrence}}
