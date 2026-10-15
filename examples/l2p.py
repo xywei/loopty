@@ -35,13 +35,17 @@ L2P, read top to bottom, in three layers:
    only the box's at hand, as sumpy's registers do, is a window
    (``contract``), which is refused for now, with the reason: a window of an
    array over a domain is loopty #244, and of a recurrence #213.
+   ``on_a_gpu`` is sumpy's own schedule for a GPU, each box a work group:
+   ``fused`` with its box loop on ``g.0``, and no work item reads what
+   another stored.
 
 Run it three ways.
 
 ``python examples/l2p.py``
     Runs ``l2p`` natively against numpy on a quadtree's leaves, compares each
     target's potential with the sum over the charges, shows the refused
-    interchange, and runs ``fused`` compiled.
+    interchange, runs ``fused`` compiled, and lists the facts of
+    ``on_a_gpu``.
 
 ``lanky check examples/l2p.py``
     The ledger: the theorems; the layout's facts; each kernel's accesses,
@@ -51,7 +55,8 @@ Run it three ways.
 
 ``loopty run examples/l2p.py``
     Every kernel and the program, and each schedule, compiled for the C
-    target and compared with the native run.
+    target and compared with the native run; ``on_a_gpu`` on a device,
+    where pyopencl is installed (``PYOPENCL_CTX`` picks the device).
 
 How faithful. The coefficients are sumpy's ``src_expansions`` row by row, in
 its storage order, and ``rscale`` is sumpy's; the boxes are leaves owning
@@ -327,6 +332,13 @@ fused = (
     .fuse("reconstruct", "evaluate", loops=1)
 )
 
+#: sumpy's own schedule on a GPU, ``E2PFromSingleBox.get_optimized_kernel``:
+#: each box a work group (its ``itgt_box`` on ``g.0``), whose one work item
+#: runs the box's coefficients, triangle and targets in turn. The cells of C
+#: and R the program makes are zeroed by the work item that stores them.
+#: Checked anywhere; ``loopty run`` runs it where pyopencl and a device are.
+on_a_gpu = fused.retarget("opencl").tag(i="g.0")
+
 
 def refused_interchange() -> Schedule:
     """Columns of the triangle outside its rows: refused, with the pair it reorders."""
@@ -444,7 +456,11 @@ def sumpy_l2p(coeffs, cx, cy, cnt, tx, ty, pot, rscale):
 
 
 def main() -> int:
-    """Run natively, compare with the charges, show the refusal, run ``fused``."""
+    """Run natively, compare with the charges, show the refusal, run ``fused``.
+
+    And list the facts of sumpy's schedule for a GPU, ``on_a_gpu``, whose run
+    is ``loopty run``'s, where pyopencl is installed.
+    """
     from loopty.executor import LoopyExecutor
     from loopty.schedule import IllegalCast
 
@@ -478,7 +494,15 @@ def main() -> int:
             f"  {name}: difference {detail['difference']:.3g} within "
             f"{detail['tolerance']:.3g} ({detail['exactness']}) -> {run.status.value}"
         )
-    return 0 if error < 1e-8 and run.status.value == "tested" else 1
+    print()
+    # the fusions' facts are fused's, above; these are the tag's
+    shown = {fact.id for fact in fused.facts()}
+    device = [fact for fact in on_a_gpu.facts() if fact.id not in shown]
+    print(f"on a GPU, each box a work group, as sumpy's: {on_a_gpu!r}")
+    for fact in device:
+        print(f"  {fact.status.value:8} {fact.decided_by or '-':4} {fact.statement}")
+    legal = all(fact.status.value == "decided" for fact in device)
+    return 0 if error < 1e-8 and run.status.value == "tested" and legal else 1
 
 
 if __name__ == "__main__":

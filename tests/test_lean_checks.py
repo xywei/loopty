@@ -928,10 +928,15 @@ def _isl_facts(path: Path) -> list[Any]:
 
 
 #: What loopty states for isl alone in the examples, by the words of the
-#: statement: nothing, since a rewritten layout (#186) and a substitution's
+#: statement: the work items of sumpy's GPU schedule in ``examples/l2p.py``,
+#: whose order is stated and whose claim that no dependence joins two work
+#: items is not yet (#188). A rewritten layout (#186) and a substitution's
 #: definedness and the casts after it (#187) are stated. The coverage report
 #: lists what is left with the reason (docs/lean-checks.md).
-NOT_STATED: tuple[str, ...] = ()
+NOT_STATED: tuple[str, ...] = (
+    "the order after tag(i='g.0') runs every dependence of l2p forward, within "
+    "one work item",
+)
 
 
 def test_lean_proves_the_windows_and_the_substitution_of_the_test_kernels(

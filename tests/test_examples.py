@@ -1576,6 +1576,14 @@ def test_the_l2p_demo_refuses_the_interchange_and_fuses_box_by_box() -> None:
         "yet; keep it whole\n"
     ) in result.stdout
     assert "pot: difference 0 within" in result.stdout
+    # sumpy's own GPU schedule, each box a work group, with the file's names:
+    # the tag's two facts, the fusions' being fused's, above
+    device = result.stdout.split("on a GPU, each box a work group, as sumpy's: ")[1]
+    assert device.splitlines()[1:] == [
+        "  decided  isl  tag(i='g.0') renames the instances of l2p one for one",
+        "  decided  isl  the order after tag(i='g.0') runs every dependence of l2p "
+        "forward, within one work item",
+    ]
 
 
 # }}}
