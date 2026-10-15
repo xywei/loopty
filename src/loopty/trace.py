@@ -120,6 +120,7 @@ from loopty.flow import (
     is_isl_keyword,
 )
 from loopty.idx import Reflections
+from loopty.source import frame_statement_text, statement_text
 from loopty.term import Access, ArrType, Difference, Reduction, Stmt, Term, subtracted
 
 __all__ = [
@@ -722,6 +723,10 @@ class Tracer:
         #: (see :meth:`bind`).
         self.binders: set[str] = set()
         self.open_binders: list[tuple[Any, Var, Any, Any]] = []
+        #: The sums over a ``Fin`` of a number the body added up term by
+        #: term, by the identity of the value each made; see
+        #: :meth:`unrolled_sum`.
+        self.unrolled: dict[int, tuple[Any, tuple[str, int]]] = {}
 
     # {{{ calls of other kernels
 
@@ -1133,6 +1138,7 @@ class Tracer:
         where: str,
         source: Any = None,
         exactness: str | None = None,
+        text: str = "",
     ) -> Stmt:
         """Append one statement instance family to the term being built.
 
@@ -1153,6 +1159,12 @@ class Tracer:
         ``exactness`` is the class of an update, ``y[cell[c, j]] += v``
         (:func:`update_exactness`), which :attr:`loopty.term.Stmt.exactness`
         keeps.
+
+        ``text`` is the statement as the source writes it, which the
+        statement keeps with the names the source gives its loops
+        (:attr:`loopty.term.Stmt.text`, :attr:`~loopty.term.Stmt.spelled`),
+        and the sums over a ``Fin`` of a number it adds up term by term are
+        read off ``source`` (:meth:`unrolled_in`).
         """
         escaped = self._escaped(assignee, expr, source)
         if escaped:
@@ -1176,9 +1188,56 @@ class Tracer:
             loop_domain=self.loop_domain() if self.guards else None,
             unnarrowed=self.unnarrowed(),
             exactness=exactness if kind == "accumulate" else None,
+            text=text,
+            spelled=self.spelled(),
+            unrolled=self.unrolled_in(expr if source is None else source),
         )
         self.stmts.append(stmt)
         return stmt
+
+    def spelled(self) -> tuple[str, ...]:
+        """The names the source gives the enclosing loops, outermost first.
+
+        The ``for`` target of each, where :attr:`inames` may have renamed it
+        (a second ``for r`` is ``r_0``). Where two loops have one target, a
+        loop inside a loop of the same name, the inames are kept, so that
+        an instance's coordinates still tell its loops apart.
+        """
+        names = tuple(loop.target or loop.iname for loop in self.loops)
+        return names if len(set(names)) == len(names) else self.inames
+
+    def unrolled_sum(self, value: Any, binder: str, count: int) -> None:
+        """Note that ``value`` is a sum over a ``Fin`` of ``count``, term by term.
+
+        lanky walks ``Fin[3]`` as ``range(3)``, so ``reduce_sum(... for d in
+        Fin[3])`` hands :func:`loopty.reduction.reduce_sum` the three terms'
+        sum, with ``d`` gone. The statement the value ends up in records
+        ``(d, 3)`` (:meth:`unrolled_in`), which the ledger states the
+        accesses of the terms over, once (:attr:`loopty.term.Stmt.unrolled`).
+        The value itself is kept, so that its identity is not reused.
+        """
+        self.unrolled[id(value)] = (value, (binder, count))
+
+    def unrolled_in(self, value: Any) -> tuple[tuple[str, int], ...]:
+        """The ``(binder, count)`` of each unrolled sum ``value`` holds, in order."""
+        if not self.unrolled:
+            return ()
+        found: list[tuple[str, int]] = []
+        stack = [value]
+        seen: set[int] = set()
+        while stack:
+            node = stack.pop()
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            entry = self.unrolled.get(id(node))
+            if entry is not None and entry[0] is node:
+                found.append(entry[1])
+            if isinstance(node, tuple | list):
+                stack.extend(reversed(node))
+            elif isinstance(node, prim.ExpressionNode):
+                stack.extend(reversed(init_args(node)))
+        return tuple(dict.fromkeys(found))
 
     def _escaped(self, assignee: Access, expr: Any, source: Any = None) -> set[str]:
         """Loop variables a statement mentions that no loop around it binds.
@@ -2900,13 +2959,20 @@ class SymArr:
 
     def __setitem__(self, key: Any, value: Any) -> None:
         """Write: record a statement at the caller's file and line."""
-        where = _location(sys._getframe(1))
+        frame = sys._getframe(1)
+        where = _location(frame)
         key = _exact_key(_unguarded(key, self.tracer, where), self.tracer)
         self._refuse_whole(key, where, write=True)
-        self._store(_index_tuple(key), value, where)
+        self._store(_index_tuple(key), value, where, frame_statement_text(frame))
 
-    def _store(self, indices: tuple[Any, ...], value: Any, where: str) -> None:
-        """Record the statement that writes ``value`` into the cell at ``indices``."""
+    def _store(
+        self, indices: tuple[Any, ...], value: Any, where: str, text: str = ""
+    ) -> None:
+        """Record the statement that writes ``value`` into the cell at ``indices``.
+
+        ``text`` is the statement as the source writes it, for the messages
+        that name it (:attr:`loopty.term.Stmt.text`).
+        """
         value = _unguarded(value, self.tracer, where)
         key = _key_of(indices)
         if self.type.domain is not None:
@@ -2937,7 +3003,15 @@ class SymArr:
             if kind == "accumulate"
             else None
         )
-        tracer.record(assignee, expr, kind, where, source=value, exactness=exactness)
+        tracer.record(
+            assignee,
+            expr,
+            kind,
+            where,
+            source=value,
+            exactness=exactness,
+            text=text,
+        )
 
     def _refuse_many_values(self, key: Any, value: Any, where: str) -> None:
         """Refuse a store of many values into one cell.
@@ -3187,7 +3261,9 @@ class _RowView(SymArr):
     def _read(self, indices: tuple[Any, ...], where: str) -> Any:
         return self.base._read((*self.prefix, *indices), where)
 
-    def _store(self, indices: tuple[Any, ...], value: Any, where: str) -> None:
+    def _store(
+        self, indices: tuple[Any, ...], value: Any, where: str, text: str = ""
+    ) -> None:
         if self.base.name in self.tracer.tables:
             raise TraceError(
                 f"{self.name}[{_key_text(_key_of(indices))}] = ... at {where} "
@@ -3195,7 +3271,7 @@ class _RowView(SymArr):
                 "are part of the kernel's code, and nothing writes them. Pass an "
                 "array the called kernel may write instead"
             )
-        self.base._store((*self.prefix, *indices), value, where)
+        self.base._store((*self.prefix, *indices), value, where, text)
 
 
 class _GatherView(SymArr):
@@ -3264,7 +3340,9 @@ class _GatherView(SymArr):
         picked = self.index._read(tuple(indices[:depth]), where)
         return self.source._read((picked, *indices[depth:]), where)
 
-    def _store(self, indices: tuple[Any, ...], value: Any, where: str) -> None:
+    def _store(
+        self, indices: tuple[Any, ...], value: Any, where: str, text: str = ""
+    ) -> None:
         raise TraceError(
             f"{self.name}[{_key_text(_key_of(indices))}] = ... at {where} writes "
             f"the cells {self.name} gathers, and natively {self.name} is a copy "
@@ -3658,6 +3736,7 @@ def _refuse_arithmetic(expr: Any, params: Mapping[str, Any], where: str) -> None
             _refuse_division_by_zero(node, promotion, where)
         elif isinstance(node, prim.Call):
             _refuse_half_precision(node, promotion, where)
+            _refuse_integer_power_sorts(node, promotion, where)
         _refuse_unheld_literal(node, promotion, where)
     _refuse_untyped_literals(expr, promotion, where)
 
@@ -3689,6 +3768,41 @@ def _refuse_half_precision(node: prim.Call, promotion: Any, where: str) -> None:
         f"numpy computes it in for {_a(operand_type)}, and the compiled kernel "
         f"has no {result}; write {function.name}(1.0 * {scaled}) for a double"
     )
+
+
+def _refuse_integer_power_sorts(node: prim.Call, promotion: Any, where: str) -> None:
+    """Refuse ``ipow(x, n)`` of a base that is not real or a power not an integer.
+
+    :func:`loopty.math.ipow` refuses both natively, where it sees the
+    values. Traced it sees terms, so the same refusal is made here from the
+    operands' types, before a kernel is built whose compiled run would
+    compute a power its native run refuses: of an integer base, loopy's
+    integer power in the integer's type; of a real exponent, the C library's
+    ``pow``.
+    """
+    from loopty.promotion import _one_dtype
+
+    function = node.function
+    if not isinstance(function, prim.Variable) or function.name != "ipow":
+        return
+    if len(node.parameters) != 2:
+        return
+    base, power = node.parameters
+    shown = f"ipow({_written(base)}, {_written(power)})"
+    base_type = _one_dtype(promotion.types(base)[0])
+    if base_type is not None and base_type.kind != "f":
+        raise TraceError(
+            f"{shown} at {where}: loopty.math.ipow takes a real base of a "
+            f"floating type, and {_written(base)} is {_a(base_type)}; for an "
+            "integer or a complex number, write x ** n"
+        )
+    power_type = _one_dtype(promotion.types(power)[0])
+    if power_type is not None and power_type.kind not in "iu":
+        raise TraceError(
+            f"{shown} at {where}: loopty.math.ipow takes an integer power, and "
+            f"{_written(power)} is {_a(power_type)}; x ** n is the power of a "
+            "real exponent"
+        )
 
 
 def _a(dtype: Any) -> str:
@@ -5571,7 +5685,12 @@ def _returned(
             "made; return the value, or write it into a parameter and return "
             "nothing"
         )
-    result._store((0,), value, where)
+    text = (
+        statement_text(code.co_filename, line)
+        if code is not None and line is not None
+        else ""
+    )
+    result._store((0,), value, where, text)
 
 
 # }}}

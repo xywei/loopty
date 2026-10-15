@@ -94,15 +94,21 @@ def _resolve(obj: Any, target: str | None = None) -> tuple[Term, Any, Lowering, 
         # Asked before loopy is, so that an accepted-but-unbuildable schedule
         # names the limit it hits instead of throwing from code generation.
         obj.require_buildable()
+        # A device schedule built where pyopencl is not installed is checked,
+        # and its code is generated and run where pyopencl is.
+        from loopty.lower import require_pyopencl
+
+        require_pyopencl(obj.kernel)
         return obj.term, obj.kernel, obj.lowering, obj.target
     term = obj if isinstance(obj, Term) else getattr(obj, "term", None)
     if term is None and hasattr(obj, "trace"):
         term = obj.trace()
     if not isinstance(term, Term):
         raise TypeError(f"{obj!r} is neither a kernel, a schedule, nor a term")
-    from loopty.lower import lower_generic
+    from loopty.lower import lower_generic, require_pyopencl
 
     lowering = lower_generic(term, target or "c")
+    require_pyopencl(lowering.kernel)
     return term, lowering.kernel, lowering, target or "c"
 
 
@@ -920,16 +926,21 @@ def _agreement_fact(
     without a schedule is named by its definition and the target alone, and a
     term by its name and the target.
 
-    It is placed at the term's first statement, or at the term's own
-    :attr:`~loopty.term.Term.where` when it has one: a program's term does,
-    since its first statement is some kernel's, perhaps in another file.
+    It is placed where the schedule is written
+    (:attr:`~loopty.schedule.Schedule.where`), the line of its last step;
+    without a schedule, at the term's own :attr:`~loopty.term.Term.where`
+    when it has one (a program's term does, since its first statement is
+    some kernel's, perhaps in another file), and else at its first
+    statement.
     """
     from lanky.ledger import Fact, Status, fact_id
 
     from loopty.schedule import Schedule, definition_of
 
+    where = term.where or (term.stmts[0].where if term.stmts else "")
     if isinstance(schedule, Schedule):
         identifier = schedule.fact_id("agreement")
+        where = schedule.where or where
     else:
         identifier = fact_id(
             "agreement",
@@ -947,7 +958,7 @@ def _agreement_fact(
         status=Status.TESTED if ok else Status.REFUTED,
         decided_by="loopy",
         provenance=provenance,
-        where=term.where or (term.stmts[0].where if term.stmts else ""),
+        where=where,
         owner=term.name,
     )
 

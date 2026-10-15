@@ -312,6 +312,7 @@ def postcondition_fact(
     *,
     module: str | None = None,
     line: int | None = None,
+    at_class: bool = False,
 ) -> Fact:
     """A kernel's postcondition, tested against what its native runs left.
 
@@ -325,28 +326,46 @@ def postcondition_fact(
     oracle mistakes for a closed proposition.
 
     A call of a function of :mod:`loopty.math` in it is numpy's, as in the
-    body: ``-> all(y[i] == sqrt(x[i]) for i in Fin[n])``.
+    body: ``-> all(y[i] == sqrt(x[i]) for i in Fin[n])``. An equation of
+    reals that rounds is compared within its class's tolerance, as the
+    compiled run is compared with the native one (:mod:`loopty.reals`), and
+    the statement says so.
 
     It is ``tested`` only when it held after every run: one after which it
     cannot be evaluated (it reads a cell the run's arrays do not have, or a
     name nothing gives a value) leaves it ``assumed``, however many others
     it held after, since a program that calls the kernel skips a check on the
     strength of a ``tested`` postcondition (see :mod:`loopty.compose`).
+
+    ``kernel`` may be a program, whose sizes its term's types give. With
+    ``at_class``, which a program's postcondition is tested with, an
+    equation that reads an array the program writes is compared at that
+    array's class (:func:`loopty.tolerance.output_class`), ``approx`` for
+    reals, as the compiled run is compared with the native one: a program's
+    calls sum in an order of their own, ``weak_grad``'s three passes against
+    the dense operator its claim states, and the two agree as reals, which
+    Lean shows (:mod:`loopty.unfolding`), and as floats to rounding. Every
+    other comparison of a program's is exact; a kernel's equations of reals
+    are read by :mod:`loopty.reals`, as above.
     """
     from lanky.terms import render, truth_value
 
     from loopty.contract import resolve_sizes
     from loopty.math import FUNCTIONS as MATH
+    from loopty.reals import at_the_class, statement, tolerance_words
     from loopty.typing import AfterCall, postcondition_id
 
     post = term.post
+    # an equation of reals that rounds, compared within its class's tolerance;
+    # a program's (``at_class``) is compared at its outputs' class below
+    judged = post if at_class else at_the_class(term, post)
     inputs: list[dict[str, Any]] = []
 
     def fact(status: Status, **provenance: Any) -> Fact:
         return Fact(
             id=postcondition_id(owner, module=module, line=line),
             kind="postcondition",
-            statement=render(post),
+            statement=render(post) if at_class else statement(term, post),
             term=AfterCall(term.name, post),
             status=status,
             decided_by="native" if status is not Status.ASSUMED else None,
@@ -370,8 +389,13 @@ def postcondition_fact(
             inputs.append({"input": label, "outcome": f"not run: {arguments.reason}"})
             continue
         context: dict[str, Any] = dict(arguments)
+        arg_types = getattr(kernel, "arg_types", None)
         try:
-            sizes = resolve_sizes(getattr(kernel, "arg_types", {}), arguments)
+            sizes = (
+                resolve_sizes(arg_types, arguments)
+                if arg_types is not None
+                else _sizes_of(term, arguments)
+            )
         except Exception:  # noqa: BLE001 - a size the claim names is missed below
             sizes = {}
         for name, value in sizes.items():
@@ -379,10 +403,15 @@ def postcondition_fact(
         # A claim may call loopty.math's functions, as the body does.
         for name, function in MATH.items():
             context.setdefault(name, function)
+        failure: str | None = None
         try:
             with np.errstate(all="ignore"), warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                holds = truth_value(evaluate(post, context), post)
+                if at_class:
+                    failure = _at_class(post, context, term)
+                    holds = failure is None
+                else:
+                    holds = truth_value(evaluate(judged, context), judged)
         except Exception as exc:  # noqa: BLE001 - said in the provenance
             inputs.append(
                 {
@@ -394,12 +423,14 @@ def postcondition_fact(
         if not holds:
             inputs.append({"input": label, "outcome": "false"})
             extra = {"arguments": recorded} if recorded is not None else {}
+            said = f" ({failure})" if failure else tolerance_words(term, post)
             return fact(
                 Status.REFUTED,
                 counterexample={"input": label},
                 reason=(
                     f"on {label}, the body run natively leaves {render(post)} "
-                    f"false, so {term.name} does not establish its postcondition"
+                    f"false{said}, so {term.name} does not establish its "
+                    "postcondition"
                 ),
                 **extra,
             )
@@ -429,7 +460,177 @@ def postcondition_fact(
                 f"could not be evaluated after the others ({tried})"
             ),
         )
+    if at_class:
+        return fact(Status.TESTED, compared=held, classes=_classes_of(post, term))
     return fact(Status.TESTED, compared=held)
+
+
+#: The name a comparison at a class is called under in a claim evaluated
+#: point by point (:func:`_at_class`); no identifier of a program's starts so.
+_NEAR = "__loopty_near__"
+
+
+def _classes_of(post: Any, term: Term) -> dict[str, str]:
+    """The class each equation of ``post`` is compared at, by its rendering."""
+    from lanky.terms import Forall, conjuncts, render
+
+    out = {}
+    for part in conjuncts(post):
+        body = part.body if isinstance(part, Forall) else part
+        out[render(body)] = _class_of(body, term)
+    return out
+
+
+def _class_of(body: Any, term: Term) -> str:
+    """The class an equation is compared at: the weakest of the outputs it reads.
+
+    ``exact`` for anything but an equation, and for one that reads no array
+    the program writes.
+    """
+    import pymbolic.primitives as prim
+
+    from loopty.trace import EXACTNESS_ORDER
+
+    if not (isinstance(body, prim.Comparison) and body.operator == "=="):
+        return "exact"
+    written = {stmt.assignee.array for stmt in term.stmts}
+    params = {name for name, _ in term.params}
+    read = _arrays_read(body) & written & params
+    classes = [output_class(term, name) for name in sorted(read)]
+    known = [c for c in classes if c in EXACTNESS_ORDER] or ["exact"]
+    return max(known, key=EXACTNESS_ORDER.index)
+
+
+def _arrays_read(expr: Any) -> set[str]:
+    """The arrays ``expr`` reads a cell of."""
+    import pymbolic.primitives as prim
+    from lanky.terms import init_args
+
+    out: set[str] = set()
+
+    def visit(node: Any) -> None:
+        if isinstance(node, prim.Subscript) and isinstance(
+            node.aggregate, prim.Variable
+        ):
+            out.add(node.aggregate.name)
+        if isinstance(node, prim.ExpressionNode):
+            for arg in init_args(node):
+                visit(arg)
+        elif isinstance(node, tuple | list):
+            for item in node:
+                visit(item)
+
+    visit(expr)
+    return out
+
+
+def _at_class(post: Any, context: Mapping[str, Any], term: Term) -> str | None:
+    """Where ``post`` is false, each equation compared at its class; ``None`` where not.
+
+    A conjunct that is an equation of an output of a class weaker than
+    ``exact`` (:func:`_class_of`) is evaluated over all its points at once,
+    each binder a column of indices, and its two sides compared cell by cell
+    as :func:`loopty.tolerance.disagreement` compares two runs: the dense
+    operator ``weak_grad`` claims is a sum over ``4 n**3`` terms at every
+    one of ``3 ne n**3`` points, which point by point takes seconds. A
+    conjunct whose binders do not make a box (a bound that names another
+    binder, a sort that is not a ``Fin``) is evaluated point by point, the
+    equation a comparison at its class. Every other conjunct is evaluated
+    exactly, as a kernel's postcondition is.
+    """
+    from lanky.terms import Call, Forall, Var, conjuncts, render, truth_value
+
+    for part in conjuncts(post):
+        binders, body, guard = (
+            (part.binders, part.body, part.guard)
+            if isinstance(part, Forall)
+            else ((), part, None)
+        )
+        exactness = _class_of(body, term)
+        if exactness == "exact":
+            if not truth_value(evaluate(part, dict(context)), part):
+                return f"{render(part)} is false"
+            continue
+        try:
+            failure = _in_a_box(binders, body, guard, context, exactness)
+        except _NotABox:
+            near = Call(Var(_NEAR), (body.left, body.right))
+            pointwise = Forall(binders, near, guard) if binders else near
+            local = dict(context)
+            local[_NEAR] = lambda got, want, exactness=exactness: _near(
+                got, want, exactness
+            )
+            if not truth_value(evaluate(pointwise, local), pointwise):
+                return f"{render(body)} fails at a point, beyond the {exactness} class"
+            continue
+        if failure is not None:
+            return failure
+    return None
+
+
+class _NotABox(Exception):
+    """A conjunct whose points are not evaluated at once (:func:`_in_a_box`)."""
+
+
+def _near(got: Any, want: Any, exactness: str) -> bool:
+    """Whether two values agree at ``exactness``, as two runs' cells do."""
+    got, want = np.asarray(got), np.asarray(want)
+    dtype = np.result_type(got, want)
+    differ = disagreement(got.astype(dtype), want.astype(dtype), exactness)
+    return not bool(differ.any())
+
+
+def _in_a_box(
+    binders: Sequence[tuple[Any, Any]],
+    body: Any,
+    guard: Any,
+    context: Mapping[str, Any],
+    exactness: str,
+) -> str | None:
+    """An equation at every point of its binders' box at once (see :func:`_at_class`).
+
+    Raises:
+        _NotABox: If a binder's sort is not a ``Fin`` whose bound names no
+            other binder, or a side or the guard cannot be evaluated on
+            columns of indices.
+    """
+    from lanky.terms import render
+
+    names = [var.name for var, _ in binders]
+    extents = []
+    for var, sort in binders:
+        if not isinstance(sort, FinType):
+            raise _NotABox(f"{var.name} is over {sort}")
+        if set(free_variables(sort.bound)) & set(names):
+            raise _NotABox(f"the bound of {var.name} names another binder")
+        extents.append(max(int(evaluate(sort.bound, dict(context))), 0))
+    count = int(np.prod(extents)) if extents else 1
+    if count == 0:
+        return None
+    columns = np.indices(extents).reshape(len(extents), -1) if extents else []
+    local = dict(context)
+    for name, column in zip(names, columns, strict=True):
+        local[name] = column
+    try:
+        mask = np.ones(count, dtype=bool)
+        if guard is not None:
+            held = np.asarray(evaluate(guard, local), dtype=bool)
+            mask = np.broadcast_to(held, (count,))
+        left = np.broadcast_to(np.asarray(evaluate(body.left, local)), (count,))
+        right = np.broadcast_to(np.asarray(evaluate(body.right, local)), (count,))
+    except Exception as exc:  # noqa: BLE001 - evaluated point by point instead
+        raise _NotABox(f"{type(exc).__name__}: {exc}") from exc
+    dtype = np.result_type(left, right)
+    bad = disagreement(left.astype(dtype), right.astype(dtype), exactness) & mask
+    if not bad.any():
+        return None
+    k = int(np.argmax(bad))
+    at = ", ".join(f"{name}={int(column[k])}" for name, column in zip(names, columns))
+    return (
+        f"at {at}, {render(body.left)} is {left[k].item()!r} and "
+        f"{render(body.right)} is {right[k].item()!r}, further apart than the "
+        f"{exactness} class allows"
+    )
 
 
 def layout_fact(
@@ -523,8 +724,23 @@ class Collision:
 
     @property
     def instances(self) -> str:
-        """``S1[c=0, j=1] and S1[c=1, j=2]``."""
+        """``S1[c=0, j=1] and S1[c=1, j=2]``, as a witness records them."""
         return f"{_instance(*self.first)} and {_instance(*self.second)}"
+
+    def named(self, term: Term) -> str:
+        """The two instances as a message names them, by the statements' text.
+
+        ``y[cell[c, j]] = yl[c, j] (f.py:12) at c=0, j=1 and at c=1, j=2``
+        (:func:`loopty.source.instances_text`).
+        """
+        from loopty.source import instances_text
+
+        first, second = instances_text(
+            {stmt.id: stmt for stmt in term.stmts}, self.first, self.second
+        )
+        if second.startswith("the same statement at "):
+            second = second.removeprefix("the same statement ")
+        return f"{first} and {second}"
 
     @property
     def at(self) -> str:
@@ -729,7 +945,7 @@ def collision_fact(term: Term, fact: Fact, touched: Sequence[Logged]) -> Fact:
             witness=found.instances,
             counterexample={"input": found.label, **found.sizes},
             reason=(
-                f"{found.instances} both write {found.cell_text} on {found.at}"
+                f"{found.named(term)} both write {found.cell_text} on {found.at}"
                 f"{found.where}, so the later write overwrites the earlier one"
             ),
         )

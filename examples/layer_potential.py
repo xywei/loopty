@@ -1,81 +1,224 @@
-"""A layer potential by QBX: complex points, ``loopty.math``, and sumpy's CPU tile.
+"""pytential's QBX on its own curve: sumpy's tile checked, its series proved.
 
-pytential evaluates the Laplace single layer of a density on a curve, at a
-target on the curve, through a local expansion about a center just off the
-curve (QBX). For a target ``z`` with center ``c``, the expansion of ``log |c
-+ tau (z - c) - y|`` in ``tau`` to order ``P``, evaluated at ``tau = 1``, is
-the line-Taylor form sumpy generates as straight-line code::
+pytential evaluates a layer potential at the points of its own curve by QBX: for
+each target ``z`` on the curve it takes a center ``c`` just off it, expands the
+kernel about ``c`` and sums the expansion at ``z``. With ``fmm_order=False`` and
+no derivative at the target, that is sumpy's ``LayerPotential``, the direct sum
+over every source, with a line-Taylor expansion: the kernel along the line from
+the center through the target, ``log |alpha + tau * beta|`` with ``alpha = c -
+y`` and ``beta = z - c``, expanded in ``tau`` to the QBX order and summed at
+``tau = 1``. Read ``alpha`` and ``beta`` as complex numbers and that is::
 
-    Re( log(c - y) - sum_{k=1..P} ((c - z) / (c - y))**k / k )
+    log|alpha| + Re( c(1) + ... + c(5) ),   c(k) = -(-beta / alpha)**k / k
 
-Over complex points that is one line of a kernel, with ``real`` and ``log``
-from ``loopty.math``:
+One file holds the three layers of it:
 
-    out[t] = SCALE * reduce_sum(
-        w[s] * real(log(c[t] - y[s]) - reduce_sum(...))
-        for s in y.dom
-    )
-
-The curve is the unit circle and the density ``cos(theta)``, whose single
-layer on the circle is ``cos(theta) / 2``, so the answer is known.
+- **The algorithm.** ``line_taylor`` is the theorem behind the ``c(k)``, for
+  every order, lanky's ``examples/line_taylor.py``: a table that satisfies
+  what the differential equation ``(alpha + tau * beta) f'(tau) == beta`` says
+  about its coefficients is the closed form ``coefficient`` writes, at the
+  ratio ``-beta / alpha``. That the Taylor coefficients of ``log(alpha + tau
+  * beta)`` satisfy it is cited, not proved. The kernels add
+  ``coefficient(ratio(alpha, beta), k)``, the same function, with the ratio
+  computed by the conjugate, ``-beta * conj(alpha) / |alpha|**2``, which
+  ``by_the_conjugate`` proves is ``-beta / alpha``. ``single_layer`` cites
+  both, and its ledger has the row that links them: ``single_layer adds
+  line_taylor's c(n) for n in 1..5``, about the term it evaluates read over
+  the complex numbers, not about the floats it produces.
+- **The kernels and their transforms.** ``single_layer`` and ``double_layer``
+  are pytential's ``S`` and ``D`` as sumpy computes them, over complex points.
+  ``sumpy_tile()`` is sumpy's CPU schedule, as ``get_optimized_kernel`` writes
+  it, and ``tiled`` the same tile on the C target. sumpy silences loopy's
+  ``write_race(write_lpot*)`` warning on this kernel; here the ledger has the
+  fact that stands in its place, ``distinct instances of S0 write distinct
+  cells of out``, decided by isl and, with Lean, proved.
+- **The agreement and the accuracy.** ``sumpy_single_layer`` and
+  ``sumpy_double_layer`` are what sumpy's own ``LayerPotential`` returns on
+  the same inputs, called as pytential calls it, and each kernel's
+  ``upstream`` row compares its native run with them, within ``1e-12`` of
+  the largest value, which is round-off between two orders of summation.
+  pytential's identity test case, Green's identity ``S(du/dn) - D(u) - u/2
+  == 0`` on the five-armed starfish, and the jump relations its integral
+  equations rest on are measured with the compiled kernels at 30 to 90
+  panels, each a ``tested`` row decided by the run.
 
 Run this file three ways.
 
 ``python examples/layer_potential.py``
-    Evaluates the layer potential natively at 32 targets from 512 sources,
-    and checks it against the exact value. Then schedules it as sumpy's CPU
-    tile, 16 targets at a time and 256 sources at a time, with the sources'
-    loop outside the targets', and prints the facts of that schedule, its
-    comparison with the native run, and the same order on a target loop that
-    runs in sequence, which loopy cannot keep.
+    Evaluates both layer potentials natively and compiled on the starfish,
+    prints the facts of sumpy's tile and its run on the C target, and measures
+    Green's identity and the two jumps as the panels shrink.
 
 ``lanky check examples/layer_potential.py``
-    The kernel's obligations: every access in bounds, decided by isl, and
-    the trace faithful to the body, with ``log`` and ``real`` interpreted by
-    numpy.
+    The ledger. The theorem reads ``proved`` by Lean where Mathlib is
+    installed, and ``assumed`` without it, since the property tester draws no
+    table over ``Nat``; the identity ``by_the_conjugate`` reads ``proved``
+    with Mathlib and ``tested`` without. The row that ``single_layer`` adds
+    the theorem's ``c(n)`` is ``decided`` by ``theorem``, and proved by Lean
+    with Mathlib. Each kernel's accesses are in bounds and its writes
+    distinct, and each cast of its tile on C keeps every dependence, decided
+    by isl (proved by Lean where it is installed); its trace is faithful to
+    its body, its agreement with sumpy is ``tested`` by ``upstream`` within
+    ``1e-12`` of the largest value, and the three accuracy rows are
+    ``tested`` by their run.
 
 ``loopty run examples/layer_potential.py``
-    The tiled schedule compiled on the C target and compared with the native
-    run. The difference it prints is one of ``log``'s last bits, numpy's
-    against the C library's, which can differ from machine to machine.
+    Both kernels on their tile, compiled on the C target and compared with
+    the native run. ``sumpy_tile()``, with its work items, runs on a device
+    in ``benchmarks/qbx_layer_potential.py``.
 
-What is worth reading here
---------------------------
+What it mirrors, at the commits the demonstration pins
+------------------------------------------------------
 
-*Elementary functions are numpy's, in both runs.* ``log`` of a complex number
-is numpy's natively and ``clog`` compiled (``cdouble_log`` on OpenCL), and
-``real`` is ``creal``; each is computed in the type numpy computes it in.
+- sumpy's ``LayerPotential.get_kernel``, whose result is ``knl_scaling *
+  simul_reduce(sum, isrc, pair_result)`` with the warning silenced
+  (https://github.com/inducer/sumpy/blob/13a48a0260eec8cf7ac67f1faca701205d9096ae/sumpy/qbx.py#L248-L306),
+  and its CPU schedule, ``get_optimized_kernel(is_cpu=True)``
+  (https://github.com/inducer/sumpy/blob/13a48a0260eec8cf7ac67f1faca701205d9096ae/sumpy/qbx.py#L208-L240).
+- The expansion, ``LineTaylorLocalExpansion``
+  (https://github.com/inducer/sumpy/blob/13a48a0260eec8cf7ac67f1faca701205d9096ae/sumpy/expansion/local.py#L116-L185).
+- pytential's direct self-interaction, which calls it with the stage-1 nodes
+  as targets, the upsampled nodes as sources and the centers on the side the
+  operator asks for
+  (https://github.com/inducer/pytential/blob/8700a2918085572ae86ace15a0beb2f106458bb2/pytential/qbx/__init__.py#L800-L829
+  and #L866-L973), its expansion radii, half the panel size on a curve
+  (https://github.com/inducer/pytential/blob/8700a2918085572ae86ace15a0beb2f106458bb2/pytential/symbolic/primitives.py#L1301-L1396),
+  and its identity test, ``GreenExpr`` on the starfish at QBX order 5, target
+  order 8 and sources upsampled by 4, which asks for an order above ``5 -
+  1.6`` (https://github.com/inducer/pytential/blob/8700a2918085572ae86ace15a0beb2f106458bb2/test/test_layer_pot_identity.py#L87-L99,
+  #L258-L268 and #L277-L411). pytential runs that case with its FMM; here it
+  is the direct evaluation, ``fmm_order=False``, as pytential's test runs the
+  starfish's Calderon case.
+- meshmode's ``NArmedStarfish(5, 0.25)``
+  (https://github.com/inducer/meshmode/blob/bbaf4ab4ecfb3b1cfcdac79165d4ca61fe0de64a/meshmode/mesh/generation.py#L310-L374).
 
-*The tile is sumpy's.* ``LayerPotential.get_optimized_kernel`` splits the
-targets by 16 onto a group and its work items, splits the sources by 256,
-and runs the sources' outer loop outside the work items' loop
-(``prioritize_loops([isrc_outer, itgt_inner])``). Here it is
-``.prioritize("s_outer", "t_inner")``: each target's sum still adds its
-sources in order, so nothing is reassociated, and the targets in a tile no
-longer order one another, so a dependence between two of them would be
-refused. On the C target the 16 targets are an ``ilp`` loop, so that loopy
-keeps an accumulator for each of them, ``acc[16]``; on a loop in sequence
-loopy keeps one and would drop the order, and the schedule says so. On a
-device, the sumpy schedule is written as it is, ``.tag(t_outer="g.0",
-t_inner="l.0")``.
+What differs: sumpy computes the expansion in real arithmetic, straight-line
+code sympy writes for each order; here it is the same series in complex
+arithmetic, one sum over the order that the trace writes out, with the
+ratio's division multiplied out by the conjugate. The curve here is the
+parametrization itself at Gauss-Legendre points, where meshmode interpolates
+it by polynomials and pytential refines its panels first, so the accuracy
+rows measure this discretization and not pytential's. What sumpy's kernel
+returns on this file's own inputs is recorded in
+``layer_potential_sumpy.json`` with the commits it ran at, since sumpy needs a
+newer loopy than loopty's; ``benchmarks/qbx_layer_potential.py`` records it,
+and compares the kernels with sumpy on the arguments pytential itself hands
+it, on its refined starfish.
+
+What loopy does with sumpy's tile: ``prioritize_loops([isrc_outer,
+itgt_inner])`` cannot be kept with the targets on a hardware axis, which
+loopy says, and it then nests the inner source loop outside the outer one,
+so that each work item adds its sources 256 apart. The schedule here states
+the order its facts were checked for, and its code keeps it.
 """
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import numpy as np
-from lanky.prelude import Real
+from lanky import theorem
+from lanky.prelude import Complex, Fn, Nat, Real
 
-from loopty import Arr, Fin, Schedule, kernel, reduce_sum
-from loopty.math import log, real
+from loopty import Arr, Fin, Schedule, kernel, reduce_sum, tested, upstream
+from loopty.math import conj, log, real
 
-#: The order of the expansion, the targets and the sources.
-P, TARGETS, SOURCES = 4, 32, 512
+#: pytential's QBX order in its identity test.
+ORDER = 5
 
-#: The Laplace single layer's constant: G(x, y) = -log|x - y| / (2 pi).
+#: The Laplace kernel's constant: G(x, y) = -log|x - y| / (2 pi).
 SCALE = -1 / (2 * np.pi)
 
 
-@kernel
+# {{{ the algorithm: the line-Taylor coefficients, for every order
+
+
+def coefficient(ratio, k):
+    """The ``k``-th Taylor coefficient of ``log(alpha + tau * beta)``, ``k >= 1``.
+
+    ``ratio`` is ``-beta / alpha``.
+    """
+    return -(ratio**k) / k
+
+
+@theorem
+def line_taylor(
+    alpha: Complex,
+    beta: Complex,
+    c: Fn[Nat, Complex],
+    away: alpha != 0,
+    first: alpha * c(1) == beta,
+    ode: all((n + 1) * alpha * c(n + 1) + n * beta * c(n) == 0 for n in Nat if n >= 1),
+) -> all(c(n) == coefficient(-beta / alpha, n) for n in Nat if n >= 1):
+    """The line-Taylor coefficients of ``log(alpha + tau * beta)``, for every order.
+
+    ``f(tau) = log(alpha + tau * beta)`` solves ``(alpha + tau * beta) * f'(tau)
+    == beta``. Comparing the powers of ``tau`` in it gives ``first`` and
+    ``ode`` (L. V. Ahlfors, Complex Analysis, 3rd ed., 1979, chs. 2 and 5;
+    lanky's ``examples/line_taylor.py`` states the equation as an axiom and
+    checks sumpy's own coefficients against the closed form through order 6).
+    The induction is two orders at a time; Python finds the linear combination
+    of the hypotheses each step needs, and Lean checks it with Mathlib.
+    """
+
+
+def ratio(alpha, beta):
+    """``-beta / alpha``, by the conjugate: ``-beta * conj(alpha) / |alpha|**2``.
+
+    As sumpy's real arithmetic has it: one real division where a complex
+    division takes three, and a branch.
+    """
+    return -beta * conj(alpha) * (1 / real(alpha * conj(alpha)))
+
+
+@theorem
+def by_the_conjugate(
+    alpha: Complex, beta: Complex, away: alpha != 0
+) -> ratio(alpha, beta) == -beta / alpha:
+    """The kernels' ratio is the theorem's: ``-beta / alpha``, by the conjugate.
+
+    ``alpha * conj(alpha)`` is ``|alpha|**2``, a real number, so ``conj(alpha)
+    / |alpha|**2`` is ``1 / alpha``. Lean proves it with Mathlib, writing the
+    division as the conjugate over ``|alpha|**2`` and both sides as one
+    expression in it, which ``ring`` closes.
+    """
+
+
+def single(alpha, beta):
+    """``log|alpha + beta|``: ``log|alpha|`` and the series through ``ORDER``.
+
+    With ``r2 = |alpha|**2``, ``log|alpha|`` is ``log(r2) / 2``, and the
+    series is in :func:`ratio`, the theorem's ``-beta / alpha`` multiplied out
+    by the conjugate.
+    """
+    r2 = real(alpha * conj(alpha))
+    series = reduce_sum(
+        coefficient(ratio(alpha, beta), k) for k in Fin[ORDER + 1] if k >= 1
+    )
+    return log(r2) / 2 + real(series)
+
+
+def double(alpha, beta, normal):
+    """:func:`single` differentiated along ``normal`` at the source, by the same series.
+
+    The source is ``c - alpha``, so this is ``Re(normal * d/dy)`` of the
+    series in ``y``: ``-Re(normal / alpha * (1 + ratio + ... +
+    ratio**ORDER))``, the line-Taylor series of ``Re(normal / (y - x))``
+    itself, divided out by the conjugate as :func:`single` does.
+    """
+    r2 = real(alpha * conj(alpha))
+    powers = reduce_sum(ratio(alpha, beta) ** k for k in Fin[ORDER + 1])
+    return -real(normal * conj(alpha) * (1 / r2) * powers)
+
+
+# }}}
+
+
+# {{{ the kernels: pytential's S and D, as sumpy's LayerPotential computes them
+
+
+@kernel(uses=[line_taylor, by_the_conjugate])
 def single_layer(
     z: Arr[Fin[nt], np.complex128],
     c: Arr[Fin[nt], np.complex128],
@@ -83,103 +226,375 @@ def single_layer(
     w: Arr[Fin[ns], Real],
     out: Arr[Fin[nt], Real],
 ):
-    """The QBX single layer at each target, through its center's expansion."""
+    """``S`` at each target ``z[t]``, through the expansion about its center ``c[t]``.
+
+    ``y`` holds the sources and ``w`` the quadrature weight times the density
+    at each, as pytential hands sumpy its strengths. It cites ``line_taylor``
+    for the terms of its series, which ``by_the_conjugate`` says are at the
+    theorem's ratio.
+    """
     for t in out.dom:
         out[t] = SCALE * reduce_sum(
-            w[s]
-            * real(
-                log(c[t] - y[s])
-                - reduce_sum(
-                    ((c[t] - z[t]) / (c[t] - y[s])) ** k / k
-                    for k in Fin[P + 1]
-                    if k >= 1
-                )
-            )
-            for s in y.dom
+            w[s] * single(c[t] - y[s], z[t] - c[t]) for s in y.dom
         )
 
 
-def circle(targets: int = TARGETS, sources: int = SOURCES) -> dict:
-    """Targets on the unit circle, centers inside it, and the density's sources.
+@kernel
+def double_layer(
+    z: Arr[Fin[nt], np.complex128],
+    c: Arr[Fin[nt], np.complex128],
+    y: Arr[Fin[ns], np.complex128],
+    n: Arr[Fin[ns], np.complex128],
+    w: Arr[Fin[ns], Real],
+    out: Arr[Fin[nt], Real],
+):
+    """``D`` at each target: ``S``'s kernel differentiated along ``n[s]``."""
+    for t in out.dom:
+        out[t] = SCALE * reduce_sum(
+            w[s] * double(c[t] - y[s], z[t] - c[t], n[s]) for s in y.dom
+        )
 
-    The sources are the trapezoid rule's points, each weighted by the rule's
-    weight times the density ``cos(theta)``; the centers are four source
-    spacings inside the circle, one per target.
+
+# }}}
+
+
+# {{{ the curve: meshmode's five-armed starfish, discretized as pytential does
+
+
+def _panels(panels: int, nodes: int) -> tuple:
+    """``nodes`` Gauss-Legendre points a panel: points, normals, weights, panel sizes.
+
+    The curve is ``NArmedStarfish(5, 0.25)``, ``r = 1 + sin(5 theta) / 4``,
+    with the panels equal in its parameter. The weights are the rule's times
+    the speed, the curve's length element, and the size of a panel is its
+    parameter length times the largest speed on it.
     """
-    theta_s = 2 * np.pi * (np.arange(sources) + 0.5) / sources
-    theta_t = 2 * np.pi * np.arange(targets) / targets
-    z = np.exp(1j * theta_t)
-    radius = 4 * 2 * np.pi / sources
+    x, w = np.polynomial.legendre.leggauss(nodes)
+    h = 1 / panels
+    t = (np.arange(panels)[:, None] * h + h * (x + 1) / 2).ravel()
+    theta = 2 * np.pi * t
+    radius = 1 + 0.25 * np.sin(5 * theta)
+    point = radius * np.exp(1j * theta)
+    tangent = (2 * np.pi * 1.25 * np.cos(5 * theta) + 2j * np.pi * radius) * np.exp(
+        1j * theta
+    )
+    speed = np.abs(tangent)
+    size = np.repeat(h * speed.reshape(panels, nodes).max(axis=1), nodes)
+    return point, -1j * tangent / speed, np.tile(w * h / 2, panels) * speed, size
+
+
+def starfish(panels: int, source_panels: int | None = None) -> dict:
+    """pytential's discretization of the starfish at ``panels`` panels.
+
+    The targets are the stage-1 nodes, 9 a panel (meshmode's group of order
+    8); the sources are the upsampled nodes, 33 a panel (its quadrature group
+    of order 4 * 8, Gauss-Legendre nodes that integrate degree 65), on the
+    same panels unless ``source_panels`` says how many; each target's centers
+    are half its panel's size inside and outside along the normal.
+    """
+    z, normal, _, size = _panels(panels, 9)
+    y, ny, wy, _ = _panels(source_panels or panels, 33)
     return {
-        "z": Arr.from_numpy(z),
-        "c": Arr.from_numpy((1 - radius) * z),
-        "y": Arr.from_numpy(np.exp(1j * theta_s)),
-        "w": Arr.from_numpy(2 * np.pi / sources * np.cos(theta_s)),
-        "out": Arr.zeros(targets),
+        "z": z,
+        "normal": normal,
+        "inside": z - size / 2 * normal,
+        "outside": z + size / 2 * normal,
+        "size": size,
+        "y": y,
+        "ny": ny,
+        "wy": wy,
     }
 
 
-def exact(targets: int = TARGETS) -> np.ndarray:
-    """The single layer of ``cos(theta)`` on the unit circle: ``cos(theta) / 2``."""
-    return np.cos(2 * np.pi * np.arange(targets) / targets) / 2
+def arguments(
+    curve: dict, side: str, density: np.ndarray, normals: bool = False
+) -> dict:
+    """A kernel's arguments: the curve's targets, centers on ``side``, a density.
+
+    With ``normals``, the sources' normals too, which ``double_layer`` takes.
+    """
+    args = {
+        "z": Arr.from_numpy(curve["z"]),
+        "c": Arr.from_numpy(curve[side]),
+        "y": Arr.from_numpy(curve["y"]),
+        "w": Arr.from_numpy(curve["wy"] * density),
+        "out": Arr.zeros(curve["z"].size),
+    }
+    if normals:
+        args["n"] = Arr.from_numpy(curve["ny"])
+    return args
 
 
-#: sumpy's CPU tile, on the C target: 16 targets at a time, each with an
-#: accumulator of its own, and 256 sources at a time outside them.
+#: A harmonic function inside the starfish, pytential's: ``log|x - x0|``,
+#: ``x0 = (3, 1)``.
+SOURCE = 3 + 1j
+
+
+def harmonic(x: np.ndarray) -> np.ndarray:
+    """``u(x) = log|x - x0|``."""
+    return np.log(np.abs(x - SOURCE))
+
+
+def normal_derivative(x: np.ndarray, normal: np.ndarray) -> np.ndarray:
+    """``du/dn = n . (x - x0) / |x - x0|**2``."""
+    d = x - SOURCE
+    return (d.real * normal.real + d.imag * normal.imag) / np.abs(d) ** 2
+
+
+def density(x: np.ndarray) -> np.ndarray:
+    """A smooth density for the jumps: ``cos(3 theta)``."""
+    return np.cos(3 * np.angle(x))
+
+
+def example_inputs() -> dict:
+    """Four panels, small enough to run natively: 36 targets, 132 sources."""
+    curve = starfish(4)
+    sigma = density(curve["y"])
+    return {
+        "single_layer": arguments(curve, "inside", sigma),
+        "double_layer": arguments(curve, "inside", sigma, normals=True),
+    }
+
+
+# }}}
+
+
+# {{{ the schedules
+
+
+def sumpy_tile(target: str = "opencl") -> Schedule:
+    """sumpy's CPU schedule, as ``get_optimized_kernel(is_cpu=True)`` writes it.
+
+    16 targets to a work group, a work item each, the sources 256 at a time,
+    and the sources' loop outside the targets'. It is a schedule for a device,
+    PoCL's CPU device being the one ``is_cpu`` is written for; on the C
+    target its casts are decided as well, and it does not build, which is
+    why it is a function: a file's schedules are run by ``loopty run`` and
+    listed by ``lanky check``, and this one runs where pyopencl does
+    (``benchmarks/qbx_layer_potential.py``).
+    """
+    return (
+        Schedule(single_layer, target=target)
+        .split("t", 16)
+        .tag(t_outer="g.0", t_inner="l.0")
+        .split("s", 256)
+        .prioritize("s_outer", "t_inner")
+    )
+
+
+#: The same tile on the C target, the 16 targets an ``ilp`` loop, which gives
+#: each an accumulator of its own.
 tiled = (
     Schedule(single_layer, target="c")
     .split("t", 16)
     .tag(t_inner="ilp")
     .split("s", 256)
     .prioritize("s_outer", "t_inner")
-    .example(**circle())
+    .example(**example_inputs()["single_layer"])
+)
+
+#: The double layer on the same tile, which the accuracy rows run as well.
+tiled_double = (
+    Schedule(double_layer, target="c")
+    .split("t", 16)
+    .tag(t_inner="ilp")
+    .split("s", 256)
+    .prioritize("s_outer", "t_inner")
+    .example(**example_inputs()["double_layer"])
 )
 
 
-def example_inputs() -> dict:
-    """The inputs ``loopty run`` gives the kernel."""
-    return circle()
+# }}}
+
+
+# {{{ the agreement with sumpy's own kernel
+
+#: What sumpy's ``LayerPotential`` returns on :func:`example_inputs`, called as
+#: pytential calls it (``benchmarks/qbx_layer_potential.py record``).
+RECORDED = Path(__file__).with_name("layer_potential_sumpy.json")
+
+
+def recorded(layer: str) -> list[float]:
+    """What sumpy returned for ``single_layer`` or ``double_layer``."""
+    return json.loads(RECORDED.read_text(encoding="utf-8"))[layer]
+
+
+@upstream(single_layer, within=1e-12)
+def sumpy_single_layer(z, c, y, w, out):
+    """sumpy's own LayerPotential at 13a48a0 for S, as pytential calls it, recorded."""
+    return {"out": recorded("single_layer")}
+
+
+@upstream(double_layer, within=1e-12)
+def sumpy_double_layer(z, c, y, n, w, out):
+    """sumpy's own LayerPotential at 13a48a0 for D, as pytential calls it, recorded."""
+    return {"out": recorded("double_layer")}
+
+
+# }}}
+
+
+# {{{ the accuracy: pytential's identity and the jump relations, measured
+
+#: The panels the accuracy rows are measured at, pytential's starfish resolutions.
+PANELS = (30, 50, 70, 90)
+
+#: The order the errors have to fall at: pytential's test asks for ``ORDER - 1.6``.
+EXPECTED = ORDER - 1.6
+
+
+def _layer(
+    schedule: Schedule, curve: dict, side: str, values: np.ndarray
+) -> np.ndarray:
+    """One layer potential of ``values`` at the sources, compiled and run."""
+    from loopty.executor import LoopyExecutor
+
+    args = arguments(curve, side, values, normals=schedule is tiled_double)
+    return LoopyExecutor().run(schedule, **args)["out"]
+
+
+def residuals(panels: int) -> dict[str, float]:
+    """The largest error of Green's identity and of each jump at ``panels`` panels."""
+    curve = starfish(panels)
+    z, y = curve["z"], curve["y"]
+    dn_u = normal_derivative(y, curve["ny"])
+    u, sigma = harmonic(y), density(y)
+    green = (
+        _layer(tiled, curve, "inside", dn_u)
+        - (
+            _layer(tiled_double, curve, "inside", u)
+            + _layer(tiled_double, curve, "outside", u)
+        )
+        / 2
+        - harmonic(z) / 2
+    )
+    jump_s = _layer(tiled, curve, "outside", sigma) - _layer(
+        tiled, curve, "inside", sigma
+    )
+    jump_d = (
+        _layer(tiled_double, curve, "outside", sigma)
+        - _layer(tiled_double, curve, "inside", sigma)
+        - density(z)
+    )
+    return {
+        "green": float(np.abs(green).max()),
+        "jump_S": float(np.abs(jump_s).max()),
+        "jump_D": float(np.abs(jump_d).max()),
+    }
+
+
+_MEASURED: dict[str, list[float]] = {}
+
+
+def measured() -> dict[str, list[float]]:
+    """Each row's errors at :data:`PANELS`, measured once."""
+    if not _MEASURED:
+        rows = [residuals(panels) for panels in PANELS]
+        for name in rows[0]:
+            _MEASURED[name] = [row[name] for row in rows]
+    return _MEASURED
+
+
+def order(errors: list[float]) -> float:
+    """The order the errors fall at as the panels shrink: a least-squares slope."""
+    sizes = [starfish(panels)["size"].max() for panels in PANELS]
+    return float(np.polyfit(np.log(sizes), np.log(errors), 1)[0])
+
+
+def _verdict(name: str) -> tuple[bool, str]:
+    errors = measured()[name]
+    rate = order(errors)
+    shown = ", ".join(f"{error:.1e}" for error in errors)
+    return rate > EXPECTED, f"errors {shown}: order {rate:.2f}"
+
+
+@tested
+def green_identity():
+    """S(du/dn) - D(u) = u/2, Green's identity, at order 5 - 1.6 or faster."""
+    return _verdict("green")
+
+
+@tested
+def jump_S():
+    """S(+) - S(-) = 0: S is continuous, at order 5 - 1.6 or faster."""
+    return _verdict("jump_S")
+
+
+@tested
+def jump_D():
+    """D(+) - D(-) = sigma: D jumps by the density, at order 5 - 1.6 or faster."""
+    return _verdict("jump_D")
+
+
+# }}}
 
 
 def main() -> int:
-    """Evaluate natively, then show the tile, its run, and the order loopy drops."""
+    """Run both layers, show sumpy's tile, and measure the identity and the jumps."""
     from loopty.executor import LoopyExecutor
+    from loopty.obligations import prove
+    from loopty.oracle import IslOracle
 
-    data = circle()
-    single_layer(**data)
-    error = float(np.abs(data["out"].numpy() - exact()).max())
-    print(f"{TARGETS} targets, {SOURCES} sources, order {P}")
-    print(f"largest error against cos(theta) / 2: {error:.1e}")
-    ok = error < 1e-8
-
-    print()
-    print(f"schedule: {tiled!r}")
-    for fact in tiled.facts():
-        print(f"  {fact.status.value:8} {fact.decided_by or '-':4} {fact.statement}")
-    # The difference is one of log's last bits, numpy's and the C library's,
-    # which may differ from machine to machine; whether it is inside the
-    # tolerance does not.
-    fact = LoopyExecutor().differential(single_layer, tiled, circle())
-    for name, detail in fact.provenance["outputs"].items():
-        print(
-            f"  {name}: the compiled run agrees with the native run to the "
-            f"{detail['exactness']} tolerance: {detail['agree']} -> "
-            f"{fact.status.value}"
-        )
-    ok = ok and fact.status.value == "tested"
-
-    print()
-    sequential = (
-        Schedule(single_layer, target="c")
-        .split("t", 16)
-        .split("s", 256)
-        .prioritize("s_outer", "t_inner")
+    curve = starfish(4)
+    print(
+        f"pytential's starfish, QBX order {ORDER}, at 4 panels: "
+        f"{curve['z'].size} targets, {curve['y'].size} sources"
     )
-    buildable, reason = sequential.buildable
-    print(f"schedule: {sequential!r}")
-    print(f"  buildable: {buildable}")
-    print(f"  reason: {reason}")
-    return 0 if ok and not buildable else 1
+    ok = True
+    for kern, schedule in ((single_layer, tiled), (double_layer, tiled_double)):
+        fact = LoopyExecutor().differential(kern, schedule, schedule.examples)
+        detail = fact.provenance["outputs"]["out"]
+        print(
+            f"  {kern.__name__}: compiled on C agrees with native to the "
+            f"{detail['exactness']} tolerance: {detail['agree']} -> {fact.status.value}"
+        )
+        ok = ok and fact.status.value == "tested"
+
+    for agreement in (sumpy_single_layer, sumpy_double_layer):
+        # the verdict and the allowance the row states, not the difference,
+        # whose last digits are the platform's
+        (fact,) = agreement.facts()
+        detail = fact.provenance.get("outputs", {}).get("out")
+        measured = (
+            f"within {detail['within']:g} of the largest value"
+            if detail and "within" in detail
+            else f"to the {detail['exactness']} tolerance"
+            if detail
+            else fact.provenance.get("reason", "")
+        )
+        print(
+            f"  {agreement.kernel.__name__}: agrees with sumpy's own kernel, as "
+            f"pytential calls it, {measured} -> {fact.status.value}"
+        )
+        ok = ok and fact.status.value == "tested"
+
+    # the theorem and the kernel, in one row
+    (series,) = [fact for fact in single_layer.facts() if fact.kind == "by-theorem"]
+    print(f"  {series.statement} -> {series.status.value}")
+    ok = ok and series.status.value in ("decided", "proved")
+
+    print()
+    tile = sumpy_tile("c")
+    print(f"sumpy's tile, get_optimized_kernel(is_cpu=True): {'.'.join(tile.history)}")
+    writes = [fact for fact in single_layer.facts() if fact.kind == "disjoint-writes"]
+    oracle = IslOracle()
+    for fact in [*tile.facts(), *writes]:
+        if fact.kind == "buildable":
+            continue
+        # Lean, where it is installed, proves each cast, that no dependence
+        # joins two work items included, and the writes; isl decides the rest
+        fact = prove(fact)
+        if fact.status.value == "assumed":
+            fact = oracle.establish(fact) or fact
+        print(f"  {fact.status.value:8} {fact.decided_by or '-':4} {fact.statement}")
+    print(f"  on C, an ilp loop for the work items: {'.'.join(tiled.history)}")
+    print()
+    print(f"accuracy at {', '.join(map(str, PANELS))} panels:")
+    for claim in (green_identity, jump_S, jump_D):
+        held, what = claim()
+        print(f"  {claim.__name__:15} {what} -> {'tested' if held else 'REFUTED'}")
+        ok = ok and held
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

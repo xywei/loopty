@@ -122,6 +122,7 @@ __all__ = [
     "RESERVED_PREFIX",
     "RESERVED_WORDS",
     "WRAP_FLAG",
+    "CheckedOpenCLTarget",
     "ExpressionLowerer",
     "InKernelOpenCLTarget",
     "InProcessCTarget",
@@ -138,6 +139,8 @@ __all__ = [
     "lower",
     "lower_generic",
     "numpy_dtype",
+    "pyopencl_installed",
+    "require_pyopencl",
     "target_for",
 ]
 
@@ -493,6 +496,57 @@ class _OpenCLExpressions(NumpyArithmetic, ExpressionToPyOpenCLCExpressionMapper)
             return prim.LogicalAnd(compared)
         return prim.LogicalOr(compared)
 
+    def map_power(self, expr: Any, type_context: Any) -> Any:
+        """A complex number to a small natural power, as numpy multiplies it.
+
+        loopy writes a complex power by 2, 3 or 4 as products, and by any
+        other exponent, 1 and 5 included, as pyopencl's ``cdouble_powr``,
+        which is ``exp(n log z)``: a logarithm and an exponential where numpy
+        multiplies, and not exact even for ``z**1``. A line-Taylor series
+        written ``(-beta / alpha) ** k``, whose terms a constant sum writes
+        out, paid that for its first and fifth terms on every pair. A power by
+        an integer ``n`` with ``0 < n < 100`` is numpy's products here
+        (:func:`_natural_power`); any other is loopy's.
+        """
+        exponent = expr.exponent
+        if (
+            isinstance(exponent, int | np.integer)
+            and not isinstance(exponent, bool)
+            and 0 < exponent < _PRODUCT_POWERS
+            and self.infer_type(expr.base).is_complex()
+        ):
+            return self.rec(_natural_power(expr.base, int(exponent)), type_context)
+        return super().map_power(expr, type_context)
+
+
+#: The exponents below which a complex power is written as products, as numpy
+#: computes one (``npy_cpow``), which multiplies for ``|n| < 100``.
+_PRODUCT_POWERS = 100
+
+
+def _natural_power(base: Any, n: int) -> Any:
+    """``base ** n`` as the products numpy's complex power by an integer takes.
+
+    ``z`` for 1, ``z * z``, and ``z * (z * z)`` for 3; from 4 on, by squaring,
+    multiplying in the square for each bit of ``n`` from the lowest, so that
+    ``z**5`` is ``z * ((z * z) * (z * z))``. Each product is one multiply of
+    the target, so the rounding is numpy's wherever a complex product is.
+    """
+    if n == 1:
+        return base
+    if n == 2:
+        return prim.Product((base, base))
+    if n == 3:
+        return prim.Product((base, prim.Product((base, base))))
+    result, square, mask = None, base, 1
+    while True:
+        if n & mask:
+            result = square if result is None else prim.Product((result, square))
+        mask <<= 1
+        if n < mask:
+            return result
+        square = prim.Product((square, square))
+
 
 class _OpenCLCode(PyOpenCLCASTBuilder):
     """The kernel code of :class:`InKernelOpenCLTarget`; see :class:`_CCode`."""
@@ -532,6 +586,41 @@ class InKernelOpenCLTarget(_ReadDeclining, lp.PyOpenCLTarget):
         return _OpenCLCode(self)
 
 
+class CheckedOpenCLTarget(_ReadDeclining, lp.OpenCLTarget):
+    """The ``opencl`` target where pyopencl is not installed: checked, not built.
+
+    What a schedule for a device claims (the order of its loops, which work
+    item runs each instance, whether loopy can build it) is read off the
+    kernel's loops and accesses (:class:`loopty.schedule.Schedule`), and
+    needs neither pyopencl nor a device. loopy's PyOpenCL target imports
+    pyopencl when it is built; its plain OpenCL target has the same kernels
+    and imports nothing. So where pyopencl is not installed, a schedule for
+    ``"opencl"`` is built on this one, and its facts are the ones it has
+    where pyopencl is: a file keeps its device schedules beside the others,
+    ``python file.py`` and ``lanky check file.py`` run anywhere, and the
+    ledger lists their facts. Generating their code and running them are
+    pyopencl's, and are refused here, saying so (:func:`require_pyopencl`).
+    """
+
+
+@functools.cache
+def pyopencl_installed() -> bool:
+    """Whether pyopencl is installed, asked without importing it."""
+    import importlib.util
+
+    return importlib.util.find_spec("pyopencl") is not None
+
+
+def require_pyopencl(kernel: Any) -> None:
+    """Refuse to generate or run code for a :class:`CheckedOpenCLTarget` kernel."""
+    if isinstance(kernel.target, CheckedOpenCLTarget):
+        raise ImportError(
+            "generating and running OpenCL code needs pyopencl, which is not "
+            "installed here; the schedule's facts are checked without it. "
+            "Install loopty's opencl extra where the device is"
+        )
+
+
 def target_for(target: str = "c") -> Any:
     """The loopy target named by ``target``.
 
@@ -542,15 +631,18 @@ def target_for(target: str = "c") -> Any:
     ``"opencl"`` is :class:`InKernelOpenCLTarget`, ``lp.PyOpenCLTarget`` with
     every condition in the kernel, and pyopencl is imported when it is built,
     here and nowhere else, inside the branch, so that importing loopty on a
-    machine without a device costs nothing and can never fail. All three
-    write ``//``, ``%``, ``<<`` and ``>>`` as numpy computes them
-    (:mod:`loopty.operations`).
+    machine without a device costs nothing and can never fail; where
+    pyopencl is not installed, it is :class:`CheckedOpenCLTarget`, whose
+    schedules are checked and not built. All of them write ``//``, ``%``,
+    ``<<`` and ``>>`` as numpy computes them (:mod:`loopty.operations`).
     """
     if target in ("c", None):
         return InProcessCTarget()
     if target == "c-source":
         return SourceCTarget()
     if target == "opencl":
+        if not pyopencl_installed():
+            return CheckedOpenCLTarget()
         return InKernelOpenCLTarget()
     raise LoweringError(f"unknown target {target!r}; expected 'c' or 'opencl'")
 
@@ -1084,6 +1176,12 @@ class ExpressionLowerer(Mapper):
             and len(expr.parameters) == 1
         ):
             return self._conversion(CONVERSIONS[function.name], expr.parameters[0])
+        if (
+            isinstance(function, prim.Variable)
+            and function.name == "ipow"
+            and len(expr.parameters) == 2
+        ):
+            return self._integer_power(expr, *expr.parameters)
         return prim.Call(
             self.rec(expr.function), tuple(self.rec(p) for p in expr.parameters)
         )
@@ -1150,6 +1248,26 @@ class ExpressionLowerer(Mapper):
         if name in ("real", "conj"):
             return lowered
         return prim.Call(prim.Variable(name), (lowered,))
+
+    def _integer_power(self, expr: Any, base: Any, exponent: Any) -> prim.Expression:
+        """``ipow(x, n)`` of :mod:`loopty.math`: loopy's own integer power.
+
+        Written as the power it is, with the exponent left an integer, so that
+        loopy calls the ``loopy_pow_<base>_<exponent>`` it defines, which
+        multiplies as :func:`loopty.math.integer_power` does natively; ``x **
+        n`` would get a floating exponent and the C library's ``pow``
+        (:mod:`loopty.promotion`). The base is converted into numpy's type of
+        the result where the lowering computes it in another.
+        """
+        promotion = self.lowering.promotion
+        lowered = self.rec(base)
+        power = self.rec(exponent)
+        if promotion is not None:
+            compiled = promotion.types(base)[1]
+            target = promotion.types(expr)[1]
+            if compiled is not None and target is not None and compiled != target:
+                lowered = self._convert(lowered, target)
+        return prim.Power(lowered, power)
 
     def _absolute(self, expr: Any, operand: Any) -> prim.Expression:
         """``abs(operand)``: C's ``abs`` of a number, and numpy's of an integer.
@@ -2467,6 +2585,29 @@ class _Builder:
             seen: dict[tuple[str, ...], list[tuple[isl.Set, tuple[str, ...]]]] = {}
             self._plan_in(stmt.id, stmt.expr, {}, owner, seen, taken)
 
+    def _loops_left_out(self, stmt_id: str, domain: isl.Set) -> isl.Set:
+        """A reduction's ``domain`` without the loops of its statement it ignores.
+
+        See :func:`_without_loops_ignored`; the loops are those of statement
+        ``stmt_id``, over its domain, the points its instruction runs at: an
+        affine ``when`` narrows the domain, and the rest of a guard is the
+        instruction's predicate. The names a domain may name besides them are
+        the ones a call fixes, its sizes and its scalars, and the binders of
+        the statement's sums.
+        """
+        stmt = next(s for s in self.term.stmts if s.id == stmt_id)
+        binders = {
+            name
+            for reduction in reductions_of(stmt.expr)
+            for name in reduction.inames
+        }
+        binders |= self.extra_inames
+        return _without_loops_ignored(
+            domain,
+            _domain_over(stmt.domain, stmt.inames),
+            known={*self.term.sizes, *self.scalar_types, *binders},
+        )
+
     def _plan_in(
         self,
         stmt_id: str,
@@ -2486,7 +2627,10 @@ class _Builder:
         """
         for reduction in _outermost_reductions(expr):
             names = tuple(reduction.inames)
-            domain = _rename_params(_domain_over(reduction.domain, names), renaming)
+            domain = self._loops_left_out(
+                stmt_id,
+                _rename_params(_domain_over(reduction.domain, names), renaming),
+            )
             known = seen.setdefault(names, [])
             chosen: tuple[str, ...] | None = None
             if all(owner.get(name, stmt_id) == stmt_id for name in names):
@@ -2771,6 +2915,84 @@ def _rename_params(domain: isl.Set, renaming: Mapping[str, str]) -> isl.Set:
     if not wanted:
         return domain
     return rename(domain, wanted, what="a nested sum's domain, its binders renamed")
+
+
+def _without_loops_ignored(
+    domain: isl.Set, nest: isl.Set, known: set[str] | frozenset[str]
+) -> isl.Set:
+    """``domain``, a sum's, with the loops its points do not depend on left out.
+
+    A sum's domain names every loop around its statement as a parameter (see
+    :func:`_domain_over`), and loopy reads a domain that names a loop as one
+    defined inside that loop: it opens the sum's loop inside it. For a loop it
+    runs in sequence that is where the sum runs anyway. For a loop tagged
+    ``ilp`` it is not: loopy then opens one loop of the sum per lane and runs
+    the lanes one after another, where a sum over the same box beside the
+    lanes, as plain loopy writes it, runs them interleaved in one loop, each
+    lane with an accumulator of its own (#264).
+
+    So a loop is left out when the sum's points do not depend on it: within
+    ``nest``, the statement's loops over its loop variables, isl's gist of
+    ``domain`` names it in no constraint. ``gist`` keeps the domain the same
+    set wherever ``nest`` holds, which is wherever loopy runs the sum's update,
+    since the update carries the statement's own predicates. A loop a bound
+    reads (a triangle's ``j < i``, a clause the sum is narrowed by, ``if k ==
+    j``) stays, and so does the nesting it makes. The result is checked to be
+    that same set, and bounded where ``domain`` is; a domain isl does not
+    simplify so is kept as it was, and so is one whose statement never runs,
+    within which any set is the same.
+
+    ``known`` names the parameters other than the loops that a domain may name
+    and still lose them: the sizes, the scalars and the binders of sums, which
+    nothing in the kernel assigns. A domain that names anything else keeps
+    every loop, as it was. That is a ragged row's length, ``cnt_r`` or
+    ``nl_cnt_r``, which is assigned inside the row's loop, and only a domain
+    that names the row's loop is nested where it is assigned.
+    """
+    loops = set(nest.get_var_names(isl.dim_type.set))
+    named = set(_domain_params(domain))
+    present = named & loops
+    if not present or not named - loops <= set(known):
+        return domain
+    # the nest, its loops as parameters: the points the sum runs at
+    context = nest.move_dims(
+        isl.dim_type.param,
+        nest.dim(isl.dim_type.param),
+        isl.dim_type.set,
+        0,
+        nest.dim(isl.dim_type.set),
+    ).params()
+    if context.is_empty():
+        return domain
+    simpler = domain.gist_params(context)
+    ignored = {name for name in present if not _names_param(simpler, name)}
+    if not ignored:
+        return domain
+    # gist states the result over the context's parameters too; a loop left
+    # out, or one the domain never named, must not come back as a parameter,
+    # since loopy nests a domain inside every loop it names
+    kept = named - ignored
+    for name in _domain_params(simpler):
+        if name in kept:
+            continue
+        if _names_param(simpler, name):  # pragma: no cover - gist added a bound
+            return domain
+        simpler = simpler.remove_dims(
+            isl.dim_type.param, simpler.find_dim_by_name(isl.dim_type.param, name), 1
+        )
+    same = _same_set(
+        simpler.align_params(domain.get_space()).intersect_params(context),
+        domain.intersect_params(context),
+    )
+    if not same or (domain.is_bounded() and not simpler.is_bounded()):
+        return domain  # pragma: no cover - gist is that set within the context
+    return check_names(simpler, "a sum's domain, with the loops it ignores left out")
+
+
+def _names_param(domain: isl.Set, name: str) -> bool:
+    """Does a constraint of ``domain`` name its parameter ``name``?"""
+    position = domain.find_dim_by_name(isl.dim_type.param, name)
+    return position >= 0 and domain.involves_dims(isl.dim_type.param, position, 1)
 
 
 def _outermost_reductions(expr: Any) -> tuple[Reduction, ...]:
@@ -3574,7 +3796,9 @@ def _power_preambles(term: Term, target: str | None) -> tuple[tuple[str, str], .
         for node in walk((stmt.assignee, stmt.expr, stmt.guard))
     ]
     if not any(
-        isinstance(node, prim.Power) and not _written_as_product(node)
+        isinstance(node, prim.Power)
+        and not _written_as_product(node)
+        or _integer_power_call(node)
         for node in nodes
     ):
         return ()
@@ -3588,6 +3812,20 @@ def _power_preambles(term: Term, target: str | None) -> tuple[tuple[str, str], .
     if complex_term:
         return ((_POWER_TAG, f"{POWER_INCLUDES}\n{_COMPLEX_INCLUDE}"),)
     return ((_POWER_TAG, POWER_INCLUDES),)
+
+
+def _integer_power_call(node: Any) -> bool:
+    """Whether ``node`` is ``ipow(x, n)``, which loopy writes as its own power."""
+    return (
+        isinstance(node, prim.Call)
+        and isinstance(node.function, prim.Variable)
+        and node.function.name == "ipow"
+        and not (
+            len(node.parameters) == 2
+            and isinstance(node.parameters[1], int | np.integer)
+            and node.parameters[1] in (0, 1, 2)
+        )
+    )
 
 
 def _written_as_product(power: prim.Power) -> bool:
@@ -4016,6 +4254,28 @@ def _arguments(
             free |= {name for name in _names_in(size)}
         return shape if free <= declared | scalars else None
 
+    def strides_of(typ: ArrType, ragged: bool) -> str | None:
+        """Row-major strides for an array whose shape cannot be declared.
+
+        An array of several axes whose first extent is a size the code never
+        mentions, ``coords: Arr[Fin[nv], Fin[2], Real]`` read only as
+        ``coords[cell[c, k], d]``, is declared without a shape (see
+        :func:`_used_names`), and loopy then indexes it in one dimension only.
+        Its strides need only the extents after the first, so where those are
+        declared, they are given instead: ``stride:2,stride:1``. ``None``
+        where they are not, or the array has one axis, or no box of axes.
+        """
+        if ragged or typ.domain is not None or len(typ.axes) < 2:
+            return None
+        trailing = [_plain(size) for size in typ.axes[1:]]
+        for size in trailing:
+            if not _names_in(size) <= declared | scalars:
+                return None
+        strides: list[Any] = [1]
+        for size in reversed(trailing):
+            strides.insert(0, size * strides[0] if strides[0] != 1 else size)
+        return ",".join(f"stride:{stride}" for stride in strides)
+
     for name, typ in term.params:
         if not isinstance(typ, ArrType):
             declare_value(name, numpy_dtype(typ))
@@ -4024,11 +4284,14 @@ def _arguments(
         ragged = builder.ragged_axis(name) is not None
         if ragged:
             builder.offsets_for(name)  # make sure the offsets argument exists
+        shape = shape_of(typ, ragged, name)
+        strides = strides_of(typ, ragged) if shape is None else None
         args.append(
             lp.GlobalArg(
                 name,
                 array_dtype(term, name, typ.dtype),
-                shape=shape_of(typ, ragged, name),
+                shape=shape,
+                dim_tags=strides,
                 is_input=True,
                 is_output=is_output,
             )

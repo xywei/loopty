@@ -25,10 +25,11 @@ from typing import Any
 import islpy as isl
 import pymbolic.primitives as prim
 import pytest
-from lanky.prelude import Nat, Real
+from lanky.prelude import FnType, Nat, Real
 
 import hand_terms as ht
-from loopty import Arr, Fin, kernel, reduce_sum, when
+from lines import where
+from loopty import Arr, Fin, kernel, program, reduce_sum, when
 from loopty.isl_reading import declining
 from loopty.schedule import IllegalCast, Schedule
 from loopty.term import Access, Stmt, Term
@@ -91,8 +92,12 @@ def test_a_stencil_step_on_two_work_items_is_refused(plain_opencl, axis) -> None
     with pytest.raises(IllegalCast) as caught:
         schedule.tag(i=axis)
     message = str(caught.value)
-    assert message.startswith(f"tag(i={axis!r}) illegal: instance S0[t=")
-    assert "writes u[" in message and "read by S0[" in message
+    # the statement as the demo writes it, its line, and the pair's coordinates
+    assert message.startswith(
+        f"tag(i={axis!r}) illegal: u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 "
+        f"({where(jacobi, 'u[t + 1, i] =')}) at t="
+    )
+    assert "writes u[" in message and ", read by the same statement at t=" in message
     assert "on another work item (at nt=16, nx=16, as hinted)" in message
     assert f"the loop i on {axis} runs them on work items" in message
     assert message.endswith(
@@ -124,7 +129,10 @@ def test_the_acoustic_pair_on_two_work_items_is_refused(plain_opencl, axis) -> N
     with pytest.raises(IllegalCast) as caught:
         schedule.tag(i=axis)
     message = str(caught.value)
-    assert "writes velocity[" in message and "read by S1[" in message
+    # too long to show whole, each statement keeps what it writes into
+    assert "velocity[t + 1, i] = ... (wavefront_acoustic.py:" in message
+    assert "writes velocity[" in message
+    assert ", read by pressure[t + 1, i] = ... (wavefront_acoustic.py:" in message
     assert (
         f"on another work item (at nt=16, nx=32, as hinted): the loop i on {axis}"
         in message
@@ -164,7 +172,7 @@ def test_two_loops_that_pass_data_along_one_axis_are_refused(plain_opencl, axis)
     assert said.startswith("MissingBarrierError") and GLOBAL_BARRIER in said, said
     with pytest.raises(IllegalCast) as caught:
         schedule.tag(i=axis)
-    assert f"S1 runs in no loop on {axis}, so on every work item of it" in str(
+    assert f"the read is in no loop on {axis}, so on every work item of it" in str(
         caught.value
     )
 
@@ -287,9 +295,15 @@ def test_a_statement_with_no_loop_on_the_axis_runs_on_every_work_item(plain_open
     with pytest.raises(IllegalCast) as caught:
         schedule.tag(i="g.0")
     message = str(caught.value)
-    assert message.startswith("tag(i='g.0') illegal: instance S0[] writes s[0]")
-    assert "read by S1[i=" in message
-    assert "S0 runs in no loop on g.0, so on every work item of it" in message
+    # a statement in no loop has one instance, which needs no coordinates
+    assert message.startswith(
+        f"tag(i='g.0') illegal: s[0] = x[0] ({where(broadcast, 's[0] =')}) writes "
+        "s[0]"
+    )
+    assert f"read by y[i] = s[0] * x[i] ({where(broadcast, 'y[i] =')}) at i=" in (
+        message
+    )
+    assert "the write is in no loop on g.0, so on every work item of it" in message
 
 
 @kernel
@@ -311,7 +325,10 @@ def test_a_skew_that_moves_a_column_across_work_items_is_refused() -> None:
     with pytest.raises(IllegalCast) as caught:
         tagged.skew("i", by="t")
     message = str(caught.value)
-    assert message.startswith("skew(i, by='t') illegal: instance S0[t=")
+    assert message.startswith(
+        "skew(i, by='t') illegal: u[t + 1, i] = u[t, i] / 2 "
+        f"({where(halved_columns, 'u[t + 1, i] =')}) at t="
+    )
     (_, source), (_, sink), _ = caught.value.witness
     assert sink["t"] == source["t"] + 1 and sink["i"] == source["i"]
     first, second = source["i"] + source["t"], sink["i"] + sink["t"]
@@ -503,10 +520,9 @@ def test_a_sum_that_reads_what_a_sum_stored_is_refused(
     with pytest.raises(IllegalCast) as caught:
         schedule.tag(**tags)
     message = str(caught.value)
-    source, sink = pair
     assert (
-        f"{source} writes it on one work item of l.0, once its sum on l.0 is "
-        f"done; {sink} reads it in a sum, on every work item of l.0, and nothing"
+        "the write is on one work item of l.0, once its sum on l.0 is done; the "
+        "read is in a sum, on every work item of l.0, and nothing"
     ) in message, message
     (source_id, _), (sink_id, _), _ = caught.value.witness
     assert (source_id, sink_id) == pair
@@ -531,10 +547,12 @@ def test_a_sum_over_the_cell_its_statement_writes_is_refused(plain_opencl):
     with pytest.raises(IllegalCast) as caught:
         schedule.tag(k="l.0")
     assert str(caught.value) == (
-        "tag(k='l.0') illegal: instance S0[] reads a[7] overwritten by S0[] on "
-        "another work item: S0 reads it in a sum, on every work item of l.0; S0 "
-        "writes it on one work item of l.0, once its sum on l.0 is done, and "
-        "nothing in a kernel orders two work items through global memory"
+        "tag(k='l.0') illegal: a[7] = reduce_sum(a[k] for k in a.dom) "
+        f"({where(total_into_its_own_array, 'a[7] =')}) reads a[7], overwritten "
+        "by the same statement on another work item: the read is in a sum, on "
+        "every work item of l.0; the write is on one work item of l.0, once its "
+        "sum on l.0 is done, and nothing in a kernel orders two work items "
+        "through global memory"
     )
     assert caught.value.fact.provenance["detail"] == (
         "a war dependence on a joins two work items of l.0"
@@ -591,6 +609,180 @@ def test_each_access_says_which_instruction_of_its_statement_makes_it() -> None:
     accesses = _accesses(term.stmts[0], term)
     parts = {(kind, array, part) for kind, array, _, part in accesses}
     assert ("write", "term", "") in parts and ("read", "cnt", "row") in parts
+
+
+# }}}
+
+
+# {{{ a program's zeros on a device (#255, #261)
+
+
+#: The demos below index families at several indices, ``Fn[Nat, Nat, Real]``
+#: applied as ``D[a, b]``, which is lanky main's and not the 0.2.0 release's
+#: that the released-lanky job installs (as in ``tests/test_examples.py``).
+needs_several_indices = pytest.mark.skipif(
+    not hasattr(FnType, "indices"),
+    reason="the demo's theorems index families at several indices (lanky main)",
+)
+
+
+@kernel
+def doubled(x: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):  # noqa: F821
+    """Each cell twice ``x``'s."""
+    for i in f.dom:
+        f[i] = 2.0 * x[i]
+
+
+@kernel
+def plus_one(f: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """Each cell one more than ``f``'s."""
+    for i in y.dom:
+        y[i] = f[i] + 1.0
+
+
+@program
+def twice_plus_one(x, y):
+    """``f`` an array of the program's own, zeroed where it is made."""
+    f = Arr.zeros_like(x)
+    doubled(x, f)
+    plus_one(f, y)
+
+
+def lp_quiet(lp: Any) -> Any:
+    """loopy's code generation for a loopty kernel, its caches off."""
+    import contextlib
+
+    stack = contextlib.ExitStack()
+    stack.enter_context(lp.CacheMode(False))
+    stack.enter_context(declining())
+    return stack
+
+
+def test_a_programs_zeros_run_on_the_work_item_that_stores_each_cell(plain_opencl):
+    # The program zeroes f in a statement of its own, in a loop the file
+    # never names (i_1). Tagged with the calls' loop alone, every work item
+    # would zero every cell, those another work item stores included: loopy
+    # asks for a global barrier there. The zeros go on the loop's axis
+    # instead, since doubled stores f along it, and each work item zeroes
+    # the cell it stores, before it stores it.
+    fused = Schedule(twice_plus_one, target="opencl").fuse("doubled", "plus_one")
+    (zeros,) = [stmt for stmt in fused.term.stmts if stmt.id == "f.zeros"]
+    (loop,) = zeros.inames
+    said = loopy_says(plain_opencl, fused.kernel, {"i": "g.0"})
+    assert said.startswith("MissingBarrierError") and GLOBAL_BARRIER in said, said
+    tagged = fused.tag(i="g.0")
+    assert repr(tagged).endswith(".tag(i='g.0')")
+    assert casts(tagged) == ["decided"] * 4
+    assert tagged.buildable == (True, "")
+    assert tagged.tags == {"i": "g.0", loop: "g.0"}
+    with lp_quiet(plain_opencl):
+        code = plain_opencl.generate_code_v2(tagged.kernel).device_code()
+    body = code[code.index("{", code.index("__kernel")) :]
+    assert body.index("f[gid(0)] = (double) (0.0);") < body.index(
+        "f[gid(0)] = 2.0 * x[gid(0)];"
+    ), code
+
+
+def test_zeros_a_split_loop_stores_are_refused_saying_what_drops_them(plain_opencl):
+    # Split, doubled stores f[4*i_outer + i_inner], along no loop of its own,
+    # so the zeros stay on every work item, and the refusal says why and
+    # which steps drop them.
+    fused = Schedule(twice_plus_one, target="opencl").fuse("doubled", "plus_one")
+    with pytest.raises(IllegalCast) as caught:
+        fused.split("i", 4).tag(i_outer="g.0", i_inner="l.0")
+    message = str(caught.value)
+    # the zeros keep their id, a statement loopty made and the file did not
+    assert message.startswith(
+        "tag(i_outer='g.0', i_inner='l.0') illegal: f.zeros[i_1=0] writes f[0]"
+    )
+    assert (
+        "the first write is in no loop on g.0, so on every work item of it"
+    ) in message
+    assert message.endswith(
+        "nothing in a kernel orders two work items through global memory. The "
+        "zeros f is made with run on the work item that stores each cell only "
+        "where every statement that stores f stores it along a loop of its own "
+        "on g.0, and none does here; keep f in a window (contract) or compute "
+        "it where it is read (substitute), which drops them"
+    )
+    # substituted, f has no zeros, and the split is legal
+    computed = (
+        Schedule(twice_plus_one, target="opencl")
+        .substitute("f")
+        .split("i_0", 4)
+        .tag(i_0_outer="g.0", i_0_inner="l.0")
+    )
+    assert set(casts(computed)) == {"decided"}
+
+
+def test_a_call_that_runs_on_every_work_item_is_named_before_the_zeros(
+    plain_opencl,
+):
+    # plus_one's loop is not tagged, so it runs on every work item and reads
+    # what doubled stored on one: that is the refusal, not the zeros, which
+    # follow doubled's loop.
+    with pytest.raises(IllegalCast) as caught:
+        Schedule(twice_plus_one, target="opencl").tag(i="g.0")
+    message = str(caught.value)
+    reading = where(plus_one, "y[i] = f[i] + 1.0")
+    assert f"read by y[i] = f[i] + 1.0 ({reading}) at i=" in message
+    assert "the read is in no loop on g.0" in message
+    assert "zeros" not in message
+
+
+@needs_several_indices
+def test_one_launch_of_the_hexahedra_passes_is_refused_for_its_reads(plain_opencl):
+    # Every node of an element on a work item of its own, in one launch: the
+    # pass along r reads a row the metric stored on other work items. That is
+    # the refusal now, where the zeros of w on every work item used to be.
+    hexahedra = example("hexahedra")
+    nodes = {"e": "g.0", "k": "l.2", "j": "l.1", "i": "l.0"}
+    every = {
+        f"{loop}{suffix}": axis
+        for suffix in ("", "_0", "_1", "_2")
+        for loop, axis in nodes.items()
+    }
+    with pytest.raises(IllegalCast) as caught:
+        Schedule(hexahedra.weak_grad, target="opencl").tag(**every)
+    message = str(caught.value)
+    along_r = where(hexahedra.along_r, "v[q, e, k, j, i] = reduce_sum(")
+    assert " writes w[" in message
+    assert f" read by v[q, e, k, j, i] = reduce_sum(...) ({along_r}) at q=" in message
+    assert "the loops i and i_0 on l.0 run them on work items" in message
+    assert "zeros" not in message
+    # Each element's passes on one work item, in one launch, are legal, the
+    # zeros of w, v and vs on the element's work group.
+    groups = {f"e{suffix}": "g.0" for suffix in ("", "_0", "_1", "_2")}
+    tagged = Schedule(hexahedra.weak_grad, target="opencl").tag(**groups)
+    assert set(casts(tagged)) == {"decided"}
+    assert tagged.buildable == (True, "")
+
+
+@needs_several_indices
+def test_sumpys_gpu_schedule_of_l2p_names_only_the_files_loops() -> None:
+    # sumpy's own schedule for a GPU, each box a work group, as the file
+    # writes it: no generated loop names, each box's cells of C and R zeroed
+    # on its work item, and the fusions' facts those of fused, on C.
+    l2p = example("l2p")
+    schedule = l2p.on_a_gpu
+    assert schedule.target == "opencl"
+    assert repr(schedule).endswith(
+        ".fuse(reconstruct, evaluate, loops=1).tag(i='g.0')"
+    )
+    assert set(casts(schedule)) == {"decided"}
+    assert schedule.buildable == (True, "")
+    zeros = {
+        stmt.id: stmt.inames[0] for stmt in schedule.term.stmts if ".zeros" in stmt.id
+    }
+    assert set(zeros) == {"C.zeros", "R.zeros"}
+    assert {schedule.tags[loop] for loop in zeros.values()} == {"g.0"}
+    fused = {fact.id for fact in l2p.fused.facts()}
+    mine = [fact for fact in schedule.facts() if fact.id not in fused]
+    assert [fact.statement for fact in mine] == [
+        "tag(i='g.0') renames the instances of l2p one for one",
+        "the order after tag(i='g.0') runs every dependence of l2p forward, "
+        "within one work item",
+    ]
 
 
 # }}}

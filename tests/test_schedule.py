@@ -12,6 +12,7 @@ not allowed either.
 from __future__ import annotations
 
 import dataclasses
+import sys
 
 import islpy as isl
 import numpy as np
@@ -19,6 +20,7 @@ import pytest
 from lanky.prelude import Nat, Real
 
 import hand_terms as ht
+from lines import where
 from loopty import Arr, Fin, kernel, reduce_sum, when
 from loopty.executor import emit_code
 from loopty.isl_reading import declining
@@ -50,9 +52,10 @@ def test_tiling_the_stencil_is_rejected_with_a_witness() -> None:
         schedule.tile("t", "i", 8, 8)
 
     message = str(caught.value)
-    assert message.startswith("tile(t,i,8,8) illegal: instance S0[")
+    # a term written by hand has no source text: its instances are by id
+    assert message.startswith("tile(t,i,8,8) illegal: S0[")
     assert "writes u[" in message
-    assert "read by S0[" in message
+    assert ", read by S0[" in message
     # The sizes the witness was read off at are part of the message: the pair
     # isl picks depends on them, and on whether the hint could be honoured.
     assert message.endswith("scheduled earlier (at nt=16, nx=16, as hinted)")
@@ -157,8 +160,12 @@ def test_a_vectorized_loop_that_carries_a_dependence_is_rejected() -> None:
         with pytest.raises(IllegalCast) as caught:
             Schedule(term).tag(i=tag)
         message = str(caught.value)
-        assert message.startswith(f"tag(i='{tag}') illegal: instance S1[i=")
-        assert "read by S0[i=" in message
+        writes = where(carried_across_statements, "y[i + 1] = z[i] + 1.0")
+        reads = where(carried_across_statements, "z[i] = y[i]")
+        assert message.startswith(
+            f"tag(i='{tag}') illegal: y[i + 1] = z[i] + 1.0 ({writes}) at i="
+        )
+        assert f"read by z[i] = y[i] ({reads}) at i=" in message
     unrolled = Schedule(term).tag(i="unr")
     y = np.zeros(9)
     out = run(unrolled, y=y, z=np.zeros(8))
@@ -234,9 +241,15 @@ def test_a_parallel_tag_that_would_read_through_stale_offsets_is_rejected() -> N
     with pytest.raises(IllegalCast) as caught:
         schedule.tag(r="l.0")
     message = str(caught.value)
-    assert message.startswith("tag(r='l.0') illegal: instance S1[r=")
+    stores = where(row_sums_then_next_offset, "off[r + 1] = ends[r]")
+    sums = where(row_sums_then_next_offset, "y[r] = reduce_sum(")
+    assert message.startswith(
+        f"tag(r='l.0') illegal: off[r + 1] = ends[r] ({stores}) at r="
+    )
     assert "writes off[" in message
-    assert "read by S0[" in message
+    assert (
+        f"read by y[r] = reduce_sum(val[r, j] for j in val.dom[r]) ({sums}) at r="
+    ) in message
     (source_id, source), (sink_id, sink), params = caught.value.witness
     assert (source_id, sink_id) == ("S1", "S0")
     assert sink["r"] == source["r"] + 1
@@ -288,9 +301,15 @@ def test_a_parallel_tag_that_would_read_a_stale_row_length_is_rejected(fn) -> No
     with pytest.raises(IllegalCast) as caught:
         schedule.tag(r="l.0")
     message = str(caught.value)
-    assert message.startswith("tag(r='l.0') illegal: instance S1[r=")
+    clears = where(fn, "cnt[r + 1] = 0")
+    sums = where(fn, "y[r] = reduce_sum(")
+    assert message.startswith(
+        f"tag(r='l.0') illegal: cnt[r + 1] = 0 ({clears}) at r="
+    )
     assert "writes cnt[" in message
-    assert "read by S0[" in message
+    assert (
+        f"read by y[r] = reduce_sum(val[r, j] for j in val.dom[r]) ({sums}) at r="
+    ) in message
     (source_id, source), (sink_id, sink), _params = caught.value.witness
     assert (source_id, sink_id) == ("S1", "S0")
     assert sink["r"] == source["r"] + 1
@@ -330,9 +349,16 @@ def test_a_tag_that_would_read_a_sums_bound_before_it_is_written_is_rejected() -
     with pytest.raises(IllegalCast) as caught:
         schedule.tag(r="l.0")
     message = str(caught.value)
-    assert message.startswith("tag(r='l.0') illegal: instance S1[r=")
+    # a long statement keeps what it writes and shortens the calls it makes
+    clears = where(sums_at_i_then_next_count, "cnt[r + 1] = 0")
+    sums = where(sums_at_i_then_next_count, "y[r] = y[r] + x[i]")
+    assert message.startswith(
+        f"tag(r='l.0') illegal: cnt[r + 1] = 0 ({clears}) at r="
+    )
     assert "writes cnt[" in message
-    assert "read by S0[" in message
+    assert (
+        f"read by y[r] = y[r] + x[i] * reduce_sum(...) ({sums}) at r="
+    ) in message
     (source_id, source), (sink_id, sink), _params = caught.value.witness
     assert (source_id, sink_id) == ("S1", "S0")
     assert sink["r"] == source["r"] + 1
@@ -411,7 +437,8 @@ def test_the_rows_read_after_the_scan_are_ordered_and_not_on_one_work_item() -> 
     assert "in no loop on l.0, so on every work item of it" in message
     assert "scheduled earlier" not in message
     with pytest.raises(
-        IllegalCast, match=r"writes off\[.*read by S1\[.*scheduled earlier"
+        IllegalCast,
+        match=r"writes off\[.*, read by the same statement at r=.*scheduled earlier",
     ):
         schedule.tag(r="l.0")
 
@@ -712,7 +739,7 @@ def test_exactness_is_read_off_the_reduction_being_transformed() -> None:
     # asks the same permission and runs in one work item.)
     tagged = schedule.tag(k="ilp")
     assert tagged.reassociated == frozenset({"y"})
-    with pytest.raises(IllegalCast, match="S0 runs in no loop on l.0"):
+    with pytest.raises(IllegalCast, match="is in no loop on l.0"):
         schedule.tag(k="l.0")
 
 
@@ -731,12 +758,13 @@ def test_realize_answers_for_every_reduction_writing_the_array() -> None:
 def test_the_facts_name_the_term_the_oracle_and_the_dependence_source() -> None:
     schedule = Schedule(ht.transpose_term()).split("i", 4)
     facts = schedule.facts()
-    steps = "[c].split('i', 4, inner='i_inner', outer='i_outer')"
-    assert schedule.key == f"transpose{steps}"
-    # A term has no definition behind it, and is named by its name.
+    split = "split('i', 4, inner='i_inner', outer='i_outer')"
+    assert schedule.key == f"transpose[c].{split}"
+    # A term has no definition behind it, and is named by its name; a cast by
+    # its steps, which mean the same on every target.
     assert [fact.id for fact in facts] == [
-        f"cast:transpose:{steps}:bijective",
-        f"cast:transpose:{steps}:monotone",
+        f"cast:transpose:{split}:bijective",
+        f"cast:transpose:{split}:monotone",
     ]
     for fact in facts:
         assert fact.decided_by == "isl"
@@ -778,13 +806,28 @@ def test_two_schedules_of_one_kernel_keep_their_facts_apart() -> None:
     assert len(ledger) == 8
 
 
-def test_the_target_is_part_of_the_key(plain_opencl) -> None:
+def test_the_target_is_part_of_the_key_and_not_of_a_casts_facts(
+    plain_opencl,
+) -> None:
     term = ht.transpose_term()
     assert Schedule(term).key == "transpose[c]"
     on_c = Schedule(term).split("i", 4)
     on_device = Schedule(term, target="opencl").split("i", 4)
     assert on_device.key.startswith("transpose[opencl].split(")
-    assert not {f.id for f in on_c.facts()} & {f.id for f in on_device.facts()}
+    assert on_c.fact_id("agreement") != on_device.fact_id("agreement")
+    # What the split means is the same on both targets: one claim, one id,
+    # so a file with both lists it once, as it lists a retargeted schedule's.
+    assert [f.id for f in on_c.facts()] == [f.id for f in on_device.facts()]
+    assert [f.id for f in on_c.retarget("opencl").facts()] == [
+        f.id for f in on_c.facts()
+    ]
+    # What the target builds is not: a work group on C is a fact of C's.
+    grouped = on_c.tag(i_outer="g.0")
+    (buildable,) = [f for f in grouped.facts() if f.kind == "buildable"]
+    assert "[c]." in buildable.id
+    assert not [
+        f for f in on_device.tag(i_outer="g.0").facts() if f.kind == "buildable"
+    ]
 
 
 def two_accumulations(
@@ -1770,6 +1813,30 @@ def test_a_map_per_statement_moves_each_statement_by_its_own() -> None:
     assert schedule.retarget("c-source").history == schedule.history
 
 
+def test_a_schedules_facts_are_at_the_lines_of_its_steps() -> None:
+    # Each step's facts are at the line of the step, written over several
+    # lines as a chain is; the assumption at its .assume(...); the schedule,
+    # whose run is placed there, at its last step. They were all at the
+    # term's first statement, the callee's line for a kernel that calls one
+    # first (#259). Replayed on another target, they stay where they were.
+    here = sys._getframe().f_lineno
+    schedule = (
+        Schedule(ht.jacobi_term(), sizes={"nt": 8, "nx": 8})
+        .assume("nx >= 4")
+        .split("i", 2)
+        .tag(i_inner="unr")
+    )
+    at = [f"test_schedule.py:{here + line}" for line in (3, 4, 5)]
+    expected = [at[0], at[1], at[1], at[2], at[2]]
+    assert [fact.where for fact in schedule.facts()] == expected
+    assert schedule.where == at[2]
+    again = schedule.retarget("c-source")
+    assert [fact.where for fact in again.facts()] == expected
+    assert again.where == at[2]
+    # with no step, the schedule is where it is made
+    assert Schedule(ht.jacobi_term()).where == f"test_schedule.py:{here + 15}"
+
+
 def test_maps_per_statement_are_checked_together_across_the_statements() -> None:
     # S1 reads the v that S0 writes at the same t, so S1 may not come first.
     schedule = Schedule(ht.coupled_pair_term(), sizes={"n": 8})
@@ -1777,7 +1844,7 @@ def test_maps_per_statement_are_checked_together_across_the_statements() -> None
         schedule.affine("{ S0[t] -> [k] : k = 2t + 1; S1[t] -> [k] : k = 2t }")
     assert caught.value.witness == (("S0", {"t": 0}), ("S1", {"t": 0}), {"n": 8})
     assert caught.value.fact.kind == "monotone"
-    assert "S0[t=0] writes v[1] read by S1[t=0] scheduled earlier" in str(
+    assert "S0[t=0] writes v[1], read by S1[t=0], scheduled earlier" in str(
         caught.value
     )
     # One statement's map that merges its instances, or misses one, is refused
@@ -2361,7 +2428,10 @@ def test_a_dependence_through_a_cell_a_size_names_is_found() -> None:
     with pytest.raises(IllegalCast) as caught:
         schedule.tag(i="g.0")
     message = str(caught.value)
-    assert message.startswith("tag(i='g.0') illegal: S0[i=")
+    assert message.startswith(
+        "tag(i='g.0') illegal: y[y.dom.size - 1] = y[y.dom.size - 1] + x[i] "
+        f"({where(into_the_last, 'y[y.dom.size - 1] =')}) at i="
+    )
     assert "both update y[3]" in message
     assert message.endswith("with atomic('y') before this step")
     assert caught.value.fact.kind == "disjoint-writes"
@@ -2404,14 +2474,15 @@ def into_the_last_of_x0(x: Arr[Fin[x0], Real], y: Arr[Fin[x0], Real]):  # noqa: 
             chain_over_s,
             "s",
             "x[2]",
-            "instance S0[i=",
+            f"x[i] = x[i] + x[i - 1] ({where(chain_over_s, 'x[i] = ')}) at i=",
             "scheduled earlier (at s=4, as hinted)",
         ),
         (
             into_the_last_of_x0,
             "x0",
             "y[3]",
-            "S0[i=",
+            "y[y.dom.size - 1] = y[y.dom.size - 1] + x[i] "
+            f"({where(into_the_last_of_x0, 'y[y.dom.size - 1] =')}) at i=",
             "(at x0=4, as hinted), and the loop i on g.0 runs them on two work "
             "items, so one can overwrite what the other added; make the updates "
             "atomic, with atomic('y') before this step",

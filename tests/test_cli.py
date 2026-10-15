@@ -302,6 +302,34 @@ def test_target_c_on_a_device_schedule_says_c_has_no_hardware_axes(
     assert "difference" not in out
 
 
+def test_a_files_device_schedule_is_checked_where_pyopencl_is_not_installed(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    """``loopty run`` lists a device schedule's facts, and says why it ran none.
+
+    A file keeps its schedule for a device beside the others: where pyopencl
+    is not installed it is checked on loopy's plain OpenCL target, and its
+    run is left to a machine that has pyopencl, which is not a failure.
+    """
+    from loopty import lower
+
+    monkeypatch.setattr(lower, "pyopencl_installed", lambda: False)
+    path = write_fixture(tmp_path, DEVICE)
+    code = main(["run", str(path)])
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert (
+        "scale: Schedule(scale, target='opencl').tag(i='g.0')\n"
+        "  not run here: running on a device needs pyopencl, which is not "
+        "installed; its facts are checked all the same\n"
+    ) in out
+    assert "difference" not in out
+    assert "tag(i='g.0') renames the instances of scale one for one" in out
+    # --target opencl keeps it, and says the same
+    assert main(["run", str(path), "--target", "opencl"]) == 0
+    assert "not run here" in capsys.readouterr().out
+
+
 def test_without_target_a_schedule_keeps_the_one_it_was_written_for(
     tmp_path, capsys
 ) -> None:
@@ -484,7 +512,8 @@ def test_run_prints_what_refuted_a_run_under_its_line(tmp_path, capsys) -> None:
     code = main(["run", str(path), "--json", str(out_path)])
     out = capsys.readouterr().out
     assert code == 1
-    lines, header = refutation_block(out, "scale at fixture.py:1: ")
+    # at the schedule's line, the run of which was refuted
+    lines, header = refutation_block(out, "scale at fixture.py:53: ")
     assert lines[header].endswith(
         "the scheduled run of scale agrees with the native run to the accuracy "
         "its types state"
@@ -634,7 +663,8 @@ def test_two_kernels_of_one_name_keep_their_schedules_facts_apart(tmp_path) -> N
     splits shared them: the ledger held four facts where six are owed, the
     local kernel's casts replaced by the helper's, and the helper's agreement
     kept only through the ``#2`` a schedule run twice gets (#75). They are now
-    keyed by each kernel's definition, as its own facts are.
+    keyed by each kernel's definition, as its own facts are, and each
+    schedule's facts are at its own line of the file (#259).
     """
     helpers = f"helpers_twice_{tmp_path.name.replace('-', '_')}"
     (tmp_path / f"{helpers}.py").write_text(HELPERS_TWICE, encoding="utf-8")
@@ -646,19 +676,21 @@ def test_two_kernels_of_one_name_keep_their_schedules_facts_apart(tmp_path) -> N
     ids = [fact["id"] for fact in facts]
     assert len(set(ids)) == len(ids) == 6
     assert not [identifier for identifier in ids if "#" in identifier]
-    steps = "[c].split('i', 2, inner='i_inner', outer='i_outer')"
+    split = "split('i', 2, inner='i_inner', outer='i_outer')"
+    steps = f"[c].{split}"
     by_where = {}
     for fact in facts:
-        by_where.setdefault(fact["where"].split(":")[0], []).append(fact["id"])
-    assert sorted(by_where) == [f"{helpers}.py", "twice.py"]
+        by_where.setdefault(fact["where"], []).append(fact["id"])
+    assert sorted(by_where) == ["twice.py:17", "twice.py:18"]
     for where, mine in by_where.items():
-        module = where.removesuffix(".py")
-        line = 11 if module == "twice" else 9
-        definition = f"{module}.double@{line}"
+        definition = (
+            "twice.double@11" if where == "twice.py:17" else f"{helpers}.double@9"
+        )
+        # a cast is keyed by its steps alone, a run by its target too
         assert sorted(mine) == [
             f"agreement:{definition}:{steps}",
-            f"cast:{definition}:{steps}:bijective",
-            f"cast:{definition}:{steps}:monotone",
+            f"cast:{definition}:{split}:bijective",
+            f"cast:{definition}:{split}:monotone",
         ]
 
 
@@ -720,7 +752,8 @@ def test_two_kernels_one_factory_makes_are_refused_as_lanky_check_refuses_them(
     assert out.count("  y: difference 0 ") == 3
     facts = json.loads(out_path.read_text(encoding="utf-8"))
     definition = "fixture.make.<locals>.double@11"
-    steps = "[c].split('i', 2, inner='i_inner', outer='i_outer')"
+    split = "split('i', 2, inner='i_inner', outer='i_outer')"
+    steps = f"[c].{split}"
     bijective = "split(i, 2) renames the instances of double one for one"
     monotone = "the order after split(i, 2) runs every dependence of double forward"
     (agreement,) = {
@@ -729,19 +762,20 @@ def test_two_kernels_one_factory_makes_are_refused_as_lanky_check_refuses_them(
     assert [
         (fact["id"], fact["provenance"].get("duplicate_claims")) for fact in facts
     ] == [
-        (f"cast:{definition}:{steps}:bijective", [bijective]),
-        (f"cast:{definition}:{steps}:monotone", [monotone]),
+        (f"cast:{definition}:{split}:bijective", [bijective]),
+        (f"cast:{definition}:{split}:monotone", [monotone]),
         (f"agreement:{definition}:{steps}", [agreement]),
         (f"agreement:{definition}:{steps}#2", None),
     ]
     block = out[out.index("DUPLICATE") :].splitlines()
     assert block == [
-        "DUPLICATE double at fixture.py:14: several claims have each of the 3 "
+        # the first of the facts, s1's split, is at its line
+        "DUPLICATE double at fixture.py:21: several claims have each of the 3 "
         "ids below",
-        f"  cast:{definition}:{steps}:bijective",
+        f"  cast:{definition}:{split}:bijective",
         f"    in the table: {bijective}",
         f"    not in the table: {bijective}",
-        f"  cast:{definition}:{steps}:monotone",
+        f"  cast:{definition}:{split}:monotone",
         f"    in the table: {monotone}",
         f"    not in the table: {monotone}",
         f"  agreement:{definition}:{steps}",
@@ -756,6 +790,8 @@ def test_one_claim_of_an_id_prints_it_on_the_duplicate_line(tmp_path, capsys) ->
     # Two kernels one factory makes, run with no schedule: each is run through
     # the identity schedule, which makes no cast, so the one id they share is
     # the agreement's, and the block says so on its first line, as lanky's does.
+    # The identity schedule is loopty's, so its run is at the kernel's
+    # definition, and not at the line that called the command.
     body = FACTORY.split("s1 = ")[0] + (
         "\n\ndef example_inputs():\n"
         '    return {"x": Arr.from_numpy(np.arange(4.0)), "y": Arr.zeros(4)}\n'
@@ -765,7 +801,7 @@ def test_one_claim_of_an_id_prints_it_on_the_duplicate_line(tmp_path, capsys) ->
     out = capsys.readouterr().out
     block = out[out.index("DUPLICATE") :].splitlines()
     assert block[0] == (
-        "DUPLICATE double at fixture.py:14: 2 claims have the id "
+        "DUPLICATE double at fixture.py:11: 2 claims have the id "
         "agreement:fixture.make.<locals>.double@11:[c]"
     )
     assert [line.split(":")[0] for line in block[1:3]] == [
@@ -805,7 +841,7 @@ def test_a_claim_not_in_the_table_that_was_refuted_is_said_to_be(
     agreement += "accuracy its types state"
     block = out[out.index("DUPLICATE") :].splitlines()
     assert block[0] == (
-        "DUPLICATE scale at fixture.py:1: several claims have each of the 3 ids "
+        "DUPLICATE scale at fixture.py:53: several claims have each of the 3 ids "
         "below"
     )
     assert block[-5:] == [

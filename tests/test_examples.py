@@ -26,6 +26,10 @@ from typing import Any
 import islpy as isl
 import numpy as np
 import pytest
+from lanky import terms as lanky_terms
+from lanky.prelude import FnType
+
+from lines import where
 
 pytest.importorskip("loopy")
 
@@ -50,7 +54,63 @@ NAMES = (
     "calls",
     "assembly",
     "storage_layouts",
+    "l2p",
+    "hexahedra",
+    "advection",
 )
+
+#: The families with several indices, ``Fn[Nat, Nat, Real]`` applied as
+#: ``D[a, b]``, that ``examples/l2p.py`` writes its theorems with, and
+#: ``Fn[Fin[n], Fin[n], Real]`` applied as ``Fr[i, a]``, that
+#: ``examples/hexahedra.py`` and ``examples/advection.py`` write their theorems
+#: with, are lanky main's and not the 0.2.0 release's, which the released-lanky
+#: job installs.
+SEVERAL_INDICES = hasattr(FnType, "indices")
+
+#: The demos that need them.
+NEEDS_SEVERAL_INDICES = {"l2p", "hexahedra", "advection"}
+
+needs_several_indices = pytest.mark.skipif(
+    not SEVERAL_INDICES,
+    reason="the demo's theorems index families at several indices (lanky main)",
+)
+
+#: ``examples/hexahedra.py``'s operators claim over ``x in Fin[3]`` beside
+#: ``e in Fin[ne]``, which lanky reads as two binders since lanky#144.
+LITERAL_BINDERS = hasattr(lanky_terms, "literal_binders")
+
+#: The demos that need that.
+NEEDS_LITERAL_BINDERS = {"hexahedra"}
+
+needs_literal_binders = pytest.mark.skipif(
+    not LITERAL_BINDERS,
+    reason="the demo's claims put a literal domain beside a symbolic one (lanky main)",
+)
+
+#: The parts of a complex number, ``real``, ``imag`` and ``conj``, that
+#: ``examples/layer_potential.py``'s identity is written with, are lanky
+#: main's and not the 0.2.0 release's.
+PARTS = "conj" in getattr(lanky_terms, "ELEMENTARY_FUNCTIONS", ())
+
+#: The demos that need that.
+NEEDS_PARTS = {"layer_potential"}
+
+needs_parts = pytest.mark.skipif(
+    not PARTS, reason="the demo's identity takes complex numbers apart (lanky main)"
+)
+
+#: Every demo, as a parameter: those that need lanky main skip without it.
+DEMOS = [
+    pytest.param(
+        name,
+        marks=[
+            *([needs_several_indices] if name in NEEDS_SEVERAL_INDICES else []),
+            *([needs_literal_binders] if name in NEEDS_LITERAL_BINDERS else []),
+            *([needs_parts] if name in NEEDS_PARTS else []),
+        ],
+    )
+    for name in NAMES
+]
 
 _RESULTS: dict[tuple[str, str], tuple[Any, list[dict]]] = {}
 _MODULES: dict[str, Any] = {}
@@ -125,14 +185,14 @@ def _statuses(facts: list[dict], **fields: Any) -> list[str]:
 # {{{ every demo, the three commands
 
 
-@pytest.mark.parametrize("name", NAMES)
+@pytest.mark.parametrize("name", DEMOS)
 def test_a_demo_runs_under_plain_python(name: str) -> None:
     result, _ = _invoke(name, "python")
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.strip(), "a demo that prints nothing demonstrates nothing"
 
 
-@pytest.mark.parametrize("name", NAMES)
+@pytest.mark.parametrize("name", DEMOS)
 def test_a_demo_states_obligations_and_none_is_refuted(name: str) -> None:
     result, facts = _invoke(name, "check")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -158,11 +218,36 @@ KERNELS = {
     "composition": {"flux", "divergence", "burgers_rhs"},
     "fusion": {"flux", "divergence", "burgers_rhs"},
     "quadrature": {"mass_action"},
-    "layer_potential": {"single_layer"},
+    "layer_potential": {"single_layer", "double_layer"},
     "sum_factorization": {"along_r", "along_s", "weak_derivative"},
     "calls": {"dot", "matvec", "csr", "integrate", "element_mass", "mass_matrices"},
-    "assembly": {"mass_action"},
+    "assembly": {"mass_ffc", "mass_action"},
     "storage_layouts": {"stored_table", "unflatten"},
+    "l2p": {"unpack", "reconstruct", "evaluate", "l2p"},
+    "hexahedra": {
+        "metric",
+        "contravariant",
+        "along_r",
+        "along_s",
+        "gradient_along_t",
+        "divergence_along_t",
+        "weak_grad",
+        "weak_div",
+        "metric_along_r",
+        "contravariant_along_r",
+    },
+    "advection": {
+        "reference_velocity",
+        "normal_velocity",
+        "upwind",
+        "volume",
+        "lift",
+        "lift_on_faces",
+        "advection_rhs",
+        "folded_rhs",
+        "surface",
+        "volume_and_lift",
+    },
     "travel": {
         "number",
         "number_quiet",
@@ -186,7 +271,7 @@ KERNELS = {
 REFUSES_DRAWS = {("travel", "weigh"), ("travel", "flat")}
 
 
-@pytest.mark.parametrize("name", NAMES)
+@pytest.mark.parametrize("name", DEMOS)
 def test_every_kernel_of_a_demo_computes_what_its_body_computes(name: str) -> None:
     # The traced term, interpreted, against the native body: on the demo's
     # own example inputs first, then on inputs drawn from the declared types.
@@ -210,7 +295,7 @@ def test_every_kernel_of_a_demo_computes_what_its_body_computes(name: str) -> No
         assert outcomes == ["agreed"] * 4
 
 
-@pytest.mark.parametrize("name", NAMES)
+@pytest.mark.parametrize("name", DEMOS)
 def test_a_demo_compiles_and_agrees_with_the_native_run(name: str) -> None:
     result, facts = _invoke(name, "run")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -868,15 +953,17 @@ def test_the_fusion_demo_prints_the_refusals_and_three_kernels() -> None:
     result, _ = _invoke("fusion", "python")
     assert result.returncode == 0, result.stdout + result.stderr
     assert (
-        "refused: fuse(flux, divergence) illegal: instance flux.S0[j=2] writes "
-        "f[2] read by divergence.S0[i=1] scheduled earlier (at n=16, as hinted); "
-        "fuse('flux', 'divergence', shift=1) runs every dependence between them "
-        "forward"
+        "refused: fuse(flux, divergence) illegal: f[j] = 0.5 * u[j] * u[j] "
+        "(fusion.py:81) at j=2 writes f[2], read by rhs[i] = -(f[i + 1] - "
+        "f[i - 1]) / 2 (fusion.py:89) at i=1, scheduled earlier (at n=16, as "
+        "hinted); fuse('flux', 'divergence', shift=1) runs every dependence "
+        "between them forward"
     ) in result.stdout
     assert (
-        "refused: contract('f', lambda j: j % 2) illegal: instance "
-        "divergence.S0[i=14] reads f[13], which flux.S0[j=13] stored in slot 1, "
-        "after flux.S0[j=15] stored f[15] there (at n=16, as hinted)"
+        "refused: contract('f', lambda j: j % 2) illegal: rhs[i] = -(f[i + 1] - "
+        "f[i - 1]) / 2 (fusion.py:89) at i=14 reads f[13], which f[j] = 0.5 * "
+        "u[j] * u[j] (fusion.py:81) at j=13 stored in slot 1, after the same "
+        "statement at j=15 stored f[15] there (at n=16, as hinted)"
     ) in result.stdout
     fused, substituted, windowed = result.stdout.split("accepted: ")[1:]
     # Fused, f is stored, and the executor allocates it (#62); substituted,
@@ -939,6 +1026,388 @@ def test_the_storage_layouts_demo_refutes_the_wrong_nesting() -> None:
     assert (
         "refuted: dof_array stores every cell where dim_tags N3,N2,N1,N0 does"
     ) in result.stdout
+
+
+# }}}
+
+
+# {{{ hexahedra
+
+
+@needs_several_indices
+@needs_literal_binders
+def test_the_hexahedra_demo_decides_its_layouts_and_its_programs() -> None:
+    result, facts = _invoke("hexahedra", "check")
+    assert result.returncode == 0, result.stdout + result.stderr
+    layouts = [
+        (fact["owner"], fact["kind"], fact["status"])
+        for fact in facts
+        if fact["kind"].startswith("layout")
+    ]
+    # at every order: isl decides each at n from 1 to 6, and without Lean
+    # that is what the fact is, tested
+    assert layouts == [
+        ("dof_array", "layout-in-bounds", "tested"),
+        ("dof_array", "layout-one-for-one", "tested"),
+        ("dof_array", "layout-onto", "tested"),
+        ("as_dim_tags", "layout-same", "tested"),
+        ("row_major", "layout-in-bounds", "tested"),
+        ("row_major", "layout-one-for-one", "tested"),
+        ("row_major", "layout-onto", "tested"),
+        ("as_row_major", "layout-same", "tested"),
+    ]
+    # every intermediate a program makes is read where its producer stored it
+    defined = [fact for fact in facts if fact["kind"] == "definedness"]
+    assert {fact["owner"] for fact in defined} == {
+        "weak_grad",
+        "weak_div",
+        "metric_along_r",
+        "contravariant_along_r",
+    }
+    assert all(fact["status"] == "decided" for fact in defined), defined
+    # each operator states what it leaves, the dense Kronecker operators:
+    # tested on its runs, and proved by Lean where Mathlib is
+    posts = {
+        fact["owner"]: fact for fact in facts if fact["kind"] == "postcondition"
+    }
+    assert set(posts) == {"weak_grad", "weak_div"}
+    for post in posts.values():
+        assert (post["status"], post["decided_by"]) in (
+            ("tested", "native"),
+            ("proved", "lean"),
+        ), post
+    assert posts["weak_grad"]["statement"].startswith(
+        "forall x in Fin(3), e in Fin(ne), k in Fin(n), j in Fin(n), i in Fin(n). "
+        "grad[x, e, k, j, i] == sum(Ft[3*x + d, k, c]*Fs[3*x + d, j, b]"
+    )
+    # what each call stores, once per cell, which the proof rests on
+    stored = [
+        (fact["owner"], fact["statement"].split(" stores")[0])
+        for fact in facts
+        if fact["kind"] == "single-assignment"
+    ]
+    assert stored == [
+        ("weak_grad", call)
+        for call in ("metric", "along_r", "along_s", "gradient_along_t")
+    ] + [
+        ("weak_div", call)
+        for call in ("contravariant", "along_r", "along_s", "divergence_along_t")
+    ]
+    # nothing in the file is left to an assumption
+    assert "assumed" not in {fact["status"] for fact in facts}
+    # the sums over Fin[3] are stated once over their binder, as written
+    # (#181): one row for each access and one for the sums over c
+    along_t = [
+        fact["statement"] for fact in facts if fact["owner"] == "gradient_along_t"
+    ]
+    assert (
+        "Ft[3*x + d, k, c] is in bounds for every d in Fin(3) and every instance "
+        "of S0"
+    ) in along_t
+    assert not [line for line in along_t if "3*x + 0" in line]
+    assert [line for line in along_t if line.startswith("the accumulation")] == [
+        "the accumulation into grad[x, e, k, j, i] over c is approx for every d "
+        "in Fin(3)"
+    ]
+    contravariant = [
+        fact["statement"] for fact in facts if fact["owner"] == "contravariant"
+    ]
+    assert (
+        "G[3*x + d, e, k, j, i] is in bounds for every x in Fin(3) and every "
+        "instance of S0"
+    ) in contravariant
+
+
+@needs_several_indices
+@needs_literal_binders
+def test_the_hexahedra_layouts_are_loopys_strides_and_modepys_reshape() -> None:
+    # The layout facts are about loopty's reading of the dim_tags and of the
+    # DOFArray. This ties each reading to the code it stands for: the strides
+    # loopy itself computes for N3,N0,N1,N2, modepy's F-order reshape of an
+    # element's row, and numpy's row-major u[e, k, j, i], at several orders.
+    import loopy as lp
+
+    module = _module("hexahedra")
+    ne = 3
+    for n in (2, module.N, 5):
+        kernel = lp.make_kernel(
+            f"{{[e, a, b, c]: 0 <= e < {ne} and 0 <= a, b, c < {n}}}",
+            "out[e, a, b, c] = 1",
+            [
+                lp.GlobalArg(
+                    "out", np.float64, shape=(ne, n, n, n), dim_tags="N3,N0,N1,N2"
+                )
+            ],
+            target=lp.CTarget(),
+            lang_version=(2018, 2),
+        )
+        tags = kernel.default_entrypoint.arg_dict["out"].dim_tags
+        strides = [tag.stride for tag in tags]
+        address = " + ".join(f"{stride}*c{axis}" for axis, stride in enumerate(strides))
+        loopys = isl.Map(
+            f"[ne] -> {{ [c0, c1, c2, c3] -> [{address}] : "
+            f"0 <= c0 < ne and 0 <= c1, c2, c3 < {n} }}"
+        )
+        ours = module.as_dim_tags.second.at(n=n).relation()
+        assert loopys.is_equal(ours), strides
+        dof_array = np.arange(ne * n**3).reshape(ne, n**3)
+        row_major = np.arange(ne * n**3).reshape(ne, n, n, n)
+        for e, i, j, k in np.ndindex(ne, n, n, n):
+            stored = module.dof_array(e, i, j, k, n=n)
+            assert stored == dof_array[e].reshape(n, n, n, order="F")[i, j, k]
+            assert stored == row_major[e, k, j, i] == module.row_major(e, i, j, k, n=n)
+
+
+@needs_several_indices
+@needs_literal_binders
+def test_the_hexahedra_theorem_holds_at_exact_matrices() -> None:
+    from fractions import Fraction
+
+    module = _module("hexahedra")
+    rng = np.random.default_rng(0)
+    n = 3
+
+    def exact(*shape: int) -> Any:
+        return np.vectorize(Fraction)(rng.integers(-4, 5, size=shape)).tolist()
+
+    Fr, Fs, Ft, u = exact(n, n), exact(n, n), exact(n, n), exact(n, n, n)
+    for k in range(n):
+        for j in range(n):
+            for i in range(n):
+                claim = module.sum_factorization(
+                    n=n, Fr=Fr, Fs=Fs, Ft=Ft, u=u, k=k, j=j, i=i
+                )
+                assert claim.holds, (k, j, i)
+
+
+@needs_several_indices
+@pytest.mark.parametrize("order", [1, 2, 3, 4, 5, 6])
+def test_the_hexahedra_factors_are_the_stiffness_and_the_mass(order: int) -> None:
+    # sum_j S^T[i, j] is the integral of the i-th basis function's derivative,
+    # its value at 1 minus its value at -1; the mass integrates 1 to 2
+    module = _module("hexahedra")
+    stiffness_t, mass = module.factors(order)
+    ends = np.zeros(order + 1)
+    ends[0], ends[-1] = -1.0, 1.0
+    assert np.allclose(stiffness_t.sum(axis=1), ends, atol=1e-12)
+    assert np.isclose(mass.sum(), 2.0)
+    assert np.allclose(mass, mass.T)
+    assert np.all(np.linalg.eigvalsh(mass) > 0)
+
+
+@needs_several_indices
+@needs_literal_binders
+def test_the_hexahedra_demo_refuses_the_deeper_fusion_and_keeps_the_windows() -> None:
+    result, _ = _invoke("hexahedra", "python")
+    assert result.returncode == 0, result.stdout + result.stderr
+    out = result.stdout
+    assert "the passes are the dense Kronecker operators: True" in out
+    # each pass's statement by its text and line, at the names its loops have
+    module = _module("hexahedra")
+    along_r = where(module.along_r, "v[q, e, k, j, i] = reduce_sum(")
+    along_s = where(module.along_s, "vs[q, e, k, j, i] = reduce_sum(")
+    assert (
+        "refused: fuse(along_r, along_s) illegal: v[q, e, k, j, i] = "
+        f"reduce_sum(...) ({along_r}) at q="
+    ) in out
+    assert f"read by vs[q, e, k, j, i] = reduce_sum(...) ({along_s}) at q=" in out
+    assert "fuse('along_r', 'along_s', loops=3) runs every dependence" in out
+    assert "w kept in n cells" in out
+    assert "v kept in n*n cells" in out
+    assert "grad: difference" in out and "-> tested" in out
+    assert out.count("all decided by isl") == 3
+
+
+@needs_several_indices
+@needs_literal_binders
+def test_the_hexahedra_launches_are_legal_and_build_on_opencl(plain_opencl) -> None:
+    module = _module("hexahedra")
+    for operator in ("grad", "div"):
+        launches = module.passes_on_a_device(operator)
+        assert len(launches) == 3
+        for schedule in launches:
+            on_device = schedule.retarget("opencl")
+            assert on_device.buildable == (True, ""), on_device.buildable
+            statuses = {fact.status.value for fact in on_device.facts()}
+            assert statuses == {"decided"}, [
+                (fact.statement, fact.status.value) for fact in on_device.facts()
+            ]
+
+
+# }}}
+
+
+# {{{ advection
+
+
+@needs_several_indices
+def test_the_advection_demo_decides_every_access_and_every_launch() -> None:
+    result, facts = _invoke("advection", "check")
+    assert result.returncode == 0, result.stdout + result.stderr
+    # the face gathers: the neighbor's node by type, this element's by type
+    # on the node and by isl on the element
+    gathers = {
+        fact["statement"]: (fact["status"], fact["decided_by"])
+        for fact in facts
+        if fact["owner"] == "upwind" and fact["statement"].startswith("u[")
+    }
+    assert gathers == {
+        "u[e, inside[f, a, b, 0], inside[f, a, b, 1], inside[f, a, b, 2]] is in "
+        "bounds for every instance of S0 (inside[f, a, b, 0] : Fin(n), inside[f, "
+        "a, b, 1] : Fin(n), inside[f, a, b, 2] : Fin(n), by type)": ("decided", "isl"),
+        "u[nbr[e, f], outside[f, a, b, 0], outside[f, a, b, 1], outside[f, a, b, "
+        "2]] is in bounds by type (nbr[e, f] : Fin(ne), outside[f, a, b, 0] : "
+        "Fin(n), outside[f, a, b, 1] : Fin(n), outside[f, a, b, 2] : Fin(n))": (
+            "decided",
+            "type",
+        ),
+    }
+    # every array a program makes is read where its producer stored it
+    defined = [fact for fact in facts if fact["kind"] == "definedness"]
+    assert {fact["owner"] for fact in defined} == {
+        "advection_rhs",
+        "folded_rhs",
+        "surface",
+    }
+    assert all(fact["status"] == "decided" for fact in defined), defined
+    assert "assumed" not in {fact["status"] for fact in facts}
+
+
+@needs_several_indices
+@pytest.mark.parametrize("order", [1, 2, 3, 4, 5, 6])
+def test_the_advection_tables_are_grudges_operators_with_the_inverse_mass_in(
+    order: int,
+) -> None:
+    # D and the lift's columns against grudge's operators as dense matrices,
+    # the inverse mass applied last, on random fields: the rearrangement the
+    # two theorems state, at the tables' values
+    module = _module("advection")
+    stiffness_t, mass = module.factors(order)
+    inverse = np.linalg.inv(mass)
+    D, L = module.tables(order)
+    n = order + 1
+    rng = np.random.default_rng(order)
+    w = rng.normal(size=(n, n, n))  # [t, s, r]
+    weak = np.einsum("ct,bs,ar,tsr->cba", mass, mass, stiffness_t, w)
+    pushed = np.einsum("kc,jb,ia,cba->kji", inverse, inverse, inverse, weak)
+    assert np.allclose(pushed, np.einsum("ia,kja->kji", D, w), atol=1e-11)
+    g = rng.normal(size=(n, n))  # a face's sJ * flux, [t, s]
+    for side, end in enumerate((np.eye(n)[0], np.eye(n)[-1])):
+        face = np.einsum("a,ct,bs,ts->cba", end, mass, mass, g)
+        lifted = np.einsum("kc,jb,ia,cba->kji", inverse, inverse, inverse, face)
+        assert np.allclose(lifted, np.einsum("i,kj->kji", L[side], g), atol=1e-11)
+
+
+@needs_several_indices
+@pytest.mark.parametrize("order", [1, 3, 6])
+def test_the_gll_tables_are_the_quadratures_and_conserve(order: int) -> None:
+    module = _module("advection")
+    _nodes, weights = module.gll(order)
+    D, L = module.tables(order, mass="gll")
+    n = order + 1
+    # the lift is a face node's own weight, and nothing else
+    assert np.allclose(L[0], np.eye(n)[0] / weights[0])
+    assert np.allclose(L[1], np.eye(n)[-1] / weights[-1])
+    # W D is S^T with the GLL quadrature: its columns sum to the ends, the
+    # integral of each basis function's derivative
+    ends = np.zeros(n)
+    ends[0], ends[-1] = -1.0, 1.0
+    assert np.allclose((weights[:, None] * D).sum(axis=1), ends, atol=1e-11)
+    assert np.isclose(weights.sum(), 2.0)
+
+
+@needs_several_indices
+def test_the_lift_onto_the_face_nodes_is_the_lift_with_the_gll_tables() -> None:
+    from loopty import Arr
+
+    module = _module("advection")
+    inputs = module.example_inputs()["lift_on_faces"]
+    _D, L = module.tables(mass="gll")
+    dense = {
+        name: Arr.from_numpy(inputs[name].numpy().copy())
+        for name in ("invJ", "flux", "rhs")
+    }
+    module.lift(Arr.from_numpy(L), **dense)
+    module.lift_on_faces(**inputs)
+    expected = dense["rhs"].numpy()
+    gap = np.abs(inputs["rhs"].numpy() - expected).max()
+    assert gap <= 1e-14 * np.abs(expected).max()
+
+
+@needs_several_indices
+def test_the_face_maps_are_modepys_faces_and_the_box_is_periodic() -> None:
+    module = _module("advection")
+    n = module.N
+    inside, outside = module.face_maps()
+    # modepy's faces of the hypercube: t, r, s, each at -1 and then at +1
+    assert module.FACES == ((2, -1), (2, 1), (0, -1), (0, 1), (1, -1), (1, 1))
+    for f, (axis, side) in enumerate(module.FACES):
+        position = 2 - axis  # (k, j, i)
+        here, there = (0, n - 1) if side < 0 else (n - 1, 0)
+        assert (inside[f, ..., position] == here).all()
+        assert (outside[f, ..., position] == there).all()
+        others = [p for p in range(3) if p != position]
+        assert (inside[f][..., others] == outside[f][..., others]).all()
+        # the face's nodes, each once
+        assert len({tuple(node) for node in inside[f].reshape(-1, 3)}) == n * n
+    nbr = module.box(3)
+    for f in range(6):
+        across = nbr[:, f]
+        assert (nbr[across, f ^ 1] == np.arange(27)).all()
+
+
+@needs_several_indices
+def test_the_advection_right_hand_side_conserves_on_the_periodic_box() -> None:
+    # integrated with the mass, the right-hand side of a periodic problem is
+    # zero: what leaves an element through a face enters its neighbor
+    module = _module("advection")
+    data = module.inputs(elements=3)
+    module.advection_rhs(**data)
+    _nodes, weights = module.gll(module.ORDER)
+    J = 1 / data["invJ"].numpy()
+    rhs = data["rhs"].numpy()
+    total = np.einsum("ekji,k,j,i->", J * rhs, weights, weights, weights)
+    scale = np.einsum("ekji,k,j,i->", J * np.abs(rhs), weights, weights, weights)
+    assert abs(total) <= 1e-13 * scale
+
+
+@needs_several_indices
+def test_the_advection_demo_refuses_the_deeper_fusion_and_runs_every_split() -> None:
+    result, _ = _invoke("advection", "python")
+    assert result.returncode == 0, result.stdout + result.stderr
+    out = result.stdout
+    assert "inverse mass and all, to 1e-13 of the largest value: True" in out
+    assert "M^-1 M is the identity: True" in out
+    assert "the transpose of the face gather on these maps: True" in out
+    assert (
+        "refused: fuse(upwind, volume) illegal: flux[e, f, a, b] = upwind_flux(...) "
+        "(advection.py:"
+    ) in out
+    assert "fuse('upwind', 'volume', loops=1) runs every dependence" in out
+    assert "flux kept in lambda" in out and "-> tested" in out
+    # libParanumal's lift onto the face nodes races on an edge without its
+    # barriers, and is legal once the updates are atomic
+    # each update by its statement, shortened to what it writes into
+    assert "refused: tag(e='g.0', a='l.1', b='l.0') illegal: rhs[e, " in out
+    assert " -= ... (advection.py:" in out
+    assert "both update rhs[" in out and "atomic('rhs')" in out
+    assert "accepted: atomic('rhs').tag(" in out
+    for split in _module("advection").SPLITS:
+        assert f"  {split}: " in out, split
+    assert "all decided" in out and "refuted" not in out
+
+
+@needs_several_indices
+def test_the_advection_launches_are_legal_and_build_on_opencl(plain_opencl) -> None:
+    module = _module("advection")
+    for split in module.SPLITS:
+        for schedule in module.launches(split):
+            on_device = schedule.retarget("opencl")
+            assert on_device.buildable == (True, ""), (split, on_device.buildable)
+            statuses = {fact.status.value for fact in on_device.facts()}
+            assert statuses == {"decided"}, [
+                (fact.statement, fact.status.value) for fact in on_device.facts()
+            ]
 
 
 # }}}
@@ -1055,12 +1524,21 @@ def test_the_assembly_demo_names_the_node_two_cells_share() -> None:
     result, _ = _invoke("assembly", "python")
     assert result.returncode == 0, result.stdout + result.stderr
     assert (
-        "PyOP2's two triangles: 2 cells, y agrees with the assembled matrix: True"
+        "PyOP2's two triangles: the cells' matrices sum to expected_matrix: True"
     ) in result.stdout
+    assert "and y is that matrix times u: True" in result.stdout
+    assert "y is the closed form: True" in result.stdout
+    assert "W3 and FE0 are the rule to 3.3e-16: True" in result.stdout
     assert (
-        "IllegalCast: tag(c_outer='g.0', c_inner='l.0') illegal: S1[c=0, k=2] and "
-        "S1[c=1, k=1] both update y[3] on example_inputs() (nc=2, nv=4), where "
-        "cell[0, 2] = 3 and cell[1, 1] = 3"
+        "mass_ffc's postcondition, its matrix |J| (1 + delta_jk) / 24 to the "
+        "approx tolerance -> tested"
+    ) in result.stdout
+    scatter = where(_module("assembly").mass_action, "y[cell[c, a]] += reduce_sum(")
+    assert (
+        f"IllegalCast: tag(c_outer='g.0', c_inner='l.0') illegal: y[cell[c, a]] "
+        f"+= reduce_sum(...) ({scatter}) at c=0, a=2 and at c=1, a=1 both "
+        "update y[3] on example_inputs() (nc=2, nv=4), where cell[0, 2] = 3 and "
+        "cell[1, 1] = 3"
     ) in result.stdout
     accepted = result.stdout.split("accepted: ")[1]
     assert "atomic updates of y run at the same time after tag(" in accepted
@@ -1070,22 +1548,437 @@ def test_the_assembly_demo_names_the_node_two_cells_share() -> None:
 
 def test_the_assembly_owes_its_sum_and_not_distinct_writes_of_y() -> None:
     _result, facts = _invoke("assembly", "check")
-    disjoint = [
-        fact["provenance"]["array"]
+    disjoint = {
+        (fact["owner"], fact["provenance"]["array"])
         for fact in facts
         if fact["kind"] == "disjoint-writes"
-    ]
-    assert disjoint == ["yl"]
-    # the kernel's own; the reassociation a schedule records has no op
+    }
+    assert disjoint == {("mass_ffc", "A"), ("mass_action", "Ae")}
     (update,) = [
         fact
         for fact in facts
-        if fact["kind"] == "exactness" and fact["provenance"].get("op") == "update"
+        # the kernel's own; the reassociation a schedule records has no op
+        if fact["kind"] == "exactness"
+        and fact["provenance"].get("op") == "update"
+        and fact["owner"] == "mass_action"
+        and "over c, a" in fact["statement"]
     ]
     assert update["statement"] == (
-        "the accumulation into y[cell[c, k]] over c, k is approx"
+        "the accumulation into y[cell[c, a]] over c, a is approx"
     )
     assert (update["status"], update["decided_by"]) == ("decided", "type")
+
+
+def test_the_element_mass_is_mass_ffcs_postcondition_to_the_approx_tolerance() -> None:
+    """``|J| (1 + delta_jk) / 24`` from FFC's 15-digit tables: to round-off (#254).
+
+    Tested on the runs at the approx tolerance; with Mathlib, proved over the
+    reals from what the kernel stores, resting on that and on its trace.
+    """
+    _result, facts = _invoke("assembly", "check")
+    owned = [fact for fact in facts if fact["owner"] == "mass_ffc"]
+    (post,) = [fact for fact in owned if fact["kind"] == "postcondition"]
+    assert post["statement"].startswith(
+        "(A[0, 0] == abs((x[1, 0] - x[0, 0])*(x[2, 1] - x[0, 1]) - (x[2, 0] - "
+        "x[0, 0])*(x[1, 1] - x[0, 1])) / 12 and "
+    )
+    assert post["statement"].endswith(") / 24), to the approx tolerance")
+    assert (post["status"], post["decided_by"]) in (
+        ("tested", "native"),
+        ("proved", "lean"),
+    )
+    (stored,) = [fact for fact in owned if fact["kind"] == "single-assignment"]
+    (faithful,) = [fact for fact in owned if fact["kind"] == "trace-faithful"]
+    assert set(post["rests_on"]) >= {stored["id"], faithful["id"]}
+
+
+def test_the_assembly_calls_mass_ffc_per_cell_and_has_its_element_mass() -> None:
+    """The D3 form: the element kernel inlined per cell, its postcondition carried."""
+    _result, facts = _invoke("assembly", "check")
+    owned = [fact for fact in facts if fact["owner"] == "mass_action"]
+    (after,) = [
+        fact for fact in owned if fact["statement"].startswith("after each call")
+    ]
+    assert "mass_ffc(coords[cell[c]], Ae[c])" in after["statement"]
+    assert "Ae[c, 0, 0] == abs((coords[cell[c, 1], 0] - " in after["statement"]
+    assert after["statement"].endswith(", to the approx tolerance")
+    assert after["status"] == "decided"
+    # every read of the corners through the cell map is decided, none assumed
+    corners = [fact for fact in owned if fact["statement"].startswith("coords[")]
+    assert len(corners) == 6
+    assert {fact["status"] for fact in corners} == {"decided"}
+    # nothing is assumed but the schedule's assumption, nc a multiple of four
+    assumed = [fact for fact in facts if fact["status"] == "assumed"]
+    assert [fact["kind"] for fact in assumed] in ([], ["assumption"])
+
+
+def test_the_assembly_schedules_facts_are_at_the_lines_of_its_steps() -> None:
+    """Each at the step that made it, and not in mass_ffc (#259).
+
+    mass_action's first statement is the one of mass_ffc it calls, and the
+    facts of a schedule of it were placed there, inside the element kernel.
+    """
+    _result, facts = _invoke("assembly", "check")
+    lines = _path("assembly").read_text(encoding="utf-8").splitlines()
+
+    def line_of(step: str) -> str:
+        (found,) = [k for k, line in enumerate(lines, 1) if line.strip() == step]
+        return f"assembly.py:{found}"
+
+    placed = {
+        fact["statement"]: fact["where"]
+        for fact in facts
+        if fact["owner"] == "mass_action"
+        and fact["kind"] in ("assumption", "bijective")
+    }
+    assert placed == {
+        "nc % 4 == 0, which mass_action is scheduled assuming": line_of(
+            '.assume("nc % 4 == 0")'
+        ),
+        "split(c, 4) renames the instances of mass_action one for one": line_of(
+            '.split("c", 4)'
+        ),
+        "tag(c_inner='ilp') renames the instances of mass_action one for one": (
+            line_of('.tag(c_inner="ilp")')
+        ),
+    }
+
+
+def test_the_assembly_theorems_are_in_its_ledger() -> None:
+    """The rule, the element's mass and the scatter's total: proved with Mathlib."""
+    _result, facts = _invoke("assembly", "check")
+    claims = {
+        fact["owner"]: fact["status"] for fact in facts if fact["kind"] == "theorem"
+    }
+    assert set(claims) == {"exact_to_degree_two", "element_mass", "conservation"}
+    assert set(claims.values()) <= {"tested", "decided", "proved"}
+
+
+# }}}
+
+
+# {{{ l2p
+
+
+@needs_several_indices
+def test_the_l2p_demo_applies_its_theorem_to_what_reconstruct_stores() -> None:
+    """The postcondition decided from the stores, and the theorem applied to it."""
+    _result, facts = _invoke("l2p", "check")
+    owned = {(fact["owner"], fact["kind"]): fact for fact in facts}
+    post = owned[("reconstruct", "postcondition")]
+    assert (post["status"], post["decided_by"]) == ("decided", "isl")
+    applied = [fact for fact in facts if fact["kind"] == "by-theorem"]
+    assert [(fact["owner"], fact["decided_by"]) for fact in applied] == [
+        ("reconstruct", "theorem")
+    ]
+    assert applied[0]["statement"].startswith(
+        "by on_every_triangle, for every D with pde and stored: "
+    )
+    assert owned[("reconstruct", "single-assignment")]["status"] == "decided"
+    # the table the theorem's hypothesis is about holds sumpy's coefficients
+    # in sumpy's storage order, decided from what unpack stores
+    stored = owned[("unpack", "postcondition")]
+    assert (stored["status"], stored["decided_by"]) == ("decided", "isl")
+    assert "C[i, a, b] == coeffs[i, 2*(a + b) - 1 + a]" in stored["statement"]
+    # sumpy's storage index is one for one onto its 2P + 1 addresses
+    layout = [fact for fact in facts if fact["owner"] == "storage_index"]
+    assert len(layout) == 3
+    assert {(fact["status"], fact["decided_by"]) for fact in layout} == {
+        ("decided", "isl")
+    }
+    # what each call reads, the call before it stored
+    defined = [
+        fact["statement"]
+        for fact in facts
+        if fact["owner"] == "l2p" and fact["kind"] == "definedness"
+    ]
+    assert defined == [
+        "every cell of C that reconstruct reads, unpack stored before it",
+        "every cell of R that evaluate reads, reconstruct stored before it",
+        # and what each window keeps, the zeros the program made it with gone
+        "for contract('R'), every cell of R that l2p reads, reconstruct.S0 or "
+        "reconstruct.S1 has stored by the time it is read",
+        "for contract('C'), every cell of C that l2p reads, unpack.S0 or unpack.S1 "
+        "has stored by the time it is read",
+    ]
+
+
+@needs_several_indices
+def test_the_l2p_demo_agrees_with_sumpys_own_kernel() -> None:
+    """The row the recording of sumpy's E2PFromSingleBox gives, tested."""
+    _result, facts = _invoke("l2p", "check")
+    (row,) = [fact for fact in facts if fact["kind"] == "upstream"]
+    assert (row["status"], row["decided_by"], row["owner"]) == (
+        "tested",
+        "upstream",
+        "l2p",
+    )
+    assert row["statement"] == (
+        "the native run of l2p agrees with sumpy_l2p in pot, on its example inputs"
+    )
+    assert row["provenance"]["uncompared"] == []
+    detail = row["provenance"]["outputs"]["pot"]
+    assert detail["agree"] and detail["exactness"] == "approx"
+    # round-off, far inside the class's allowance
+    assert detail["difference"] < 1e-14 * detail["largest"]
+
+
+@needs_several_indices
+def test_the_l2p_demo_refuses_the_interchange_and_fuses_box_by_box() -> None:
+    result, _ = _invoke("l2p", "python")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "largest error against the charges' potential: " in result.stdout
+    refusal = result.stdout.split("refused: ")[1].splitlines()[0]
+    # the copy and the recurrence, each by its text and line
+    reconstruct = _module("l2p").reconstruct
+    copy = where(reconstruct, "R[i, a, b] = C[i, a, b]")
+    recurrence = where(reconstruct, "R[i, a, b] = -R[i, a - 2, b + 2]")
+    assert refusal.startswith(
+        f"interchange(b, a) illegal: R[i, a, b] = C[i, a, b] ({copy}) at i="
+    )
+    assert " writes R[" in refusal
+    assert f" read by R[i, a, b] = -R[i, a - 2, b + 2] ({recurrence}) at i=" in refusal
+    module = _module("l2p")
+    steps = [fact.statement for fact in module.fused.facts()]
+    assert steps == [
+        "fuse(unpack, reconstruct, loops=1) renames the instances of l2p one for one",
+        "the order after fuse(unpack, reconstruct, loops=1) runs every dependence "
+        "of l2p forward",
+        "fuse(reconstruct, evaluate, loops=1) renames the instances of l2p one for "
+        "one",
+        "the order after fuse(reconstruct, evaluate, loops=1) runs every dependence "
+        "of l2p forward",
+    ]
+    assert {fact.status.value for fact in module.fused.facts()} == {"decided"}
+    assert "pot: difference 0 within" in result.stdout
+    # sumpy's own GPU schedule, each box a work group, with the file's names:
+    # the tag's two facts, the fusions' being fused's, above
+    device = result.stdout.split("on a GPU, each box a work group, as sumpy's: ")[1]
+    assert device.splitlines()[1:] == [
+        "  decided  isl  tag(i='g.0') renames the instances of l2p one for one",
+        "  decided  isl  the order after tag(i='g.0') runs every dependence of l2p "
+        "forward, within one work item",
+    ]
+
+
+@needs_several_indices
+def test_the_l2p_demo_keeps_one_triangle_per_box_and_refuses_one_row() -> None:
+    # One box's triangle of R, over a domain (#244), stored by a copy and by
+    # the recurrence that reads it (#213): the window is found along the
+    # fused order, and one row of it is refused with the read it would break.
+    module = _module("l2p")
+    windows = module.contracted.windows
+    assert {name: repr(window.placement) for name, window in windows.items()} == {
+        "R": "lambda i, a, b: (a, b)",
+        "C": "lambda i, a, b: (a, b)",
+    }
+    assert windows["R"].extents == (11, 11) and windows["C"].extents == (2, 11)
+    added = module.contracted.facts()[len(module.fused.facts()) :]
+    assert [(fact.kind, fact.status.value) for fact in added] == [
+        ("definedness", "decided"),
+        ("no-clobber", "decided"),
+    ] * 2
+    assert [fact.statement for fact in added][:2] == [
+        "for contract('R'), every cell of R that l2p reads, reconstruct.S0 or "
+        "reconstruct.S1 has stored by the time it is read",
+        "no read of R sees its slot overwritten after contract('R', lambda i, a, "
+        "b: (a, b)): R kept in 121 cells, R[i, a, b] in slot (a, b)",
+    ]
+    result, _ = _invoke("l2p", "python")
+    assert result.returncode == 0, result.stdout + result.stderr
+    recurrence = where(module.reconstruct, "R[i, a, b] = -R[i, a - 2, b + 2]")
+    assert (
+        "refused: contract('R', lambda i, a, b: b) illegal: R[i, a, b] = -R[i, a "
+        f"- 2, b + 2] ({recurrence}) at i=0, a=9, b=0 reads R[0, 7, 2], which the "
+        "same statement at i=0, a=7, b=2 stored in slot 2, after the same "
+        "statement at i=0, a=8, b=2 stored R[0, 8, 2] there (at nb=1, isl's "
+        "choice); contract('R') finds the smallest window that keeps every read, "
+        "lambda i, a, b: (a, b)\n"
+    ) in result.stdout
+    assert (
+        "on a device, each box a work group keeping its windows: tag(i='g.0'): 2 "
+        "facts, all decided by isl\n"
+    ) in result.stdout
+
+
+# {{{ the QBX layer potential
+
+
+@needs_parts
+def test_the_qbx_demo_states_the_fact_sumpy_silences_for_both_layers() -> None:
+    # sumpy silences loopy's write_race(write_lpot*) on its LayerPotential;
+    # the fact in its place is that each target's cell is written once.
+    _result, facts = _invoke("layer_potential", "check")
+    for owner in ("single_layer", "double_layer"):
+        (writes,) = [
+            fact
+            for fact in facts
+            if fact["owner"] == owner and fact["kind"] == "disjoint-writes"
+        ]
+        assert writes["statement"] == (
+            "distinct instances of S0 write distinct cells of out"
+        )
+        assert writes["status"] in ("decided", "proved"), writes
+        assert writes["decided_by"] in ("isl", "lean"), writes
+
+
+@needs_parts
+def test_the_qbx_demo_agrees_with_what_sumpy_returned_at_the_pinned_commit() -> None:
+    _result, facts = _invoke("layer_potential", "check")
+    rows = {fact["owner"]: fact for fact in facts if fact["kind"] == "upstream"}
+    assert set(rows) == {"single_layer", "double_layer"}
+    for owner, row in rows.items():
+        assert (row["status"], row["decided_by"]) == ("tested", "upstream"), row
+        # round-off of two orders of summation and two arithmetics, real and
+        # complex, far inside the class's allowance: the row states its own
+        assert row["statement"] == (
+            f"the native run of {owner} agrees with sumpy_{owner} in out within "
+            "1e-12 of the largest value, on its example inputs"
+        )
+        assert row["provenance"]["uncompared"] == []
+        detail = row["provenance"]["outputs"]["out"]
+        assert detail["agree"] and detail["exactness"] == "approx", detail
+        assert detail["within"] == 1e-12
+        assert detail["tolerance"] == 1e-12 * detail["largest"], detail
+        assert detail["difference"] <= detail["tolerance"], detail
+    # the recording is of the sumpy the docstring cites, on loopy main
+    module = _module("layer_potential")
+    recorded = json.loads(module.RECORDED.read_text(encoding="utf-8"))
+    assert recorded["sumpy"] == "13a48a0260eec8cf7ac67f1faca701205d9096ae"
+    assert recorded["sumpy"] in module.__doc__
+    assert recorded["versions"]["loopy"].startswith("24a2da6")
+    size = module.example_inputs()["single_layer"]["z"].numpy().size
+    assert len(recorded["single_layer"]) == len(recorded["double_layer"]) == size
+
+
+@needs_parts
+def test_the_qbx_demo_measures_pytentials_identity_and_the_jumps() -> None:
+    _result, facts = _invoke("layer_potential", "check")
+    rows = {fact["owner"]: fact for fact in facts if fact["kind"] == "tested"}
+    assert set(rows) == {"green_identity", "jump_S", "jump_D"}
+    for fact in rows.values():
+        assert (fact["status"], fact["decided_by"]) == ("tested", "run"), fact
+        order = float(fact["provenance"]["measured"].rsplit("order ", 1)[1])
+        # pytential's test asks for the QBX order less 1.6
+        assert order > 5 - 1.6, fact
+
+
+@needs_parts
+def test_the_line_taylor_theorem_is_in_the_qbx_ledger_and_not_refuted() -> None:
+    _result, facts = _invoke("layer_potential", "check")
+    statuses = {
+        fact["status"] for fact in facts if fact["owner"] == "line_taylor"
+    }
+    assert statuses and "refuted" not in statuses
+    # without Mathlib the tester draws no table over Nat, and says so
+    assert statuses <= {"assumed", "tested", "proved"}
+
+
+@needs_parts
+def test_the_qbx_ledger_says_single_layer_adds_line_taylors_terms() -> None:
+    """The theorem and the kernel in one row: its terms are line_taylor's c(n) (#252).
+
+    The kernel's ratio is by the conjugate, and ``by_the_conjugate`` says it
+    is the theorem's ``-beta / alpha``: a theorem of its own, tested by the
+    property tester and, with Mathlib, proved.
+    """
+    _result, facts = _invoke("layer_potential", "check")
+    (identity,) = [
+        fact
+        for fact in facts
+        if fact["owner"] == "by_the_conjugate" and fact["kind"] == "theorem"
+    ]
+    assert identity["status"] in ("tested", "proved"), identity
+    (row,) = [fact for fact in facts if fact["kind"] == "by-theorem"]
+    assert row["owner"] == "single_layer"
+    assert row["statement"] == (
+        "single_layer adds line_taylor's c(n) for n in 1..5, for every c with "
+        "away, first and ode, read over the complex numbers"
+    )
+    assert row["status"] in ("decided", "proved"), row
+    assert row["decided_by"] in ("theorem", "lean"), row
+    provenance = row["provenance"]
+    assert provenance["bindings"] == "alpha = c[t] - y[s], beta = z[t] - c[t]"
+    assert provenance["orders"] == [1, 2, 3, 4, 5]
+    module = _module("layer_potential")
+    assert set(row["rests_on"]) >= {
+        module.line_taylor.fact_id,
+        module.by_the_conjugate.fact_id,
+    }
+    # where the statement is that adds them
+    line = int(row["where"].rsplit(":", 1)[1])
+    source = _path("layer_potential").read_text(encoding="utf-8").splitlines()
+    assert source[line - 1].strip() == "out[t] = SCALE * reduce_sum("
+    assert "single(c[t] - y[s], z[t] - c[t])" in source[line]
+
+
+@needs_parts
+def test_the_kernels_ratio_is_the_theorems() -> None:
+    # The kernels add coefficient(ratio, k) with the ratio multiplied out by
+    # the conjugate; the theorem's is -beta / alpha. They agree to rounding,
+    # and the series is log|alpha + beta| to the order's truncation.
+    module = _module("layer_potential")
+    rng = np.random.default_rng(5)
+    for alpha, beta in zip(
+        rng.normal(size=20) + 1j * rng.normal(size=20),
+        0.3 * (rng.normal(size=20) + 1j * rng.normal(size=20)),
+        strict=True,
+    ):
+        ratio = module.ratio(alpha, beta)
+        assert abs(ratio - (-beta / alpha)) <= 1e-15 * abs(beta / alpha) * 4
+        closed = sum(
+            module.coefficient(-beta / alpha, k) for k in range(1, module.ORDER + 1)
+        )
+        series = module.single(alpha, beta)
+        assert abs(series - (np.log(abs(alpha)) + closed.real)) <= 1e-14
+        truncation = abs(beta / alpha) ** (module.ORDER + 1) / (1 - abs(beta / alpha))
+        if abs(beta / alpha) < 0.5:
+            assert abs(series - np.log(abs(alpha + beta))) <= truncation
+
+
+@needs_parts
+def test_sumpys_tile_is_legal_and_c_cannot_build_its_axes() -> None:
+    module = _module("layer_potential")
+    tile = module.sumpy_tile("c")
+    casts = [fact for fact in tile.facts() if fact.kind != "buildable"]
+    assert len(casts) == 8
+    assert all(fact.status.value == "decided" for fact in casts)
+    buildable, reason = tile.buildable
+    assert not buildable
+    assert "puts a loop on a hardware axis, and the C target has none" in reason
+
+
+@needs_parts
+def test_the_qbx_demo_prints_the_tile_the_fact_and_the_rows() -> None:
+    result, _ = _invoke("layer_potential", "python")
+    assert result.returncode == 0, result.stdout + result.stderr
+    out = result.stdout
+    assert (
+        "decided  isl  prioritize(s_outer, t_inner) renames the instances of "
+        "single_layer one for one"
+    ) in out
+    assert "decided  isl  distinct instances of S0 write distinct cells of out" in out
+    # the tile is shown as sumpy writes it, without the target its casts were
+    # decided on, which cannot build its hardware axes
+    assert (
+        "sumpy's tile, get_optimized_kernel(is_cpu=True): split(t, 16)"
+        ".tag(t_outer='g.0', t_inner='l.0').split(s, 256)"
+        ".prioritize(s_outer, t_inner)"
+    ) in out
+    lines = [line for line in out.splitlines() if "sumpy's own kernel" in line]
+    assert [line.split(":")[0].strip() for line in lines] == [
+        "single_layer",
+        "double_layer",
+    ]
+    for line in lines:
+        assert line.endswith(", within 1e-12 of the largest value -> tested"), line
+    assert (
+        "  single_layer adds line_taylor's c(n) for n in 1..5, for every c with "
+        "away, first and ode, read over the complex numbers -> decided"
+    ) in out.splitlines()
+    for name in ("green_identity", "jump_S", "jump_D"):
+        (line,) = [line for line in out.splitlines() if line.strip().startswith(name)]
+        assert line.endswith("-> tested"), line
 
 
 # }}}

@@ -75,6 +75,7 @@ from loopty.contract import (
     resolve_sizes,
 )
 from loopty.flow import bounds_dimension
+from loopty.math import integer_power
 from loopty.names import check_names, rename
 from loopty.term import (
     Access,
@@ -112,6 +113,11 @@ class _Unknown(Exception):
     """A name with no value yet: a loop variable of a level not reached."""
 
 
+#: The most points a reduction's domain is enumerated in one go to be read
+#: from a table (:meth:`_Run._table`) when no limit bounds the run.
+TABLE_POINTS = 200_000
+
+
 #: The functions a term may call, by the name loopy resolves against the
 #: target's math library, and the numpy function that computes the same thing.
 _FUNCTIONS = {
@@ -144,6 +150,8 @@ _FUNCTIONS = {
     "real": np.real,
     "imag": np.imag,
     "conj": np.conj,
+    # loopty.math's integer power, multiplied out as loopy multiplies it.
+    "ipow": integer_power,
     # A scalar a called kernel converts into its sort's storage, as its
     # contract does natively (loopty.calls): np.float32 and the rest.
     **{
@@ -336,6 +344,13 @@ class _Run:
         #: The work allowed (see :func:`interpret`) and the work done so far.
         self.limit: int | None = None
         self.spent = 0
+        #: The sizes and scalars a domain may name (:meth:`_known`), which
+        #: do not change while the term runs.
+        self.known: dict[str, Any] | None = None
+        #: A reduction's points, by the cells of its domain each statement
+        #: instance fixes (:meth:`_table`), for each domain and each value of
+        #: its parameters: the domain, and the table or ``None`` for none.
+        self.tables: dict[tuple[Any, ...], tuple[isl.Set, Any]] = {}
 
     def _temporary(self, name: str, typ: ArrType) -> Arr:
         """A buffer for one of a program's own arrays, at the arguments' sizes.
@@ -812,7 +827,14 @@ class _Run:
         A domain parameter is an integer to isl. A scalar that is not a whole
         number is kept as it is, so that fixing it refuses with its value
         (:func:`_fix_param`) rather than reporting the parameter unknown.
+        Neither changes while the term runs, so this is worked out once.
         """
+        if self.known is None:
+            self.known = self._sizes_and_scalars()
+        return self.known
+
+    def _sizes_and_scalars(self) -> dict[str, Any]:
+        """:meth:`_known`, worked out."""
         out: dict[str, Any] = dict(self.sizes)
         for name, value in self.scalars.items():
             if isinstance(value, bool | np.bool_):
@@ -841,13 +863,19 @@ class _Run:
         parameter is fixed the rest is enumerated in one go.
         """
         names = domain.get_var_names(isl.dim_type.set)
+        params = domain.get_var_names(isl.dim_type.param)
+        if all(name in known for name in params):
+            table = self._table(domain, names, params, known)
+            if table is not None:
+                yield from table
+                return
         space = domain
         env = dict(known)
         for position, name in enumerate(names):
             if name in env:
                 space = space.fix_val(isl.dim_type.set, position, int(env[name]))
         pending: dict[str, Any] = {}
-        for name in domain.get_var_names(isl.dim_type.param):
+        for name in params:
             if name in env:
                 space = _fix_param(space, name, env[name])
             elif name in self.reflected:
@@ -859,6 +887,116 @@ class _Run:
                 )
         free = [k for k, name in enumerate(names) if name not in env]
         yield from self._walk(space, names, free, 0, env, pending)
+
+    def _table(
+        self,
+        domain: isl.Set,
+        names: Sequence[str],
+        params: Sequence[str],
+        known: Mapping[str, Any],
+    ) -> list[dict[str, Any]] | None:
+        """:meth:`points` of a domain all of whose parameters ``known`` gives.
+
+        A reduction's domain is the statement's loop variables followed by
+        its own binders, and :meth:`reduction` asks for its points once per
+        statement instance, with the loop variables fixed. Fixing them and
+        enumerating with isl at each instance was most of what interpreting
+        a sum-factorized kernel cost (lanky #125). So the domain is
+        enumerated once, at the values its parameters have, and its points
+        are kept by the values of the dimensions ``known`` fixes; each
+        instance reads its own, sorted as :func:`_enumerate` sorts them.
+        The limit is checked as :meth:`enumerate` checks it, each instance's
+        points by their bounding box before they are taken, which is the
+        box of the integer points kept for it, as isl's ``dim_min_val`` and
+        ``dim_max_val`` give it.
+
+        ``None`` where the domain at these values is unbounded, or its box
+        holds more points than the work left allows, or the values cannot
+        key a table; :meth:`points` then fixes and enumerates at the
+        instance, as it always did, which refuses an unbounded domain and
+        one past the limit as it did.
+        """
+        fixed = tuple(k for k, name in enumerate(names) if name in known)
+        try:
+            key = (id(domain), fixed, tuple(known[name] for name in params))
+            entry = self.tables.get(key)
+        except TypeError:  # a value that cannot be hashed
+            return None
+        if entry is None or entry[0] is not domain:
+            entry = (domain, self._group(domain, params, known, fixed))
+            self.tables[key] = entry
+        groups = entry[1]
+        if groups is None:
+            return None
+        found = groups.get(tuple(int(known[names[k]]) for k in fixed))
+        if found is None:
+            return []
+        volume, tails = found
+        if (
+            self.limit is not None
+            and len(fixed) < len(names)
+            and volume > self.limit - self.spent
+        ):
+            raise TooLarge(
+                f"more than {self.limit} statement instances and reduction terms"
+            )
+        free = [name for k, name in enumerate(names) if k not in fixed]
+        out = []
+        for tail in tails:
+            values = dict(zip(free, tail, strict=True))
+            out.append(
+                {
+                    name: known[name] if name in known else values[name]
+                    for name in names
+                }
+            )
+        return out
+
+    def _group(
+        self,
+        domain: isl.Set,
+        params: Sequence[str],
+        known: Mapping[str, Any],
+        fixed: Sequence[int],
+    ) -> dict[tuple[int, ...], tuple[int, list[tuple[int, ...]]]] | None:
+        """What :meth:`_table` reads: each instance's box and points, or ``None``."""
+        space = domain
+        for name in params:
+            space = _fix_param(space, name, known[name])
+        if space.is_empty():
+            return {}
+        if not space.is_bounded():
+            return None
+        room = TABLE_POINTS if self.limit is None else self.limit - self.spent
+        if _box_volume(space) > room:
+            return None
+        count = space.dim(isl.dim_type.set)
+        free = [k for k in range(count) if k not in fixed]
+        leading = list(fixed) == list(range(len(fixed)))
+        split = _product(space, len(fixed)) if leading else None
+        if split is not None:
+            # the sum's points are the same at every instance: two short
+            # enumerations instead of one of every pair
+            head, tail = split
+            tails = _enumerate(tail, range(len(free)))
+            entry = (_volume(tails, len(free)), tails)
+            return {key: entry for key in _enumerate(head, range(len(fixed)))}
+        found: dict[tuple[int, ...], set[tuple[int, ...]]] = {}
+
+        def visit(point: Any) -> None:
+            coordinates = [
+                point.get_coordinate_val(isl.dim_type.set, k).to_python()
+                for k in range(count)
+            ]
+            found.setdefault(tuple(coordinates[k] for k in fixed), set()).add(
+                tuple(coordinates[k] for k in free)
+            )
+
+        space.foreach_point(visit)
+        return {
+            at: (_volume(tails, len(free)), sorted(tails))
+            for at, tails in found.items()
+        }
 
     def _walk(
         self,
@@ -948,33 +1086,21 @@ class _Run:
         return value
 
     def value(self, node: Any, env: Mapping[str, Any]) -> Any:
-        """The value of one expression at one point, by numpy's arithmetic."""
-        if isinstance(node, bool | int | float | complex | np.generic):
-            return node
-        if isinstance(node, Reduction):
-            return self.reduction(node, env)
-        if isinstance(node, Access):
-            return self.read(node.array, node.indices, env)
-        if isinstance(node, prim.Subscript):
-            aggregate = node.aggregate
-            if not isinstance(aggregate, prim.Variable):
-                raise InterpretError(f"cannot subscript {render(aggregate)}")
-            index = node.index
-            indices = index if isinstance(index, tuple) else (index,)
-            return self.read(aggregate.name, indices, env)
-        if isinstance(node, prim.Variable):
-            return self.variable(node.name, env)
-        if isinstance(node, prim.Sum):
-            return self.sum(node, env)
-        if isinstance(node, prim.Product):
-            from loopty.promotion import _subtrahend
+        """The value of one expression at one point, by numpy's arithmetic.
 
-            negated = _subtrahend(node)
-            if negated is not None:
-                # pymbolic builds -u as -1 * u, which numpy refuses of an
-                # unsigned u and the native run negates.
-                return -self.value(negated, env)
-            return _fold(operator.mul, [self.value(c, env) for c in node.children])
+        The nodes a term is mostly made of, numbers, reductions, accesses,
+        subscripts, variables, sums and products, are taken by a rule found
+        once for their type (:func:`_rule_of`), by the tests that come first;
+        any other node by the tests below. A kernel's sums evaluate millions
+        of nodes in a faithful check, and testing each one's type in turn was
+        most of what it cost (lanky #125).
+        """
+        kind = type(node)
+        rule = _RULES.get(kind, _UNSEEN)
+        if rule is _UNSEEN:
+            rule = _RULES[kind] = _rule_of(node)
+        if rule is not None:
+            return rule(self, node, env)
         if isinstance(node, prim.BitwiseXor):
             return _fold(operator.xor, [self.value(c, env) for c in node.children])
         if isinstance(node, prim.LeftShift | prim.RightShift):
@@ -1016,6 +1142,17 @@ class _Run:
             f"no numpy meaning for {type(node).__name__} in the term: "
             f"{_text(node)}"
         )
+
+    def product(self, node: prim.Product, env: Mapping[str, Any]) -> Any:
+        """A product from the left, as the body wrote it."""
+        from loopty.promotion import _subtrahend
+
+        negated = _subtrahend(node)
+        if negated is not None:
+            # pymbolic builds -u as -1 * u, which numpy refuses of an
+            # unsigned u and the native run negates.
+            return -self.value(negated, env)
+        return _fold(operator.mul, [self.value(c, env) for c in node.children])
 
     def sum(self, node: prim.Sum, env: Mapping[str, Any]) -> Any:
         """A sum from the left, as the body wrote it.
@@ -1104,6 +1241,62 @@ class _Run:
         return builtins.sum(terms)
 
     # }}}
+
+
+def _itself(run: _Run, node: Any, env: Mapping[str, Any]) -> Any:
+    """A number's value: the number."""
+    return node
+
+
+def _access(run: _Run, node: Access, env: Mapping[str, Any]) -> Any:
+    """An access's value: the element it reads."""
+    return run.read(node.array, node.indices, env)
+
+
+def _subscript(run: _Run, node: prim.Subscript, env: Mapping[str, Any]) -> Any:
+    """A subscript's value: the element of the array it names."""
+    aggregate = node.aggregate
+    if not isinstance(aggregate, prim.Variable):
+        raise InterpretError(f"cannot subscript {render(aggregate)}")
+    index = node.index
+    indices = index if isinstance(index, tuple) else (index,)
+    return run.read(aggregate.name, indices, env)
+
+
+def _variable(run: _Run, node: prim.Variable, env: Mapping[str, Any]) -> Any:
+    """A variable's value (:meth:`_Run.variable`)."""
+    return run.variable(node.name, env)
+
+
+def _rule_of(node: Any) -> Any:
+    """How :meth:`_Run.value` evaluates a node of this type; ``None`` for its tests.
+
+    The tests come before the ones :meth:`_Run.value` makes at each node,
+    and are about the type alone, so a type is taken by one rule however
+    often it is met: lanky's ``Var`` is a ``prim.Variable``, and is read as
+    one. A type none of them takes is left to :meth:`_Run.value`'s tests.
+    """
+    if isinstance(node, bool | int | float | complex | np.generic):
+        return _itself
+    if isinstance(node, Reduction):
+        return _Run.reduction
+    if isinstance(node, Access):
+        return _access
+    if isinstance(node, prim.Subscript):
+        return _subscript
+    if isinstance(node, prim.Variable):
+        return _variable
+    if isinstance(node, prim.Sum):
+        return _Run.sum
+    if isinstance(node, prim.Product):
+        return _Run.product
+    return None
+
+
+#: The rule :meth:`_Run.value` takes for each type of node it has met
+#: (:func:`_rule_of`), and the mark of a type it has not.
+_RULES: dict[type, Any] = {}
+_UNSEEN = object()
 
 
 def _innermost(constraint: isl.Constraint) -> int | None:
@@ -1278,6 +1471,38 @@ def _enumerate(space: isl.Set, positions: Sequence[int]) -> list[tuple[int, ...]
 
     space.foreach_point(visit)
     return sorted(found)
+
+
+def _product(space: isl.Set, count: int) -> tuple[isl.Set, isl.Set] | None:
+    """``space`` as its first ``count`` dimensions times the rest, when it is that.
+
+    A sum over ``Fin[n]`` inside a loop nest is over the same binders at
+    every instance of the loops, and its domain is the loops' points times
+    the sum's. Where it is, the two factors are returned, the loops' and
+    the sum's, each a set of its own dimensions; ``None`` where the sum's
+    points depend on the loops' (a triangle), or where either side has no
+    dimensions.
+    """
+    total = space.dim(isl.dim_type.set)
+    if not 0 < count < total:
+        return None
+    head = space.project_out(isl.dim_type.set, count, total - count)
+    tail = space.project_out(isl.dim_type.set, 0, count)
+    try:
+        product = head.flat_product(tail)
+        same = product.reset_tuple_id().is_equal(space.reset_tuple_id())
+    except isl.Error:
+        return None
+    return (head, tail) if same else None
+
+
+def _volume(points: Any, count: int) -> int:
+    """How many points the box around ``points``, ``count`` coordinates each, holds."""
+    volume = 1
+    for position in range(count):
+        values = [point[position] for point in points]
+        volume *= max(values) - min(values) + 1
+    return volume
 
 
 def _box_volume(space: isl.Set) -> int:

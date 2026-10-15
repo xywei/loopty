@@ -42,7 +42,7 @@ from lanky.ledger import Status  # noqa: E402
 from lanky.prelude import Int, Real  # noqa: E402
 from lanky.terms import Var, evaluate, render  # noqa: E402
 
-from loopty import Arr, Fin, Schedule, kernel  # noqa: E402
+from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum  # noqa: E402
 from loopty.description import (  # noqa: E402
     Unstatable,
     description_of,
@@ -60,6 +60,36 @@ from loopty.schedule import IllegalCast  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLES = ROOT / "examples"
 KERNELS = ROOT / "tests" / "kernels"
+
+#: The examples whose theorems index families at several indices,
+#: ``Fn[Nat, Nat, Real]`` applied as ``D[a, b]``, which lanky main has and the
+#: 0.2.0 release, which the released-lanky job installs, does not: they do
+#: not import there.
+NEEDS_SEVERAL_INDICES = frozenset({"l2p.py"})
+
+
+def _imports_here(path: Path) -> bool:
+    """Whether this lanky can import the file ``path``."""
+    from lanky.prelude import FnType
+
+    return not (
+        path.parent == EXAMPLES
+        and path.name in NEEDS_SEVERAL_INDICES
+        and not hasattr(FnType, "indices")
+    )
+
+
+def _files(*directories: Path) -> list[Any]:
+    """The ``.py`` files of ``directories``, those this lanky cannot import skipped."""
+    out: list[Any] = []
+    for directory in directories:
+        for path in sorted(directory.glob("*.py")):
+            if _imports_here(path):
+                out.append(path)
+            else:
+                reason = "its theorems index families at several indices (lanky main)"
+                out.append(pytest.param(path, marks=pytest.mark.skip(reason=reason)))
+    return out
 
 
 def load(path: Path) -> Any:
@@ -207,7 +237,7 @@ def _domains(path: Path) -> Iterator[tuple[str, Any, Any]]:
 
 @pytest.mark.parametrize(
     "path",
-    [*sorted(EXAMPLES.glob("*.py")), *sorted(KERNELS.glob("*.py"))],
+    _files(EXAMPLES, KERNELS),
     ids=lambda path: f"{path.parent.name}/{path.name}",
 )
 def test_the_description_reads_back_as_isl_reads_it(path: Path) -> None:
@@ -400,6 +430,55 @@ def test_a_cast_is_stated_one_part_per_dependence_class() -> None:
     ]
 
 
+def _device_launches() -> list[tuple[str, Any]]:
+    """The demos' casts that put loops on hardware axes, each with its schedule."""
+    hexahedra = load(EXAMPLES / "hexahedra.py")
+    qbx = load(EXAMPLES / "layer_potential.py")
+    assembly = load(EXAMPLES / "assembly.py")
+    out = [
+        (f"{operator} {schedule.term.name}", schedule)
+        for operator in ("grad", "div")
+        for schedule in hexahedra.passes_on_a_device(operator)
+    ]
+    out.append(("sumpy's tile", qbx.sumpy_tile("c")))
+    out.append(("Kulkarni's split", assembly.kulkarni(atomic=True)))
+    advection = load(EXAMPLES / "advection.py")
+    out += [
+        (f"advection {split} {schedule.term.name}", schedule)
+        for split in advection.SPLITS
+        for schedule in advection.launches(split)
+    ]
+    out.append(
+        (
+            "libParanumal's lift, atomic",
+            Schedule(advection.lift_on_faces)
+            .atomic("rhs")
+            .tag(e="g.0", a="l.1", b="l.0"),
+        )
+    )
+    return out
+
+
+def test_a_cast_on_a_hardware_axis_keeps_each_class_on_one_work_item() -> None:
+    hexahedra = load(EXAMPLES / "hexahedra.py")
+    _first, along_s, _last = hexahedra.passes_on_a_device()
+    (monotone,) = [fact for fact in along_s.facts() if fact.kind == "monotone"]
+    assert monotone.statement.endswith("forward, within one work item")
+    obligation = monotone.term.lean_obligation()
+    assert not obligation.declined
+    names = [part.name for part in obligation.parts]
+    assert names == ["dependence_0", "dependence_0_work_item"]
+    together = obligation.parts[1]
+    assert together.label == (
+        "vs[q, e, k, j, i] written again by S0 after vs[q, e, k, j, i] is written "
+        "by S0, on one work item"
+    )
+    # each axis's loop, less where loopy starts it, is the work item
+    assert render(together.term.body) == (
+        "e_a1 == e_b1 and i_a1 == i_b1 and j_a1 == j_b1 and k_a1 == k_b1"
+    )
+
+
 def test_a_refused_cast_is_stated_with_isls_pair() -> None:
     module = stencil()
     with pytest.raises(IllegalCast) as refused:
@@ -581,6 +660,76 @@ def test_a_mixed_subscript_is_in_bounds_by_type_and_isl() -> None:
     assert "0 <= cell[c, k]" in text and "cell[c, k] < nv" in text
 
 
+@kernel
+def gather_twice(
+    face: Arr[Fin[nf], Fin[3], Fin[n]],  # noqa: F821
+    u: Arr[Fin[ne], Fin[n], Real],  # noqa: F821
+    g: Arr[Fin[ne], Fin[nf], Fin[3], Real],  # noqa: F821
+):
+    """Each element's values at its face nodes, read twice: an upwind flux's shape."""
+    for e in g.dom:
+        for f in g.dom[e]:
+            for k in g.dom[e, f]:
+                g[e, f, k] = u[e, face[f, k]] * u[e, face[f, k]] + u[e, face[f, k]]
+
+
+def test_a_mixed_subscript_read_twice_in_a_statement_is_one_place() -> None:
+    """``u[e, face[f, k]]`` three times in one statement: one fact, decided.
+
+    It used to be ``assumed`` ("the index is not quasi-affine"): the rule for
+    mixed subscripts took only an access made once, and a flux reads the
+    value inside the element twice, in its average and in its jump.
+    """
+    from loopty.oracle import IslOracle
+
+    (fact,) = [f for f in gather_twice.facts() if f.statement.startswith("u[")]
+    assert fact.statement == (
+        "u[e, face[f, k]] is in bounds for every instance of S0 "
+        "(face[f, k] : Fin(n), by type)"
+    )
+    decided = IslOracle().establish(fact)
+    assert decided.status is Status.DECIDED and decided.decided_by == "isl"
+    (part,) = fact.term.lean_obligation().parts
+    assert "face[f, k] < n" in render(part.term)
+
+
+@kernel
+def jacobian(
+    cell: Arr[Fin[nc], Fin[3], Fin[nv]],  # noqa: F821
+    X: Arr[Fin[nv], Fin[2], Real],  # noqa: F821
+    J: Arr[Fin[nc], Real],  # noqa: F821
+):
+    """Each cell's Jacobian determinant: the first corner is read twice per axis."""
+    for c in J.dom:
+        J[c] = (X[cell[c, 1], 0] - X[cell[c, 0], 0]) * (
+            X[cell[c, 2], 1] - X[cell[c, 0], 1]
+        ) - (X[cell[c, 2], 0] - X[cell[c, 0], 0]) * (
+            X[cell[c, 1], 1] - X[cell[c, 0], 1]
+        )
+
+
+def test_a_mixed_subscript_a_statement_reads_twice_is_one_place() -> None:
+    """``X[cell[c, 0], 0]`` twice in one statement is one access, decided by isl.
+
+    It was ``assumed``: the places of one access were one each only where the
+    statement read it once, and an inlined element kernel reads a corner for
+    two entries of its Jacobian.
+    """
+    from loopty.oracle import IslOracle
+
+    statement = (
+        "X[cell[c, 0], 0] is in bounds for every instance of S0 "
+        "(cell[c, 0] : Fin(nv), by type)"
+    )
+    (fact,) = [f for f in jacobian.facts() if f.statement == statement]
+    decided = IslOracle().establish(fact)
+    assert decided.status is Status.DECIDED and decided.decided_by == "isl"
+    assert not [
+        f for f in jacobian.facts() if f.kind == "in-bounds" and "X[" in f.statement
+        and "by type" not in f.statement
+    ]
+
+
 def test_an_array_the_kernel_reads_where_it_wrote_it_has_a_definedness_fact() -> None:
     spmv = load(EXAMPLES / "spmv.py")
     facts = [f for f in spmv.scan.facts() if f.kind == "definedness"]
@@ -666,7 +815,7 @@ def _cell_sets(path: Path) -> Iterator[tuple[str, Any]]:
 
 @pytest.mark.parametrize(
     "path",
-    [*sorted(EXAMPLES.glob("*.py")), *sorted(KERNELS.glob("*.py"))],
+    _files(EXAMPLES, KERNELS),
     ids=lambda path: f"{path.parent.name}/{path.name}",
 )
 def test_the_cells_an_access_is_checked_against_read_back_as_isl_reads_them(
@@ -739,6 +888,8 @@ def test_an_assumption_is_a_fact_the_casts_rest_on() -> None:
     (part, *_rest) = monotone.term.lean_obligation().parts
     assert "n % 4 == 0" in render(part.term)
     assert schedule.history == ("assume('n % 4 == 0')", "split(i, 4)")
+    # the casts' status names it shortly, ``decided under assume('n % 4 == 0')``
+    assert assumption.provenance["label"] == "assume('n % 4 == 0')"
 
 
 @pytest.mark.parametrize(
@@ -826,9 +977,10 @@ def _isl_facts(path: Path) -> list[Any]:
 
 
 #: What loopty states for isl alone in the examples, by the words of the
-#: statement: nothing, since a rewritten layout (#186) and a substitution's
-#: definedness and the casts after it (#187) are stated. The coverage report
-#: lists what is left with the reason (docs/lean-checks.md).
+#: statement: nothing, since a rewritten layout (#186), a substitution's
+#: definedness and the casts after it (#187), and a cast's work items (#188)
+#: are stated. The coverage report lists what is left with the reason
+#: (docs/lean-checks.md).
 NOT_STATED: tuple[str, ...] = ()
 
 
@@ -852,7 +1004,7 @@ def test_lean_proves_the_windows_and_the_substitution_of_the_test_kernels(
     assert not unproved
 
 
-@pytest.mark.parametrize("path", sorted(EXAMPLES.glob("*.py")), ids=lambda p: p.name)
+@pytest.mark.parametrize("path", _files(EXAMPLES), ids=lambda p: p.name)
 def test_lean_proves_what_isl_decides_in_every_example(lean: Any, path: Path) -> None:
     unproved = []
     for fact in _isl_facts(path):
@@ -936,6 +1088,10 @@ def _refused_casts() -> list[tuple[str, IllegalCast]]:
         (
             "the loop run backwards after the window",
             lambda: windows.windowed.affine(windows.REVERSED),
+        ),
+        (
+            "a row of the triangle, which the recurrence reads two rows up",
+            lambda: windows.boxed.contract("R", lambda i, a, b: b),
         ),
     ]
     out = []
@@ -1040,16 +1196,124 @@ def test_lean_confirms_a_layouts_refutation_at_isls_cell(lean: Any) -> None:
 
     layouts = load(EXAMPLES / "storage_layouts.py")
     (wrong,) = layouts.dof_array.same_as("N3,N2,N1,N0").facts()
+    # the element innermost makes ne a stride: a layout at every size, which
+    # isl refutes at ne = 2, and Lean there
+    (inside,) = layouts.dof_array.same_as("N0,N1,N2,N3").facts()
 
     def folded(i: Fin[4]) -> Fin[2]:  # noqa: F821
         return i // 2
 
     _bounds, injective, _onto = layout(folded).facts()
-    for fact in (wrong, injective):
+    for fact in (wrong, inside, injective):
         refuted = IslOracle().establish(fact)
         assert refuted.status is Status.REFUTED, fact.statement
         said = lean.establish(refuted).provenance.get("lean_counterexample", "")
         assert said.startswith("Lean confirmed the counterexample"), said
+
+
+def test_lean_proves_the_device_launches_of_the_demos(lean: Any) -> None:
+    # every cast that puts a loop on a hardware axis: S1's three launches of
+    # each operator, sumpy's tile in S2, Kulkarni's split in S3, and the
+    # advection right-hand side's launches of every split
+    unproved = []
+    for label, schedule in _device_launches():
+        for fact in schedule.facts():
+            if fact.kind not in ("bijective", "monotone"):
+                continue
+            result = lean.establish(fact)
+            if result.status is not Status.PROVED:
+                unproved.append((label, fact.statement, result.provenance))
+    assert not unproved
+
+
+def test_lean_fails_where_a_dependence_joins_two_work_items(lean: Any) -> None:
+    # jacobi with i on g.0 reads at t + 1 what the next group wrote at t: isl
+    # refuses it. Stated as if isl had found it legal, Lean proves the order
+    # of every class and fails on the work items of exactly the two that join
+    # two of them, u[t, i - 1] and u[t, i + 1] read after the write; the
+    # classes of a write after those reads are empty.
+    from dataclasses import replace
+
+    from lanky.ledger import Fact
+
+    with pytest.raises(IllegalCast) as refused:
+        Schedule(stencil().jacobi, sizes={"nt": 8, "nx": 8}).tag(i="g.0")
+    planted = replace(refused.value.fact.term, refuted=False, refusal=None)
+    parts = planted.lean_obligation().parts
+    result = lean.establish(
+        Fact(
+            id="planted",
+            kind="monotone",
+            statement="i on g.0, taken to be legal",
+            term=_Planted(parts),
+            status=Status.DECIDED,
+            decided_by="isl",
+            where="stencil.py:1",
+            owner="jacobi",
+        )
+    )
+    failed = [r["name"] for r in result.provenance["lean_parts"] if not r["proved"]]
+    assert failed == ["dependence_1_work_item", "dependence_2_work_item"]
+
+
+@kernel
+def doubled(x: Arr[Fin[n], Real], w: Arr[Fin[n], Real]):  # noqa: F821
+    """``w`` twice ``x``, which a substitution computes where it is read."""
+    for i in w.dom:
+        w[i] = 2 * x[i]
+
+
+@kernel
+def scaled_in_place(
+    w: Arr[Fin[n], Real],  # noqa: F821
+    c: Arr[Fin[m], Real],  # noqa: F821
+    x: Arr[Fin[n], Real],  # noqa: F821
+):
+    """``x[i]`` from a sum that reads ``w[i]``, which is ``2 x[i]`` substituted."""
+    for i in x.dom:
+        x[i] = reduce_sum(w[i] * c[j] for j in c.dom)
+
+
+@program
+def doubled_then_scaled(x, c):
+    w = Arr.zeros_like(x)
+    doubled(x, w)
+    scaled_in_place(w, c, x)
+
+
+def test_a_substituted_sum_reading_its_own_write_is_caught_apart(lean: Any) -> None:
+    # Codex: after substitute('w') the sum of scaled_in_place reads x[i], which
+    # its own instruction writes, and the Lean parts did not see the read the
+    # substitution moved there. With the sum on l.0 it reads on every work
+    # item and the write is on one: isl refuses. Stated as if isl had found
+    # it legal, Lean fails on exactly that pair.
+    from dataclasses import replace
+
+    from lanky.ledger import Fact
+
+    substituted = Schedule(doubled_then_scaled, sizes={"n": 8, "m": 4}).substitute("w")
+    with pytest.raises(IllegalCast) as refused:
+        substituted.tag(j="l.0")
+    planted = replace(refused.value.fact.term, refuted=False, refusal=None)
+    parts = planted.lean_obligation().parts
+    assert parts[-1].label == (
+        "the sum of scaled_in_place.S0 reads x[i_0], which its instruction writes, "
+        "on another work item of l.0"
+    )
+    result = lean.establish(
+        Fact(
+            id="planted-within",
+            kind="monotone",
+            statement="the sum on l.0, taken to be legal",
+            term=_Planted(parts),
+            status=Status.DECIDED,
+            decided_by="isl",
+            where="test_lean_checks.py:1",
+            owner="doubled_then_scaled",
+        )
+    )
+    failed = [r["name"] for r in result.provenance["lean_parts"] if not r["proved"]]
+    assert failed == ["within_0"]
 
 
 class _Planted:
@@ -1168,13 +1432,13 @@ def test_lean_fails_on_exactly_the_classes_isl_finds_reversed(
     reversed_by_isl: dict[str, list] = {}
     first_violation = Scheduled._first_violation
 
-    def recording(self: Any, schedule: Any) -> Any:
+    def recording(self: Any, schedule: Any, deps: Any = None) -> Any:
         reversed_by_isl["deps"] = [
             dep
-            for dep in self._deps
+            for dep in (self._deps if deps is None else deps)
             if not isl_oracle.is_monotone(schedule, dep.relation).ok
         ]
-        return first_violation(self, schedule)
+        return first_violation(self, schedule, deps)
 
     monkeypatch.setattr(Scheduled, "_first_violation", recording)
     kinds = {
@@ -1477,6 +1741,8 @@ def test_every_hypothesis_set_isl_can_sample_is_not_vacuous_in_lean(lean: Any) -
     checked = 0
     arrays = 0
     for path in [*sorted(EXAMPLES.glob("*.py")), *sorted(KERNELS.glob("*.py"))]:
+        if not _imports_here(path):
+            continue
         # one Lean command per file, each theorem again alone to name a failure
         sources: list[tuple[str, str]] = []
         for fact in _isl_facts(path):

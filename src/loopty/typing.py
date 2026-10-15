@@ -121,6 +121,8 @@ kernel behind it leaves the module and the line out.
 
 from __future__ import annotations
 
+import dataclasses
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
@@ -160,6 +162,7 @@ __all__ = [
     "ordering_facts",
     "postcondition_facts",
     "postcondition_id",
+    "postcondition_statement",
     "reduction_facts",
     "render_instance",
     "requirement_facts",
@@ -329,6 +332,14 @@ def in_bounds_facts(
 
     A read of a constant table (:mod:`loopty.table`) is an access like any
     other, decided over the table's shape.
+
+    The terms of a sum over a ``Fin`` of a number, which the trace adds up
+    one by one (:attr:`loopty.term.Stmt.unrolled`), make one access each:
+    ``reduce_sum(Ft[3 * x + d, k, c] * ... for d in Fin[3])`` reads
+    ``Ft[3*x + 0, k, c]``, ``Ft[3*x + 1, k, c]`` and ``Ft[3*x + 2, k, c]``.
+    Those are gathered into the access the source writes, with one fact,
+    ``Ft[3*x + d, k, c] is in bounds for every d in Fin(3) and every instance
+    of S0``, about the cells all three reach (:func:`_gathered_over_unrolled`).
     """
     from loopty.table import table_type
 
@@ -360,9 +371,19 @@ def in_bounds_facts(
                 (tuple(indices), inames, domain)
             )
         roles = _layout_roles(stmt, term)
+        listed, over = _gathered_over_unrolled(stmt, listed, types, roles, sizes)
         for (array, kind, text), places in listed.items():
             arrtype = types[array]
             indices = places[0][0]
+            unrolled = over.get((array, kind, text))
+            each = "" if unrolled is None else " for every {} in Fin({})".format(
+                *unrolled
+            )
+            # "for every d in Fin(3) and every instance of S0": the binder
+            # first, which a table that cuts the row keeps on screen
+            instances = (
+                f"{each}{' and' if each else ' for'} every instance of {stmt.id}"
+            )
             identifier = fact_id(
                 "in-bounds",
                 owner,
@@ -383,9 +404,7 @@ def in_bounds_facts(
                     Fact(
                         id=identifier,
                         kind="in-bounds",
-                        statement=(
-                            f"{subject} is in bounds for every instance of {stmt.id}"
-                        ),
+                        statement=f"{subject} is in bounds{instances}",
                         term=None,
                         status=Status.ASSUMED,
                         provenance={"reason": behind, **layout},
@@ -465,7 +484,7 @@ def in_bounds_facts(
                     Fact(
                         id=identifier,
                         kind="in-bounds",
-                        statement=f"{subject} is in bounds",
+                        statement=f"{subject} is in bounds{each}",
                         term=None,
                         status=Status.ASSUMED,
                         provenance={"reason": f"no isl form: {exc}", **layout},
@@ -479,7 +498,7 @@ def in_bounds_facts(
                     Fact(
                         id=identifier,
                         kind="in-bounds",
-                        statement=f"{subject} is in bounds",
+                        statement=f"{subject} is in bounds{each}",
                         term=None,
                         status=Status.ASSUMED,
                         provenance={
@@ -499,9 +518,7 @@ def in_bounds_facts(
                 Fact(
                     id=identifier,
                     kind="in-bounds",
-                    statement=(
-                        f"{subject} is in bounds for every instance of {stmt.id}"
-                    ),
+                    statement=f"{subject} is in bounds{instances}",
                     term=Subset(
                         reached,
                         cells,
@@ -531,6 +548,133 @@ def in_bounds_facts(
                 )
             )
     return facts
+
+
+def _gathered_over_unrolled(
+    stmt: Any,
+    listed: dict[tuple[str, str, str], list[Any]],
+    types: dict[str, Any],
+    roles: Mapping[tuple[str, str, str], str],
+    sizes: Any,
+) -> tuple[dict[tuple[str, str, str], list[Any]], dict[tuple[str, str, str], Any]]:
+    """``listed`` with the accesses of an unrolled sum's terms gathered into one.
+
+    ``listed`` is :func:`in_bounds_facts`'s, each access of ``stmt`` by
+    ``(array, kind, text)`` with the places it is made at. Where the
+    statement adds up the terms of a sum over a ``Fin`` of a number
+    (:attr:`loopty.term.Stmt.unrolled`), say ``(d, 3)``, the accesses of one
+    array that differ only in integers, which run as ``a * d + b`` over ``d =
+    0, 1, 2`` in the order the terms were added (``Ft[3*x + 0, k, c]``,
+    ``Ft[3*x + 1, k, c]``, ``Ft[3*x + 2, k, c]``; ``G[0 + d, ...]``, ``G[3 +
+    d, ...]``, ``G[6 + d, ...]`` over ``x``), are one access, ``Ft[3*x + d,
+    k, c]`` or ``G[3*x + d, ...]``, as the source writes it, made at all
+    their places. Returned with ``(binder, count)`` for each access so
+    gathered, by its key.
+
+    Only accesses to a dense array whose indices isl reads are gathered.
+    One decided by type, through a ragged row or through an element of an
+    index array keeps its fact, whose reason is its own, and so does a group
+    whose binder names something the access already reads.
+    """
+    if not stmt.unrolled:
+        return listed, {}
+    groups: dict[tuple[str, str, str], list[tuple[Any, Any, list[int]]]] = {}
+    for key, places in listed.items():
+        array, kind, _ = key
+        arrtype = types[array]
+        indices = places[0][0]
+        if (
+            any(arrtype.ragged)
+            or key in roles
+            or len({_access_text(array, place[0]) for place in places}) != 1
+            or any(_justified_by_type(place[0], arrtype, types) for place in places)
+            or _mixed_axes(indices, arrtype, types) is not None
+        ):
+            continue
+        leaves: list[int] = []
+        holed = _holed(tuple(indices), leaves)
+        if not leaves:
+            continue
+        groups.setdefault((array, kind, _access_text(array, holed)), []).append(
+            (key, holed, leaves)
+        )
+    taken = {*stmt.inames, *(str(size) for size in sizes)}
+    gathered: dict[tuple[str, str, str], tuple[tuple[str, str, str], Any]] = {}
+    over: dict[tuple[str, str, str], Any] = {}
+    for (array, kind, skeleton), members in groups.items():
+        names = taken | set(re.findall(r"[A-Za-z_][A-Za-z_0-9]*", skeleton))
+        for binder, count in stmt.unrolled:
+            if len(members) != count or count < 2 or binder in names:
+                continue
+            forms = _progression([leaves for _, _, leaves in members])
+            if forms is None:
+                continue
+            indices = _filled(members[0][1], forms, binder)
+            merged = (array, kind, _access_text(array, indices))
+            for key, _, _ in members:
+                gathered[key] = (merged, members[0][0])
+            over[merged] = (binder, count)
+            break
+    if not gathered:
+        return listed, {}
+    out: dict[tuple[str, str, str], list[Any]] = {}
+    for key, places in listed.items():
+        if key not in gathered:
+            out[key] = places
+            continue
+        merged, _first = gathered[key]
+        out.setdefault(merged, []).extend(places)
+    return out, over
+
+
+def _holed(expr: Any, leaves: list[int]) -> Any:
+    """``expr`` with each integer in it a hole, the integers appended to ``leaves``."""
+    if isinstance(expr, bool):
+        return expr
+    if isinstance(expr, int):
+        leaves.append(expr)
+        return prim.Variable(f"_hole{len(leaves) - 1}")
+    if isinstance(expr, tuple):
+        return tuple(_holed(item, leaves) for item in expr)
+    if isinstance(expr, prim.ExpressionNode) and not isinstance(expr, prim.Variable):
+        return type(expr)(*(_holed(arg, leaves) for arg in init_args(expr)))
+    return expr
+
+
+def _progression(lists: Sequence[Sequence[int]]) -> list[tuple[int, int]] | None:
+    """Each position's ``(a, b)``: its integers are ``a * v + b``, ``v = 0, 1, ...``.
+
+    ``None`` where a position's do not, or where none moves. Tried in the
+    order given, the order the terms were added, and then sorted.
+    """
+    for order in (list(lists), sorted(lists)):
+        forms = []
+        for position in range(len(order[0])):
+            values = [leaves[position] for leaves in order]
+            step, start = values[1] - values[0], values[0]
+            if any(value != step * v + start for v, value in enumerate(values)):
+                break
+            forms.append((step, start))
+        else:
+            if any(step for step, _ in forms):
+                return forms
+    return None
+
+
+def _filled(holed: Any, forms: Sequence[tuple[int, int]], binder: str) -> Any:
+    """``holed`` with each hole ``a * binder + b``, as :func:`_progression` read it."""
+    if isinstance(holed, prim.Variable) and holed.name.startswith("_hole"):
+        step, start = forms[int(holed.name.removeprefix("_hole"))]
+        if not step:
+            return start
+        var = prim.Variable(binder)
+        moved = var if step == 1 else prim.Product((step, var))
+        return moved if not start else prim.Sum((moved, start))
+    if isinstance(holed, tuple):
+        return tuple(_filled(item, forms, binder) for item in holed)
+    if isinstance(holed, prim.ExpressionNode) and not isinstance(holed, prim.Variable):
+        return type(holed)(*(_filled(arg, forms, binder) for arg in init_args(holed)))
+    return holed
 
 
 def _mixed_axes(
@@ -591,7 +735,12 @@ def _mixed_fact(
     rests on, the element-sort facts of the arrays its indices are read
     from. Lean states the whole access, with what the type says of each
     typed index as a hypothesis (:func:`loopty.obligations.mixed_in_bounds_obligation`).
+
+    An access a statement makes twice over one domain, ``x[0, 0]`` read for
+    two entries of a Jacobian once a called kernel is inlined, is one place;
+    an access over several domains is left to the rules after this one.
     """
+    places = _distinct_places(places)
     if len(places) != 1:
         return None
     (place_indices, inames, domain) = places[0]
@@ -652,6 +801,33 @@ def _mixed_fact(
         owner=owner,
         rests_on=rests_on,
     )
+
+
+def _distinct_places(
+    places: Sequence[tuple[tuple[Any, ...], tuple[str, ...], Any]],
+) -> list[tuple[tuple[Any, ...], tuple[str, ...], Any]]:
+    """``places`` without repeats: one access text over the same loops and domain.
+
+    The places of one access are gathered by its text, so their indices print
+    alike; two of them are one place when their loops are the same and isl
+    finds their domains equal.
+    """
+    distinct: list[tuple[tuple[Any, ...], tuple[str, ...], Any]] = []
+    for place in places:
+        _indices, inames, domain = place
+        repeated = False
+        for _seen, seen_inames, seen_domain in distinct:
+            if tuple(inames) != tuple(seen_inames):
+                continue
+            try:
+                repeated = bool(domain.is_equal(seen_domain))
+            except Exception:  # noqa: BLE001 - spaces isl cannot compare differ
+                repeated = False
+            if repeated:
+                break
+        if not repeated:
+            distinct.append(place)
+    return distinct
 
 
 def _access_text(array: str, indices: Sequence[Any]) -> str:
@@ -2179,10 +2355,17 @@ def reduction_facts(
     in the order the source runs them, over the loops the cell does not
     name, and the class is the one :func:`loopty.trace.update_exactness`
     reads off what they add.
+
+    The sums in the terms of a sum over a ``Fin`` of a number, which the
+    trace adds up one by one (:attr:`loopty.term.Stmt.unrolled`), are one
+    fact where their facts say the same: ``the accumulation into grad[x, e,
+    k, j, i] over c is approx for every d in Fin(3)``, where the trace has
+    three sums over ``c``, one for each ``d``.
     """
     facts: list[Fact] = []
     sums = accumulating(term)
     for stmt in term.stmts:
+        start = len(facts)
         if stmt.id in sums:
             target = _access_text(stmt.assignee.array, stmt.assignee.indices)
             loops = sums[stmt.id]
@@ -2245,7 +2428,42 @@ def reduction_facts(
                     owner=owner,
                 )
             )
+        facts[start:] = _once_over_unrolled(stmt, facts[start:])
     return facts
+
+
+def _once_over_unrolled(stmt: Any, facts: list[Fact]) -> list[Fact]:
+    """A statement's exactness facts, those of an unrolled sum's terms as one.
+
+    Where the statement adds up the terms of a sum over a ``Fin`` of
+    ``count`` (:attr:`loopty.term.Stmt.unrolled`), ``count`` facts that say
+    the same are the one claim the source writes, made for each point: the
+    first stands for them, ``for every d in Fin(3)``.
+    """
+    if not stmt.unrolled:
+        return facts
+    alike: dict[str, list[int]] = {}
+    for k, fact in enumerate(facts):
+        alike.setdefault(fact.statement, []).append(k)
+    out = list(facts)
+    gone: set[int] = set()
+    for positions in alike.values():
+        unrolled = [
+            (binder, count)
+            for binder, count in stmt.unrolled
+            if count == len(positions) and count >= 2
+        ]
+        if len(unrolled) != 1:
+            continue
+        binder, count = unrolled[0]
+        first = facts[positions[0]]
+        out[positions[0]] = dataclasses.replace(
+            first,
+            statement=f"{first.statement} for every {binder} in Fin({count})",
+            provenance={**first.provenance, "unrolled": [binder, count]},
+        )
+        gone.update(positions[1:])
+    return [fact for k, fact in enumerate(out) if k not in gone]
 
 
 def postcondition_id(
@@ -2282,6 +2500,16 @@ class AfterCall:
         return render(self.claim)
 
 
+def postcondition_statement(term: Term, claim: Any) -> str:
+    """A postcondition as the ledger says it, and the tolerance its reals are taken to.
+
+    See :mod:`loopty.reals`.
+    """
+    from loopty.reals import statement
+
+    return statement(term, claim)
+
+
 def postcondition_facts(
     term: Term,
     owner: str,
@@ -2297,7 +2525,7 @@ def postcondition_facts(
         Fact(
             id=postcondition_id(owner, module=module, line=line),
             kind="postcondition",
-            statement=render(term.post),
+            statement=postcondition_statement(term, term.post),
             term=AfterCall(term.name, term.post),
             status=Status.ASSUMED,
             provenance={"kernel": term.name},
@@ -3035,7 +3263,7 @@ def _call_facts(
                 kind="postcondition-in-scope",
                 statement=(
                     f"after each call {_call_text(call)} at {call.where}: "
-                    f"{render(call.post)}"
+                    f"{postcondition_statement(term, call.post)}"
                 ),
                 term=AfterCall(call.callee, call.post),
                 status=Status.DECIDED,

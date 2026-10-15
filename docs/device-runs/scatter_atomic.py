@@ -110,6 +110,9 @@ def main() -> int:
             ("a square of 2 x 64 x 64 cells", assembly.square_mesh(64)),
             ("a square of 2 x 256 x 256 cells", assembly.square_mesh(256)),
         ):
+            if schedule is vectorized and len(mesh[1]) % 4:
+                # Sun et al.'s split assumes the cells a multiple of four
+                continue
             fact = executor.differential(
                 assembly.mass_action, schedule, assembly.inputs_on(mesh)
             )

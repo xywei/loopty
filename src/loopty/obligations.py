@@ -385,6 +385,7 @@ def _obligation(
     counterexample: Any = None,
     rests_on: Sequence[str] = (),
     refuted: bool = False,
+    decider: str = "isl",
 ) -> Any:
     """The obligation of ``parts``; a refuted one is checked at its counterexample.
 
@@ -392,6 +393,11 @@ def _obligation(
     Lean proves the claim false at. With none that can be stated, Lean is not
     asked at all: were the parts offered as a claim, a proof of them would
     read ``proved`` where isl refuted, and the refutation would be lost.
+
+    ``decider`` names who decided the claim and found its hints, which the
+    ledger's LEAN line counts the fact under; ``""`` for a claim nobody but
+    Lean decides, a program's postcondition unfolded from what its calls
+    store (:mod:`loopty.unfolding`).
     """
     if refuted and counterexample is None:
         return _declined(REFUTED_UNSTATED)
@@ -414,7 +420,7 @@ def _obligation(
         parts=tuple(parts),
         counterexample=counterexample,
         rests_on=tuple(rests_on),
-        decider="isl",
+        decider=decider,
         **extra,
     )
 
@@ -2001,8 +2007,10 @@ def cast_obligation(cast: Any) -> Any:
     in that order, keep that order after every step: the time vectors of the
     last step's order (its parallel loops left out) compare as the source's
     do. A cast whose tags put a loop on a hardware axis claims besides that no
-    dependence joins two work items, which is not stated here yet, and the
-    cast is left to isl with that reason.
+    dependence joins two work items: one more part per dependence class, that
+    the two instances run on one work item of every axis (see
+    :func:`_work_item_goal`), and one per read a statement's sum makes of the
+    array its own instruction writes, on an axis where the two run apart.
 
     ``bijective``: three parts per statement the last step moves, over the
     instances as the steps before it left them: every instance has an image
@@ -2022,17 +2030,6 @@ def cast_obligation(cast: Any) -> Any:
         if cast.kind == "bijective":
             parts = _bijective_parts(origin, steps)
         else:
-            hardware = sorted(
-                name
-                for name, tag in steps[-1].tags.items()
-                if tag.startswith(("g.", "l."))
-            )
-            if hardware:
-                return _declined(
-                    f"the loops {', '.join(hardware)} are on hardware axes, and the "
-                    "claim that no dependence joins two work items is stated for "
-                    "isl only"
-                )
             parts = _monotone_parts(origin, steps)
     except Unstatable as exc:
         return _declined(str(exc))
@@ -2047,6 +2044,7 @@ def _monotone_parts(origin: Any, steps: Sequence[Any]) -> list[Any]:
     term = origin._term
     parts = []
     assumed = steps[-1].assumptions if steps else ()
+    work = steps[-1].work if steps else None
     for found in _cast_classes(origin, steps):
         claim = Claim(term)
         claim.hypotheses.extend(assumed)
@@ -2150,6 +2148,22 @@ def _monotone_parts(origin: Any, steps: Sequence[Any]) -> list[Any]:
             _stage_time(origin, steps, len(steps), b.id, chain_b[-1]),
         )
         parts.append(lanky.Part(found.name, found.label, claim.close(goal)))
+        if work is not None:
+            together = _work_item_goal(
+                claim,
+                work,
+                (a.id, found.first[3], chain_a[-1]),
+                (b.id, found.second[3], chain_b[-1]),
+            )
+            parts.append(
+                lanky.Part(
+                    f"{found.name}_work_item",
+                    f"{found.label}, on one work item",
+                    claim.close(together),
+                )
+            )
+    if work is not None:
+        parts += _within_parts(origin, steps, work)
     if not parts:
         # no two accesses a dependence can join: there is nothing to reverse
         parts.append(
@@ -2157,6 +2171,148 @@ def _monotone_parts(origin: Any, steps: Sequence[Any]) -> list[Any]:
                 "no_dependence",
                 f"{term.name} has no two accesses a dependence can join",
                 Claim(term).close(True),
+            )
+        )
+    return parts
+
+
+def _work_item_goal(
+    claim: Claim,
+    work: Any,
+    one: tuple[str, str, Mapping[str, Any]],
+    other: tuple[str, str, Mapping[str, Any]],
+) -> Any:
+    """Two instances run on one work item of every hardware axis, as a proposition.
+
+    ``one`` and ``other`` are each a statement, where in it the access is
+    made (:func:`loopty.schedule._accesses`'s part) and the instance's loops
+    after the last step. An instance's work item along an axis is its loop
+    on the axis less where loopy starts that loop, as
+    :func:`loopty.schedule._work_items` reads it: the start loopy's code
+    generation gives (``0`` mostly), or a variable of its own where loopy
+    gives none. A statement's instruction whose sum is on the axis, and no
+    loop of it, runs on one work item of it, the same for every such
+    statement, which is a variable of the claim's; and an access that runs
+    on every work item of the axis, a statement with no loop on it, or the
+    body of a sum on it, shares a work item with nothing, so the claim is
+    that no two such instances touch one cell: ``False``.
+    """
+    starts: dict[str, Any] = {}
+    results: dict[str, Any] = {}
+
+    def start(loop: str) -> Any:
+        if loop not in starts:
+            known = work.starts.get(loop)
+            starts[loop] = (
+                claim.fresh(f"start_{loop}") if known is None else plain(known)
+            )
+        return starts[loop]
+
+    def at(end: tuple[str, str, Mapping[str, Any]], axis: str) -> Any:
+        stmt_id, part, values = end
+        loop = work.loops[stmt_id].get(axis)
+        if loop is not None:
+            begins = start(loop)
+            if isinstance(begins, int) and not isinstance(begins, bool) and not begins:
+                # loopy counts the work items from 0, as it mostly does
+                return values[loop]
+            return values[loop] - begins
+        if part == "" and axis in work.summed[stmt_id]:
+            if axis not in results:
+                name = "".join(c if c.isalnum() else "_" for c in axis)
+                results[axis] = claim.fresh(f"result_{name}")
+            return results[axis]
+        return None
+
+    equal = []
+    for axis in work.axes:
+        first, second = at(one, axis), at(other, axis)
+        if first is None or second is None:
+            return False
+        equal.append(Comparison(first, "==", second))
+    return conjunction(equal)
+
+
+def _within_parts(origin: Any, steps: Sequence[Any], work: Any) -> list[Any]:
+    """A statement's sum reading a cell its own instruction writes, apart.
+
+    One instance makes both accesses, so the pair is no dependence class, and
+    needs no order; on a device the two can run on two work items, the body
+    of a sum on a local axis on every one of them and the instruction on one
+    (:func:`loopty.schedule._within_instances`). Where the statement has no
+    loop on an axis, the two are apart there, and the claim is that they
+    never touch one cell. After a substitution a reader's sum reads what the
+    producer read, at the cell the producer stored, as
+    :meth:`loopty.schedule.Schedule._carried_over` reads it, and those reads
+    are pairs too. A read's subscripts can name the sum's own loops, which
+    are not stated, so the cell is compared on the other axes alone, the
+    wider claim.
+    """
+    lanky = _lanky_obligations()
+    schedule = _schedule_module()
+    term = origin._term
+    gone: set[str] = set()
+    for step in steps:
+        gone |= set(step.gone)
+    # (statement, the cell its sum reads, its instruction's write)
+    pairs: list[tuple[Stmt, tuple, tuple]] = []
+    for stmt in term.stmts:
+        if stmt.id in gone:
+            continue
+        accesses = schedule._accesses(stmt, term)
+        for read in accesses:
+            if read[0] != "read" or read[3] != "sum":
+                continue
+            for write in accesses:
+                if write[0] == "write" and write[3] == "" and write[1] == read[1]:
+                    pairs.append((stmt, tuple(read[2]), write))
+    for step in steps:
+        if step.substituted is None:
+            continue
+        array, producer, readers = step.substituted
+        stored = producer.assignee.indices
+        reads = [
+            (name, indices)
+            for kind, name, indices, _part in schedule._accesses(producer, term)
+            if kind == "read"
+        ]
+        for reader in readers:
+            if reader.id in gone:
+                continue
+            accesses = schedule._accesses(reader, term)
+            for kind, name, at, part in accesses:
+                if kind != "read" or name != array or part != "sum":
+                    continue
+                renaming = {
+                    index.name: plain(value)
+                    for index, value in zip(stored, at, strict=True)
+                }
+                for read, indices in reads:
+                    moved = tuple(substitute(plain(i), renaming) for i in indices)
+                    for write in accesses:
+                        if write[0] == "write" and write[3] == "" and write[1] == read:
+                            pairs.append((reader, moved, write))
+    assumed = steps[-1].assumptions
+    parts = []
+    for count, (stmt, cell, write) in enumerate(
+        pair for pair in pairs if len(pair[1]) == len(pair[2][2])
+    ):
+        loops = work.loops[stmt.id]
+        apart = [axis for axis in work.axes if loops.get(axis) is None]
+        if not apart:
+            continue
+        claim = Claim(term)
+        claim.hypotheses.extend(assumed)
+        chain = _chain(claim, origin, stmt, steps, "a")
+        same = _same_cell(origin, stmt, stmt, cell, write[2], chain[0], chain[0])
+        claim.hypotheses.append(same)
+        written = f"{write[1]}[{', '.join(render(i) for i in write[2])}]"
+        parts.append(
+            lanky.Part(
+                f"within_{count}",
+                f"the sum of {stmt.id} reads {written}, which its instruction "
+                f"writes, on another work item of {', '.join(apart)}",
+                claim.close(False),
             )
         )
     return parts
@@ -2300,14 +2456,7 @@ def _cast_classes(origin: Any, steps: Sequence[Any]) -> list[_Class]:
         window = step.window
         if window is None:
             continue
-        found = [
-            *win.accesses(term, window.array, [window.producer]),
-            *(
-                access
-                for access in win.accesses(term, window.array, window.readers)
-                if access.kind == "read"
-            ),
-        ]
+        found = win.window_accesses(term, window)
         for one in found:
             for other in found:
                 if one.kind == "read" and other.kind == "read":
@@ -2657,9 +2806,7 @@ def _layout_claim(layout: Any, *others: Any) -> Claim:
     """A claim over a layout's cells: its sizes are not negative."""
     sizes: set[str] = set()
     for one in (layout, *others):
-        for piece in one.pieces:
-            sizes |= set(piece.cells.get_var_names(isl.dim_type.param))
-        sizes |= set(one.addresses().get_var_names(isl.dim_type.param))
+        sizes |= set(one.size_names())
     return Claim(None, sizes=frozenset(sizes))
 
 
@@ -2676,21 +2823,256 @@ def _address(piece: Any, coords: Sequence[Any]) -> Any:
     return _renamed(plain(piece.address), piece.names, coords)
 
 
+def _in_buffer(layout: Any, address: Any) -> Any:
+    """``0 <= address < k``: an address of the layout's buffer, ``Fin[k]``.
+
+    As isl was given it for a layout isl states, and as the annotation writes
+    it for one at every size, ``Fin[ne * n**3]``, whose bound isl cannot read.
+    """
+    if not layout.polynomial:
+        buffer = _described(layout.addresses(), "the addresses of the buffer")
+        return buffer.predicate([address])
+    return conjunction(
+        [Comparison(0, "<=", address), Comparison(address, "<", plain(layout.buffer))]
+    )
+
+
+# {{{ a layout at every size: the steps omega lacks
+
+# A layout whose address multiplies an index by a size, ``n**3 * e + (i + n * j
+# + n**2 * k)``, is one omega reads with each product an atom it knows nothing
+# of. Where it is a mixed radix (:meth:`loopty.layout.Layout.radix`), each digit
+# times the product of the extents nested inside it, the facts follow by a few
+# steps on the digits, which Lean is given (:mod:`lanky.obligations`):
+#
+# - every stride and every digit's term is not negative, and a digit's term is
+#   at most the next stride less its own, ``n * (n - 1 - j)``: in bounds;
+# - two cells at one address agree on the first digit, from the outermost, on
+#   which they would differ, since a larger digit there outweighs every digit
+#   inside it: one for one, by a case split from the outermost digit;
+# - an address's digits are its remainders by the extents, from the innermost,
+#   ``c % n``, ``c // n % n``: onto, with each quotient's equation multiplied
+#   by its stride, and the case of an extent that is zero, where the buffer is
+#   empty.
+#
+# The arithmetic is multiplied out before ``omega`` reads it, so that each
+# product of unknowns is one atom however it is written.
+
+
+def _is_one(term: Any) -> bool:
+    return isinstance(term, int) and not isinstance(term, bool) and term == 1
+
+
+def _multiplies() -> bool:
+    """Whether lanky takes the hints of arithmetic where unknowns multiply.
+
+    A lanky before them gets none, and Lean, given no steps, leaves a layout
+    at every size where isl did, ``tested``.
+    """
+    lanky = _lanky_obligations()
+    fields = getattr(lanky.Hints, "__dataclass_fields__", {})
+    return hasattr(lanky, "Product") and "ring" in fields
+
+
+def _ring() -> Any:
+    """The hint that multiplies the arithmetic out, where lanky takes it."""
+    lanky = _lanky_obligations()
+    return lanky.Hints(ring=True) if _multiplies() else lanky.Hints()
+
+
+def _product_of(factors: Sequence[Any]) -> Any:
+    """``a * b * c``, nested from the left, as a stride is."""
+    out = factors[0]
+    for factor in factors[1:]:
+        out = prim.Product((out, factor))
+    return out
+
+
+def _stride_products(levels: Sequence[Any]) -> list[Any]:
+    """Every stride that is a product of extents is not negative: ``0 ≤ n * n``."""
+    lanky = _lanky_obligations()
+    out = []
+    for before, level in zip(levels, levels[1:]):
+        if not _is_one(before.stride):
+            out.append(lanky.Product(before.stride, before.extent))
+    return out
+
+
+def _digit_products(levels: Sequence[Any], cell: Mapping[str, Any]) -> list[Any]:
+    """Each digit's term between ``0`` and the next stride less its own."""
+    lanky = _lanky_obligations()
+    out = []
+    for level in levels:
+        if _is_one(level.stride):
+            continue
+        digit = cell[level.name]
+        out.append(lanky.Product(level.stride, digit))
+        out.append(lanky.Product(level.stride, level.extent - 1 - digit))
+    return out
+
+
+def _radix_bounds_hints(layout: Any, coords: Sequence[Any]) -> Any:
+    """The steps of a mixed radix's in-bounds part (see above)."""
+    lanky = _lanky_obligations()
+    levels = layout.radix()
+    if levels is None or not _multiplies():
+        return _ring()
+    cell = dict(zip(layout.pieces[0].names, coords, strict=True))
+    return lanky.Hints(
+        products=(*_stride_products(levels), *_digit_products(levels, cell)),
+        ring=True,
+    )
+
+
+def _radix_injective_hints(
+    layout: Any, one: Sequence[Any], other: Sequence[Any]
+) -> Any:
+    """The steps of a mixed radix's one-for-one part, split from the outermost digit."""
+    lanky = _lanky_obligations()
+    levels = layout.radix()
+    if levels is None or not _multiplies():
+        return _ring()
+    names = layout.pieces[0].names
+    c = dict(zip(names, one, strict=True))
+    d = dict(zip(names, other, strict=True))
+    products = [
+        *_stride_products(levels),
+        *_digit_products(levels, c),
+        *_digit_products(levels, d),
+    ]
+    cases: list[Any] = []
+    equal: list[Any] = []
+    for level in reversed(levels[1:]):
+        x, y = c[level.name], d[level.name]
+        cases.append(conjunction([*equal, Comparison(x, "<", y)]))
+        cases.append(conjunction([*equal, Comparison(y, "<", x)]))
+        equal.append(Comparison(x, "==", y))
+        stride = level.stride
+        products += [
+            lanky.Product(stride, y - x - 1, in_cases=True),
+            lanky.Product(stride, x - y - 1, in_cases=True),
+            lanky.Product(stride, x - y, in_cases=True),
+            lanky.Product(stride, y - x, in_cases=True),
+        ]
+    splits = ()
+    if cases:
+        cases.append(conjunction(equal))
+        splits = (disjunction(cases),)
+    return lanky.Hints(products=tuple(products), splits=splits, ring=True)
+
+
+def _radix_onto_hints(layout: Any, address: Any) -> Any:
+    """The steps of a mixed radix's onto part: the digits by division, the witness.
+
+    ``q0 = c``, ``q[d + 1] = q[d] // X[d]``; the digit of level ``d`` is
+    ``q[d] % X[d]``, and the outermost's is its quotient. Lean is told what it
+    knows of each quotient by an extent that is no number, each equation
+    ``q[d] = q[d] % X[d] + q[d] // X[d] * X[d]`` multiplied by the stride of
+    level ``d``, each digit's term not negative, and, in the case of an extent
+    that is zero, the buffer not positive: there is no address to find a cell
+    for. A case split on the outermost digit leaves the address below the
+    buffer only where it is inside its extent.
+    """
+    lanky = _lanky_obligations()
+    levels = layout.radix()
+    if levels is None or not _multiplies():
+        return _ring()
+    quotients: list[Any] = [address]
+    for level in levels[:-1]:
+        quotients.append(prim.FloorDiv(quotients[-1], level.extent))
+    digits = {
+        level.name: prim.Remainder(quotients[d], level.extent)
+        for d, level in enumerate(levels[:-1])
+    }
+    top = levels[-1]
+    digits[top.name] = quotients[-1]
+    witness = tuple(digits[name] for name in layout.pieces[0].names)
+
+    def literal(term: Any) -> bool:
+        return isinstance(term, int) and not isinstance(term, bool) and term > 0
+
+    divisors: list[Any] = []
+    for level in levels[:-1]:
+        if not literal(level.extent) and all(
+            render(level.extent) != render(other) for other in divisors
+        ):
+            divisors.append(level.extent)
+    extents = [level.extent for level in levels]
+    everywhere = list(_stride_products(levels))
+    in_cases = []
+    splits = [
+        LogicalOr((Comparison(divisor, "<=", 0), Comparison(divisor, ">", 0)))
+        for divisor in divisors
+    ]
+    for divisor in divisors:
+        # an extent of zero leaves the buffer empty: its product is not positive
+        rest = list(extents)
+        rest.pop(next(k for k, e in enumerate(rest) if render(e) == render(divisor)))
+        if rest:
+            for k in range(1, len(rest)):
+                everywhere.append(lanky.Product(_product_of(rest[:k]), rest[k]))
+            in_cases.append(
+                lanky.Product(0 - divisor, _product_of(rest), in_cases=True)
+            )
+    splits.append(
+        LogicalOr(
+            (
+                Comparison(quotients[-1], "<", top.extent),
+                Comparison(top.extent, "<=", quotients[-1]),
+            )
+        )
+    )
+    for d, level in enumerate(levels[:-1]):
+        if d == 0:
+            continue
+        stride = level.stride
+        q, nxt = quotients[d], quotients[d + 1]
+        written = prim.Remainder(q, level.extent) + nxt * level.extent
+        in_cases += [
+            lanky.Product(stride, q - written, in_cases=True),
+            lanky.Product(stride, written - q, in_cases=True),
+            lanky.Product(stride, digits[level.name], in_cases=True),
+        ]
+    if not _is_one(top.stride):
+        in_cases += [
+            lanky.Product(top.stride, quotients[-1], in_cases=True),
+            lanky.Product(top.stride, quotients[-1] - top.extent, in_cases=True),
+        ]
+    return lanky.Hints(
+        witness=(lanky.Piece(witness),),
+        splits=tuple(splits),
+        products=(*everywhere, *in_cases),
+        quotients=tuple(
+            lanky.Quotient(quotients[d], level.extent)
+            for d, level in enumerate(levels[:-1])
+        ),
+        ring=True,
+    )
+
+
+# }}}
+
+
 def layout_bounds_obligation(layout: Any, verdict: Any) -> Any:
     """Every cell of a layout is at an address of its buffer: a part per piece."""
     lanky = _lanky_obligations()
     parts = []
     try:
-        buffer = _described(layout.addresses(), "the addresses of the buffer")
         for k, piece in enumerate(layout.pieces):
             claim = _layout_claim(layout)
             coords = _piece_place(claim, piece)
-            goal = buffer.predicate([_address(piece, coords)])
+            goal = _in_buffer(layout, _address(piece, coords))
+            hints = (
+                _radix_bounds_hints(layout, coords)
+                if layout.polynomial
+                else lanky.Hints()
+            )
             parts.append(
                 lanky.Part(
                     f"in_bounds_{k}",
                     f"the address of a cell of {piece.label}",
                     claim.close(goal),
+                    hints,
                 )
             )
     except Unstatable as exc:
@@ -2718,12 +3100,18 @@ def layout_injective_obligation(layout: Any, verdict: Any) -> Any:
                 claim.hypotheses.append(
                     Comparison(_address(first, one), "==", _address(second, other))
                 )
+                hints = (
+                    _radix_injective_hints(layout, one, other)
+                    if layout.polynomial
+                    else lanky.Hints()
+                )
                 parts.append(
                     lanky.Part(
                         f"one_for_one_{i}_{j}",
                         f"a cell of {first.label} and one of {second.label} at one "
                         "address",
                         claim.close(_equal(one, other)),
+                        hints,
                     )
                 )
     except Unstatable as exc:
@@ -2749,17 +3137,18 @@ def layout_onto_obligation(layout: Any, verdict: Any) -> Any:
     disjunction of existentials, one per piece. The witness is isl's
     inverse of the layout, piece by piece, as ``lexmin`` gives it: the
     region of addresses each piece stores at, after the ones before it, and
-    the cell there, with ``//`` and ``%`` by numbers.
+    the cell there, with ``//`` and ``%`` by numbers. A layout at every size
+    has no inverse isl can compute; where it is a mixed radix, the witness
+    is its digits, ``c % n`` and ``c // n``, the inverse isl gives at a
+    number (see above).
     """
     from lanky.terms import Exists
 
     lanky = _lanky_obligations()
     try:
-        buffer = layout.addresses()
-        described = _described(buffer, "the addresses of the buffer")
         claim = _layout_claim(layout)
         (x,) = claim.coordinates(("address",))
-        claim.hypotheses.append(described.predicate([x]))
+        claim.hypotheses.append(_in_buffer(layout, x))
         options = []
         for piece in layout.pieces:
             ys = claim.fresh_all(piece.names, "cell")
@@ -2775,44 +3164,10 @@ def layout_onto_obligation(layout: Any, verdict: Any) -> Any:
                 Exists(tuple((ys[name], Int) for name in piece.names), body)
             )
         goal = disjunction(options) if len(options) > 1 else options[0]
-        pieces: list[Any] = []
-        taken = None
-        multiple = len(layout.pieces) > 1
-        for index, piece in enumerate(layout.pieces):
-            inverse = piece.relation().reverse()
-            inverse, space = inverse.align_params(buffer.get_space()), buffer
-            space = space.align_params(inverse.get_space())
-            inverse = inverse.intersect_domain(space)
-            region = inverse.domain()
-            if taken is not None:
-                region, earlier = _both(region, taken)
-                region = region.subtract(earlier)
-            if region.is_empty():
-                continue
-            params = {
-                name: Var(name) for name in inverse.get_var_names(isl.dim_type.param)
-            }
-            best = isl.PwMultiAff.from_map(inverse.intersect_domain(region).lexmin())
-            found: list[tuple[Any, Any]] = []
-            best.foreach_piece(lambda where, value: found.append((where, value)))
-            for where, value in found:
-                pieces.append(
-                    lanky.Piece(
-                        tuple(
-                            _aff_term(value.get_at(k), [x], params)
-                            for k in range(value.dim(isl.dim_type.out))
-                        ),
-                        _set_term(where, [x], params),
-                        index if multiple else None,
-                    )
-                )
-            taken = region if taken is None else _both(taken, region)[0].union(
-                _both(region, taken)[0]
-            )
-        if pieces:
-            last = pieces[-1]
-            pieces[-1] = lanky.Piece(last.values, None, last.disjunct)
-        hints = lanky.Hints(witness=tuple(pieces)) if pieces else lanky.Hints()
+        if layout.polynomial:
+            hints = _radix_onto_hints(layout, x)
+        else:
+            hints = _isl_inverse(layout, x)
         part = lanky.Part(
             "onto",
             f"a cell at every address of Fin({layout.buffer})",
@@ -2824,16 +3179,62 @@ def layout_onto_obligation(layout: Any, verdict: Any) -> Any:
     return _obligation([part], refuted=verdict.ok is False)
 
 
+def _isl_inverse(layout: Any, x: Any) -> Any:
+    """isl's inverse of a layout, piece by piece, as the witness of its onto part."""
+    lanky = _lanky_obligations()
+    buffer = layout.addresses()
+    pieces: list[Any] = []
+    taken = None
+    multiple = len(layout.pieces) > 1
+    for index, piece in enumerate(layout.pieces):
+        inverse = piece.relation().reverse()
+        inverse, space = inverse.align_params(buffer.get_space()), buffer
+        space = space.align_params(inverse.get_space())
+        inverse = inverse.intersect_domain(space)
+        region = inverse.domain()
+        if taken is not None:
+            region, earlier = _both(region, taken)
+            region = region.subtract(earlier)
+        if region.is_empty():
+            continue
+        params = {
+            name: Var(name) for name in inverse.get_var_names(isl.dim_type.param)
+        }
+        best = isl.PwMultiAff.from_map(inverse.intersect_domain(region).lexmin())
+        found: list[tuple[Any, Any]] = []
+        best.foreach_piece(lambda where, value: found.append((where, value)))
+        for where, value in found:
+            pieces.append(
+                lanky.Piece(
+                    tuple(
+                        _aff_term(value.get_at(k), [x], params)
+                        for k in range(value.dim(isl.dim_type.out))
+                    ),
+                    _set_term(where, [x], params),
+                    index if multiple else None,
+                )
+            )
+        taken = region if taken is None else _both(taken, region)[0].union(
+            _both(region, taken)[0]
+        )
+    if pieces:
+        last = pieces[-1]
+        pieces[-1] = lanky.Piece(last.values, None, last.disjunct)
+    return lanky.Hints(witness=tuple(pieces)) if pieces else lanky.Hints()
+
+
 def layout_same_obligation(first: Any, second: Any, verdict: Any) -> Any:
     """Two layouts store every cell at one address: a part per pair of pieces.
 
     A cell of a piece of each is stored at one address by both; and every
     cell of each is a cell of the other, a part per piece, when their pieces
     are not the same cells. A refuted one is stated with isl's cell when both
-    have one piece.
+    have one piece. Where a size multiplies an index in either, the first
+    claim is a polynomial identity, which Lean multiplies out.
     """
     lanky = _lanky_obligations()
     parts = []
+    ring = _ring() if first.polynomial or second.polynomial else None
     try:
         for i, one in enumerate(first.pieces):
             for j, other in enumerate(second.pieces):
@@ -2849,6 +3250,7 @@ def layout_same_obligation(first: Any, second: Any, verdict: Any) -> Any:
                         f"same_{i}_{j}",
                         f"a cell of {one.label} and of {other.label}",
                         claim.close(goal),
+                        ring or lanky.Hints(),
                     )
                 )
         for mine, theirs, which in ((first, second, "a"), (second, first, "b")):
@@ -2897,16 +3299,20 @@ def layout_same_obligation(first: Any, second: Any, verdict: Any) -> Any:
 def window_obligation(window: Any) -> Any:
     """The ``no-clobber`` fact of a :class:`loopty.schedule.Window`, for Lean.
 
-    One part per read of the array. Three instances, each in its domain and
-    through every step taken before the window: a read ``r``, the
-    producer's instance ``w`` that stored the cell it reads, and another of
-    its instances ``v`` that stored a different cell into the same slot,
-    after ``w``. Then ``v`` does not run before ``r``, in the order the
-    steps leave: their time vectors do not compare that way. The slot is
-    the placement, a term with ``%`` and ``//`` by numbers, which ``omega``
-    reads; the time vectors are those the checker's order has
-    (:func:`_time`). A refused window is stated with isl's triple, at which
-    Lean proves the part false.
+    One part per read of the array, and per two of its producers where
+    several store it. Three instances, each in its domain and through every
+    step taken before the window: a read ``r``, a producer's instance ``w``
+    that stored the cell it reads, and an instance ``v`` of a producer that
+    stored a different cell into the same slot, after ``w``. Then ``v`` does
+    not run before ``r``, in the order the steps leave: their time vectors
+    do not compare that way. The slot is the placement, a term with ``%``
+    and ``//`` by numbers, which ``omega`` reads; the time vectors are those
+    the checker's order has (:func:`_time`). A refused window is stated with
+    isl's triple, at which Lean proves the part false.
+
+    ``w`` is any instance that stored the cell, not only the last before
+    the read, which claims more than the window needs where a cell is stored
+    twice, and is what isl decided (:func:`loopty.window.clobbers`).
     """
     from loopty import window as win
 
@@ -2914,7 +3320,7 @@ def window_obligation(window: Any) -> Any:
     origin = window.schedule
     steps = tuple(window.steps)
     term = origin._term
-    producer = window.producer
+    producers = tuple(window.producers)
     placement = window.placement
     assumed = steps[-1].assumptions if steps else ()
     found = [
@@ -2925,50 +3331,61 @@ def window_obligation(window: Any) -> Any:
     parts = []
     try:
         for k, access in enumerate(found):
-            claim = Claim(term)
-            claim.hypotheses.extend(assumed)
-            chain_r = _chain(claim, origin, access.stmt, steps, "r")
-            chain_w = _chain(claim, origin, producer, steps, "w")
-            chain_v = _chain(claim, origin, producer, steps, "v")
-            at_r = _footprint_place(
-                claim,
-                access.stmt,
-                list(chain_r[0].values()),
-                access.inames,
-                access.domain,
-                "s",
-            )
-            read = [_renamed(i, access.inames, at_r) for i in access.indices]
-            stored = [
-                _renamed(i, producer.inames, list(chain_w[0].values()))
-                for i in producer.assignee.indices
-            ]
-            other = [
-                _renamed(i, producer.inames, list(chain_v[0].values()))
-                for i in producer.assignee.indices
-            ]
-            last = len(steps)
-            time_r = _stage_time(origin, steps, last, access.stmt.id, chain_r[-1])
-            time_w = _stage_time(origin, steps, last, producer.id, chain_w[-1])
-            time_v = _stage_time(origin, steps, last, producer.id, chain_v[-1])
-            claim.hypotheses += [
-                _equal(read, stored),
-                _equal(placement.at(other), placement.at(stored)),
-                LogicalNot(_equal(other, stored)),
-                lexicographically_before(time_w, time_v),
-            ]
-            overwritten = lexicographically_before(time_v, time_r)
-            goal = (
-                not overwritten
-                if isinstance(overwritten, bool)
-                else LogicalNot(overwritten)
-            )
-            cell = f"{window.array}[{', '.join(render(i) for i in access.indices)}]"
-            label = (
-                f"{access.stmt.id} reads {cell} before another cell is stored in "
-                f"its slot, {placement}"
-            )
-            parts.append(lanky.Part(f"read_{k}", label, claim.close(goal)))
+            for p, first in enumerate(producers):
+                for q, second in enumerate(producers):
+                    claim = Claim(term)
+                    claim.hypotheses.extend(assumed)
+                    chain_r = _chain(claim, origin, access.stmt, steps, "r")
+                    chain_w = _chain(claim, origin, first, steps, "w")
+                    chain_v = _chain(claim, origin, second, steps, "v")
+                    at_r = _footprint_place(
+                        claim,
+                        access.stmt,
+                        list(chain_r[0].values()),
+                        access.inames,
+                        access.domain,
+                        "s",
+                    )
+                    read = [_renamed(i, access.inames, at_r) for i in access.indices]
+                    stored = [
+                        _renamed(i, first.inames, list(chain_w[0].values()))
+                        for i in first.assignee.indices
+                    ]
+                    other = [
+                        _renamed(i, second.inames, list(chain_v[0].values()))
+                        for i in second.assignee.indices
+                    ]
+                    last = len(steps)
+                    time_r = _stage_time(
+                        origin, steps, last, access.stmt.id, chain_r[-1]
+                    )
+                    time_w = _stage_time(origin, steps, last, first.id, chain_w[-1])
+                    time_v = _stage_time(origin, steps, last, second.id, chain_v[-1])
+                    claim.hypotheses += [
+                        _equal(read, stored),
+                        _equal(placement.at(other), placement.at(stored)),
+                        LogicalNot(_equal(other, stored)),
+                        lexicographically_before(time_w, time_v),
+                    ]
+                    overwritten = lexicographically_before(time_v, time_r)
+                    goal = (
+                        not overwritten
+                        if isinstance(overwritten, bool)
+                        else LogicalNot(overwritten)
+                    )
+                    cell = (
+                        f"{window.array}"
+                        f"[{', '.join(render(i) for i in access.indices)}]"
+                    )
+                    label = (
+                        f"{access.stmt.id} reads {cell} before another cell is "
+                        f"stored in its slot, {placement}"
+                    )
+                    name = f"read_{k}"
+                    if len(producers) > 1:
+                        name = f"read_{k}_{p}_{q}"
+                        label += f", stored by {first.id}, then by {second.id}"
+                    parts.append(lanky.Part(name, label, claim.close(goal)))
     except Unstatable as exc:
         return _declined(str(exc))
     counterexample = None
@@ -2993,23 +3410,30 @@ def _window_refusal(
     if not triple or not 0 <= k < len(found) or found[k].part == "sum":
         return None
     access = found[k]
-    part = next((p for p in parts if p.name == f"read_{k}"), None)
+    (reader, at), (stored_by, stored), (written_by, other), params = triple
+    producers = {producer.id: producer for producer in window.producers}
+    if stored_by not in producers or written_by not in producers:
+        return None
+    name = f"read_{k}"
+    if len(producers) > 1:
+        ids = list(producers)
+        name = f"read_{k}_{ids.index(stored_by)}_{ids.index(written_by)}"
+    part = next((p for p in parts if p.name == name), None)
     if part is None:
         return None
-    (reader, at), (_, stored), (_, other), params = triple
     try:
         values = dict(params)
         for stmt, coords, tag in (
             (access.stmt, at, "r"),
-            (window.producer, stored, "w"),
-            (window.producer, other, "v"),
+            (producers[stored_by], stored, "w"),
+            (producers[written_by], other, "v"),
         ):
             values |= _stages(origin, stmt, steps, coords, params, tag, part)
     except (Unstatable, isl.Error, KeyError, ValueError):
         return None
     text = (
-        f"{reader}{_shown(at)}, {window.producer.id}{_shown(stored)} and "
-        f"{window.producer.id}{_shown(other)} at "
+        f"{reader}{_shown(at)}, {stored_by}{_shown(stored)} and "
+        f"{written_by}{_shown(other)} at "
         + ", ".join(f"{k}={v}" for k, v in params.items())
     )
     return _counterexample(part, values, text)

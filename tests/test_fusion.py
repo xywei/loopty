@@ -25,6 +25,7 @@ import pytest
 from lanky.ledger import Status
 from lanky.prelude import Int, Nat, Real
 
+from lines import where
 from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum, when
 from loopty.executor import LoopyExecutor, emit_code
 from loopty.named import domains_of
@@ -213,6 +214,16 @@ def chained(u, rhs):
     flux(u, f)
     doubled(f, g)
     divergence(g, rhs)
+
+
+@program
+def chained_in_place(u):
+    """Two arrays computed one from the other, then a step that writes ``u``."""
+    f = Arr.zeros_like(u)
+    g = Arr.zeros_like(u)
+    flux(u, f)
+    doubled(f, g)
+    update(g, u)
 
 
 @program
@@ -931,7 +942,15 @@ def test_a_fusion_that_runs_a_dependence_backwards_is_refused_with_the_pair() ->
     assert source_at["j"] == sink_at["i"] + 1
     assert sizes == {"n": 16}
     message = str(caught.value)
-    assert message.startswith("fuse(flux, divergence) illegal: instance flux.S0[")
+    # each statement by its text and line, at the names its loops have
+    assert message.startswith(
+        "fuse(flux, divergence) illegal: f[j] = 0.5 * u[j] * u[j] "
+        f"({where(flux, 'f[j] =')}) at j="
+    )
+    assert (
+        "read by rhs[i] = -(f[i + 1] - f[i - 1]) / 2 "
+        f"({where(divergence, 'rhs[i] =')}) at i="
+    ) in message
     # The refusal names the least shift that is accepted, which it checked.
     assert message.endswith(
         "fuse('flux', 'divergence', shift=1) runs every dependence between "
@@ -1134,7 +1153,12 @@ def test_a_fusion_past_a_checked_point_is_refused_for_its_flag() -> None:
         assert caught.value.fact.kind == "monotone"
         (source, _), (sink, _), _sizes = caught.value.witness
         assert (source, sink) == (check, "gather.S0")
-        assert f"writes {flag}[0] read by gather.S0[" in str(caught.value)
+        # the check is loopty's, with no source text, and named by its id
+        assert f"{check}[" in str(caught.value)
+        assert (
+            f"writes {flag}[0], read by y[i] = f[idx[i]] ({where(gather, 'y[i] =')}) "
+            "at i="
+        ) in str(caught.value)
 
 
 def test_a_checked_point_fused_with_the_producer_stays_before_the_reads() -> None:
@@ -1397,8 +1421,10 @@ def test_a_read_before_the_producer_stores_the_cell_is_refused() -> None:
         Schedule(early, sizes={"n": 4}).substitute("f")
     assert caught.value.fact.kind == "definedness"
     message = str(caught.value)
-    assert "instance shifted.S0[" in message
-    assert "before flux.S0[" in message
+    assert f"y[i] = f[i] + 1.0 ({where(shifted, 'y[i] =')}) at i=" in message
+    assert f"before f[j] = 0.5 * u[j] * u[j] ({where(flux, 'f[j] =')}) at j=" in (
+        message
+    )
     assert "stores it (at n=4, as hinted)" in message
 
 
@@ -1409,9 +1435,14 @@ def test_a_write_between_the_producer_and_a_read_is_refused() -> None:
         Schedule(bumped, sizes={"n": 8}).substitute("f")
     assert caught.value.fact.kind == "monotone"
     message = str(caught.value)
-    assert message.startswith("substitute('f') illegal: instance divergence.S0[")
+    assert message.startswith(
+        "substitute('f') illegal: rhs[i] = -(f[i + 1] - f[i - 1]) / 2 "
+        f"({where(divergence, 'rhs[i] =')}) at i="
+    )
     assert " reads u[" in message
-    assert "overwritten by bump.S0[" in message
+    assert f"overwritten by u[k] = u[k] + 1.0 ({where(bump, 'u[k] =')}) at k=" in (
+        message
+    )
 
 
 def test_a_later_write_of_what_the_producer_read_waits_for_the_reads() -> None:
@@ -1443,7 +1474,9 @@ def test_a_later_write_of_what_the_producer_read_waits_for_the_reads() -> None:
 def test_an_in_place_consumer_cannot_have_the_array_computed_again() -> None:
     # update writes u[i - 1] one step before it reads f[i - 1], which is
     # 0.5 * u[i - 1]**2 of the u before the update.
-    with pytest.raises(IllegalCast, match="overwritten by update.S0"):
+    with pytest.raises(
+        IllegalCast, match=r"reads u\[1\], overwritten by the same statement at i=1"
+    ):
         Schedule(stepped).substitute("f")
     # Stored, the same program fuses and runs.
     agrees(
@@ -1486,16 +1519,25 @@ def test_what_a_substitution_cannot_take_is_named(
         Schedule(prog).substitute(array)
 
 
-def test_a_substitution_through_two_arrays_is_refused_either_way() -> None:
+def test_a_substitution_through_two_arrays_is_refused_where_it_drops_a_dependence():
     # The dependences carried over are those of what the producer reads, and
     # through two arrays that is what the first producer reads, which the
-    # second step does not see: refused, whichever comes first.
-    with pytest.raises(ValueError, match="doubled.S0 reads f, which is computed"):
-        Schedule(chained).substitute("f").substitute("g")
+    # second step does not see. Where the first is computed from what nothing
+    # writes, u, there is nothing to see, and the chain is substituted.
+    both = Schedule(chained).substitute("f").substitute("g")
+    agrees(chained, both, burgers_inputs(7))
+    ids = {insn.id for insn in both.kernel.default_entrypoint.instructions}
+    assert "divergence_S0" in ids and not ids & {"flux_S0", "doubled_S0"}
+    # The other way round, the reader of f is gone already.
     with pytest.raises(ValueError, match="doubled.S0 reads f and runs no more"):
         Schedule(chained).substitute("g").substitute("f")
     for array in ("f", "g"):
         agrees(chained, Schedule(chained).substitute(array), burgers_inputs(7))
+    # Where something writes what the first read, the chain is refused: the
+    # update reads g[i - 1] after it wrote u[i - 1], and g computed there
+    # would be computed from the new u.
+    with pytest.raises(ValueError, match="doubled.S0 reads f, which is computed"):
+        Schedule(chained_in_place).substitute("f").substitute("g")
 
 
 def test_a_statement_taken_out_leaves_no_loop_to_name() -> None:

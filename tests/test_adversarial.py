@@ -71,8 +71,9 @@ def test_tagging_a_dependence_carrying_iname_parallel_is_refuted_with_a_witness(
     assert params == {"nt": 8, "nx": 8}
 
     message = str(error)
-    assert message.startswith("tag(t='g.0') illegal: instance S0[")
-    assert "writes u[" in message and "read by S0[" in message
+    # a term written by hand has no source text: its instances are by id
+    assert message.startswith("tag(t='g.0') illegal: S0[")
+    assert "writes u[" in message and ", read by S0[" in message
     assert message.endswith("scheduled earlier (at nt=8, nx=8, as hinted)")
 
     # The refusal is a refusal: nothing was committed to the schedule it was

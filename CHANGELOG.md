@@ -28,6 +28,281 @@ All notable changes to loopty are recorded here. The format follows
   loop over a product of sizes, `Fin[n * m]`, which does not run compiled on
   loopy 2025.2 either (#197), stops earlier on loopy main, in loopy's bounds
   check, which cannot read the shape `n * m` (#245).
+- **What fusing and contracting S1's passes buys on a CPU**,
+  `benchmarks/hexahedra.py c`: the weak gradient's three programs of
+  `examples/hexahedra.py`, the passes one after another, `fused`, and
+  `contracted`, on the C target, each checked against numpy and then timed
+  in turn on one thread. Every program is built with loopty's flags and the
+  same `--cflags`, which the CSV records, and `report` tables the rows as it
+  does the device's.
+- **sumpy's GPU schedule in the flagship's ledger** (`examples/l2p.py`):
+  `on_a_gpu = fused.retarget("opencl").tag(i="g.0")`, `E2PFromSingleBox`'s
+  own, each box a work group, written with the file's names. Its tag's two
+  facts are rows of `lanky check` (the fusions' are `fused`'s), the python
+  run lists them, and `loopty run` runs it on a device where pyopencl is
+  installed and compares it with the native run; on a GPU and on a CPU
+  through PoCL the two agreed exactly, up to 4,096 boxes. The same with each
+  box's windows, `on_a_device()`, is checked by isl in the python run; Lean
+  does not state a cast on windows each work item keeps of its own yet
+  (#295).
+- **A schedule for a device, checked where pyopencl is not installed**
+  (`loopty.lower.CheckedOpenCLTarget`). A schedule for `"opencl"` is built
+  on loopy's plain OpenCL target there, which has the same kernel and
+  imports nothing, so a file keeps its device schedules at module level and
+  `python`, `lanky check` and `loopty run` read them on any machine.
+  Generating or running their code is refused with the reason
+  (`ImportError: generating and running OpenCL code needs pyopencl, ...`),
+  and `loopty run` says `not run here: running on a device needs pyopencl,
+  which is not installed; its facts are checked all the same`, which is no
+  failure. `--target opencl` without pyopencl is refused by name, as before.
+- **A window of an array over a domain, of several writers and of a
+  recurrence** (`Schedule.contract`, #244, #213). A placement over an array
+  over a domain takes the domain's binders, and the window is the box its
+  slots span: sumpy's L2P, fused box by box, keeps one box's triangle,
+  `contract("R")` finds `lambda i, a, b: (a, b)`, 121 cells for the 66 of a
+  triangle of order 10, as plain loopy's temporary of the box. The array may
+  be stored by several statements, and read by one of them: the copy of
+  the stored rows and the recurrence `R[i, a, b] = -R[i, a - 2, b + 2]`. The
+  `definedness` fact asks that every read is of a cell one of them stored
+  before it, and the `no-clobber` fact is asked of every pair of them,
+  decided by isl and proved by Lean; a window too small, one row of the
+  triangle, is refused with the read the recurrence makes, the cell and the
+  instance that overwrote its slot. A window of a number of cells is each
+  work item's own, as loopy keeps a private temporary, so two of its
+  accesses on two work items need no order, and a read on a work item its
+  cell's store is not on is refused with the pair; the boxes on `g.0`,
+  sumpy's own schedule, each keep their triangle. A window of a size,
+  `f_window[n]`, is still one for every work item. A recurrence along a
+  loop, `f[j] = f[j - 1] + u[j]`, is a shift register too
+  (`registers=True`, the default on OpenCL): its store is the newest
+  register and its read the one before. `examples/l2p.py` now
+  runs `contracted`, its fused program with the triangle and the table kept
+  one box at a time, refuses the row with its read, and checks sumpy's
+  schedule on a device; `benchmarks/l2p.py --variant windowed` (and
+  `unrolled_windowed`) times it.
+- **A layout at every size** (`loopty.layout`, #263). A layout's body may
+  compute with a size its annotations name, so grudge's DOFArray is one
+  layout for every order, `n**3 * e + (i + n * j + n**2 * k)` over
+  `Fin[ne] x Fin[n]**3`, and so is loopy's `dim_tags` `N3,N0,N1,N2` of it,
+  each stride the product of the extents nested inside it. isl cannot state
+  `n * j`, so it decides each fact at `n` from 1 to 6 and the fact reads
+  `tested`, saying why; Lean proves it for every `n`, given the steps
+  `omega` lacks (lanky's products, quotients and multiplying out): the
+  products that bound each digit's term, a case split on the first digit
+  two cells differ in, and an address's digits by division as the cell it
+  stores. Two layouts the same is a polynomial identity Lean multiplies
+  out. All in core Lean. A refuted one names the size isl found it at,
+  `padded stores (i=0, j=1) and (i=0, j=0) both at 0 (at m=2, n=1)`. A call
+  gives the size by name, `dof_array(e, i, j, k, n=4)`.
+  `examples/hexahedra.py` declares its three layouts at a symbolic order, so
+  its claim that the DOFArray, #418's `dim_tags` and the kernels' row-major
+  arrays are one layout holds for every order, where it held at order 3 and
+  `as_dim_tags` read `x = x` in Lean.
+- **A device cast proved whole** (#188). A cast that puts a loop on a
+  hardware axis claims besides its order that no dependence joins two work
+  items, which was stated for isl only, so the cast stayed `decided` where
+  Lean is installed. Lean is now asked it too: for each dependence class,
+  that the two instances run on one work item of every axis, each one's loop
+  counted from where loopy starts it, and for a statement's sum that reads
+  what its own instruction writes, that the two never touch one cell where
+  they run apart. S1's three device launches, sumpy's tile in S2, Kulkarni's
+  split in S3 and the advection right-hand side's launches of every split
+  read `proved` by Lean, and the four demo drivers offer their casts to Lean
+  where it is installed (`python examples/hexahedra.py`: `along_s: tag(...):
+  2 facts, all proved by lean`).
+- **A program's postcondition** (`loopty.unfolding`,
+  `loopty.dataflow.program_stores`). A `@program`'s return annotation is a
+  claim about what it leaves in its parameters, written in their names and
+  the sizes its kernels name, and it is a row of the ledger, keyed as a
+  kernel's is:
+  - `tested` on the program's native runs, an equation that reads an output
+    compared at that output's class, `approx` for reals, as the compiled run
+    is compared with the native one: the calls sum in an order of their own,
+    and agree with the claim as reals and as floats to rounding. A run that
+    leaves it false refutes it, naming the cell and the two values;
+  - `decided` by isl where what the calls store decides it, as a kernel's
+    postcondition is: each call that stores no cell of an array twice, and
+    reads none before its store, has a `single-assignment` fact of the
+    program's, and each of its statements is an equation about what the
+    program leaves, until a later call writes an array it names;
+  - otherwise stated for Lean, a part of Mathlib's for a claim about reals:
+    what the calls store unfolded into the claim a pass at a time, each
+    theorem the program cites (`@program(uses=[...])`) rewritten where one of
+    its sides is, its families at the sections of the arrays they stand
+    for, `Fr (3 * x + 0)` and `w (3 * x + 0) e`, then the sums over a literal
+    range written out and `ring`. Python finds the steps, and Lean checks
+    them; a wrong one is no proof. Proved, the fact rests on the
+    `single-assignment` facts and the theorems it used.
+  In `examples/hexahedra.py`, `weak_grad` and `weak_div` claim that `grad`
+  and `div` are the dense Kronecker operators of the three directions
+  applied to the field times its metric terms, citing `sum_factorization`,
+  and with Mathlib both rows read `proved lean`: the theorem proved for
+  every order now says something about the programs that compute it.
+  A claim that names anything but the program's parameters and sizes is
+  `assumed`, and says what it names.
+- **A theorem tied to the terms a kernel adds** (`loopty.summands`, #252). A
+  cited theorem that concludes `all(c(n) == E for n in Nat if ...)` gives a
+  `by-theorem` row where a sum in the kernel's term adds `E` at whole
+  numbers `n`, with the theorem's variables bound to the kernel's
+  expressions of the sorts it takes them at (a theorem about reals says
+  nothing of complex numbers), and an identity the kernel cites, `L == R`,
+  rewrites `R` in `E` into the kernel's `L` first; the row names the
+  identity's premises that are not the theorem's. `examples/layer_potential.py`'s `single_layer` cites
+  `line_taylor` and the new `by_the_conjugate`, `ratio(alpha, beta) == -beta
+  / alpha`, the kernels' ratio by the conjugate, and its ledger reads
+  `single_layer adds line_taylor's c(n) for n in 1..5, for every c with away,
+  first and ode, read over the complex numbers`: `decided` by `theorem`,
+  resting on both theorems, and proved by Lean with Mathlib, the identity
+  rewritten and the theorem applied a term at a time. A theorem's annotation
+  that calls `loopty.math`'s `conj`, `real`, `exp` and the rest, itself or
+  through a helper the kernel calls too, reads them as lanky's functions
+  (needs lanky with `real`, `imag` and `conj`), and a kernel's postcondition
+  keeps the calls its trace makes (`loopty.math.as_traced`, `as_stated`).
+- **A postcondition's equations of reals at their class** (`loopty.reals`,
+  #254). An equation that rounds is compared after each native run within
+  the tolerance of the class of what it reads, as the compiled run is with
+  the native one, `|a - b| <= 1e-6 (|b| + 1)` for `approx`, and the
+  statement says so (`..., to the approx tolerance`); one that rounds
+  nothing, one of integers and one of an `exact` class are compared bit for
+  bit as before. Where its cells are stored once, by statements whose sums
+  run over concrete bounds, Lean proves it with Mathlib over the reals from
+  what they store, the tables at the values they hold, resting on the
+  `single-assignment` facts and on the `trace-faithful` fact.
+  `examples/assembly.py`'s `mass_ffc` now promises the element's mass,
+  `|J| (1 + delta_jk) / 24`, in place of a symmetric matrix: `tested` on its
+  runs, `proved` with Mathlib, and restated of every cell after its call.
+- **`@upstream(kernel, within=1e-12)`** (#268): the agreement with the code a
+  kernel mirrors, compared within the stated fraction of the largest value
+  of each output computed in floating point, and the row says so (`... in
+  out within 1e-12 of the largest value, on its example inputs`); an `exact`
+  output is still compared bit for bit. `examples/layer_potential.py`'s two
+  rows state it, where the bound was in a test only.
+- **Claims settled by running them** (`loopty.tested`): `@tested` on a
+  function that takes nothing and returns whether its claim held, alone or
+  with what it measured, puts the claim in the ledger as a `tested` row,
+  decided by `run`, the docstring's first line its statement; `refuted` with
+  the reason when it returns false, raises, or returns something that is not
+  a verdict. A run is evidence about its inputs, so nothing here reads more
+  than `tested`. `examples/layer_potential.py` measures pytential's Green
+  identity and the two jump relations this way.
+- **S2 of the demonstration** (`examples/layer_potential.py`): pytential's
+  QBX on its own curve. The line-Taylor theorem, for every order, in the same
+  file as the kernels that add its closed form, `coefficient(ratio, k)`;
+  pytential's single and double layer on the five-armed starfish over complex
+  points; sumpy's CPU tile (`sumpy_tile()`), its casts decided, with the
+  write sumpy silences (`write_race(write_lpot*)`) the fact `distinct
+  instances of S0 write distinct cells of out`, proved by Lean where it is
+  installed; each kernel's agreement with what sumpy's own `LayerPotential`
+  returned on the example's inputs (recorded at sumpy's commit,
+  `layer_potential_sumpy.json`), an `upstream` row; and, as tested rows,
+  pytential's identity test case and the jump relations, the errors falling
+  faster than the QBX order less 1.6.
+  `benchmarks/qbx_layer_potential.py` times the kernel against plain loopy
+  and sumpy's own on one OpenCL device, records sumpy's results, and runs
+  the kernels on the arguments pytential itself hands sumpy.
+- **S1 of the demonstration** (`examples/hexahedra.py`, #253): grudge
+  #418's sum-factorized weak gradient and weak divergence on hexahedra, the
+  kernels written for `n` nodes per axis, so that their facts hold at every
+  order. The metric product (`metric`, or `contravariant`, which sums the
+  metric terms first, three operator applications where grudge makes
+  nine), a pass per reference axis (`along_r`, `along_s`) and the last pass
+  with the three directions summed (`gradient_along_t`,
+  `divergence_along_t`), chained by the programs `weak_grad` and
+  `weak_div`. The Kronecker theorem the passes rest on,
+  `sum_factorization`, for every `n`, proved by Lean with Mathlib and tested
+  without it; the DOFArray's layout, at order 3, the same as #418's
+  `dim_tags` `N3,N0,N1,N2` and as the kernels' row-major arrays, each a
+  fact. The passes fused as deep as each pair allows, one loop deeper
+  refused with its pair and the fusion of fewer loops named, and what
+  passes between them kept a row (`w`) and a slab (`v`) at a time; on a
+  device, three launches, every node on a work item
+  (`passes_on_a_device`). `benchmarks/hexahedra.py` times the variants
+  against the same kernels in plain loopy and against grudge on one device,
+  and compares them with #418's own `weak_local_grad` and `weak_local_div`
+  (`agree`): on a warped mesh at orders 3 to 6 they agree to `3e-15` to
+  `5e-15`, natively, compiled, fused and contracted, and as the device
+  launches.
+- **The demo's flagship, `examples/l2p.py`**: sumpy's L2P for the 2-D
+  Laplace kernel (`E2PFromSingleBox` with the compressed Taylor expansion),
+  in one file and one ledger. The claim sumpy's reconstruction rests on,
+  for every order (lanky#86), and its form box by box on the triangle `a + b
+  <= p`, both proved by Lean with Mathlib; sumpy's storage index as a
+  checked layout; `unpack`, whose postcondition, decided from what it
+  stores, is sumpy's storage order, `reconstruct`, whose postcondition is
+  decided from what it stores and is the theorem's hypotheses, so the
+  theorem applies, and `evaluate`, composed by the program `l2p` and fused
+  box by box; the interchange of the triangle's loops refused with isl's
+  pair, and each box's triangle kept in a window (above). The program agrees with sumpy's own kernel on the file's inputs to
+  round-off (`upstream`, below), and with the charges' potential to `4e-13`
+  at order 10.
+- **Agreement with the code a kernel mirrors**, `@upstream(kernel)`
+  (`loopty.upstream`). The decorated function computes, on the file's
+  example inputs, what the code the kernel is written after computes there;
+  `lanky check` runs the kernel natively on the same inputs and compares,
+  output by output, at the accuracy the kernel's types claim, a dense
+  output in its own shape. The row is `tested` by `upstream`, `refuted`
+  with the cell and both values (or both shapes), or `assumed` with why
+  where the function cannot run: its package is not installed, or its
+  recording is not there.
+- **`loopty.math.ipow(x, n)`**, `x` to an integer power multiplied out as
+  loopy multiplies one, by squaring, rounded at every product, in both runs:
+  natively by the same loop (`loopty.math.integer_power`), compiled as
+  loopy's `loopy_pow_<base>_<exponent>`. The two runs agree bit for bit, in
+  single precision too. An integer base or a real power is refused, natively
+  from the values and traced from the operands' types, and so is the
+  smallest power of the type the compiled kernel holds the power in
+  (`-2**31`, `-2**63`), whose negation loopy's helper cannot take. `x ** n` of a real `x` stays numpy's power, the C
+  library's `pow` in both runs; at the flagship's Taylor sum `ipow` is an
+  order of magnitude faster on the C target (`benchmarks/l2p.py`).
+- **`benchmarks/l2p.py`**, which times sumpy's own `E2PFromSingleBox`, the
+  same algorithm written directly in plain loopy (loopy #970's L2P
+  microkernel with the Laplace step put back, and variants that make
+  loopty's choices), and loopty's schedules of `examples/l2p.py`, on one
+  tree and one device, and compares their potentials with each other and
+  with the direct sum. On the C target plain loopy is built with the flags
+  loopty builds its kernels with (`-fwrapv`; `--no-wrapv` for loopy's
+  alone), and each record names the flags it was built with. It also
+  records sumpy's potential on the example's inputs, for the `upstream`
+  row.
+- **The S3 demo: firedrake's PyOP2 assembly loop** (`examples/assembly.py`).
+  FFC's P1 mass kernel of firedrake's PyOP2 tests, `mass_ffc`, with its
+  15-digit tables as constant tables, is a kernel of its own, called inside
+  the loop over the cells as PyOP2 calls it, `mass_ffc(coords[cell[c]],
+  Ae[c])`, and the cell's matrix applied to `u` is added into the nodes,
+  `y[cell[c, a]] += ...`. The three identities the loop rests on are lanky
+  theorems in the same file, proved where Mathlib is installed: the 3-point
+  rule integrates every quadratic exactly, a cell's mass matrix is `|J| (1 +
+  delta_jk) / 24`, and the scatter keeps the total on every mesh. PyOP2's GPU
+  split is refused with the node its two test triangles share and accepted
+  once the updates are atomic, and both PyOP2 branches' schedules take the
+  assumptions their transforms make (`assume("nc >= 1")`, `assume("nc % 4
+  == 0")`). `benchmarks/assembly.py` times loopty's schedules against a
+  plain-loopy transcription of PyOP2's wrapper with Kulkarni's and Sun et
+  al.'s transforms applied, and with `--nested` against the transcription
+  given loopty's nesting of a cell's loops under the cell loop, which is
+  what decides where loopy puts the `ilp` loop of Sun et al.'s split
+  (interleaving the four cells, or running each whole); and
+  `benchmarks/assembly_agreement.py` compares
+  the example with firedrake's own assembly and PyOP2's own `par_loop`.
+
+- **The advection right-hand side on hexahedra** (`examples/advection.py`),
+  the stretch of the S1 demo: grudge #418's `WeakAdvectionOperator` with the
+  upwind flux, from grudge's own geometry, as kernels for every order. The
+  flux reads the neighbor's value through the face maps, in bounds by type;
+  the inverse mass is pushed inward, as grudge #362 rewrites it, and the
+  same kernels take the GLL quadrature's tables. Three lanky theorems, proved
+  where Mathlib is installed: the two rearrangements, and that the lift onto
+  the face nodes is the transpose of the face gather, so it keeps the
+  element's total. The kernels fuse on the element, one loop deeper is
+  refused with its pair, and the fluxes are kept an element at a time;
+  libParanumal's lift onto the face nodes without its barriers is refused
+  with the edge node two faces update, and accepted atomic. Five splits on a
+  device (libParanumal's volume and surface, the fluxes first, three
+  launches, one, one from the metric terms), each launch a checked schedule;
+  `benchmarks/advection.py` times them in five shapes beside the same
+  launches in plain loopy and grudge's own right-hand side, and compares
+  them with grudge's on a warped periodic mesh.
+
 - **A kernel's postcondition decided from what its statements store**
   (`loopty.dataflow`, #113). Where no cell of an array a kernel writes is
   stored twice, or read before its store, a `single-assignment` fact says
@@ -474,6 +749,81 @@ All notable changes to loopty are recorded here. The format follows
   outermost first, `2*b_inner_step - a_outer - b_outer - a_inner` for the
   tiled diamond, rather than in the order of the domain's dimensions, which
   loopy main keeps in namedisl's order.
+- **The interpreter finds a sum's points once, not at every instance**
+  (lanky #125). The faithful check runs each kernel's term through
+  `loopty.interpret`, and a reduction asked isl for its points at every
+  statement instance: it fixed the loop variables, the domain's parameters
+  and enumerated. Now a reduction's domain is enumerated once per run at
+  the values of its parameters, its points kept by the loop variables each
+  instance fixes, and where it is the loops' points times the sum's (a sum
+  over `Fin[n]` in a loop nest), as its two factors. Each instance reads its
+  own points, in the same order, and the work limit is checked on them by
+  their bounding box as before. The rule for a node is found once per type.
+  `lanky check examples/hexahedra.py` spends 7 s in the interpreter where it
+  spent 31, and takes 12 s of CPU where it took 38 without Lean; every
+  example's ledger, JSON included, is what it was.
+- **`loopty run` says what a row lacks to be proved**, with lanky's
+  `WITHOUT LEAN` and `WITHOUT MATHLIB` lines under its table, and sizes the
+  table's statement column to the terminal, as `lanky check` does, where the
+  lanky it runs with has them. The transcripts show each statement whole,
+  wrapped under its row.
+- A refusal names each instance of its pair by the statement as the source
+  writes it, the line it is on, and its coordinates by the names the source
+  gives its loops (#260). The flagship's interchange reads `R[i, a, b] =
+  C[i, a, b] (l2p.py:276) at i=0, a=1, b=9 writes R[0, 1, 9], read by R[i,
+  a, b] = -R[i, a - 2, b + 2] (l2p.py:278) at i=0, a=3, b=7, scheduled
+  earlier`, where it read `instance S0[i=0, a=1, b=9] writes R[0, 1, 9]
+  read by S1[i=0, a=3, b=7] scheduled earlier`; S3's race, `y[cell[c, a]]
+  += reduce_sum(...) (assembly.py:269) at c=0, a=2 and at c=1, a=1 both
+  update y[3]`. A long statement keeps what it writes into and shortens the
+  calls on its right, `reduce_sum(...)`; an instance of the statement just
+  named is `the same statement at t=1, i=7`. The same holds for every
+  refusal that names a pair (of `tile`, `interchange`, `skew`, `affine`,
+  `fuse`, `tag`, `contract`, `substitute`), and for a disjoint-writes fact
+  refuted on an input, and the fix each names is kept. A pair on two work
+  items says where each access runs by what it does, `the write is in a
+  sum, on every work item of l.0`, where it named the statement a second
+  time. A fact's `witness` keeps the ids, `S0[t=0, i=8]`, and so does a
+  term written by hand, which has no source.
+- A schedule's facts are at the line of the step that made them, the
+  `.split(...)` or the `.assume(...)` of a chain, and its run at the line
+  the schedule is finished, its last step (#259). They were all at the
+  kernel's first statement, which for S3's `mass_action`, whose first
+  statement is the one of `mass_ffc` it calls, was a line in `mass_ffc`.
+  The run of a kernel the file does not schedule is at the kernel's
+  definition.
+- A sum over a `Fin` of a number, which the trace adds up term by term, has
+  the facts of its terms' accesses stated once, over its binder, as the
+  source writes the access (#181, #223): S1's `contravariant` reads
+  `G[3*x + d, e, k, j, i] is in bounds for every x in Fin(3) and every
+  instance of S0`, where it listed `G[0 + d, ...]`, `G[3 + d, ...]` and `G[6 +
+  d, ...]`, and the three sums over `c` of `gradient_along_t` are one
+  exactness row, `for every d in Fin(3)`. The term, and the code, still
+  add the terms one by one. S1's ledger is 80 facts where it was 96, with
+  the same verdicts.
+- **A cast's fact id leaves out the target.** What a step means is the same
+  on every target, so the id of a cast's facts is the kernel's definition and
+  the steps (`cast:spmv.spmv@102:split('j', 2, ...):bijective`), and a
+  schedule retargeted (`fused.retarget("opencl").tag(i="g.0")`) shares the
+  facts of the steps it replays with the one it came from: a ledger lists
+  each fusion once. A `buildable` fact and a run's agreement keep the
+  target (`agreement:...:[c].split(...)`).
+- **A substitution through an array computed from inputs alone.**
+  `Schedule.substitute` computes an array where it is read from what its
+  producer read, and refused one whose producer reads an array an earlier
+  substitution computes where it is read, since the dependences of that
+  array's own reads were carried to a statement that no longer runs. Where
+  that array is computed from arrays nothing in the program writes (its
+  inputs), there are none, and the chain is substituted: grudge's `v.n`
+  from the normals, read by the upwind flux, read by the lift
+  (`examples/advection.py`). A chain through an array something writes is
+  refused as before.
+
+- `contract` of a program's array over a domain names `substitute` as the
+  other fix only where one statement stores the array, which is what a
+  substitution computes again; the flagship's triangles, which two
+  statements store, are refused with `keep it whole`.
+
 - A kernel's postcondition that its statements' stores decide reads
   `decided isl` where it read `tested native`, after a new `single-assignment`
   row, and the restatements of it in programs are worth `decided`; the
@@ -504,16 +854,25 @@ All notable changes to loopty are recorded here. The format follows
   up to 32 of isl's instances of them, where it was given 16.
 - `substitute` refuses an array kept in a window, and `contract` one
   computed where it is read.
-- The coverage report in `docs/lean-checks.md` covers the four examples the
-  demo kernels added (`assembly.py`, `layer_potential.py`, `quadrature.py`,
+- The coverage report in `docs/lean-checks.md` covers the demos' examples
+  (`l2p.py`, the flagship, `assembly.py`, `hexahedra.py`,
+  `layer_potential.py`, `advection.py`, `quadrature.py`,
   `sum_factorization.py`), `storage_layouts.py`, `taylor_reconstruction.py`,
   the calls in loops (`examples/calls.py`, `tests/kernels/calls.py`,
-  `tests/kernels/program_domains.py`), and the windows, updates, layouts,
-  postconditions decided from what kernels store and cited theorems above:
-  of 1163 facts isl decides in 27 files, Lean proves 1122 and confirms the
-  counterexample of the 29 refuted ones. The 12 it leaves decided are claims
-  about reals, which core Lean has no words for; with Mathlib it proves them
-  too, 1134 in all, and none stays decided.
+  `tests/kernels/program_domains.py`), the upstream test kernels
+  (`tests/kernels/upstream.py`), the test kernels of programs'
+  postconditions, of reals at their class and of series
+  (`tests/kernels/program_posts.py`, `reals.py`, `series.py`), and the
+  windows, updates, layouts, postconditions decided from what kernels store
+  and cited theorems above: of 1584 facts isl decides in 34 files, Lean
+  proves 1521 and confirms the counterexample of 37 of the 38 refuted ones;
+  the other, two updates of one cell at the same time in `advection.py`, is
+  stated for isl only. The 25 it leaves decided are claims about reals,
+  which core Lean has no words for; with Mathlib it proves them too, 1546 in
+  all, and none stays decided. `examples/layer_potential.py` has 32, all
+  proved with Mathlib. `examples/l2p.py` has 48: 46 proved with Mathlib, and
+  its refused interchange and window of one row, whose negations Lean
+  proves.
 - A ledger gains a `definedness` row for each array a kernel reads only where
   it wrote it before (`scan`'s `off`, `p2p`'s `term`, `pairs`' `f`), and an
   access with mixed subscripts is decided where it was assumed; the
@@ -567,6 +926,64 @@ All notable changes to loopty are recorded here. The format follows
   `fill's loop n, inlined at ..., is n_0 here`.
 
 ### Fixed
+
+- **An `ilp` loop around a sum runs its lanes in one loop of the sum
+  (#264).** A sum's domain named every loop around its statement, and loopy
+  opens a sum's loop inside every loop its domain names, so
+  `split("q", 3).tag(q_inner="ilp")` around `reduce_sum(... for b in
+  Fs.dom[q, j])` gave each lane a loop over `b` of its own, and the lanes
+  ran one after another. The domain now names only the loops its bounds
+  read: over a box, the loop over `b` holds the three lanes' updates, as
+  plain loopy writes it, while a triangle's `j < i + 1` keeps its sum in the
+  loop it reads, and a ragged row's length keeps every loop. The facts are
+  the term's and do not change. The launches of S1's "fields three at a
+  time" shape are now plain loopy's code up to loop names, and every other
+  shape's code is what it was; sumpy's tile on C in
+  `examples/layer_potential.py` runs the sources' loop once around its 16
+  targets, where it ran it once per target. Note 32 in
+  `docs/loopy-notes.md` has the details.
+- **A program's zeros on a device** (#255, #261). A program zeroes each array
+  it makes in a statement of its own, in loops the lowering names (`i_2`,
+  `i_5`), which ran on every work item: `fused.tag(i="g.0")` was refused at
+  `C.zeros`, and the schedule that was timed tagged `i_2` and `i_5`, names the
+  file never wrote. The zeros' loop along an axis of the array now goes on
+  the axis of the loop that every statement storing the array stores it
+  along, so each work item zeroes the cells it stores, before it stores them,
+  and the work-item check asks about the zeros as about any statement.
+  Where a crossing is a call's and the zeros', the call's is named. Zeros
+  that cannot follow (the array stored along a split loop, or along loops on
+  two axes) stay on every work item, and the refusal says why and that
+  `contract` or `substitute` drops them (#289). grudge's weak gradient in one launch,
+  every node on a work item of its own, is now refused for the row the pass
+  along `r` reads from other work items, not for the zeros of `w`.
+- On OpenCL, a complex number to a natural power below 100 is the products
+  numpy's power by an integer takes (`z * ((z * z) * (z * z))` for 5), never
+  pyopencl's `cdouble_powr`. loopy writes only the powers by 2, 3 and 4 as
+  products, and by 1 or 5, which a written-out series has, `exp(n log z)`:
+  a logarithm and an exponential for each, and not exact for `z**1`.
+- A schedule's `ilp` or `vec` tag no longer has loopy warn, on every build,
+  that it falls back to its first scheduler, which it does for every kernel
+  with such a loop: the tag silences `v1_scheduler_fallback` on the kernel
+  it makes. The warning opened `python examples/assembly.py` and
+  `python examples/layer_potential.py` on a fresh checkout.
+- An array of several axes read only through an index array,
+  `coords[cell[c, k], d]` with `nv` in no loop bound, is declared with its
+  strides, `stride:2,stride:1`, so that loopy indexes its rows; it was
+  declared without a shape, and loopy refused the read.
+- An access with mixed subscripts that a statement reads twice over one
+  domain, `x[0, 0]` read for two entries of an inlined Jacobian, is one
+  place, decided by isl; it was `assumed`.
+- A schedule's assumption is named `assume('nc % 4 == 0')` in the status of
+  the casts that rest on it (with lanky's `label`), where its whole id was.
+- **Two statements' atomic updates of one cell asked loopy for a global
+  barrier.** `y[p] += a[p]` and `y[p + 1] += a[p]` with `p` on `l.0` race
+  on `y[p + 1]`, and after `atomic("y")` the schedule is legal and its
+  `buildable` fact holds, but the lowered kernel kept the source's order of
+  the two, so loopy refused to generate it (`MissingBarrierError`). Once an
+  array's updates are atomic, the order is drawn again from the dependences
+  the casts are checked against, and two updates no dependence joins need
+  no order (loopy's `no_sync_with`): libParanumal's lift onto the face nodes
+  (`examples/advection.py`).
 
 - A write through a cell read from an array, `y[perm[i]] = x[i]`, no longer
   has its distinct writes refuted by isl with two instances that write no
