@@ -1751,12 +1751,28 @@ on a device, each split's launches, every node on a work item:
 ```console
 $ uv run lanky check examples/advection.py
 STATUS   BY             WHERE             OWNER                          STATEMENT
--------  -------------  ----------------  -----------------------------  ------------------------------------------------------------------------
-tested   property-test  advection.py:125  inverse_mass_inward            n : Nat, Mi : Fn[Fin(n), Fin(n), Real], S : Fn[Fin(n), Fin(n), Real],...
+-------  -------------  ----------------  -----------------------------  ----------------------------------------------------------------------------------------------------
+tested   property-test  advection.py:125  inverse_mass_inward            n : Nat, Mi : Fn[Fin(n), Fin(n), Real], S : Fn[Fin(n), Fin(n), Real], M : Fn[Fin(n), Fin(n), Real],
+                                                                           w : Fn[Fin(n), Fin(n), Fin(n), Real], k : Fin(n), j : Fin(n), i : Fin(n)
+                                                                         |- sum(Mi[k, c]*Mi[j, b]*Mi[i, a]*sum(M[c, t]*M[b, s]*S[a, r]*w[t, s, r] for t in Fin(n),
+                                                                                 s in Fin(n), r in Fin(n)) for c in Fin(n), b in Fin(n), a in Fin(n))
+                                                                             == sum(sum(Mi[k, c]*M[c, t] for c in Fin(n))*sum(Mi[j, b]*M[b, s]
+                                                                                 for b in Fin(n))*sum(Mi[i, a]*S[a, r] for a in Fin(n))*w[t, s, r] for t in Fin(n),
+                                                                               s in Fin(n), r in Fin(n))
 tested   python         advection.py:125  inverse_mass_inward            the term computes what the annotations compute
-tested   property-test  advection.py:167  lift_inward                    n : Nat, Mi : Fn[Fin(n), Fin(n), Real], M : Fn[Fin(n), Fin(n), Real],...
+tested   property-test  advection.py:167  lift_inward                    n : Nat, Mi : Fn[Fin(n), Fin(n), Real], M : Fn[Fin(n), Fin(n), Real], end : Fn[Fin(n), Real],
+                                                                           g : Fn[Fin(n), Fin(n), Real], k : Fin(n), j : Fin(n), i : Fin(n)
+                                                                         |- sum(Mi[k, c]*Mi[j, b]*Mi[i, a]*(end[a]*sum(M[c, t]*M[b, s]*g[t, s] for t in Fin(n), s in Fin(n)))
+                                                                               for c in Fin(n), b in Fin(n), a in Fin(n))
+                                                                             == sum(Mi[i, a]*end[a]
+                                                                               for a in Fin(n))*sum(sum(Mi[k, c]*M[c, t] for c in Fin(n))*sum(Mi[j, b]*M[b, s]
+                                                                                 for b in Fin(n))*g[t, s] for t in Fin(n), s in Fin(n))
 tested   python         advection.py:167  lift_inward                    the term computes what the annotations compute
-tested   property-test  advection.py:202  lift_is_the_gather_transposed  faces : Nat, n : Nat, nodes : Nat, node : Fn[Fin(faces), Fin(n), Fin(...
+tested   property-test  advection.py:202  lift_is_the_gather_transposed  faces : Nat, n : Nat, nodes : Nat, node : Fn[Fin(faces), Fin(n), Fin(n), Fin(nodes)],
+                                                                           g : Fn[Fin(faces), Fin(n), Fin(n), Real], u : Fn[Fin(nodes), Real]
+                                                                         |- sum(sum(g[f, a, b] for f in Fin(faces), a in Fin(n), b in Fin(n) if node[f, a, b] == x)*u[x]
+                                                                               for x in Fin(nodes))
+                                                                             == sum(g[f, a, b]*u[node[f, a, b]] for f in Fin(faces), a in Fin(n), b in Fin(n))
 tested   python         advection.py:202  lift_is_the_gather_transposed  the term computes what the annotations compute
 decided  isl            advection.py:260  reference_velocity             V[d, e, k, j, i] is in bounds for every instance of S0
 decided  isl            advection.py:260  reference_velocity             G[d, e, k, j, i] is in bounds for every instance of S0
@@ -1781,11 +1797,15 @@ decided  isl            advection.py:267  normal_velocity                the sou
 tested   interpreter    advection.py:267  normal_velocity                the traced term computes what the body computes
 decided  isl            advection.py:309  upwind                         flux[e, f, a, b] is in bounds for every instance of S0
 decided  isl            advection.py:309  upwind                         vn[e, f, a, b] is in bounds for every instance of S0
-decided  isl            advection.py:309  upwind                         u[e, inside[f, a, b, 0], inside[f, a, b, 1], inside[f, a, b, 2]] is i...
+decided  isl            advection.py:309  upwind                         u[e, inside[f, a, b, 0], inside[f, a, b, 1], inside[f, a, b, 2]] is in bounds
+                                                                           for every instance of S0
+                                                                           (inside[f, a, b, 0] : Fin(n), inside[f, a, b, 1] : Fin(n), inside[f, a, b, 2] : Fin(n), by type)
 decided  isl            advection.py:309  upwind                         inside[f, a, b, 0] is in bounds for every instance of S0
 decided  isl            advection.py:309  upwind                         inside[f, a, b, 1] is in bounds for every instance of S0
 decided  isl            advection.py:309  upwind                         inside[f, a, b, 2] is in bounds for every instance of S0
-decided  type           advection.py:309  upwind                         u[nbr[e, f], outside[f, a, b, 0], outside[f, a, b, 1], outside[f, a, ...
+decided  type           advection.py:309  upwind                         u[nbr[e, f], outside[f, a, b, 0], outside[f, a, b, 1], outside[f, a, b, 2]] is in bounds by type
+                                                                           (nbr[e, f] : Fin(ne), outside[f, a, b, 0] : Fin(n), outside[f, a, b, 1] : Fin(n),
+                                                                             outside[f, a, b, 2] : Fin(n))
 decided  isl            advection.py:309  upwind                         nbr[e, f] is in bounds for every instance of S0
 decided  isl            advection.py:309  upwind                         outside[f, a, b, 0] is in bounds for every instance of S0
 decided  isl            advection.py:309  upwind                         outside[f, a, b, 1] is in bounds for every instance of S0
@@ -1863,18 +1883,23 @@ decided  isl            advection.py:415  advection_rhs                  every c
 decided  isl            advection.py:414  advection_rhs                  every cell of vn that upwind reads, normal_velocity stored before it
 decided  isl            advection.py:416  advection_rhs                  every cell of flux that lift reads, upwind stored before it
 tested   interpreter    advection.py:405  advection_rhs                  the traced term computes what the body computes
-decided  isl            advection.py:409  advection_rhs                  for substitute('V'), every cell of V that advection_rhs reads, refere...
+decided  isl            advection.py:409  advection_rhs                  for substitute('V'), every cell of V that advection_rhs reads,
+                                                                           reference_velocity.S0 has stored by the time it is read
 decided  isl            advection.py:409  advection_rhs                  substitute('V') renames the instances of advection_rhs one for one
-decided  isl            advection.py:409  advection_rhs                  the order after substitute('V') runs every dependence of advection_rh...
-decided  isl            advection.py:409  advection_rhs                  for substitute('vn'), every cell of vn that advection_rhs reads, norm...
+decided  isl            advection.py:409  advection_rhs                  the order after substitute('V') runs every dependence of advection_rhs forward
+decided  isl            advection.py:409  advection_rhs                  for substitute('vn'), every cell of vn that advection_rhs reads,
+                                                                           normal_velocity.S0 has stored by the time it is read
 decided  isl            advection.py:409  advection_rhs                  substitute('vn') renames the instances of advection_rhs one for one
-decided  isl            advection.py:409  advection_rhs                  the order after substitute('vn') runs every dependence of advection_r...
-decided  isl            advection.py:409  advection_rhs                  fuse(volume, lift, loops=4) renames the instances of advection_rhs on...
-decided  isl            advection.py:409  advection_rhs                  the order after fuse(volume, lift, loops=4) runs every dependence of ...
-decided  isl            advection.py:409  advection_rhs                  fuse(upwind, volume, loops=1) renames the instances of advection_rhs ...
-decided  isl            advection.py:409  advection_rhs                  the order after fuse(upwind, volume, loops=1) runs every dependence o...
-decided  isl            advection.py:409  advection_rhs                  for contract('flux'), every cell of flux that advection_rhs reads, up...
-decided  isl            advection.py:409  advection_rhs                  no read of flux sees its slot overwritten after contract('flux', lamb...
+decided  isl            advection.py:409  advection_rhs                  the order after substitute('vn') runs every dependence of advection_rhs forward
+decided  isl            advection.py:409  advection_rhs                  fuse(volume, lift, loops=4) renames the instances of advection_rhs one for one
+decided  isl            advection.py:409  advection_rhs                  the order after fuse(volume, lift, loops=4) runs every dependence of advection_rhs forward
+decided  isl            advection.py:409  advection_rhs                  fuse(upwind, volume, loops=1) renames the instances of advection_rhs one for one
+decided  isl            advection.py:409  advection_rhs                  the order after fuse(upwind, volume, loops=1) runs every dependence of advection_rhs forward
+decided  isl            advection.py:409  advection_rhs                  for contract('flux'), every cell of flux that advection_rhs reads,
+                                                                           upwind.S0 has stored by the time it is read
+decided  isl            advection.py:409  advection_rhs                  no read of flux sees its slot overwritten after
+                                                                           contract('flux', lambda e_1, f_0, a_0, b_0: (f_0, a_0, b_0)):
+                                                                           flux kept in 6*n*n cells, flux[e_1, f_0, a_0, b_0] in slot (f_0, a_0, b_0)
 decided  isl            advection.py:425  folded_rhs                     every cell of flux that lift reads, upwind stored before it
 tested   interpreter    advection.py:419  folded_rhs                     the traced term computes what the body computes
 decided  isl            advection.py:452  surface                        every cell of flux that lift reads, upwind stored before it
@@ -1882,6 +1907,9 @@ tested   interpreter    advection.py:447  surface                        the tra
 tested   interpreter    advection.py:455  volume_and_lift                the traced term computes what the body computes
 
 128 facts: 112 decided, 16 tested
+
+WITHOUT LEAN: inverse_mass_inward, lift_inward, lift_is_the_gather_transposed and 108 more rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
+WITHOUT MATHLIB: inverse_mass_inward, lift_inward and lift_is_the_gather_transposed are not proved, since only Lean with Mathlib can state them. To have Lean prove them: python -m lanky.mathlib ~/mathlib (about 7 GB), then export LANKY_LEAN_MATHLIB=~/mathlib.
 ```
 
 ### loopty run examples/advection.py
@@ -1912,32 +1940,39 @@ volume_and_lift: Schedule(volume_and_lift, target='c')
   rhs: difference 0 within 1.03e-06 (approx) -> tested
 
 STATUS   BY     WHERE             OWNER               STATEMENT
--------  -----  ----------------  ------------------  ------------------------------------------------------------------------
-decided  isl    advection.py:409  advection_rhs       for substitute('V'), every cell of V that advection_rhs reads, refere...
+-------  -----  ----------------  ------------------  --------------------------------------------------------------------------------------------------
+decided  isl    advection.py:409  advection_rhs       for substitute('V'), every cell of V that advection_rhs reads,
+                                                        reference_velocity.S0 has stored by the time it is read
 decided  isl    advection.py:409  advection_rhs       substitute('V') renames the instances of advection_rhs one for one
-decided  isl    advection.py:409  advection_rhs       the order after substitute('V') runs every dependence of advection_rh...
-decided  isl    advection.py:409  advection_rhs       for substitute('vn'), every cell of vn that advection_rhs reads, norm...
+decided  isl    advection.py:409  advection_rhs       the order after substitute('V') runs every dependence of advection_rhs forward
+decided  isl    advection.py:409  advection_rhs       for substitute('vn'), every cell of vn that advection_rhs reads,
+                                                        normal_velocity.S0 has stored by the time it is read
 decided  isl    advection.py:409  advection_rhs       substitute('vn') renames the instances of advection_rhs one for one
-decided  isl    advection.py:409  advection_rhs       the order after substitute('vn') runs every dependence of advection_r...
-decided  isl    advection.py:409  advection_rhs       fuse(volume, lift, loops=4) renames the instances of advection_rhs on...
-decided  isl    advection.py:409  advection_rhs       the order after fuse(volume, lift, loops=4) runs every dependence of ...
-decided  isl    advection.py:409  advection_rhs       fuse(upwind, volume, loops=1) renames the instances of advection_rhs ...
-decided  isl    advection.py:409  advection_rhs       the order after fuse(upwind, volume, loops=1) runs every dependence o...
-tested   loopy  advection.py:405  advection_rhs       the scheduled run of advection_rhs agrees with the native run to the ...
-decided  isl    advection.py:409  advection_rhs       for contract('flux'), every cell of flux that advection_rhs reads, up...
-decided  isl    advection.py:409  advection_rhs       no read of flux sees its slot overwritten after contract('flux', lamb...
-tested   loopy  advection.py:405  advection_rhs       the scheduled run of advection_rhs agrees with the native run to the ...
-tested   loopy  advection.py:260  reference_velocity  the scheduled run of reference_velocity agrees with the native run to...
-tested   loopy  advection.py:279  normal_velocity     the scheduled run of normal_velocity agrees with the native run to th...
-tested   loopy  advection.py:309  upwind              the scheduled run of upwind agrees with the native run to the accurac...
-tested   loopy  advection.py:339  volume              the scheduled run of volume agrees with the native run to the accurac...
-tested   loopy  advection.py:367  lift                the scheduled run of lift agrees with the native run to the accuracy ...
-tested   loopy  advection.py:395  lift_on_faces       the scheduled run of lift_on_faces agrees with the native run to the ...
-tested   loopy  advection.py:419  folded_rhs          the scheduled run of folded_rhs agrees with the native run to the acc...
-tested   loopy  advection.py:447  surface             the scheduled run of surface agrees with the native run to the accura...
-tested   loopy  advection.py:455  volume_and_lift     the scheduled run of volume_and_lift agrees with the native run to th...
+decided  isl    advection.py:409  advection_rhs       the order after substitute('vn') runs every dependence of advection_rhs forward
+decided  isl    advection.py:409  advection_rhs       fuse(volume, lift, loops=4) renames the instances of advection_rhs one for one
+decided  isl    advection.py:409  advection_rhs       the order after fuse(volume, lift, loops=4) runs every dependence of advection_rhs forward
+decided  isl    advection.py:409  advection_rhs       fuse(upwind, volume, loops=1) renames the instances of advection_rhs one for one
+decided  isl    advection.py:409  advection_rhs       the order after fuse(upwind, volume, loops=1) runs every dependence of advection_rhs forward
+tested   loopy  advection.py:405  advection_rhs       the scheduled run of advection_rhs agrees with the native run to the accuracy its types state
+decided  isl    advection.py:409  advection_rhs       for contract('flux'), every cell of flux that advection_rhs reads,
+                                                        upwind.S0 has stored by the time it is read
+decided  isl    advection.py:409  advection_rhs       no read of flux sees its slot overwritten after
+                                                        contract('flux', lambda e_1, f_0, a_0, b_0: (f_0, a_0, b_0)):
+                                                        flux kept in 6*n*n cells, flux[e_1, f_0, a_0, b_0] in slot (f_0, a_0, b_0)
+tested   loopy  advection.py:405  advection_rhs       the scheduled run of advection_rhs agrees with the native run to the accuracy its types state
+tested   loopy  advection.py:260  reference_velocity  the scheduled run of reference_velocity agrees with the native run to the accuracy its types state
+tested   loopy  advection.py:279  normal_velocity     the scheduled run of normal_velocity agrees with the native run to the accuracy its types state
+tested   loopy  advection.py:309  upwind              the scheduled run of upwind agrees with the native run to the accuracy its types state
+tested   loopy  advection.py:339  volume              the scheduled run of volume agrees with the native run to the accuracy its types state
+tested   loopy  advection.py:367  lift                the scheduled run of lift agrees with the native run to the accuracy its types state
+tested   loopy  advection.py:395  lift_on_faces       the scheduled run of lift_on_faces agrees with the native run to the accuracy its types state
+tested   loopy  advection.py:419  folded_rhs          the scheduled run of folded_rhs agrees with the native run to the accuracy its types state
+tested   loopy  advection.py:447  surface             the scheduled run of surface agrees with the native run to the accuracy its types state
+tested   loopy  advection.py:455  volume_and_lift     the scheduled run of volume_and_lift agrees with the native run to the accuracy its types state
 
 23 facts: 12 decided, 11 tested
+
+WITHOUT LEAN: 12 rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
 ```
 
 ## calls.py
