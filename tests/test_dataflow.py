@@ -663,7 +663,7 @@ def test_lanky_check_lists_the_casts_of_the_files_schedules_once(capsys: Any) ->
     first = [
         fact
         for fact in casts
-        if ".split('r', 2" in fact.id and "split('r_outer'" not in fact.id
+        if "split('r', 2" in fact.id and "split('r_outer'" not in fact.id
     ]
     assert len(first) == 2  # bijective and monotone, once
     assert not [fact for fact in ledger if fact.provenance.get("duplicate_claims")]

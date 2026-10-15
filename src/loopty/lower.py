@@ -121,6 +121,7 @@ __all__ = [
     "RESERVED_PREFIX",
     "RESERVED_WORDS",
     "WRAP_FLAG",
+    "CheckedOpenCLTarget",
     "ExpressionLowerer",
     "InKernelOpenCLTarget",
     "InProcessCTarget",
@@ -137,6 +138,8 @@ __all__ = [
     "lower",
     "lower_generic",
     "numpy_dtype",
+    "pyopencl_installed",
+    "require_pyopencl",
     "target_for",
 ]
 
@@ -582,6 +585,41 @@ class InKernelOpenCLTarget(_ReadDeclining, lp.PyOpenCLTarget):
         return _OpenCLCode(self)
 
 
+class CheckedOpenCLTarget(_ReadDeclining, lp.OpenCLTarget):
+    """The ``opencl`` target where pyopencl is not installed: checked, not built.
+
+    What a schedule for a device claims (the order of its loops, which work
+    item runs each instance, whether loopy can build it) is read off the
+    kernel's loops and accesses (:class:`loopty.schedule.Schedule`), and
+    needs neither pyopencl nor a device. loopy's PyOpenCL target imports
+    pyopencl when it is built; its plain OpenCL target has the same kernels
+    and imports nothing. So where pyopencl is not installed, a schedule for
+    ``"opencl"`` is built on this one, and its facts are the ones it has
+    where pyopencl is: a file keeps its device schedules beside the others,
+    ``python file.py`` and ``lanky check file.py`` run anywhere, and the
+    ledger lists their facts. Generating their code and running them are
+    pyopencl's, and are refused here, saying so (:func:`require_pyopencl`).
+    """
+
+
+@functools.cache
+def pyopencl_installed() -> bool:
+    """Whether pyopencl is installed, asked without importing it."""
+    import importlib.util
+
+    return importlib.util.find_spec("pyopencl") is not None
+
+
+def require_pyopencl(kernel: Any) -> None:
+    """Refuse to generate or run code for a :class:`CheckedOpenCLTarget` kernel."""
+    if isinstance(kernel.target, CheckedOpenCLTarget):
+        raise ImportError(
+            "generating and running OpenCL code needs pyopencl, which is not "
+            "installed here; the schedule's facts are checked without it. "
+            "Install loopty's opencl extra where the device is"
+        )
+
+
 def target_for(target: str = "c") -> Any:
     """The loopy target named by ``target``.
 
@@ -592,15 +630,18 @@ def target_for(target: str = "c") -> Any:
     ``"opencl"`` is :class:`InKernelOpenCLTarget`, ``lp.PyOpenCLTarget`` with
     every condition in the kernel, and pyopencl is imported when it is built,
     here and nowhere else, inside the branch, so that importing loopty on a
-    machine without a device costs nothing and can never fail. All three
-    write ``//``, ``%``, ``<<`` and ``>>`` as numpy computes them
-    (:mod:`loopty.operations`).
+    machine without a device costs nothing and can never fail; where
+    pyopencl is not installed, it is :class:`CheckedOpenCLTarget`, whose
+    schedules are checked and not built. All of them write ``//``, ``%``,
+    ``<<`` and ``>>`` as numpy computes them (:mod:`loopty.operations`).
     """
     if target in ("c", None):
         return InProcessCTarget()
     if target == "c-source":
         return SourceCTarget()
     if target == "opencl":
+        if not pyopencl_installed():
+            return CheckedOpenCLTarget()
         return InKernelOpenCLTarget()
     raise LoweringError(f"unknown target {target!r}; expected 'c' or 'opencl'")
 

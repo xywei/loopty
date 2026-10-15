@@ -93,6 +93,12 @@ work items each step records (:attr:`Step.work`): each dependence class's two
 instances on one work item of every axis
 (:func:`loopty.obligations.cast_obligation`).
 
+A program zeroes each array it makes in a statement of its own, in loops the
+file never wrote. Those loops go on the axis of the loop that stores the
+array along the same axis of it, so ``fused.tag(i="g.0")`` zeroes each box's
+cells on the work item that stores them (see :meth:`Schedule.tag`), and the
+check asks about the zeros as about any statement.
+
 Legal is not the same as buildable
 ----------------------------------
 
@@ -131,9 +137,15 @@ Fact ids
 --------
 
 A fact's id names the schedule it is about, precisely enough to tell it from
-every other schedule of every kernel: the kernel's definition, then the
-target and every step up to the one the fact is about, with every argument it
-was given (:meth:`Schedule.fact_id`). The definition is the module the
+every other schedule of every kernel: the kernel's definition, then every
+step up to the one the fact is about, with every argument it was given
+(:meth:`Schedule.fact_id`). What a step means is the same on every target,
+so a cast's facts leave the target out, and a schedule retargeted
+(:meth:`Schedule.retarget`) shares them with the one it was retargeted from:
+a file that keeps ``fused`` for C and ``fused.retarget("opencl").tag(i="g.0")``
+for a device lists each fusion once. What the target builds is not, and a
+``buildable`` fact, like the agreement a run records, names the target before
+the steps. The definition is the module the
 kernel's file's path gives it, its qualified name and its line, through
 :func:`lanky.ledger.fact_id`, as every fact of the kernel itself is keyed, so
 two kernels of one name, one defined in a file and one imported into it, keep
@@ -1414,6 +1426,108 @@ def _apart(
     return first.apply_range(isl.Map(_OTHER_WORK_ITEM)).apply_range(
         second.reverse()
     )
+
+
+def _zeros_ids(term: Term) -> dict[str, str]:
+    """The statements that zero the arrays a program makes, by id: ``{"C.zeros": "C"}``.
+
+    Only the ones the term has: the flag of a checked point is a temporary
+    the executor zeroes, with no statement of its own.
+    """
+    ids = {stmt.id for stmt in term.stmts}
+    return {
+        f"{name}.zeros": name
+        for name, _typ in term.temporaries
+        if f"{name}.zeros" in ids
+    }
+
+
+def _zeros_tags(
+    draft: _Draft, term: Term, insn_ids: Mapping[str, str]
+) -> dict[str, str]:
+    """The axes the loops that zero a program's arrays go on, by loop name.
+
+    A program zeroes each array it makes (``C = Arr.zeros(...)``) in a
+    statement of its own, ``C.zeros``, in loops the lowering names (``i_2``,
+    ``i_3``, ...) and the file never wrote. On a device, a statement with no
+    loop on an axis runs on every work item of it, so tagging the calls'
+    loops alone would have every work item zero every cell, those another
+    work item stores included (#255), and tagging the zeros' loops too would
+    take names the file never wrote (#261). So the zeros go where the array
+    is stored: along an axis of the array that every statement storing it
+    stores along a loop of its own on one group or local axis, the same for
+    each, the zeros' loop along that axis goes on that axis too.
+    ``fused.tag(i="g.0")`` then zeroes each box's cells on the work item of
+    the box's work group that stores them, before it stores them.
+
+    A loop the schedule has tagged keeps its tag. An axis of the array along
+    which the statements that store it disagree, or one they store through
+    a subscript that is not a loop of theirs (a loop split, a cell read from
+    an array), gives none; so does an axis two axes of the array would
+    share, and so does an array no statement stores. Those zeros stay on
+    every work item, and the work-item check refuses them, as it refuses any
+    statement there, saying why (:meth:`Schedule._render_crossing`). The
+    check is what stands behind the axes chosen here: a zero and the store
+    of its cell on two work items, which two loops that start at different
+    values would give, are refused like any other pair. Read off the
+    draft's kernel, whose instructions store along the loops the steps so
+    far have left them; a draft with no kernel gives none.
+    """
+    if draft.kernel is None:
+        return {}
+    zeros = {insn_ids[stmt_id]: array for stmt_id, array in _zeros_ids(term).items()}
+    if not zeros:
+        return {}
+    entry = draft.kernel.default_entrypoint
+    zeroing: dict[str, Any] = {}
+    storing: dict[str, list[Any]] = {}
+    for insn in entry.instructions:
+        names = insn.assignee_var_names()
+        if len(names) != 1:
+            continue
+        if zeros.get(insn.id) == names[0]:
+            zeroing[names[0]] = insn
+        else:
+            storing.setdefault(names[0], []).append(insn)
+
+    def axis_of(insn: Any, position: int, rank: int) -> tuple[str, str] | None:
+        """The axis of the loop ``insn`` stores along at ``position``, and its tag."""
+        if not isinstance(insn.assignee, prim.Subscript):
+            return None
+        index = insn.assignee.index_tuple
+        if len(index) != rank:
+            return None
+        expr = index[position]
+        if not isinstance(expr, prim.Variable) or expr.name not in insn.within_inames:
+            return None
+        tag = draft.tags.get(expr.name)
+        if tag is None:
+            return None
+        axis = _grid_axis(tag, expr.name)
+        # l.auto is an axis loopy has not chosen, which a zero cannot share
+        if axis is None or "(" in axis:
+            return None
+        return axis, str(tag)
+
+    out: dict[str, str] = {}
+    for array, zero in zeroing.items():
+        writers = storing.get(array, [])
+        if not writers or not isinstance(zero.assignee, prim.Subscript):
+            continue
+        loops = zero.assignee.index_tuple
+        given: dict[str, tuple[str, str]] = {}
+        for position, loop in enumerate(loops):
+            if not isinstance(loop, prim.Variable) or loop.name in draft.tags:
+                continue
+            found = {axis_of(insn, position, len(loops)) for insn in writers}
+            if len(found) != 1 or None in found:
+                continue
+            given[loop.name] = found.pop()
+        axes = [axis for axis, _tag in given.values()]
+        out.update(
+            {loop: tag for loop, (axis, tag) in given.items() if axes.count(axis) == 1}
+        )
+    return out
 
 
 # }}}
@@ -3334,7 +3448,10 @@ class Schedule:
 
         That is the id of the agreement a run of the schedule records
         (:func:`loopty.executor.agreement`). A cast fact's is ``cast:`` and
-        the steps up to the one it is about, then its kind. Keyed by the
+        the steps up to the one it is about, without the target, then its
+        kind: ``cast:spmv.spmv@102:split('j', 2, inner='j_in',
+        outer='j_out'):bijective``, the same for the schedule on every
+        target; a ``buildable`` fact's names the target. Keyed by the
         definition, as every fact of the kernel itself is, so that two
         kernels of one name scheduled in one file, one defined there and one
         imported, keep their facts apart (#75); a term scheduled with no
@@ -3343,10 +3460,20 @@ class Schedule:
         return self._fact_id(kind, self._steps, detail)
 
     def _fact_id(
-        self, kind: str, steps: Sequence[tuple[str, tuple, dict]], detail: str = ""
+        self,
+        kind: str,
+        steps: Sequence[tuple[str, tuple, dict]],
+        detail: str = "",
+        *,
+        target: bool = True,
     ) -> str:
-        """:meth:`fact_id`, over the steps given rather than the schedule's."""
-        text = _steps_text(self._target, steps)
+        """:meth:`fact_id`, over the steps given rather than the schedule's.
+
+        ``target=False`` leaves the target out, for a claim about meaning,
+        which is the same on every target (see "Fact ids" in the module
+        docstring).
+        """
+        text = _steps_text(self._target if target else None, steps)
         return fact_id(
             kind, **self._definition, detail=f"{text}:{detail}" if detail else text
         )
@@ -3372,6 +3499,13 @@ class Schedule:
         ``t + 1`` reads the neighbours of step ``t``, and every dependence to
         or from a statement with no loop on the axis, which runs on every
         work item of it (see "Work items" in the module docstring).
+
+        The zeros of an array a program makes go where the array is stored:
+        ``fused.tag(i="g.0")`` zeroes each box's cells of ``C`` on the work
+        item that stores them, since every statement that stores ``C``
+        stores it along ``i`` (:func:`_zeros_tags`). So a device schedule of
+        a program names only the loops its file wrote, and its steps and
+        facts say ``tag(i='g.0')``, as written.
 
         A name that is neither a loop nor the loop of a reduction, and a tag
         loopy cannot read, are refused with a ``ValueError`` before anything
@@ -3438,7 +3572,12 @@ class Schedule:
                 )
             draft.reassoc.add(accumulated)
         draft.tags.update(inames)
-        draft.kernel = _transformed(draft.kernel, lp.tag_inames, dict(inames))
+        # the zeros of an array the program makes go where it is stored
+        zeros = _zeros_tags(draft, self._term, self._lowering.insn_ids)
+        draft.tags.update(zeros)
+        draft.kernel = _transformed(
+            draft.kernel, lp.tag_inames, {**dict(inames), **zeros}
+        )
         if any(str(tag).split(".")[0] in ("ilp", "vec") for tag in inames.values()):
             draft.kernel = _transformed(draft.kernel, _expecting_v1_scheduler)
         text = "tag(" + ", ".join(f"{k}={v!r}" for k, v in inames.items()) + ")"
@@ -5856,7 +5995,7 @@ class Schedule:
         other._code = _transformed(self._code, lp.assume, text)
         recipe = ("assume", (condition,), {})
         fact = Fact(
-            id=self._fact_id("assumption", (*self._steps, recipe)),
+            id=self._fact_id("assumption", (*self._steps, recipe), target=False),
             kind="assumption",
             statement=f"{condition}, which {self._term.name} is scheduled assuming",
             term=None,
@@ -6915,7 +7054,15 @@ class Schedule:
                 not total.intersect(spread[axis]).is_empty() for axis in work.axes
             )
         private = self._private_windows()
-        for dep in (*(deps if crossed else ()), *self._within):
+        # The zeros of a program's array go where the statements that store
+        # it run (see _zeros_tags), so a statement's own crossing is the one
+        # to name where there is one, and the zeros' pairs are asked last.
+        zeros = _zeros_ids(self._term)
+        ordered = sorted(
+            deps if crossed else (),
+            key=lambda dep: dep.source in zeros or dep.sink in zeros,
+        )
+        for dep in (*ordered, *self._within):
             for axis in work.axes:
                 if dep.array in private:
                     # two work items keep two windows: only a read can miss
@@ -7058,6 +7205,7 @@ class Schedule:
         (source_id, source_coords), (sink_id, sink_coords), params = witness
         source_loop = work.loops[source_id][axis]
         sink_loop = work.loops[sink_id][axis]
+        hints: list[str] = []
         if source_loop is None or sink_loop is None:
             active = {
                 "raw": ("writes", "reads"),
@@ -7097,6 +7245,20 @@ class Schedule:
                     f"{' and '.join(everywhere)} {verb} in no loop on {axis}, so "
                     "on every work item of it"
                 )
+                # zeros the tag could not place (see _zeros_tags): why, and
+                # the steps that drop them
+                zeros = _zeros_ids(self._term)
+                for stmt_id in everywhere:
+                    if stmt_id in zeros:
+                        array = zeros[stmt_id]
+                        hints.append(
+                            f". The zeros {array} is made with run on the work "
+                            "item that stores each cell only where every "
+                            f"statement that stores {array} stores it along a "
+                            f"loop of its own on {axis}, and none does here; "
+                            f"keep {array} in a window (contract) or compute it "
+                            "where it is read (substitute), which drops them"
+                        )
             how = "; ".join(parts)
         else:
             one = source_loop == sink_loop
@@ -7136,7 +7298,7 @@ class Schedule:
             )
         message = (
             f"{text} illegal: {pair} on another work item{at}: {how}, and {why}"
-            f"{note}"
+            f"{note}{''.join(hints)}"
         )
         detail = (
             f"a {dep.kind} dependence on {dep.array} joins two work items of {axis}"
@@ -7217,7 +7379,14 @@ class Schedule:
             # decided where the sizes are as assumed (see assume)
             rests_on = (*rests_on, *self._assumption_ids)
         return Fact(
-            id=self._fact_id("cast", (*self._steps, step), f"{kind}{suffix}"),
+            # what a step means is the same on every target, and a schedule
+            # retargeted shares those facts; what the target builds is not
+            id=self._fact_id(
+                "cast",
+                (*self._steps, step),
+                f"{kind}{suffix}",
+                target=kind == "buildable",
+            ),
             kind=kind,
             statement=statement,
             term=term,
@@ -7292,9 +7461,16 @@ def _key(name: str, target: str, steps: Sequence[tuple[str, tuple, dict]]) -> st
     return name + _steps_text(target, steps)
 
 
-def _steps_text(target: str, steps: Sequence[tuple[str, tuple, dict]]) -> str:
-    """``[c].split('j', 2, inner='j_in', outer='j_out')``: a key after the name."""
-    return f"[{target}]" + "".join(f".{_call_text(step)}" for step in steps)
+def _steps_text(target: str | None, steps: Sequence[tuple[str, tuple, dict]]) -> str:
+    """``[c].split('j', 2, inner='j_in', outer='j_out')``: a key after the name.
+
+    With no target, the steps alone: ``split('j', 2, inner='j_in',
+    outer='j_out')``, which is what a cast's fact is keyed by.
+    """
+    calls = [_call_text(step) for step in steps]
+    if target is None:
+        return ".".join(calls)
+    return f"[{target}]" + "".join(f".{call}" for call in calls)
 
 
 def _call_text(step: tuple[str, tuple, dict]) -> str:

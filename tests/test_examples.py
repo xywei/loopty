@@ -1674,6 +1674,14 @@ def test_the_l2p_demo_refuses_the_interchange_and_fuses_box_by_box() -> None:
     ]
     assert {fact.status.value for fact in module.fused.facts()} == {"decided"}
     assert "pot: difference 0 within" in result.stdout
+    # sumpy's own GPU schedule, each box a work group, with the file's names:
+    # the tag's two facts, the fusions' being fused's, above
+    device = result.stdout.split("on a GPU, each box a work group, as sumpy's: ")[1]
+    assert device.splitlines()[1:] == [
+        "  decided  isl  tag(i='g.0') renames the instances of l2p one for one",
+        "  decided  isl  the order after tag(i='g.0') runs every dependence of l2p "
+        "forward, within one work item",
+    ]
 
 
 @needs_several_indices
@@ -1710,8 +1718,8 @@ def test_the_l2p_demo_keeps_one_triangle_per_box_and_refuses_one_row() -> None:
         "read, lambda i, a, b: (a, b)\n"
     ) in result.stdout
     assert (
-        "on a device, each box a work group, as sumpy's own schedule: "
-        "tag(i='g.0'): 2 facts, all decided by isl\n"
+        "on a device, each box a work group keeping its windows: tag(i='g.0'): 2 "
+        "facts, all decided by isl\n"
     ) in result.stdout
 
 

@@ -36,17 +36,20 @@ L2P, read top to bottom, in three layers:
    (``contract``), found along the fused order, whose two facts, that every
    read sees a stored cell and that no read sees its slot overwritten, isl
    decides and Lean proves. One row of the triangle is too small a window,
-   and is refused with the read it would break. On a device each box is a
-   work group, ``tag(i="g.0")``, sumpy's own schedule, and each keeps its
-   windows.
+   and is refused with the read it would break. ``on_a_gpu`` is sumpy's own
+   schedule for a GPU, each box a work group: ``fused`` with its box loop on
+   ``g.0``, and no work item reads what another stored. ``on_a_device()`` is
+   the same with each box's windows, ``contracted`` on ``g.0``, each work
+   item keeping its own; isl decides it, and Lean does not state a cast on
+   such windows yet (loopty #295).
 
 Run it three ways.
 
 ``python examples/l2p.py``
     Runs ``l2p`` natively against numpy on a quadtree's leaves, compares each
     target's potential with the sum over the charges, shows the refused
-    interchange and the refused window, runs ``contracted`` compiled, and
-    checks sumpy's schedule on a device.
+    interchange and the refused window, runs ``contracted`` compiled, checks
+    ``on_a_device()``, and lists the facts of ``on_a_gpu``.
 
 ``lanky check examples/l2p.py``
     The ledger: the theorems; the layout's facts; each kernel's accesses,
@@ -56,7 +59,8 @@ Run it three ways.
 
 ``loopty run examples/l2p.py``
     Every kernel and the program, and each schedule, compiled for the C
-    target and compared with the native run.
+    target and compared with the native run; ``on_a_gpu`` on a device,
+    where pyopencl is installed (``PYOPENCL_CTX`` picks the device).
 
 How faithful. The coefficients are sumpy's ``src_expansions`` row by row, in
 its storage order, and ``rscale`` is sumpy's; the boxes are leaves owning
@@ -336,6 +340,13 @@ fused = (
 #: keeps them in registers: lambda i, a, b: (a, b), found along the order.
 contracted = fused.contract("R").contract("C")
 
+#: sumpy's own schedule on a GPU, ``E2PFromSingleBox.get_optimized_kernel``:
+#: each box a work group (its ``itgt_box`` on ``g.0``), whose one work item
+#: runs the box's coefficients, triangle and targets in turn. The cells of C
+#: and R the program makes are zeroed by the work item that stores them.
+#: Checked anywhere; ``loopty run`` runs it where pyopencl and a device are.
+on_a_gpu = fused.retarget("opencl").tag(i="g.0")
+
 
 def refused_interchange() -> Schedule:
     """Columns of the triangle outside its rows: refused, with the pair it reorders."""
@@ -348,11 +359,14 @@ def refused_row() -> Schedule:
 
 
 def on_a_device(target: str = "c") -> Schedule:
-    """sumpy's own schedule: each box a work group, ``i`` on ``g.0``.
+    """sumpy's own schedule with each box's windows: ``i`` on ``g.0``.
 
     Each work item keeps its own windows, as loopy keeps a private
     temporary, so the boxes need no order. Built for C here, which has no
-    work groups; ``benchmarks/l2p.py`` retargets it onto OpenCL.
+    work groups; ``benchmarks/l2p.py`` retargets it onto OpenCL. isl decides
+    its tag; Lean does not state a cast on windows each work item keeps of
+    its own yet (loopty #295), so it is checked here and is no row of the
+    ledger.
     """
     schedule = contracted if target == "c" else contracted.retarget(target)
     return schedule.tag(i="g.0")
@@ -469,7 +483,11 @@ def sumpy_l2p(coeffs, cx, cy, cnt, tx, ty, pot, rscale):
 
 
 def main() -> int:
-    """Run natively, compare with the charges, show the refusals, run ``contracted``."""
+    """Run natively, compare with the charges, show the refusals, run ``contracted``.
+
+    And list the facts of sumpy's schedule for a GPU, ``on_a_gpu``, whose run
+    is ``loopty run``'s, where pyopencl is installed.
+    """
     from loopty.executor import LoopyExecutor
     from loopty.schedule import IllegalCast
 
@@ -501,22 +519,30 @@ def main() -> int:
             f"{detail['tolerance']:.3g} ({detail['exactness']}) -> {run.status.value}"
         )
     print()
-    device = on_a_device()
+    windowed = on_a_device()
     # its own facts, the tag's, but whether C can build it: it cannot
     before = {fact.id for fact in contracted.facts()}
     added = [
         fact
-        for fact in device.facts()
+        for fact in windowed.facts()
         if fact.id not in before and fact.kind != "buildable"
     ]
-    legal = all(fact.status.value == "decided" for fact in added)
+    kept = all(fact.status.value == "decided" for fact in added)
     print(
-        f"on a device, each box a work group, as sumpy's own schedule: "
-        f"{device.history[-1]}: {len(added)} facts, all "
-        f"{'decided by isl' if legal else 'not decided'}"
+        f"on a device, each box a work group keeping its windows: "
+        f"{windowed.history[-1]}: {len(added)} facts, all "
+        f"{'decided by isl' if kept else 'not decided'}"
     )
+    print()
+    # the fusions' facts are fused's, above; these are the tag's
+    shown = {fact.id for fact in fused.facts()}
+    device = [fact for fact in on_a_gpu.facts() if fact.id not in shown]
+    print(f"on a GPU, each box a work group, as sumpy's: {on_a_gpu!r}")
+    for fact in device:
+        print(f"  {fact.status.value:8} {fact.decided_by or '-':4} {fact.statement}")
+    legal = all(fact.status.value == "decided" for fact in device)
     tested = run.status.value == "tested"
-    return 0 if error < 1e-8 and tested and legal else 1
+    return 0 if error < 1e-8 and tested and kept and legal else 1
 
 
 if __name__ == "__main__":

@@ -977,9 +977,10 @@ def _isl_facts(path: Path) -> list[Any]:
 
 
 #: What loopty states for isl alone in the examples, by the words of the
-#: statement: nothing, since a rewritten layout (#186) and a substitution's
-#: definedness and the casts after it (#187) are stated. The coverage report
-#: lists what is left with the reason (docs/lean-checks.md).
+#: statement: nothing, since a rewritten layout (#186), a substitution's
+#: definedness and the casts after it (#187), and a cast's work items (#188)
+#: are stated. The coverage report lists what is left with the reason
+#: (docs/lean-checks.md).
 NOT_STATED: tuple[str, ...] = ()
 
 
