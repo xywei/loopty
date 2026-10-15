@@ -28,10 +28,10 @@ marked with `...` is an excerpt and the lines it keeps are checked verbatim.
 | `travel.py` | facts that travel between a program's calls: a requirement decided under the postcondition of the call before, one checked by the compiled program between the calls, and a flat access in bounds where it follows the scan |
 | `fusion.py` | the program of `composition.py` with its two loops fused into one, a fusion one step too early refused with its pair, the intermediate computed where it is read instead of stored, and kept in the three cells live at once, a window of two refused with the read that sees its slot overwritten |
 | `quadrature.py` | firedrake's P1 mass kernel cell by cell, its quadrature rule and basis held in constant tables, read-only arrays written into the compiled code, and its gathers through the cell map in bounds by type |
-| `layer_potential.py` | pytential's QBX on its own curve: the line-Taylor theorem the kernels add the terms of, the single and double layer over complex points, sumpy's CPU tile checked and the write sumpy silences a fact, each kernel's agreement with sumpy's own as an `upstream` row, and pytential's Green identity and the jump relations as tested rows |
+| `layer_potential.py` | pytential's QBX on its own curve: the line-Taylor theorem tied by a row to the terms the single layer adds, through the identity that its ratio by the conjugate is `-beta / alpha`, the single and double layer over complex points, sumpy's CPU tile checked and the write sumpy silences a fact, each kernel's agreement with sumpy's own as an `upstream` row within `1e-12` of the largest value, and pytential's Green identity and the jump relations as tested rows |
 | `sum_factorization.py` | grudge's two passes of a sum-factorized operator, fused on the element and the row and no deeper: the deeper fusion refused with its pair, the fusion of fewer loops it names, and what passes between them kept one row at a time |
 | `storage_layouts.py` | where cells are stored, as checked maps: sumpy's compressed-Taylor storage index in two pieces, one for one onto its buffer, and grudge's `dim_tags` `N3,N0,N1,N2` the same layout as modepy's reshape of the DOFArray, a wrong nesting refuted with a cell; two kernels read through them |
-| `assembly.py` | firedrake's PyOP2 assembly loop with FFC's P1 mass kernel called per cell and the cell's matrix added into the nodes, `y[cell[c, a]] += ...`: the rule's exactness, the element's mass and the scatter's total as theorems, an update that owes the class of its sum and not distinct writes, PyOP2's GPU split refused with the node its two triangles share, and accepted once the updates are atomic |
+| `assembly.py` | firedrake's PyOP2 assembly loop with FFC's P1 mass kernel called per cell and the cell's matrix added into the nodes, `y[cell[c, a]] += ...`: the rule's exactness, the element's mass and the scatter's total as theorems, the element's mass as `mass_ffc`'s postcondition to the approx tolerance, an update that owes the class of its sum and not distinct writes, PyOP2's GPU split refused with the node its two triangles share, and accepted once the updates are atomic |
 | `calls.py` | kernels calling kernels inside their loops: a rule with a loop of its own (`dot`, loopy #1044) in a matrix-vector and a sparse product, and firedrake's P1 quadrature rule applied per element through a rule that takes the integrand (#1043), each call inlined with binders of its own and owing the caller what the callee's contract checks |
 | `taylor_reconstruction.py` | sumpy's compressed Taylor reconstruction in one file, theorem, kernel and schedule: the theorem proved for every order, the kernel's postcondition decided from what it stores, the theorem applied to it, and the schedule's casts, in one ledger |
 | `l2p.py` | the demo's flagship, sumpy's L2P for the 2-D Laplace kernel (`E2PFromSingleBox`): the compressed Taylor theorem proved for every order and its form box by box, sumpy's storage index a checked layout, the kernel that reconstructs each box's triangle with the theorem applied to its postcondition, the interchange of the triangle's loops refused with its pair, the three calls fused box by box, and a row that compares the program with sumpy's own kernel |
@@ -1096,8 +1096,16 @@ log|alpha| + Re( c(1) + ... + c(5) ),   c(k) = -(-beta / alpha)**k / k
   `c(k)`; that the Taylor coefficients of `log(alpha + tau * beta)` satisfy
   that equation is cited, not proved. With Mathlib, Lean proves it; without,
   it is `assumed`, since the property tester draws no table over `Nat`. The
-  kernels add `coefficient(ratio, k)`, the same function the theorem's
-  conclusion is written with; no row of the ledger links the two yet.
+  kernels add `coefficient(ratio(alpha, beta), k)`, the same function the
+  theorem's conclusion is written with, at the ratio computed by the
+  conjugate, `-beta * conj(alpha) / |alpha|**2`. `by_the_conjugate` says
+  that is `-beta / alpha`, and `single_layer` cites both: its row
+  `single_layer adds line_taylor's c(n) for n in 1..5, for every c with
+  away, first and ode, read over the complex numbers` ties the theorem to the
+  terms the kernel evaluates, `decided` by `theorem` and, with Mathlib,
+  proved by Lean, the identity rewritten and the theorem applied a term at a
+  time. It is about the term read over the complex numbers, not about the
+  floats the kernel produces.
 - `single_layer` and `double_layer` are pytential's `S` and `D` on the
   five-armed starfish, as sumpy computes them, over complex points.
   `sumpy_tile()` is sumpy's CPU schedule, `get_optimized_kernel(is_cpu=True)`:
@@ -1113,7 +1121,9 @@ log|alpha| + Re( c(1) + ... + c(5) ),   c(k) = -(-beta / alpha)**k / k
   recorded with the commits it ran at in `layer_potential_sumpy.json` (sumpy
   needs a newer loopy than loopty's, so it is not run here). Each is
   `@upstream` of its kernel, as `examples/l2p.py`'s `sumpy_l2p` is, and its
-  row, `tested` by `upstream`, compares the kernel's native run with it.
+  row, `tested` by `upstream`, compares the kernel's native run with it
+  within `1e-12` of the largest value, which the row states: round-off
+  between two orders of summation, far inside the approx allowance.
 - `green_identity`, `jump_S` and `jump_D` are pytential's identity test case
   on the starfish and the jump relations, evaluated directly
   (`fmm_order=False`) with the compiled kernels at 30 to 90 panels of this
@@ -1131,8 +1141,9 @@ $ uv run python examples/layer_potential.py
 pytential's starfish, QBX order 5, at 4 panels: 36 targets, 132 sources
   single_layer: compiled on C agrees with native to the approx tolerance: True -> tested
   double_layer: compiled on C agrees with native to the approx tolerance: True -> tested
-  single_layer: agrees with sumpy's own kernel, as pytential calls it, to the approx tolerance -> tested
-  double_layer: agrees with sumpy's own kernel, as pytential calls it, to the approx tolerance -> tested
+  single_layer: agrees with sumpy's own kernel, as pytential calls it, within 1e-12 of the largest value -> tested
+  double_layer: agrees with sumpy's own kernel, as pytential calls it, within 1e-12 of the largest value -> tested
+  single_layer adds line_taylor's c(n) for n in 1..5, for every c with away, first and ode, read over the complex numbers -> decided
 
 sumpy's tile, get_optimized_kernel(is_cpu=True): split(t, 16).tag(t_outer='g.0', t_inner='l.0').split(s, 256).prioritize(s_outer, t_inner)
   decided  isl  split(t, 16) renames the instances of single_layer one for one
@@ -1156,61 +1167,66 @@ accuracy at 30, 50, 70, 90 panels:
 
 ```console
 $ uv run lanky check examples/layer_potential.py
-STATUS   BY           WHERE                   OWNER           STATEMENT
--------  -----------  ----------------------  --------------  ------------------------------------------------------------------------
-assumed  -            layer_potential.py:137  line_taylor     alpha : Complex, beta : Complex, c : Fn[Nat, Complex] | alpha != 0, a...
-tested   python       layer_potential.py:137  line_taylor     the term computes what the annotations compute
-decided  isl          layer_potential.py:206  single_layer    out[t] is in bounds for every instance of S0
-decided  isl          layer_potential.py:206  single_layer    w[s] is in bounds for every instance of S0
-decided  isl          layer_potential.py:206  single_layer    c[t] is in bounds for every instance of S0
-decided  isl          layer_potential.py:206  single_layer    y[s] is in bounds for every instance of S0
-decided  isl          layer_potential.py:206  single_layer    z[t] is in bounds for every instance of S0
-decided  isl          layer_potential.py:206  single_layer    distinct instances of S0 write distinct cells of out
-decided  isl          layer_potential.py:192  single_layer    the source order runs every dependence forward in time
-decided  type         layer_potential.py:206  single_layer    the accumulation into out[t] over s is approx
-tested   interpreter  layer_potential.py:192  single_layer    the traced term computes what the body computes
-decided  isl          layer_potential.py:206  single_layer    split(t, 16) renames the instances of single_layer one for one
-decided  isl          layer_potential.py:206  single_layer    the order after split(t, 16) runs every dependence of single_layer fo...
-decided  isl          layer_potential.py:206  single_layer    tag(t_inner='ilp') renames the instances of single_layer one for one
-decided  isl          layer_potential.py:206  single_layer    the order after tag(t_inner='ilp') runs every dependence of single_la...
-decided  isl          layer_potential.py:206  single_layer    split(s, 256) renames the instances of single_layer one for one
-decided  isl          layer_potential.py:206  single_layer    the order after split(s, 256) runs every dependence of single_layer f...
-decided  isl          layer_potential.py:206  single_layer    prioritize(s_outer, t_inner) renames the instances of single_layer on...
-decided  isl          layer_potential.py:206  single_layer    the order after prioritize(s_outer, t_inner) runs every dependence of...
-decided  isl          layer_potential.py:222  double_layer    out[t] is in bounds for every instance of S0
-decided  isl          layer_potential.py:222  double_layer    w[s] is in bounds for every instance of S0
-decided  isl          layer_potential.py:222  double_layer    n[s] is in bounds for every instance of S0
-decided  isl          layer_potential.py:222  double_layer    c[t] is in bounds for every instance of S0
-decided  isl          layer_potential.py:222  double_layer    y[s] is in bounds for every instance of S0
-decided  isl          layer_potential.py:222  double_layer    z[t] is in bounds for every instance of S0
-decided  isl          layer_potential.py:222  double_layer    distinct instances of S0 write distinct cells of out
-decided  isl          layer_potential.py:211  double_layer    the source order runs every dependence forward in time
-decided  type         layer_potential.py:222  double_layer    the accumulation into out[t] over s is approx
-tested   interpreter  layer_potential.py:211  double_layer    the traced term computes what the body computes
-decided  isl          layer_potential.py:222  double_layer    split(t, 16) renames the instances of double_layer one for one
-decided  isl          layer_potential.py:222  double_layer    the order after split(t, 16) runs every dependence of double_layer fo...
-decided  isl          layer_potential.py:222  double_layer    tag(t_inner='ilp') renames the instances of double_layer one for one
-decided  isl          layer_potential.py:222  double_layer    the order after tag(t_inner='ilp') runs every dependence of double_la...
-decided  isl          layer_potential.py:222  double_layer    split(s, 256) renames the instances of double_layer one for one
-decided  isl          layer_potential.py:222  double_layer    the order after split(s, 256) runs every dependence of double_layer f...
-decided  isl          layer_potential.py:222  double_layer    prioritize(s_outer, t_inner) renames the instances of double_layer on...
-decided  isl          layer_potential.py:222  double_layer    the order after prioritize(s_outer, t_inner) runs every dependence of...
-tested   upstream     layer_potential.py:391  single_layer    the native run of single_layer agrees with sumpy_single_layer in out,...
-tested   upstream     layer_potential.py:397  double_layer    the native run of double_layer agrees with sumpy_double_layer in out,...
-tested   run          layer_potential.py:480  green_identity  S(du/dn) - D(u) = u/2, Green's identity, at order 5 - 1.6 or faster
-tested   run          layer_potential.py:486  jump_S          S(+) - S(-) = 0: S is continuous, at order 5 - 1.6 or faster
-tested   run          layer_potential.py:492  jump_D          D(+) - D(-) = sigma: D jumps by the density, at order 5 - 1.6 or faster
+STATUS                     EFFECTIVE  BY             WHERE                   OWNER             STATEMENT
+-------------------------  ---------  -------------  ----------------------  ----------------  ------------------------------------------------------------------------
+assumed                    assumed    -              layer_potential.py:145  line_taylor       alpha : Complex, beta : Complex, c : Fn[Nat, Complex] | alpha != 0, a...
+tested                     tested     python         layer_potential.py:145  line_taylor       the term computes what the annotations compute
+tested                     tested     property-test  layer_potential.py:175  by_the_conjugate  alpha : Complex, beta : Complex | alpha != 0 |- -beta*conj(alpha)*(1 ...
+tested                     tested     python         layer_potential.py:175  by_the_conjugate  the term computes what the annotations compute
+decided                    decided    isl            layer_potential.py:237  single_layer      out[t] is in bounds for every instance of S0
+decided                    decided    isl            layer_potential.py:237  single_layer      w[s] is in bounds for every instance of S0
+decided                    decided    isl            layer_potential.py:237  single_layer      c[t] is in bounds for every instance of S0
+decided                    decided    isl            layer_potential.py:237  single_layer      y[s] is in bounds for every instance of S0
+decided                    decided    isl            layer_potential.py:237  single_layer      z[t] is in bounds for every instance of S0
+decided                    decided    isl            layer_potential.py:237  single_layer      distinct instances of S0 write distinct cells of out
+decided                    decided    isl            layer_potential.py:221  single_layer      the source order runs every dependence forward in time
+decided                    decided    type           layer_potential.py:237  single_layer      the accumulation into out[t] over s is approx
+decided under line_taylor  assumed    theorem        layer_potential.py:237  single_layer      single_layer adds line_taylor's c(n) for n in 1..5, for every c with ...
+tested                     tested     interpreter    layer_potential.py:221  single_layer      the traced term computes what the body computes
+decided                    decided    isl            layer_potential.py:237  single_layer      split(t, 16) renames the instances of single_layer one for one
+decided                    decided    isl            layer_potential.py:237  single_layer      the order after split(t, 16) runs every dependence of single_layer fo...
+decided                    decided    isl            layer_potential.py:237  single_layer      tag(t_inner='ilp') renames the instances of single_layer one for one
+decided                    decided    isl            layer_potential.py:237  single_layer      the order after tag(t_inner='ilp') runs every dependence of single_la...
+decided                    decided    isl            layer_potential.py:237  single_layer      split(s, 256) renames the instances of single_layer one for one
+decided                    decided    isl            layer_potential.py:237  single_layer      the order after split(s, 256) runs every dependence of single_layer f...
+decided                    decided    isl            layer_potential.py:237  single_layer      prioritize(s_outer, t_inner) renames the instances of single_layer on...
+decided                    decided    isl            layer_potential.py:237  single_layer      the order after prioritize(s_outer, t_inner) runs every dependence of...
+decided                    decided    isl            layer_potential.py:253  double_layer      out[t] is in bounds for every instance of S0
+decided                    decided    isl            layer_potential.py:253  double_layer      w[s] is in bounds for every instance of S0
+decided                    decided    isl            layer_potential.py:253  double_layer      n[s] is in bounds for every instance of S0
+decided                    decided    isl            layer_potential.py:253  double_layer      c[t] is in bounds for every instance of S0
+decided                    decided    isl            layer_potential.py:253  double_layer      y[s] is in bounds for every instance of S0
+decided                    decided    isl            layer_potential.py:253  double_layer      z[t] is in bounds for every instance of S0
+decided                    decided    isl            layer_potential.py:253  double_layer      distinct instances of S0 write distinct cells of out
+decided                    decided    isl            layer_potential.py:242  double_layer      the source order runs every dependence forward in time
+decided                    decided    type           layer_potential.py:253  double_layer      the accumulation into out[t] over s is approx
+tested                     tested     interpreter    layer_potential.py:242  double_layer      the traced term computes what the body computes
+decided                    decided    isl            layer_potential.py:253  double_layer      split(t, 16) renames the instances of double_layer one for one
+decided                    decided    isl            layer_potential.py:253  double_layer      the order after split(t, 16) runs every dependence of double_layer fo...
+decided                    decided    isl            layer_potential.py:253  double_layer      tag(t_inner='ilp') renames the instances of double_layer one for one
+decided                    decided    isl            layer_potential.py:253  double_layer      the order after tag(t_inner='ilp') runs every dependence of double_la...
+decided                    decided    isl            layer_potential.py:253  double_layer      split(s, 256) renames the instances of double_layer one for one
+decided                    decided    isl            layer_potential.py:253  double_layer      the order after split(s, 256) runs every dependence of double_layer f...
+decided                    decided    isl            layer_potential.py:253  double_layer      prioritize(s_outer, t_inner) renames the instances of double_layer on...
+decided                    decided    isl            layer_potential.py:253  double_layer      the order after prioritize(s_outer, t_inner) runs every dependence of...
+tested                     tested     upstream       layer_potential.py:422  single_layer      the native run of single_layer agrees with sumpy_single_layer in out ...
+tested                     tested     upstream       layer_potential.py:428  double_layer      the native run of double_layer agrees with sumpy_double_layer in out ...
+tested                     tested     run            layer_potential.py:511  green_identity    S(du/dn) - D(u) = u/2, Green's identity, at order 5 - 1.6 or faster
+tested                     tested     run            layer_potential.py:517  jump_S            S(+) - S(-) = 0: S is continuous, at order 5 - 1.6 or faster
+tested                     tested     run            layer_potential.py:523  jump_D            D(+) - D(-) = sigma: D jumps by the density, at order 5 - 1.6 or faster
 
-42 facts: 1 assumed, 33 decided, 8 tested
+45 facts: 1 assumed, 34 decided, 10 tested
 ```
 
 With Lean, the 31 facts isl decided read `proved` by `lean`, the write fact
-sumpy silences and the tile's casts among them (`41 facts: 1 assumed, 2
-decided, 31 proved, 7 tested`). With Mathlib too, `line_taylor` reads `proved`
-by `lean`, by induction two orders at a time with the linear combinations
-Python found, and is worth `tested`: what the theorem rests on includes the
-reading of its annotations, which lanky checks by running them (the second
-row).
+sumpy silences and the tile's casts among them (`45 facts: 1 assumed, 3
+decided, 31 proved, 10 tested`); the row that ties `line_taylor` to
+`single_layer` is about complex numbers, and waits for Mathlib. With Mathlib
+too, `line_taylor` reads `proved` by `lean`, by induction two orders at a time
+with the linear combinations Python found, and is worth `tested`: what the
+theorem rests on includes the reading of its annotations, which lanky checks
+by running them (the second row). `by_the_conjugate` reads `proved`, and so
+does the row, which rests on the two theorems.
 
 ### loopty run examples/layer_potential.py
 
@@ -2054,12 +2070,21 @@ firedrake's PyOP2 test of the P1 mass kernel, `mass_ffc`, and the assembly
 loop around it: per cell, the kernel called on the cell's corners, the rows of
 `coords` the cell map picks, and the cell's matrix applied to `u` and added
 into the nodes, `y[cell[c, a]] += ...`. The kernel is a kernel of its own,
-inlined where it is called, and its symmetric matrix is restated of every
-cell after the call. The file's theorems are the mathematics the loop rests
-on: the 3-point rule integrates every quadratic exactly, a cell's mass matrix
-is `|J| (1 + delta_jk) / 24`, and the scatter keeps the total on every mesh.
-With Mathlib all three are proved; the transcripts below have no Lean, and
-read `tested`.
+inlined where it is called. The file's theorems are the mathematics the loop
+rests on: the 3-point rule integrates every quadratic exactly, a cell's mass
+matrix is `|J| (1 + delta_jk) / 24`, and the scatter keeps the total on every
+mesh. With Mathlib all three are proved; the transcripts below have no Lean,
+and read `tested`.
+
+`mass_ffc` promises the element's mass in closed form, `|J| (1 + delta_jk) /
+24`, which it computes from FFC's 15-digit tables, so to the last digits
+only. Its postcondition is compared as its compiled run is with its native
+one, at the approx tolerance, `|a - b| <= 1e-6 (|b| + 1)`, and its row says
+so (`..., to the approx tolerance`): `tested` on its runs, and, with Mathlib,
+`proved` by Lean over the reals from what the kernel stores, with each table
+at the value it holds, resting on `no cell of A is stored twice, or read
+before its store` and on the kernel's trace. After each call it is restated
+of the cell's `Ae[c]`.
 
 Two cells that share a node add into one cell of `y`. Such a statement is an
 update: either order of two updates of one cell gives the same sum, to the
@@ -2085,6 +2110,7 @@ PyOP2's two triangles: the cells' matrices sum to expected_matrix: True
   and y is that matrix times u: True
 a square, 32 cells: y is the closed form: True
 W3 and FE0 are the rule to 3.3e-16: True
+mass_ffc's postcondition, its matrix |J| (1 + delta_jk) / 24 to the approx tolerance -> tested
 
 Schedule(mass_action).split('c', 32).tag(c_outer='g.0', c_inner='l.0') ->
   IllegalCast: tag(c_outer='g.0', c_inner='l.0') illegal: S1[c=0, a=2] and S1[c=1, a=1] both update y[3] on example_inputs() (nc=2, nv=4), where cell[0, 2] = 3 and cell[1, 1] = 3, and the loop c_inner on l.0 runs them on two work items, so one can overwrite what the other added; make the updates atomic, with atomic('y') before this step
@@ -2109,64 +2135,65 @@ schedule: Schedule(mass_action, target='c').assume('nc % 4 == 0').atomic('y').sp
 $ uv run lanky check examples/assembly.py
 STATUS                               EFFECTIVE  BY             WHERE            OWNER                STATEMENT
 -----------------------------------  ---------  -------------  ---------------  -------------------  ------------------------------------------------------------------------
-tested                               tested     property-test  assembly.py:147  exact_to_degree_two  a : Real, b : Real, c : Real, d : Real, e : Real, f : Real |- (a + b*...
-tested                               tested     python         assembly.py:147  exact_to_degree_two  the term computes what the annotations compute
-tested                               tested     property-test  assembly.py:160  element_mass         J : Real, u : Fn[Fin(3), Real] |- abs(J)*((2/3*(u[0]*(2/3) + u[1]*(1/...
-tested                               tested     python         assembly.py:160  element_mass         the term computes what the annotations compute
-tested                               tested     property-test  assembly.py:174  conservation         nc : Nat, nv : Nat, d : Nat, cell : Fn[Fin(nc), Fin(d), Fin(nv)], yl ...
-tested                               tested     python         assembly.py:174  conservation         the term computes what the annotations compute
-decided                              decided    isl            assembly.py:224  mass_ffc             A[j, k] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:224  mass_ffc             FE0[ip, j] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:224  mass_ffc             FE0[ip, k] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:224  mass_ffc             W3[ip] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:224  mass_ffc             x[1, 0] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:224  mass_ffc             x[0, 0] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:224  mass_ffc             x[2, 1] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:224  mass_ffc             x[0, 1] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:224  mass_ffc             x[2, 0] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:224  mass_ffc             x[1, 1] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:224  mass_ffc             distinct instances of S0 write distinct cells of A
-decided                              decided    isl            assembly.py:212  mass_ffc             the source order runs every dependence forward in time
-decided                              decided    type           assembly.py:224  mass_ffc             the accumulation into A[j, k] over ip is approx
-tested                               tested     native         assembly.py:212  mass_ffc             A[0, 0] == A[0, 0] and A[0, 1] == A[1, 0] and A[0, 2] == A[2, 0] and ...
-tested                               tested     interpreter    assembly.py:212  mass_ffc             the traced term computes what the body computes
-decided                              decided    isl            assembly.py:224  mass_action          Ae[c, j, k] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:224  mass_action          FE0[ip, j] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:224  mass_action          FE0[ip, k] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:224  mass_action          W3[ip] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:224  mass_action          coords[cell[c, 1], 0] is in bounds for every instance of S0 (cell[c, ...
-decided                              decided    isl            assembly.py:224  mass_action          cell[c, 1] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:224  mass_action          coords[cell[c, 0], 0] is in bounds for every instance of S0 (cell[c, ...
-decided                              decided    isl            assembly.py:224  mass_action          cell[c, 0] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:224  mass_action          coords[cell[c, 2], 1] is in bounds for every instance of S0 (cell[c, ...
-decided                              decided    isl            assembly.py:224  mass_action          cell[c, 2] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:224  mass_action          coords[cell[c, 0], 1] is in bounds for every instance of S0 (cell[c, ...
-decided                              decided    isl            assembly.py:224  mass_action          coords[cell[c, 2], 0] is in bounds for every instance of S0 (cell[c, ...
-decided                              decided    isl            assembly.py:224  mass_action          coords[cell[c, 1], 1] is in bounds for every instance of S0 (cell[c, ...
-decided                              decided    type           assembly.py:241  mass_action          y[cell[c, a]] is in bounds by type (cell[c, a] : Fin(nv))
-decided                              decided    isl            assembly.py:241  mass_action          cell[c, a] is in bounds for every instance of S1
-decided                              decided    isl            assembly.py:241  mass_action          Ae[c, a, b] is in bounds for every instance of S1
-decided                              decided    type           assembly.py:241  mass_action          u[cell[c, b]] is in bounds by type (cell[c, b] : Fin(nv))
-decided                              decided    isl            assembly.py:241  mass_action          cell[c, b] is in bounds for every instance of S1
-decided                              decided    isl            assembly.py:224  mass_action          distinct instances of S0 write distinct cells of Ae
-decided                              decided    isl            assembly.py:241  mass_action          every cell of Ae that S1 reads, S0 wrote before the read
-decided                              decided    isl            assembly.py:229  mass_action          the source order runs every dependence forward in time
-decided                              decided    type           assembly.py:224  mass_action          the accumulation into Ae[c, j, k] over ip is approx
-decided                              decided    type           assembly.py:241  mass_action          the accumulation into y[cell[c, a]] over c, a is approx
-decided                              decided    type           assembly.py:241  mass_action          the accumulation into y[cell[c, a]] over b is approx
-decided                              decided    isl            assembly.py:239  mass_action          cell[c], the indices of the cells passed as x, is in bounds wherever ...
-decided                              decided    type           assembly.py:239  mass_action          the cells coords[cell[c]] picks, passed as x, are in bounds by type (...
-decided                              decided    isl            assembly.py:239  mass_action          Ae[c], the row passed to mass_ffc as A, is in bounds wherever mass_ff...
-decided                              tested     call           assembly.py:239  mass_action          after each call mass_ffc(coords[cell[c]], Ae[c]) at assembly.py:239: ...
-tested                               tested     interpreter    assembly.py:229  mass_action          the traced term computes what the body computes
-assumed                              assumed    -              assembly.py:224  mass_action          nc % 4 == 0, which mass_action is scheduled assuming
-decided under assume('nc % 4 == 0')  assumed    isl            assembly.py:224  mass_action          split(c, 4) renames the instances of mass_action one for one
-decided under assume('nc % 4 == 0')  assumed    isl            assembly.py:224  mass_action          the order after split(c, 4) runs every dependence of mass_action forward
-decided under assume('nc % 4 == 0')  assumed    isl            assembly.py:224  mass_action          tag(c_inner='ilp') renames the instances of mass_action one for one
-decided under assume('nc % 4 == 0')  assumed    isl            assembly.py:224  mass_action          the order after tag(c_inner='ilp') runs every dependence of mass_acti...
-decided                              decided    isl            assembly.py:224  mass_action          atomic updates of y run at the same time after tag(c_inner='ilp'), so...
+tested                               tested     property-test  assembly.py:159  exact_to_degree_two  a : Real, b : Real, c : Real, d : Real, e : Real, f : Real |- (a + b*...
+tested                               tested     python         assembly.py:159  exact_to_degree_two  the term computes what the annotations compute
+tested                               tested     property-test  assembly.py:172  element_mass         J : Real, u : Fn[Fin(3), Real] |- abs(J)*((2/3*(u[0]*(2/3) + u[1]*(1/...
+tested                               tested     python         assembly.py:172  element_mass         the term computes what the annotations compute
+tested                               tested     property-test  assembly.py:186  conservation         nc : Nat, nv : Nat, d : Nat, cell : Fn[Fin(nc), Fin(d), Fin(nv)], yl ...
+tested                               tested     python         assembly.py:186  conservation         the term computes what the annotations compute
+decided                              decided    isl            assembly.py:252  mass_ffc             A[j, k] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:252  mass_ffc             FE0[ip, j] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:252  mass_ffc             FE0[ip, k] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:252  mass_ffc             W3[ip] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:252  mass_ffc             x[1, 0] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:252  mass_ffc             x[0, 0] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:252  mass_ffc             x[2, 1] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:252  mass_ffc             x[0, 1] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:252  mass_ffc             x[2, 0] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:252  mass_ffc             x[1, 1] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:252  mass_ffc             distinct instances of S0 write distinct cells of A
+decided                              decided    isl            assembly.py:236  mass_ffc             the source order runs every dependence forward in time
+decided                              decided    type           assembly.py:252  mass_ffc             the accumulation into A[j, k] over ip is approx
+decided                              decided    isl            assembly.py:252  mass_ffc             no cell of A is stored twice, or read before its store
+tested                               tested     native         assembly.py:236  mass_ffc             (A[0, 0] == abs((x[1, 0] - x[0, 0])*(x[2, 1] - x[0, 1]) - (x[2, 0] - ...
+tested                               tested     interpreter    assembly.py:236  mass_ffc             the traced term computes what the body computes
+decided                              decided    isl            assembly.py:252  mass_action          Ae[c, j, k] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:252  mass_action          FE0[ip, j] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:252  mass_action          FE0[ip, k] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:252  mass_action          W3[ip] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:252  mass_action          coords[cell[c, 1], 0] is in bounds for every instance of S0 (cell[c, ...
+decided                              decided    isl            assembly.py:252  mass_action          cell[c, 1] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:252  mass_action          coords[cell[c, 0], 0] is in bounds for every instance of S0 (cell[c, ...
+decided                              decided    isl            assembly.py:252  mass_action          cell[c, 0] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:252  mass_action          coords[cell[c, 2], 1] is in bounds for every instance of S0 (cell[c, ...
+decided                              decided    isl            assembly.py:252  mass_action          cell[c, 2] is in bounds for every instance of S0
+decided                              decided    isl            assembly.py:252  mass_action          coords[cell[c, 0], 1] is in bounds for every instance of S0 (cell[c, ...
+decided                              decided    isl            assembly.py:252  mass_action          coords[cell[c, 2], 0] is in bounds for every instance of S0 (cell[c, ...
+decided                              decided    isl            assembly.py:252  mass_action          coords[cell[c, 1], 1] is in bounds for every instance of S0 (cell[c, ...
+decided                              decided    type           assembly.py:269  mass_action          y[cell[c, a]] is in bounds by type (cell[c, a] : Fin(nv))
+decided                              decided    isl            assembly.py:269  mass_action          cell[c, a] is in bounds for every instance of S1
+decided                              decided    isl            assembly.py:269  mass_action          Ae[c, a, b] is in bounds for every instance of S1
+decided                              decided    type           assembly.py:269  mass_action          u[cell[c, b]] is in bounds by type (cell[c, b] : Fin(nv))
+decided                              decided    isl            assembly.py:269  mass_action          cell[c, b] is in bounds for every instance of S1
+decided                              decided    isl            assembly.py:252  mass_action          distinct instances of S0 write distinct cells of Ae
+decided                              decided    isl            assembly.py:269  mass_action          every cell of Ae that S1 reads, S0 wrote before the read
+decided                              decided    isl            assembly.py:257  mass_action          the source order runs every dependence forward in time
+decided                              decided    type           assembly.py:252  mass_action          the accumulation into Ae[c, j, k] over ip is approx
+decided                              decided    type           assembly.py:269  mass_action          the accumulation into y[cell[c, a]] over c, a is approx
+decided                              decided    type           assembly.py:269  mass_action          the accumulation into y[cell[c, a]] over b is approx
+decided                              decided    isl            assembly.py:267  mass_action          cell[c], the indices of the cells passed as x, is in bounds wherever ...
+decided                              decided    type           assembly.py:267  mass_action          the cells coords[cell[c]] picks, passed as x, are in bounds by type (...
+decided                              decided    isl            assembly.py:267  mass_action          Ae[c], the row passed to mass_ffc as A, is in bounds wherever mass_ff...
+decided                              tested     call           assembly.py:267  mass_action          after each call mass_ffc(coords[cell[c]], Ae[c]) at assembly.py:267: ...
+tested                               tested     interpreter    assembly.py:257  mass_action          the traced term computes what the body computes
+assumed                              assumed    -              assembly.py:252  mass_action          nc % 4 == 0, which mass_action is scheduled assuming
+decided under assume('nc % 4 == 0')  assumed    isl            assembly.py:252  mass_action          split(c, 4) renames the instances of mass_action one for one
+decided under assume('nc % 4 == 0')  assumed    isl            assembly.py:252  mass_action          the order after split(c, 4) runs every dependence of mass_action forward
+decided under assume('nc % 4 == 0')  assumed    isl            assembly.py:252  mass_action          tag(c_inner='ilp') renames the instances of mass_action one for one
+decided under assume('nc % 4 == 0')  assumed    isl            assembly.py:252  mass_action          the order after tag(c_inner='ilp') runs every dependence of mass_acti...
+decided                              decided    isl            assembly.py:252  mass_action          atomic updates of y run at the same time after tag(c_inner='ilp'), so...
 
-56 facts: 1 assumed, 46 decided, 9 tested
+57 facts: 1 assumed, 47 decided, 9 tested
 ```
 
 ### loopty run examples/assembly.py
@@ -2181,14 +2208,14 @@ mass_ffc: Schedule(mass_ffc, target='c')
 
 STATUS                               EFFECTIVE  BY     WHERE            OWNER        STATEMENT
 -----------------------------------  ---------  -----  ---------------  -----------  ------------------------------------------------------------------------
-assumed                              assumed    -      assembly.py:224  mass_action  nc % 4 == 0, which mass_action is scheduled assuming
-decided under assume('nc % 4 == 0')  assumed    isl    assembly.py:224  mass_action  split(c, 4) renames the instances of mass_action one for one
-decided under assume('nc % 4 == 0')  assumed    isl    assembly.py:224  mass_action  the order after split(c, 4) runs every dependence of mass_action forward
-decided under assume('nc % 4 == 0')  assumed    isl    assembly.py:224  mass_action  tag(c_inner='ilp') renames the instances of mass_action one for one
-decided under assume('nc % 4 == 0')  assumed    isl    assembly.py:224  mass_action  the order after tag(c_inner='ilp') runs every dependence of mass_acti...
-decided                              decided    isl    assembly.py:224  mass_action  atomic updates of y run at the same time after tag(c_inner='ilp'), so...
-tested                               tested     loopy  assembly.py:224  mass_action  the scheduled run of mass_action agrees with the native run to the ac...
-tested                               tested     loopy  assembly.py:224  mass_ffc     the scheduled run of mass_ffc agrees with the native run to the accur...
+assumed                              assumed    -      assembly.py:252  mass_action  nc % 4 == 0, which mass_action is scheduled assuming
+decided under assume('nc % 4 == 0')  assumed    isl    assembly.py:252  mass_action  split(c, 4) renames the instances of mass_action one for one
+decided under assume('nc % 4 == 0')  assumed    isl    assembly.py:252  mass_action  the order after split(c, 4) runs every dependence of mass_action forward
+decided under assume('nc % 4 == 0')  assumed    isl    assembly.py:252  mass_action  tag(c_inner='ilp') renames the instances of mass_action one for one
+decided under assume('nc % 4 == 0')  assumed    isl    assembly.py:252  mass_action  the order after tag(c_inner='ilp') runs every dependence of mass_acti...
+decided                              decided    isl    assembly.py:252  mass_action  atomic updates of y run at the same time after tag(c_inner='ilp'), so...
+tested                               tested     loopy  assembly.py:252  mass_action  the scheduled run of mass_action agrees with the native run to the ac...
+tested                               tested     loopy  assembly.py:252  mass_ffc     the scheduled run of mass_ffc agrees with the native run to the accur...
 
 8 facts: 1 assumed, 5 decided, 2 tested
 ```

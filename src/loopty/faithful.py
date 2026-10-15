@@ -326,7 +326,10 @@ def postcondition_fact(
     oracle mistakes for a closed proposition.
 
     A call of a function of :mod:`loopty.math` in it is numpy's, as in the
-    body: ``-> all(y[i] == sqrt(x[i]) for i in Fin[n])``.
+    body: ``-> all(y[i] == sqrt(x[i]) for i in Fin[n])``. An equation of
+    reals that rounds is compared within its class's tolerance, as the
+    compiled run is compared with the native one (:mod:`loopty.reals`), and
+    the statement says so.
 
     It is ``tested`` only when it held after every run: one after which it
     cannot be evaluated (it reads a cell the run's arrays do not have, or a
@@ -342,22 +345,27 @@ def postcondition_fact(
     calls sum in an order of their own, ``weak_grad``'s three passes against
     the dense operator its claim states, and the two agree as reals, which
     Lean shows (:mod:`loopty.unfolding`), and as floats to rounding. Every
-    other comparison is exact, as a kernel's are (#254).
+    other comparison of a program's is exact; a kernel's equations of reals
+    are read by :mod:`loopty.reals`, as above.
     """
     from lanky.terms import render, truth_value
 
     from loopty.contract import resolve_sizes
     from loopty.math import FUNCTIONS as MATH
+    from loopty.reals import at_the_class, statement, tolerance_words
     from loopty.typing import AfterCall, postcondition_id
 
     post = term.post
+    # an equation of reals that rounds, compared within its class's tolerance;
+    # a program's (``at_class``) is compared at its outputs' class below
+    judged = post if at_class else at_the_class(term, post)
     inputs: list[dict[str, Any]] = []
 
     def fact(status: Status, **provenance: Any) -> Fact:
         return Fact(
             id=postcondition_id(owner, module=module, line=line),
             kind="postcondition",
-            statement=render(post),
+            statement=render(post) if at_class else statement(term, post),
             term=AfterCall(term.name, post),
             status=status,
             decided_by="native" if status is not Status.ASSUMED else None,
@@ -403,7 +411,7 @@ def postcondition_fact(
                     failure = _at_class(post, context, term)
                     holds = failure is None
                 else:
-                    holds = truth_value(evaluate(post, context), post)
+                    holds = truth_value(evaluate(judged, context), judged)
         except Exception as exc:  # noqa: BLE001 - said in the provenance
             inputs.append(
                 {
@@ -415,7 +423,7 @@ def postcondition_fact(
         if not holds:
             inputs.append({"input": label, "outcome": "false"})
             extra = {"arguments": recorded} if recorded is not None else {}
-            said = f" ({failure})" if failure else ""
+            said = f" ({failure})" if failure else tolerance_words(term, post)
             return fact(
                 Status.REFUTED,
                 counterexample={"input": label},

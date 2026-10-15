@@ -2,7 +2,10 @@
 
 ``double`` doubles a vector. ``numpy_double`` is numpy's own doubling, which
 agrees with it; the others disagree at one cell, cannot run, or return what
-the kernel does not write, one way each. tests/test_upstream.py reads them.
+the kernel does not write, one way each. ``rounded`` and ``off_by_a_billionth``
+state the allowance of their claim, ``within=1e-12``: the first is off by
+round-off, and the second by more, inside the class's allowance and beyond
+the claim's. tests/test_upstream.py reads them.
 """
 
 from __future__ import annotations
@@ -90,3 +93,19 @@ def doubles_only(x, y, z):
     """Code that computes the doubles and not the squares."""
     return {"y": 2.0 * x.numpy()}
 
+
+
+@upstream(double, within=1e-12)
+def rounded(x, y):
+    """Doubling, off at the last cell by a few units of the last place."""
+    out = 2.0 * x.numpy()
+    out[-1] += 4e-16
+    return {"y": out}
+
+
+@upstream(double, within=1e-12)
+def off_by_a_billionth(x, y):
+    """Doubling, off at the last cell by a billionth: inside approx, past the claim."""
+    out = 2.0 * x.numpy()
+    out[-1] += 1e-9
+    return {"y": out}
