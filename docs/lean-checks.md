@@ -135,11 +135,12 @@ its own, in parallel.
 | no read sees its slot overwritten (a window) | read of the array, and pair of producers | three instances, the read, a producer's that stored the cell it reads, and a producer's that stored a different cell into the same slot after it: that one does not run before the read, in the order the steps leave; the slot is the placement, `j % 3`, or `(a, b)` for one box's triangle `R[i, a, b]` |
 | a rewritten layout, by the row starts | statement that writes the offsets | where the offsets start at 0 and step by the counts, as the contract checks on entry, the value written is the value the cell holds: the induction step, its base case the contract's check |
 | a rewritten layout, by induction | statement that writes the layout | the rows in order before the write imply them in order after it, at the cells the write reads |
-| a declared layout | piece, or pair of pieces | every cell's address is in the buffer; two cells at one address are one cell; and every address of the buffer has a cell (an existential) |
-| two layouts the same | pair of pieces | a cell of both is stored at one address by each, and a cell of one is a cell of the other |
+| a declared layout | piece, or pair of pieces | every cell's address is in the buffer; two cells at one address are one cell; and every address of the buffer has a cell (an existential); at every size, `n**3 * e + (i + n * j + n**2 * k)`, as the layout writes it (below) |
+| two layouts the same | pair of pieces | a cell of both is stored at one address by each, and a cell of one is a cell of the other; at every size a polynomial identity |
 | the source order | pair of accesses | the source runs the pair in the order the dependence says, which is its definition |
 | a cast is bijective | statement the step moves | every instance has an image (an existential), one only, and no two share one |
 | a cast is monotone | dependence class, a pair of accesses (two updates of one cell, `y[cell[c, k]] += v`, are none: either order gives the sum) | two instances that touch one cell, in the source's order, keep it after every step: their time vectors compare as the source's do |
+| a cast on a hardware axis (`g.*`, `l.*`) | dependence class, and a statement's sum that reads what its own instruction writes | besides the order, the two instances run on one work item of every axis: each one's loop on the axis, counted from where loopy starts it (`0`, mostly); an access that runs on every work item of an axis (a statement with no loop on it, the body of a sum on it) shares one with no other, so the two never touch one cell |
 | a cast after a substitution | class of a read it computes again and a write of what it reads | the instance of the producer that stored the cell read, before or after the write in the source's order, puts the read on that side of the write after every step |
 | a cast after a window | pair of accesses to one slot | two instances that touch one slot, in the order the window was taken in, keep it after every step |
 | what a program's call may assume | requirement, or flat access | the claim at every point of its domain, under the hypotheses isl used (a callee's postcondition, a theorem the program cites, a type the contract checks) |
@@ -149,6 +150,9 @@ its own, in parallel.
 | single assignment | pair of statements that store into the array; read of the array and statement that stores into it | two instances, distinct where they are of one statement, store into cells that differ; an instance that stores the cell an instance reads runs before it, in the source order, and so is not the instance that reads it |
 | a kernel's postcondition | conjunct | the conjunct at every point of its binders' domain, under what each statement stores, its value equation, with the instances isl took of the equations as hints; one about reals is stated with Mathlib's `ℝ` and closed by `linarith` |
 | a cited theorem, applied | (one part) | the theorem as it was proved, and the conjuncts of the postcondition it was matched with, imply the claim: Lean applies the theorem with the arrays and sizes loopty bound given by name, and each premise left is a hypothesis |
+| a program's postcondition, where isl does not decide it | conjunct | the conjunct, under what each call stores (the equations that still hold when the program returns) and the theorems the program cites: the arrays the claim reads unfolded into what was stored in them (`simp only`), a theorem rewritten where one of its sides is, its families given as the sections of the arrays they stand for (`rw [← h n (Fr (3 * x + 0)) ... (w (3 * x + 0) e) ...]`), the sums over a literal range written out, then `ring_nf`; one about reals with Mathlib |
+| a cited theorem about a series, applied to the terms a kernel adds | term the kernel adds | the theorem and the identities the kernel cites, as they were proved, and the theorem's hypotheses at the expressions loopty bound, imply that the family at the term's order is the term: Lean rewrites the goal by the identities, then applies the theorem, or rewrites by it and leaves the numerals to `norm_num`; Mathlib's, over the reals or the complex numbers |
+| a postcondition of reals at its class (not isl's: `tested` by its runs) | conjunct | the conjunct within its class's tolerance, `\|a - b\| ≤ 1e-6 (\|b\| + 1)`, of the cells read as what their statements store there, sums written out and tables at their values; Mathlib's, closed by `linarith` with the bounds of each absolute value |
 | an assumption of a schedule | (a hypothesis of every later cast) | |
 
 The points of a call of a kernel inside another kernel's loop
@@ -224,11 +228,33 @@ equation it cannot read an atom, the same equation at the same point being
 one atom, and stated for Lean with Mathlib's reals (`LANKY_LEAN_MATHLIB`),
 where `linarith` closes it; core Lean has no reals, and says so.
 
+An equation of reals in a postcondition that rounds, a closed form the kernel
+computes another way, is compared after each native run at the class of what
+it reads, as the compiled run is compared with the native one
+(`loopty.reals`): `examples/assembly.py`'s `mass_ffc` promises `A[0, 0] ==
+abs(J) / 12` and the rest of `|J| (1 + delta_jk) / 24` from FFC's 15-digit
+tables, to the approx tolerance. isl reads none of it, and the runs test it.
+Where its cells are stored once by statements whose sums run over concrete
+bounds, Lean is shown each conjunct with the cell replaced by what the
+statement stores there, the sum written out and each table read at its
+value, and proves it at the tolerance with Mathlib, a proof of the term read
+over the reals.
+
 A theorem a kernel cites, `@kernel(uses=[on_the_triangle])`, is applied to its
 postcondition: Lean is handed the theorem as it was proved, as a hypothesis,
 and applies it to the claim with the arrays loopty matched to its families,
 `apply h1 (p := p) (c := c) (R := R)`, so that a wrong match is a part Lean
 does not prove.
+
+A theorem about a series is applied to the terms a kernel adds
+(`loopty.summands`): `examples/layer_potential.py`'s `single_layer` adds
+`-(ratio(alpha, beta))**k / k` for `k` from 1 to 5, and `line_taylor`
+concludes `c(n) == -(-beta / alpha)**n / n`. Each term is a part with the
+theorem and the identity the kernel cites, `by_the_conjugate`, as
+hypotheses: Lean rewrites the goal by the identity, `rw [h1 (beta := z t - c
+t) (alpha := c t - y s)]`, and applies the theorem, `apply h0 (alpha := c t
+- y s) (beta := z t - c t) (c := c)`, so that a kernel whose terms are not
+the theorem's is a part Lean does not prove.
 
 ## What isl gives Lean, which Lean checks
 
@@ -256,6 +282,20 @@ stays `decided`.
 - **Case splits,** for what `omega` lacks: it has no dark or grey shadows, and
   a split by the rational bounds isl knows rescues it. None of the examples
   needs one.
+- **The steps of a layout at every size,** where isl has nothing to give.
+  `n * j` is an atom to `omega`, and to isl not a set it can state, so isl
+  decides the layout's facts at `n` from 1 to 6 and loopty gives Lean the
+  steps of a mixed radix (each index times the product of the extents nested
+  inside it, as loopy's `dim_tags` make it) from the layout's own strides:
+  the products that bound each digit's term, `0 ≤ n * (n - 1 - j)` by
+  `Int.mul_nonneg`; for one for one, a case split on the first digit, from
+  the outermost, two cells differ in; for onto, the digits of an address by
+  division, `c % n`, `c // n % n` and so on, which is the inverse isl gives
+  at a number, with what Lean knows of `Int.fdiv` and `Int.fmod`; and the
+  arithmetic multiplied out, so each product of unknowns is one atom.
+  `examples/hexahedra.py`'s DOFArray is proved so in core Lean, and its two
+  layouts the same, `n**3 * e + (i + n * j + n**2 * k)` and `((e * n + k) *
+  n + j) * n + i`, by multiplying out alone.
 - **The counterexample of a refuted fact,** which Lean proves false by
   `decide`, evaluating the statement at the point in the kernel.
 
@@ -438,14 +478,6 @@ Facts loopty states for isl alone, from sets isl computes, which Lean is not
 asked about, and claims core Lean has no words for; each says so with
 `--verbose`, and the coverage report lists them.
 
-- **Work items:** a cast that puts a loop on a hardware axis also claims that
-  no dependence joins two work items, which is stated for isl only; the cast
-  is then left `decided` as a whole; none of the examples' schedules has one
-  (`examples/l2p.py` checks sumpy's, each box a work group, in its python
-  run); issue [#188](https://github.com/xywei/loopty/issues/188). A window of
-  a number of cells is each work item's own, so two of its accesses on two
-  work items need no order, and the claim is then that every read is on a
-  work item that stored its cell.
 - **A claim about reals, in core Lean:** a kernel's postcondition over a
   `Real` array, and a theorem applied to it, are stated with Mathlib's `ℝ`;
   without Mathlib they stay `decided`, saying why, and with it Lean proves
@@ -463,6 +495,15 @@ asked about, and claims core Lean has no words for; each says so with
   so has `tests/kernels/windows.py` a split after a window whose reader is a
   scatter-add, `y[node[i]] += ...`: the window's classes, and none of two
   updates.
+- **A device cast on a window each work item keeps:** a window of a number of
+  cells is each work item's own, so isl asks only the pairs of its accesses
+  that run on one work item to keep their order; Lean's statement of a cast
+  that puts a loop on a hardware axis claims that every pair runs on one,
+  which two boxes storing into one slot of their own windows do not, so the
+  cast is not proved and stays `decided`. `examples/l2p.py` checks such a
+  schedule, `on_a_device()`, with isl, and keeps the one in its ledger,
+  `on_a_gpu`, without windows; issue
+  [#295](https://github.com/xywei/loopty/issues/295).
 - **A part of a tile isl computed:** a statement in one of two tiled loops is
   split by the part of the tile's map over its loop, which isl computes; a
   cast with such a step is left `decided`; none of the examples has one;

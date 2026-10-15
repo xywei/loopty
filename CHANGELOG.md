@@ -33,6 +33,103 @@ All notable changes to loopty are recorded here. The format follows
   one box at a time, refuses the row with its read, and checks sumpy's
   schedule on a device; `benchmarks/l2p.py --variant windowed` (and
   `unrolled_windowed`) times it.
+- **A layout at every size** (`loopty.layout`, #263). A layout's body may
+  compute with a size its annotations name, so grudge's DOFArray is one
+  layout for every order, `n**3 * e + (i + n * j + n**2 * k)` over
+  `Fin[ne] x Fin[n]**3`, and so is loopy's `dim_tags` `N3,N0,N1,N2` of it,
+  each stride the product of the extents nested inside it. isl cannot state
+  `n * j`, so it decides each fact at `n` from 1 to 6 and the fact reads
+  `tested`, saying why; Lean proves it for every `n`, given the steps
+  `omega` lacks (lanky's products, quotients and multiplying out): the
+  products that bound each digit's term, a case split on the first digit
+  two cells differ in, and an address's digits by division as the cell it
+  stores. Two layouts the same is a polynomial identity Lean multiplies
+  out. All in core Lean. A refuted one names the size isl found it at,
+  `padded stores (i=0, j=1) and (i=0, j=0) both at 0 (at m=2, n=1)`. A call
+  gives the size by name, `dof_array(e, i, j, k, n=4)`.
+  `examples/hexahedra.py` declares its three layouts at a symbolic order, so
+  its claim that the DOFArray, #418's `dim_tags` and the kernels' row-major
+  arrays are one layout holds for every order, where it held at order 3 and
+  `as_dim_tags` read `x = x` in Lean.
+- **A device cast proved whole** (#188). A cast that puts a loop on a
+  hardware axis claims besides its order that no dependence joins two work
+  items, which was stated for isl only, so the cast stayed `decided` where
+  Lean is installed. Lean is now asked it too: for each dependence class,
+  that the two instances run on one work item of every axis, each one's loop
+  counted from where loopy starts it, and for a statement's sum that reads
+  what its own instruction writes, that the two never touch one cell where
+  they run apart. S1's three device launches, sumpy's tile in S2, Kulkarni's
+  split in S3 and the advection right-hand side's launches of every split
+  read `proved` by Lean, and the four demo drivers offer their casts to Lean
+  where it is installed (`python examples/hexahedra.py`: `along_s: tag(...):
+  2 facts, all proved by lean`).
+- **A program's postcondition** (`loopty.unfolding`,
+  `loopty.dataflow.program_stores`). A `@program`'s return annotation is a
+  claim about what it leaves in its parameters, written in their names and
+  the sizes its kernels name, and it is a row of the ledger, keyed as a
+  kernel's is:
+  - `tested` on the program's native runs, an equation that reads an output
+    compared at that output's class, `approx` for reals, as the compiled run
+    is compared with the native one: the calls sum in an order of their own,
+    and agree with the claim as reals and as floats to rounding. A run that
+    leaves it false refutes it, naming the cell and the two values;
+  - `decided` by isl where what the calls store decides it, as a kernel's
+    postcondition is: each call that stores no cell of an array twice, and
+    reads none before its store, has a `single-assignment` fact of the
+    program's, and each of its statements is an equation about what the
+    program leaves, until a later call writes an array it names;
+  - otherwise stated for Lean, a part of Mathlib's for a claim about reals:
+    what the calls store unfolded into the claim a pass at a time, each
+    theorem the program cites (`@program(uses=[...])`) rewritten where one of
+    its sides is, its families at the sections of the arrays they stand
+    for, `Fr (3 * x + 0)` and `w (3 * x + 0) e`, then the sums over a literal
+    range written out and `ring`. Python finds the steps, and Lean checks
+    them; a wrong one is no proof. Proved, the fact rests on the
+    `single-assignment` facts and the theorems it used.
+  In `examples/hexahedra.py`, `weak_grad` and `weak_div` claim that `grad`
+  and `div` are the dense Kronecker operators of the three directions
+  applied to the field times its metric terms, citing `sum_factorization`,
+  and with Mathlib both rows read `proved lean`: the theorem proved for
+  every order now says something about the programs that compute it.
+  A claim that names anything but the program's parameters and sizes is
+  `assumed`, and says what it names.
+- **A theorem tied to the terms a kernel adds** (`loopty.summands`, #252). A
+  cited theorem that concludes `all(c(n) == E for n in Nat if ...)` gives a
+  `by-theorem` row where a sum in the kernel's term adds `E` at whole
+  numbers `n`, with the theorem's variables bound to the kernel's
+  expressions of the sorts it takes them at (a theorem about reals says
+  nothing of complex numbers), and an identity the kernel cites, `L == R`,
+  rewrites `R` in `E` into the kernel's `L` first; the row names the
+  identity's premises that are not the theorem's. `examples/layer_potential.py`'s `single_layer` cites
+  `line_taylor` and the new `by_the_conjugate`, `ratio(alpha, beta) == -beta
+  / alpha`, the kernels' ratio by the conjugate, and its ledger reads
+  `single_layer adds line_taylor's c(n) for n in 1..5, for every c with away,
+  first and ode, read over the complex numbers`: `decided` by `theorem`,
+  resting on both theorems, and proved by Lean with Mathlib, the identity
+  rewritten and the theorem applied a term at a time. A theorem's annotation
+  that calls `loopty.math`'s `conj`, `real`, `exp` and the rest, itself or
+  through a helper the kernel calls too, reads them as lanky's functions
+  (needs lanky with `real`, `imag` and `conj`), and a kernel's postcondition
+  keeps the calls its trace makes (`loopty.math.as_traced`, `as_stated`).
+- **A postcondition's equations of reals at their class** (`loopty.reals`,
+  #254). An equation that rounds is compared after each native run within
+  the tolerance of the class of what it reads, as the compiled run is with
+  the native one, `|a - b| <= 1e-6 (|b| + 1)` for `approx`, and the
+  statement says so (`..., to the approx tolerance`); one that rounds
+  nothing, one of integers and one of an `exact` class are compared bit for
+  bit as before. Where its cells are stored once, by statements whose sums
+  run over concrete bounds, Lean proves it with Mathlib over the reals from
+  what they store, the tables at the values they hold, resting on the
+  `single-assignment` facts and on the `trace-faithful` fact.
+  `examples/assembly.py`'s `mass_ffc` now promises the element's mass,
+  `|J| (1 + delta_jk) / 24`, in place of a symmetric matrix: `tested` on its
+  runs, `proved` with Mathlib, and restated of every cell after its call.
+- **`@upstream(kernel, within=1e-12)`** (#268): the agreement with the code a
+  kernel mirrors, compared within the stated fraction of the largest value
+  of each output computed in floating point, and the row says so (`... in
+  out within 1e-12 of the largest value, on its example inputs`); an `exact`
+  output is still compared bit for bit. `examples/layer_potential.py`'s two
+  rows state it, where the bound was in a test only.
 - **Claims settled by running them** (`loopty.tested`): `@tested` on a
   function that takes nothing and returns whether its claim held, alone or
   with what it measured, puts the claim in the ledger as a `tested` row,
@@ -118,6 +215,24 @@ All notable changes to loopty are recorded here. The format follows
   (interleaving the four cells, or running each whole); and
   `benchmarks/assembly_agreement.py` compares
   the example with firedrake's own assembly and PyOP2's own `par_loop`.
+
+- **The advection right-hand side on hexahedra** (`examples/advection.py`),
+  the stretch of the S1 demo: grudge #418's `WeakAdvectionOperator` with the
+  upwind flux, from grudge's own geometry, as kernels for every order. The
+  flux reads the neighbor's value through the face maps, in bounds by type;
+  the inverse mass is pushed inward, as grudge #362 rewrites it, and the
+  same kernels take the GLL quadrature's tables. Three lanky theorems, proved
+  where Mathlib is installed: the two rearrangements, and that the lift onto
+  the face nodes is the transpose of the face gather, so it keeps the
+  element's total. The kernels fuse on the element, one loop deeper is
+  refused with its pair, and the fluxes are kept an element at a time;
+  libParanumal's lift onto the face nodes without its barriers is refused
+  with the edge node two faces update, and accepted atomic. Five splits on a
+  device (libParanumal's volume and surface, the fluxes first, three
+  launches, one, one from the metric terms), each launch a checked schedule;
+  `benchmarks/advection.py` times them in five shapes beside the same
+  launches in plain loopy and grudge's own right-hand side, and compares
+  them with grudge's on a warped periodic mesh.
 
 - **A kernel's postcondition decided from what its statements store**
   (`loopty.dataflow`, #113). Where no cell of an array a kernel writes is
@@ -544,6 +659,17 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Changed
 
+- **A substitution through an array computed from inputs alone.**
+  `Schedule.substitute` computes an array where it is read from what its
+  producer read, and refused one whose producer reads an array an earlier
+  substitution computes where it is read, since the dependences of that
+  array's own reads were carried to a statement that no longer runs. Where
+  that array is computed from arrays nothing in the program writes (its
+  inputs), there are none, and the chain is substituted: grudge's `v.n`
+  from the normals, read by the upwind flux, read by the lift
+  (`examples/advection.py`). A chain through an array something writes is
+  refused as before.
+
 - `contract` of a program's array over a domain names `substitute` as the
   other fix only where one statement stores the array, which is what a
   substitution computes again; the flagship's triangles, which two
@@ -667,6 +793,15 @@ All notable changes to loopty are recorded here. The format follows
   place, decided by isl; it was `assumed`.
 - A schedule's assumption is named `assume('nc % 4 == 0')` in the status of
   the casts that rest on it (with lanky's `label`), where its whole id was.
+- **Two statements' atomic updates of one cell asked loopy for a global
+  barrier.** `y[p] += a[p]` and `y[p + 1] += a[p]` with `p` on `l.0` race
+  on `y[p + 1]`, and after `atomic("y")` the schedule is legal and its
+  `buildable` fact holds, but the lowered kernel kept the source's order of
+  the two, so loopy refused to generate it (`MissingBarrierError`). Once an
+  array's updates are atomic, the order is drawn again from the dependences
+  the casts are checked against, and two updates no dependence joins need
+  no order (loopy's `no_sync_with`): libParanumal's lift onto the face nodes
+  (`examples/advection.py`).
 
 - A write through a cell read from an array, `y[perm[i]] = x[i]`, no longer
   has its distinct writes refuted by isl with two instances that write no

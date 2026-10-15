@@ -88,7 +88,10 @@ a global barrier, and so is a sum that reads the cell its own statement
 writes, which is one instance (see :func:`_within_instances`). ``ilp`` and
 ``vec`` loops run inside one work item, and only lose their order. A refusal
 names the dependence and the two work items: ``S0[t=0, i=1] writes u[1, 1]
-read by S0[t=1, i=2] on another work item``.
+read by S0[t=1, i=2] on another work item``. Lean is asked the same, from the
+work items each step records (:attr:`Step.work`): each dependence class's two
+instances on one work item of every axis
+(:func:`loopty.obligations.cast_obligation`).
 
 Legal is not the same as buildable
 ----------------------------------
@@ -1178,7 +1181,9 @@ def _grid_axis(tag: Any, name: str) -> str | None:
     return None
 
 
-def _grid_base(kernel: Any, name: str) -> tuple[str, tuple[str, ...]] | None:
+def _grid_base(
+    kernel: Any, name: str
+) -> tuple[str, tuple[str, ...], Any] | None:
     """Where loopy starts counting the work items of the loop ``name``.
 
     loopy runs a loop on a hardware axis as ``name = base + index``, where
@@ -1186,8 +1191,8 @@ def _grid_base(kernel: Any, name: str) -> tuple[str, tuple[str, ...]] | None:
     minimum of the loop's lower bound over the sizes
     (``loopy.kernel.tools.get_hw_axis_base_for_codegen``, which loopy's code
     generation and its own race check both use). Returns ``base`` as isl
-    text with the parameters it names, or ``None`` when there is no kernel to
-    ask or loopy finds no such minimum.
+    text with the parameters it names, and as an expression, or ``None``
+    when there is no kernel to ask or loopy finds no such minimum.
     """
     if kernel is None:
         return None
@@ -1196,7 +1201,8 @@ def _grid_base(kernel: Any, name: str) -> tuple[str, tuple[str, ...]] | None:
 
     try:
         base = get_hw_axis_base_for_codegen(kernel.default_entrypoint, name)
-        text = idx.isl_expr(aff_to_expr(base))
+        expr = aff_to_expr(base)
+        text = idx.isl_expr(expr)
     except Exception:  # noqa: BLE001 - a start loopy cannot say is not known
         return None
     space = base.get_space()
@@ -1204,7 +1210,7 @@ def _grid_base(kernel: Any, name: str) -> tuple[str, tuple[str, ...]] | None:
         space.get_dim_name(isl.dim_type.param, k)
         for k in range(space.dim(isl.dim_type.param))
     )
-    return text, params
+    return text, params, expr
 
 
 @dataclass(frozen=True)
@@ -1226,6 +1232,9 @@ class _WorkItems:
     its sum on all of them. ``known`` names the loops whose start loopy says,
     and ``hidden`` the parameters that stand for the start of each of the
     others, and for the work item of each axis where a sum's statement runs.
+    ``starts`` maps each loop on an axis to its start as an expression, or
+    to ``None`` where loopy says none: what Lean is told of it
+    (:func:`loopty.obligations.cast_obligation`).
     """
 
     axes: tuple[str, ...]
@@ -1235,6 +1244,7 @@ class _WorkItems:
     spread: dict[str, isl.Map]
     known: frozenset[str]
     hidden: frozenset[str]
+    starts: Mapping[str, Any] = field(default_factory=dict)
 
     def placed(self, part: str, axis: str) -> isl.Map:
         """The work items along ``axis`` of an access made in ``part``.
@@ -1322,15 +1332,18 @@ def _work_items(
         return name
 
     starts: dict[str, tuple[str, tuple[str, ...]]] = {}
+    expressions: dict[str, Any] = {}
     known: set[str] = set()
     for name in sorted({n for mine in on.values() for ns in mine.values() for n in ns}):
-        start = _grid_base(kernel, name)
-        if start is None:
+        found = _grid_base(kernel, name)
+        if found is None:
             param = fresh(f"start_{name}")
-            start = (param, (param,))
+            starts[name] = (param, (param,))
+            expressions[name] = None
         else:
             known.add(name)
-        starts[name] = start
+            starts[name] = found[:2]
+            expressions[name] = found[2]
     results = {
         axis: fresh("result_" + "".join(c if c.isalnum() else "_" for c in axis))
         for axis in axes
@@ -1376,6 +1389,7 @@ def _work_items(
         spread={axis: coordinate(axis, after_sums=False) for axis in axes},
         known=frozenset(known),
         hidden=frozenset(hidden),
+        starts=expressions,
     )
 
 
@@ -2728,6 +2742,9 @@ class Step:
     window: Any = None
     #: A substitution's array, its producer and the statements that read it.
     substituted: tuple[str, Any, tuple[Any, ...]] | None = None
+    #: Where each instance runs on the launch grid after the step
+    #: (:func:`_work_items`), or ``None`` when no loop is on a hardware axis.
+    work: Any = None
 
 
 @dataclass(frozen=True, eq=False)
@@ -4677,7 +4694,11 @@ class Schedule:
         gone, and the reads that replace them are there. The kernel's
         instructions are ordered by those too
         (:meth:`_ordered_by_dependences`). A substitution through two arrays,
-        one computed from the other, is refused. Keeping an array in the
+        one computed from the other, is refused, unless the first is computed
+        from arrays nothing in the term writes: then its value at a cell is
+        the same wherever it is computed, and nothing is carried through it
+        (grudge's ``v.n`` from the normals, read by the flux, read by the
+        lift, in ``examples/advection.py``). Keeping an array in the
         window of cells that are live at once (:meth:`contract`) is the other
         way of storing it less, and an array is stored one way or the other.
         """
@@ -4750,11 +4771,16 @@ class Schedule:
         # substitution took out reads nothing, and an array it computes is
         # read through what its own producer reads. Both are refused.
         taken = [stmt.id for stmt in readers if stmt.id in self._gone]
+        # Through an array computed where it is read from arrays nothing in
+        # the term writes, there is nothing to carry over: its value at a
+        # cell is the same wherever it is computed.
         through = sorted(
             {
                 name
                 for kind, name, _indices, _part in _accesses(producer, term)
-                if kind == "read" and name in self._substituted
+                if kind == "read"
+                and name in self._substituted
+                and not self._computed_from_inputs(name)
             }
         )
         if taken or through:
@@ -5633,6 +5659,25 @@ class Schedule:
             ),
         )
 
+    def _computed_from_inputs(self, array: str) -> bool:
+        """Whether ``array``, computed where it is read, reads only what nothing writes.
+
+        Its statement no longer runs, and the dependences of what it read
+        were carried over to the statements that read ``array``. Where those
+        are arrays no statement of the term writes, such as the program's
+        inputs, there were none, and a later substitution through ``array``
+        drops nothing.
+        """
+        term = self._term
+        written = {stmt.assignee.array for stmt in term.stmts}
+        return all(
+            name not in written
+            for stmt in term.stmts
+            if stmt.id in self._gone and stmt.assignee.array == array
+            for kind, name, _indices, _part in _accesses(stmt, term)
+            if kind == "read"
+        )
+
     def _carried_over(
         self, producer: Stmt, gone: set[str], readers: Sequence[Stmt], array: str
     ) -> tuple[tuple[_Dep, ...], tuple[_Dep, ...]]:
@@ -5947,6 +5992,12 @@ class Schedule:
         if draft.target not in _C_TARGETS:
             ids = {self._lowering.insn_ids[stmt.id] for stmt in updates}
             draft.kernel = _transformed(draft.kernel, _atomic_kernel, array, ids)
+            # Two statements that update one cell are ordered by no
+            # dependence once their updates are atomic, so the order the
+            # lowering gave them goes: loopy would otherwise ask for a global
+            # barrier between two work items that update one cell.
+            if len(updates) > 1 and draft.kernel is not None:
+                draft.kernel = self._ordered_by_dependences(draft)
         return self._commit(draft, text, ("atomic", (array,), {}), cast=False)
 
     @property
@@ -6009,6 +6060,18 @@ class Schedule:
             stmt_ids=self._layout.stmt_ids, coords=dict(draft.coords)
         )
         step = _step_map(self._layout, layout, draft.mappings)
+        # Where each instance runs on the launch grid, which the order leaves
+        # out (see "Work items" in the module docstring).
+        sums: dict[str, list[str]] = {}
+        for name, key in draft.reductions.items():
+            sums.setdefault(key.rsplit(":", 1)[0], []).append(name)
+        work = _work_items(
+            layout,
+            draft.tags,
+            draft.kernel,
+            set(self._params) | set(self._term.sizes),
+            sums,
+        )
         record = Step(
             text=text,
             recipe=recipe,
@@ -6026,6 +6089,7 @@ class Schedule:
             assumptions=self._assumptions,
             gone=gone,
             substituted=substituted,
+            work=work,
         )
         records = (*self._records, record)
 
@@ -6072,16 +6136,6 @@ class Schedule:
         # is refused whatever the order (see "Work items" in the module
         # docstring). A window each work item keeps its own of orders only
         # the accesses on one work item.
-        sums: dict[str, list[str]] = {}
-        for name, key in draft.reductions.items():
-            sums.setdefault(key.rsplit(":", 1)[0], []).append(name)
-        work = _work_items(
-            layout,
-            draft.tags,
-            draft.kernel,
-            set(self._params) | set(self._term.sizes),
-            sums,
-        )
         deps, total = self._per_work_item(reindex, work)
         overall = (
             isl_oracle.is_monotone(schedule, total)
@@ -7348,8 +7402,7 @@ def _subscript_text(dep: _Dep) -> str:
 #: time is not stated for Lean.
 UPDATES_ISL_ONLY = (
     "the updates a step runs at the same time are read off its order and its "
-    "work items, which loopty states for isl only, as it does a dependence "
-    "between two work items"
+    "work items, from sets isl computes, which loopty states for isl only"
 )
 
 

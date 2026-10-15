@@ -42,7 +42,7 @@ from lanky.ledger import Status  # noqa: E402
 from lanky.prelude import Int, Real  # noqa: E402
 from lanky.terms import Var, evaluate, render  # noqa: E402
 
-from loopty import Arr, Fin, Schedule, kernel  # noqa: E402
+from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum  # noqa: E402
 from loopty.description import (  # noqa: E402
     Unstatable,
     description_of,
@@ -430,6 +430,55 @@ def test_a_cast_is_stated_one_part_per_dependence_class() -> None:
     ]
 
 
+def _device_launches() -> list[tuple[str, Any]]:
+    """The demos' casts that put loops on hardware axes, each with its schedule."""
+    hexahedra = load(EXAMPLES / "hexahedra.py")
+    qbx = load(EXAMPLES / "layer_potential.py")
+    assembly = load(EXAMPLES / "assembly.py")
+    out = [
+        (f"{operator} {schedule.term.name}", schedule)
+        for operator in ("grad", "div")
+        for schedule in hexahedra.passes_on_a_device(operator)
+    ]
+    out.append(("sumpy's tile", qbx.sumpy_tile("c")))
+    out.append(("Kulkarni's split", assembly.kulkarni(atomic=True)))
+    advection = load(EXAMPLES / "advection.py")
+    out += [
+        (f"advection {split} {schedule.term.name}", schedule)
+        for split in advection.SPLITS
+        for schedule in advection.launches(split)
+    ]
+    out.append(
+        (
+            "libParanumal's lift, atomic",
+            Schedule(advection.lift_on_faces)
+            .atomic("rhs")
+            .tag(e="g.0", a="l.1", b="l.0"),
+        )
+    )
+    return out
+
+
+def test_a_cast_on_a_hardware_axis_keeps_each_class_on_one_work_item() -> None:
+    hexahedra = load(EXAMPLES / "hexahedra.py")
+    _first, along_s, _last = hexahedra.passes_on_a_device()
+    (monotone,) = [fact for fact in along_s.facts() if fact.kind == "monotone"]
+    assert monotone.statement.endswith("forward, within one work item")
+    obligation = monotone.term.lean_obligation()
+    assert not obligation.declined
+    names = [part.name for part in obligation.parts]
+    assert names == ["dependence_0", "dependence_0_work_item"]
+    together = obligation.parts[1]
+    assert together.label == (
+        "vs[q, e, k, j, i] written again by S0 after vs[q, e, k, j, i] is written "
+        "by S0, on one work item"
+    )
+    # each axis's loop, less where loopy starts it, is the work item
+    assert render(together.term.body) == (
+        "e_a1 == e_b1 and i_a1 == i_b1 and j_a1 == j_b1 and k_a1 == k_b1"
+    )
+
+
 def test_a_refused_cast_is_stated_with_isls_pair() -> None:
     module = stencil()
     with pytest.raises(IllegalCast) as refused:
@@ -609,6 +658,39 @@ def test_a_mixed_subscript_is_in_bounds_by_type_and_isl() -> None:
     (part,) = obligation.parts
     text = render(part.term)
     assert "0 <= cell[c, k]" in text and "cell[c, k] < nv" in text
+
+
+@kernel
+def gather_twice(
+    face: Arr[Fin[nf], Fin[3], Fin[n]],  # noqa: F821
+    u: Arr[Fin[ne], Fin[n], Real],  # noqa: F821
+    g: Arr[Fin[ne], Fin[nf], Fin[3], Real],  # noqa: F821
+):
+    """Each element's values at its face nodes, read twice: an upwind flux's shape."""
+    for e in g.dom:
+        for f in g.dom[e]:
+            for k in g.dom[e, f]:
+                g[e, f, k] = u[e, face[f, k]] * u[e, face[f, k]] + u[e, face[f, k]]
+
+
+def test_a_mixed_subscript_read_twice_in_a_statement_is_one_place() -> None:
+    """``u[e, face[f, k]]`` three times in one statement: one fact, decided.
+
+    It used to be ``assumed`` ("the index is not quasi-affine"): the rule for
+    mixed subscripts took only an access made once, and a flux reads the
+    value inside the element twice, in its average and in its jump.
+    """
+    from loopty.oracle import IslOracle
+
+    (fact,) = [f for f in gather_twice.facts() if f.statement.startswith("u[")]
+    assert fact.statement == (
+        "u[e, face[f, k]] is in bounds for every instance of S0 "
+        "(face[f, k] : Fin(n), by type)"
+    )
+    decided = IslOracle().establish(fact)
+    assert decided.status is Status.DECIDED and decided.decided_by == "isl"
+    (part,) = fact.term.lean_obligation().parts
+    assert "face[f, k] < n" in render(part.term)
 
 
 @kernel
@@ -1113,16 +1195,124 @@ def test_lean_confirms_a_layouts_refutation_at_isls_cell(lean: Any) -> None:
 
     layouts = load(EXAMPLES / "storage_layouts.py")
     (wrong,) = layouts.dof_array.same_as("N3,N2,N1,N0").facts()
+    # the element innermost makes ne a stride: a layout at every size, which
+    # isl refutes at ne = 2, and Lean there
+    (inside,) = layouts.dof_array.same_as("N0,N1,N2,N3").facts()
 
     def folded(i: Fin[4]) -> Fin[2]:  # noqa: F821
         return i // 2
 
     _bounds, injective, _onto = layout(folded).facts()
-    for fact in (wrong, injective):
+    for fact in (wrong, inside, injective):
         refuted = IslOracle().establish(fact)
         assert refuted.status is Status.REFUTED, fact.statement
         said = lean.establish(refuted).provenance.get("lean_counterexample", "")
         assert said.startswith("Lean confirmed the counterexample"), said
+
+
+def test_lean_proves_the_device_launches_of_the_demos(lean: Any) -> None:
+    # every cast that puts a loop on a hardware axis: S1's three launches of
+    # each operator, sumpy's tile in S2, Kulkarni's split in S3, and the
+    # advection right-hand side's launches of every split
+    unproved = []
+    for label, schedule in _device_launches():
+        for fact in schedule.facts():
+            if fact.kind not in ("bijective", "monotone"):
+                continue
+            result = lean.establish(fact)
+            if result.status is not Status.PROVED:
+                unproved.append((label, fact.statement, result.provenance))
+    assert not unproved
+
+
+def test_lean_fails_where_a_dependence_joins_two_work_items(lean: Any) -> None:
+    # jacobi with i on g.0 reads at t + 1 what the next group wrote at t: isl
+    # refuses it. Stated as if isl had found it legal, Lean proves the order
+    # of every class and fails on the work items of exactly the two that join
+    # two of them, u[t, i - 1] and u[t, i + 1] read after the write; the
+    # classes of a write after those reads are empty.
+    from dataclasses import replace
+
+    from lanky.ledger import Fact
+
+    with pytest.raises(IllegalCast) as refused:
+        Schedule(stencil().jacobi, sizes={"nt": 8, "nx": 8}).tag(i="g.0")
+    planted = replace(refused.value.fact.term, refuted=False, refusal=None)
+    parts = planted.lean_obligation().parts
+    result = lean.establish(
+        Fact(
+            id="planted",
+            kind="monotone",
+            statement="i on g.0, taken to be legal",
+            term=_Planted(parts),
+            status=Status.DECIDED,
+            decided_by="isl",
+            where="stencil.py:1",
+            owner="jacobi",
+        )
+    )
+    failed = [r["name"] for r in result.provenance["lean_parts"] if not r["proved"]]
+    assert failed == ["dependence_1_work_item", "dependence_2_work_item"]
+
+
+@kernel
+def doubled(x: Arr[Fin[n], Real], w: Arr[Fin[n], Real]):  # noqa: F821
+    """``w`` twice ``x``, which a substitution computes where it is read."""
+    for i in w.dom:
+        w[i] = 2 * x[i]
+
+
+@kernel
+def scaled_in_place(
+    w: Arr[Fin[n], Real],  # noqa: F821
+    c: Arr[Fin[m], Real],  # noqa: F821
+    x: Arr[Fin[n], Real],  # noqa: F821
+):
+    """``x[i]`` from a sum that reads ``w[i]``, which is ``2 x[i]`` substituted."""
+    for i in x.dom:
+        x[i] = reduce_sum(w[i] * c[j] for j in c.dom)
+
+
+@program
+def doubled_then_scaled(x, c):
+    w = Arr.zeros_like(x)
+    doubled(x, w)
+    scaled_in_place(w, c, x)
+
+
+def test_a_substituted_sum_reading_its_own_write_is_caught_apart(lean: Any) -> None:
+    # Codex: after substitute('w') the sum of scaled_in_place reads x[i], which
+    # its own instruction writes, and the Lean parts did not see the read the
+    # substitution moved there. With the sum on l.0 it reads on every work
+    # item and the write is on one: isl refuses. Stated as if isl had found
+    # it legal, Lean fails on exactly that pair.
+    from dataclasses import replace
+
+    from lanky.ledger import Fact
+
+    substituted = Schedule(doubled_then_scaled, sizes={"n": 8, "m": 4}).substitute("w")
+    with pytest.raises(IllegalCast) as refused:
+        substituted.tag(j="l.0")
+    planted = replace(refused.value.fact.term, refuted=False, refusal=None)
+    parts = planted.lean_obligation().parts
+    assert parts[-1].label == (
+        "the sum of scaled_in_place.S0 reads x[i_0], which its instruction writes, "
+        "on another work item of l.0"
+    )
+    result = lean.establish(
+        Fact(
+            id="planted-within",
+            kind="monotone",
+            statement="the sum on l.0, taken to be legal",
+            term=_Planted(parts),
+            status=Status.DECIDED,
+            decided_by="isl",
+            where="test_lean_checks.py:1",
+            owner="doubled_then_scaled",
+        )
+    )
+    failed = [r["name"] for r in result.provenance["lean_parts"] if not r["proved"]]
+    assert failed == ["within_0"]
 
 
 class _Planted:
