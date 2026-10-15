@@ -619,8 +619,9 @@ def _in_a_box(
     k = int(np.argmax(bad))
     at = ", ".join(f"{name}={int(column[k])}" for name, column in zip(names, columns))
     return (
-        f"at {at}, {render(body.left)} is {left[k]!r} and {render(body.right)} is "
-        f"{right[k]!r}, further apart than the {exactness} class allows"
+        f"at {at}, {render(body.left)} is {left[k].item()!r} and "
+        f"{render(body.right)} is {right[k].item()!r}, further apart than the "
+        f"{exactness} class allows"
     )
 
 
