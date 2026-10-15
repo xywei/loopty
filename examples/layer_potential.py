@@ -19,9 +19,12 @@ One file holds the three layers of it:
   about its coefficients is the closed form ``coefficient`` writes, at the
   ratio ``-beta / alpha``. That the Taylor coefficients of ``log(alpha + tau
   * beta)`` satisfy it is cited, not proved. The kernels add
-  ``coefficient(ratio, k)``, the same function, with the ratio computed as
-  ``-beta * conj(alpha) / |alpha|**2``; no row of the ledger links the two
-  yet.
+  ``coefficient(ratio(alpha, beta), k)``, the same function, with the ratio
+  computed by the conjugate, ``-beta * conj(alpha) / |alpha|**2``, which
+  ``by_the_conjugate`` proves is ``-beta / alpha``. ``single_layer`` cites
+  both, and its ledger has the row that links them: ``single_layer adds
+  line_taylor's c(n) for n in 1..5``, about the term it evaluates read over
+  the complex numbers, not about the floats it produces.
 - **The kernels and their transforms.** ``single_layer`` and ``double_layer``
   are pytential's ``S`` and ``D`` as sumpy computes them, over complex points.
   ``sumpy_tile()`` is sumpy's CPU schedule, as ``get_optimized_kernel`` writes
@@ -32,11 +35,12 @@ One file holds the three layers of it:
 - **The agreement and the accuracy.** ``sumpy_single_layer`` and
   ``sumpy_double_layer`` are what sumpy's own ``LayerPotential`` returns on
   the same inputs, called as pytential calls it, and each kernel's
-  ``upstream`` row compares its native run with them. pytential's identity
-  test case, Green's identity ``S(du/dn) - D(u) - u/2 == 0`` on the
-  five-armed starfish, and the jump relations its integral equations rest on
-  are measured with the compiled kernels at 30 to 90 panels, each a
-  ``tested`` row decided by the run.
+  ``upstream`` row compares its native run with them, within ``1e-12`` of
+  the largest value, which is round-off between two orders of summation.
+  pytential's identity test case, Green's identity ``S(du/dn) - D(u) - u/2
+  == 0`` on the five-armed starfish, and the jump relations its integral
+  equations rest on are measured with the compiled kernels at 30 to 90
+  panels, each a ``tested`` row decided by the run.
 
 Run this file three ways.
 
@@ -48,11 +52,15 @@ Run this file three ways.
 ``lanky check examples/layer_potential.py``
     The ledger. The theorem reads ``proved`` by Lean where Mathlib is
     installed, and ``assumed`` without it, since the property tester draws no
-    table over ``Nat``. Each kernel's accesses are in bounds and its writes
+    table over ``Nat``; the identity ``by_the_conjugate`` reads ``proved``
+    with Mathlib and ``tested`` without. The row that ``single_layer`` adds
+    the theorem's ``c(n)`` is ``decided`` by ``theorem``, and proved by Lean
+    with Mathlib. Each kernel's accesses are in bounds and its writes
     distinct, and each cast of its tile on C keeps every dependence, decided
     by isl (proved by Lean where it is installed); its trace is faithful to
-    its body, its agreement with sumpy is ``tested`` by ``upstream``, and the
-    three accuracy rows are ``tested`` by their run.
+    its body, its agreement with sumpy is ``tested`` by ``upstream`` within
+    ``1e-12`` of the largest value, and the three accuracy rows are
+    ``tested`` by their run.
 
 ``loopty run examples/layer_potential.py``
     Both kernels on their tile, compiled on the C target and compared with
@@ -155,17 +163,39 @@ def line_taylor(
     """
 
 
+def ratio(alpha, beta):
+    """``-beta / alpha``, by the conjugate: ``-beta * conj(alpha) / |alpha|**2``.
+
+    As sumpy's real arithmetic has it: one real division where a complex
+    division takes three, and a branch.
+    """
+    return -beta * conj(alpha) * (1 / real(alpha * conj(alpha)))
+
+
+@theorem
+def by_the_conjugate(
+    alpha: Complex, beta: Complex, away: alpha != 0
+) -> ratio(alpha, beta) == -beta / alpha:
+    """The kernels' ratio is the theorem's: ``-beta / alpha``, by the conjugate.
+
+    ``alpha * conj(alpha)`` is ``|alpha|**2``, a real number, so ``conj(alpha)
+    / |alpha|**2`` is ``1 / alpha``. Lean proves it with Mathlib, writing the
+    division as the conjugate over ``|alpha|**2`` and both sides as one
+    expression in it, which ``ring`` closes.
+    """
+
+
 def single(alpha, beta):
     """``log|alpha + beta|``: ``log|alpha|`` and the series through ``ORDER``.
 
     With ``r2 = |alpha|**2``, ``log|alpha|`` is ``log(r2) / 2``, and the
-    ratio ``-beta / alpha`` is ``-beta * conj(alpha) / r2``, a complex
-    division multiplied out by the conjugate, as sumpy's real arithmetic has
-    it: one real division where a complex division takes three, and a branch.
+    series is in :func:`ratio`, the theorem's ``-beta / alpha`` multiplied out
+    by the conjugate.
     """
     r2 = real(alpha * conj(alpha))
-    ratio = -beta * conj(alpha) * (1 / r2)
-    series = reduce_sum(coefficient(ratio, k) for k in Fin[ORDER + 1] if k >= 1)
+    series = reduce_sum(
+        coefficient(ratio(alpha, beta), k) for k in Fin[ORDER + 1] if k >= 1
+    )
     return log(r2) / 2 + real(series)
 
 
@@ -178,8 +208,7 @@ def double(alpha, beta, normal):
     itself, divided out by the conjugate as :func:`single` does.
     """
     r2 = real(alpha * conj(alpha))
-    ratio = -beta * conj(alpha) * (1 / r2)
-    powers = reduce_sum(ratio**k for k in Fin[ORDER + 1])
+    powers = reduce_sum(ratio(alpha, beta) ** k for k in Fin[ORDER + 1])
     return -real(normal * conj(alpha) * (1 / r2) * powers)
 
 
@@ -189,7 +218,7 @@ def double(alpha, beta, normal):
 # {{{ the kernels: pytential's S and D, as sumpy's LayerPotential computes them
 
 
-@kernel
+@kernel(uses=[line_taylor, by_the_conjugate])
 def single_layer(
     z: Arr[Fin[nt], np.complex128],
     c: Arr[Fin[nt], np.complex128],
@@ -200,7 +229,9 @@ def single_layer(
     """``S`` at each target ``z[t]``, through the expansion about its center ``c[t]``.
 
     ``y`` holds the sources and ``w`` the quadrature weight times the density
-    at each, as pytential hands sumpy its strengths.
+    at each, as pytential hands sumpy its strengths. It cites ``line_taylor``
+    for the terms of its series, which ``by_the_conjugate`` says are at the
+    theorem's ratio.
     """
     for t in out.dom:
         out[t] = SCALE * reduce_sum(
@@ -388,13 +419,13 @@ def recorded(layer: str) -> list[float]:
     return json.loads(RECORDED.read_text(encoding="utf-8"))[layer]
 
 
-@upstream(single_layer)
+@upstream(single_layer, within=1e-12)
 def sumpy_single_layer(z, c, y, w, out):
     """sumpy's own LayerPotential at 13a48a0 for S, as pytential calls it, recorded."""
     return {"out": recorded("single_layer")}
 
 
-@upstream(double_layer)
+@upstream(double_layer, within=1e-12)
 def sumpy_double_layer(z, c, y, n, w, out):
     """sumpy's own LayerPotential at 13a48a0 for D, as pytential calls it, recorded."""
     return {"out": recorded("double_layer")}
@@ -520,12 +551,14 @@ def main() -> int:
         ok = ok and fact.status.value == "tested"
 
     for agreement in (sumpy_single_layer, sumpy_double_layer):
-        # the verdict and the class, not the difference, whose last digits are
-        # the platform's
+        # the verdict and the allowance the row states, not the difference,
+        # whose last digits are the platform's
         (fact,) = agreement.facts()
         detail = fact.provenance.get("outputs", {}).get("out")
         measured = (
-            f"to the {detail['exactness']} tolerance"
+            f"within {detail['within']:g} of the largest value"
+            if detail and "within" in detail
+            else f"to the {detail['exactness']} tolerance"
             if detail
             else fact.provenance.get("reason", "")
         )
@@ -534,6 +567,11 @@ def main() -> int:
             f"pytential calls it, {measured} -> {fact.status.value}"
         )
         ok = ok and fact.status.value == "tested"
+
+    # the theorem and the kernel, in one row
+    (series,) = [fact for fact in single_layer.facts() if fact.kind == "by-theorem"]
+    print(f"  {series.statement} -> {series.status.value}")
+    ok = ok and series.status.value in ("decided", "proved")
 
     print()
     tile = sumpy_tile("c")

@@ -38,7 +38,73 @@ All notable changes to loopty are recorded here. The format follows
   read `proved` by Lean, and the four demo drivers offer their casts to Lean
   where it is installed (`python examples/hexahedra.py`: `along_s: tag(...):
   2 facts, all proved by lean`).
-
+- **A program's postcondition** (`loopty.unfolding`,
+  `loopty.dataflow.program_stores`). A `@program`'s return annotation is a
+  claim about what it leaves in its parameters, written in their names and
+  the sizes its kernels name, and it is a row of the ledger, keyed as a
+  kernel's is:
+  - `tested` on the program's native runs, an equation that reads an output
+    compared at that output's class, `approx` for reals, as the compiled run
+    is compared with the native one: the calls sum in an order of their own,
+    and agree with the claim as reals and as floats to rounding. A run that
+    leaves it false refutes it, naming the cell and the two values;
+  - `decided` by isl where what the calls store decides it, as a kernel's
+    postcondition is: each call that stores no cell of an array twice, and
+    reads none before its store, has a `single-assignment` fact of the
+    program's, and each of its statements is an equation about what the
+    program leaves, until a later call writes an array it names;
+  - otherwise stated for Lean, a part of Mathlib's for a claim about reals:
+    what the calls store unfolded into the claim a pass at a time, each
+    theorem the program cites (`@program(uses=[...])`) rewritten where one of
+    its sides is, its families at the sections of the arrays they stand
+    for, `Fr (3 * x + 0)` and `w (3 * x + 0) e`, then the sums over a literal
+    range written out and `ring`. Python finds the steps, and Lean checks
+    them; a wrong one is no proof. Proved, the fact rests on the
+    `single-assignment` facts and the theorems it used.
+  In `examples/hexahedra.py`, `weak_grad` and `weak_div` claim that `grad`
+  and `div` are the dense Kronecker operators of the three directions
+  applied to the field times its metric terms, citing `sum_factorization`,
+  and with Mathlib both rows read `proved lean`: the theorem proved for
+  every order now says something about the programs that compute it.
+  A claim that names anything but the program's parameters and sizes is
+  `assumed`, and says what it names.
+- **A theorem tied to the terms a kernel adds** (`loopty.summands`, #252). A
+  cited theorem that concludes `all(c(n) == E for n in Nat if ...)` gives a
+  `by-theorem` row where a sum in the kernel's term adds `E` at whole
+  numbers `n`, with the theorem's variables bound to the kernel's
+  expressions of the sorts it takes them at (a theorem about reals says
+  nothing of complex numbers), and an identity the kernel cites, `L == R`,
+  rewrites `R` in `E` into the kernel's `L` first; the row names the
+  identity's premises that are not the theorem's. `examples/layer_potential.py`'s `single_layer` cites
+  `line_taylor` and the new `by_the_conjugate`, `ratio(alpha, beta) == -beta
+  / alpha`, the kernels' ratio by the conjugate, and its ledger reads
+  `single_layer adds line_taylor's c(n) for n in 1..5, for every c with away,
+  first and ode, read over the complex numbers`: `decided` by `theorem`,
+  resting on both theorems, and proved by Lean with Mathlib, the identity
+  rewritten and the theorem applied a term at a time. A theorem's annotation
+  that calls `loopty.math`'s `conj`, `real`, `exp` and the rest, itself or
+  through a helper the kernel calls too, reads them as lanky's functions
+  (needs lanky with `real`, `imag` and `conj`), and a kernel's postcondition
+  keeps the calls its trace makes (`loopty.math.as_traced`, `as_stated`).
+- **A postcondition's equations of reals at their class** (`loopty.reals`,
+  #254). An equation that rounds is compared after each native run within
+  the tolerance of the class of what it reads, as the compiled run is with
+  the native one, `|a - b| <= 1e-6 (|b| + 1)` for `approx`, and the
+  statement says so (`..., to the approx tolerance`); one that rounds
+  nothing, one of integers and one of an `exact` class are compared bit for
+  bit as before. Where its cells are stored once, by statements whose sums
+  run over concrete bounds, Lean proves it with Mathlib over the reals from
+  what they store, the tables at the values they hold, resting on the
+  `single-assignment` facts and on the `trace-faithful` fact.
+  `examples/assembly.py`'s `mass_ffc` now promises the element's mass,
+  `|J| (1 + delta_jk) / 24`, in place of a symmetric matrix: `tested` on its
+  runs, `proved` with Mathlib, and restated of every cell after its call.
+- **`@upstream(kernel, within=1e-12)`** (#268): the agreement with the code a
+  kernel mirrors, compared within the stated fraction of the largest value
+  of each output computed in floating point, and the row says so (`... in
+  out within 1e-12 of the largest value, on its example inputs`); an `exact`
+  output is still compared bit for bit. `examples/layer_potential.py`'s two
+  rows state it, where the bound was in a test only.
 - **Claims settled by running them** (`loopty.tested`): `@tested` on a
   function that takes nothing and returns whether its claim held, alone or
   with what it measured, puts the claim in the ledger as a `tested` row,

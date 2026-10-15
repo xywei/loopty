@@ -385,6 +385,7 @@ def _obligation(
     counterexample: Any = None,
     rests_on: Sequence[str] = (),
     refuted: bool = False,
+    decider: str = "isl",
 ) -> Any:
     """The obligation of ``parts``; a refuted one is checked at its counterexample.
 
@@ -392,6 +393,11 @@ def _obligation(
     Lean proves the claim false at. With none that can be stated, Lean is not
     asked at all: were the parts offered as a claim, a proof of them would
     read ``proved`` where isl refuted, and the refutation would be lost.
+
+    ``decider`` names who decided the claim and found its hints, which the
+    ledger's LEAN line counts the fact under; ``""`` for a claim nobody but
+    Lean decides, a program's postcondition unfolded from what its calls
+    store (:mod:`loopty.unfolding`).
     """
     if refuted and counterexample is None:
         return _declined(REFUTED_UNSTATED)
@@ -414,7 +420,7 @@ def _obligation(
         parts=tuple(parts),
         counterexample=counterexample,
         rests_on=tuple(rests_on),
-        decider="isl",
+        decider=decider,
         **extra,
     )
 

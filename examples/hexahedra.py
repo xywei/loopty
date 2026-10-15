@@ -55,7 +55,8 @@ Run this file three ways.
     launches a device runs.
 
 ``lanky check examples/hexahedra.py``
-    The theorem, every kernel's facts, the programs', and the layout's.
+    The theorem, every kernel's facts, the programs', with what each program
+    leaves, and the layout's.
 
 ``loopty run examples/hexahedra.py``
     Each kernel, both programs and the fused schedule, compiled and compared.
@@ -67,6 +68,15 @@ What is worth reading here
 each fact about them and their schedules is decided for every order, the
 Kronecker theorem is proved for every ``n``, and so are the layouts: isl tests
 them at ``n`` from 1 to 6, as ``n * j`` is not linear, and Lean proves them.
+
+*What the programs leave.* ``weak_grad`` claims that ``grad`` is the dense
+operator of each direction applied to the field times its metric term, the
+three summed, and ``weak_div`` the same of the flux. Lean proves each, with
+Mathlib, from what the four calls store and ``sum_factorization``, taken at
+each direction's sections: ``Fr[3*x + 0]`` for the theorem's ``Fr`` and
+``w[3*x + 0, e]`` for its ``u``. Without Mathlib the claims are tested on the
+programs' runs, compared at the class of ``grad``, since the passes sum in
+another order than the dense operator does.
 
 *How deep each fusion goes.* ``along_s`` reads a whole column of what
 ``along_r`` stored in the same ``k``-slab, so the two fuse on ``(q, e, k)``
@@ -270,9 +280,33 @@ def divergence_along_t(
                     )
 
 
-@program
-def weak_grad(G, u, Fr, Fs, Ft, grad):
-    """grudge's ``weak_local_grad``: the metric, then a pass per reference axis."""
+@program(uses=[sum_factorization])
+def weak_grad(G, u, Fr, Fs, Ft, grad) -> all(
+    grad[x, e, k, j, i]
+    == sum(
+        Ft[3 * x + d, k, c]
+        * Fs[3 * x + d, j, b]
+        * Fr[3 * x + d, i, a]
+        * G[3 * x + d, e, c, b, a]
+        * u[e, c, b, a]
+        for d in Fin[3]
+        for c in Fin[n]
+        for b in Fin[n]
+        for a in Fin[n]
+    )
+    for x in Fin[3]
+    for e in Fin[ne]
+    for k in Fin[n]
+    for j in Fin[n]
+    for i in Fin[n]
+):
+    """grudge's ``weak_local_grad``: the metric, then a pass per reference axis.
+
+    What it leaves in ``grad`` is the dense Kronecker operator of each
+    direction ``d`` applied to ``u`` times the metric term ``J dr_d/dx_x``,
+    the three directions summed, which is what grudge's escape hatch
+    computes. The passes are that operator by ``sum_factorization``.
+    """
     w = Arr.zeros_like(G)
     v = Arr.zeros_like(G)
     vs = Arr.zeros_like(G)
@@ -282,9 +316,30 @@ def weak_grad(G, u, Fr, Fs, Ft, grad):
     gradient_along_t(Ft, vs, grad)
 
 
-@program
-def weak_div(G, f, Fr, Fs, Ft, div):
-    """grudge's ``weak_local_div``, the metric terms summed first."""
+@program(uses=[sum_factorization])
+def weak_div(G, f, Fr, Fs, Ft, div) -> all(
+    div[e, k, j, i]
+    == sum(
+        Ft[d, k, c]
+        * Fs[d, j, b]
+        * Fr[d, i, a]
+        * sum(G[3 * x + d, e, c, b, a] * f[x, e, c, b, a] for x in Fin[3])
+        for d in Fin[3]
+        for c in Fin[n]
+        for b in Fin[n]
+        for a in Fin[n]
+    )
+    for e in Fin[ne]
+    for k in Fin[n]
+    for j in Fin[n]
+    for i in Fin[n]
+):
+    """grudge's ``weak_local_div``, the metric terms summed first.
+
+    What it leaves in ``div`` is the dense operator of each direction ``d``
+    applied to the flux along it, ``sum_x J dr_d/dx_x f_x``, the three
+    directions summed.
+    """
     w = Arr.zeros_like(f)
     v = Arr.zeros_like(f)
     vs = Arr.zeros_like(f)

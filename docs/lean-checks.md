@@ -150,6 +150,9 @@ its own, in parallel.
 | single assignment | pair of statements that store into the array; read of the array and statement that stores into it | two instances, distinct where they are of one statement, store into cells that differ; an instance that stores the cell an instance reads runs before it, in the source order, and so is not the instance that reads it |
 | a kernel's postcondition | conjunct | the conjunct at every point of its binders' domain, under what each statement stores, its value equation, with the instances isl took of the equations as hints; one about reals is stated with Mathlib's `ℝ` and closed by `linarith` |
 | a cited theorem, applied | (one part) | the theorem as it was proved, and the conjuncts of the postcondition it was matched with, imply the claim: Lean applies the theorem with the arrays and sizes loopty bound given by name, and each premise left is a hypothesis |
+| a program's postcondition, where isl does not decide it | conjunct | the conjunct, under what each call stores (the equations that still hold when the program returns) and the theorems the program cites: the arrays the claim reads unfolded into what was stored in them (`simp only`), a theorem rewritten where one of its sides is, its families given as the sections of the arrays they stand for (`rw [← h n (Fr (3 * x + 0)) ... (w (3 * x + 0) e) ...]`), the sums over a literal range written out, then `ring_nf`; one about reals with Mathlib |
+| a cited theorem about a series, applied to the terms a kernel adds | term the kernel adds | the theorem and the identities the kernel cites, as they were proved, and the theorem's hypotheses at the expressions loopty bound, imply that the family at the term's order is the term: Lean rewrites the goal by the identities, then applies the theorem, or rewrites by it and leaves the numerals to `norm_num`; Mathlib's, over the reals or the complex numbers |
+| a postcondition of reals at its class (not isl's: `tested` by its runs) | conjunct | the conjunct within its class's tolerance, `\|a - b\| ≤ 1e-6 (\|b\| + 1)`, of the cells read as what their statements store there, sums written out and tables at their values; Mathlib's, closed by `linarith` with the bounds of each absolute value |
 | an assumption of a schedule | (a hypothesis of every later cast) | |
 
 The points of a call of a kernel inside another kernel's loop
@@ -225,11 +228,33 @@ equation it cannot read an atom, the same equation at the same point being
 one atom, and stated for Lean with Mathlib's reals (`LANKY_LEAN_MATHLIB`),
 where `linarith` closes it; core Lean has no reals, and says so.
 
+An equation of reals in a postcondition that rounds, a closed form the kernel
+computes another way, is compared after each native run at the class of what
+it reads, as the compiled run is compared with the native one
+(`loopty.reals`): `examples/assembly.py`'s `mass_ffc` promises `A[0, 0] ==
+abs(J) / 12` and the rest of `|J| (1 + delta_jk) / 24` from FFC's 15-digit
+tables, to the approx tolerance. isl reads none of it, and the runs test it.
+Where its cells are stored once by statements whose sums run over concrete
+bounds, Lean is shown each conjunct with the cell replaced by what the
+statement stores there, the sum written out and each table read at its
+value, and proves it at the tolerance with Mathlib, a proof of the term read
+over the reals.
+
 A theorem a kernel cites, `@kernel(uses=[on_the_triangle])`, is applied to its
 postcondition: Lean is handed the theorem as it was proved, as a hypothesis,
 and applies it to the claim with the arrays loopty matched to its families,
 `apply h1 (p := p) (c := c) (R := R)`, so that a wrong match is a part Lean
 does not prove.
+
+A theorem about a series is applied to the terms a kernel adds
+(`loopty.summands`): `examples/layer_potential.py`'s `single_layer` adds
+`-(ratio(alpha, beta))**k / k` for `k` from 1 to 5, and `line_taylor`
+concludes `c(n) == -(-beta / alpha)**n / n`. Each term is a part with the
+theorem and the identity the kernel cites, `by_the_conjugate`, as
+hypotheses: Lean rewrites the goal by the identity, `rw [h1 (beta := z t - c
+t) (alpha := c t - y s)]`, and applies the theorem, `apply h0 (alpha := c t
+- y s) (beta := z t - c t) (c := c)`, so that a kernel whose terms are not
+the theorem's is a part Lean does not prove.
 
 ## What isl gives Lean, which Lean checks
 

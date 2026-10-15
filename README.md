@@ -602,6 +602,33 @@ release; the CHANGELOG says when one does.
   the floats and not of them read as reals. The theorem is taken at the
   kernel's sizes in every sort as well: a table `D: Fn[Fin[n], Real]` that
   nothing binds, with `n` matched to the kernel's `p`, ranges over `Fin[p]`.
+- A cited theorem about a series, applied to the terms a kernel adds
+  (`loopty.summands`). A theorem that concludes `all(c(n) == E for n in
+  Nat if ...)` is about the `n`-th term of a series; where the kernel's term
+  adds `E` at whole numbers `n`, with the theorem's variables bound to the
+  kernel's expressions, a `by-theorem` row says so, resting on the theorem.
+  An identity the kernel cites, a theorem that concludes `L == R`, rewrites
+  `R` in `E` into `L` first, the kernel's way of computing it.
+  `examples/layer_potential.py`'s `single_layer` cites `line_taylor` and
+  `by_the_conjugate`, `ratio(alpha, beta) == -beta / alpha`, and reads
+  `single_layer adds line_taylor's c(n) for n in 1..5, for every c with
+  away, first and ode, read over the complex numbers`: about the term it
+  evaluates, read over the complex numbers, and not about the floats it
+  produces. With Mathlib, Lean checks it a term at a time, the identity
+  rewritten and the theorem applied.
+- Equations of reals at their class (`loopty.reals`). An equation of a
+  postcondition that rounds, a closed form the kernel computes another way,
+  is compared after each native run as the compiled run is with the native
+  one, at the class of what it reads: `|a - b| <= 1e-6 (|b| + 1)` for
+  `approx`. One that rounds nothing (a copy, a sign change), one of
+  integers and one whose class is `exact` are compared bit for bit, and the
+  statement says which: `..., to the approx tolerance`. Where the cells it
+  reads are stored once, by statements whose sums run over concrete bounds,
+  Lean proves it with Mathlib over the reals, the tables at the values they
+  hold; that is a proof of the term read over the reals, and the fact rests
+  on the kernel's `trace-faithful` fact. `examples/assembly.py`'s `mass_ffc`
+  promises the element's mass, `|J| (1 + delta_jk) / 24`, from FFC's
+  15-digit tables.
 - `lanky check` lists a file's schedules (#191). The casts of every schedule
   a file holds at module level are rows of the ledger beside the facts of
   the kernel or program it schedules, decided by isl as each step was taken
@@ -752,7 +779,12 @@ release; the CHANGELOG says when one does.
   types claim, `tested` by `upstream`, `refuted` with the cell, or `assumed`
   where the function cannot run (its package or its recording is not
   there). `examples/l2p.py` compares its program with sumpy's own
-  `E2PFromSingleBox`, recorded on its inputs.
+  `E2PFromSingleBox`, recorded on its inputs. `@upstream(kernel,
+  within=1e-12)` compares each output computed in floating point within
+  `1e-12` of the largest value the function gave for it, and the row says
+  so (`... agrees with sumpy_single_layer in out within 1e-12 of the
+  largest value, on its example inputs`): round-off between two orders of
+  summation is far inside the class's allowance, and the row states how far.
 - Constant tables, `loopty.table`: `W = table([1 / 6, 1 / 6, 1 / 6])`
   next to the kernel, read by the body as an array is (`W[q]`, `W.dom`). A
   table is a read-only copy of its values; its reads are in bounds over its
@@ -878,6 +910,15 @@ release; the CHANGELOG says when one does.
   over `Int` to say the offsets a scan computed are monotone. Only affine
   facts reach isl; a hypothesis isl cannot state is dropped, which assumes
   less, never more.
+  A program's own return annotation is its postcondition, a claim about what
+  it leaves in its parameters. It is `tested` on the program's native runs,
+  an equation of an output compared at that output's class (`approx` for
+  reals), and `decided` by isl from what each call stores where that decides
+  it; otherwise Lean is asked to prove it from the same equations and the
+  theorems the program cites, unfolding a call at a time (`loopty.unfolding`).
+  `examples/hexahedra.py`'s `weak_grad` claims the dense Kronecker operators
+  grudge's escape hatch applies, and Lean proves it with Mathlib from what
+  the three passes store and `sum_factorization`.
 - A program lowers sequentially: its calls' loops run one after another, as
   the program runs them, until a schedule fuses them. A fusion moves the
   outer loops of each side, as many as both have or as `loops` says, and a
