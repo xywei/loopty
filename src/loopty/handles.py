@@ -733,9 +733,11 @@ def _short(index: _Index, labels: tuple[str, ...], name: str) -> Any:
         word = {"loop": "loops", "array": "arrays", "call": "calls", "size": "sizes"}
         path = index.scope_path(labels)
         forms = [f"{path}.{word[kind]}.{name}" for kind in kinds]
+        what = " and ".join(
+            f"{'an' if kind[0] in 'aeiou' else 'a'} {kind}" for kind in kinds
+        )
         raise AttributeError(
-            f"{path}.{name} names a {' and a '.join(kinds)}; write "
-            f"{_joined(forms, 'or')}"
+            f"{path}.{name} names {what}; write {_joined(forms, 'or')}"
         )
     return _named(index, labels, name, kinds[0])
 

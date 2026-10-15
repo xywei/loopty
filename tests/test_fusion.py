@@ -1421,7 +1421,7 @@ def test_a_read_of_a_cell_the_producer_does_not_store_is_refused() -> None:
     )
     message = str(caught.value)
     assert message.startswith("substitute(padded.f) illegal: padded.shifted reads f[")
-    assert "which interior_flux.S0 does not store" in message
+    assert "which padded.interior_flux does not store" in message
     assert "would see the zeros" in message
     assert len(fact.provenance["witness"]) == 1
     (program_fact,) = definedness(padded)
