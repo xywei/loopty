@@ -95,6 +95,24 @@ All notable changes to loopty are recorded here. The format follows
   `benchmarks/assembly_agreement.py` compares
   the example with firedrake's own assembly and PyOP2's own `par_loop`.
 
+- **The advection right-hand side on hexahedra** (`examples/advection.py`),
+  the stretch of the S1 demo: grudge #418's `WeakAdvectionOperator` with the
+  upwind flux, from grudge's own geometry, as kernels for every order. The
+  flux reads the neighbor's value through the face maps, in bounds by type;
+  the inverse mass is pushed inward, as grudge #362 rewrites it, and the
+  same kernels take the GLL quadrature's tables. Three lanky theorems, proved
+  where Mathlib is installed: the two rearrangements, and that the lift onto
+  the face nodes is the transpose of the face gather, so it keeps the
+  element's total. The kernels fuse on the element, one loop deeper is
+  refused with its pair, and the fluxes are kept an element at a time;
+  libParanumal's lift onto the face nodes without its barriers is refused
+  with the edge node two faces update, and accepted atomic. Five splits on a
+  device (libParanumal's volume and surface, the fluxes first, three
+  launches, one, one from the metric terms), each launch a checked schedule;
+  `benchmarks/advection.py` times them in five shapes beside the same
+  launches in plain loopy and grudge's own right-hand side, and compares
+  them with grudge's on a warped periodic mesh.
+
 - **A kernel's postcondition decided from what its statements store**
   (`loopty.dataflow`, #113). Where no cell of an array a kernel writes is
   stored twice, or read before its store, a `single-assignment` fact says
@@ -520,6 +538,17 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Changed
 
+- **A substitution through an array computed from inputs alone.**
+  `Schedule.substitute` computes an array where it is read from what its
+  producer read, and refused one whose producer reads an array an earlier
+  substitution computes where it is read, since the dependences of that
+  array's own reads were carried to a statement that no longer runs. Where
+  that array is computed from arrays nothing in the program writes (its
+  inputs), there are none, and the chain is substituted: grudge's `v.n`
+  from the normals, read by the upwind flux, read by the lift
+  (`examples/advection.py`). A chain through an array something writes is
+  refused as before.
+
 - `contract` of a program's array over a domain names `substitute` as the
   other fix only where one statement stores the array, which is what a
   substitution computes again; the flagship's triangles, which two
@@ -643,6 +672,15 @@ All notable changes to loopty are recorded here. The format follows
   place, decided by isl; it was `assumed`.
 - A schedule's assumption is named `assume('nc % 4 == 0')` in the status of
   the casts that rest on it (with lanky's `label`), where its whole id was.
+- **Two statements' atomic updates of one cell asked loopy for a global
+  barrier.** `y[p] += a[p]` and `y[p + 1] += a[p]` with `p` on `l.0` race
+  on `y[p + 1]`, and after `atomic("y")` the schedule is legal and its
+  `buildable` fact holds, but the lowered kernel kept the source's order of
+  the two, so loopy refused to generate it (`MissingBarrierError`). Once an
+  array's updates are atomic, the order is drawn again from the dependences
+  the casts are checked against, and two updates no dependence joins need
+  no order (loopy's `no_sync_with`): libParanumal's lift onto the face nodes
+  (`examples/advection.py`).
 
 - A write through a cell read from an array, `y[perm[i]] = x[i]`, no longer
   has its distinct writes refuted by isl with two instances that write no
