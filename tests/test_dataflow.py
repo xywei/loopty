@@ -398,6 +398,25 @@ def test_a_theorems_integer_decides_nothing_at_a_real() -> None:
     assert kernels.integral_half.fact_id not in post.rests_on
 
 
+def test_a_theorems_real_is_taken_at_a_kernels_real_scalar() -> None:
+    """``constant_table``'s ``k`` is a real, and ``fill_real``'s ``s`` is one (#247).
+
+    The cells hold ``s`` exactly, so ``R[i] == s`` reads the same as reals,
+    and the theorem gives that any two cells agree; claimed, that conjunct
+    is decided by the theorem's instance. ``s + 0.1`` rounds, and the
+    theorem's ``k`` does not stand for it.
+    """
+    (applied,) = facts(kernels.fill_real, APPLIED)
+    assert applied.statement == (
+        "by constant_table: forall i in Fin(n), j in Fin(n). R[i] == R[j]"
+    )
+    assert applied.provenance["bindings"] == "n = n, k = s, R = R"
+    (post,) = facts(kernels.fill_agrees, "postcondition")
+    assert (post.status, post.decided_by) == (Status.DECIDED, "isl")
+    assert kernels.constant_table.fact_id in post.rests_on
+    assert not facts(kernels.fill_shifted, APPLIED)
+
+
 def test_numpys_floats_are_reals_to_a_theorem_about_reals() -> None:
     (applied,) = facts(kernels.copy64, APPLIED)
     assert applied.statement == "by copied: forall i in Fin(n). -R[i] == -c[i]"
@@ -868,6 +887,18 @@ def test_with_mathlib_the_reconstruction_and_the_theorem_it_cites_are_proved(
     assert proved.status is Status.PROVED, proved.provenance.get("lean_reason")
     assert "apply h" in proved.provenance["lean_source"]
     assert kernels.on_the_triangle.fact_id in proved.rests_on
+
+
+@pytest.mark.lean
+def test_with_mathlib_a_theorem_taken_at_a_real_scalar_is_proved(lean: Any) -> None:
+    """``constant_table`` applied at ``k = s``, ``s`` a real of Lean's (#247)."""
+    if not lean._mathlib():
+        pytest.skip("Mathlib is not imported here (LANKY_LEAN_MATHLIB)")
+    (applied,) = facts(kernels.fill_real, APPLIED)
+    proved = lean.establish(applied)
+    assert proved.status is Status.PROVED, proved.provenance.get("lean_reason")
+    assert "(s : ℝ)" in proved.provenance["lean_source"]
+    assert kernels.constant_table.fact_id in proved.rests_on
 
 
 @pytest.mark.lean

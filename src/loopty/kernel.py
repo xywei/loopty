@@ -43,7 +43,7 @@ import numpy as np
 from lanky.check import module_name
 from lanky.ledger import Fact, Status, fact_id
 from lanky.plugins import registry
-from lanky.terms import evaluate_annotations
+from lanky.terms import evaluate_annotations, render
 
 from loopty import typing as rules
 from loopty.arr import Arr, ArrSpec
@@ -128,8 +128,18 @@ class _Decorated:
 
     @property
     def annotations(self) -> dict[str, Any]:
-        """The annotations, evaluated in a scope that invents unknown names."""
-        return evaluate_annotations(self.fn)
+        """The annotations, evaluated in a scope that invents unknown names.
+
+        The return annotation, the postcondition, is in the spelling of the
+        body's trace: a call of :mod:`loopty.math` in it is the call the body
+        makes (:func:`loopty.math.as_traced`).
+        """
+        from loopty.math import as_traced
+
+        evaluated = evaluate_annotations(self.fn)
+        if "return" in evaluated:
+            evaluated["return"] = as_traced(evaluated["return"])
+        return evaluated
 
 
 def _code_objects(code: Any) -> list[Any]:
@@ -766,18 +776,30 @@ class Kernel(_Decorated):
         kind ``by-theorem`` resting on the theorem and the postcondition
         (:func:`loopty.dataflow.application_facts`). A refuted postcondition
         gives nothing.
+
+        A theorem about a series whose terms the kernel adds gives a row of
+        the same kind after the others, the terms it adds read as the
+        theorem's, with the identities the kernel cites to read them so
+        (:mod:`loopty.summands`).
         """
         from lanky.ledger import Status
 
         from loopty.dataflow import application_facts
+        from loopty.summands import series_facts
 
         if not self.uses:
             return facts
+        try:
+            series = series_facts(
+                term, self.uses, self.qualname, module=self.module, line=self.line
+            )
+        except Exception:  # noqa: BLE001 - a theorem that does not apply gives nothing
+            series = []
         at = next(
             (k for k, fact in enumerate(facts) if fact.kind == "postcondition"), None
         )
         if at is None or facts[at].status is Status.REFUTED:
-            return facts
+            return [*facts, *series]
         try:
             applied = application_facts(
                 term,
@@ -789,7 +811,7 @@ class Kernel(_Decorated):
             )
         except Exception:  # noqa: BLE001 - a theorem that does not apply gives nothing
             applied = []
-        return [*facts[: at + 1], *applied, *facts[at + 1 :]]
+        return [*facts[: at + 1], *applied, *facts[at + 1 :], *series]
 
     def _decided(self, term: Term, facts: list[Fact]) -> list[Fact]:
         """``facts`` with the postcondition decided from the term, where it can be.
@@ -830,6 +852,21 @@ class Kernel(_Decorated):
                     f"{array}: {why}" for array, why in stored.why.items()
                 )
             facts[at] = post.with_status(post.status, undecided=reason)
+            # an equation of reals at its class, which Lean proves over the
+            # reals from what the statements store (loopty.reals)
+            from loopty.faithful import KIND as FAITHFUL
+            from loopty.reals import proved_over_the_reals
+
+            found = None
+            if stored is not None:
+                faithful = fact_id(FAITHFUL, self.qualname, **key)
+                try:
+                    found = proved_over_the_reals(term, facts[at], stored, faithful)
+                except Exception:  # noqa: BLE001 - the runs' verdict stands
+                    found = None
+            if found is not None:
+                over, needed = found
+                return [*facts[:at], *needed, over, *facts[at + 1 :]]
             return facts
         assert stored is not None
         needed = [
@@ -838,7 +875,9 @@ class Kernel(_Decorated):
         decided = Fact(
             id=post.id,
             kind=post.kind,
-            statement=post.statement,
+            # what isl decided is the claim as written, exactly, which says
+            # more than the runs' comparison at its class (loopty.reals)
+            statement=render(term.post),
             term=decision.question,
             status=Status.DECIDED,
             decided_by="isl",
@@ -906,6 +945,23 @@ class Program(_Decorated):
     fact its own term leaves ``assumed``, a flat ``val[off[r] + j]``, is
     decided under the same hypotheses where they decide it
     (:func:`loopty.typing.scoped_in_bounds_facts`).
+
+    The program's own return annotation is its postcondition, a claim about
+    what it leaves in its parameters, written in their names and the sizes
+    its kernels name::
+
+        @program(uses=[two_passes])
+        def dense(A, B, g, out) -> all(
+            out[q, k, j]
+            == sum(A[q, k, b] * B[q, j, a] * g[q, b, a] for b in Fin[n] for a in Fin[n])
+            for q in Fin[nq] for k in Fin[n] for j in Fin[n]
+        ):
+
+    It is tested on the program's native runs, at the class of the outputs it
+    reads, and decided by isl from what each call stores where that decides
+    it; otherwise Lean is asked, with Mathlib for reals, to prove it from the
+    same and from the theorems the program cites (:meth:`_postcondition`,
+    :mod:`loopty.unfolding`).
 
     The last fact is the program's ``trace-faithful`` fact, as a kernel's is:
     its term, interpreted, against its body run natively, on the module's
@@ -1032,6 +1088,11 @@ class Program(_Decorated):
         (:func:`loopty.typing.definedness_facts`): whether each cell it
         reads is one a call before it stored or one of the zeros the array
         was made with, and, where it reads zeros no call stored, which.
+
+        After them, where the program states a postcondition, its
+        ``single-assignment`` facts and the postcondition itself
+        (:meth:`_postcondition`), tested on the same native runs as the
+        ``trace-faithful`` fact compares.
         """
         if self._facts is not None:
             return self._facts
@@ -1043,8 +1104,6 @@ class Program(_Decorated):
                 continue
             if post is None:
                 continue
-            from lanky.terms import render
-
             out.append(
                 Fact(
                     id=rules.restatement_id(
@@ -1056,7 +1115,7 @@ class Program(_Decorated):
                     kind="postcondition-in-scope",
                     statement=(
                         f"after {callee.__name__}(...) in {self.__name__}: "
-                        f"{render(post)}"
+                        f"{rules.postcondition_statement(callee.term, post)}"
                     ),
                     term=rules.AfterCall(callee.__name__, post),
                     status=Status.DECIDED,
@@ -1098,13 +1157,151 @@ class Program(_Decorated):
             out.extend(rules.scoped_in_bounds_facts(term, self.qualname, **key))
             out.extend(rules.layout_facts(term, self.qualname, **key))
             out.extend(rules.definedness_facts(term, self.qualname, **key))
-            out.append(
-                faithfulness_fact(
-                    self, term, owner=self.qualname, where=self.where, **key
-                )
+            observed: list[Any] | None = None if term.post is None else []
+            faithful = faithfulness_fact(
+                self,
+                term,
+                owner=self.qualname,
+                where=self.where,
+                observed=observed,
+                **key,
             )
+            out.extend(self._postcondition(term, observed or []))
+            out.append(faithful)
         self._facts = tuple(out)
         return self._facts
+
+    def _postcondition(self, term: Term, observed: list[Any]) -> list[Fact]:
+        """The program's postcondition: tested on its runs, decided or stated for Lean.
+
+        The return annotation is a claim about what the program leaves in its
+        parameters, ``weak_grad``'s that ``grad`` is the weak gradient of
+        ``u`` as the dense operators compute it. A fact of kind
+        ``postcondition``, keyed as a kernel's is:
+
+        - ``tested`` on the program's native runs, the runs its
+          ``trace-faithful`` fact makes, an equation that reads an output
+          compared at that output's class (``approx`` for reals), since the
+          calls sum in an order of their own
+          (:func:`loopty.faithful.postcondition_fact`); ``refuted`` where a
+          run leaves it false;
+        - ``decided`` by isl where what the calls store decides it, as a
+          kernel's postcondition is decided under what its statements store,
+          with the theorems the program cites (:func:`loopty.dataflow.program_stores`,
+          :func:`loopty.dataflow.decide_postcondition`), each equation an atom;
+        - otherwise stated for Lean from the same equations and theorems,
+          unfolded a call at a time (:mod:`loopty.unfolding`), and left as the
+          runs found it: Lean, with Mathlib for a claim about reals, proves
+          it, and the proof rests on the ``single-assignment`` facts the
+          equations need and on the theorems it takes.
+
+        The ``single-assignment`` facts come first, the program's own, one for
+        each array a call stores that the claim needs. A claim that names
+        anything but the program's parameters and the sizes its kernels name
+        is ``assumed``, and says so.
+        """
+        import dataclasses
+
+        from lanky.terms import render
+
+        from loopty.dataflow import decide_postcondition, program_stores
+        from loopty.faithful import postcondition_fact
+        from loopty.hypotheses import free_in
+        from loopty.unfolding import unfolded
+
+        if term.post is None:
+            return []
+        key = {"module": self.module, "line": self.line}
+        known = (
+            {name for name, _ in term.params}
+            | set(term.sizes)
+            | {name for name, _ in term.reflected}
+        )
+        unknown = sorted(free_in(term.post) - known)
+        if unknown:
+            sizes = " and ".join(term.sizes) if term.sizes else "none"
+            return [
+                Fact(
+                    id=rules.postcondition_id(self.qualname, **key),
+                    kind="postcondition",
+                    statement=render(term.post),
+                    term=rules.AfterCall(term.name, term.post),
+                    status=Status.ASSUMED,
+                    provenance={
+                        "kernel": term.name,
+                        "reason": (
+                            f"the postcondition of {self.__name__} names "
+                            f"{', '.join(unknown)}, which is none of its "
+                            f"parameters and none of its sizes ({sizes}, as the "
+                            "kernels it calls name them)"
+                        ),
+                    },
+                    where=self.where,
+                    owner=self.qualname,
+                )
+            ]
+        tested = postcondition_fact(
+            self,
+            term,
+            observed,
+            owner=self.qualname,
+            where=self.where,
+            at_class=True,
+            **key,
+        )
+        if tested.status is Status.REFUTED:
+            return [tested]
+        try:
+            stored = program_stores(term, self.qualname, **key)
+        except Exception as exc:  # noqa: BLE001 - the runs' verdict stands, with why
+            return [tested.with_status(tested.status, undecided=f"{exc}")]
+        try:
+            decision = decide_postcondition(term, stored.equations, theorems=self.uses)
+        except Exception as exc:  # noqa: BLE001 - stated for Lean instead, below
+            decision = f"{type(exc).__name__}: {exc}"
+        if not isinstance(decision, str):
+            needed = [
+                fact for fact in stored.facts.values() if fact.id in decision.rests_on
+            ]
+            decided = Fact(
+                id=tested.id,
+                kind=tested.kind,
+                statement=tested.statement,
+                term=decision.question,
+                status=Status.DECIDED,
+                decided_by="isl",
+                provenance={
+                    **tested.provenance,
+                    "native": tested.status.value,
+                    "used": [hypothesis.source for hypothesis in decision.used],
+                    "rule": "decided under what the calls store",
+                },
+                where=tested.where,
+                owner=tested.owner,
+                rests_on=decision.rests_on,
+            )
+            return [*needed, decided]
+        try:
+            found = unfolded(term, stored.equations, self.uses)
+        except Exception as exc:  # noqa: BLE001 - the runs' verdict stands, with why
+            found = f"{type(exc).__name__}: {exc}"
+        if isinstance(found, str):
+            return [tested.with_status(tested.status, undecided=f"{decision}; {found}")]
+        stated, used, words = found
+        needed = [fact for fact in stored.facts.values() if fact.id in stated.rests_on]
+        return [
+            *needed,
+            dataclasses.replace(
+                tested,
+                term=stated,
+                provenance={
+                    **tested.provenance,
+                    "undecided": decision,
+                    "lean": words,
+                    "used": [hypothesis.source for hypothesis in used],
+                },
+            ),
+        ]
 
     def __repr__(self) -> str:
         return f"<program {self.__name__} at {self.where}>"

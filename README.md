@@ -243,8 +243,10 @@ table of row starts. Both compiled runs agree with the native one.
   is a fact isl decides and Lean proves, as is that two layouts store every
   cell alike: sumpy's compressed-Taylor storage index, and grudge's
   `dim_tags` `N3,N0,N1,N2` against modepy's reshape of the DOFArray
-  (`examples/storage_layouts.py`). loopy's shaped arrays (loopy #1053) take a
-  layout's injectivity on trust.
+  (`examples/storage_layouts.py`), at every order in
+  `examples/hexahedra.py`, where isl tests it at a few orders and Lean proves
+  it for every one. loopy's shaped arrays (loopy #1053) take a layout's
+  injectivity on trust.
 - **What isl decides, Lean proves.** isl decides a fact in milliseconds and
   gives no proof. Where Lean is installed, every fact isl decides, an access in
   bounds, two writes apart, a definedness, a cast's legality one dependence
@@ -390,18 +392,24 @@ release; the CHANGELOG says when one does.
 
   A placement is a Python function from a cell's indices to its slot, given
   or found axis by axis along the order as it stands (one row of the
-  sum-factorized passes' `v`, `lambda e, a, b: b`). The step is legal when
-  every read is of a cell the producer stored before it, the `definedness`
-  fact, and no read sees its slot overwritten between that store and the
-  read, the `no-clobber` fact, decided by isl over the schedule's order and
-  proved by Lean, and refuted with the read, the cell and the instance that
-  overwrote its slot. From then on every pair of accesses to one slot is a
-  dependence of the schedule, so a later step that breaks the window, or
-  puts its slots on two work items, is refused with its pair. It lowers to
-  `double f_window[3]` with modulo addressing, or, with `registers=True`
-  (the default on OpenCL), to a shift register whose every access has a
-  constant index, `f_window[0] = f_window[1]` at each step.
-  `examples/fusion.py` is the Burgers flux and divergence of
+  sum-factorized passes' `v`, `lambda e, a, b: b`); an array over a domain
+  is placed by the domain's binders (one box's triangle of sumpy's L2P,
+  `lambda i, a, b: (a, b)`, in `examples/l2p.py`). The array may be stored
+  by several statements, and read by one of them, a recurrence. The step
+  is legal when every read is of a cell stored before it, the
+  `definedness` fact, and no read sees its slot overwritten between that
+  store and the read, the `no-clobber` fact, decided by isl over the
+  schedule's order and proved by Lean, and refuted with the read, the cell
+  and the instance that overwrote its slot. From then on every pair of
+  accesses to one slot is a dependence of the schedule, so a later step
+  that breaks the window is refused with its pair. A window of a number of
+  cells is each work item's own, so the boxes of the L2P on `g.0` each keep
+  their triangle, and a read on a work item its cell's store is not on is
+  refused; a window of a size, `f_window[n]`, is one for every work item
+  (in global memory on OpenCL). It lowers to `double f_window[3]` with
+  modulo addressing, or, with `registers=True` (the default on OpenCL), to
+  a shift register whose every access has a constant index, `f_window[0] =
+  f_window[1]` at each step. `examples/fusion.py` is the Burgers flux and divergence of
   `examples/composition.py`, fused, then substituted, or kept in a window,
   each compiled run compared with the native one.
 - Declared layouts, checked (`loopty.layout`). A layout is a function from a
@@ -427,7 +435,14 @@ release; the CHANGELOG says when one does.
   Lean is isl's inverse, with `//` and `%`), and `same_as` one more, and a
   kernel reads through the layout's own function. A wrong nesting,
   `N3,N2,N1,N0`, is refuted with the cell it moves
-  (`examples/storage_layouts.py`).
+  (`examples/storage_layouts.py`). A layout's body may compute with a size,
+  `n**3 * e + (i + n * j + n**2 * k)` over `Fin[n]` for every order: isl
+  cannot state `n * j`, so it decides each fact at `n` from 1 to 6, which
+  reads `tested`, and Lean proves it for every `n`, given the steps `omega`
+  lacks (the products that bound each digit, the digits of an address by
+  division); two such layouts the same is a polynomial identity Lean
+  multiplies out (`examples/hexahedra.py`). A call gives the size by name,
+  `dof_array(e, i, j, k, n=4)`.
 - Tracing a body to a typed term: accesses, statements, reductions, ragged
   fibers, `when` guards, source locations, and a `TraceError` that names the fix
   when a Python `if` is used on a computed value, when a Python name, a
@@ -593,6 +608,33 @@ release; the CHANGELOG says when one does.
   the floats and not of them read as reals. The theorem is taken at the
   kernel's sizes in every sort as well: a table `D: Fn[Fin[n], Real]` that
   nothing binds, with `n` matched to the kernel's `p`, ranges over `Fin[p]`.
+- A cited theorem about a series, applied to the terms a kernel adds
+  (`loopty.summands`). A theorem that concludes `all(c(n) == E for n in
+  Nat if ...)` is about the `n`-th term of a series; where the kernel's term
+  adds `E` at whole numbers `n`, with the theorem's variables bound to the
+  kernel's expressions, a `by-theorem` row says so, resting on the theorem.
+  An identity the kernel cites, a theorem that concludes `L == R`, rewrites
+  `R` in `E` into `L` first, the kernel's way of computing it.
+  `examples/layer_potential.py`'s `single_layer` cites `line_taylor` and
+  `by_the_conjugate`, `ratio(alpha, beta) == -beta / alpha`, and reads
+  `single_layer adds line_taylor's c(n) for n in 1..5, for every c with
+  away, first and ode, read over the complex numbers`: about the term it
+  evaluates, read over the complex numbers, and not about the floats it
+  produces. With Mathlib, Lean checks it a term at a time, the identity
+  rewritten and the theorem applied.
+- Equations of reals at their class (`loopty.reals`). An equation of a
+  postcondition that rounds, a closed form the kernel computes another way,
+  is compared after each native run as the compiled run is with the native
+  one, at the class of what it reads: `|a - b| <= 1e-6 (|b| + 1)` for
+  `approx`. One that rounds nothing (a copy, a sign change), one of
+  integers and one whose class is `exact` are compared bit for bit, and the
+  statement says which: `..., to the approx tolerance`. Where the cells it
+  reads are stored once, by statements whose sums run over concrete bounds,
+  Lean proves it with Mathlib over the reals, the tables at the values they
+  hold; that is a proof of the term read over the reals, and the fact rests
+  on the kernel's `trace-faithful` fact. `examples/assembly.py`'s `mass_ffc`
+  promises the element's mass, `|J| (1 + delta_jk) / 24`, from FFC's
+  15-digit tables.
 - `lanky check` lists a file's schedules (#191). The casts of every schedule
   a file holds at module level are rows of the ledger beside the facts of
   the kernel or program it schedules, decided by isl as each step was taken
@@ -748,7 +790,12 @@ release; the CHANGELOG says when one does.
   types claim, `tested` by `upstream`, `refuted` with the cell, or `assumed`
   where the function cannot run (its package or its recording is not
   there). `examples/l2p.py` compares its program with sumpy's own
-  `E2PFromSingleBox`, recorded on its inputs.
+  `E2PFromSingleBox`, recorded on its inputs. `@upstream(kernel,
+  within=1e-12)` compares each output computed in floating point within
+  `1e-12` of the largest value the function gave for it, and the row says
+  so (`... agrees with sumpy_single_layer in out within 1e-12 of the
+  largest value, on its example inputs`): round-off between two orders of
+  summation is far inside the class's allowance, and the row states how far.
 - Constant tables, `loopty.table`: `W = table([1 / 6, 1 / 6, 1 / 6])`
   next to the kernel, read by the body as an array is (`W[q]`, `W.dom`). A
   table is a read-only copy of its values; its reads are in bounds over its
@@ -874,6 +921,15 @@ release; the CHANGELOG says when one does.
   over `Int` to say the offsets a scan computed are monotone. Only affine
   facts reach isl; a hypothesis isl cannot state is dropped, which assumes
   less, never more.
+  A program's own return annotation is its postcondition, a claim about what
+  it leaves in its parameters. It is `tested` on the program's native runs,
+  an equation of an output compared at that output's class (`approx` for
+  reals), and `decided` by isl from what each call stores where that decides
+  it; otherwise Lean is asked to prove it from the same equations and the
+  theorems the program cites, unfolding a call at a time (`loopty.unfolding`).
+  `examples/hexahedra.py`'s `weak_grad` claims the dense Kronecker operators
+  grudge's escape hatch applies, and Lean proves it with Mathlib from what
+  the three passes store and `sum_factorization`.
 - A program lowers sequentially: its calls' loops run one after another, as
   the program runs them, until a schedule fuses them. A fusion moves the
   outer loops of each side, as many as both have or as `loops` says, and a
@@ -881,9 +937,9 @@ release; the CHANGELOG says when one does.
   takes that are not the outer loops of their domain leave the casts
   decided and the kernel unbuildable. Only a pointwise
   producer is substituted (one cell per instance, at its loop variables, no
-  sum, no guard isl cannot state). A window is taken of an array one
-  statement stores, once per cell, and reads none of, which the others read
-  in values, before any of their loops is tagged (#213, #214).
+  sum, no guard isl cannot state). A window is taken of an array its
+  statements store a value in, not update, which they read in values,
+  before any of their loops is tagged (#213).
   Every read gets the value as the store converted it, a read in a
   subscript included (`y[(int16_t) (t[i])]`), and a conversion inside the
   value stays (`(t[j] + 1) % n` of a 32-bit `Fin[m]` entry, computed in 64
@@ -1028,12 +1084,9 @@ release; the CHANGELOG says when one does.
   compile (#220). A domain
   declared outside an annotation, for `Arr.zeros(TRIANGLE, ...)` in a
   program, names its binders and sizes as lanky variables, `i, j, n =
-  Var("i"), Var("j"), Var("n")` (#210). A program's array over a domain is
-  not kept in a window: `contract` refuses it, naming the fix, keep it whole
-  or, where one statement stores it, `substitute` it (#244). So the flagship's
-  triangles, `examples/l2p.py`, are kept whole where sumpy keeps a box's
-  in registers; a window of an array its producer reads, a recurrence, or that
-  several statements store, is #213.
+  Var("i"), Var("j"), Var("n")` (#210). A program's array over a domain
+  kept in a window is kept in the box its placement's slots span, `11 x 11`
+  for a triangle of 66 cells, as plain loopy keeps one in a temporary.
 - `loopty.math` has eight functions (#184), and numpy's own functions on a
   traced value are refused rather than read as them (#195). A function
   only a guard calls is refused when lowered: loopy resolves a function by
@@ -1236,18 +1289,20 @@ on the inputs it runs.
   after it have written their outputs, where natively the program stopped
   inside that call. After the error, do not trust the arrays, and pass copies
   if you need them as they were.
-- **A window is an edge's, between one writer and its readers**
+- **A window keeps values stored, not updated**
   ([#213](https://github.com/xywei/loopty/issues/213),
   [#214](https://github.com/xywei/loopty/issues/214),
   [#229](https://github.com/xywei/loopty/issues/229),
   [#133](https://github.com/xywei/loopty/issues/133)). `Schedule.contract`
-  refuses an array its producer reads (a recurrence) or updates (`f[j] +=
-  v` adds to the zeros a window drops: store each cell once, or keep the
-  array whole), or that two statements store, and a loop tagged with no
-  order before it; an update of another array may read a window, and
-  `atomic` does not lift the order of its slots. A window that drops a
-  loop is shared by its every value, so putting that loop on a hardware axis
-  after it is refused, where one window per work item would do. An array
+  refuses an array a statement updates (`f[j] += v` adds to the zeros a
+  window drops: store each cell once, or keep the array whole), and a loop
+  tagged with no order before it; an update of another array may read a
+  window, and `atomic` does not lift the order of its slots. A cell stored
+  twice is asked about at both stores, not only at the last before the
+  read, so a window that is safe can be refused there. A window of a size, `f_window[n]`, is one
+  for every work item (in global memory on OpenCL), so a loop it drops
+  cannot go on a hardware axis after it; a window of a number of cells is
+  each work item's own. An array
   kept in a window, and another computed from it where it is read, are
   refused together, in either order: `substitute` moves the reads of the
   window to where the other is read. A substitution through two
@@ -1255,10 +1310,9 @@ on the inputs it runs.
   is computed from arrays nothing in the program writes (grudge's `v.n`
   from the normals, in `examples/advection.py`): substitute one of them.
 - **Some facts are isl's alone** ([docs/lean-checks.md](https://github.com/xywei/loopty/blob/main/docs/lean-checks.md#what-stays-isls)).
-  Where Lean is installed, a cast that puts a loop on a hardware axis and a
-  cast through the part of a tile isl computes stay `decided isl`: loopty
-  states them for isl only, and `lanky check --verbose` or `loopty run
-  --verbose` says so. A cast refused through a substitution's carried read,
+  Where Lean is installed, a cast through the part of a tile isl computes
+  stays `decided isl`: loopty states it for isl only, and `lanky check
+  --verbose` or `loopty run --verbose` says so. A cast refused through a substitution's carried read,
   or a window refused at a read in a sum, is refuted by isl with no
   counterexample stated for Lean
   ([#215](https://github.com/xywei/loopty/issues/215)).

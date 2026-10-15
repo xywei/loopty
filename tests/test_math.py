@@ -394,6 +394,74 @@ def test_a_postcondition_calls_the_functions_the_body_calls() -> None:
 
 
 
+def _ratio(alpha, beta):
+    """``-beta / alpha`` by the conjugate, as a kernel computes it."""
+    return -beta * conj(alpha) * (1 / real(alpha * conj(alpha)))
+
+
+def test_a_theorem_reads_them_as_the_functions_they_are() -> None:
+    """In a theorem's annotation, through a helper, ``conj`` is the conjugate (#252).
+
+    A family named ``conj`` would make the claim about any function at all.
+    Natively, and in a kernel's trace, they are numpy's and a call.
+    """
+    lanky = pytest.importorskip("lanky.terms")
+    if "conj" not in getattr(lanky, "ELEMENTARY_FUNCTIONS", ()):
+        pytest.skip("this lanky has no parts of a complex number (lanky main)")
+    from lanky import theorem
+    from lanky.plugins import registry
+    from lanky.prelude import Complex
+    from lanky.terms import Call, Elementary
+
+    with registry.collecting():
+
+        @theorem
+        def conjugate(
+            alpha: Complex, beta: Complex, away: alpha != 0  # noqa: F821
+        ) -> _ratio(alpha, beta) == -beta / alpha:  # noqa: F821
+            """The ratio by the conjugate is the ratio."""
+
+    found = [
+        node.function
+        for node in _nodes(conjugate.goal)
+        if isinstance(node, Elementary)
+    ]
+    assert sorted(found) == ["conj", "conj", "real"]
+    assert not [node for node in _nodes(conjugate.goal) if isinstance(node, Call)]
+    assert _ratio(2 + 0j, 1 + 1j) == pytest.approx(-(1 + 1j) / 2)
+    assert isinstance(_ratio(np.complex128(2), np.complex128(1j)), np.complex128)
+
+
+def test_a_kernels_postcondition_keeps_the_calls_its_trace_makes() -> None:
+    """``as_traced`` and ``as_stated`` put a term in one spelling and back."""
+    from lanky.terms import Call, Elementary, Var
+
+    from loopty.math import as_stated, as_traced
+
+    (post,) = [fact for fact in roots.facts() if fact.kind == "postcondition"]
+    assert "sqrt(x[i])" in post.statement
+    called = Call(Var("sqrt"), (Var("x"),))
+    assert isinstance(as_stated(called), Elementary)
+    assert isinstance(as_traced(as_stated(called)), Call)
+    # a function lanky has no node for stays a call
+    sine = Call(Var("sin"), (Var("x"),))
+    assert as_stated(sine) is sine
+
+
+def _nodes(expr):
+    from lanky.terms import init_args
+
+    out, stack = [], [expr]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, tuple):
+            stack.extend(node)
+        elif isinstance(node, prim.ExpressionNode):
+            out.append(node)
+            stack.extend(init_args(node))
+    return out
+
+
 def test_a_functions_value_compares_in_a_guard() -> None:
     # A plain pymbolic call refused the comparison: "expressions don't have
     # an order".

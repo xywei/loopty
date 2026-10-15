@@ -15,7 +15,9 @@ Run this file three ways.
 ``python examples/assembly.py``
     Runs the kernel natively on the two triangles of PyOP2's test mesh, where
     the cells' matrices add up to the test's ``expected_matrix``, and on a
-    mesh of the unit square, where ``y`` is the closed form. Then PyOP2's GPU
+    mesh of the unit square, where ``y`` is the closed form, and says what
+    ``mass_ffc``'s postcondition, its matrix in closed form, reads on its
+    runs. Then PyOP2's GPU
     schedule, the cells split by 32 onto groups and work items: refused, with
     the two cells of PyOP2's mesh that share a node; and accepted once the
     updates of ``y`` are atomic. Then Sun et al.'s, the cells four at a time,
@@ -25,11 +27,14 @@ Run this file three ways.
     The ledger, three layers in one table. The mathematics: the rule
     integrates every quadratic exactly, the element's mass in closed form,
     and the scatter keeps the total on every mesh; proved by Lean where
-    Mathlib is installed, tested where it is not. The kernels: the call's
-    rows and gathers in bounds, ``mass_ffc``'s symmetric matrix restated of
-    every cell after its call, and the accumulation into ``y`` approx, which
-    is what an update owes in place of distinct writes. Then Sun et al.'s
-    casts, under the assumption their schedule makes.
+    Mathlib is installed, tested where it is not. The kernels:
+    ``mass_ffc``'s postcondition, the element's mass in closed form to the
+    approx tolerance, tested on its runs and, with Mathlib, proved by Lean
+    from what it stores; the call's rows and gathers in bounds, that
+    postcondition restated of every cell after its call, and the
+    accumulation into ``y`` approx, which is what an update owes in place
+    of distinct writes. Then Sun et al.'s casts, under the assumption their
+    schedule makes.
 
 ``loopty run examples/assembly.py``
     Both kernels and Sun et al.'s schedule compiled and compared with the
@@ -77,8 +82,9 @@ What is worth reading here
 ``mass_ffc(coords[cell[c]], Ae[c])`` passes the cell's three corners, the
 rows of ``coords`` the cell map picks, and the cell's row of ``Ae``; traced,
 the call is inlined with loops of its own, and every fact of
-``mass_action`` is about what it runs. ``mass_ffc`` promises a symmetric
-matrix, and after each call ``mass_action`` has it of ``Ae[c]``.
+``mass_action`` is about what it runs. ``mass_ffc`` promises the element's
+mass, ``|J| (1 + delta_jk) / 24``, and after each call ``mass_action`` has
+it of ``Ae[c]``.
 
 *An update is not a write.* ``y[cell[c, a]] += ...`` adds to the cell it
 writes a value that reads nothing else of ``y``: two such updates of one cell
@@ -105,7 +111,13 @@ run on PyOP2's two triangles is refused, ``nc = 2``.
 *The tables are the rule, to their 15 digits.* ``FE0`` and ``W3`` are
 ``mass_ffc``'s tables as the test writes them. The theorems are about the
 rule they round, in exact rationals, and ``python`` checks that the tables
-are that rule to within ``1e-15``.
+are that rule to within ``1e-15``. So ``mass_ffc``'s matrix is the closed
+form to the last digits only, and its postcondition is read as its compiled
+run is compared with its native one, at the approx tolerance, ``|a - b| <=
+1e-6 (|b| + 1)``: tested on its runs, and proved by Lean with Mathlib, from
+what the kernel stores, with each table at the value it holds. That proof
+is of the kernel's term read over the reals; the floats it computes are
+what the runs test.
 """
 
 from __future__ import annotations
@@ -209,16 +221,32 @@ FE0 = table(
 )
 
 
-@kernel
-def mass_ffc(x: Arr[Fin[3], Fin[2], Real], A: Arr[Fin[3], Fin[3], Real]) -> all(
-    A[j, k] == A[k, j] for j in Fin[3] for k in Fin[3]
-):
-    """FFC's P1 mass kernel: the mass matrix of the triangle with corners ``x``."""
+def jacobian(x):
+    """``J``, the Jacobian's determinant of the cell with corners ``x``, as FFC has it.
+
+    Twice the cell's area, signed by the order of its corners.
+    """
     J_00 = x[1, 0] - x[0, 0]
     J_01 = x[2, 0] - x[0, 0]
     J_10 = x[1, 1] - x[0, 1]
     J_11 = x[2, 1] - x[0, 1]
-    det = abs(J_00 * J_11 - J_01 * J_10)
+    return J_00 * J_11 - J_01 * J_10
+
+
+@kernel
+def mass_ffc(x: Arr[Fin[3], Fin[2], Real], A: Arr[Fin[3], Fin[3], Real]) -> all(
+    A[j, j] == abs(jacobian(x)) / 12 for j in Fin[3]
+) & all(
+    A[j, k] == abs(jacobian(x)) / 24 for j in Fin[3] for k in Fin[3] if j != k
+):
+    """FFC's P1 mass kernel: the mass matrix of the triangle with corners ``x``.
+
+    It promises the element's mass in closed form, :func:`element_mass`'s
+    ``|J| (1 + delta_jk) / 24``, which it computes from FFC's tables: to
+    their 15 digits, so to the approx tolerance, as its compiled run is
+    compared with its native one.
+    """
+    det = abs(jacobian(x))
     for j in A.dom:
         for k in A.dom[j]:
             A[j, k] = reduce_sum(
@@ -378,6 +406,7 @@ def example_inputs() -> dict:
 def main() -> int:
     """Run natively on both meshes, then the refused and the accepted schedules."""
     from loopty.executor import LoopyExecutor
+    from loopty.obligations import prove
 
     coords, cells = pyop2_mesh()
     data = inputs_on((coords, cells))
@@ -399,6 +428,11 @@ def main() -> int:
     gap = max(np.abs(W3.numpy() - 1 / 6).max(), np.abs(FE0.numpy() - exact).max())
     rounded = bool(gap <= 1e-15)
     print(f"W3 and FE0 are the rule to {gap:.1e}: {rounded}")
+    (post,) = [fact for fact in mass_ffc.facts() if fact.kind == "postcondition"]
+    print(
+        "mass_ffc's postcondition, its matrix |J| (1 + delta_jk) / 24 to the approx "
+        f"tolerance -> {post.status.value}"
+    )
 
     message, _witness = rejected_split()
     print()
@@ -410,6 +444,9 @@ def main() -> int:
     print(f"accepted: {accepted!r}")
     for fact in accepted.facts():
         if fact.kind != "buildable":
+            # Lean, where it is installed, proves each cast, that no
+            # dependence joins two work items included
+            fact = prove(fact)
             status, by = fact.status.value, fact.decided_by or "-"
             print(f"  {status:8} {by:4} {fact.statement}")
     buildable, reason = accepted.buildable
@@ -426,7 +463,7 @@ def main() -> int:
             f"{detail['tolerance']:.3g} ({detail['exactness']}) -> "
             f"{fact.status.value}"
         )
-    ok = test and action and closed and rounded
+    ok = test and action and closed and rounded and post.status.value == "tested"
     return 0 if ok and not buildable and fact.status.value == "tested" else 1
 
 

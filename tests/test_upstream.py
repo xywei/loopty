@@ -89,6 +89,57 @@ def test_the_claim_names_the_outputs_compared_and_no_others() -> None:
     assert fact.provenance["uncompared"] == ["z"]
 
 
+def test_a_claim_states_the_allowance_it_was_checked_to() -> None:
+    # round-off, which the claim's 1e-12 of the largest value allows
+    fact = _fact(K.rounded)
+    assert fact.status is Status.TESTED
+    assert fact.statement == (
+        "the native run of double agrees with rounded in y within 1e-12 of the "
+        "largest value, on its example inputs"
+    )
+    detail = fact.provenance["outputs"]["y"]
+    assert detail["within"] == 1e-12
+    assert detail["exactness"] == "approx"
+    assert detail["tolerance"] == 1e-12 * detail["largest"]
+    assert 0 < detail["difference"] <= detail["tolerance"]
+
+
+def test_a_difference_inside_the_class_and_beyond_the_claim_refutes_it() -> None:
+    # a billionth is inside approx's millionth, and beyond what the row says
+    fact = _fact(K.off_by_a_billionth)
+    assert fact.status is Status.REFUTED
+    assert fact.provenance["reason"].startswith("y: cell 4 is 2.0 natively and ")
+    assert fact.provenance["reason"].endswith(
+        "from off_by_a_billionth, beyond 1e-12 of the largest value"
+    )
+
+
+def test_a_complex_nan_matches_only_part_by_part() -> None:
+    """``nan + 1j`` and ``nan + 2j`` differ in a part both have (Codex)."""
+    import numpy as np
+
+    from loopty.upstream import _beyond
+
+    got = np.array([complex(np.nan, 1.0), complex(np.nan, 1.0), 1.0 + 1j])
+    want = np.array([complex(np.nan, 2.0), complex(np.nan, 1.0), 1.0 + 1j])
+    assert _beyond(got, want, 1e-12).tolist() == [True, False, False]
+
+
+@pytest.mark.parametrize(
+    ("within", "error", "message"),
+    [
+        ("tight", TypeError, r"within=\.\.\.\) takes a number"),
+        (True, TypeError, r"takes a number"),
+        (0.0, ValueError, r"allows nothing a run can meet"),
+        (-1e-12, ValueError, r"allows nothing a run can meet"),
+        (float("nan"), ValueError, r"allows nothing a run can meet"),
+    ],
+)
+def test_an_allowance_is_a_positive_number(within, error, message) -> None:
+    with pytest.raises(error, match=message):
+        upstream(K.double, within=within)
+
+
 def test_an_output_the_kernel_does_not_write_is_no_agreement() -> None:
     fact = _fact(K.about_its_input)
     assert fact.status is Status.ASSUMED
@@ -112,6 +163,8 @@ def test_the_rows_are_in_the_ledger_under_the_kernel() -> None:
         "not_recorded": Status.ASSUMED,
         "about_its_input": Status.ASSUMED,
         "doubles_only": Status.TESTED,
+        "rounded": Status.TESTED,
+        "off_by_a_billionth": Status.REFUTED,
     }
     assert {fact.owner for fact in rows.values()} == {"double", "double_and_square"}
 
@@ -171,6 +224,33 @@ def test_an_output_of_another_shape_is_refuted_with_both_shapes(tmp_path) -> Non
     assert flat.provenance["reason"] == (
         "y: [2, 3] cells natively, [6] from flattened"
     )
+
+
+def test_an_output_of_another_length_is_refuted_within_an_allowance(tmp_path) -> None:
+    # within= compares cell by cell, and 5 cells against 4 is no comparison:
+    # refuted with both shapes, not a broadcasting error (Codex)
+    source = tmp_path / "short.py"
+    source.write_text(
+        "from __future__ import annotations\n"
+        "import numpy as np\n"
+        "from lanky.prelude import Fin, Real\n"
+        "from loopty import Arr, kernel, upstream\n"
+        "@kernel\n"
+        "def copy(x: Arr[Fin[m], Real], y: Arr[Fin[m], Real]):\n"
+        "    for i in y.dom:\n"
+        "        y[i] = x[i]\n"
+        "def example_inputs():\n"
+        "    x = Arr.from_numpy(np.arange(5.0))\n"
+        "    return {'copy': {'x': x, 'y': Arr.zeros((5,))}}\n"
+        "@upstream(copy, within=1e-12)\n"
+        "def short(x, y):\n"
+        "    return {'y': x.numpy()[:4]}\n"
+    )
+    ledger = check_path(source)
+    (row,) = [fact for fact in ledger if fact.kind == KIND]
+    assert row.status is Status.REFUTED
+    assert row.provenance["outputs"]["y"]["shapes"] == [[5], [4]]
+    assert row.provenance["reason"] == "y: [5] cells natively, [4] from short"
 
 
 def test_upstream_takes_a_kernel() -> None:

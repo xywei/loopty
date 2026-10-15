@@ -27,8 +27,18 @@ output by output, at the accuracy the kernel's types claim for that output
 test does. The outputs compared are the ones the function gives, and the
 claim names them (``the native run of l2p agrees with sumpy_l2p in pot, on
 its example inputs``); an array the kernel writes that the function leaves
-out is not claimed, and the provenance lists it (``uncompared``). The fact
-reads
+out is not claimed, and the provenance lists it (``uncompared``).
+
+Two codes that compute one thing in two orders agree to round-off, far
+inside the allowance of ``approx``, a millionth of each value. The claim
+can say so: ``@upstream(single_layer, within=1e-12)`` compares each cell of
+an output computed in floating point within ``1e-12`` times the largest
+value the function returned for it, and the claim names that allowance
+(``the native run of single_layer agrees with sumpy_single_layer in out
+within 1e-12 of the largest value, on its example inputs``), so the ledger
+says how close the two are and not only that they agree to the class. An
+output of an exact class is still compared bit for bit, which no allowance
+loosens. The fact reads
 
 * ``tested`` by ``upstream`` when every output agrees, with the largest
   difference and its allowance in the provenance;
@@ -72,7 +82,7 @@ class Upstream:
     :meth:`facts`; see the module.
     """
 
-    def __init__(self, kernel: Any, fn: Any) -> None:
+    def __init__(self, kernel: Any, fn: Any, within: float | None = None) -> None:
         from loopty.kernel import Kernel, Program
 
         if not isinstance(kernel, Kernel | Program):
@@ -84,6 +94,9 @@ class Upstream:
             raise TypeError(f"@upstream({kernel.__name__}) decorates a function")
         self.kernel = kernel
         self.fn = fn
+        #: The allowance the claim states, a fraction of the largest value of
+        #: an output, or ``None`` for the class's (see the module).
+        self.within = _allowance(kernel.__name__, within)
         functools.update_wrapper(self, fn)
         code = fn.__code__
         self.path = code.co_filename
@@ -116,7 +129,11 @@ class Upstream:
         inputs``: only the outputs the function gave are compared, and the
         claim says which, so that one it left out is not claimed.
         """
-        compared = f" in {', '.join(outputs)}," if outputs else ""
+        compared = f" in {', '.join(outputs)}" if outputs else ""
+        if self.within is not None:
+            compared += f" within {self.within:g} of the largest value"
+        if compared:
+            compared += ","
         return (
             f"the native run of {self.kernel.__name__} agrees with "
             f"{self.fn.__name__}{compared} on its example inputs"
@@ -254,7 +271,11 @@ class Upstream:
             shapes = [list(got.shape), list(want.shape)]
             got, want = got.reshape(-1), want.reshape(-1)
             exactness = output_class(term, name)
-            agree, difference, tolerance = _compare(got, want, exactness)
+            within = self.within if exactness != "exact" else None
+            if within is None:
+                agree, difference, tolerance = _compare(got, want, exactness)
+            else:
+                agree, difference, tolerance = _within(got, want, within)
             agree = agree and shapes[0] == shapes[1]
             detail: dict[str, Any] = {
                 "exactness": exactness,
@@ -263,12 +284,19 @@ class Upstream:
                 "largest": float(np.max(np.abs(want))) if want.size else 0.0,
                 "agree": agree,
             }
+            if within is not None:
+                detail["within"] = within
             if shapes[0] != shapes[1]:
                 detail["shapes"] = shapes
             elif not agree:
                 from loopty.tolerance import disagreement
 
-                k = int(np.flatnonzero(disagreement(got, want, exactness))[0])
+                differs = (
+                    disagreement(got, want, exactness)
+                    if within is None
+                    else _beyond(got, want, tolerance)
+                )
+                k = int(np.flatnonzero(differs)[0])
                 detail["cell"] = k
                 detail["native"] = got[k].item()
                 detail[self.fn.__name__] = want[k].item()
@@ -289,11 +317,15 @@ class Upstream:
                         f"{detail['shapes'][1]} from {self.fn.__name__}"
                     )
                 else:
+                    allowance = (
+                        f"{detail['within']:g} of the largest value"
+                        if "within" in detail
+                        else f"the {detail['exactness']} allowance"
+                    )
                     lines.append(
                         f"{name}: cell {detail['cell']} is {detail['native']!r} "
                         f"natively and {detail[self.fn.__name__]!r} from "
-                        f"{self.fn.__name__}, beyond the {detail['exactness']} "
-                        "allowance"
+                        f"{self.fn.__name__}, beyond {allowance}"
                     )
             return fact(
                 Status.REFUTED,
@@ -307,18 +339,99 @@ class Upstream:
     # }}}
 
 
-def upstream(kernel: Any) -> Any:
+def _allowance(name: str, within: Any) -> float | None:
+    """``within`` as the allowance a claim states, or why it cannot be one.
+
+    Raises:
+        TypeError: If it is not a number.
+        ValueError: If it is not a finite number above zero.
+    """
+    if within is None:
+        return None
+    if isinstance(within, bool) or not isinstance(within, int | float | np.floating):
+        raise TypeError(
+            f"@upstream({name}, within=...) takes a number, the allowance as a "
+            f"fraction of the largest value, such as within=1e-12, not {within!r}"
+        )
+    if not np.isfinite(within) or within <= 0:
+        raise ValueError(
+            f"@upstream({name}, within={within!r}) allows nothing a run can meet; "
+            "the allowance is a fraction of the largest value above zero, such as "
+            "within=1e-12"
+        )
+    return float(within)
+
+
+def _within(
+    got: np.ndarray, want: np.ndarray, within: float
+) -> tuple[bool, float, float]:
+    """``(agree, difference, allowance)``: each cell within ``within`` of the largest.
+
+    The allowance is ``within`` times the largest modulus of ``want``, one
+    number for the whole output, which is what round-off between two orders
+    of summation is measured against. A cell whose two values match (are
+    equal, or are both NaN) agrees, and one that is not finite on either side
+    otherwise does not, as :func:`loopty.tolerance.disagreement` has it.
+    Arrays of two shapes do not agree, as :func:`loopty.executor._compare`
+    has it, and their cells are not compared.
+    """
+    if got.shape != want.shape:
+        return False, float("inf"), 0.0
+    common = np.result_type(got, want)
+    got = got.astype(common, copy=False)
+    want = want.astype(common, copy=False)
+    if not want.size:
+        return True, 0.0, 0.0
+    finite = np.isfinite(want)
+    largest = float(np.max(np.abs(want[finite]))) if finite.any() else 0.0
+    allowance = within * largest
+    differs = _beyond(got, want, allowance)
+    with np.errstate(invalid="ignore", over="ignore"):
+        gaps = np.abs(got - want)
+    shown = gaps[np.isfinite(gaps)]
+    difference = float(shown.max()) if shown.size else 0.0
+    if differs.any() and not np.isfinite(gaps[differs]).all():
+        difference = float("inf")
+    return not bool(differs.any()), difference, allowance
+
+
+def _beyond(got: np.ndarray, want: np.ndarray, allowance: float) -> np.ndarray:
+    """The cells at which ``got`` is not within ``allowance`` of ``want``, as a mask.
+
+    Two values match when they are equal or both NaN, a complex one part by
+    part, as :func:`loopty.tolerance.disagreement` has it: ``nan + 1j`` and
+    ``nan + 2j`` do not.
+    """
+    parts = [
+        np.stack([side.real, side.imag], axis=-1)
+        if side.dtype.kind == "c"
+        else side[..., np.newaxis]
+        for side in (got, want)
+    ]
+    with np.errstate(invalid="ignore", over="ignore"):
+        matched = np.all(
+            (parts[0] == parts[1]) | (np.isnan(parts[0]) & np.isnan(parts[1])),
+            axis=-1,
+        )
+        near = np.isfinite(want) & (np.abs(got - want) <= allowance)
+    return ~(matched | near)
+
+
+def upstream(kernel: Any, *, within: float | None = None) -> Any:
     """``@upstream(kernel)``: the function computes what the code ``kernel`` mirrors.
 
-    See the module. The decorated name is the :class:`Upstream`, which calls
-    the function when called, and whose fact ``lanky check`` lists under the
+    See the module. ``within=1e-12`` states the allowance in the claim, a
+    fraction of the largest value of each output, where the class's is the
+    default. The decorated name is the :class:`Upstream`, which calls the
+    function when called, and whose fact ``lanky check`` lists under the
     kernel.
     """
+    allowance = _allowance(getattr(kernel, "__name__", "kernel"), within)
 
     def decorate(fn: Any) -> Upstream:
         from loopty.kernel import ensure_registered
 
         ensure_registered()
-        return registry.register_object(Upstream(kernel, fn))
+        return registry.register_object(Upstream(kernel, fn, allowance))
 
     return decorate

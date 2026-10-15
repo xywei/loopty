@@ -808,9 +808,20 @@ def example_inputs() -> dict:
 # }}}
 
 
+def _settled(facts: list) -> str:
+    """``all decided``, or ``4 proved, 1 decided``: the statuses of a launch's casts."""
+    counts: dict[str, int] = {}
+    for fact in facts:
+        counts[fact.status.value] = counts.get(fact.status.value, 0) + 1
+    if len(counts) == 1:
+        return f"all {next(iter(counts))}"
+    return ", ".join(f"{count} {status}" for status, count in counts.items())
+
+
 def main() -> int:
     """Natively against grudge's dense operators, the fusion and window, the device."""
     from loopty.executor import LoopyExecutor
+    from loopty.obligations import prove
 
     _, mass = factors()
     inverse = bool(np.allclose(np.linalg.inv(mass) @ mass, np.eye(N), atol=1e-13))
@@ -886,22 +897,27 @@ def main() -> int:
     except IllegalCast as exc:
         print(f"  refused: {exc}")
     atomic = Schedule(lift_on_faces).atomic("rhs").tag(**on_faces)
-    cast = [fact for fact in atomic.facts() if fact.kind != "buildable"]
+    # where Lean is installed it proves each cast, that no dependence joins
+    # two work items included
+    settled = ("decided", "proved")
+    cast = [prove(fact) for fact in atomic.facts() if fact.kind != "buildable"]
     print(
-        f"  accepted: {'.'.join(atomic.history)}: {len(cast)} facts, all "
-        f"{cast[0].status.value}"
+        f"  accepted: {'.'.join(atomic.history)}: {len(cast)} facts, "
+        f"{_settled(cast)}"
     )
-    legal = all(fact.status.value == "decided" for fact in cast)
+    legal = all(fact.status.value in settled for fact in cast)
     print()
 
     print("on a device, each split's launches, every node on a work item:")
     for split in SPLITS:
         for schedule in launches(split):
-            cast = [fact for fact in schedule.facts() if fact.kind != "buildable"]
-            legal = legal and all(fact.status.value == "decided" for fact in cast)
+            cast = [
+                prove(fact) for fact in schedule.facts() if fact.kind != "buildable"
+            ]
+            legal = legal and all(fact.status.value in settled for fact in cast)
             print(
                 f"  {split}: {schedule.term.name}, {len(schedule.history)} steps: "
-                f"{len(cast)} facts, all {cast[0].status.value}"
+                f"{len(cast)} facts, {_settled(cast)}"
             )
     good = native and inverse and transposed and legal
     return 0 if good and kept.status.value == "tested" else 1
