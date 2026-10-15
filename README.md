@@ -1118,11 +1118,13 @@ release; the CHANGELOG says when one does.
   read a loop's start off (after an `affine` step the kernel rewrite could
   not write), only two instances of one loop are taken to share a work item.
 - The zeros of a program's array follow a loop that stores the array, and
-  not a split of one: after `split("i", 4).tag(i_outer="g.0",
-  i_inner="l.0")`, a statement stores `f[4*i_outer + i_inner]`, along no loop
-  of its own, so the zeros stay on every work item and the tag is refused,
-  saying so. Keeping the array in a window (`contract`) or computing it where
-  it is read (`substitute`) drops the zeros.
+  not a split of one ([#289](https://github.com/xywei/loopty/issues/289)):
+  after `split("i", 4).tag(i_outer="g.0", i_inner="l.0")`, a statement
+  stores `f[4*i_outer + i_inner]`, along no loop of its own, so the zeros
+  stay on every work item and the tag is refused, saying so. Keeping the
+  array in a window (`contract`) or computing it where it is read
+  (`substitute`) drops the zeros, and so would a schedule wherever no read
+  sees them ([#290](https://github.com/xywei/loopty/issues/290)).
 - A kernel called with a zero-length *shape-bearing* argument (a matrix with no
   rows at all) cannot run on the C target: loopy cannot pass an empty array, and
   the workaround that rescues the empty flat buffer of a ragged axis cannot be

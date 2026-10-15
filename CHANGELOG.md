@@ -688,7 +688,7 @@ All notable changes to loopty are recorded here. The format follows
   Where a crossing is a call's and the zeros', the call's is named. Zeros
   that cannot follow (the array stored along a split loop, or along loops on
   two axes) stay on every work item, and the refusal says why and that
-  `contract` or `substitute` drops them. grudge's weak gradient in one launch,
+  `contract` or `substitute` drops them (#289). grudge's weak gradient in one launch,
   every node on a work item of its own, is now refused for the row the pass
   along `r` reads from other work items, not for the zeros of `w`.
 - On OpenCL, a complex number to a natural power below 100 is the products
