@@ -129,6 +129,79 @@ def test_a_reduction_adds_in_the_order_the_native_sum_does() -> None:
 
 
 @kernel
+def rows(a: Arr[Fin[n], Fin[m], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    for i in y.dom:
+        y[i] = reduce_sum(a[i, j] * 2.0 for j in Fin[m])  # noqa: F821
+
+
+@kernel
+def lower(a: Arr[Fin[n], Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    for i in y.dom:
+        y[i] = reduce_sum(a[i, j] for j in Fin[i + 1])
+
+
+def _counting_enumerations(monkeypatch) -> list:
+    """Each enumeration of a domain's points the interpreter asks isl for, from now."""
+    import loopty.interpret as interpret_module
+
+    calls: list = []
+    real = interpret_module._enumerate
+
+    def counted(space, positions):
+        calls.append(space)
+        return real(space, positions)
+
+    monkeypatch.setattr(interpret_module, "_enumerate", counted)
+    return calls
+
+
+def test_a_sum_over_a_box_is_enumerated_once_not_at_each_instance(monkeypatch) -> None:
+    """lanky #125: a sum's points, the same at every instance of the loops, found once.
+
+    They are kept by the loop variables each instance fixes, and the sum's
+    domain, the rows times the columns, is enumerated as its two factors:
+    the work of finding points no longer grows with the instances, and the
+    terms are added in the same order, to the same bits.
+    """
+    rng = np.random.default_rng(1)
+    calls = _counting_enumerations(monkeypatch)
+    for count in (3, 30):
+        arguments = {
+            "a": Arr.from_numpy(rng.standard_normal((count, 7))),
+            "y": Arr.zeros(count),
+        }
+        calls.clear()
+        native, interpreted = both(rows, arguments)
+        assert_identical(native, interpreted)
+        assert len(calls) <= 3
+
+
+def test_a_sum_over_a_triangle_reads_each_instance_its_points(monkeypatch) -> None:
+    """Where a sum's points depend on the loops', each instance reads its own row."""
+    rng = np.random.default_rng(2)
+    calls = _counting_enumerations(monkeypatch)
+    arguments = {"a": Arr.from_numpy(rng.standard_normal((9, 9))), "y": Arr.zeros(9)}
+    native, interpreted = both(lower, arguments)
+    assert_identical(native, interpreted)
+    assert len(calls) <= 2
+    expected = [sum(arguments["a"].numpy()[i, : i + 1]) for i in range(9)]
+    assert list(interpreted["y"].numpy()) == expected
+
+
+def test_a_sum_past_the_work_left_is_too_large_at_its_instance() -> None:
+    """The limit is checked on each instance's points, by their box, as it always was.
+
+    Nine rows of a triangle, 45 terms and 9 instances: 54 fits, and with 50
+    allowed the eighth row's eight terms go over, which is refused when the
+    row's box is checked, before its terms are added.
+    """
+    arguments = {"a": Arr.from_numpy(np.ones((9, 9))), "y": Arr.zeros(9)}
+    interpret(lower.term, _copies(arguments), limit=54)
+    with pytest.raises(TooLarge, match="more than 50 statement instances"):
+        interpret(lower.term, _copies(arguments), limit=50)
+
+
+@kernel
 def masked(
     cnt: Arr[Fin[n], Nat],  # noqa: F821
     lst: Arr[Fin[n], Fin[cnt], Fin[n]],  # noqa: F821

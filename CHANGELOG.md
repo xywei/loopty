@@ -6,6 +6,27 @@ All notable changes to loopty are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **The interpreter finds a sum's points once, not at every instance**
+  (lanky #125). The faithful check runs each kernel's term through
+  `loopty.interpret`, and a reduction asked isl for its points at every
+  statement instance: it fixed the loop variables, the domain's parameters
+  and enumerated. Now a reduction's domain is enumerated once per run at
+  the values of its parameters, its points kept by the loop variables each
+  instance fixes, and where it is the loops' points times the sum's (a sum
+  over `Fin[n]` in a loop nest), as its two factors. Each instance reads its
+  own points, in the same order, and the work limit is checked on them by
+  their bounding box as before. The rule for a node is found once per type.
+  `lanky check examples/hexahedra.py` spends 7 s in the interpreter where it
+  spent 31, and takes 12 s of CPU where it took 38 without Lean; every
+  example's ledger, JSON included, is what it was.
+- **`loopty run` says what a row lacks to be proved**, with lanky's
+  `WITHOUT LEAN` and `WITHOUT MATHLIB` lines under its table, and sizes the
+  table's statement column to the terminal, as `lanky check` does, where the
+  lanky it runs with has them. The transcripts show each statement whole,
+  wrapped under its row.
+
 ### Added
 
 - **Claims settled by running them** (`loopty.tested`): `@tested` on a

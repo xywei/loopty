@@ -895,7 +895,7 @@ class _Run:
         params: Sequence[str],
         known: Mapping[str, Any],
     ) -> list[dict[str, Any]] | None:
-        """:meth:`points` of a domain whose parameters ``known`` all gives, from a table.
+        """:meth:`points` of a domain all of whose parameters ``known`` gives.
 
         A reduction's domain is the statement's loop variables followed by
         its own binders, and :meth:`reduction` asks for its points once per
@@ -959,7 +959,7 @@ class _Run:
         known: Mapping[str, Any],
         fixed: Sequence[int],
     ) -> dict[tuple[int, ...], tuple[int, list[tuple[int, ...]]]] | None:
-        """The table :meth:`_table` reads: each instance's box and points; ``None`` for none."""
+        """What :meth:`_table` reads: each instance's box and points, or ``None``."""
         space = domain
         for name in params:
             space = _fix_param(space, name, known[name])
@@ -972,7 +972,8 @@ class _Run:
             return None
         count = space.dim(isl.dim_type.set)
         free = [k for k in range(count) if k not in fixed]
-        split = _product(space, len(fixed)) if list(fixed) == list(range(len(fixed))) else None
+        leading = list(fixed) == list(range(len(fixed)))
+        split = _product(space, len(fixed)) if leading else None
         if split is not None:
             # the sum's points are the same at every instance: two short
             # enumerations instead of one of every pair
@@ -993,7 +994,8 @@ class _Run:
 
         space.foreach_point(visit)
         return {
-            at: (_volume(tails, len(free)), sorted(tails)) for at, tails in found.items()
+            at: (_volume(tails, len(free)), sorted(tails))
+            for at, tails in found.items()
         }
 
     def _walk(
@@ -1267,7 +1269,7 @@ def _variable(run: _Run, node: prim.Variable, env: Mapping[str, Any]) -> Any:
 
 
 def _rule_of(node: Any) -> Any:
-    """How :meth:`_Run.value` evaluates a node of this one's type; ``None`` for its own tests.
+    """How :meth:`_Run.value` evaluates a node of this type; ``None`` for its tests.
 
     The tests come before the ones :meth:`_Run.value` makes at each node,
     and are about the type alone, so a type is taken by one rule however
@@ -1495,7 +1497,7 @@ def _product(space: isl.Set, count: int) -> tuple[isl.Set, isl.Set] | None:
 
 
 def _volume(points: Any, count: int) -> int:
-    """How many points the bounding box of some points, ``count`` coordinates each, holds."""
+    """How many points the box around ``points``, ``count`` coordinates each, holds."""
     volume = 1
     for position in range(count):
         values = [point[position] for point in points]
