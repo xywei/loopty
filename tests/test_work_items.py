@@ -25,7 +25,7 @@ from typing import Any
 import islpy as isl
 import pymbolic.primitives as prim
 import pytest
-from lanky.prelude import Nat, Real
+from lanky.prelude import FnType, Nat, Real
 
 import hand_terms as ht
 from loopty import Arr, Fin, kernel, program, reduce_sum, when
@@ -599,6 +599,15 @@ def test_each_access_says_which_instruction_of_its_statement_makes_it() -> None:
 # {{{ a program's zeros on a device (#255, #261)
 
 
+#: The demos below index families at several indices, ``Fn[Nat, Nat, Real]``
+#: applied as ``D[a, b]``, which is lanky main's and not the 0.2.0 release's
+#: that the released-lanky job installs (as in ``tests/test_examples.py``).
+needs_several_indices = pytest.mark.skipif(
+    not hasattr(FnType, "indices"),
+    reason="the demo's theorems index families at several indices (lanky main)",
+)
+
+
 @kernel
 def doubled(x: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):  # noqa: F821
     """Each cell twice ``x``'s."""
@@ -696,6 +705,7 @@ def test_a_call_that_runs_on_every_work_item_is_named_before_the_zeros(
     assert "zeros" not in message
 
 
+@needs_several_indices
 def test_one_launch_of_the_hexahedra_passes_is_refused_for_its_reads(plain_opencl):
     # Every node of an element on a work item of its own, in one launch: the
     # pass along r reads a row the metric stored on other work items. That is
@@ -721,6 +731,7 @@ def test_one_launch_of_the_hexahedra_passes_is_refused_for_its_reads(plain_openc
     assert tagged.buildable == (True, "")
 
 
+@needs_several_indices
 def test_sumpys_gpu_schedule_of_l2p_names_only_the_files_loops() -> None:
     # sumpy's own schedule for a GPU, each box a work group, as the file
     # writes it: no generated loop names, each box's cells of C and R zeroed
