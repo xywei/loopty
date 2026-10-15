@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import itertools
 import linecache
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
@@ -48,10 +49,11 @@ def frame_statement_text(frame: Any) -> str:
     the one that is running.
     """
     code = frame.f_code
-    try:
-        positions = list(code.co_positions())[frame.f_lasti // 2]
-    except (IndexError, ValueError):  # no position recorded for the instruction
-        positions = (frame.f_lineno, None, None, None)
+    # one entry per two-byte code unit, the instruction's at f_lasti // 2
+    positions = next(
+        itertools.islice(code.co_positions(), frame.f_lasti // 2, None),
+        (frame.f_lineno, None, None, None),
+    )
     line, _, column, _ = positions
     return statement_text(code.co_filename, line or frame.f_lineno, column)
 
