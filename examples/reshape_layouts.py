@@ -202,8 +202,8 @@ def matrix() -> Arr:
 #: would be rejected; the difference is in the footprints, not in the syntax.
 blocked = (
     Schedule(transpose, target="c", sizes={"n": ROWS, "m": COLS})
-    .split("i", 2, inner="i_in", outer="i_out")
-    .interchange("i_out", "j", "i_in")
+    .split(transpose.i, 2)
+    .interchange(transpose.i.outer, transpose.j, transpose.i.inner)
     .example(a=matrix(), b=Arr.zeros((COLS, ROWS)))
 )
 
@@ -248,7 +248,7 @@ def main() -> int:
 
     print()
     print(f"schedule: {blocked!r}")
-    print(f"  loop nest: {' '.join(blocked.order)}")
+    print(f"  loop nest: {' '.join(blocked.nest)}")
     for fact in blocked.facts():
         print(f"  {fact.status.value:8} {fact.decided_by or '-':4} {fact.statement}")
 

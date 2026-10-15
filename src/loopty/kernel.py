@@ -116,6 +116,62 @@ class _Decorated:
             module_name(code.co_filename) or getattr(fn, "__module__", "") or ""
         )
 
+    # {{{ handles
+
+    def __getattr__(self, name: str) -> Any:
+        """A loop, an array, a call or a size of the source, by its short form.
+
+        ``reconstruct.i``, ``l2p.R``, ``l2p.unpack``: a handle a schedule
+        names it by (:mod:`loopty.handles`). Only a name that is no
+        attribute comes here, so the API keeps every name it has, and a
+        loop named like one is reached through :attr:`loops`.
+        """
+        if name.startswith("_") or "fn" not in self.__dict__:
+            raise AttributeError(name)
+        from loopty.handles import short_name
+
+        return short_name(self, name)
+
+    def __dir__(self) -> list[str]:
+        names: list[str] = []
+        try:
+            from loopty.handles import scope
+
+            names = dir(scope(self))
+        except Exception:  # noqa: BLE001 - a body that cannot be traced lists none
+            names = []
+        return sorted({*object.__dir__(self), *names})
+
+    @property
+    def loops(self) -> Any:
+        """The loops of the source by name, the long form: ``reconstruct.loops.i``."""
+        from loopty.handles import scope
+
+        return scope(self).loops
+
+    @property
+    def arrays(self) -> Any:
+        """The arrays by name, the long form: ``l2p.arrays.R``."""
+        from loopty.handles import scope
+
+        return scope(self).arrays
+
+    @property
+    def calls(self) -> Any:
+        """The calls by the callee's name, the long form: ``l2p.calls.unpack``."""
+        from loopty.handles import scope
+
+        return scope(self).calls
+
+    @property
+    def sizes(self) -> Any:
+        """The sizes by name, the long form: ``mass_action.sizes.nc``."""
+        from loopty.handles import scope
+
+        return scope(self).sizes
+
+    # }}}
+
     @property
     def definition(self) -> str:
         """``spmv.scan@69``: the module, the qualified name and the line.
@@ -279,6 +335,7 @@ class Kernel(_Decorated):
         #: helpers it calls. Reported, not relied on: :meth:`__call__` masks
         #: every run. See :func:`opens_a_guard`.
         self.guards_writes = opens_a_guard(fn)
+        _warn_shadowed(self)
 
     # {{{ running
 
@@ -982,6 +1039,7 @@ class Program(_Decorated):
         self._term: Term | None = None
         self._facts: tuple[Fact, ...] | None = None
         self.uses = _theorems(uses, self.qualname)
+        _warn_shadowed(self)
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """Run the body natively; its kernel calls run natively too.
@@ -1497,6 +1555,17 @@ def _is_statement(entry: Any) -> bool:
         and hasattr(entry, "goal")
         and isinstance(getattr(entry, "fact_id", None), str)
     )
+
+
+def _warn_shadowed(obj: Any) -> None:
+    """Warn of a loop or a parameter named like an attribute of the API.
+
+    See :class:`loopty.handles.ShadowedName`; the warning names the long
+    form that reaches it.
+    """
+    from loopty.handles import warn_shadowed
+
+    warn_shadowed(obj)
 
 
 def _where_of(frame: Any) -> str:

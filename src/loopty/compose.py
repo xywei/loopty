@@ -184,6 +184,8 @@ from loopty.table import Table, passed_message
 from loopty.term import (
     Access,
     ArrType,
+    Binder,
+    Callsite,
     Hypothesis,
     Reduction,
     Requirement,
@@ -782,6 +784,8 @@ class _Done:
     program's names, ``types`` its parameters' types and ``arrays`` the
     program array passed for each, ``written`` the program arrays it writes,
     and ``wants`` its requirements on arrays written before it.
+    ``binders`` and ``callsites`` are the callee's loops and calls, in the
+    program's names and inside this call (:class:`loopty.term.Binder`).
     """
 
     label: str
@@ -794,6 +798,8 @@ class _Done:
     arrays: dict[str, str]
     written: set[str]
     wants: list[_Want]
+    binders: tuple[Binder, ...] = ()
+    callsites: tuple[Callsite, ...] = ()
 
 
 class _Recorder:
@@ -1065,6 +1071,18 @@ def _own_names(term: Term) -> list[str]:
                 if name not in known:
                     add(name)
     return out
+
+
+def _binders(term: Term) -> tuple[Binder, ...]:
+    """A callee's loops: its term's records, or its statements' loops.
+
+    A term written by hand records none (:attr:`loopty.term.Term.binders`),
+    and its loops are then the loops of its statements and of their sums,
+    each named as the term names it.
+    """
+    from loopty.handles import binders_of
+
+    return binders_of(term)
 
 
 def _fin_bound(sort: Any) -> Any:
@@ -1607,6 +1625,29 @@ class _Composer:
                 stmt.assignee.array, f"{kernel.__name__} at {call.where}"
             )
             self.last_writer[stmt.assignee.array] = f"{kernel.__name__} at {call.where}"
+        # The callee's loops and calls, in the program's names and inside
+        # this call, for the handles a schedule names them by
+        # (loopty.handles); a loop no statement runs in has no name here.
+        binders = tuple(
+            dataclasses.replace(
+                binder, name=names[binder.name], scope=(label, *binder.scope)
+            )
+            for binder in _binders(term)
+            if binder.name in names
+        )
+        callsites = (
+            Callsite((label,), kernel.__name__, call.where, tuple(arrays.items())),
+            *(
+                dataclasses.replace(
+                    site,
+                    labels=(label, *site.labels),
+                    arrays=tuple(
+                        (param, names.get(array, array)) for param, array in site.arrays
+                    ),
+                )
+                for site in term.callsites
+            ),
+        )
         return _Done(
             label=label,
             kernel=kernel,
@@ -1618,6 +1659,8 @@ class _Composer:
             arrays=dict(arrays),
             written={stmt.assignee.array for stmt in stmts},
             wants=wants,
+            binders=binders,
+            callsites=callsites,
         )
 
     def claim(self, name: str, kind: str, call: _Call, param: str) -> None:
@@ -2332,6 +2375,18 @@ class _Composer:
             scopes=tuple(scopes),
             deferred_offsets=tuple(self.deferred),
             tables=tuple(self.tables.items()),
+            binders=tuple(
+                binder
+                for slot in self.slots
+                if isinstance(slot, _Done)
+                for binder in slot.binders
+            ),
+            callsites=tuple(
+                site
+                for slot in self.slots
+                if isinstance(slot, _Done)
+                for site in slot.callsites
+            ),
         )
 
     def postcondition(self) -> Any:

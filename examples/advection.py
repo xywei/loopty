@@ -102,6 +102,8 @@ two faces write from two work items.
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 from lanky import theorem
 from lanky.prelude import Fn, Nat, Real
@@ -434,14 +436,14 @@ def folded_rhs(u, V, invJ, nbr, inside, outside, vn, D, L, rhs):
 #: each node, on every loop; the fluxes with them on the element.
 fused = (
     Schedule(advection_rhs)
-    .substitute("V")
-    .substitute("vn")
-    .fuse("volume", "lift", loops=4)
-    .fuse("upwind", "volume", loops=1)
+    .substitute(advection_rhs.V)
+    .substitute(advection_rhs.vn)
+    .fuse(advection_rhs.volume.i, advection_rhs.lift.i)
+    .fuse(advection_rhs.upwind.e, advection_rhs.volume.e)
 )
 
 #: The same, with the fluxes kept one element at a time.
-contracted = fused.contract("flux")
+contracted = fused.contract(advection_rhs.flux)
 
 
 @program
@@ -459,25 +461,26 @@ def volume_and_lift(D, V, invJ, u, L, flux, rhs):
     lift(L, invJ, flux, rhs)
 
 
-#: The element a work group, its nodes the work items: ``e, k, j, i``.
-NODES = ("g.0", "l.2", "l.1", "l.0")
+def on_nodes(schedule: Schedule, loops: Any) -> Schedule:
+    """``schedule`` with the element a work group, its nodes the work items.
 
-#: The fluxes' launch: the element a work group, a face's nodes the work
-#: items, its six faces in sequence on each: ``e, f, a, b``.
-FACE_NODES = ("g.0", None, "l.1", "l.0")
-
-
-def on(schedule: Schedule, call: str, axes: tuple) -> Schedule:
-    """``schedule`` with the loops of ``call`` on ``axes``, outermost first.
-
-    A program names each call's loops apart from the others' (the lift's
-    ``e`` is ``e_1`` after the volume's ``e_0``); this reads the names off
-    the statement ``call`` made.
+    ``loops`` is the kernel, or the call of it, whose loops ``e, k, j, i``
+    go on ``g.0, l.2, l.1, l.0``: ``on_nodes(whole, folded_rhs.volume)``
+    puts the volume term's loops there, whatever the program calls them.
     """
-    stmt = next(s for s in schedule.term.stmts if s.id in ("S0", f"{call}.S0"))
     return schedule.tag(
-        **{loop: axis for loop, axis in zip(stmt.inames, axes) if axis is not None}
+        {loops.e: "g.0", loops.k: "l.2", loops.j: "l.1", loops.i: "l.0"}
     )
+
+
+def on_face_nodes(schedule: Schedule, loops: Any) -> Schedule:
+    """The fluxes' launch: the element a work group, a face's nodes the work items.
+
+    ``loops`` is the kernel, or the call, whose loops ``e, f, a, b`` are
+    the element, the face and a face's nodes; the six faces run in sequence
+    on each work item.
+    """
+    return schedule.tag({loops.e: "g.0", loops.a: "l.1", loops.b: "l.0"})
 
 
 def launches(split: str = "one", target: str = "c") -> list[Schedule]:
@@ -496,32 +499,37 @@ def launches(split: str = "one", target: str = "c") -> list[Schedule]:
     """
     if split == "three":
         return [
-            on(Schedule(upwind, target=target), "upwind", FACE_NODES),
-            on(Schedule(volume, target=target), "volume", NODES),
-            on(Schedule(lift, target=target), "lift", NODES),
+            on_face_nodes(Schedule(upwind, target=target), upwind),
+            on_nodes(Schedule(volume, target=target), volume),
+            on_nodes(Schedule(lift, target=target), lift),
         ]
     if split == "volume, surface":
+        second = Schedule(surface, target=target).substitute(surface.flux)
         return [
-            on(Schedule(volume, target=target), "volume", NODES),
-            on(Schedule(surface, target=target).substitute("flux"), "lift", NODES),
+            on_nodes(Schedule(volume, target=target), volume),
+            on_nodes(second, surface.lift),
         ]
     if split == "fluxes, volume":
-        both = Schedule(volume_and_lift, target=target).fuse("volume", "lift", loops=4)
+        both = Schedule(volume_and_lift, target=target).fuse(
+            volume_and_lift.volume.i, volume_and_lift.lift.i
+        )
         return [
-            on(Schedule(upwind, target=target), "upwind", FACE_NODES),
-            on(both, "volume", NODES),
+            on_face_nodes(Schedule(upwind, target=target), upwind),
+            on_nodes(both, volume_and_lift.volume),
         ]
     if split == "one":
-        whole = Schedule(folded_rhs, target=target).substitute("flux")
-        return [on(whole.fuse("volume", "lift", loops=4), "volume", NODES)]
+        whole = Schedule(folded_rhs, target=target).substitute(folded_rhs.flux)
+        fused_nodes = whole.fuse(folded_rhs.volume.i, folded_rhs.lift.i)
+        return [on_nodes(fused_nodes, folded_rhs.volume)]
     if split == "one, from the metric":
         whole = (
             Schedule(advection_rhs, target=target)
-            .substitute("V")
-            .substitute("vn")
-            .substitute("flux")
+            .substitute(advection_rhs.V)
+            .substitute(advection_rhs.vn)
+            .substitute(advection_rhs.flux)
         )
-        return [on(whole.fuse("volume", "lift", loops=4), "volume", NODES)]
+        fused_nodes = whole.fuse(advection_rhs.volume.i, advection_rhs.lift.i)
+        return [on_nodes(fused_nodes, advection_rhs.volume)]
     raise ValueError(f"no split {split!r}")
 
 
@@ -867,14 +875,14 @@ def main() -> int:
 
     # one loop deeper than fused: the fluxes on the loops of the nodes
     sizes = {"n": N, "ne": ELEMENTS**3}
-    on_nodes = (
+    nodes_fused = (
         Schedule(advection_rhs, sizes=sizes)
-        .substitute("V")
-        .substitute("vn")
-        .fuse("volume", "lift", loops=4)
+        .substitute(advection_rhs.V)
+        .substitute(advection_rhs.vn)
+        .fuse(advection_rhs.volume.i, advection_rhs.lift.i)
     )
     try:
-        on_nodes.fuse("upwind", "volume")
+        nodes_fused.fuse(advection_rhs.upwind.b, advection_rhs.volume.i)
     except IllegalCast as exc:
         print(f"refused: {exc}")
     print()
@@ -891,12 +899,13 @@ def main() -> int:
     print()
 
     print("libParanumal's lift onto the face nodes, a face's nodes on the work items:")
-    on_faces = {"e": "g.0", "a": "l.1", "b": "l.0"}
     try:
-        Schedule(lift_on_faces, sizes=sizes).tag(**on_faces)
+        on_face_nodes(Schedule(lift_on_faces, sizes=sizes), lift_on_faces)
     except IllegalCast as exc:
         print(f"  refused: {exc}")
-    atomic = Schedule(lift_on_faces).atomic("rhs").tag(**on_faces)
+    atomic = on_face_nodes(
+        Schedule(lift_on_faces).atomic(lift_on_faces.rhs), lift_on_faces
+    )
     # where Lean is installed it proves each cast, that no dependence joins
     # two work items included
     settled = ("decided", "proved")

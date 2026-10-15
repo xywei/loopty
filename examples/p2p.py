@@ -178,8 +178,8 @@ def direct(data: dict) -> np.ndarray:
 #: reindexing, the second is a reassociation, and both are checked.
 split_targets = (
     Schedule(p2p, target="c")
-    .split("t", 4, inner="t_in", outer="t_out")
-    .realize("pot", tree=True)
+    .split(p2p.t, 4)
+    .realize(p2p.pot, tree=True)
     .example(**scene())
 )
 

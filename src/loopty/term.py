@@ -31,7 +31,9 @@ __all__ = [
     "Access",
     "Argument",
     "ArrType",
+    "Binder",
     "Call",
+    "Callsite",
     "Difference",
     "Expression",
     "Hypothesis",
@@ -519,6 +521,51 @@ class Scope:
     hypotheses: tuple[Hypothesis, ...] = ()
 
 
+@dataclass(frozen=True)
+class Binder:
+    """A loop of the source: the target of a ``for``, or the binder of a sum.
+
+    ``name`` is what the term calls it, an iname of its statements or a
+    binder of a sum in them, and ``binder`` what the source calls it: the
+    second ``for r`` of a body is ``r_0`` in the term and ``r`` here.
+    ``where`` is the line of the ``for``, or of the sum's ``for`` clause.
+    ``scope`` is the labels of the calls the loop is inside, outermost
+    first: empty for a kernel's own loops, ``("dot",)`` for a loop of a
+    kernel its body calls and inlines (:mod:`loopty.calls`), and
+    ``("unpack",)`` in a program for a loop of its call of ``unpack``
+    (:mod:`loopty.compose`). ``sum`` says that it binds a sum.
+
+    A schedule names a loop by a handle (:mod:`loopty.handles`), which is
+    this record seen from the kernel or the program: ``l2p.reconstruct.i``
+    is the binder ``i`` in the scope ``("reconstruct",)`` of ``l2p``.
+    """
+
+    name: str
+    binder: str
+    where: str = ""
+    sum: bool = False
+    scope: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class Callsite:
+    """A call a term holds: a kernel's inlined call, or a program's call.
+
+    ``labels`` are the labels of the calls it is inside and its own, last,
+    outermost first: ``("evaluate",)`` for a program's call, and
+    ``("assemble", "dot@2")`` for the second call of ``dot`` that the
+    program's call of ``assemble`` makes. ``kernel`` is the callee's name,
+    ``where`` the line of the call, and ``arrays`` the term's array passed
+    for each of the callee's array parameters, ``(param, array)``. A handle
+    reaches a call's loops and arrays through it (:mod:`loopty.handles`).
+    """
+
+    labels: tuple[str, ...]
+    kernel: str
+    where: str = ""
+    arrays: tuple[tuple[str, str], ...] = ()
+
+
 @dataclass(frozen=True, eq=False)
 class Argument:
     """What one argument of a call inside a kernel's body is, in the caller's names.
@@ -584,6 +631,8 @@ class Call:
     ``unknown`` says why the points of the call cannot be stated, where they
     cannot (inside a sum over a binder the trace does not bind itself), and
     is empty otherwise; the facts of such a call are left ``assumed``.
+    ``within`` are the labels of the calls this one is made inside,
+    outermost first, empty for a call the body makes itself.
     """
 
     callee: str
@@ -600,6 +649,7 @@ class Call:
     loop_domain: isl.Set | None = None
     unnarrowed: tuple[tuple[str, str], ...] = ()
     unknown: str = ""
+    within: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -677,6 +727,17 @@ class Term:
       writes that value into a one-cell array, ``result[0] = ...``, which
       the lowering compiles and the native run fills in. ``None`` for a
       kernel that writes its parameters.
+
+    Two more say what the source calls what the term holds, for the handles
+    a schedule names its loops and arrays by (:mod:`loopty.handles`):
+
+    * ``binders`` are the loops of the source, each with the name the term
+      gives it, its line and the calls it is inside (:class:`Binder`);
+    * ``callsites`` are the calls, inlined or composed, each with the
+      arrays it was passed (:class:`Callsite`).
+
+    Both are empty for a term written by hand, whose statements' loops are
+    then its binders, each named as the term names it.
     """
 
     name: str
@@ -695,6 +756,8 @@ class Term:
     tables: tuple[tuple[str, Any], ...] = ()
     calls: tuple[Call, ...] = ()
     result: str | None = None
+    binders: tuple[Binder, ...] = ()
+    callsites: tuple[Callsite, ...] = ()
 
     @property
     def param_names(self) -> tuple[str, ...]:

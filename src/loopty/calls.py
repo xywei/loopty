@@ -260,6 +260,7 @@ class _Inlining:
                 loop_domain=loop_domain,
                 unnarrowed=unnarrowed,
                 unknown=unknown,
+                within=tuple(label for label, _key in tracer.inlining),
             )
         )
         return value
