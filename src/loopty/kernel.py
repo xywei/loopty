@@ -907,6 +907,23 @@ class Program(_Decorated):
     decided under the same hypotheses where they decide it
     (:func:`loopty.typing.scoped_in_bounds_facts`).
 
+    The program's own return annotation is its postcondition, a claim about
+    what it leaves in its parameters, written in their names and the sizes
+    its kernels name::
+
+        @program(uses=[two_passes])
+        def dense(A, B, g, out) -> all(
+            out[q, k, j]
+            == sum(A[q, k, b] * B[q, j, a] * g[q, b, a] for b in Fin[n] for a in Fin[n])
+            for q in Fin[nq] for k in Fin[n] for j in Fin[n]
+        ):
+
+    It is tested on the program's native runs, at the class of the outputs it
+    reads, and decided by isl from what each call stores where that decides
+    it; otherwise Lean is asked, with Mathlib for reals, to prove it from the
+    same and from the theorems the program cites (:meth:`_postcondition`,
+    :mod:`loopty.unfolding`).
+
     The last fact is the program's ``trace-faithful`` fact, as a kernel's is:
     its term, interpreted, against its body run natively, on the module's
     example inputs for it and on inputs drawn from the term's parameters
@@ -1032,6 +1049,11 @@ class Program(_Decorated):
         (:func:`loopty.typing.definedness_facts`): whether each cell it
         reads is one a call before it stored or one of the zeros the array
         was made with, and, where it reads zeros no call stored, which.
+
+        After them, where the program states a postcondition, its
+        ``single-assignment`` facts and the postcondition itself
+        (:meth:`_postcondition`), tested on the same native runs as the
+        ``trace-faithful`` fact compares.
         """
         if self._facts is not None:
             return self._facts

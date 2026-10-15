@@ -8,6 +8,36 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Added
 
+- **A program's postcondition** (`loopty.unfolding`,
+  `loopty.dataflow.program_stores`). A `@program`'s return annotation is a
+  claim about what it leaves in its parameters, written in their names and
+  the sizes its kernels name, and it is a row of the ledger, keyed as a
+  kernel's is:
+  - `tested` on the program's native runs, an equation that reads an output
+    compared at that output's class, `approx` for reals, as the compiled run
+    is compared with the native one: the calls sum in an order of their own,
+    and agree with the claim as reals and as floats to rounding. A run that
+    leaves it false refutes it, naming the cell and the two values;
+  - `decided` by isl where what the calls store decides it, as a kernel's
+    postcondition is: each call that stores no cell of an array twice, and
+    reads none before its store, has a `single-assignment` fact of the
+    program's, and each of its statements is an equation about what the
+    program leaves, until a later call writes an array it names;
+  - otherwise stated for Lean, a part of Mathlib's for a claim about reals:
+    what the calls store unfolded into the claim a pass at a time, each
+    theorem the program cites (`@program(uses=[...])`) rewritten where one of
+    its sides is, its families at the sections of the arrays they stand
+    for, `Fr (3 * x + 0)` and `w (3 * x + 0) e`, then the sums over a literal
+    range written out and `ring`. Python finds the steps, and Lean checks
+    them; a wrong one is no proof. Proved, the fact rests on the
+    `single-assignment` facts and the theorems it used.
+  In `examples/hexahedra.py`, `weak_grad` and `weak_div` claim that `grad`
+  and `div` are the dense Kronecker operators of the three directions
+  applied to the field times its metric terms, citing `sum_factorization`,
+  and with Mathlib both rows read `proved lean`: the theorem proved for
+  every order now says something about the programs that compute it.
+  A claim that names anything but the program's parameters and sizes is
+  `assumed`, and says what it names.
 - **Claims settled by running them** (`loopty.tested`): `@tested` on a
   function that takes nothing and returns whether its claim held, alone or
   with what it measured, puts the claim in the ledger as a `tested` row,

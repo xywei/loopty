@@ -1026,6 +1026,34 @@ def test_the_hexahedra_demo_decides_its_layouts_and_its_programs() -> None:
         "contravariant_along_r",
     }
     assert all(fact["status"] == "decided" for fact in defined), defined
+    # each operator states what it leaves, the dense Kronecker operators:
+    # tested on its runs, and proved by Lean where Mathlib is
+    posts = {
+        fact["owner"]: fact for fact in facts if fact["kind"] == "postcondition"
+    }
+    assert set(posts) == {"weak_grad", "weak_div"}
+    for post in posts.values():
+        assert (post["status"], post["decided_by"]) in (
+            ("tested", "native"),
+            ("proved", "lean"),
+        ), post
+    assert posts["weak_grad"]["statement"].startswith(
+        "forall x in Fin(3), e in Fin(ne), k in Fin(n), j in Fin(n), i in Fin(n). "
+        "grad[x, e, k, j, i] == sum(Ft[3*x + d, k, c]*Fs[3*x + d, j, b]"
+    )
+    # what each call stores, once per cell, which the proof rests on
+    stored = [
+        (fact["owner"], fact["statement"].split(" stores")[0])
+        for fact in facts
+        if fact["kind"] == "single-assignment"
+    ]
+    assert stored == [
+        ("weak_grad", call)
+        for call in ("metric", "along_r", "along_s", "gradient_along_t")
+    ] + [
+        ("weak_div", call)
+        for call in ("contravariant", "along_r", "along_s", "divergence_along_t")
+    ]
     # nothing in the file is left to an assumption
     assert "assumed" not in {fact["status"] for fact in facts}
 

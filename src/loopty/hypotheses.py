@@ -1632,6 +1632,7 @@ def theorem_instances(
     applicable: Callable[[str, Any, Any], str | None],
     nonnegative: Callable[[Any], bool],
     integer: Callable[[Any], bool] | None = None,
+    real: Callable[[Any], bool] | None = None,
 ) -> tuple[list[Hypothesis], list[str]]:
     """The instances of ``theorem`` that ``available`` hypotheses establish.
 
@@ -1648,10 +1649,13 @@ def theorem_instances(
     against them before it is used: ``applicable(array, domain, codomain)``
     says why an array cannot stand for a family ``Fn[domain, codomain]``
     there, or ``None`` when it can, and ``nonnegative(expr)`` whether an
-    expression a ``Nat`` variable matched is never negative, and
+    expression a ``Nat`` variable matched is never negative,
     ``integer(expr)``, when given, whether one an ``Int`` variable matched is
-    an integer. A binding that fails is not used, and the reasons come back
-    beside the instances.
+    an integer, and ``real(expr)``, when given, whether one a ``Real``
+    variable matched is a real that reads as the floats do (a kernel's real
+    scalar, a number); without it a ``Real`` variable binds nothing. A
+    binding that fails is not used, and the reasons come back beside the
+    instances.
     """
     variables = dict(getattr(theorem, "variables", ()))
     functions = {name for name, sort in variables.items() if isinstance(sort, FnType)}
@@ -1712,6 +1716,12 @@ def theorem_instances(
                     why = (
                         f"{var} of {name} is an Int, and {render(sigma[var])}, "
                         "which it matched, is not an integer"
+                    )
+            elif getattr(sort, "name", None) == "Real" and real is not None:
+                if not real(sigma[var]):
+                    why = (
+                        f"{var} of {name} is a Real, and {render(sigma[var])}, "
+                        "which it matched, is neither a real scalar nor a number"
                     )
             else:
                 why = (

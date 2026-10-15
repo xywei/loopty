@@ -817,11 +817,42 @@ def theorem_instances(
     def fits(array: str, domain: Any, codomain: Any) -> str | None:
         return applicable(term, written, array, codomain)
 
+    scalars = real_scalars(term)
+
+    def real(expr: Any) -> bool:
+        return _real_value(expr, scalars)
+
     out: list[Hypothesis] = []
     for theorem in theorems:
-        found, _reasons = instances_of(theorem, available, fits, nonnegative, integer)
+        found, _reasons = instances_of(
+            theorem, available, fits, nonnegative, integer, real
+        )
         out.extend(found)
     return out
+
+
+def real_scalars(term: Term) -> set[str]:
+    """The kernel's scalars that are reals: ``s`` of ``s: Real``."""
+    return {
+        name
+        for name, typ in term.params
+        if not isinstance(typ, ArrType) and _real(typ)
+    }
+
+
+def _real_value(expr: Any, scalars: Collection[str]) -> bool:
+    """Whether a theorem's ``Real`` may stand for ``expr``: a real scalar, or a number.
+
+    A real scalar of the kernel is the real its float holds, and a number
+    the rational it is, as Lean reads it. Anything computed from them may
+    round, and is refused, as a conjunct that rounds is not matched
+    (:func:`exact`).
+    """
+    if isinstance(expr, bool):
+        return False
+    if isinstance(expr, int | float):
+        return True
+    return isinstance(expr, prim.Variable) and expr.name in scalars
 
 
 def applicable(term: Term, written: set[str], array: str, codomain: Any) -> str | None:
@@ -1088,10 +1119,12 @@ def _fits(
     that is never negative; an integer scalar for an affine expression of
     the sizes and the kernel's integer scalars, never of a real one: a
     theorem about an integer ``k`` taken at a real ``s`` says what may be
-    false of it.
+    false of it; and a real scalar for one of the kernel's real scalars, or
+    a number, which read as reals as their floats do (:func:`_real_value`).
     """
     from lanky.prelude import FnType
 
+    reals = real_scalars(term)
     types = dict(term.params)
     integral = set(sizes) | {
         name
@@ -1121,6 +1154,9 @@ def _fits(
         elif getattr(sort, "name", None) == "Int":
             form = linear(sigma[name])
             if form is None or any(n not in integral for n in form[0]):
+                return False
+        elif getattr(sort, "name", None) == "Real":
+            if not _real_value(sigma[name], reals):
                 return False
         else:
             return False

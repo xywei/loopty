@@ -55,7 +55,8 @@ Run this file three ways.
     launches a device runs.
 
 ``lanky check examples/hexahedra.py``
-    The theorem, every kernel's facts, the programs', and the layout's.
+    The theorem, every kernel's facts, the programs', with what each program
+    leaves, and the layout's.
 
 ``loopty run examples/hexahedra.py``
     Each kernel, both programs and the fused schedule, compiled and compared.
@@ -67,6 +68,15 @@ What is worth reading here
 each fact about them and their schedules is decided for every order, and
 the theorem that three passes are the Kronecker operator is proved for every
 ``n``. The layouts are the exception: they are decided at order 3.
+
+*What the programs leave.* ``weak_grad`` claims that ``grad`` is the dense
+operator of each direction applied to the field times its metric term, the
+three summed, and ``weak_div`` the same of the flux. Lean proves each, with
+Mathlib, from what the four calls store and ``sum_factorization``, taken at
+each direction's sections: ``Fr[3*x + 0]`` for the theorem's ``Fr`` and
+``w[3*x + 0, e]`` for its ``u``. Without Mathlib the claims are tested on the
+programs' runs, compared at the class of ``grad``, since the passes sum in
+another order than the dense operator does.
 
 *How deep each fusion goes.* ``along_s`` reads a whole column of what
 ``along_r`` stored in the same ``k``-slab, so the two fuse on ``(q, e, k)``
