@@ -378,6 +378,11 @@ def in_bounds_facts(
             each = "" if unrolled is None else " for every {} in Fin({})".format(
                 *unrolled
             )
+            # "for every d in Fin(3) and every instance of S0": the binder
+            # first, which a table that cuts the row keeps on screen
+            instances = (
+                f"{each}{' and' if each else ' for'} every instance of {stmt.id}"
+            )
             identifier = fact_id(
                 "in-bounds",
                 owner,
@@ -398,9 +403,7 @@ def in_bounds_facts(
                     Fact(
                         id=identifier,
                         kind="in-bounds",
-                        statement=(
-                            f"{subject} is in bounds for every instance of {stmt.id}"
-                        ),
+                        statement=f"{subject} is in bounds{instances}",
                         term=None,
                         status=Status.ASSUMED,
                         provenance={"reason": behind, **layout},
@@ -514,10 +517,7 @@ def in_bounds_facts(
                 Fact(
                     id=identifier,
                     kind="in-bounds",
-                    statement=(
-                        f"{subject} is in bounds{each}"
-                        f"{' and' if each else ' for'} every instance of {stmt.id}"
-                    ),
+                    statement=f"{subject} is in bounds{instances}",
                     term=Subset(
                         reached,
                         cells,
