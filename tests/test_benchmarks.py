@@ -124,3 +124,79 @@ def test_the_report_matches_copies_by_mesh_and_device_and_drops_wrong_rows(
     # the other mesh is another measurement, in a table of its own
     assert out.count("weak_grad: GDOFs/s") == 2
     assert "4**3 hexahedra on a GPU" in out
+
+
+# {{{ the advection right-hand side
+
+ADVECTION = Path(__file__).resolve().parent.parent / "benchmarks" / "advection.py"
+
+
+def _advection() -> dict[str, Any]:
+    return runpy.run_path(str(ADVECTION), run_name="advection_driver")
+
+
+def test_the_advection_bytes_are_those_of_each_geometry() -> None:
+    driver = _advection()
+    n = 4
+    # u, rhs, 1/J and V at a node, sJ v.n at a face node
+    assert driver["required_bytes"](3, 10) == 8 * 10 * (6 * n**3 + 6 * n**2)
+    # and from the metric: nine metric terms at a node, the normal and sJ at
+    # a face node
+    assert driver["required_bytes"](3, 10, "one launch, from the metric") == (
+        8 * 10 * (12 * n**3 + 24 * n**2)
+    )
+
+
+def test_every_advection_shape_names_its_axes() -> None:
+    driver = _advection()
+    for shape in driver["SHAPES"]:
+        roles = (("nodes", "ekji"), ("faces", "efab"), ("face nodes", "eab"))
+        for role, loops in roles:
+            splits, tags, sequential = shape.steps(role, tuple(loops))
+            assert "g.0" in tags.values() and "l.0" in tags.values(), shape
+            assert not set(sequential) & set(tags), shape
+
+
+@pytest.mark.parametrize(
+    "split",
+    [
+        "three launches",
+        "volume, surface",
+        "fluxes, volume",
+        "one launch",
+        "three launches, the GLL lift on the face nodes, atomic",
+        "one launch, from the metric",
+    ],
+)
+def test_every_advection_variant_is_accepted_and_builds(plain_opencl, split) -> None:
+    driver = _advection()
+    demo = driver["load_demo"]()
+    assert split in driver["SPLITS"]
+    for shape in driver["SHAPES"]:
+        mine = driver["loopty_launches"](demo, split, shape, order=3, ne=8)
+        theirs = driver["plain_launches"](split, shape, order=3, ne=8)
+        assert len(mine) == len(theirs) == len(driver["SPLITS"][split])
+        for launch in mine:
+            assert launch.loopty
+            assert {fact.status.value for fact in launch.facts} == {"decided"}
+        for ours, plain in zip(mine, theirs):
+            assert _axes(ours.kernel) == _axes(plain.kernel), shape.name
+            assert set(ours.args) == set(plain.args), shape.name
+
+
+def test_the_advection_reference_is_the_demos_program() -> None:
+    import numpy as np
+
+    driver = _advection()
+    demo = driver["load_demo"]()
+    host = driver["host_arrays"](demo, 3, 2)
+    data = demo["inputs"](2, 3)
+    demo["advection_rhs"](**data)
+    expected = data["rhs"].numpy()
+    got = driver["reference"](host, np.arange(8))
+    assert np.abs(got - expected).max() <= 1e-13 * np.abs(expected).max()
+    downwind = driver["reference"](host, np.arange(8), downwind=True)
+    assert np.abs(downwind - expected).max() > 1e-3 * np.abs(expected).max()
+
+
+# }}}
