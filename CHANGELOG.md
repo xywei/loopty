@@ -33,10 +33,11 @@ All notable changes to loopty are recorded here. The format follows
   that the two instances run on one work item of every axis, each one's loop
   counted from where loopy starts it, and for a statement's sum that reads
   what its own instruction writes, that the two never touch one cell where
-  they run apart. S1's three device launches, sumpy's tile in S2 and
-  Kulkarni's split in S3 read `proved` by Lean, and the three demo drivers
-  offer their casts to Lean where it is installed (`python
-  examples/hexahedra.py`: `along_s: tag(...): 2 facts, all proved by lean`).
+  they run apart. S1's three device launches, sumpy's tile in S2, Kulkarni's
+  split in S3 and the advection right-hand side's launches of every split
+  read `proved` by Lean, and the four demo drivers offer their casts to Lean
+  where it is installed (`python examples/hexahedra.py`: `along_s: tag(...):
+  2 facts, all proved by lean`).
 
 - **Claims settled by running them** (`loopty.tested`): `@tested` on a
   function that takes nothing and returns whether its claim held, alone or

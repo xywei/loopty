@@ -442,6 +442,20 @@ def _device_launches() -> list[tuple[str, Any]]:
     ]
     out.append(("sumpy's tile", qbx.sumpy_tile("c")))
     out.append(("Kulkarni's split", assembly.kulkarni(atomic=True)))
+    advection = load(EXAMPLES / "advection.py")
+    out += [
+        (f"advection {split} {schedule.term.name}", schedule)
+        for split in advection.SPLITS
+        for schedule in advection.launches(split)
+    ]
+    out.append(
+        (
+            "libParanumal's lift, atomic",
+            Schedule(advection.lift_on_faces)
+            .atomic("rhs")
+            .tag(e="g.0", a="l.1", b="l.0"),
+        )
+    )
     return out
 
 
@@ -1194,7 +1208,8 @@ def test_lean_confirms_a_layouts_refutation_at_isls_cell(lean: Any) -> None:
 
 def test_lean_proves_the_device_launches_of_the_demos(lean: Any) -> None:
     # every cast that puts a loop on a hardware axis: S1's three launches of
-    # each operator, sumpy's tile in S2, Kulkarni's split in S3
+    # each operator, sumpy's tile in S2, Kulkarni's split in S3, and the
+    # advection right-hand side's launches of every split
     unproved = []
     for label, schedule in _device_launches():
         for fact in schedule.facts():
