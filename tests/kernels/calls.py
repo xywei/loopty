@@ -250,15 +250,22 @@ def unflatten(flat: Arr[Fin[ne], Fin[9], Real], u: Arr[Fin[ne], Fin[3], Fin[3], 
 
 
 #: The called kernel's updates atomic, so that ``ilp`` may leave two in no order.
-assembled_in_no_order = Schedule(assemble).atomic("y").split("c", 2).tag(c_inner="ilp")
+assembled_in_no_order = (
+    Schedule(assemble)
+    .atomic(assemble.y)
+    .split(assemble.c, 2)
+    .tag(assemble.c.inner, "ilp")
+)
 
 #: Each row's divergence one step behind its flux, both inlined calls.
 fused_rows = Schedule(burgers_rows, sizes={"m": 3, "n": 8}).fuse(
-    "row_fluxes", "row_divergences", shift=(0, 1)
+    burgers_rows.row_fluxes.half_square.j,
+    burgers_rows.row_divergences.centred.i,
+    shift=(0, 1),
 )
 
 #: ``f`` in the three cells of a row live at once, ``f[e, j]`` in slot ``j % 3``.
-windowed_rows = fused_rows.contract("f")
+windowed_rows = fused_rows.contract(burgers_rows.f)
 
 
 def rejected_window_of_two_rows() -> str:
@@ -266,7 +273,7 @@ def rejected_window_of_two_rows() -> str:
     from loopty.schedule import IllegalCast
 
     try:
-        fused_rows.contract("f", lambda e, j: j % 2)
+        fused_rows.contract(burgers_rows.f, lambda e, j: j % 2)
     except IllegalCast as refused:
         return str(refused)
     raise AssertionError("a window of two cells is too small")

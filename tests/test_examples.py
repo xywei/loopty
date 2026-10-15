@@ -323,7 +323,7 @@ def test_the_device_schedule_of_spmv_is_legal_and_not_buildable() -> None:
 
     module = _module("spmv")
     schedule = module.device_schedule()
-    assert schedule.tags == {"r": "g.0", "j_in": "l.0"}
+    assert schedule.tags == {"r": "g.0", "j_inner": "l.0"}
     assert schedule.reassociated == frozenset({"y"})
 
     casts = [fact for fact in schedule.facts() if fact.kind != "buildable"]
@@ -359,7 +359,7 @@ def test_one_row_per_group_is_the_schedule_that_does_build(plain_opencl) -> None
     on_c = module.rows_parallel(target="c")
     ok, reason = on_c.buildable
     assert not ok
-    assert reason.startswith("the tag r='g.0' puts a loop on a hardware axis")
+    assert reason.startswith("tag(spmv.r, 'g.0') puts a loop on a hardware axis")
     assert "Retarget to opencl" in reason
 
 
@@ -390,7 +390,7 @@ def test_the_refused_tiling_leaves_a_refuted_fact_behind() -> None:
 
     schedule = Schedule(module.jacobi, target="c", sizes={"nt": 16, "nx": 16})
     with pytest.raises(IllegalCast) as refused:
-        schedule.tile("t", "i", 8, 8)
+        schedule.tile(module.jacobi.t, module.jacobi.i, 8, 8)
     assert refused.value.fact.status.value == "refuted"
     assert refused.value.fact.kind == "monotone"
     assert refused.value.fact.provenance["witness"] == refused.value.witness
@@ -402,7 +402,10 @@ def test_the_refused_tiling_leaves_a_refuted_fact_behind() -> None:
 def test_skewing_first_makes_the_same_tiling_decided() -> None:
     module = _module("stencil_skew")
     schedule = module.skewed()
-    assert schedule.history == ("skew(i, by='t')", "tile(t,i,8,8)")
+    assert schedule.history == (
+        "skew(jacobi.i, by=jacobi.t)",
+        "tile(jacobi.t, jacobi.i, 8, 8)",
+    )
     assert [fact.status.value for fact in schedule.facts()] == ["decided"] * 4
     assert schedule.order == ("t_outer", "i_outer", "t_inner", "i_inner")
 
@@ -427,7 +430,8 @@ def test_the_stencil_in_diamond_coordinates_agrees_with_the_native_run() -> None
     diamond = Schedule(module.jacobi, sizes={"nt": 16, "nx": 16}).affine(
         "{ [t, i] -> [a, b] : a = t + i and b = t - i }"
     )
-    for schedule in (diamond, diamond.tile("a", "b", 4, 4)):
+    loops = diamond.loops
+    for schedule in (diamond, diamond.tile(loops.a, loops.b, 4, 4)):
         assert [f.status.value for f in schedule.facts()] == ["decided"] * len(
             schedule.facts()
         )
@@ -488,7 +492,7 @@ def test_every_rectangular_wave_tile_cuts_the_same_dependence(
     nt, nx = sizes
     schedule = Schedule(module.acoustic, target="c", sizes={"nt": nt, "nx": nx})
     with pytest.raises(IllegalCast) as refused:
-        schedule.tile("t", "i", *tile)
+        schedule.tile(module.acoustic.t, module.acoustic.i, *tile)
     assert ("as hinted" in str(refused.value)) is hinted
     (source_id, source), (sink_id, sink), _params = refused.value.witness
     assert (source_id, sink_id) == ("S1", "S0")
@@ -498,7 +502,10 @@ def test_every_rectangular_wave_tile_cuts_the_same_dependence(
 def test_skewing_the_coupled_wave_makes_the_tile_legal() -> None:
     module = _module("wavefront_acoustic")
     schedule = module.wavefront_schedule()
-    assert schedule.history == ("skew(i, by='t')", "tile(t,i,4,8)")
+    assert schedule.history == (
+        "skew(acoustic.i, by=acoustic.t)",
+        "tile(acoustic.t, acoustic.i, 4, 8)",
+    )
     assert [fact.status.value for fact in schedule.facts()] == ["decided"] * 4
     assert schedule.order == ("t_outer", "i_outer", "t_inner", "i_inner")
 
@@ -549,7 +556,10 @@ def test_the_wave_demo_prints_the_rejections_then_every_agreement() -> None:
     assert "velocity: difference" in result.stdout
     assert result.stdout.count("-> tested") == 6
     assert "[a, b_step]" in result.stdout
-    assert "S1[t, i] -> [a = t + i, b = 1 + t - i] }).tile(a,b,4,4)" in result.stdout
+    assert (
+        "S1[t, i] -> [a = t + i, b = 1 + t - i] })"
+        ".tile(acoustic.loops.a, acoustic.loops.b, 4, 4)"
+    ) in result.stdout
     assert "matches the hand-written recurrence: True" in result.stdout
 
 
@@ -560,12 +570,12 @@ def test_loopty_run_keeps_the_facts_of_every_wave_schedule() -> None:
     _result, facts = _invoke("wavefront_acoustic", "run")
     agreements = [fact for fact in facts if fact["kind"] == "agreement"]
     assert [fact["provenance"]["schedule"] for fact in agreements] == [
-        ["skew(i, by='t')", "tile(t,i,4,8)"],
+        ["skew(acoustic.i, by=acoustic.t)", "tile(acoustic.t, acoustic.i, 4, 8)"],
         ["affine({ [t, i] -> [a = t + i, b = t - i] })"],
         [
             "affine({ S0[t, i] -> [a = t + i, b = t - i]; "
             "S1[t, i] -> [a = t + i, b = 1 + t - i] })",
-            "tile(a,b,4,4)",
+            "tile(acoustic.loops.a, acoustic.loops.b, 4, 4)",
         ],
     ]
     assert {fact["status"] for fact in agreements} == {"tested"}
@@ -637,7 +647,7 @@ def test_tiling_the_wave_diamond_cuts_the_same_step_dependence() -> None:
     # diamond tiling of this pair needs a time offset between the statements.
     module = _module("wavefront_acoustic")
     message, witness = module.rejected_diamond_tiling()
-    assert message.startswith("tile(a,b,4,4) illegal")
+    assert message.startswith("tile(acoustic.loops.a, acoustic.loops.b, 4, 4) illegal")
     assert "writes velocity[" in message
     (source_id, source), (sink_id, sink), _params = witness
     assert (source_id, sink_id) == ("S0", "S1")
@@ -797,7 +807,7 @@ def test_the_pairs_run_in_both_layouts_and_both_agree() -> None:
     assert definition.startswith("pairs.pairs@")
     assert agreements == [
         f"agreement:{definition}:[c]",
-        f"agreement:{definition}:[c].pack('f')",
+        f"agreement:{definition}:[c].pack(pairs.f)",
     ]
 
 
@@ -896,17 +906,18 @@ def test_the_fusion_demo_prints_the_refusals_and_three_kernels() -> None:
     result, _ = _invoke("fusion", "python")
     assert result.returncode == 0, result.stdout + result.stderr
     assert (
-        "refused: fuse(flux, divergence) illegal: f[j] = 0.5 * u[j] * u[j] "
-        "(fusion.py:81) at j=2 writes f[2], read by rhs[i] = -(f[i + 1] - "
-        "f[i - 1]) / 2 (fusion.py:89) at i=1, scheduled earlier (at n=16, as "
-        "hinted); fuse('flux', 'divergence', shift=1) runs every dependence "
-        "between them forward"
+        "refused: fuse(burgers_rhs.flux.j, burgers_rhs.divergence.i) illegal: "
+        "f[j] = 0.5 * u[j] * u[j] (fusion.py:84) at j=2 writes f[2], read by "
+        "rhs[i] = -(f[i + 1] - f[i - 1]) / 2 (fusion.py:92) at i=1, scheduled "
+        "earlier (at n=16, as hinted); fuse(burgers_rhs.flux.j, "
+        "burgers_rhs.divergence.i, shift=1) runs every dependence between them "
+        "forward"
     ) in result.stdout
     assert (
-        "refused: contract('f', lambda j: j % 2) illegal: rhs[i] = -(f[i + 1] - "
-        "f[i - 1]) / 2 (fusion.py:89) at i=14 reads f[13], which f[j] = 0.5 * "
-        "u[j] * u[j] (fusion.py:81) at j=13 stored in slot 1, after the same "
-        "statement at j=15 stored f[15] there (at n=16, as hinted)"
+        "refused: contract(burgers_rhs.f, lambda j: j % 2) illegal: rhs[i] = "
+        "-(f[i + 1] - f[i - 1]) / 2 (fusion.py:92) at i=14 reads f[13], which "
+        "f[j] = 0.5 * u[j] * u[j] (fusion.py:84) at j=13 stored in slot 1, after "
+        "the same statement at j=15 stored f[15] there (at n=16, as hinted)"
     ) in result.stdout
     fused, substituted, windowed = result.stdout.split("accepted: ")[1:]
     # Fused, f is stored, and the executor allocates it (#62); substituted,
@@ -1141,11 +1152,13 @@ def test_the_hexahedra_demo_refuses_the_deeper_fusion_and_keeps_the_windows() ->
     along_r = where(module.along_r, "v[q, e, k, j, i] = reduce_sum(")
     along_s = where(module.along_s, "vs[q, e, k, j, i] = reduce_sum(")
     assert (
-        "refused: fuse(along_r, along_s) illegal: v[q, e, k, j, i] = "
-        f"reduce_sum(...) ({along_r}) at q="
+        "refused: fuse(weak_grad.along_r.i, weak_grad.along_s.i) illegal: "
+        f"v[q, e, k, j, i] = reduce_sum(...) ({along_r}) at q="
     ) in out
     assert f"read by vs[q, e, k, j, i] = reduce_sum(...) ({along_s}) at q=" in out
-    assert "fuse('along_r', 'along_s', loops=3) runs every dependence" in out
+    assert (
+        "fuse(weak_grad.along_r.k, weak_grad.along_s.k) runs every dependence" in out
+    )
     assert "w kept in n cells" in out
     assert "v kept in n*n cells" in out
     assert "grad: difference" in out and "-> tested" in out
@@ -1305,18 +1318,24 @@ def test_the_advection_demo_refuses_the_deeper_fusion_and_runs_every_split() -> 
     assert "M^-1 M is the identity: True" in out
     assert "the transpose of the face gather on these maps: True" in out
     assert (
-        "refused: fuse(upwind, volume) illegal: flux[e, f, a, b] = upwind_flux(...) "
-        "(advection.py:"
+        "refused: fuse(advection_rhs.upwind.b, advection_rhs.volume.i) illegal: "
+        "flux[e, f, a, b] = upwind_flux(...) (advection.py:"
     ) in out
-    assert "fuse('upwind', 'volume', loops=1) runs every dependence" in out
+    assert (
+        "fuse(advection_rhs.upwind.f, advection_rhs.volume.k, shift=(0, 5)) runs "
+        "every dependence"
+    ) in out
     assert "flux kept in lambda" in out and "-> tested" in out
     # libParanumal's lift onto the face nodes races on an edge without its
     # barriers, and is legal once the updates are atomic
     # each update by its statement, shortened to what it writes into
-    assert "refused: tag(e='g.0', a='l.1', b='l.0') illegal: rhs[e, " in out
+    assert (
+        "refused: tag({lift_on_faces.e: 'g.0', lift_on_faces.a: 'l.1', "
+        "lift_on_faces.b: 'l.0'}) illegal: rhs[e, "
+    ) in out
     assert " -= ... (advection.py:" in out
-    assert "both update rhs[" in out and "atomic('rhs')" in out
-    assert "accepted: atomic('rhs').tag(" in out
+    assert "both update rhs[" in out and "atomic(lift_on_faces.rhs)" in out
+    assert "accepted: atomic(lift_on_faces.rhs).tag(" in out
     for split in _module("advection").SPLITS:
         assert f"  {split}: " in out, split
     assert "all decided" in out and "refuted" not in out
@@ -1459,14 +1478,17 @@ def test_the_assembly_demo_names_the_node_two_cells_share() -> None:
     ) in result.stdout
     scatter = where(_module("assembly").mass_action, "y[cell[c, a]] += reduce_sum(")
     assert (
-        f"IllegalCast: tag(c_outer='g.0', c_inner='l.0') illegal: y[cell[c, a]] "
-        f"+= reduce_sum(...) ({scatter}) at c=0, a=2 and at c=1, a=1 both "
+        "IllegalCast: tag({mass_action.c.outer: 'g.0', mass_action.c.inner: "
+        f"'l.0'}}) illegal: y[cell[c, a]] += reduce_sum(...) ({scatter}) at c=0, "
+        "a=2 and at c=1, a=1 both "
         "update y[3] on example_inputs() (nc=2, nv=4), where cell[0, 2] = 3 and "
         "cell[1, 1] = 3"
     ) in result.stdout
     accepted = result.stdout.split("accepted: ")[1]
-    assert "atomic updates of y run at the same time after tag(" in accepted
-    assert "atomic('y') renames" not in accepted
+    assert "atomic updates of mass_action.y run at the same time after tag(" in (
+        accepted
+    )
+    assert "atomic(mass_action.y) renames" not in accepted
     assert "-> tested" in result.stdout
 
 
@@ -1556,15 +1578,13 @@ def test_the_assembly_schedules_facts_are_at_the_lines_of_its_steps() -> None:
         and fact["kind"] in ("assumption", "bijective")
     }
     assert placed == {
-        "nc % 4 == 0, which mass_action is scheduled assuming": line_of(
-            '.assume("nc % 4 == 0")'
+        "mass_action.nc % 4 == 0, which mass_action is scheduled assuming": (
+            line_of(".assume(mass_action.nc % 4 == 0)")
         ),
-        "split(c, 4) renames the instances of mass_action one for one": line_of(
-            '.split("c", 4)'
-        ),
-        "tag(c_inner='ilp') renames the instances of mass_action one for one": (
-            line_of('.tag(c_inner="ilp")')
-        ),
+        "split(mass_action.c, 4) renames the instances of mass_action one for "
+        "one": line_of(".split(mass_action.c, 4)"),
+        "tag(mass_action.c.inner, 'ilp') renames the instances of mass_action "
+        "one for one": (line_of('.tag(mass_action.c.inner, "ilp")')),
     }
 
 
@@ -1619,10 +1639,10 @@ def test_the_l2p_demo_applies_its_theorem_to_what_reconstruct_stores() -> None:
         "every cell of C that reconstruct reads, unpack stored before it",
         "every cell of R that evaluate reads, reconstruct stored before it",
         # and what each window keeps, the zeros the program made it with gone
-        "for contract('R'), every cell of R that l2p reads, reconstruct.S0 or "
-        "reconstruct.S1 has stored by the time it is read",
-        "for contract('C'), every cell of C that l2p reads, unpack.S0 or unpack.S1 "
-        "has stored by the time it is read",
+        "for contract(l2p.R), every cell of l2p.R that l2p reads, "
+        "l2p.reconstruct has stored by the time it is read",
+        "for contract(l2p.C), every cell of l2p.C that l2p reads, l2p.unpack has "
+        "stored by the time it is read",
     ]
 
 
@@ -1652,23 +1672,22 @@ def test_the_l2p_demo_refuses_the_interchange_and_fuses_box_by_box() -> None:
     refusal = result.stdout.split("refused: ")[1].splitlines()[0]
     # the copy and the recurrence, each by its text and line
     reconstruct = _module("l2p").reconstruct
-    copy = where(reconstruct, "R[i, a, b] = C[i, a, b]")
-    recurrence = where(reconstruct, "R[i, a, b] = -R[i, a - 2, b + 2]")
+    copy = where(reconstruct, "R[box, a, b] = C[box, a, b]")
+    recurrence = where(reconstruct, "R[box, a, b] = -R[box, a - 2, b + 2]")
     assert refusal.startswith(
-        f"interchange(b, a) illegal: R[i, a, b] = C[i, a, b] ({copy}) at i="
+        "interchange(reconstruct.b, reconstruct.a) illegal: R[box, a, b] = "
+        f"C[box, a, b] ({copy}) at box="
     )
     assert " writes R[" in refusal
-    assert f" read by R[i, a, b] = -R[i, a - 2, b + 2] ({recurrence}) at i=" in refusal
+    assert (
+        f" read by R[box, a, b] = -R[box, a - 2, b + 2] ({recurrence}) at box="
+    ) in refusal
     module = _module("l2p")
     steps = [fact.statement for fact in module.fused.facts()]
+    fusion = "fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box)"
     assert steps == [
-        "fuse(unpack, reconstruct, loops=1) renames the instances of l2p one for one",
-        "the order after fuse(unpack, reconstruct, loops=1) runs every dependence "
-        "of l2p forward",
-        "fuse(reconstruct, evaluate, loops=1) renames the instances of l2p one for "
-        "one",
-        "the order after fuse(reconstruct, evaluate, loops=1) runs every dependence "
-        "of l2p forward",
+        f"{fusion} renames the instances of l2p one for one",
+        f"the order after {fusion} runs every dependence of l2p forward",
     ]
     assert {fact.status.value for fact in module.fused.facts()} == {"decided"}
     assert "pot: difference 0 within" in result.stdout
@@ -1676,9 +1695,10 @@ def test_the_l2p_demo_refuses_the_interchange_and_fuses_box_by_box() -> None:
     # the tag's two facts, the fusions' being fused's, above
     device = result.stdout.split("on a GPU, each box a work group, as sumpy's: ")[1]
     assert device.splitlines()[1:] == [
-        "  decided  isl  tag(i='g.0') renames the instances of l2p one for one",
-        "  decided  isl  the order after tag(i='g.0') runs every dependence of l2p "
-        "forward, within one work item",
+        "  decided  isl  tag(l2p.unpack.box, 'g.0') renames the instances of l2p "
+        "one for one",
+        "  decided  isl  the order after tag(l2p.unpack.box, 'g.0') runs every "
+        "dependence of l2p forward, within one work item",
     ]
 
 
@@ -1689,8 +1709,8 @@ def test_the_l2p_demo_keeps_one_triangle_per_box_and_refuses_one_row() -> None:
     module = _module("l2p")
     windows = module.contracted.windows
     assert {name: repr(window.placement) for name, window in windows.items()} == {
-        "R": "lambda i, a, b: (a, b)",
-        "C": "lambda i, a, b: (a, b)",
+        "R": "lambda box, a, b: (a, b)",
+        "C": "lambda box, a, b: (a, b)",
     }
     assert windows["R"].extents == (11, 11) and windows["C"].extents == (2, 11)
     added = module.contracted.facts()[len(module.fused.facts()) :]
@@ -1699,25 +1719,25 @@ def test_the_l2p_demo_keeps_one_triangle_per_box_and_refuses_one_row() -> None:
         ("no-clobber", "decided"),
     ] * 2
     assert [fact.statement for fact in added][:2] == [
-        "for contract('R'), every cell of R that l2p reads, reconstruct.S0 or "
-        "reconstruct.S1 has stored by the time it is read",
-        "no read of R sees its slot overwritten after contract('R', lambda i, a, "
-        "b: (a, b)): R kept in 121 cells, R[i, a, b] in slot (a, b)",
+        "for contract(l2p.R), every cell of l2p.R that l2p reads, "
+        "l2p.reconstruct has stored by the time it is read",
+        "no read of l2p.R sees its slot overwritten after contract(l2p.R, lambda "
+        "box, a, b: (a, b)): l2p.R kept in 121 cells, R[box, a, b] in slot (a, b)",
     ]
     result, _ = _invoke("l2p", "python")
     assert result.returncode == 0, result.stdout + result.stderr
-    recurrence = where(module.reconstruct, "R[i, a, b] = -R[i, a - 2, b + 2]")
+    recurrence = where(module.reconstruct, "R[box, a, b] = -R[box, a - 2, b + 2]")
     assert (
-        "refused: contract('R', lambda i, a, b: b) illegal: R[i, a, b] = -R[i, a "
-        f"- 2, b + 2] ({recurrence}) at i=0, a=9, b=0 reads R[0, 7, 2], which the "
-        "same statement at i=0, a=7, b=2 stored in slot 2, after the same "
-        "statement at i=0, a=8, b=2 stored R[0, 8, 2] there (at nb=1, isl's "
-        "choice); contract('R') finds the smallest window that keeps every read, "
-        "lambda i, a, b: (a, b)\n"
+        "refused: contract(l2p.R, lambda box, a, b: b) illegal: R[box, a, b] = "
+        f"-R[box, a - 2, b + 2] ({recurrence}) at box=0, a=9, b=0 reads "
+        "R[0, 7, 2], which the same statement at box=0, a=7, b=2 stored in slot "
+        "2, after the same statement at box=0, a=8, b=2 stored R[0, 8, 2] there "
+        "(at nb=1, isl's choice); contract(l2p.R) finds the smallest window that "
+        "keeps every read, lambda box, a, b: (a, b)\n"
     ) in result.stdout
     assert (
-        "on a device, each box a work group keeping its windows: tag(i='g.0'): 2 "
-        "facts, all decided by isl\n"
+        "on a device, each box a work group keeping its windows: "
+        "tag(l2p.unpack.box, 'g.0'): 2 facts, all decided by isl\n"
     ) in result.stdout
 
 
@@ -1866,16 +1886,17 @@ def test_the_qbx_demo_prints_the_tile_the_fact_and_the_rows() -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     out = result.stdout
     assert (
-        "decided  isl  prioritize(s_outer, t_inner) renames the instances of "
-        "single_layer one for one"
+        "decided  isl  prioritize(single_layer.s.outer, single_layer.t.inner) "
+        "renames the instances of single_layer one for one"
     ) in out
     assert "decided  isl  distinct instances of S0 write distinct cells of out" in out
     # the tile is shown as sumpy writes it, without the target its casts were
     # decided on, which cannot build its hardware axes
     assert (
-        "sumpy's tile, get_optimized_kernel(is_cpu=True): split(t, 16)"
-        ".tag(t_outer='g.0', t_inner='l.0').split(s, 256)"
-        ".prioritize(s_outer, t_inner)"
+        "sumpy's tile, get_optimized_kernel(is_cpu=True): "
+        "split(single_layer.t, 16).tag({single_layer.t.outer: 'g.0', "
+        "single_layer.t.inner: 'l.0'}).split(single_layer.s, 256)"
+        ".prioritize(single_layer.s.outer, single_layer.t.inner)"
     ) in out
     lines = [line for line in out.splitlines() if "sumpy's own kernel" in line]
     assert [line.split(":")[0].strip() for line in lines] == [

@@ -64,6 +64,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -167,25 +168,27 @@ class Shape:
         return ", ".join(words)
 
     def steps(
-        self, role: str, loops: Sequence[str]
-    ) -> tuple[list[tuple[str, int]], dict[str, str], list[str]]:
+        self, role: str, loops: Sequence[Any]
+    ) -> tuple[list[tuple[Any, int]], dict[Any, str], list[Any]]:
         """The splits, the tags and the sequential loops of a launch's ``loops``.
 
         ``role`` is ``"nodes"`` (``e, k, j, i``), ``"faces"`` (``e, f, a,
         b``) or ``"face nodes"``, a face's nodes with the six faces' statements
-        in each (``e, a, b``).
+        in each (``e, a, b``). The loops are loopty's handles, or plain loopy's
+        names, and a split's two loops the handle's children or loopy's
+        ``e_outer`` and ``e_inner``.
         """
         if role == "face nodes":
             e, middle, inner = loops
             if self.per_group > 1:
-                tags = {f"{e}_outer": "g.0", f"{e}_inner": "l.2"}
+                tags = {_part(e, "outer"): "g.0", _part(e, "inner"): "l.2"}
                 return [(e, self.per_group)], {**tags, middle: "l.1", inner: "l.0"}, []
             return [], {e: "g.0", middle: "l.1", inner: "l.0"}, []
         e, outer, middle, inner = loops
-        splits: list[tuple[str, int]] = []
+        splits: list[tuple[Any, int]] = []
         if self.per_group > 1:
             splits.append((e, self.per_group))
-            tags = {f"{e}_outer": "g.0", f"{e}_inner": "l.2", middle: "l.1"}
+            tags = {_part(e, "outer"): "g.0", _part(e, "inner"): "l.2", middle: "l.1"}
             return splits, {**tags, inner: "l.0"}, [outer]
         tags = {e: "g.0", middle: "l.1", inner: "l.0"}
         on_items = self.faces if role == "faces" else not self.slab
@@ -203,64 +206,86 @@ SHAPES = (
     Shape(contraction=False),
 )
 
+def _part(loop: Any, side: str) -> Any:
+    """The ``side`` half of a split of ``loop``: its handle's, or loopy's name."""
+    return getattr(loop, side) if not isinstance(loop, str) else f"{loop}_{side}"
+
+
+def _fused_nodes(program: Any) -> Any:
+    """``program``'s volume term and lift fused at each node: the four loops."""
+    return lambda schedule: schedule.fuse(program.volume.i, program.lift.i)
+
+
 #: Each split's launches: the demo's kernel or program, the steps that make it
-#: one launch, the call whose loops are placed, and whether they run over the
-#: nodes or the face nodes.
+#: one launch (a function of the demo module, from the schedule to the
+#: schedule), the scope whose loops are placed (a function of the demo
+#: module too), and whether they run over the nodes or the face nodes.
 SPLITS = {
     "three launches": (
-        ("upwind", (), "upwind", "faces"),
-        ("volume", (), "volume", "nodes"),
-        ("lift", (), "lift", "nodes"),
+        ("upwind", None, lambda d: d.upwind, "faces"),
+        ("volume", None, lambda d: d.volume, "nodes"),
+        ("lift", None, lambda d: d.lift, "nodes"),
     ),
     "volume, surface": (
-        ("volume", (), "volume", "nodes"),
-        ("surface", (("substitute", ("flux",), {}),), "lift", "nodes"),
+        ("volume", None, lambda d: d.volume, "nodes"),
+        (
+            "surface",
+            lambda d: lambda schedule: schedule.substitute(d.surface.flux),
+            lambda d: d.surface.lift,
+            "nodes",
+        ),
     ),
     "fluxes, volume": (
-        ("upwind", (), "upwind", "faces"),
+        ("upwind", None, lambda d: d.upwind, "faces"),
         (
             "volume_and_lift",
-            (("fuse", ("volume", "lift"), {"loops": 4}),),
-            "volume",
+            lambda d: _fused_nodes(d.volume_and_lift),
+            lambda d: d.volume_and_lift.volume,
             "nodes",
         ),
     ),
     "one launch": (
         (
             "folded_rhs",
-            (
-                ("substitute", ("flux",), {}),
-                ("fuse", ("volume", "lift"), {"loops": 4}),
+            lambda d: lambda schedule: _fused_nodes(d.folded_rhs)(
+                schedule.substitute(d.folded_rhs.flux)
             ),
-            "volume",
+            lambda d: d.folded_rhs.volume,
             "nodes",
         ),
     ),
     f"three launches, {ON_THE_FACE_NODES}": (
-        ("upwind", (), "upwind", "faces"),
-        ("volume", (), "volume", "nodes"),
-        ("lift_on_faces", (("atomic", ("rhs",), {}),), "lift_on_faces", "face nodes"),
+        ("upwind", None, lambda d: d.upwind, "faces"),
+        ("volume", None, lambda d: d.volume, "nodes"),
+        (
+            "lift_on_faces",
+            lambda d: lambda schedule: schedule.atomic(d.lift_on_faces.rhs),
+            lambda d: d.lift_on_faces,
+            "face nodes",
+        ),
     ),
     f"one launch, {FROM_THE_METRIC}": (
         (
             "advection_rhs",
-            (
-                ("substitute", ("V",), {}),
-                ("substitute", ("vn",), {}),
-                ("substitute", ("flux",), {}),
-                ("fuse", ("volume", "lift"), {"loops": 4}),
+            lambda d: lambda schedule: _fused_nodes(d.advection_rhs)(
+                schedule.substitute(d.advection_rhs.V)
+                .substitute(d.advection_rhs.vn)
+                .substitute(d.advection_rhs.flux)
             ),
-            "volume",
+            lambda d: d.advection_rhs.volume,
             "nodes",
         ),
     ),
 }
 
 
-def _loops_of(schedule: Any, call: str, role: str) -> tuple[str, ...]:
-    """The loops of ``call``'s statement in ``schedule``, outermost first."""
-    stmt = next(s for s in schedule.term.stmts if s.id in ("S0", f"{call}.S0"))
-    return tuple(stmt.inames[: 3 if role == "face nodes" else 4])
+def _loops_of(scope: Any, role: str) -> tuple[Any, ...]:
+    """The loops of a launch, outermost first: the handles of ``scope``'s."""
+    if role == "face nodes":
+        return (scope.e, scope.a, scope.b)
+    if role == "faces":
+        return (scope.e, scope.f, scope.a, scope.b)
+    return (scope.e, scope.k, scope.j, scope.i)
 
 
 def _arguments(kernel: Any, split: str) -> dict[str, str]:
@@ -287,14 +312,15 @@ def loopty_launches(
 
     sizes = {"n": order + 1, "ne": ne}
     out = []
-    for name, steps, call, role in SPLITS[split]:
+    module = SimpleNamespace(**demo)
+    for name, steps, scope, role in SPLITS[split]:
         schedule = Schedule(demo[name])
-        for method, args, kwargs in steps:
-            schedule = getattr(schedule, method)(*args, **kwargs)
-        splits, tags, _sequential = shape.steps(role, _loops_of(schedule, call, role))
+        if steps is not None:
+            schedule = steps(module)(schedule)
+        splits, tags, _sequential = shape.steps(role, _loops_of(scope(module), role))
         for loop, factor in splits:
             schedule = schedule.split(loop, factor)
-        launch = from_schedule(schedule.tag(**tags), {}, **sizes)
+        launch = from_schedule(schedule.tag(tags), {}, **sizes)
         launch.args = _arguments(launch.kernel, split)
         out.append(launch if shape.contraction else _without_contraction(launch))
     return out

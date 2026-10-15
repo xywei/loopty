@@ -25,6 +25,7 @@ from lanky.prelude import Nat, Real
 
 from loopty import Arr, Fin, kernel
 from loopty import sum as reduce_sum
+from loopty.handles import scope
 from loopty.isl_reading import declining
 from loopty.schedule import Schedule
 
@@ -216,10 +217,26 @@ def loopy_says_code(lp, schedule) -> str:
 
 
 def scheduled(fn, target: str, steps) -> Schedule:
-    """``Schedule(fn, target)`` with each ``(method, kwargs)`` step applied."""
+    """``Schedule(fn, target)`` with each ``(method, args, kwargs)`` step applied.
+
+    A loop is written in a step by its binder, and ``t_outer`` for the outer
+    loop a split of ``t`` makes: each is the handle of ``fn`` it names.
+    """
+    names = scope(fn)
+
+    def loop(name: str):
+        for side in ("outer", "inner"):
+            if name.endswith(f"_{side}"):
+                return getattr(loop(name[: -len(side) - 1]), side)
+        return getattr(names, name)
+
     schedule = Schedule(fn, target=target)
     for method, args, kwargs in steps:
-        schedule = getattr(schedule, method)(*args, **kwargs)
+        if method == "tag":
+            schedule = schedule.tag({loop(name): tag for name, tag in kwargs.items()})
+            continue
+        handles = [loop(arg) if isinstance(arg, str) else arg for arg in args]
+        schedule = getattr(schedule, method)(*handles, **kwargs)
     return schedule
 
 
@@ -252,7 +269,8 @@ CASES = {
     # {{{ the C target has no hardware axes (#47)
     "c-local-axis": (
         copy8, "c", [tag(i="l.0")],
-        "the tag i='l.0' puts a loop on a hardware axis, and the C target has none",
+        "tag(copy8.i, 'l.0') puts a loop on a hardware axis, and the C target "
+        "has none",
         "plain C does not have local hw axes",
     ),
     "c-group-axis": (
@@ -262,13 +280,12 @@ CASES = {
     ),
     "c-local-reduction": (
         rowsum8, "c", [tag(j="l.0")],
-        "the tag j='l.0' puts a loop on a hardware axis",
+        "tag(rowsum8.j, 'l.0') puts a loop on a hardware axis",
         "NotImplementedError",
     ),
     "c-vector-accumulator": (
         rowsum8, "c", [tag(i="vec")],
-        "the accumulator of the sum in statement S0, as a vector along it; the "
-        "C target has no vector types",
+        "as a vector along it; the C target has no vector types",
         "does not understand axis tag",
     ),
     "opencl-local-axis": (copy8, "opencl", [tag(i="l.0")], None, None),
@@ -278,7 +295,7 @@ CASES = {
     # {{{ an unrolled loop needs a numeric length (#48)
     "unr-symbolic": (
         copy_n, "opencl", [tag(i="unr")],
-        "the extent of i is at most n, which no number bounds",
+        "the extent of copy_n.i is at most n, which no number bounds",
         "unbounded optimum",
     ),
     "unr-symbolic-c": (
@@ -298,16 +315,16 @@ CASES = {
     ),
     "unr-symbolic-reduction": (
         total_n, "opencl", [tag(i="unr")],
-        "the loop i is tagged unr",
+        "the loop total_n.i is tagged unr",
         "unbounded optimum",
     ),
     "unr-ragged-fiber": (
         ragged_copy, "opencl", [tag(j="unr")],
-        "the extent of j is read out of an array (a ragged fiber)",
+        "the extent of ragged_copy.j is read out of an array (a ragged fiber)",
         "unbounded optimum",
     ),
     "unr-split": (
-        copy_n, "opencl", [split("i", 4, inner="ii"), tag(ii="unr")], None, None
+        copy_n, "opencl", [split("i", 4), tag(i_inner="unr")], None, None
     ),
     "unr-fixed": (copy8, "c", [tag(i="unr")], None, None),
     "unr-triangle": (triangle8, "opencl", [tag(j="unr")], None, None),
@@ -315,7 +332,8 @@ CASES = {
     # {{{ loopy's numbering of hardware axes (#55)
     "local-axis-gap": (
         copy8, "opencl", [tag(i="l.1")],
-        "the loop i is on the local axis l.1, and no loop of the kernel is on l.0",
+        "the loop copy8.i is on the local axis l.1, and no loop of the kernel is "
+        "on l.0",
         "local axis 0 unused",
     ),
     "group-axis-gap": (
@@ -332,12 +350,12 @@ CASES = {
     # {{{ one loop of an instruction per axis (#55)
     "two-loops-one-local-axis": (
         copy2_8, "opencl", [tag(i="l.0", j="l.0")],
-        "statement S0 runs in two loops tagged l.0, i and j",
+        "runs in two loops tagged l.0, copy2_8.i and copy2_8.j",
         "has multiple inames tagged 'l.0'",
     ),
     "two-loops-one-group-axis": (
         copy2_8, "opencl", [tag(i="g.0", j="g.0")],
-        "statement S0 runs in two loops tagged g.0, i and j",
+        "runs in two loops tagged g.0, copy2_8.i and copy2_8.j",
         "has multiple inames tagged 'g.0'",
     ),
     "two-loops-vectorized": (
@@ -347,12 +365,12 @@ CASES = {
     ),
     "a-statement-loop-and-its-sum-on-one-axis": (
         rowsum8, "opencl", [tag(i="l.0", j="l.0")],
-        "statement S0 runs in two loops tagged l.0, i and j",
+        "runs in two loops tagged l.0, rowsum8.i and rowsum8.j",
         "has multiple inames tagged 'l.0'",
     ),
     "two-sums-on-one-axis": (
         two_sums8, "opencl", [tag(i="l.0", j="l.0")],
-        "statement S0 runs in two loops tagged l.0, i and j",
+        "runs in two loops tagged l.0, two_sums8.i and two_sums8.j",
         "has multiple inames tagged 'l.0'",
     ),
     "a-statement-loop-and-its-sum-on-two-axes": (
@@ -362,7 +380,7 @@ CASES = {
     # {{{ every instruction on every axis of the kernel
     "a-statement-off-the-group-axis": (
         two_loops8, "opencl", [tag(i="g.0")],
-        "statement S1 runs in no loop on g.0, the group axis i is on",
+        "runs in no loop on g.0, the group axis two_loops8.i is on",
         "does not use all group hw axes",
     ),
     "both-statements-on-the-group-axis": (
@@ -370,12 +388,12 @@ CASES = {
     ),
     "a-sum-beside-a-local-sum": (
         two_sums8, "opencl", [tag(i="l.0")],
-        "the sum over j in statement S0 runs in no loop on l.0",
+        "the sum over two_sums8.j in the statement ",
         "does not use all local hw axes",
     ),
     "an-outer-statement-beside-a-local-loop": (
         outer_and_inner8, "opencl", [tag(j="l.0")],
-        "statement S0 runs in no loop on l.0, the local axis j is on",
+        "runs in no loop on l.0, the local axis outer_and_inner8.j is on",
         "does not use all local hw axes",
     ),
     "a-row-length-off-the-local-axis": (
@@ -403,33 +421,33 @@ CASES = {
     # {{{ an axis loopy is asked to choose
     "automatic-local-axis": (
         copy8, "opencl", [tag(i="l.auto")],
-        "the tag l.auto on i asks loopy to choose a local axis",
+        "the tag l.auto on copy8.i asks loopy to choose a local axis",
         "automatically-assigned local axes",
     ),
     # }}}
     # {{{ temporaries a vectorized loop cannot hold
     "a-local-sum-in-a-vectorized-loop": (
         rowsum8, "opencl", [tag(i="vec", j="l.0")],
-        "the sum over j in statement S0 runs on a local axis inside the loop i, "
-        "which is tagged vec",
+        "runs on a local axis inside the loop rowsum8.i, which is tagged vec",
         "TypeError",
     ),
     "a-row-length-in-a-vectorized-loop": (
         between8, "opencl", [tag(r="vec")],
-        "the length of a ragged row is read inside the loop r, which is tagged vec",
+        "the length of a ragged row is read inside the loop between8.r, which is "
+        "tagged vec",
         "TypeError",
     ),
     # }}}
     # {{{ a concurrent loop in a domain whose extent is read out of an array
     "a-vectorized-ragged-fiber": (
         ragged_copy, "opencl", [tag(j="vec")],
-        "the tag j='vec' makes a loop inside a ragged fiber concurrent",
+        "tag(ragged_copy.j, 'vec') makes a loop inside a ragged fiber concurrent",
         "data-dependent parameter",
     ),
     "a-local-loop-beside-a-ragged-fiber": (
         between8, "opencl", [tag(i="l.0")],
-        "loopy defines i in one domain with the length of a ragged row, beside "
-        "the ragged fiber j",
+        "loopy defines between8.i in one domain with the length of a ragged row, "
+        "beside the ragged fiber between8.j",
         "data-dependent parameter",
     ),
     # }}}
@@ -468,17 +486,17 @@ def test_an_ilp_loop_around_a_row_length_is_refused_for_the_code_loopy_writes(
     # loop still reads the length by its name, so it compares its variable
     # with the array. The compiled C run read past the rows, and crashed. It
     # was buildable, since nothing concurrent sits in the fiber's domain.
-    schedule = Schedule(ragged_rows8, target=target).tag(r=tag)
+    schedule = Schedule(ragged_rows8, target=target).tag(ragged_rows8.r, tag)
     ok, reason = schedule.buildable
     assert not ok
     assert reason.startswith(
-        "the length of a ragged row is read inside the loop r, which is "
-        f"tagged {tag}, and the code loopy generates for it is wrong"
+        "the length of a ragged row is read inside the loop ragged_rows8.r, which "
+        f"is tagged {tag}, and the code loopy generates for it is wrong"
     )
     code = loopy_says_code(plain_opencl, schedule)
     (length,) = re.findall(r"\b(nl_\w+)\[8\];", code)
     assert re.search(rf"\bj <= -1 \+ {length};", code), code
-    unrolled = Schedule(ragged_rows8, target=target).tag(r="unr")
+    unrolled = Schedule(ragged_rows8, target=target).tag(ragged_rows8.r, "unr")
     assert unrolled.buildable == (True, "")
 
 
@@ -515,7 +533,7 @@ def test_a_sum_outside_a_sequential_loop_is_the_order_loopy_drops(
 def test_retargeting_a_device_schedule_to_c_refuses_its_axes(plain_opencl) -> None:
     # ``loopty run --target c`` on a file written for a device replays its
     # steps against C, and used to come out buildable.
-    device = Schedule(copy8, target="opencl").tag(i="g.0")
+    device = Schedule(copy8, target="opencl").tag(copy8.i, "g.0")
     assert device.buildable == (True, "")
     on_c = device.retarget("c")
     ok, reason = on_c.buildable
@@ -529,32 +547,34 @@ def test_the_c_target_is_named_only_when_nothing_else_stands_in_the_way() -> Non
     # on C keeps its ragged-fiber reason, and carries one buildable fact.
     import hand_terms as ht
 
-    rows = Schedule(ht.spmv_term()).tag(r="g.0")
+    SPMV = scope(ht.spmv_term())
+
+    rows = Schedule(ht.spmv_term()).tag(SPMV.r, "g.0")
     assert "the C target has none" in rows.buildable[1]
-    device = rows.split("j", 32, inner="j_in", outer="j_out").tag(j_in="l.0")
+    device = rows.split(SPMV.j, 32).tag(SPMV.j.inner, "l.0")
     assert "ragged fiber" in device.buildable[1]
     (fact,) = [fact for fact in device.facts() if fact.kind == "buildable"]
-    assert fact.id.endswith(".tag(j_in='l.0'):buildable")
+    assert fact.id.endswith(".tag(spmv.j.inner, 'l.0'):buildable")
 
 
 def test_ilp_on_a_nested_sum_is_refused_as_ilp_not_as_a_hardware_axis() -> None:
     # The check for a hardware axis on a nested reduction counted ilp as one.
     # loopy unrolls an ilp loop; what stands in the way is the privatization
     # that makes the build depend on the string hash seed (note 11).
-    ok, reason = Schedule(lower_total8).tag(j="ilp").buildable
+    ok, reason = Schedule(lower_total8).tag(lower_total8.j, "ilp").buildable
     assert not ok
     assert "hardware axis" not in reason
     assert "on an ilp axis" in reason and "Tag it unr instead" in reason
-    assert Schedule(lower_total8).tag(j="unr").buildable == (True, "")
+    assert Schedule(lower_total8).tag(lower_total8.j, "unr").buildable == (True, "")
 
 
 def test_a_later_step_puts_an_unrolled_loop_right_by_splitting_it() -> None:
     # The question is asked of the schedule as it stands: tagging the inner
     # half after a split is the remedy the reason names.
-    whole = Schedule(copy_n).tag(i="unr")
+    whole = Schedule(copy_n).tag(copy_n.i, "unr")
     assert not whole.buildable[0]
-    assert "split('i', 4)" in whole.buildable[1]
-    halves = Schedule(copy_n).split("i", 4, inner="ii").tag(ii="unr")
+    assert "split(copy_n.i, 4)" in whole.buildable[1]
+    halves = Schedule(copy_n).split(copy_n.i, 4).tag(copy_n.i.inner, "unr")
     assert halves.buildable == (True, "")
     assert not [fact for fact in halves.facts() if fact.kind == "buildable"]
 

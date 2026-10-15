@@ -256,7 +256,7 @@ def test_the_compiled_kernel_holds_the_values_with_every_digit() -> None:
     )
     assert "static double PHI[3 * 3] = { 0.6666666666666666," in code
     for cells in (1, 4, 7):
-        agrees(mass, Schedule(mass).split("c", 2), mass_inputs(cells))
+        agrees(mass, Schedule(mass).split(mass.c, 2), mass_inputs(cells))
 
 
 def test_tables_of_other_dtypes_are_read_in_their_own() -> None:

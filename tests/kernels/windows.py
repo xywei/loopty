@@ -145,33 +145,35 @@ def burgers_assembled(u, node, y):
 SIZES = {"n": 16}
 
 #: The divergence one step behind the flux, in the flux's loop.
-fused = Schedule(burgers, sizes=SIZES).fuse("flux", "divergence", shift=1)
+fused = Schedule(burgers, sizes=SIZES).fuse(
+    burgers.flux.j, burgers.divergence.i, shift=1
+)
 
 #: ``f`` in the three cells live at once, ``f[j]`` in slot ``j % 3``.
-windowed = fused.contract("f")
+windowed = fused.contract(burgers.f)
 
 #: The same window, a shift register: every access at a constant index.
-registers = fused.contract("f", registers=True)
+registers = fused.contract(burgers.f, registers=True)
 
 #: A split of the loop after the window, which keeps every slot's order.
-split_after = windowed.split("j", 4)
+split_after = windowed.split(burgers.flux.j, 4)
 
 #: A second reader of ``f[j - 3]`` at step ``j``: a window of four cells.
 deeper = (
     Schedule(two_readers, sizes=SIZES)
-    .fuse("flux", "divergence_and_lag", shift=1)
-    .contract("f")
+    .fuse(two_readers.flux.j, two_readers.divergence_and_lag.i, shift=1)
+    .contract(two_readers.f)
 )
 
 #: The fused loop run backwards, and the window taken along that order.
 REVERSED = "{ flux_S0[j] -> [k] : k = -j; divergence_S0[j] -> [k] : k = 2 - j }"
-reversed_window = fused.affine(REVERSED).contract("f")
+reversed_window = fused.affine(REVERSED).contract(burgers.f)
 
 #: Each row's flux in a shift register, shifted at each step of each row.
 row_registers = (
     Schedule(rows, sizes={"m": 3, "n": 8})
-    .fuse("row_flux", "row_divergence", shift=(0, 1))
-    .contract("f", registers=True)
+    .fuse(rows.row_flux.j, rows.row_divergence.i, shift=(0, 1))
+    .contract(rows.f, registers=True)
 )
 
 #: The divergence added into the nodes, one step behind the flux: ``f`` in
@@ -179,17 +181,17 @@ row_registers = (
 #: both, whose cast keeps every slot's order and no order of two updates.
 assembled = (
     Schedule(burgers_assembled, sizes={"n": 16, "m": 4})
-    .fuse("flux", "assembled_divergence", shift=1)
-    .contract("f")
-    .atomic("y")
-    .split("j", 4)
+    .fuse(burgers_assembled.flux.j, burgers_assembled.assembled_divergence.i, shift=1)
+    .contract(burgers_assembled.f)
+    .atomic(burgers_assembled.y)
+    .split(burgers_assembled.flux.j, 4)
 )
 
 #: The flux computed where it is read, before ``bump`` writes what it read.
 substituted = (
     Schedule(bumped_after, sizes=SIZES)
-    .fuse("flux", "divergence", shift=1)
-    .substitute("f")
+    .fuse(bumped_after.flux.j, bumped_after.divergence.i, shift=1)
+    .substitute(bumped_after.f)
 )
 
 
@@ -198,7 +200,7 @@ def rejected_window() -> str:
     from loopty.schedule import IllegalCast
 
     try:
-        fused.contract("f", lambda j: j % 2)
+        fused.contract(burgers.f, lambda j: j % 2)
     except IllegalCast as refused:
         return str(refused)
     raise AssertionError("a window of two cells is too small")
@@ -224,8 +226,8 @@ def rejected_short_window() -> str:
     try:
         (
             Schedule(two_readers, sizes=SIZES)
-            .fuse("flux", "divergence_and_lag", shift=1)
-            .contract("f", lambda j: j % 3)
+            .fuse(two_readers.flux.j, two_readers.divergence_and_lag.i, shift=1)
+            .contract(two_readers.f, lambda j: j % 3)
         )
     except IllegalCast as refused:
         return str(refused)
@@ -286,10 +288,12 @@ def triangles(c, s):
 
 
 #: Box by box: a box's triangle, then its sum.
-boxed = Schedule(triangles, sizes={"nb": 3}).fuse("triangle", "triangle_sums", loops=1)
+boxed = Schedule(triangles, sizes={"nb": 3}).fuse(
+    triangles.triangle.i, triangles.triangle_sums.i
+)
 
 #: One box's triangle at a time: ``lambda i, a, b: (a, b)``, found.
-one_triangle = boxed.contract("R")
+one_triangle = boxed.contract(triangles.R)
 
 
 def rejected_row() -> str:
@@ -297,7 +301,7 @@ def rejected_row() -> str:
     from loopty.schedule import IllegalCast
 
     try:
-        boxed.contract("R", lambda i, a, b: b)
+        boxed.contract(triangles.R, lambda i, a, b: b)
     except IllegalCast as refused:
         return str(refused)
     raise AssertionError("the recurrence reads the row two up, which a row lost")
@@ -333,6 +337,6 @@ def running_differences(u, y):
 #: once kept in a shift register: ``lambda j: j % 2``, found.
 running_registers = (
     Schedule(running_differences, sizes=SIZES)
-    .fuse("running", "differences")
-    .contract("f", registers=True)
+    .fuse(running_differences.running.j, running_differences.differences.k)
+    .contract(running_differences.f, registers=True)
 )

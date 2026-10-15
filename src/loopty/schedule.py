@@ -3861,9 +3861,11 @@ class Schedule:
                     f"{shown!r} is not split; split it first, split({shown!r}, ...)"
                 )
         if handle.made is not None:
+            index = self._handles
             raise ValueError(
-                f"{text}: no map of affine(...) named a loop {handle.made} in "
-                f"{self!r}"
+                f"{text}: {index.name} has no loop {handle.made}, "
+                f"{index.contents(())}, and no map of affine(...) in {self!r} "
+                "named one"
             )
         raise ValueError(
             f"{text}: {handle!r} runs no statement of {self._handles.name}, so "
@@ -3957,16 +3959,16 @@ class Schedule:
         array by its name, each printed as its handle is.
         """
         if kind == "array":
+            # the term's own array by that name, or else each call's
             index = self._handles
-            out = [index.array_path((), array) for array in index.root_arrays]
-            out = [path for path, array in zip(out, index.root_arrays, strict=True)
-                   if array == name]
-            for labels, site in index.sites.items():
-                out += [
-                    index.array_path(labels, param)
-                    for param, _array in site.arrays
-                    if param == name
-                ]
+            if name in index.root_arrays:
+                return [index.array_path((), name)]
+            out = [
+                index.array_path(labels, param)
+                for labels, site in index.sites.items()
+                for param, _array in site.arrays
+                if param == name
+            ]
             return list(dict.fromkeys(out))
         out = []
         for key, names in self._loops.items():
@@ -5901,7 +5903,9 @@ class Schedule:
                     f"{handle!r} in a window or compute "
                     f"{self._shown_array(computed)} where it is read, not both"
                 )
-        producers, readers = win.preconditions(term, array, self._gone, text)
+        producers, readers = win.preconditions(
+            term, array, self._gone, text, lambda sid: self._stmts_shown([sid])
+        )
         statements = {
             *(producer.id for producer in producers),
             *(reader.id for reader in readers),
@@ -6014,7 +6018,7 @@ class Schedule:
                     f"{text}: every cell of {handle!r} is still to be read while "
                     "the others are stored, in the order as it stands, so no "
                     f"window is smaller than {handle!r}; fuse its readers with "
-                    f"{_joined(self._stmt_shown(stmt.id) for stmt in producers)} "
+                    f"{self._stmts_shown((stmt.id for stmt in producers), 'and')} "
                     "first, so that fewer cells are live at once"
                 )
         else:
@@ -6501,11 +6505,19 @@ class Schedule:
         if verdict.ok is not True:
             witness = verdict.witness
             detail = verdict.detail
+            # the statements as a reader knows them, by their calls
+            said = verdict.detail
+            for stmt in (*producers, *readers):
+                said = re.sub(
+                    rf"(?<![\w.@]){re.escape(stmt.id)}(?![\w])",
+                    self._stmts_shown([stmt.id]),
+                    said,
+                )
             message = (
-                f"{text} illegal: {verdict.detail}, so the read would see the "
+                f"{text} illegal: {said}, so the read would see the "
                 f"zeros the array was made with, and {losing}"
                 if verdict.ok is False
-                else f"{text} illegal: {verdict.detail}"
+                else f"{text} illegal: {said}"
             )
         else:
             ids = {producer.id for producer in producers}
@@ -7743,8 +7755,17 @@ class Schedule:
         return {stmt.id: stmt for stmt in self._term.stmts}
 
     def _named(self, *instances: tuple[str, dict[str, int]]) -> list[str]:
-        """Instances as a refusal names them (:func:`loopty.source.instances_text`)."""
-        return instances_text(self._statements(), *instances)
+        """Instances as a refusal names them (:func:`loopty.source.instances_text`).
+
+        A statement of a call by the call's path, where two calls of one
+        kernel need telling apart, and an array by its path.
+        """
+        return instances_text(
+            self._statements(),
+            *instances,
+            called=lambda stmt_id: self._stmts_shown([stmt_id]),
+            arrays=self._shown_array,
+        )
 
     def _name_instance(self, point: Sequence[int]) -> tuple[str, dict[str, int]]:
         """A uniform-space point read back as ``(statement id, coordinates)``."""
@@ -7822,14 +7843,14 @@ class Schedule:
         note = ""
         if _widened(dep):
             why = (
-                f"substitute({dep.through!r}) reads {dep.array} where "
-                f"{dep.through} was read, which no run of an input shows"
+                f"substitute({self._shown_array(dep.through)}) reads {dep.array} "
+                f"where {dep.through} was read, which no run of an input shows"
                 if dep.through
                 else "no example input has two such instances on one cell"
             )
             note = (
-                f". The pair is isl's: the cell {_subscript_text(dep)} is read "
-                f"from an array, which isl cannot follow, and {why}"
+                f". The pair is isl's: the cell {_subscript_text(dep, self._term)} "
+                f"is read from an array, which isl cannot follow, and {why}"
             )
         return cell, at, note
 
@@ -8409,19 +8430,38 @@ def _at_sizes(relation: isl.Map, sizes: Mapping[str, int]) -> isl.Map:
     return relation
 
 
-def _subscript_text(dep: _Dep) -> str:
+def _subscript_text(dep: _Dep, term: Term | None = None) -> str:
     """``y[cell[c, j]]``: the cell an end of ``dep`` reads from an array, as written.
 
     The source's, unless only the sink's subscript is one isl cannot read
     (:func:`_widened`): ``y[i]`` written and ``y[p[j]]`` read names the read.
+    Its loops as the source spells them, ``i`` where a program named the
+    loop ``i_0`` (:attr:`loopty.term.Stmt.spelled`), when ``term`` is given.
     """
     from lanky.terms import render
 
-    indices = (
-        dep.sink_indices
-        if _unread(dep.sink_indices) and not _unread(dep.source_indices)
-        else dep.source_indices
-    )
+    sink = _unread(dep.sink_indices) and not _unread(dep.source_indices)
+    indices = dep.sink_indices if sink else dep.source_indices
+    if term is not None:
+        try:
+            stmt = term.stmt(dep.sink if sink else dep.source)
+        except KeyError:
+            stmt = None
+        if stmt is not None and stmt.spelled and len(set(stmt.spelled)) == len(
+            stmt.spelled
+        ):
+            names = {
+                name: spelled
+                for name, spelled in zip(stmt.inames, stmt.spelled, strict=False)
+                if name != spelled
+            }
+            if names:
+                from loopty.compose import rename_expr
+
+                try:
+                    indices = tuple(rename_expr(index, names, {}) for index in indices)
+                except Exception:  # noqa: BLE001 - the term's names stand
+                    pass
     return f"{dep.array}[{', '.join(render(i) for i in indices)}]"
 
 

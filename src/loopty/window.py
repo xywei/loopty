@@ -406,6 +406,7 @@ def preconditions(
     array: str,
     gone: frozenset[str],
     text: str,
+    named: Any = None,
 ) -> tuple[list[Stmt], list[Stmt]]:
     """The producers and the readers of ``array``, or why it cannot be contracted.
 
@@ -421,7 +422,14 @@ def preconditions(
     window is safe only where the order of the reads is the instances'.
     Each is a :class:`WindowError` naming what stands in the way. A
     producer that reads the array, a recurrence, is among the readers.
+    ``named`` names a statement in a message, by its id where it is not
+    given (a schedule names it by its call, :mod:`loopty.handles`).
     """
+    if named is None:
+
+        def named(stmt_id: str) -> str:
+            return stmt_id
+
     if array not in dict(term.temporaries) or array in dict(term.checks):
         what = (
             f"a parameter of {term.name}, which its caller passes and sees"
@@ -460,20 +468,20 @@ def preconditions(
                 else f"keep {array} whole"
             )
             raise WindowError(
-                f"{text}: {producer.id} updates {cell} in place, starting from the "
-                f"zeros {array} was made with, and a window keeps a value stored "
-                f"once, without them; {fix}"
+                f"{text}: {named(producer.id)} updates {cell} in place, starting "
+                f"from the zeros {array} was made with, and a window keeps a value "
+                f"stored once, without them; {fix}"
             )
         if not affine_indices(producer.assignee.indices):
             shown = ", ".join(str(index) for index in producer.assignee.indices)
             raise WindowError(
-                f"{text}: {producer.id} stores {array}[{shown}], an index isl "
+                f"{text}: {named(producer.id)} stores {array}[{shown}], an index isl "
                 "cannot read, so which slot it stores into is not known"
             )
         if producer.unnarrowed:
             conjuncts = ", ".join(conjunct for conjunct, _why in producer.unnarrowed)
             raise WindowError(
-                f"{text}: {producer.id} stores {array} under a guard isl cannot "
+                f"{text}: {named(producer.id)} stores {array} under a guard isl cannot "
                 f"state ({conjuncts}), so which cells it stores is not known"
             )
     readers = [
@@ -490,15 +498,15 @@ def preconditions(
             _in(index, array) for index in reader.assignee.indices
         ):
             raise WindowError(
-                f"{text}: {reader.id} reads {array} in a guard or in the subscript "
-                "of what it stores, which is evaluated where it stores nothing; a "
-                "window is taken of an array read in values"
+                f"{text}: {named(reader.id)} reads {array} in a guard or in the "
+                "subscript of what it stores, which is evaluated where it stores "
+                "nothing; a window is taken of an array read in values"
             )
         for access in accesses(term, array, [reader]):
             if access.part == "row" or not affine_indices(access.indices):
                 shown = ", ".join(str(index) for index in access.indices)
                 raise WindowError(
-                    f"{text}: {reader.id} reads {array}[{shown}], an index isl "
+                    f"{text}: {named(reader.id)} reads {array}[{shown}], an index isl "
                     "cannot read, so which slot it reads is not known"
                 )
     return producers, readers

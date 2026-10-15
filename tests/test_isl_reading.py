@@ -131,7 +131,7 @@ def test_running_a_kernel_leaves_loopys_own_readings_in_place() -> None:
         index_square,
         lambda: {"x": np.arange(9, dtype=np.float64), "y": np.zeros(9)},
     )
-    emit_code(Schedule(index_square).split("i", 2))
+    emit_code(Schedule(index_square).split(index_square.i, 2))
     loopys_own()
     space = isl.Space.create_from_names(isl.DEFAULT_CONTEXT, set=["i"])
     loopys_own_reading_of(space, prim.Variable("i"))

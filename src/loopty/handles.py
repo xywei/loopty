@@ -65,7 +65,8 @@ children, ``h.outer`` and ``h.inner`` (``tile`` makes the same children of
 both its loops), and a split of a child makes grandchildren,
 ``h.inner.outer``. A map of :meth:`~loopty.schedule.Schedule.affine` keeps
 the loops it does not rename and replaces the others by the loops it names,
-which the schedule's own long form reaches, ``schedule.loops.a``. A handle
+which the long form reaches, ``acoustic.loops.a`` (or the schedule's own,
+``diamond.loops.a``). A handle
 to a loop no step left, one a split replaced or one only statements a
 substitution took out ran in, is refused with the step that did it.
 
@@ -99,7 +100,6 @@ from __future__ import annotations
 
 import ast
 import inspect
-import re
 import textwrap
 import warnings
 from collections.abc import Iterable, Iterator, Sequence
@@ -470,7 +470,7 @@ class Loop(Handle):
         if self._binder is not None:
             head = self._index.binder_path(self._binder)
         else:
-            head = f"{self._index.name}.{self._made}"
+            head = f"{self._index.name}.loops.{self._made}"
         return ".".join([head, *self._part])
 
     @property
@@ -704,6 +704,10 @@ def _named(index: _Index, labels: tuple[str, ...], name: str, kind: str) -> Any:
             if len(handles) == 1:
                 return handles[0]
             return _Several(index, path, "loop", handles)
+        if not labels and name.isidentifier():
+            # no loop of the source: a loop a map of affine names, which a
+            # schedule resolves where one of its steps made it
+            return Loop(index, None, (), made=name)
     elif kind == "array":
         arrays = index.arrays(labels)
         if name in arrays:
@@ -774,15 +778,10 @@ def scope(obj: Any) -> Root:
 def short_name(root: Any, name: str) -> Any:
     """``root.name`` for a kernel or a program: what :meth:`Kernel.__getattr__` gives.
 
-    A name that is not a binder, a parameter, a size or a callee the source
-    could have is refused at once, as any missing attribute is, without
-    tracing: ``getattr(kernel, "x", None)`` asks for no trace.
+    Only a name that is no attribute comes here. The kernel is traced, once,
+    to know what it names; a body that cannot be traced has no names, and
+    the ``AttributeError`` says why.
     """
-    if name not in static_names(root):
-        raise AttributeError(
-            f"{type(root).__name__} object {getattr(root, '__name__', root)!r} has "
-            f"no attribute {name!r}"
-        )
     try:
         index = _index(root)
     except Exception as exc:  # noqa: BLE001 - a body that cannot be traced
@@ -872,6 +871,9 @@ class SizeExpression:
 
     def __eq__(self, other: Any) -> Any:  # type: ignore[override]
         return self._compare(other, "==")
+
+    def __ne__(self, other: Any) -> Any:  # type: ignore[override]
+        return self._compare(other, "!=")
 
     def __lt__(self, other: Any) -> Any:
         return self._compare(other, "<")
@@ -1015,25 +1017,7 @@ def _variables(expression: Any) -> list[Any]:
 # }}}
 
 
-# {{{ the names a kernel's source can have, without tracing it
-
-
-def static_names(root: Any) -> frozenset[str]:
-    """The names a kernel's or a program's source could give a handle.
-
-    Read off the function without tracing it, so that asking a kernel for
-    an attribute it does not have asks for no trace: its parameters, the
-    names its body binds (the targets of its ``for`` loops and generators,
-    a program's arrays), the names its annotations use (the sizes among
-    them) and the kernels it calls. Where the source cannot be read, every
-    name its code objects hold.
-    """
-    cached = root.__dict__.get("_static_names")
-    if cached is not None:
-        return cached
-    names = set(_source_names(root.fn))
-    root.__dict__["_static_names"] = frozenset(names)
-    return root.__dict__["_static_names"]
+# {{{ the names a definition gives, read without tracing it
 
 
 def definition_names(root: Any) -> list[tuple[str, str]]:
@@ -1043,10 +1027,19 @@ def definition_names(root: Any) -> list[tuple[str, str]]:
     defined: the names that are certainly the source's, not the sizes its
     annotations might name.
     """
+    from loopty.kernel import Program
+
     fn = root.fn
     code = fn.__code__
     count = code.co_argcount + code.co_kwonlyargcount
-    out = [(name, "parameter") for name in code.co_varnames[:count]]
+    annotations = getattr(fn, "__annotations__", {}) or {}
+    out = []
+    for name in code.co_varnames[:count]:
+        # a kernel's array parameter is annotated Arr[...]; a scalar is no
+        # handle, and a program's parameters are mostly arrays
+        text = str(annotations.get(name, ""))
+        if isinstance(root, Program) or "Arr[" in text:
+            out.append((name, "array"))
     tree = _function_tree(fn)
     if tree is not None:
         out += [(name, "loop") for name in _targets(tree)]
@@ -1074,11 +1067,6 @@ def warn_shadowed(root: Any) -> None:
                 f"the {what} {name} of {owner} ({root.where}) has the name of "
                 f"{kind}.{name}, so {owner}.{name} is not the {what}; a schedule "
                 f"names it {owner}.{long_form}.{name}"
-                + (
-                    f" (or {owner}.sizes.{name}, if it is a size)"
-                    if what == "parameter"
-                    else ""
-                )
             ),
             stacklevel=4,
         )
@@ -1108,59 +1096,6 @@ def _targets(tree: ast.AST) -> list[str]:
         if isinstance(node, ast.For | ast.AsyncFor | ast.comprehension):
             out.extend(names(node.target))
     return list(dict.fromkeys(out))
-
-
-def _source_names(fn: Any) -> set[str]:
-    """Every name the source of ``fn`` could give a handle; see :func:`static_names`."""
-    code = fn.__code__
-    count = code.co_argcount + code.co_kwonlyargcount
-    out = set(code.co_varnames[:count])
-    tree = _function_tree(fn)
-    annotations = getattr(fn, "__annotations__", {}) or {}
-    for annotation in annotations.values():
-        text = annotation if isinstance(annotation, str) else None
-        if text is None:
-            continue
-        try:
-            parsed = ast.parse(text, mode="eval")
-        except SyntaxError:
-            continue
-        out |= {node.id for node in ast.walk(parsed) if isinstance(node, ast.Name)}
-    if tree is not None:
-        # the loops' targets and every name the body binds, a program's
-        # arrays among them (R = Arr.zeros(...))
-        out |= set(_targets(tree))
-        out |= {
-            node.id
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
-        }
-    else:
-        out |= set(_code_names(code))
-    from loopty.kernel import Kernel
-
-    globals_ = getattr(fn, "__globals__", {})
-    for name in _code_names(code, varnames=False):
-        value = globals_.get(name)
-        if isinstance(value, Kernel):
-            out.add(value.__name__)
-    if not isinstance(next(iter(annotations.values()), ""), str):
-        # annotations evaluated at definition: their sizes are lanky's terms,
-        # named by the text they print as
-        for annotation in annotations.values():
-            out |= set(re.findall(r"[A-Za-z_][A-Za-z_0-9]*", str(annotation)))
-    return out
-
-
-def _code_names(code: Any, varnames: bool = True) -> list[str]:
-    """Every name of a code object and those nested in it."""
-    out = list(code.co_names)
-    if varnames:
-        out += list(code.co_varnames) + list(code.co_cellvars)
-    for constant in code.co_consts:
-        if hasattr(constant, "co_names"):
-            out += _code_names(constant, varnames)
-    return out
 
 
 # }}}

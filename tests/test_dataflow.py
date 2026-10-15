@@ -662,7 +662,7 @@ def test_lanky_check_lists_the_casts_of_the_files_schedules_once(capsys: Any) ->
     first = [
         fact
         for fact in casts
-        if "split('r', 2" in fact.id and "split('r_outer'" not in fact.id
+        if "split(scan.r, 2" in fact.id and "split(scan.r.outer" not in fact.id
     ]
     assert len(first) == 2  # bijective and monotone, once
     assert not [fact for fact in ledger if fact.provenance.get("duplicate_claims")]
@@ -671,7 +671,7 @@ def test_lanky_check_lists_the_casts_of_the_files_schedules_once(capsys: Any) ->
     )  # the refuted postcondition
     out = capsys.readouterr().out
     assert "DUPLICATE" not in out
-    assert "split('r', 2" in out or "split(r, 2" in out
+    assert "split(scan.r, 2)" in out
 
 
 # }}}
@@ -728,7 +728,7 @@ def test_lanky_check_lists_a_layouts_facts_and_a_windows_casts_once() -> None:
     assert clobber.owner == "differences"
     assert (clobber.status, clobber.decided_by) == (Status.DECIDED, "isl")
     assert clobber.id in {fact.id for fact in kernels.windowed_differences.facts()}
-    window = [fact for fact in ledger if ".contract('f'" in fact.id]
+    window = [fact for fact in ledger if ".contract(differences.f" in fact.id]
     assert window
     assert all(fact.owner == "differences" for fact in window)
 
@@ -749,8 +749,11 @@ def test_a_substitutions_and_a_windows_definedness_read_apart_in_the_ledger() ->
         if fact.kind == "definedness" and fact.statement.startswith("for ")
     ]
     assert len(rows) == len(set(rows)) == 2
-    assert any(row.startswith("for substitute('f'), every cell of f") for row in rows)
-    assert any(row.startswith("for contract('f'") for row in rows)
+    assert any(
+        row.startswith("for substitute(burgers_rhs.f), every cell of burgers_rhs.f")
+        for row in rows
+    )
+    assert any(row.startswith("for contract(burgers_rhs.f") for row in rows)
 
 
 # }}}

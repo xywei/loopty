@@ -512,8 +512,8 @@ def fill_shifted(s: Real, R: Arr[Fin[n], Real]) -> all(
 
 
 #: Two schedules of the scan that share their first step: its facts are one claim.
-split = Schedule(scan, target="c").split("r", 2)
-split_twice = Schedule(scan, target="c").split("r", 2).split("r_outer", 2)
+split = Schedule(scan, target="c").split(scan.r, 2)
+split_twice = Schedule(scan, target="c").split(scan.r, 2).split(scan.r.outer, 2)
 
 
 # }}}
@@ -568,7 +568,9 @@ def differences(u, d):
 
 #: The two loops fused, and ``f`` kept in the two cells live at once.
 windowed_differences = (
-    Schedule(differences, sizes={"n": 16}).fuse("doubled", "differenced").contract("f")
+    Schedule(differences, sizes={"n": 16})
+    .fuse(differences.doubled.j, differences.differenced.i)
+    .contract(differences.f)
 )
 
 

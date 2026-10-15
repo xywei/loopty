@@ -12,6 +12,7 @@ not allowed either.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import sys
 
 import islpy as isl
@@ -23,9 +24,18 @@ import hand_terms as ht
 from lines import where
 from loopty import Arr, Fin, kernel, reduce_sum, when
 from loopty.executor import emit_code
+from loopty.handles import scope
 from loopty.isl_reading import declining
 from loopty.lower import reductions_of
 from loopty.schedule import IllegalCast, Schedule, parallel_tag
+
+#: The handles of the hand-built terms (tests/hand_terms.py).
+JACOBI = scope(ht.jacobi_term())
+SPMV = scope(ht.spmv_term())
+SPMV_EXACT = scope(ht.spmv_term(exactness="exact"))
+SPMV_REASSOC = scope(ht.spmv_term(exactness="reassoc"))
+TRANSPOSE = scope(ht.transpose_term())
+TWO_REDUCTIONS = scope(ht.two_reductions_term())
 
 pytest.importorskip("loopy")
 
@@ -48,11 +58,11 @@ def run(schedule, **arguments):
 def test_tiling_the_stencil_is_rejected_with_a_witness() -> None:
     schedule = Schedule(ht.jacobi_term(), sizes={"nt": 16, "nx": 16})
     with pytest.raises(IllegalCast) as caught:
-        schedule.tile("t", "i", 8, 8)
+        schedule.tile(JACOBI.t, JACOBI.i, 8, 8)
 
     message = str(caught.value)
     # a term written by hand has no source text: its instances are by id
-    assert message.startswith("tile(t,i,8,8) illegal: S0[")
+    assert message.startswith("tile(jacobi.t, jacobi.i, 8, 8) illegal: S0[")
     assert "writes u[" in message
     assert ", read by S0[" in message
     # The sizes the witness was read off at are part of the message: the pair
@@ -73,10 +83,13 @@ def test_tiling_the_stencil_is_rejected_with_a_witness() -> None:
 
 def test_skewing_first_makes_the_tiling_legal_and_it_still_computes() -> None:
     schedule = Schedule(ht.jacobi_term(), sizes={"nt": 6, "nx": 6})
-    skewed = schedule.skew("i", by="t")
-    tiled = skewed.tile("t", "i", 8, 8)
+    skewed = schedule.skew(JACOBI.i, by=JACOBI.t)
+    tiled = skewed.tile(JACOBI.t, JACOBI.i, 8, 8)
 
-    assert tiled.history == ("skew(i, by='t')", "tile(t,i,8,8)")
+    assert tiled.history == (
+        "skew(jacobi.i, by=jacobi.t)",
+        "tile(jacobi.t, jacobi.i, 8, 8)",
+    )
     assert tiled.order == ("t_outer", "i_outer", "t_inner", "i_inner")
     assert [fact.status.value for fact in tiled.facts()] == ["decided"] * 4
 
@@ -91,9 +104,11 @@ def test_tiling_two_loops_named_in_the_other_order_is_a_tiling_too() -> None:
     # be written against the positions the coordinates had before either of
     # them, and the second one read the first one's position: the tiling came
     # out "not single-valued" and was refused although it is a bijection.
-    tiled = Schedule(ht.jacobi_term(), sizes={"nt": 8, "nx": 8}).skew(
-        "i", by="t"
-    ).tile("i", "t", 4, 4)
+    tiled = (
+        Schedule(ht.jacobi_term(), sizes={"nt": 8, "nx": 8})
+        .skew(JACOBI.i, by=JACOBI.t)
+        .tile(JACOBI.i, JACOBI.t, 4, 4)
+    )
     assert tiled.order == ("i_outer", "t_outer", "i_inner", "t_inner")
     assert [fact.status.value for fact in tiled.facts()] == ["decided"] * 4
     for nt, nx in [(3, 3), (7, 9), (13, 4), (16, 16)]:
@@ -102,7 +117,7 @@ def test_tiling_two_loops_named_in_the_other_order_is_a_tiling_too() -> None:
         out = run(tiled, u=u.copy())
         assert np.array_equal(out["u"], ht.jacobi_reference(u)), (nt, nx)
 
-    transposed = Schedule(ht.transpose_term()).tile("j", "i", 2, 2)
+    transposed = Schedule(ht.transpose_term()).tile(TRANSPOSE.j, TRANSPOSE.i, 2, 2)
     assert transposed.order == ("j_outer", "i_outer", "j_inner", "i_inner")
     a = np.arange(15, dtype=np.float64).reshape(3, 5)
     out = run(transposed, a=a, b=np.zeros((5, 3)))
@@ -112,7 +127,7 @@ def test_tiling_two_loops_named_in_the_other_order_is_a_tiling_too() -> None:
 def test_a_rejected_step_leaves_the_schedule_it_came_from_intact() -> None:
     schedule = Schedule(ht.jacobi_term(), sizes={"nt": 16, "nx": 16})
     with pytest.raises(IllegalCast):
-        schedule.tile("t", "i", 8, 8)
+        schedule.tile(JACOBI.t, JACOBI.i, 8, 8)
     assert schedule.history == ()
     assert schedule.order == ("t", "i")
 
@@ -120,7 +135,7 @@ def test_a_rejected_step_leaves_the_schedule_it_came_from_intact() -> None:
 def test_running_a_loop_that_carries_a_dependence_in_parallel_is_rejected() -> None:
     schedule = Schedule(ht.jacobi_term(), sizes={"nt": 16, "nx": 16})
     with pytest.raises(IllegalCast) as caught:
-        schedule.tag(t="g.0")
+        schedule.tag(JACOBI.t, "g.0")
     assert "illegal" in str(caught.value)
     assert caught.value.fact.kind == "monotone"
 
@@ -157,15 +172,16 @@ def test_a_vectorized_loop_that_carries_a_dependence_is_rejected() -> None:
     )
     for tag in ("vec", "ilp"):
         with pytest.raises(IllegalCast) as caught:
-            Schedule(term).tag(i=tag)
+            Schedule(term).tag(scope(term).i, tag)
         message = str(caught.value)
         writes = where(carried_across_statements, "y[i + 1] = z[i] + 1.0")
         reads = where(carried_across_statements, "z[i] = y[i]")
         assert message.startswith(
-            f"tag(i='{tag}') illegal: y[i + 1] = z[i] + 1.0 ({writes}) at i="
+            f"tag(carried_across_statements.i, '{tag}') illegal: y[i + 1] = "
+            f"z[i] + 1.0 ({writes}) at i="
         )
         assert f"read by z[i] = y[i] ({reads}) at i=" in message
-    unrolled = Schedule(term).tag(i="unr")
+    unrolled = Schedule(term).tag(scope(term).i, "unr")
     y = np.zeros(9)
     out = run(unrolled, y=y, z=np.zeros(8))
     assert np.array_equal(out["y"], np.arange(9.0))
@@ -199,7 +215,7 @@ def test_a_parallel_tag_that_would_reorder_a_guard_read_is_rejected() -> None:
     term = trace(gated_by_the_next, evaluate_annotations(gated_by_the_next))
     schedule = Schedule(term)
     with pytest.raises(IllegalCast) as caught:
-        schedule.tag(i="g.0")
+        schedule.tag(scope(term).i, "g.0")
     message = str(caught.value)
     assert "reads flag[" in message
     assert caught.value.fact.kind == "monotone"
@@ -238,12 +254,13 @@ def test_a_parallel_tag_that_would_read_through_stale_offsets_is_rejected() -> N
     )
     schedule = Schedule(term, sizes={"n": 4})
     with pytest.raises(IllegalCast) as caught:
-        schedule.tag(r="l.0")
+        schedule.tag(scope(term).r, "l.0")
     message = str(caught.value)
     stores = where(row_sums_then_next_offset, "off[r + 1] = ends[r]")
     sums = where(row_sums_then_next_offset, "y[r] = reduce_sum(")
     assert message.startswith(
-        f"tag(r='l.0') illegal: off[r + 1] = ends[r] ({stores}) at r="
+        f"tag(row_sums_then_next_offset.r, 'l.0') illegal: off[r + 1] = ends[r] "
+        f"({stores}) at r="
     )
     assert "writes off[" in message
     assert (
@@ -298,12 +315,12 @@ def test_a_parallel_tag_that_would_read_a_stale_row_length_is_rejected(fn) -> No
     term = trace(fn, evaluate_annotations(fn))
     schedule = Schedule(term, sizes={"n": 4})
     with pytest.raises(IllegalCast) as caught:
-        schedule.tag(r="l.0")
+        schedule.tag(scope(term).r, "l.0")
     message = str(caught.value)
     clears = where(fn, "cnt[r + 1] = 0")
     sums = where(fn, "y[r] = reduce_sum(")
     assert message.startswith(
-        f"tag(r='l.0') illegal: cnt[r + 1] = 0 ({clears}) at r="
+        f"tag({fn.__name__}.r, 'l.0') illegal: cnt[r + 1] = 0 ({clears}) at r="
     )
     assert "writes cnt[" in message
     assert (
@@ -346,13 +363,14 @@ def test_a_tag_that_would_read_a_sums_bound_before_it_is_written_is_rejected() -
     )
     schedule = Schedule(term, sizes={"n": 4, "m": 3})
     with pytest.raises(IllegalCast) as caught:
-        schedule.tag(r="l.0")
+        schedule.tag(scope(term).r, "l.0")
     message = str(caught.value)
     # a long statement keeps what it writes and shortens the calls it makes
     clears = where(sums_at_i_then_next_count, "cnt[r + 1] = 0")
     sums = where(sums_at_i_then_next_count, "y[r] = y[r] + x[i]")
     assert message.startswith(
-        f"tag(r='l.0') illegal: cnt[r + 1] = 0 ({clears}) at r="
+        f"tag(sums_at_i_then_next_count.r, 'l.0') illegal: cnt[r + 1] = 0 "
+        f"({clears}) at r="
     )
     assert "writes cnt[" in message
     assert (
@@ -393,7 +411,7 @@ def test_a_row_that_stores_its_own_start_first_can_still_run_in_parallel() -> No
         offsets_stored_then_row_sums,
         evaluate_annotations(offsets_stored_then_row_sums),
     )
-    tagged = Schedule(term, sizes={"n": 4}).tag(r="l.0")
+    tagged = Schedule(term, sizes={"n": 4}).tag(scope(term).r, "l.0")
     casts = [fact for fact in tagged.facts() if fact.kind != "buildable"]
     assert [fact.status.value for fact in casts] == ["decided"] * 2
     # Legal, and not for the C target, which has no hardware axes (#47).
@@ -430,7 +448,7 @@ def test_the_rows_read_after_the_scan_are_ordered_and_not_on_one_work_item() -> 
     term = trace(scan_then_row_sums, evaluate_annotations(scan_then_row_sums))
     schedule = Schedule(term, sizes={"n": 6})
     with pytest.raises(IllegalCast) as caught:
-        schedule.tag(i="l.0")
+        schedule.tag(scope(term).i, "l.0")
     message = str(caught.value)
     assert "writes off[" in message and "on another work item" in message
     assert "in no loop on l.0, so on every work item of it" in message
@@ -439,7 +457,7 @@ def test_the_rows_read_after_the_scan_are_ordered_and_not_on_one_work_item() -> 
         IllegalCast,
         match=r"writes off\[.*, read by the same statement at r=.*scheduled earlier",
     ):
-        schedule.tag(r="l.0")
+        schedule.tag(scope(term).r, "l.0")
 
 
 # }}}
@@ -484,10 +502,11 @@ def test_a_reindexing_that_misses_instances_is_rejected() -> None:
 
 def test_split_then_tag_is_accepted_when_nothing_depends_on_the_order() -> None:
     schedule = Schedule(ht.transpose_term())
-    split = schedule.split("i", 4, inner="i_in", outer="i_out")
-    assert split.order == ("i_out", "i_in", "j")
-    tagged = split.tag(i_out="g.0")
-    assert tagged.tags == {"i_out": "g.0"}
+    split = schedule.split(TRANSPOSE.i, 4)
+    assert split.order == ("i_outer", "i_inner", "j")
+    assert split.nest == ("transpose.i.outer", "transpose.i.inner", "transpose.j")
+    tagged = split.tag(TRANSPOSE.i.outer, "g.0")
+    assert tagged.tags == {"i_outer": "g.0"}
     casts = [fact for fact in tagged.facts() if fact.kind != "buildable"]
     assert [fact.status.value for fact in casts] == ["decided"] * 4
     # The casts are about meaning; the target is another question, and on C,
@@ -503,14 +522,16 @@ def test_split_then_tag_is_accepted_when_nothing_depends_on_the_order() -> None:
 
 
 def test_interchange_is_checked_even_though_it_renames_nothing() -> None:
-    schedule = Schedule(ht.transpose_term()).interchange("j", "i")
+    schedule = Schedule(ht.transpose_term()).interchange(TRANSPOSE.j, TRANSPOSE.i)
     assert schedule.order == ("j", "i")
     kinds = [fact.kind for fact in schedule.facts()]
     assert kinds == ["bijective", "monotone"]
 
 
 def test_realizing_a_reduction_as_a_tree_marks_it_reassociated() -> None:
-    schedule = Schedule(ht.spmv_term(exactness="reassoc")).realize("y", tree=True)
+    schedule = Schedule(ht.spmv_term(exactness="reassoc")).realize(
+        SPMV_REASSOC.y, tree=True
+    )
     assert schedule.reassociated == frozenset({"y"})
     exactness = [fact for fact in schedule.facts() if fact.kind == "exactness"]
     assert len(exactness) == 1
@@ -520,26 +541,24 @@ def test_realizing_a_reduction_as_a_tree_marks_it_reassociated() -> None:
 def test_a_tree_over_an_exact_accumulation_is_rejected() -> None:
     schedule = Schedule(ht.spmv_term(exactness="exact"))
     with pytest.raises(IllegalCast) as caught:
-        schedule.realize("y", tree=True)
+        schedule.realize(SPMV_EXACT.y, tree=True)
     assert "exact" in str(caught.value)
     assert caught.value.fact.kind == "exactness"
 
 
 def test_a_reduction_iname_splits_without_touching_the_instances() -> None:
     schedule = Schedule(ht.spmv_term(exactness="reassoc"))
-    split = schedule.split("j", 2, inner="j_in", outer="j_out")
+    split = schedule.split(SPMV_REASSOC.j, 2)
     # The statement instances are the rows, before and after.
     assert split.order == ("r",)
-    tagged = split.tag(j_in="l.0")
+    tagged = split.tag(SPMV_REASSOC.j.inner, "l.0")
     assert tagged.reassociated == frozenset({"y"})
 
 
 def test_tagging_a_piece_of_an_exact_reduction_in_parallel_is_rejected() -> None:
-    schedule = Schedule(ht.spmv_term(exactness="exact")).split(
-        "j", 2, inner="j_in", outer="j_out"
-    )
+    schedule = Schedule(ht.spmv_term(exactness="exact")).split(SPMV_EXACT.j, 2)
     with pytest.raises(IllegalCast) as caught:
-        schedule.tag(j_in="l.0")
+        schedule.tag(SPMV_EXACT.j.inner, "l.0")
     assert "reassociates an exact reduction" in str(caught.value)
 
 
@@ -548,17 +567,13 @@ def test_vectorizing_a_piece_of_an_exact_reduction_is_rejected() -> None:
     # reduction asks the accumulation's permission to be reassociated, as an
     # ilp tag does. loopy cannot build this one in any case (a vec loop in a
     # ragged fiber, and a reduction over a vec loop); the cast is asked first.
-    exact = Schedule(ht.spmv_term(exactness="exact")).split(
-        "j", 2, inner="j_in", outer="j_out"
-    )
+    exact = Schedule(ht.spmv_term(exactness="exact")).split(SPMV_EXACT.j, 2)
     for tag in ("vec", "ilp"):
         with pytest.raises(IllegalCast) as caught:
-            exact.tag(j_in=tag)
+            exact.tag(SPMV_EXACT.j.inner, tag)
         assert "reassociates an exact reduction" in str(caught.value)
-    loose = Schedule(ht.spmv_term(exactness="reassoc")).split(
-        "j", 2, inner="j_in", outer="j_out"
-    )
-    tagged = loose.tag(j_in="vec")
+    loose = Schedule(ht.spmv_term(exactness="reassoc")).split(SPMV_REASSOC.j, 2)
+    tagged = loose.tag(SPMV_REASSOC.j.inner, "vec")
     assert tagged.reassociated == frozenset({"y"})
     assert not tagged.buildable[0]
 
@@ -604,7 +619,7 @@ def test_a_split_sum_adds_its_terms_in_order() -> None:
     # outside: x[0], x[2], x[1] for three terms split by 2. That is another
     # sum in floating point, 2**53 against 2**53 + 2 here, where the native
     # run adds 1 + 1 first. The priority now runs them outer first.
-    schedule = Schedule(total, target="c").split("s", 2)
+    schedule = Schedule(total, target="c").split(total.s, 2)
     code = emit_code(schedule)
     assert code.index("for (int32_t s_outer") < code.index("for (int32_t s_inner")
     x = np.array([1.0, 1.0, 2.0**53])
@@ -621,12 +636,14 @@ def test_a_sum_runs_outside_a_loop_of_its_statement_when_prioritized() -> None:
     # accumulator of its own while the sources run outside it.
     schedule = (
         Schedule(potential, target="c")
-        .split("t", 4)
-        .tag(t_inner="ilp")
-        .split("s", 4)
-        .prioritize("s_outer", "t_inner")
+        .split(potential.t, 4)
+        .tag(potential.t.inner, "ilp")
+        .split(potential.s, 4)
+        .prioritize(potential.s.outer, potential.t.inner)
     )
-    assert schedule.history[-1] == "prioritize(s_outer, t_inner)"
+    assert schedule.history[-1] == (
+        "prioritize(potential.s.outer, potential.t.inner)"
+    )
     assert schedule.buildable == (True, "")
     assert [fact.status.value for fact in schedule.facts()][-2:] == [
         "decided",
@@ -642,15 +659,15 @@ def test_a_sum_runs_outside_a_loop_of_its_statement_when_prioritized() -> None:
     # In either order of the steps, and put back with the statement loop first.
     assert (
         Schedule(potential, target="c")
-        .split("t", 4)
-        .split("s", 4)
-        .prioritize("s_outer", "t_inner")
-        .tag(t_inner="ilp")
+        .split(potential.t, 4)
+        .split(potential.s, 4)
+        .prioritize(potential.s.outer, potential.t.inner)
+        .tag(potential.t.inner, "ilp")
         .buildable
         == (True, "")
     )
     assert ("s_outer", "t_inner") in schedule.kernel.default_entrypoint.loop_priority
-    back = schedule.prioritize("t_inner", "s_outer")
+    back = schedule.prioritize(potential.t.inner, potential.s.outer)
     assert ("s_outer", "t_inner") not in back.kernel.default_entrypoint.loop_priority
 
 
@@ -659,17 +676,19 @@ def test_a_sum_outside_a_sequential_loop_is_not_buildable() -> None:
     # reason names the tag that keeps one per iteration.
     schedule = (
         Schedule(potential, target="c")
-        .split("t", 4)
-        .split("s", 4)
-        .prioritize("s_outer", "t_inner")
+        .split(potential.t, 4)
+        .split(potential.s, 4)
+        .prioritize(potential.s.outer, potential.t.inner)
     )
     ok, reason = schedule.buildable
     assert not ok
+    statement = where(potential, "out[t] = reduce_sum(")
     assert reason.startswith(
-        "the loop s_outer of the sum over s_outer, s_inner in S0 is ordered "
-        "outside t_inner, which runs in sequence"
+        "the loop potential.s.outer of the sum over potential.s.outer, "
+        f"potential.s.inner in out[t] = reduce_sum(...) ({statement}) is ordered "
+        "outside potential.t.inner, which runs in sequence"
     )
-    assert "Tag t_inner 'ilp'" in reason
+    assert "Tag potential.t.inner 'ilp', tag(potential.t.inner, 'ilp')" in reason
     (fact,) = [fact for fact in schedule.facts() if fact.kind == "buildable"]
     assert fact.status.value == "refuted"
 
@@ -678,9 +697,9 @@ def test_a_loop_a_sum_runs_outside_of_orders_none_of_its_instances() -> None:
     # running[t] reads what running[t - 1] stored: with the sum's loop
     # outside t, every sum is computed before any cell is stored, so the
     # dependence is refused with its pair, as an ilp tag on t refuses it.
-    schedule = Schedule(running, target="c").split("s", 2)
+    schedule = Schedule(running, target="c").split(running.s, 2)
     with pytest.raises(IllegalCast) as caught:
-        schedule.prioritize("s_outer", "t")
+        schedule.prioritize(running.s.outer, running.t)
     assert caught.value.fact.kind == "monotone"
     (source, source_at), (sink, sink_at), _ = caught.value.witness
     assert (source, sink) == ("S0", "S0")
@@ -691,32 +710,46 @@ def test_a_loop_a_sum_runs_outside_of_orders_none_of_its_instances() -> None:
     ("steps", "message"),
     [
         (
-            [("split", ("s", 2)), ("prioritize", ("s_inner", "s_outer"))],
-            "s_inner, s_outer are loops of one sum of S0, which adds its terms "
-            "in the order of its loops, outermost first (s_outer, s_inner); "
+            lambda p: [
+                ("split", (p.s, 2)),
+                ("prioritize", (p.s.inner, p.s.outer)),
+            ],
+            "potential.s.inner, potential.s.outer are loops of one sum of "
+            "out[t] = reduce_sum(...) ({}), which adds its terms in the order of "
+            "its loops, outermost first (potential.s.outer, potential.s.inner); "
             "reordering them would reassociate it",
         ),
         (
-            [
-                ("split", ("t", 2)),
-                ("split", ("s", 2)),
-                ("prioritize", ("s_inner", "t_inner")),
+            lambda p: [
+                ("split", (p.t, 2)),
+                ("split", (p.s, 2)),
+                ("prioritize", (p.s.inner, p.t.inner)),
             ],
-            "s_inner runs inside s_outer in the sum over s_outer, s_inner in "
-            "S0, so it can run outside t_inner only where s_outer does; name "
-            "s_outer first",
+            "potential.s.inner runs inside potential.s.outer in the sum over "
+            "potential.s.outer, potential.s.inner in out[t] = reduce_sum(...) "
+            "({}), so it can run outside potential.t.inner only where "
+            "potential.s.outer does; name potential.s.outer first",
         ),
-        ([("prioritize", ("q", "t"))], "not inames of potential: ['q']"),
     ],
 )
 def test_a_sum_keeps_the_order_of_its_own_loops(steps, message: str) -> None:
     schedule = Schedule(potential, target="c")
-    *before, (method, args) = steps
+    *before, (method, args) = steps(potential)
     for name, arguments in before:
         schedule = getattr(schedule, name)(*arguments)
     with pytest.raises(ValueError) as caught:
         getattr(schedule, method)(*args)
-    assert str(caught.value).endswith(message)
+    statement = where(potential, "out[t] = reduce_sum(")
+    assert str(caught.value).endswith(message.format(statement))
+
+
+def test_a_loop_a_kernel_does_not_have_is_refused_naming_what_it_has() -> None:
+    with pytest.raises(AttributeError) as caught:
+        potential.q  # noqa: B018
+    assert str(caught.value) == (
+        "potential has no loop, array, call or size named q; its loops are t, "
+        "s, arrays z, y, w, out and sizes m, n"
+    )
 
 
 def test_exactness_is_read_off_the_reduction_being_transformed() -> None:
@@ -726,9 +759,9 @@ def test_exactness_is_read_off_the_reduction_being_transformed() -> None:
     schedule = Schedule(ht.two_reductions_term())
 
     with pytest.raises(IllegalCast) as caught:
-        schedule.tag(j="l.0")
+        schedule.tag(TWO_REDUCTIONS.j, "l.0")
     assert "reassociates an exact reduction" in str(caught.value)
-    assert "into y" in str(caught.value)
+    assert "into two_reductions.y" in str(caught.value)
 
     # ``k`` belongs to the approx reduction, so tagging it is a reassociation
     # the type permits. It used to be refused, because the first reduction
@@ -736,10 +769,10 @@ def test_exactness_is_read_off_the_reduction_being_transformed() -> None:
     # for another reason: S0 has no loop or sum on the axis, so it runs on
     # every work item of it, and writes the ``y[r]`` S1 adds to, #63. ``ilp``
     # asks the same permission and runs in one work item.)
-    tagged = schedule.tag(k="ilp")
+    tagged = schedule.tag(TWO_REDUCTIONS.k, "ilp")
     assert tagged.reassociated == frozenset({"y"})
     with pytest.raises(IllegalCast, match="is in no loop on l.0"):
-        schedule.tag(k="l.0")
+        schedule.tag(TWO_REDUCTIONS.k, "l.0")
 
 
 def test_realize_answers_for_every_reduction_writing_the_array() -> None:
@@ -747,7 +780,7 @@ def test_realize_answers_for_every_reduction_writing_the_array() -> None:
     # exact reduction among them forbids a tree.
     schedule = Schedule(ht.two_reductions_term())
     with pytest.raises(IllegalCast) as caught:
-        schedule.realize("y", tree=True)
+        schedule.realize(TWO_REDUCTIONS.y, tree=True)
     assert "is exact" in caught.value.fact.provenance["detail"]
 
 
@@ -755,9 +788,9 @@ def test_realize_answers_for_every_reduction_writing_the_array() -> None:
 
 
 def test_the_facts_name_the_term_the_oracle_and_the_dependence_source() -> None:
-    schedule = Schedule(ht.transpose_term()).split("i", 4)
+    schedule = Schedule(ht.transpose_term()).split(TRANSPOSE.i, 4)
     facts = schedule.facts()
-    split = "split('i', 4, inner='i_inner', outer='i_outer')"
+    split = "split(transpose.i, 4)"
     assert schedule.key == f"transpose[c].{split}"
     # A term has no definition behind it, and is named by its name; a cast by
     # its steps, which mean the same on every target.
@@ -781,28 +814,25 @@ def test_two_schedules_of_one_kernel_keep_their_facts_apart() -> None:
     from lanky.ledger import Ledger
 
     term = ht.transpose_term()
-    by_four = Schedule(term).split("i", 4)
-    by_two = Schedule(term).split("i", 2)
-    # The same text, and a different schedule: the halves have swapped names.
-    swapped = Schedule(term).split("i", 4, inner="i_outer", outer="i_inner")
-    assert repr(swapped) == repr(by_four)
-    assert len({by_four.key, by_two.key, swapped.key}) == 3
+    by_four = Schedule(term).split(scope(term).i, 4)
+    by_two = Schedule(term).split(scope(term).i, 2)
+    assert len({by_four.key, by_two.key}) == 2
 
     ledger = Ledger()
-    for schedule in (by_four, by_two, swapped):
+    for schedule in (by_four, by_two):
         for fact in schedule.facts():
             ledger.add(fact)
-    assert len(ledger) == 6
+    assert len(ledger) == 4
 
     # A schedule that begins as another does shares the facts about those
     # steps, which are the same claims, and adds its own.
-    longer = by_four.interchange("j", "i_outer")
+    longer = by_four.interchange(scope(term).j, scope(term).i.inner)
     assert [fact.id for fact in longer.facts()][:2] == [
         fact.id for fact in by_four.facts()
     ]
     for fact in longer.facts():
         ledger.add(fact)
-    assert len(ledger) == 8
+    assert len(ledger) == 6
 
 
 def test_the_target_is_part_of_the_key_and_not_of_a_casts_facts(
@@ -810,8 +840,8 @@ def test_the_target_is_part_of_the_key_and_not_of_a_casts_facts(
 ) -> None:
     term = ht.transpose_term()
     assert Schedule(term).key == "transpose[c]"
-    on_c = Schedule(term).split("i", 4)
-    on_device = Schedule(term, target="opencl").split("i", 4)
+    on_c = Schedule(term).split(scope(term).i, 4)
+    on_device = Schedule(term, target="opencl").split(scope(term).i, 4)
     assert on_device.key.startswith("transpose[opencl].split(")
     assert on_c.fact_id("agreement") != on_device.fact_id("agreement")
     # What the split means is the same on both targets: one claim, one id,
@@ -821,11 +851,13 @@ def test_the_target_is_part_of_the_key_and_not_of_a_casts_facts(
         f.id for f in on_c.facts()
     ]
     # What the target builds is not: a work group on C is a fact of C's.
-    grouped = on_c.tag(i_outer="g.0")
+    grouped = on_c.tag(scope(term).i.outer, "g.0")
     (buildable,) = [f for f in grouped.facts() if f.kind == "buildable"]
     assert "[c]." in buildable.id
     assert not [
-        f for f in on_device.tag(i_outer="g.0").facts() if f.kind == "buildable"
+        f
+        for f in on_device.tag(scope(term).i.outer, "g.0").facts()
+        if f.kind == "buildable"
     ]
 
 
@@ -846,7 +878,7 @@ def test_two_accumulations_one_step_reassociates_keep_two_facts() -> None:
     from loopty.trace import trace
 
     term = trace(two_accumulations, evaluate_annotations(two_accumulations))
-    tagged = Schedule(term).tag(j="l.0", k="l.0")
+    tagged = Schedule(term).tag({scope(term).j: "l.0", scope(term).k: "l.0"})
     exactness = [fact for fact in tagged.facts() if fact.kind == "exactness"]
     assert [fact.id.rsplit(":", 1)[-1] for fact in exactness] == ["s", "t"]
     ledger = Ledger()
@@ -866,43 +898,67 @@ def test_a_schedule_carries_its_example_inputs() -> None:
     assert Schedule(ht.spmv_term()).examples is None
 
 
-def test_a_new_loop_cannot_take_the_name_of_another_one() -> None:
-    # Splitting i with its inner half called j would make two loops of the
-    # transpose one: the checker's coordinates used to get j twice, and loopy
-    # then refused the split from inside.
-    with pytest.raises(ValueError, match="share its name"):
-        Schedule(ht.transpose_term()).split("i", 4, inner="j")
-    with pytest.raises(ValueError, match="share its name"):
-        Schedule(ht.transpose_term()).split("i", 4, outer="n")
+def test_the_loops_a_split_makes_are_its_handles_children() -> None:
+    # The two loops a split makes are named by its handle, h.outer and
+    # h.inner, and no step names a new loop a string, so none can take the
+    # name of another. A child of a loop no split made, and a loop a split
+    # replaced, are refused with what the steps did.
+    split = Schedule(ht.transpose_term()).split(TRANSPOSE.i, 4)
+    assert split.nest == ("transpose.i.outer", "transpose.i.inner", "transpose.j")
+    with pytest.raises(TypeError) as caught:
+        Schedule(ht.transpose_term()).split("i", 4)
+    assert str(caught.value) == (
+        "split() takes a loop handle such as transpose.i, not the string 'i'"
+    )
+    with pytest.raises(ValueError) as caught:
+        Schedule(ht.transpose_term()).tag(TRANSPOSE.i.outer, "g.0")
+    assert str(caught.value) == (
+        "tag(transpose.i.outer, 'g.0'): transpose.i.outer is a loop a split of "
+        "transpose.i makes, and transpose.i is not split; split it first, "
+        "split(transpose.i, ...)"
+    )
+    with pytest.raises(ValueError) as caught:
+        split.tag(TRANSPOSE.i, "g.0")
+    assert str(caught.value) == (
+        "tag(transpose.i, 'g.0'): split(transpose.i, 4) replaced transpose.i by "
+        "transpose.i.outer and transpose.i.inner"
+    )
+    twice = split.split(TRANSPOSE.i.inner, 2)
+    assert twice.nest == (
+        "transpose.i.outer",
+        "transpose.i.inner.outer",
+        "transpose.i.inner.inner",
+        "transpose.j",
+    )
 
 
-def test_a_split_reduction_loop_cannot_take_another_name_either() -> None:
-    # A reduction loop is split without a reindexing map, and used to reach
-    # isl's "non-unique var name" from inside loopy's split_iname.
-    with pytest.raises(ValueError, match="share its name"):
-        Schedule(ht.spmv_term()).split("j", 4, inner="r")
-    with pytest.raises(ValueError, match="share its name"):
-        Schedule(ht.spmv_term()).split("j", 4, outer="n")
-    with pytest.raises(ValueError, match="named twice"):
-        Schedule(ht.spmv_term()).split("j", 4, inner="k", outer="k")
+def test_a_split_reduction_loop_is_named_by_its_handles_children_too() -> None:
     with pytest.raises(ValueError, match="must be positive"):
-        Schedule(ht.spmv_term()).split("j", 0)
+        Schedule(ht.spmv_term()).split(SPMV.j, 0)
+    split = Schedule(ht.spmv_term()).split(SPMV.j, 4)
+    assert split.tag(SPMV.j.inner, "l.0").tags == {"j_inner": "l.0"}
 
 
 def test_skewing_or_tiling_a_loop_by_itself_is_refused() -> None:
     schedule = Schedule(ht.jacobi_term())
     with pytest.raises(ValueError, match="two different loops"):
-        schedule.skew("i", by="i")
+        schedule.skew(JACOBI.i, by=JACOBI.i)
     with pytest.raises(ValueError, match="two different loops"):
-        schedule.tile("t", "t", 4, 4)
+        schedule.tile(JACOBI.t, JACOBI.t, 4, 4)
 
 
-def test_unknown_inames_are_refused_before_loopy_sees_them() -> None:
+def test_unknown_loops_are_refused_before_loopy_sees_them() -> None:
+    # A loop the term does not have is no handle: the scope says what it has.
+    with pytest.raises(AttributeError) as caught:
+        TRANSPOSE.k  # noqa: B018
+    assert str(caught.value) == (
+        "transpose has no loop, array, call or size named k; its loops are i, "
+        "j, arrays a, b and sizes n, m"
+    )
+    # and a handle of another kernel names the handle to write
     schedule = Schedule(ht.transpose_term())
-    with pytest.raises(ValueError, match="not an iname"):
-        schedule.split("k", 4)
-    with pytest.raises(ValueError, match="not inames"):
-        schedule.interchange("i", "k")
+    with pytest.raises(ValueError, match="this schedule is of transpose"):
+        schedule.split(JACOBI.i, 4)
 
 
 def test_the_dependences_are_reconciled_with_the_flow_module() -> None:
@@ -910,13 +966,13 @@ def test_the_dependences_are_reconciled_with_the_flow_module() -> None:
     # keeps each dependence separately so that a rejection can name the array
     # cell, and ``loopty.flow``'s, which is the definition. A schedule is checked
     # against the union, and every cast fact carries the comparison.
-    schedule = Schedule(ht.jacobi_term()).skew("i", by="t")
+    schedule = Schedule(ht.jacobi_term()).skew(JACOBI.i, by=JACOBI.t)
     notes = {fact.provenance["dependences"] for fact in schedule.facts()}
     assert notes == {"agree with loopty.flow"}
 
 
 def test_a_term_with_no_dependences_says_so_on_both_sides() -> None:
-    schedule = Schedule(ht.transpose_term()).split("i", 4)
+    schedule = Schedule(ht.transpose_term()).split(TRANSPOSE.i, 4)
     note = schedule.facts()[0].provenance["dependences"]
     assert "none either" in note
 
@@ -1005,7 +1061,7 @@ def test_tiling_the_diamond_is_legal_for_the_stencil_and_computes() -> None:
     schedule = (
         Schedule(ht.jacobi_term(), sizes={"nt": 16, "nx": 16})
         .affine(DIAMOND)
-        .tile("a", "b", 4, 4)
+        .tile(JACOBI.loops.a, JACOBI.loops.b, 4, 4)
     )
     assert schedule.order == ("a_outer", "b_outer", "a_inner", "b_inner")
     assert [fact.status.value for fact in schedule.facts()] == ["decided"] * 4
@@ -1043,7 +1099,7 @@ def test_skew_is_the_affine_map_that_keeps_the_loop_names(monkeypatch) -> None:
         raise AssertionError("skew called lp.map_domain")
 
     monkeypatch.setattr(lp, "map_domain", refuse)
-    skewed = Schedule(ht.jacobi_term()).skew("i", by="t")
+    skewed = Schedule(ht.jacobi_term()).skew(JACOBI.i, by=JACOBI.t)
 
     # The same map written out, with the names put back on the outputs.
     mapping = isl.Map("{ [t, i] -> [t2, i2] : t2 = t and i2 = i + t }")
@@ -1071,7 +1127,11 @@ def test_a_skewed_loop_keeps_its_tag_in_the_kernel() -> None:
     # stencil this was measured on is refused now: with i on l.0 each work
     # item reads what its neighbour wrote a step before, #63. The transpose
     # has no dependence for the skew to move between work items.)
-    schedule = Schedule(ht.transpose_term()).tag(i="l.0").skew("i", by="j")
+    schedule = (
+        Schedule(ht.transpose_term())
+        .tag(TRANSPOSE.i, "l.0")
+        .skew(TRANSPOSE.i, by=TRANSPOSE.j)
+    )
     assert schedule.tags == {"i": "l.0"}
     (tag,) = schedule.kernel.default_entrypoint.inames["i"].tags
     assert type(tag).__name__ == "LocalInameTag"
@@ -1082,7 +1142,10 @@ def test_a_permutation_that_keeps_the_names_is_an_interchange() -> None:
     mapping = mapping.set_dim_name(isl.dim_type.out, 0, "j")
     mapping = mapping.set_dim_name(isl.dim_type.out, 1, "i")
     schedule = Schedule(ht.transpose_term()).affine(mapping)
-    assert schedule.order == Schedule(ht.transpose_term()).interchange("j", "i").order
+    assert (
+        schedule.order
+        == Schedule(ht.transpose_term()).interchange(TRANSPOSE.j, TRANSPOSE.i).order
+    )
     assert [fact.status.value for fact in schedule.facts()] == ["decided"] * 2
 
     a = np.arange(8, dtype=np.float64).reshape(2, 4)
@@ -1148,7 +1211,7 @@ def test_a_map_the_kernel_rewrite_cannot_write_is_reported_not_thrown() -> None:
     assert schedule.kernel is None
 
     # Later steps are still checked, and still unbuildable.
-    later = schedule.split("q", 2)
+    later = schedule.split(scope(term).loops.q, 2)
     assert later.kernel is None
     assert later.buildable == (False, reason)
     assert [f.status.value for f in later.facts()][-2:] == ["decided", "decided"]
@@ -1170,15 +1233,16 @@ def test_a_tag_names_a_loop_with_or_without_a_kernel() -> None:
     )
     assert unbuildable.kernel is None
     buildable = Schedule(term, sizes={"n": 4})
-    for schedule, row in ((unbuildable, "q"), (buildable, "r")):
-        with pytest.raises(ValueError, match="'no_such_loop' is not an iname"):
-            schedule.tag(no_such_loop="g.0")
+    loops = scope(term).loops
+    for schedule, row in ((unbuildable, loops.q), (buildable, scope(term).r)):
+        with pytest.raises(ValueError, match="has no loop no_such_loop"):
+            schedule.tag(loops.no_such_loop, "g.0")
         with pytest.raises(ValueError, match="loopy cannot read the tag"):
-            schedule.tag(**{row: "g.zero"})
+            schedule.tag(row, "g.zero")
     # A reduction's loop is a loop a tag may name.
-    Schedule(ht.spmv_term()).tag(j="l.0")
+    Schedule(ht.spmv_term()).tag(SPMV.j, "l.0")
     # And a kernel-less schedule still takes a tag on a loop it has.
-    assert unbuildable.tag(q="g.0").tags == {"q": "g.0"}
+    assert unbuildable.tag(scope(term).loops.q, "g.0").tags == {"q": "g.0"}
 
 
 @pytest.mark.parametrize("tag", ["g.0", "l.0", "unr", "for"])
@@ -1195,29 +1259,34 @@ def test_a_tagged_loop_is_not_split_or_tiled_with_or_without_a_kernel(tag) -> No
 
     term = trace(ragged_row_sums, evaluate_annotations(ragged_row_sums))
     with pytest.raises(ValueError) as caught:
-        Schedule(term, sizes={"n": 4}).tag(r=tag).split("r", 2)
+        Schedule(term, sizes={"n": 4}).tag(scope(term).r, tag).split(scope(term).r, 2)
     assert str(caught.value) == (
-        f"split(r, 2): r carries the tag {tag!r}; split it before tagging the "
-        "loops it makes"
+        f"split(ragged_row_sums.r, 2): ragged_row_sums.r carries the tag {tag!r}; "
+        "split it before tagging the loops it makes"
     )
     unwritten = Schedule(term, sizes={"n": 4}).affine(
         "{ [r, j] -> [q, k] : q = r and k = j + r }"
     )
     assert unwritten.kernel is None
-    tagged = unwritten.tag(q=tag)
-    with pytest.raises(ValueError, match=f"split\\(q, 2\\): q carries the tag '{tag}'"):
-        tagged.split("q", 2, inner="qi", outer="qo")
+    tagged = unwritten.tag(scope(term).loops.q, tag)
+    with pytest.raises(
+        ValueError,
+        match=rf"split\(ragged_row_sums.loops.q, 2\): ragged_row_sums.loops.q "
+        f"carries the tag '{tag}'",
+    ):
+        tagged.split(scope(term).loops.q, 2)
     with pytest.raises(ValueError) as caught:
-        tagged.tile("q", "k", 2, 2)
+        tagged.tile(scope(term).loops.q, scope(term).loops.k, 2, 2)
     assert str(caught.value) == (
-        f"tile(q,k,2,2): q carries the tag {tag!r}; tile before tagging the "
-        "loops the tiling makes"
+        "tile(ragged_row_sums.loops.q, ragged_row_sums.loops.k, 2, 2): "
+        f"ragged_row_sums.loops.q carries the tag {tag!r}; tile before tagging "
+        "the loops the tiling makes"
     )
     # Split first and tag what the split makes, and the tag is on a loop the
     # schedule has.
-    split = unwritten.split("q", 2, inner="qi", outer="qo").tag(qo=tag)
-    assert split.tags == {"qo": tag}
-    assert split.order == ("qo", "qi", "k")
+    split = unwritten.split(scope(term).loops.q, 2).tag(scope(term).loops.q.outer, tag)
+    assert split.tags == {"q_outer": tag}
+    assert split.order == ("q_outer", "q_inner", "k")
     if tag == "g.0":
         assert split.facts()[-1].statement.endswith("within one work item")
 
@@ -1225,23 +1294,28 @@ def test_a_tagged_loop_is_not_split_or_tiled_with_or_without_a_kernel(tag) -> No
 def test_a_sums_tagged_loop_and_two_tagged_tiled_loops_are_refused_too() -> None:
     # A sum's loop is split by loopy too, and refused by it the same way.
     with pytest.raises(ValueError) as caught:
-        Schedule(ht.spmv_term(exactness="reassoc")).tag(j="l.0").split("j", 2)
+        Schedule(ht.spmv_term(exactness="reassoc")).tag(SPMV_REASSOC.j, "l.0").split(
+            SPMV_REASSOC.j, 2
+        )
     assert str(caught.value) == (
-        "split(j, 2): j carries the tag 'l.0'; split it before tagging the loops "
-        "it makes"
+        "split(spmv.j, 2): spmv.j carries the tag 'l.0'; split it before tagging "
+        "the loops it makes"
     )
     with pytest.raises(ValueError) as caught:
-        Schedule(ht.transpose_term()).tag(i="g.0", j="l.0").tile("i", "j", 2, 2)
+        Schedule(ht.transpose_term()).tag(
+            {TRANSPOSE.i: "g.0", TRANSPOSE.j: "l.0"}
+        ).tile(TRANSPOSE.i, TRANSPOSE.j, 2, 2)
     assert str(caught.value) == (
-        "tile(i,j,2,2): i carries the tag 'g.0' and j carries the tag 'l.0'; tile "
-        "before tagging the loops the tiling makes"
+        "tile(transpose.i, transpose.j, 2, 2): transpose.i carries the tag 'g.0' "
+        "and transpose.j carries the tag 'l.0'; tile before tagging the loops the "
+        "tiling makes"
     )
     # A loop beside a tagged one is split and tiled as before.
-    beside = Schedule(ht.transpose_term()).tag(i="g.0").split("j", 2)
+    beside = Schedule(ht.transpose_term()).tag(TRANSPOSE.i, "g.0").split(TRANSPOSE.j, 2)
     assert beside.tags == {"i": "g.0"}
     assert beside.order == ("i", "j_outer", "j_inner")
-    summed = Schedule(ht.spmv_term(exactness="reassoc")).tag(j="l.0")
-    assert summed.split("r", 2).tags == {"j": "l.0"}
+    summed = Schedule(ht.spmv_term(exactness="reassoc")).tag(SPMV_REASSOC.j, "l.0")
+    assert summed.split(SPMV_REASSOC.r, 2).tags == {"j": "l.0"}
 
 
 def test_only_the_loops_a_ragged_loop_becomes_keep_its_extent_from_data() -> None:
@@ -1256,9 +1330,9 @@ def test_only_the_loops_a_ragged_loop_becomes_keep_its_extent_from_data() -> Non
     term = trace(ragged_row_sums, evaluate_annotations(ragged_row_sums))
     schedule = Schedule(term, sizes={"n": 4})
     assert schedule._data_dependent == {"j"}
-    tiled = schedule.tile("r", "j", 2, 2)
+    tiled = schedule.tile(scope(term).r, scope(term).j, 2, 2)
     assert tiled._data_dependent == {"j_outer", "j_inner"}
-    assert schedule.skew("j", by="r")._data_dependent == {"j"}
+    assert schedule.skew(scope(term).j, by=scope(term).r)._data_dependent == {"j"}
     diamond = schedule.affine("{ [r, j] -> [a, b] : a = r + j and b = r - j }")
     assert diamond._data_dependent == {"a", "b"}
 
@@ -1299,7 +1373,7 @@ def test_a_statement_in_one_of_two_tiled_loops_is_split_by_its_own_loop() -> Non
 
     term = trace(ragged_row_totals, evaluate_annotations(ragged_row_totals))
     want = np.array([3.0, 0.0, 3.0 + 4.0 + 5.0, 6.0, 7.0 + 8.0 + 9.0 + 10.0])
-    tiled = Schedule(term, sizes={"n": 5}).tile("r", "j", 2, 2)
+    tiled = Schedule(term, sizes={"n": 5}).tile(scope(term).r, scope(term).j, 2, 2)
     assert tiled.order == ("r_outer", "j_outer", "r_inner", "j_inner")
     assert [fact.status.value for fact in tiled.facts()] == [
         "decided",
@@ -1311,7 +1385,7 @@ def test_a_statement_in_one_of_two_tiled_loops_is_split_by_its_own_loop() -> Non
     # outside r_inner and would pick a nest of its own (#41), which the tile
     # is refused as unbuildable for. Run the tiles with both halves of the
     # row outside, an order it can keep.
-    rows_first = tiled.interchange("r_inner", "j_outer")
+    rows_first = tiled.interchange(scope(term).r.inner, scope(term).j.outer)
     assert rows_first.order == ("r_outer", "r_inner", "j_outer", "j_inner")
     assert rows_first.buildable == (True, "")
     assert [fact.status.value for fact in rows_first.facts()] == ["decided"] * 4
@@ -1330,7 +1404,7 @@ def test_a_statement_in_one_of_two_tiled_loops_is_split_by_its_own_loop() -> Non
     # A skew mixes the two loops: S0 has no j to shift, and the skew has no
     # part over r alone that means anything for it.
     with pytest.raises(ValueError, match="not in j, and the map mixes them"):
-        Schedule(term, sizes={"n": 5}).skew("j", by="r")
+        Schedule(term, sizes={"n": 5}).skew(scope(term).j, by=scope(term).r)
     with pytest.raises(ValueError, match="S0 runs in r but not in j"):
         Schedule(term, sizes={"n": 5}).affine(
             "{ [r, j] -> [a, b] : a = r + j and b = r - j }"
@@ -1382,6 +1456,7 @@ def _shift_reference() -> np.ndarray:
     return w
 
 
+@functools.cache
 def _shift_term():
     from lanky.terms import evaluate_annotations
 
@@ -1418,7 +1493,9 @@ def test_a_tile_that_orders_a_fiber_outside_its_row_is_not_buildable() -> None:
     from loopty.executor import LoopyExecutor
     from loopty.schedule import UnbuildableSchedule
 
-    tiled = Schedule(_shift_term(), sizes={"n": 6, "q": 3}).tile("r", "j", 2, 2)
+    tiled = Schedule(_shift_term(), sizes={"n": 6, "q": 3}).tile(
+        scope(_shift_term()).r, scope(_shift_term()).j, 2, 2
+    )
     assert [f.status.value for f in tiled.facts() if f.kind != "buildable"] == [
         "decided",
         "decided",
@@ -1426,23 +1503,28 @@ def test_a_tile_that_orders_a_fiber_outside_its_row_is_not_buildable() -> None:
     ok, reason = tiled.buildable
     assert not ok
     assert reason.startswith(
-        "the loop j_outer is ordered outside r_inner, but loopy nests it inside "
-        "r_inner: the domain of j_outer names r_inner, as a ragged fiber's "
+        "the loop ragged_shift.j.outer is ordered outside ragged_shift.r.inner, "
+        "but loopy nests it inside ragged_shift.r.inner: the domain of "
+        "ragged_shift.j.outer names ragged_shift.r.inner, as a ragged fiber's "
         "names its row. "
     )
-    assert "interchange('r_inner', 'j_outer')" in reason
+    assert "interchange(ragged_shift.r.inner, ragged_shift.j.outer)" in reason
     (fact,) = [f for f in tiled.facts() if f.kind == "buildable"]
     assert (fact.status.value, fact.decided_by) == ("refuted", "loopy-target")
     assert fact.provenance["reason"] == reason
     # What the refusal stands for, measured: loopy drops the priority.
     assert any("Cannot satisfy constraint" in w for w in _loopy_warnings(tiled))
-    with pytest.raises(UnbuildableSchedule, match="j_outer is ordered outside"):
+    with pytest.raises(
+        UnbuildableSchedule, match="ragged_shift.j.outer is ordered outside"
+    ):
         LoopyExecutor().run(tiled, **_shift_inputs())
 
     # Putting the row back outside the fiber is an order loopy keeps, the
     # schedule is buildable again and carries no buildable fact, and the
     # tiles compute what the body does.
-    repaired = tiled.interchange("r_inner", "j_outer")
+    repaired = tiled.interchange(
+        scope(_shift_term()).r.inner, scope(_shift_term()).j.outer
+    )
     assert repaired.buildable == (True, "")
     assert not [f for f in repaired.facts() if f.kind == "buildable"]
     assert not any("Cannot satisfy" in w for w in _loopy_warnings(repaired))
@@ -1451,13 +1533,17 @@ def test_a_tile_that_orders_a_fiber_outside_its_row_is_not_buildable() -> None:
 
 
 def test_an_interchange_that_puts_a_fiber_before_its_row_is_not_buildable() -> None:
-    swapped = Schedule(_shift_term()).interchange("j", "r")
+    swapped = Schedule(_shift_term()).interchange(
+        scope(_shift_term()).j, scope(_shift_term()).r
+    )
     assert [f.status.value for f in swapped.facts()] == [
         "decided",
         "decided",
         "refuted",
     ]
-    assert swapped.buildable[1].startswith("the loop j is ordered outside r")
+    assert swapped.buildable[1].startswith(
+        "the loop ragged_shift.j is ordered outside ragged_shift.r"
+    )
     assert any("Cannot satisfy constraint" in w for w in _loopy_warnings(swapped))
 
 
@@ -1481,11 +1567,13 @@ def test_a_dense_loop_below_another_statement_is_nested_in_its_row_too() -> None
     from loopty.trace import trace
 
     term = trace(rows_then_totals, evaluate_annotations(rows_then_totals))
-    swapped = Schedule(term).interchange("j", "r")
-    assert swapped.buildable[1].startswith("the loop j is ordered outside r")
+    swapped = Schedule(term).interchange(scope(term).j, scope(term).r)
+    assert swapped.buildable[1].startswith(
+        "the loop rows_then_totals.j is ordered outside rows_then_totals.r"
+    )
     assert any("Cannot satisfy constraint" in w for w in _loopy_warnings(swapped))
     # One domain over both loops, as a lone dense nest is, is loopy's to order.
-    transposed = Schedule(ht.transpose_term()).interchange("j", "i")
+    transposed = Schedule(ht.transpose_term()).interchange(TRANSPOSE.j, TRANSPOSE.i)
     assert transposed.buildable == (True, "")
     assert not any("Cannot satisfy" in w for w in _loopy_warnings(transposed))
 
@@ -1535,7 +1623,7 @@ def test_a_loop_nested_in_its_row_by_instructions_alone_stays_inside() -> None:
     ]
     assert "r" in domain.get_var_names(isl.dim_type.set)
 
-    tiled = base.tile("r", "k", 2, 2)
+    tiled = base.tile(scope(term).r, scope(term).k, 2, 2)
     assert [f.status.value for f in tiled.facts() if f.kind != "buildable"] == [
         "decided",
         "decided",
@@ -1543,16 +1631,19 @@ def test_a_loop_nested_in_its_row_by_instructions_alone_stays_inside() -> None:
     ok, reason = tiled.buildable
     assert not ok
     assert reason.startswith(
-        "the loop k_outer is ordered outside r_inner, but loopy nests it inside "
-        "r_inner: r_inner runs every instruction k_outer runs, and "
+        "the loop ragged_scan.k.outer is ordered outside ragged_scan.r.inner, but "
+        "loopy nests it inside ragged_scan.r.inner: ragged_scan.r.inner runs "
+        "every instruction ragged_scan.k.outer runs, and "
     )
-    assert "interchange('r_inner', 'k_outer')" in reason
+    assert "interchange(ragged_scan.r.inner, ragged_scan.k.outer)" in reason
     assert any("Cannot satisfy constraint" in w for w in _loopy_warnings(tiled))
-    swapped = base.interchange("k", "r")
-    assert swapped.buildable[1].startswith("the loop k is ordered outside r,")
+    swapped = base.interchange(scope(term).k, scope(term).r)
+    assert swapped.buildable[1].startswith(
+        "the loop ragged_scan.k is ordered outside ragged_scan.r,"
+    )
     assert any("Cannot satisfy constraint" in w for w in _loopy_warnings(swapped))
 
-    repaired = tiled.interchange("r_inner", "k_outer")
+    repaired = tiled.interchange(scope(term).r.inner, scope(term).k.outer)
     assert repaired.buildable == (True, "")
     assert not any("Cannot satisfy" in w for w in _loopy_warnings(repaired))
     out = run(repaired, **_scan_inputs())
@@ -1574,8 +1665,6 @@ def test_a_new_loop_cannot_take_a_name_the_lowering_added() -> None:
     (offsets,) = schedule.lowering.ragged.values()
     with pytest.raises(ValueError, match="share its name"):
         schedule.affine(f"{{ [r] -> [{offsets}] : {offsets} = r }}")
-    with pytest.raises(ValueError, match="share its name"):
-        schedule.split("r", 2, inner=offsets)
 
 
 @pytest.mark.parametrize(
@@ -1607,7 +1696,9 @@ def test_affine_refuses_reduction_loops_tagged_loops_and_non_maps() -> None:
     with pytest.raises(ValueError, match="a is named twice"):
         Schedule(ht.jacobi_term()).affine(doubled)
     with pytest.raises(ValueError, match="carries a tag"):
-        Schedule(ht.transpose_term()).tag(i="g.0").affine("{ [i] -> [k] : k = i }")
+        Schedule(ht.transpose_term()).tag(TRANSPOSE.i, "g.0").affine(
+            "{ [i] -> [k] : k = i }"
+        )
     with pytest.raises(TypeError, match="takes an isl map"):
         Schedule(ht.jacobi_term()).affine(isl.Set("{ [t, i] }"))
     with pytest.raises(ValueError, match="has to be named"):
@@ -1627,8 +1718,8 @@ def test_only_a_loop_the_kernel_steps_through_is_counted() -> None:
     # loop it unrolls), so it keeps its holes; a loop inside a tagged one
     # still steps, from an offset the tagged loop gives.
     diamond = Schedule(ht.jacobi_term()).affine(DIAMOND)
-    assert diamond.tag(b="unr").strides == {}
-    assert diamond.tag(a="unr").strides == {"b": "2*b_step - a"}
+    assert diamond.tag(JACOBI.loops.b, "unr").strides == {}
+    assert diamond.tag(JACOBI.loops.a, "unr").strides == {"b": "2*b_step - a"}
     # The schedule's own loops are still a and b; only the kernel counts.
     assert diamond.order == ("a", "b")
     assert "b_step" in diamond.kernel.default_entrypoint.all_inames()
@@ -1655,7 +1746,7 @@ def test_a_loop_a_guard_narrows_to_a_congruence_steps_over_it_too() -> None:
 
     term = trace(every_other, evaluate_annotations(every_other))
     assert Schedule(term).strides == {}
-    split = Schedule(term, sizes={"n": 10}).split("i", 4)
+    split = Schedule(term, sizes={"n": 10}).split(scope(term).i, 4)
     assert split.strides == {"i_inner": "2*i_inner_step"}
     for n in (1, 2, 7, 10):
         x = np.arange(n, dtype=np.float64)
@@ -1689,10 +1780,14 @@ def _points(domain: isl.BasicSet, **sizes: int) -> int:
         (DIAMOND, (), {"b": "2*b_step - a"}),
         # A cut by an odd factor leaves the counted loop an offset that
         # depends on the loop outside it too.
-        (DIAMOND, ("split", "b", 3), {"b_inner": "2*b_inner_step - a - b_outer"}),
         (
             DIAMOND,
-            ("tile", "a", "b", 3, 5),
+            ("split", JACOBI.loops.b, 3),
+            {"b_inner": "2*b_inner_step - a - b_outer"},
+        ),
+        (
+            DIAMOND,
+            ("tile", JACOBI.loops.a, JACOBI.loops.b, 3, 5),
             {"b_inner": "2*b_inner_step - a_outer - a_inner - b_outer"},
         ),
         (
@@ -1749,7 +1844,7 @@ def test_a_congruence_cut_by_an_odd_factor_steps_from_its_outer_loop() -> None:
     from loopty.trace import trace
 
     term = trace(every_other, evaluate_annotations(every_other))
-    split = Schedule(term, sizes={"n": 10}).split("i", 3)
+    split = Schedule(term, sizes={"n": 10}).split(scope(term).i, 3)
     ((name, _expression),) = split.strides.items()
     assert name == "i_inner"
     for built in (split, _as_loopy_had_it(split)):
@@ -1820,9 +1915,9 @@ def test_a_schedules_facts_are_at_the_lines_of_its_steps() -> None:
     here = sys._getframe().f_lineno
     schedule = (
         Schedule(ht.jacobi_term(), sizes={"nt": 8, "nx": 8})
-        .assume("nx >= 4")
-        .split("i", 2)
-        .tag(i_inner="unr")
+        .assume(JACOBI.nx >= 4)
+        .split(JACOBI.i, 2)
+        .tag(JACOBI.i.inner, "unr")
     )
     at = [f"test_schedule.py:{here + line}" for line in (3, 4, 5)]
     expected = [at[0], at[1], at[1], at[2], at[2]]
@@ -2123,7 +2218,7 @@ def test_maps_per_statement_move_statements_that_run_in_all_their_loops() -> Non
 
 
 def test_retargeting_to_the_same_target_is_the_same_schedule() -> None:
-    schedule = Schedule(ht.transpose_term()).split("i", 4)
+    schedule = Schedule(ht.transpose_term()).split(TRANSPOSE.i, 4)
     assert schedule.retarget("c") is schedule
 
 
@@ -2132,8 +2227,8 @@ def test_retargeting_replays_every_step_and_checks_it_again() -> None:
     # the lowering they are checked against, and the buildability question.
     schedule = (
         Schedule(ht.transpose_term(), sizes={"n": 4, "m": 4})
-        .split("i", 4, inner="i_in", outer="i_out")
-        .interchange("j", "i_out")
+        .split(TRANSPOSE.i, 4)
+        .interchange(TRANSPOSE.j, TRANSPOSE.i.outer)
     )
     other = schedule.retarget("c-source")
 
@@ -2164,15 +2259,15 @@ def test_a_schedule_of_a_schedule_starts_from_its_steps_and_target() -> None:
     arrays = {"a": np.arange(12.0).reshape(3, 4), "b": np.zeros((4, 3))}
     inner = (
         Schedule(ht.transpose_term(), sizes={"n": 4, "m": 4})
-        .split("i", 4, inner="i_in", outer="i_out")
-        .interchange("j", "i_out")
+        .split(TRANSPOSE.i, 4)
+        .interchange(TRANSPOSE.j, TRANSPOSE.i.outer)
         .example(**arrays)
     )
     outer = Schedule(inner)
     assert outer is not inner
     assert outer.key == inner.key
     assert outer.history == inner.history
-    assert outer.order == inner.order == ("j", "i_in", "i_out")
+    assert outer.order == inner.order == ("j", "i_inner", "i_outer")
     assert outer.sizes == inner.sizes
     assert set(outer.examples) == set(arrays)
     assert [(fact.id, fact.status.value) for fact in outer.facts()] == [
@@ -2180,12 +2275,13 @@ def test_a_schedule_of_a_schedule_starts_from_its_steps_and_target() -> None:
     ]
     assert emit_code(outer) == emit_code(inner)
     # A step after it acts on the inner schedule's loops.
-    with pytest.raises(ValueError, match="is not an iname"):
-        outer.split("i", 2)
-    assert outer.split("i_in", 2).key == inner.split("i_in", 2).key
+    with pytest.raises(ValueError, match="split\\(transpose.i, 4\\) replaced"):
+        outer.split(TRANSPOSE.i, 2)
+    again = outer.split(TRANSPOSE.i.inner, 2)
+    assert again.key == inner.split(TRANSPOSE.i.inner, 2).key
     # Its target is the inner one's, unless another is given, which replays
     # the steps there as retarget does.
-    other = Schedule(ht.transpose_term(), target="c-source").split("i", 4)
+    other = Schedule(ht.transpose_term(), target="c-source").split(TRANSPOSE.i, 4)
     assert Schedule(other).target == "c-source"
     assert Schedule(other).key == other.key
     assert Schedule(inner, target="c-source").key == inner.retarget("c-source").key
@@ -2207,8 +2303,8 @@ def test_a_hardware_axis_inside_a_ragged_fiber_is_reported_not_thrown() -> None:
 
     schedule = (
         Schedule(ht.spmv_term())
-        .split("j", 32, inner="j_in", outer="j_out")
-        .tag(j_in="l.0")
+        .split(SPMV.j, 32)
+        .tag(SPMV.j.inner, "l.0")
     )
     ok, reason = schedule.buildable
     assert not ok
@@ -2239,11 +2335,7 @@ def test_a_reduction_split_across_parallel_and_sequential_inames_is_reported():
         term, name="spmv_dense", stmts=(stmt,), sizes=("n", "m", "k")
     )
 
-    schedule = (
-        Schedule(dense)
-        .split("j", 8, inner="j_in", outer="j_out")
-        .tag(j_in="l.0")
-    )
+    schedule = Schedule(dense).split(scope(dense).j, 8).tag(scope(dense).j.inner, "l.0")
     ok, reason = schedule.buildable
     assert not ok
     assert "in parallel" in reason and "in sequence" in reason
@@ -2252,7 +2344,7 @@ def test_a_reduction_split_across_parallel_and_sequential_inames_is_reported():
 def test_a_schedule_the_target_can_build_says_so_and_carries_no_extra_fact(
     plain_opencl,
 ):
-    schedule = Schedule(ht.spmv_term(), target="opencl").tag(r="g.0")
+    schedule = Schedule(ht.spmv_term(), target="opencl").tag(SPMV.r, "g.0")
     assert schedule.buildable == (True, "")
     assert not [f for f in schedule.facts() if f.kind == "buildable"]
     schedule.require_buildable()
@@ -2287,13 +2379,11 @@ def test_a_refused_cast_carries_its_message_as_the_reason() -> None:
     stencil = Schedule(ht.jacobi_term(), sizes={"nt": 16, "nx": 16})
     exact = Schedule(ht.spmv_term(exactness="exact"))
     refusals = {
-        "monotone": refused(lambda: stencil.tile("t", "i", 8, 8)),
+        "monotone": refused(lambda: stencil.tile(JACOBI.t, JACOBI.i, 8, 8)),
         "bijective": collapsed(),
-        "realize": refused(lambda: exact.realize("y", tree=True)),
+        "realize": refused(lambda: exact.realize(SPMV_EXACT.y, tree=True)),
         "tag": refused(
-            lambda: exact.split("j", 2, inner="j_in", outer="j_out").tag(
-                j_in="l.0"
-            )
+            lambda: exact.split(SPMV_EXACT.j, 2).tag(SPMV_EXACT.j.inner, "l.0")
         ),
     }
     for exc in refusals.values():
@@ -2308,7 +2398,7 @@ def test_a_refused_cast_carries_its_message_as_the_reason() -> None:
 
 def test_a_refused_cast_carries_a_witness_exactly_when_isl_gave_one() -> None:
     stencil = Schedule(ht.jacobi_term(), sizes={"nt": 16, "nx": 16})
-    backwards = refused(lambda: stencil.tile("t", "i", 8, 8))
+    backwards = refused(lambda: stencil.tile(JACOBI.t, JACOBI.i, 8, 8))
     assert backwards.fact.provenance["witness"] == backwards.witness
     (source_id, _), (sink_id, _), params = backwards.fact.provenance["witness"]
     assert source_id == sink_id == "S0"
@@ -2321,7 +2411,7 @@ def test_a_refused_cast_carries_a_witness_exactly_when_isl_gave_one() -> None:
 
     # Exactness is not a question for isl, so there is no point to show.
     exact = Schedule(ht.spmv_term(exactness="exact"))
-    tree = refused(lambda: exact.realize("y", tree=True))
+    tree = refused(lambda: exact.realize(SPMV_EXACT.y, tree=True))
     assert tree.witness is None
     assert "witness" not in tree.fact.provenance
 
@@ -2329,8 +2419,8 @@ def test_a_refused_cast_carries_a_witness_exactly_when_isl_gave_one() -> None:
 def test_a_schedule_the_target_cannot_build_gives_the_limit_as_the_reason() -> None:
     schedule = (
         Schedule(ht.spmv_term())
-        .split("j", 32, inner="j_in", outer="j_out")
-        .tag(j_in="l.0")
+        .split(SPMV.j, 32)
+        .tag(SPMV.j.inner, "l.0")
     )
     (fact,) = [f for f in schedule.facts() if f.kind == "buildable"]
     assert fact.provenance["reason"] == schedule.buildable[1]
@@ -2351,13 +2441,13 @@ def test_lanky_prints_the_reason_of_every_refuted_cast_fact() -> None:
     exact = Schedule(ht.spmv_term(exactness="exact"))
     unbuildable = (
         Schedule(ht.spmv_term())
-        .split("j", 32, inner="j_in", outer="j_out")
-        .tag(j_in="l.0")
+        .split(SPMV.j, 32)
+        .tag(SPMV.j.inner, "l.0")
     )
     facts = [
-        refused(lambda: stencil.tile("t", "i", 8, 8)).fact,
+        refused(lambda: stencil.tile(JACOBI.t, JACOBI.i, 8, 8)).fact,
         collapsed().fact,
-        refused(lambda: exact.realize("y", tree=True)).fact,
+        refused(lambda: exact.realize(SPMV_EXACT.y, tree=True)).fact,
         *[f for f in unbuildable.facts() if f.kind == "buildable"],
     ]
     assert len(facts) == 4
@@ -2406,7 +2496,7 @@ def test_a_schedule_of_an_access_indexed_by_a_size_is_built() -> None:
     from loopty.trace import trace
 
     term = trace(last_then_all, evaluate_annotations(last_then_all))
-    schedule = Schedule(term, sizes={"n": 6}).split("i", 2)
+    schedule = Schedule(term, sizes={"n": 6}).split(scope(term).i, 2)
     assert {fact.kind: fact.status.value for fact in schedule.facts()} == {
         "bijective": "decided",
         "monotone": "decided",
@@ -2424,14 +2514,15 @@ def test_a_dependence_through_a_cell_a_size_names_is_found() -> None:
     term = trace(into_the_last, evaluate_annotations(into_the_last))
     schedule = Schedule(term, sizes={"n": 4})
     with pytest.raises(IllegalCast) as caught:
-        schedule.tag(i="g.0")
+        schedule.tag(scope(term).i, "g.0")
     message = str(caught.value)
     assert message.startswith(
-        "tag(i='g.0') illegal: y[y.dom.size - 1] = y[y.dom.size - 1] + x[i] "
-        f"({where(into_the_last, 'y[y.dom.size - 1] =')}) at i="
+        "tag(into_the_last.i, 'g.0') illegal: y[y.dom.size - 1] = "
+        f"y[y.dom.size - 1] + x[i] ({where(into_the_last, 'y[y.dom.size - 1] =')}) "
+        "at i="
     )
     assert "both update y[3]" in message
-    assert message.endswith("with atomic('y') before this step")
+    assert message.endswith("with atomic(into_the_last.y) before this step")
     assert caught.value.fact.kind == "disjoint-writes"
     assert caught.value.fact.status.value == "refuted"
 
@@ -2444,7 +2535,7 @@ def test_a_write_of_the_last_offset_beside_a_ragged_read_is_scheduled() -> None:
     from loopty.trace import trace
 
     term = trace(last_offset_beside_rows, evaluate_annotations(last_offset_beside_rows))
-    schedule = Schedule(term, sizes={"n": 3}).tag(r="g.0")
+    schedule = Schedule(term, sizes={"n": 3}).tag(scope(term).r, "g.0")
     casts = {
         fact.kind: fact.status.value
         for fact in schedule.facts()
@@ -2481,9 +2572,10 @@ def into_the_last_of_x0(x: Arr[Fin[x0], Real], y: Arr[Fin[x0], Real]):  # noqa: 
             "y[3]",
             "y[y.dom.size - 1] = y[y.dom.size - 1] + x[i] "
             f"({where(into_the_last_of_x0, 'y[y.dom.size - 1] =')}) at i=",
-            "(at x0=4, as hinted), and the loop i on g.0 runs them on two work "
-            "items, so one can overwrite what the other added; make the updates "
-            "atomic, with atomic('y') before this step",
+            "(at x0=4, as hinted), and the loop into_the_last_of_x0.i on g.0 runs "
+            "them on two work items, so one can overwrite what the other added; "
+            "make the updates atomic, with atomic(into_the_last_of_x0.y) before "
+            "this step",
         ),
     ],
 )
@@ -2503,9 +2595,9 @@ def test_a_size_named_like_a_dimension_keeps_its_dependences(
     term = trace(fn, evaluate_annotations(fn))
     schedule = Schedule(term, sizes={size: 4})
     with pytest.raises(IllegalCast) as caught:
-        schedule.tag(i="g.0")
+        schedule.tag(scope(term).i, "g.0")
     message = str(caught.value)
-    assert message.startswith(f"tag(i='g.0') illegal: {start}")
+    assert message.startswith(f"tag({fn.__name__}.i, 'g.0') illegal: {start}")
     assert cell in message
     assert message.endswith(end)
     (source_id, _source), (sink_id, _sink), params = caught.value.witness

@@ -184,7 +184,7 @@ def test_a_where_array_beside_a_ragged_family_with_powers_of_binders() -> None:
     (stmt,) = evaluate.term.stmts
     assert stmt.expr.inames == ("a", "b")
     decided(evaluate)
-    agrees(evaluate, Schedule(evaluate).split("i", 2), evaluate_inputs(1))
+    agrees(evaluate, Schedule(evaluate).split(evaluate.i, 2), evaluate_inputs(1))
 
 
 def test_a_loop_variable_exponent_in_a_sum_nested_in_a_sum() -> None:
@@ -218,7 +218,7 @@ def test_four_dense_axes_run_without_loopys_parameter_warnings() -> None:
     with lp.CacheMode(False), warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         LoopyExecutor().run(
-            Schedule(along_r).split("e", 2),
+            Schedule(along_r).split(along_r.e, 2),
             F=F,
             u=u,
             out=np.zeros((2, 3, 3, 3)),
@@ -226,7 +226,7 @@ def test_four_dense_axes_run_without_loopys_parameter_warnings() -> None:
     assert not [w for w in caught if issubclass(w.category, ParameterFinderWarning)]
     agrees(
         along_r,
-        Schedule(along_r).split("e", 2),
+        Schedule(along_r).split(along_r.e, 2),
         {
             "F": Arr.from_numpy(F),
             "u": Arr.from_numpy(u),

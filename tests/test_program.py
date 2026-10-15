@@ -532,8 +532,8 @@ def test_an_exact_temporary_is_as_exact_as_an_exact_argument() -> None:
         copy(t, y)
 
     assert not lower_generic(exact_sum.term).contraction
-    with pytest.raises(IllegalCast, match="the accumulation into t is exact"):
-        Schedule(exact_sum).realize("t", tree=True)
+    with pytest.raises(IllegalCast, match="the accumulation into exact_sum.t is exact"):
+        Schedule(exact_sum).realize(exact_sum.t, tree=True)
     # And the compiled program agrees with the native one bit for bit.
     x = Arr.from_numpy(np.array([0.1, 0.2, 0.3]))
     fact = LoopyExecutor().differential(
@@ -1606,8 +1606,7 @@ def test_a_program_whose_call_rewrites_a_layout_has_its_layout_fact() -> None:
         line=clears_next.line,
         detail="cnt",
     )
-    (loop,) = clears_next.term.stmts[0].inames
-    schedule = Schedule(clears_next).split(loop, 2)
+    schedule = Schedule(clears_next).split(clears_next.clear_next.r, 2)
     (monotone,) = [fact for fact in schedule.facts() if fact.kind == "monotone"]
     assert monotone.rests_on == (layout.id,)
     assert not [fact for fact in burgers.facts() if fact.kind == "layout"]
