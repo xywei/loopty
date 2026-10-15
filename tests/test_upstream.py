@@ -89,6 +89,46 @@ def test_the_claim_names_the_outputs_compared_and_no_others() -> None:
     assert fact.provenance["uncompared"] == ["z"]
 
 
+def test_a_claim_states_the_allowance_it_was_checked_to() -> None:
+    # round-off, which the claim's 1e-12 of the largest value allows
+    fact = _fact(K.rounded)
+    assert fact.status is Status.TESTED
+    assert fact.statement == (
+        "the native run of double agrees with rounded in y within 1e-12 of the "
+        "largest value, on its example inputs"
+    )
+    detail = fact.provenance["outputs"]["y"]
+    assert detail["within"] == 1e-12
+    assert detail["exactness"] == "approx"
+    assert detail["tolerance"] == 1e-12 * detail["largest"]
+    assert 0 < detail["difference"] <= detail["tolerance"]
+
+
+def test_a_difference_inside_the_class_and_beyond_the_claim_refutes_it() -> None:
+    # a billionth is inside approx's millionth, and beyond what the row says
+    fact = _fact(K.off_by_a_billionth)
+    assert fact.status is Status.REFUTED
+    assert fact.provenance["reason"].startswith("y: cell 4 is 2.0 natively and ")
+    assert fact.provenance["reason"].endswith(
+        "from off_by_a_billionth, beyond 1e-12 of the largest value"
+    )
+
+
+@pytest.mark.parametrize(
+    ("within", "error", "message"),
+    [
+        ("tight", TypeError, r"within=\.\.\.\) takes a number"),
+        (True, TypeError, r"takes a number"),
+        (0.0, ValueError, r"allows nothing a run can meet"),
+        (-1e-12, ValueError, r"allows nothing a run can meet"),
+        (float("nan"), ValueError, r"allows nothing a run can meet"),
+    ],
+)
+def test_an_allowance_is_a_positive_number(within, error, message) -> None:
+    with pytest.raises(error, match=message):
+        upstream(K.double, within=within)
+
+
 def test_an_output_the_kernel_does_not_write_is_no_agreement() -> None:
     fact = _fact(K.about_its_input)
     assert fact.status is Status.ASSUMED
@@ -112,6 +152,8 @@ def test_the_rows_are_in_the_ledger_under_the_kernel() -> None:
         "not_recorded": Status.ASSUMED,
         "about_its_input": Status.ASSUMED,
         "doubles_only": Status.TESTED,
+        "rounded": Status.TESTED,
+        "off_by_a_billionth": Status.REFUTED,
     }
     assert {fact.owner for fact in rows.values()} == {"double", "double_and_square"}
 
