@@ -635,7 +635,7 @@ def test_each_access_says_which_instruction_of_its_statement_makes_it() -> None:
     term = Schedule(example("p2p").p2p).term
     accesses = _accesses(term.stmts[0], term)
     parts = {(kind, array, part) for kind, array, _, part in accesses}
-    assert ("write", "term", "") in parts and ("read", "cnt", "row") in parts
+    assert ("write", "contribution", "") in parts and ("read", "cnt", "row") in parts
 
 
 # }}}

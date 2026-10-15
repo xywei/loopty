@@ -761,7 +761,7 @@ def test_the_guarded_self_interaction_is_left_out_of_the_sum() -> None:
         data["x"],
         data["y"],
         data["q"],
-        data["term"],
+        data["contribution"],
         data["pot"],
     )
 

@@ -50,7 +50,7 @@ a second ``for i`` in one body is ``k.i[1]``. Indexing a name that names one
 thing with ``[0]`` is the thing itself. Handles complete in an interactive
 session (``dir`` lists the names), and a name that is not there is refused
 with the scope and what it has: ``reconstruct has no loop, array, call or
-size named t; its loops are i, a, b, its arrays C, R and its sizes nb``.
+size named t; its loops are i, a and b; its arrays C and R; its sizes nb``.
 
 Resolution
 ----------
@@ -262,7 +262,7 @@ class _Index:
         )
 
     def contents(self, labels: tuple[str, ...]) -> str:
-        """What a scope has, in words: ``its loops are i, a, b and its arrays C, R``."""
+        """What a scope has: ``its loops are i, a and b; its arrays C and R``."""
         parts = []
         for word, names in (
             ("loops", list(self.loops.get(labels, {}))),
@@ -271,16 +271,9 @@ class _Index:
             ("sizes", list(self.sizes(labels))),
         ):
             if names:
-                parts.append(f"{word} {', '.join(names)}")
-        if not parts:
-            return "it has no loops, arrays or calls"
-        first, *rest = parts
-        first = first.replace(" ", " are ", 1)
-        if not rest:
-            return f"its {first}"
-        return f"its {first}, " + ", ".join(rest[:-1]) + (
-            f" and its {rest[-1]}" if len(rest) == 1 else f" and {rest[-1]}"
-        )
+                verb = "" if parts else " are"
+                parts.append(f"its {word}{verb} {_joined(names)}")
+        return "; ".join(parts) or "it has no loops, arrays or calls"
 
     # }}}
 

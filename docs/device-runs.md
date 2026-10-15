@@ -10,6 +10,12 @@ devices are described by vendor and model class, which is what a reader needs to
 judge the evidence, and the logs under `docs/device-runs/` have had the run
 directory replaced with `<run>`.
 
+The schedules are written here as loopty 0.4 spells them, by handle (see the
+CHANGELOG's migration table). The runs used the earlier spelling of the same
+steps, `tag(r="g.0")` or `split("j", 32, inner="j_in")`, and the logs and the
+loopy messages quoted below keep the loop names those runs made: a split's
+halves were `j_out` and `j_in` where they are now `j_outer` and `j_inner`.
+
 ## Devices
 
 Two device classes, one physical machine, selected explicitly through
@@ -72,14 +78,14 @@ retouched.
 
 | case | schedule | output | difference | tolerance | verdict |
 |---|---|---|---|---|---|
-| spmv, split and realize | `split("j", 2).realize("y", tree=True)` | `y` | 5.55e-17 | 2.46e-06 (`approx`) | agrees |
-| spmv, rows across groups | `tag(r="g.0")` | `y` | 2.78e-17 | 2.46e-06 (`approx`) | agrees |
+| spmv, split and realize | `split(spmv.j, 2).realize(spmv.y, tree=True)` | `y` | 5.55e-17 | 2.46e-06 (`approx`) | agrees |
+| spmv, rows across groups | `on_groups(spmv.r)` | `y` | 2.78e-17 | 2.46e-06 (`approx`) | agrees |
 | scan | identity | `off` | 0 | 0 (`exact`) | agrees, bitwise |
-| stencil, skewed and tiled | `skew("i", by="t").tile("t", "i", 8, 8)` | `u` | 0 | 1.55e-05 (`approx`) | agrees, bitwise |
-| reshape, blocked transpose | `split("i", 2).interchange("i_out", "j", "i_in")` | `b` | 0 | 6.6e-05 (`approx`) | agrees, bitwise |
+| stencil, skewed and tiled | `skew(jacobi.i, by=jacobi.t).tile(jacobi.t, jacobi.i, 8, 8)` | `u` | 0 | 1.55e-05 (`approx`) | agrees, bitwise |
+| reshape, blocked transpose | `split(transpose.i, 2).interchange(transpose.i.outer, transpose.j, transpose.i.inner)` | `b` | 0 | 6.6e-05 (`approx`) | agrees, bitwise |
 | reshape, row-major view | identity | `mat` | 0 | 6.6e-05 (`approx`) | agrees, bitwise |
 | reshape, column-major view | identity | `mat` | 0 | 6.6e-05 (`approx`) | agrees, bitwise |
-| spmv, the design note's device schedule | `tag(r="g.0").split("j", 32).tag(j_in="l.0").realize("y", tree=True)` | | | | **refused by loopy** |
+| spmv, the design note's device schedule | `on_groups(spmv.r).split(spmv.j, 32).on_items(spmv.j.inner).realize(spmv.y, tree=True)` | | | | **refused by loopy** |
 
 The spmv product was also checked against the dense matrix written out by hand,
 not only against the traced body: on the device, `max |y - A x| = 5.551e-17` over
@@ -108,7 +114,7 @@ witness: (('S0', {'t': 6, 'i': 8}), ('S0', {'t': 7, 'i': 7}), {'nt': 16, 'nx': 1
 The design note specifies
 
 ```python
-Schedule(spmv).tag(r="g.0").split("j", 32, inner="j_in").tag(j_in="l.0").realize("y", tree=True)
+Schedule(spmv).on_groups(spmv.r).split(spmv.j, 32).on_items(spmv.j.inner).realize(spmv.y, tree=True)
 ```
 
 one work group per row, the entries of a row across the lanes of that group.
@@ -128,8 +134,8 @@ It must be split (using split_reduction_{in,out}ward) before code generation.
 loopy's own remedy does not rescue it either. Five attempts, same on both devices
 (`docs/device-runs/h200-cuda-reduction-probe.log`):
 
-1. `tag(r="g.0")` alone: **runs**, agrees at 2.78e-17.
-2. `tag(r="g.0").tag(j="l.0")`, the whole ragged reduction across lanes, without
+1. `on_groups(spmv.r)` alone: **runs**, agrees at 2.78e-17.
+2. `on_groups(spmv.r).on_items(spmv.j)`, the whole ragged reduction across lanes, without
    splitting: refused by `StaticValueFindingError`, "a numeric maximum was not
    found for PwAff `[n, nl_cnt_r] -> { [(nl_cnt_r)] : n > 0 and nl_cnt_r > 0 }`".
    A work-group axis needs a static extent and a row's length is data.
@@ -175,7 +181,7 @@ What this does and does not mean:
   side. `spmv.rows_parallel()` is the schedule for this shape that does build.
 
 What does work on a device for a ragged product is one row per work group,
-`tag(r="g.0")`, with the row's entries summed sequentially inside the group. That
+`on_groups(spmv.r)`, with the row's entries summed sequentially inside the group. That
 ran, and it agreed.
 
 ## 2026-10-11: three examples of sumpy, firedrake and grudge kernels, on the PoCL CPU device
@@ -188,9 +194,9 @@ compiled for `target="opencl"` and compared with the example's own body
 
 | case | schedule | output | difference | tolerance | verdict |
 |---|---|---|---|---|---|
-| sumpy's QBX tile, complex `log` and `real` | `split("t", 16).tag(t_outer="g.0", t_inner="l.0").split("s", 256).prioritize("s_outer", "t_inner")` | `out` | 1.11e-16 | 1.49e-06 (`approx`) | agrees |
-| P1 mass, constant tables in `__constant` memory | `split("c", 32).tag(c_outer="g.0", c_inner="l.0")` | `yl` | 1.73e-18 | 1e-06 (`approx`) | agrees |
-| two passes fused on the element and the row | `fuse("along_r", "along_s", loops=2)` | `w` | 9.23e-16 | 1.03e-06 (`approx`) | agrees |
+| sumpy's QBX tile, complex `log` and `real` | `split(single_layer.t, 16).tag({single_layer.t.outer: "g.0", single_layer.t.inner: "l.0"}).split(single_layer.s, 256).prioritize(single_layer.s.outer, single_layer.t.inner)` | `out` | 1.11e-16 | 1.49e-06 (`approx`) | agrees |
+| P1 mass, constant tables in `__constant` memory | `split(mass_action.c, 32).tag({mass_action.c.outer: "g.0", mass_action.c.inner: "l.0"})` | `yl` | 1.73e-18 | 1e-06 (`approx`) | agrees |
+| two passes fused on the element and the row | `fuse(weak_derivative.along_r.a, weak_derivative.along_s.a)` | `w` | 9.23e-16 | 1.03e-06 (`approx`) | agrees |
 
 The first is sumpy's own schedule of `LayerPotential` for a CPU device,
 written as sumpy writes it. On a device the sources' outer loop outside the
@@ -222,16 +228,16 @@ multiple of four, which the two triangles are not):
 
 | case | schedule | mesh | `y`: difference | tolerance | verdict |
 |---|---|---|---|---|---|
-| PyOP2's GPU split | `assume("nc >= 1").atomic("y").split("c", 32).tag(c_outer="g.0", c_inner="l.0")` | 2 cells | 0 | 1.13e-06 (`approx`) | agrees |
+| PyOP2's GPU split | `assume(mass_action.nc >= 1).atomic(mass_action.y).split(mass_action.c, 32).tag({mass_action.c.outer: "g.0", mass_action.c.inner: "l.0"})` | 2 cells | 0 | 1.13e-06 (`approx`) | agrees |
 | | | 8 192 cells | 1.08e-19 | 1e-06 (`approx`) | agrees |
 | | | 131 072 cells | 1.02e-20 | 1e-06 (`approx`) | agrees |
-| Sun et al.'s split, from C | `assume("nc % 4 == 0").atomic("y").split("c", 4).tag(c_inner="ilp")` | 8 192 cells | 1.08e-19 | 1e-06 (`approx`) | agrees |
+| Sun et al.'s split, from C | `assume(mass_action.nc % 4 == 0).atomic(mass_action.y).split(mass_action.c, 4).tag(mass_action.c.inner, "ilp")` | 8 192 cells | 1.08e-19 | 1e-06 (`approx`) | agrees |
 | | | 131 072 cells | 6.78e-21 | 1e-06 (`approx`) | agrees |
 
 Each update is loopy's compare-and-swap loop on the bits of the double,
 `atom_cmpxchg((__global long *) &(y[...]), ...)`, with `y` declared `__global
 volatile double *`. The differences are the reassociation of each node's sum,
-far inside the tolerance. Without `atomic("y")` the split is refused with the
+far inside the tolerance. Without `atomic(mass_action.y)` the split is refused with the
 node PyOP2's two triangles share, and the driver compiles it anyway, with
 loopy directly, to show what the refusal is about: the updates race, and `y`
 comes out wrong by up to 48% of its largest value on the squares (the

@@ -165,7 +165,7 @@ def test_a_name_a_scope_does_not_have_is_refused_with_what_it_has() -> None:
         burgers.divergence.k  # noqa: B018
     assert str(caught.value) == (
         "burgers.divergence has no loop, array, call or size named k; its loops "
-        "are i, arrays f, rhs"
+        "are i; its arrays f and rhs"
     )
     # a program has no loops of its own: its calls' are named
     with pytest.raises(AttributeError) as caught:
@@ -379,20 +379,20 @@ def test_a_fusion_of_three_calls_is_one_step_and_names_them_after() -> None:
 
 
 def test_tag_and_on_groups_and_on_items_are_one_step() -> None:
-    split = Schedule(stencil).split(stencil.i, 4)
-    tagged = split.tag({stencil.i.outer: "g.0", stencil.i.inner: "l.0"})
-    by_words = split.on_groups(stencil.i.outer).on_items(stencil.i.inner)
+    split = Schedule(doubled, target="opencl").split(doubled.i, 4)
+    tagged = split.tag({doubled.i.outer: "g.0", doubled.i.inner: "l.0"})
+    by_words = split.on_groups(doubled.i.outer).on_items(doubled.i.inner)
     assert tagged.tags == by_words.tags == {"i_outer": "g.0", "i_inner": "l.0"}
     assert by_words.history[-2:] == (
-        "tag(stencil.i.outer, 'g.0')",
-        "tag(stencil.i.inner, 'l.0')",
+        "tag(doubled.i.outer, 'g.0')",
+        "tag(doubled.i.inner, 'l.0')",
     )
     assert (
-        split.on_groups(stencil.i.outer, axis=1).history[-1]
-        == split.tag(stencil.i.outer, "g.1").history[-1]
+        split.on_groups(doubled.i.outer, axis=1).history[-1]
+        == split.tag(doubled.i.outer, "g.1").history[-1]
     )
     with pytest.raises(ValueError, match="an axis is a whole number from 0"):
-        split.on_items(stencil.i.inner, axis=-1)
+        split.on_items(doubled.i.inner, axis=-1)
 
 
 def test_a_condition_of_sizes_is_written_with_their_handles() -> None:

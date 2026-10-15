@@ -3935,11 +3935,11 @@ class Schedule:
         method = text.split("(", 1)[0]
         if isinstance(value, str):
             found = self._named_like(value, kind)
-            example = _joined(found, "or") if found else self._an_example(kind)
+            example = _joined(found, "or") if found else self._an_example(kind, method)
             given = f"the string {value!r}"
         else:
             found = []
-            example = self._an_example(kind)
+            example = self._an_example(kind, method)
             given = (
                 f"the {type(value).__name__.lower()} {value!r}"
                 if isinstance(value, Handle)
@@ -3983,11 +3983,19 @@ class Schedule:
                 out.append(handle.path)
         return list(dict.fromkeys(out))
 
-    def _an_example(self, kind: str) -> str:
-        """A handle of ``kind`` this schedule has, to name in a refusal."""
+    def _an_example(self, kind: str, method: str = "") -> str:
+        """A handle of ``kind`` this schedule has, to name in a refusal.
+
+        For ``contract`` and ``substitute``, which store an array a program
+        makes, one the program makes, where it has one.
+        """
         if kind == "array":
             index = self._handles
-            for name in index.root_arrays:
+            names = list(index.root_arrays)
+            if method in ("contract", "substitute"):
+                made = {name for name, _typ in self._term.temporaries}
+                names.sort(key=lambda name: name not in made)
+            for name in names:
                 return index.array_path((), name)
             return ""
         for key, names in self._loops.items():

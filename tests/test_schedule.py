@@ -747,8 +747,8 @@ def test_a_loop_a_kernel_does_not_have_is_refused_naming_what_it_has() -> None:
     with pytest.raises(AttributeError) as caught:
         potential.q  # noqa: B018
     assert str(caught.value) == (
-        "potential has no loop, array, call or size named q; its loops are t, "
-        "s, arrays z, y, w, out and sizes m, n"
+        "potential has no loop, array, call or size named q; its loops are t "
+        "and s; its arrays z, y, w and out; its sizes m and n"
     )
 
 
@@ -952,8 +952,8 @@ def test_unknown_loops_are_refused_before_loopy_sees_them() -> None:
     with pytest.raises(AttributeError) as caught:
         TRANSPOSE.k  # noqa: B018
     assert str(caught.value) == (
-        "transpose has no loop, array, call or size named k; its loops are i, "
-        "j, arrays a, b and sizes n, m"
+        "transpose has no loop, array, call or size named k; its loops are i "
+        "and j; its arrays a and b; its sizes n and m"
     )
     # and a handle of another kernel names the handle to write
     schedule = Schedule(ht.transpose_term())

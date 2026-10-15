@@ -1427,7 +1427,7 @@ def test_a_read_of_a_cell_the_producer_does_not_store_is_refused() -> None:
     (program_fact,) = definedness(padded)
     assert IslOracle().establish(program_fact).status is Status.DECIDED
     # The same for h, whose back half back reads and front leaves zero.
-    with pytest.raises(IllegalCast, match="back.S0 reads h\\["):
+    with pytest.raises(IllegalCast, match="between.back reads h\\["):
         Schedule(between).substitute(between.h)
 
 
