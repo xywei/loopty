@@ -8,6 +8,13 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Added
 
+- **What fusing and contracting S1's passes buys on a CPU**,
+  `benchmarks/hexahedra.py c`: the weak gradient's three programs of
+  `examples/hexahedra.py`, the passes one after another, `fused`, and
+  `contracted`, on the C target, each checked against numpy and then timed
+  in turn on one thread. Every program is built with loopty's flags and the
+  same `--cflags`, which the CSV records, and `report` tables the rows as it
+  does the device's.
 - **Claims settled by running them** (`loopty.tested`): `@tested` on a
   function that takes nothing and returns whether its claim held, alone or
   with what it measured, puts the claim in the ledger as a `tested` row,
@@ -653,6 +660,21 @@ All notable changes to loopty are recorded here. The format follows
 
 ### Fixed
 
+- **An `ilp` loop around a sum runs its lanes in one loop of the sum
+  (#264).** A sum's domain named every loop around its statement, and loopy
+  opens a sum's loop inside every loop its domain names, so
+  `split("q", 3).tag(q_inner="ilp")` around `reduce_sum(... for b in
+  Fs.dom[q, j])` gave each lane a loop over `b` of its own, and the lanes
+  ran one after another. The domain now names only the loops its bounds
+  read: over a box, the loop over `b` holds the three lanes' updates, as
+  plain loopy writes it, while a triangle's `j < i + 1` keeps its sum in the
+  loop it reads, and a ragged row's length keeps every loop. The facts are
+  the term's and do not change. The launches of S1's "fields three at a
+  time" shape are now plain loopy's code up to loop names, and every other
+  shape's code is what it was; sumpy's tile on C in
+  `examples/layer_potential.py` runs the sources' loop once around its 16
+  targets, where it ran it once per target. Note 32 in
+  `docs/loopy-notes.md` has the details.
 - On OpenCL, a complex number to a natural power below 100 is the products
   numpy's power by an integer takes (`z * ((z * z) * (z * z))` for 5), never
   pyopencl's `cdouble_powr`. loopy writes only the powers by 2, 3 and 4 as

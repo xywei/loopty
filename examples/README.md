@@ -1417,7 +1417,9 @@ Fused so, `w` is read a row at a time and `v` a slab at a time, and
 kernel and nothing orders two work items of it, so the passes are three
 launches of their own, the element a work group and its nodes the work
 items, each a schedule loopty checks: `passes_on_a_device`, which
-`benchmarks/hexahedra.py` times beside the same kernels in plain loopy.
+`benchmarks/hexahedra.py` times beside the same kernels in plain loopy. Its
+`c` mode times `fused` and `contracted` against the passes one after another
+on the C target, with the same flags.
 
 ### python examples/hexahedra.py
 

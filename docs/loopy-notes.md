@@ -1624,3 +1624,50 @@ cell's read as the assignee, which is how the trace records it
 (`loopty.term.Stmt`). On the C target the step changes the checks and not the
 code, since one thread makes every update atomic. An array of any other
 dtype is a `buildable` fact refuted on OpenCL, naming the four.
+
+## 32. A sum's domain that names a loop puts the sum inside it, an `ilp` lane included
+
+**Symptom.** `Schedule(along_s).split("q", 3).tag(q_inner="ilp")`, with
+`along_s` of `examples/hexahedra.py` summing `Fs[q, j, b] * v[q, e, k, b, i]`
+over `b in Fs.dom[q, j]`, generated three loops over `b`, one per lane, each
+updating its own accumulator and storing it before the next began:
+
+```c
+for (int b = 0; b <= 3; ++b)
+  acc_b[0] = acc_b[0] + Fs[4 * lid(1) + b] * v[...];
+vs[...] = acc_b[0];
+for (int b = 0; b <= 3; ++b)
+  acc_b[1] = acc_b[1] + Fs[16 + 4 * lid(1) + b] * v[...];
+...
+```
+
+The same kernel in plain loopy, with one domain `{ [e, k, j, i, b, q_outer,
+q_inner] : ... }`, has one loop over `b` with the three updates in it, which
+is the instruction-level parallelism the tag asks for. On a GPU the weak
+divergence at order 6 ran at 0.91 of plain loopy's throughput (#264).
+sumpy's tile on the C target in `examples/layer_potential.py`, its 16 targets
+an `ilp` loop, had a loop over the sources per target.
+
+**Cause.** The tracer records a sum's domain with the loops around its
+statement as leading dimensions, so that a ragged bound can read the row,
+and `_domain_over` makes them parameters: `[e, k, j, i, q] -> { [b] : ...
+}`. loopy nests a domain inside the loop of every iname its parameters name
+(`parents_per_domain`), and `split_iname` rewrites `q` there into `q_outer`
+and `q_inner`. A loop that runs in sequence holds the sum anyway, so nothing
+showed until a loop that is not a loop, an `ilp` lane, was named: loopy
+opens the sum's loop inside each lane it unrolls.
+
+**Local fix.** `_Builder._loops_left_out` states a sum's domain over the
+loops its bounds read and no others. isl's gist of the domain against its
+statement's loop nest drops what the nest already says, and a loop the gist
+no longer names is left out (`_without_loops_ignored`); the result is checked
+to be the same set wherever the nest holds, which is wherever loopy runs the
+sum's update, since the update carries the statement's own predicates
+(`realize_reduction` gives it `insn.predicates`). Over a box, `b` is
+`[n] -> { [b] : 0 <= b < n }` and its loop holds every lane. A bound that
+reads a loop keeps it: a triangle's `j < i + 1`, or a clause the sum is
+narrowed by, keeps the sum nested in that loop, a loop of the sum per lane
+where the loop is an `ilp` one. A domain that names a ragged row's length,
+which is assigned inside the row's loop, keeps every loop, as before. The
+facts are those of the term, and the device code of every other shape the
+S1 driver times is the same as before.
