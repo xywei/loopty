@@ -815,18 +815,22 @@ All notable changes to loopty are recorded here. The format follows
   computed where it is read.
 - The coverage report in `docs/lean-checks.md` covers the demos' examples
   (`l2p.py`, the flagship, `assembly.py`, `hexahedra.py`,
-  `layer_potential.py`, `quadrature.py`, `sum_factorization.py`),
-  `storage_layouts.py`, `taylor_reconstruction.py`, the calls in loops
-  (`examples/calls.py`, `tests/kernels/calls.py`,
+  `layer_potential.py`, `advection.py`, `quadrature.py`,
+  `sum_factorization.py`), `storage_layouts.py`, `taylor_reconstruction.py`,
+  the calls in loops (`examples/calls.py`, `tests/kernels/calls.py`,
   `tests/kernels/program_domains.py`), the upstream test kernels
-  (`tests/kernels/upstream.py`), and the windows, updates, layouts,
-  postconditions decided from what kernels store and cited theorems above:
-  of 1319 facts isl decides in 30 files, Lean proves 1272 and confirms the
-  counterexample of the 32 refuted ones. The 15 it leaves decided are claims
-  about reals, which core Lean has no words for; with Mathlib it proves them
-  too, 1287 in all, and none stays decided. `examples/layer_potential.py`
-  has 31, its single and double layer, all proved. `examples/l2p.py` has 41:
-  40 proved with Mathlib, and its refused interchange, whose negation Lean
+  (`tests/kernels/upstream.py`), the test kernels of programs'
+  postconditions, of reals at their class and of series
+  (`tests/kernels/program_posts.py`, `reals.py`, `series.py`), and the
+  windows, updates, layouts, postconditions decided from what kernels store
+  and cited theorems above: of 1584 facts isl decides in 34 files, Lean
+  proves 1521 and confirms the counterexample of 37 of the 38 refuted ones;
+  the other, two updates of one cell at the same time in `advection.py`, is
+  stated for isl only. The 25 it leaves decided are claims about reals,
+  which core Lean has no words for; with Mathlib it proves them too, 1546 in
+  all, and none stays decided. `examples/layer_potential.py` has 32, all
+  proved with Mathlib. `examples/l2p.py` has 48: 46 proved with Mathlib, and
+  its refused interchange and window of one row, whose negations Lean
   proves.
 - A ledger gains a `definedness` row for each array a kernel reads only where
   it wrote it before (`scan`'s `off`, `p2p`'s `term`, `pairs`' `f`), and an
