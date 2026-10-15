@@ -1304,12 +1304,17 @@ def test_the_advection_demo_refuses_the_deeper_fusion_and_runs_every_split() -> 
     assert "inverse mass and all, to 1e-13 of the largest value: True" in out
     assert "M^-1 M is the identity: True" in out
     assert "the transpose of the face gather on these maps: True" in out
-    assert "refused: fuse(upwind, volume) illegal: instance upwind.S0" in out
+    assert (
+        "refused: fuse(upwind, volume) illegal: flux[e, f, a, b] = upwind_flux(...) "
+        "(advection.py:"
+    ) in out
     assert "fuse('upwind', 'volume', loops=1) runs every dependence" in out
     assert "flux kept in lambda" in out and "-> tested" in out
     # libParanumal's lift onto the face nodes races on an edge without its
     # barriers, and is legal once the updates are atomic
-    assert "refused: tag(e='g.0', a='l.1', b='l.0') illegal: S" in out
+    # each update by its statement, shortened to what it writes into
+    assert "refused: tag(e='g.0', a='l.1', b='l.0') illegal: rhs[e, " in out
+    assert " -= ... (advection.py:" in out
     assert "both update rhs[" in out and "atomic('rhs')" in out
     assert "accepted: atomic('rhs').tag(" in out
     for split in _module("advection").SPLITS:
