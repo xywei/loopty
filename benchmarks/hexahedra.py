@@ -1549,10 +1549,11 @@ def mode_report(options: argparse.Namespace) -> None:
                 else:
                     rows.append(row)
 
-    # a table per operator and setup: rows of another mesh, device or loopy
-    # are other measurements, not repeats
+    # a table per operator and setup: rows of another mesh, device, loopy or
+    # set of C flags are other measurements, not repeats
     def setup(row: dict[str, str]) -> tuple[str, ...]:
-        return (row["elements"], row["device"], row["driver"], row["loopy"])
+        flags = row.get("flags") or ""  # empty on a device
+        return (row["elements"], row["device"], row["driver"], row["loopy"], flags)
 
     setups = list(dict.fromkeys(setup(r) for r in rows))
     for (name, op), this in ((item, s) for item in OPERATORS.items() for s in setups):
@@ -1563,6 +1564,7 @@ def mode_report(options: argparse.Namespace) -> None:
         names = list(dict.fromkeys(r["variant"] for r in mine))
         where = (
             f", {this[0]}**3 hexahedra on {this[1]}, loopy {this[3]}"
+            + (f", built with {this[4]}" if this[4] else "")
             if len(setups) > 1
             else ""
         )
