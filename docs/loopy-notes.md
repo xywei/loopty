@@ -1467,7 +1467,7 @@ pymbolic finds `np.uint64(1)` equal to `np.float64(1.0)`: `-1 * 1ul` in one
 statement was generated as the `-1.0 * 1.0` of another (#170). A term built
 outside a trace, by hand, has no differences, and its sums are read as
 written. A comparison of `abs` of an element traces, on either side
-(`abs(k[i]) > 2`, `127 == abs(c[i])`): from lanky 0.2.0, loopty's floor,
+(`abs(k[i]) > 2`, `127 == abs(c[i])`): since lanky 0.2.0,
 `abs` of a term is lanky's `Abs`, where before it was pymbolic's call, which
 has no order (xywei/lanky#94).
 

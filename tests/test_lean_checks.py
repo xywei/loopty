@@ -30,13 +30,11 @@ import numpy as np
 import pytest
 
 pytest.importorskip("loopy")
-lanky_obligations = pytest.importorskip(
-    "lanky.obligations", reason="this lanky states no obligations for Lean"
-)
 
 #: Lean is left on for these, where it is installed (tests/conftest.py).
 pytestmark = pytest.mark.lean
 
+from lanky import obligations as lanky_obligations  # noqa: E402
 from lanky.lean import statement_of  # noqa: E402
 from lanky.ledger import Status  # noqa: E402
 from lanky.prelude import Int, Real  # noqa: E402
@@ -61,35 +59,9 @@ ROOT = Path(__file__).resolve().parent.parent
 EXAMPLES = ROOT / "examples"
 KERNELS = ROOT / "tests" / "kernels"
 
-#: The examples whose theorems index families at several indices,
-#: ``Fn[Nat, Nat, Real]`` applied as ``D[a, b]``, which lanky main has and the
-#: 0.2.0 release, which the released-lanky job installs, does not: they do
-#: not import there.
-NEEDS_SEVERAL_INDICES = frozenset({"l2p.py"})
-
-
-def _imports_here(path: Path) -> bool:
-    """Whether this lanky can import the file ``path``."""
-    from lanky.prelude import FnType
-
-    return not (
-        path.parent == EXAMPLES
-        and path.name in NEEDS_SEVERAL_INDICES
-        and not hasattr(FnType, "indices")
-    )
-
-
-def _files(*directories: Path) -> list[Any]:
-    """The ``.py`` files of ``directories``, those this lanky cannot import skipped."""
-    out: list[Any] = []
-    for directory in directories:
-        for path in sorted(directory.glob("*.py")):
-            if _imports_here(path):
-                out.append(path)
-            else:
-                reason = "its theorems index families at several indices (lanky main)"
-                out.append(pytest.param(path, marks=pytest.mark.skip(reason=reason)))
-    return out
+def _files(*directories: Path) -> list[Path]:
+    """The ``.py`` files of ``directories``."""
+    return [path for where in directories for path in sorted(where.glob("*.py"))]
 
 
 def load(path: Path) -> Any:
@@ -1741,8 +1713,6 @@ def test_every_hypothesis_set_isl_can_sample_is_not_vacuous_in_lean(lean: Any) -
     checked = 0
     arrays = 0
     for path in [*sorted(EXAMPLES.glob("*.py")), *sorted(KERNELS.glob("*.py"))]:
-        if not _imports_here(path):
-            continue
         # one Lean command per file, each theorem again alone to name a failure
         sources: list[tuple[str, str]] = []
         for fact in _isl_facts(path):

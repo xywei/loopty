@@ -159,14 +159,14 @@ kept here ([benchmarks/README.md](https://github.com/xywei/loopty/blob/main/benc
 
 ## Run it
 
-The demos need lanky's and loopty's `main` branches; the 0.2.0 releases on
-PyPI came before them. From a clone, on Python 3.12 or 3.13 with a C
-compiler:
+The demos run on the 0.3.0 releases of loopty and lanky on PyPI. The
+examples are in the repository and not in the package, so clone the
+release's tag for them. On Python 3.12 or 3.13 with a C compiler:
 
 ```sh
-git clone https://github.com/xywei/loopty.git && cd loopty
 python3.13 -m venv .venv && . .venv/bin/activate
-pip install "lanky[lean,cas] @ git+https://github.com/xywei/lanky.git" -e .
+pip install loopty "lanky[lean,cas]"
+git clone --branch v0.3.0 https://github.com/xywei/loopty.git && cd loopty
 python examples/l2p.py
 lanky check examples/l2p.py
 loopty run examples/l2p.py
@@ -513,19 +513,20 @@ table of row starts. Both compiled runs agree with the native one.
 
 ## Status
 
-This is 0.2.0. The core works: kernels and programs run natively, trace,
-state their facts, lower and run compiled on the C target, and every schedule
-step is checked; the edges are sharp. Below is what works, what works in part
-and what does not work yet. After it, Known limits lists the open issues you
-are most likely to meet, each with what to do about it. None of them makes the
-ledger call a false fact `decided`, but in several the compiled run computes
-something other than the native run, and the ledger catches that only on the
-inputs it tries: read that section before you rely on a compiled run. CI runs
-the suite on every change, on Python 3.12 and 3.13 with lanky's `main` and on
-3.13 with the released lanky, and reruns every command whose output this
-README, the quickstart and the examples' README show, holding them to what it
-prints. It runs no OpenCL device. Until 1.0 an interface can change in a minor
-release; the CHANGELOG says when one does.
+This is 0.3.0. The core works: kernels and programs run natively, trace, state
+their facts, lower and run compiled on the C target, and every schedule step
+is checked; the edges are sharp. New in 0.3.0 are the five demos at the top of
+this page, and Lean proves again each fact isl decides. Below is what works,
+what works in part and what does not work yet. After it, Known limits lists
+the open issues you are most likely to meet, each with what to do about it.
+None of them makes the ledger call a false fact `decided`, but in several the
+compiled run computes something other than the native run, and the ledger
+catches that only on the inputs it tries: read that section before you rely on
+a compiled run. CI runs the suite on every change, on Python 3.12 and 3.13
+with lanky's `main` and on 3.13 with the released lanky, and reruns every
+command whose output this README, the quickstart and the examples' README
+show, holding them to what it prints. It runs no OpenCL device. Until 1.0 an
+interface can change in a minor release; the CHANGELOG says when one does.
 
 **Works.**
 
@@ -1572,12 +1573,13 @@ The Partial and Not yet lists under Status have the rest, and the
 pip install loopty
 ```
 
-That is the 0.2.0 release, from before the five demos at the top of this
-page, which need lanky's and loopty's `main` ([Run it](#run-it)). loopty runs on Python 3.12 and 3.13: the islpy it is held to has no wheels for
-3.14. CI, and every run this README reports, is on Linux. In a uv project,
-`uv add loopty`, and the same for the extra below. The install pulls in:
+That is the 0.3.0 release, which has the five demos at the top of this page
+([Run it](#run-it)). loopty runs on Python 3.12 and 3.13: the islpy it is held
+to has no wheels for 3.14. CI, and every run this README reports, is on Linux.
+In a uv project, `uv add loopty`, and the same for the extra below. The
+install pulls in:
 
-- [lanky](https://github.com/xywei/lanky) 0.2.0 or later, the proof host:
+- [lanky](https://github.com/xywei/lanky) 0.3.0 or later, the proof host:
   `lanky check` prints the ledger, and loopty plugs into it;
 - [loopy](https://github.com/inducer/loopy) 2025.2, which generates the code.
   loopty builds on loopy's internals, so a release of loopty is held to the

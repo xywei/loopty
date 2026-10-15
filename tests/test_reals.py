@@ -102,9 +102,8 @@ def test_an_equation_nothing_in_which_rounds_is_compared_bit_for_bit() -> None:
 
 def test_each_conjunct_is_stated_for_lean_over_the_inputs() -> None:
     """The cell is what its statement stores, the sum written out, the table read."""
-    obligations = pytest.importorskip("lanky.obligations")
-    if "mathlib" not in getattr(obligations.Part, "__dataclass_fields__", {}):
-        pytest.skip("this lanky states no part of Mathlib's")
+    from lanky import obligations
+
     obligation = obligations.obligation_of(post(kernels.thirds).term)
     assert not obligation.declined
     (part,) = obligation.parts

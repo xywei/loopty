@@ -23,14 +23,6 @@ from loopty.summands import KIND, series_applications
 
 ROOT = Path(__file__).resolve().parent.parent
 
-obligations = pytest.importorskip("lanky.obligations")
-
-#: A rewrite by an identity among a part's hints is lanky main's, not the
-#: 0.2.0 release's, which the released-lanky job installs.
-needs_rewrites = pytest.mark.skipif(
-    "rewrites" not in getattr(obligations.Hints, "__dataclass_fields__", {}),
-    reason="this lanky rewrites by no identity a hypothesis of a part is (lanky main)",
-)
 
 
 def load(path: Path) -> Any:
@@ -103,7 +95,6 @@ def test_a_term_the_theorems_guard_leaves_out_is_not_claimed() -> None:
     assert row.rests_on == (kernels.from_one.fact_id,)
 
 
-@needs_rewrites
 def test_each_term_is_a_part_lean_rewrites_and_applies_the_theorem_to() -> None:
     """One part per order: the identity rewritten in the goal, the theorem applied."""
     from lanky.obligations import attempts, obligation_of, part_statement, theorem_name
@@ -135,7 +126,6 @@ def test_series_are_found_in_the_term_and_not_in_its_spelling() -> None:
 
 
 @pytest.mark.lean
-@needs_rewrites
 def test_with_mathlib_each_term_is_proved_to_be_the_theorems() -> None:
     from lanky.oracles.lean import LeanOracle
 

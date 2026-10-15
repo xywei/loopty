@@ -869,7 +869,6 @@ def test_a_window_and_atomic_updates_compile_together_on_opencl(plain_opencl) ->
 
 
 def test_the_no_clobber_fact_is_stated_from_the_description() -> None:
-    pytest.importorskip("lanky.obligations", reason="no statements for Lean here")
     (fact,) = [f for f in WINDOWS.windowed.facts() if f.kind == "no-clobber"]
     obligation = fact.term.lean_obligation()
     assert not obligation.declined
@@ -880,7 +879,6 @@ def test_the_no_clobber_fact_is_stated_from_the_description() -> None:
 
 
 def test_the_casts_after_a_window_state_its_slots() -> None:
-    pytest.importorskip("lanky.obligations", reason="no statements for Lean here")
     from loopty.obligations import cast_obligation
 
     monotone = WINDOWS.split_after.facts()[-1]
@@ -893,7 +891,6 @@ def test_the_casts_after_a_window_state_its_slots() -> None:
 
 
 def test_the_casts_after_a_window_read_by_updates_order_no_two_updates() -> None:
-    pytest.importorskip("lanky.obligations", reason="no statements for Lean here")
     from loopty.obligations import cast_obligation
 
     monotone = WINDOWS.assembled.facts()[-1]

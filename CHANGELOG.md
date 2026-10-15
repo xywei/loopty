@@ -6,6 +6,24 @@ All notable changes to loopty are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-15
+
+The third release, on lanky 0.3.0. Five demos, each written after a kernel
+of sumpy, pytential, grudge or firedrake: sumpy's L2P (`examples/l2p.py`),
+grudge's weak gradient and divergence on hexahedra (`examples/hexahedra.py`)
+and its advection right-hand side (`examples/advection.py`), pytential's
+direct QBX (`examples/layer_potential.py`) and PyOP2's mass assembly
+(`examples/assembly.py`). Each states its facts, cites the theorems it
+computes, and agrees with the upstream code it mirrors (`@upstream`). isl
+decides each fact, and Lean proves it again from loopty's own description of
+the kernel, with the hints isl found. New in the language and the schedule:
+theorems a kernel cites (`uses=`), a program's postcondition, constant
+tables, `loopty.math`, kernels called inside a loop, a program's arrays over
+a domain, updates and `Schedule.atomic`, window contraction, checked layout
+maps at every size, fusion on chosen outer loops and `Schedule.assume`. The
+demos write their theorems with lanky 0.3.0's families of several indices
+and complex parts, so loopty requires it.
+
 ### Added
 
 - **What fusing and contracting S1's passes buys on a CPU**,
@@ -712,9 +730,21 @@ All notable changes to loopty are recorded here. The format follows
   writes loopy kernels, the flagship `examples/l2p.py` in its three layers
   with its refusals and six rows of its ledger with Lean and Mathlib, the
   five demos in a table (what each is written after, what its ledger has,
-  how it compares), how to run them from `main`, and where the limits are.
+  how it compares), how to run them, and where the limits are.
   The reference below it is as it was, the spmv walk-through under its own
-  heading and the paragraphs the front page now says shortened.
+  heading and the paragraphs the front page now says shortened. Run it and
+  Install install the 0.3.0 releases from PyPI and clone the `v0.3.0` tag
+  for the examples.
+- **Requires lanky 0.3.0** (`lanky>=0.3.0`, was `>=0.2.0`). Its Lean oracle
+  proves a plugin's parts with the solver's hints, which is how loopty
+  states each fact isl decides, and its families take several indices,
+  `D[a, b]`, and complex numbers apart, which the demos' theorems are written
+  with. The tests that skipped on lanky 0.2.0 (the demos `l2p`, `hexahedra`,
+  `advection` and `layer_potential`, the benchmark driver's test, the
+  statements for Lean, rewrites by an identity) no longer skip, so CI's job
+  against the released lanky runs them. `[tool.uv.sources]` still resolves
+  lanky from `../lanky` in a checkout, and the built distributions ask for it
+  from PyPI.
 - **The interpreter finds a sum's points once, not at every instance**
   (lanky #125). The faithful check runs each kernel's term through
   `loopty.interpret`, and a reduction asked isl for its points at every

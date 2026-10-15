@@ -26,8 +26,6 @@ from typing import Any
 import islpy as isl
 import numpy as np
 import pytest
-from lanky import terms as lanky_terms
-from lanky.prelude import FnType
 
 from lines import where
 
@@ -58,59 +56,6 @@ NAMES = (
     "hexahedra",
     "advection",
 )
-
-#: The families with several indices, ``Fn[Nat, Nat, Real]`` applied as
-#: ``D[a, b]``, that ``examples/l2p.py`` writes its theorems with, and
-#: ``Fn[Fin[n], Fin[n], Real]`` applied as ``Fr[i, a]``, that
-#: ``examples/hexahedra.py`` and ``examples/advection.py`` write their theorems
-#: with, are lanky main's and not the 0.2.0 release's, which the released-lanky
-#: job installs.
-SEVERAL_INDICES = hasattr(FnType, "indices")
-
-#: The demos that need them.
-NEEDS_SEVERAL_INDICES = {"l2p", "hexahedra", "advection"}
-
-needs_several_indices = pytest.mark.skipif(
-    not SEVERAL_INDICES,
-    reason="the demo's theorems index families at several indices (lanky main)",
-)
-
-#: ``examples/hexahedra.py``'s operators claim over ``x in Fin[3]`` beside
-#: ``e in Fin[ne]``, which lanky reads as two binders since lanky#144.
-LITERAL_BINDERS = hasattr(lanky_terms, "literal_binders")
-
-#: The demos that need that.
-NEEDS_LITERAL_BINDERS = {"hexahedra"}
-
-needs_literal_binders = pytest.mark.skipif(
-    not LITERAL_BINDERS,
-    reason="the demo's claims put a literal domain beside a symbolic one (lanky main)",
-)
-
-#: The parts of a complex number, ``real``, ``imag`` and ``conj``, that
-#: ``examples/layer_potential.py``'s identity is written with, are lanky
-#: main's and not the 0.2.0 release's.
-PARTS = "conj" in getattr(lanky_terms, "ELEMENTARY_FUNCTIONS", ())
-
-#: The demos that need that.
-NEEDS_PARTS = {"layer_potential"}
-
-needs_parts = pytest.mark.skipif(
-    not PARTS, reason="the demo's identity takes complex numbers apart (lanky main)"
-)
-
-#: Every demo, as a parameter: those that need lanky main skip without it.
-DEMOS = [
-    pytest.param(
-        name,
-        marks=[
-            *([needs_several_indices] if name in NEEDS_SEVERAL_INDICES else []),
-            *([needs_literal_binders] if name in NEEDS_LITERAL_BINDERS else []),
-            *([needs_parts] if name in NEEDS_PARTS else []),
-        ],
-    )
-    for name in NAMES
-]
 
 _RESULTS: dict[tuple[str, str], tuple[Any, list[dict]]] = {}
 _MODULES: dict[str, Any] = {}
@@ -185,14 +130,14 @@ def _statuses(facts: list[dict], **fields: Any) -> list[str]:
 # {{{ every demo, the three commands
 
 
-@pytest.mark.parametrize("name", DEMOS)
+@pytest.mark.parametrize("name", NAMES)
 def test_a_demo_runs_under_plain_python(name: str) -> None:
     result, _ = _invoke(name, "python")
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.strip(), "a demo that prints nothing demonstrates nothing"
 
 
-@pytest.mark.parametrize("name", DEMOS)
+@pytest.mark.parametrize("name", NAMES)
 def test_a_demo_states_obligations_and_none_is_refuted(name: str) -> None:
     result, facts = _invoke(name, "check")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -271,7 +216,7 @@ KERNELS = {
 REFUSES_DRAWS = {("travel", "weigh"), ("travel", "flat")}
 
 
-@pytest.mark.parametrize("name", DEMOS)
+@pytest.mark.parametrize("name", NAMES)
 def test_every_kernel_of_a_demo_computes_what_its_body_computes(name: str) -> None:
     # The traced term, interpreted, against the native body: on the demo's
     # own example inputs first, then on inputs drawn from the declared types.
@@ -295,7 +240,7 @@ def test_every_kernel_of_a_demo_computes_what_its_body_computes(name: str) -> No
         assert outcomes == ["agreed"] * 4
 
 
-@pytest.mark.parametrize("name", DEMOS)
+@pytest.mark.parametrize("name", NAMES)
 def test_a_demo_compiles_and_agrees_with_the_native_run(name: str) -> None:
     result, facts = _invoke(name, "run")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -1032,8 +977,6 @@ def test_the_storage_layouts_demo_refutes_the_wrong_nesting() -> None:
 # {{{ hexahedra
 
 
-@needs_several_indices
-@needs_literal_binders
 def test_the_hexahedra_demo_decides_its_layouts_and_its_programs() -> None:
     result, facts = _invoke("hexahedra", "check")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -1116,8 +1059,6 @@ def test_the_hexahedra_demo_decides_its_layouts_and_its_programs() -> None:
     ) in contravariant
 
 
-@needs_several_indices
-@needs_literal_binders
 def test_the_hexahedra_layouts_are_loopys_strides_and_modepys_reshape() -> None:
     # The layout facts are about loopty's reading of the dim_tags and of the
     # DOFArray. This ties each reading to the code it stands for: the strides
@@ -1156,8 +1097,6 @@ def test_the_hexahedra_layouts_are_loopys_strides_and_modepys_reshape() -> None:
             assert stored == row_major[e, k, j, i] == module.row_major(e, i, j, k, n=n)
 
 
-@needs_several_indices
-@needs_literal_binders
 def test_the_hexahedra_theorem_holds_at_exact_matrices() -> None:
     from fractions import Fraction
 
@@ -1178,7 +1117,6 @@ def test_the_hexahedra_theorem_holds_at_exact_matrices() -> None:
                 assert claim.holds, (k, j, i)
 
 
-@needs_several_indices
 @pytest.mark.parametrize("order", [1, 2, 3, 4, 5, 6])
 def test_the_hexahedra_factors_are_the_stiffness_and_the_mass(order: int) -> None:
     # sum_j S^T[i, j] is the integral of the i-th basis function's derivative,
@@ -1193,8 +1131,6 @@ def test_the_hexahedra_factors_are_the_stiffness_and_the_mass(order: int) -> Non
     assert np.all(np.linalg.eigvalsh(mass) > 0)
 
 
-@needs_several_indices
-@needs_literal_binders
 def test_the_hexahedra_demo_refuses_the_deeper_fusion_and_keeps_the_windows() -> None:
     result, _ = _invoke("hexahedra", "python")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -1216,8 +1152,6 @@ def test_the_hexahedra_demo_refuses_the_deeper_fusion_and_keeps_the_windows() ->
     assert out.count("all decided by isl") == 3
 
 
-@needs_several_indices
-@needs_literal_binders
 def test_the_hexahedra_launches_are_legal_and_build_on_opencl(plain_opencl) -> None:
     module = _module("hexahedra")
     for operator in ("grad", "div"):
@@ -1238,7 +1172,6 @@ def test_the_hexahedra_launches_are_legal_and_build_on_opencl(plain_opencl) -> N
 # {{{ advection
 
 
-@needs_several_indices
 def test_the_advection_demo_decides_every_access_and_every_launch() -> None:
     result, facts = _invoke("advection", "check")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -1271,7 +1204,6 @@ def test_the_advection_demo_decides_every_access_and_every_launch() -> None:
     assert "assumed" not in {fact["status"] for fact in facts}
 
 
-@needs_several_indices
 @pytest.mark.parametrize("order", [1, 2, 3, 4, 5, 6])
 def test_the_advection_tables_are_grudges_operators_with_the_inverse_mass_in(
     order: int,
@@ -1296,7 +1228,6 @@ def test_the_advection_tables_are_grudges_operators_with_the_inverse_mass_in(
         assert np.allclose(lifted, np.einsum("i,kj->kji", L[side], g), atol=1e-11)
 
 
-@needs_several_indices
 @pytest.mark.parametrize("order", [1, 3, 6])
 def test_the_gll_tables_are_the_quadratures_and_conserve(order: int) -> None:
     module = _module("advection")
@@ -1314,7 +1245,6 @@ def test_the_gll_tables_are_the_quadratures_and_conserve(order: int) -> None:
     assert np.isclose(weights.sum(), 2.0)
 
 
-@needs_several_indices
 def test_the_lift_onto_the_face_nodes_is_the_lift_with_the_gll_tables() -> None:
     from loopty import Arr
 
@@ -1332,7 +1262,6 @@ def test_the_lift_onto_the_face_nodes_is_the_lift_with_the_gll_tables() -> None:
     assert gap <= 1e-14 * np.abs(expected).max()
 
 
-@needs_several_indices
 def test_the_face_maps_are_modepys_faces_and_the_box_is_periodic() -> None:
     module = _module("advection")
     n = module.N
@@ -1354,7 +1283,6 @@ def test_the_face_maps_are_modepys_faces_and_the_box_is_periodic() -> None:
         assert (nbr[across, f ^ 1] == np.arange(27)).all()
 
 
-@needs_several_indices
 def test_the_advection_right_hand_side_conserves_on_the_periodic_box() -> None:
     # integrated with the mass, the right-hand side of a periodic problem is
     # zero: what leaves an element through a face enters its neighbor
@@ -1369,7 +1297,6 @@ def test_the_advection_right_hand_side_conserves_on_the_periodic_box() -> None:
     assert abs(total) <= 1e-13 * scale
 
 
-@needs_several_indices
 def test_the_advection_demo_refuses_the_deeper_fusion_and_runs_every_split() -> None:
     result, _ = _invoke("advection", "python")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -1395,7 +1322,6 @@ def test_the_advection_demo_refuses_the_deeper_fusion_and_runs_every_split() -> 
     assert "all decided" in out and "refuted" not in out
 
 
-@needs_several_indices
 def test_the_advection_launches_are_legal_and_build_on_opencl(plain_opencl) -> None:
     module = _module("advection")
     for split in module.SPLITS:
@@ -1658,7 +1584,6 @@ def test_the_assembly_theorems_are_in_its_ledger() -> None:
 # {{{ l2p
 
 
-@needs_several_indices
 def test_the_l2p_demo_applies_its_theorem_to_what_reconstruct_stores() -> None:
     """The postcondition decided from the stores, and the theorem applied to it."""
     _result, facts = _invoke("l2p", "check")
@@ -1701,7 +1626,6 @@ def test_the_l2p_demo_applies_its_theorem_to_what_reconstruct_stores() -> None:
     ]
 
 
-@needs_several_indices
 def test_the_l2p_demo_agrees_with_sumpys_own_kernel() -> None:
     """The row the recording of sumpy's E2PFromSingleBox gives, tested."""
     _result, facts = _invoke("l2p", "check")
@@ -1721,7 +1645,6 @@ def test_the_l2p_demo_agrees_with_sumpys_own_kernel() -> None:
     assert detail["difference"] < 1e-14 * detail["largest"]
 
 
-@needs_several_indices
 def test_the_l2p_demo_refuses_the_interchange_and_fuses_box_by_box() -> None:
     result, _ = _invoke("l2p", "python")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -1759,7 +1682,6 @@ def test_the_l2p_demo_refuses_the_interchange_and_fuses_box_by_box() -> None:
     ]
 
 
-@needs_several_indices
 def test_the_l2p_demo_keeps_one_triangle_per_box_and_refuses_one_row() -> None:
     # One box's triangle of R, over a domain (#244), stored by a copy and by
     # the recurrence that reads it (#213): the window is found along the
@@ -1802,7 +1724,6 @@ def test_the_l2p_demo_keeps_one_triangle_per_box_and_refuses_one_row() -> None:
 # {{{ the QBX layer potential
 
 
-@needs_parts
 def test_the_qbx_demo_states_the_fact_sumpy_silences_for_both_layers() -> None:
     # sumpy silences loopy's write_race(write_lpot*) on its LayerPotential;
     # the fact in its place is that each target's cell is written once.
@@ -1820,7 +1741,6 @@ def test_the_qbx_demo_states_the_fact_sumpy_silences_for_both_layers() -> None:
         assert writes["decided_by"] in ("isl", "lean"), writes
 
 
-@needs_parts
 def test_the_qbx_demo_agrees_with_what_sumpy_returned_at_the_pinned_commit() -> None:
     _result, facts = _invoke("layer_potential", "check")
     rows = {fact["owner"]: fact for fact in facts if fact["kind"] == "upstream"}
@@ -1849,7 +1769,6 @@ def test_the_qbx_demo_agrees_with_what_sumpy_returned_at_the_pinned_commit() -> 
     assert len(recorded["single_layer"]) == len(recorded["double_layer"]) == size
 
 
-@needs_parts
 def test_the_qbx_demo_measures_pytentials_identity_and_the_jumps() -> None:
     _result, facts = _invoke("layer_potential", "check")
     rows = {fact["owner"]: fact for fact in facts if fact["kind"] == "tested"}
@@ -1861,7 +1780,6 @@ def test_the_qbx_demo_measures_pytentials_identity_and_the_jumps() -> None:
         assert order > 5 - 1.6, fact
 
 
-@needs_parts
 def test_the_line_taylor_theorem_is_in_the_qbx_ledger_and_not_refuted() -> None:
     _result, facts = _invoke("layer_potential", "check")
     statuses = {
@@ -1872,7 +1790,6 @@ def test_the_line_taylor_theorem_is_in_the_qbx_ledger_and_not_refuted() -> None:
     assert statuses <= {"assumed", "tested", "proved"}
 
 
-@needs_parts
 def test_the_qbx_ledger_says_single_layer_adds_line_taylors_terms() -> None:
     """The theorem and the kernel in one row: its terms are line_taylor's c(n) (#252).
 
@@ -1910,7 +1827,6 @@ def test_the_qbx_ledger_says_single_layer_adds_line_taylors_terms() -> None:
     assert "single(c[t] - y[s], z[t] - c[t])" in source[line]
 
 
-@needs_parts
 def test_the_kernels_ratio_is_the_theorems() -> None:
     # The kernels add coefficient(ratio, k) with the ratio multiplied out by
     # the conjugate; the theorem's is -beta / alpha. They agree to rounding,
@@ -1934,7 +1850,6 @@ def test_the_kernels_ratio_is_the_theorems() -> None:
             assert abs(series - np.log(abs(alpha + beta))) <= truncation
 
 
-@needs_parts
 def test_sumpys_tile_is_legal_and_c_cannot_build_its_axes() -> None:
     module = _module("layer_potential")
     tile = module.sumpy_tile("c")
@@ -1946,7 +1861,6 @@ def test_sumpys_tile_is_legal_and_c_cannot_build_its_axes() -> None:
     assert "puts a loop on a hardware axis, and the C target has none" in reason
 
 
-@needs_parts
 def test_the_qbx_demo_prints_the_tile_the_fact_and_the_rows() -> None:
     result, _ = _invoke("layer_potential", "python")
     assert result.returncode == 0, result.stdout + result.stderr
