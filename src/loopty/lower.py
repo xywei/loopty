@@ -2896,14 +2896,16 @@ def _without_loops_ignored(
     since the update carries the statement's own predicates. A loop a bound
     reads (a triangle's ``j < i``, a clause the sum is narrowed by, ``if k ==
     j``) stays, and so does the nesting it makes. The result is checked to be
-    that same set, and a domain isl does not simplify so is kept as it was.
+    that same set, and bounded where ``domain`` is; a domain isl does not
+    simplify so is kept as it was, and so is one whose statement never runs,
+    within which any set is the same.
 
     ``known`` names the parameters other than the loops that a domain may name
     and still lose them: the sizes, the scalars and the binders of sums, which
-    nothing in the kernel assigns. A domain that names
-    anything else keeps every loop, as it was. That is a ragged row's length,
-    ``cnt_r`` or ``nl_cnt_r``, which is assigned inside the row's loop, and
-    only a domain that names the row's loop is nested where it is assigned.
+    nothing in the kernel assigns. A domain that names anything else keeps
+    every loop, as it was. That is a ragged row's length, ``cnt_r`` or
+    ``nl_cnt_r``, which is assigned inside the row's loop, and only a domain
+    that names the row's loop is nested where it is assigned.
     """
     loops = set(nest.get_var_names(isl.dim_type.set))
     named = set(_domain_params(domain))
@@ -2918,6 +2920,8 @@ def _without_loops_ignored(
         0,
         nest.dim(isl.dim_type.set),
     ).params()
+    if context.is_empty():
+        return domain
     simpler = domain.gist_params(context)
     ignored = {name for name in present if not _names_param(simpler, name)}
     if not ignored:
@@ -2934,11 +2938,12 @@ def _without_loops_ignored(
         simpler = simpler.remove_dims(
             isl.dim_type.param, simpler.find_dim_by_name(isl.dim_type.param, name), 1
         )
-    if not _same_set(
+    same = _same_set(
         simpler.align_params(domain.get_space()).intersect_params(context),
         domain.intersect_params(context),
-    ):  # pragma: no cover - gist is that set within the context
-        return domain
+    )
+    if not same or (domain.is_bounded() and not simpler.is_bounded()):
+        return domain  # pragma: no cover - gist is that set within the context
     return check_names(simpler, "a sum's domain, with the loops it ignores left out")
 
 

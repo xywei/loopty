@@ -1418,6 +1418,22 @@ def test_a_sum_bounded_by_a_scalar_or_under_a_guard_names_no_loop() -> None:
     assert np.allclose(out["y"], 3.0 * np.arange(5.0))
 
 
+@kernel
+def never_summed(x: Arr[Fin[n], Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
+    """A sum under a guard that holds nowhere."""
+    for i in y.dom:
+        with when(i < 0):
+            y[i] = reduce_sum(x[i, j] for j in x.dom[i])
+
+
+def test_a_sum_whose_statement_never_runs_keeps_its_bounds() -> None:
+    # Within an empty nest every set is the same one, and gist made j's
+    # domain the whole line; it is kept as it was, bounded.
+    assert _domain_of(never_summed.trace(), "j").is_bounded()
+    out = run(never_summed.trace(), x=np.arange(16.0).reshape(4, 4), y=np.ones(4))
+    assert np.array_equal(out["y"], np.ones(4))
+
+
 def test_an_ilp_split_around_a_triangle_runs_each_lane_in_turn() -> None:
     # Here the bound of j reads the lane's row, so each lane has its own loop
     # over j, and the result is the same.
