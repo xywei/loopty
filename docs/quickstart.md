@@ -125,7 +125,7 @@ row per work group, is the schedule for this shape that does build and did run.
 ```console
 $ uv run lanky check examples/spmv.py
 STATUS   BY             WHERE        OWNER          STATEMENT
--------  -------------  -----------  -------------  ---------------------------------------------------------------------
+-------  -------------  -----------  -------------  ----------------------------------------------------------------------------------------------
 decided  isl            spmv.py:79   scan           off[0] is in bounds for every instance of S0
 decided  isl            spmv.py:81   scan           off[r + 1] is in bounds for every instance of S1
 decided  isl            spmv.py:81   scan           off[r] is in bounds for every instance of S1
@@ -140,15 +140,13 @@ tested   interpreter    spmv.py:69   scan           the traced term computes wha
 tested   property-test  spmv.py:84   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat]
                                                     | h0: off(0) == 0
                                                     | hs: forall r in Fin(n). off(r + 1) == off(r) + cnt(r)
-                                                    |- forall a in Fin(n + 1), b in Fin(n + 1) where a <= b.
-                                                        off(a) <= off(b)
+                                                    |- forall a in Fin(n + 1), b in Fin(n + 1) where a <= b. off(a) <= off(b)
 tested   python         spmv.py:84   scan_monotone  the term computes what the annotations compute
 decided  isl            spmv.py:112  spmv           y[r] is in bounds for every instance of S0
 decided  isl            spmv.py:112  spmv           val[r, j] is in bounds for every instance of S0
 decided  type           spmv.py:112  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
 decided  isl            spmv.py:112  spmv           col[r, j] is in bounds for every instance of S0
-decided  isl            spmv.py:112  spmv           cnt[r], the length of row r that bounds the loop over j, is in bounds
-                                                      for every instance of S0
+decided  isl            spmv.py:112  spmv           cnt[r], the length of row r that bounds the loop over j, is in bounds for every instance of S0
 decided  isl            spmv.py:112  spmv           distinct instances of S0 write distinct cells of y
 decided  isl            spmv.py:102  spmv           the source order runs every dependence forward in time
 decided  type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
@@ -156,12 +154,10 @@ tested   interpreter    spmv.py:102  spmv           the traced term computes wha
 decided  isl            spmv.py:112  spmv           split(j, 2) renames the instances of spmv one for one
 decided  isl            spmv.py:112  spmv           the order after split(j, 2) runs every dependence of spmv forward
 decided  isl            spmv.py:112  spmv           realize('y', tree=True) renames the instances of spmv one for one
-decided  isl            spmv.py:112  spmv           the order after realize('y', tree=True) runs every dependence of
-                                                      spmv forward
+decided  isl            spmv.py:112  spmv           the order after realize('y', tree=True) runs every dependence of spmv forward
 decided  isl            spmv.py:112  spmv           the accumulation into y is reassociated by realize('y', tree=True),
                                                       so its result is compared at 'reassoc'
-decided  call           spmv.py:115  solve          after scan(...) in solve: off[0] == 0
-                                                      and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+decided  call           spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
 tested   interpreter    spmv.py:115  solve          the traced term computes what the body computes
 
 29 facts: 24 decided, 5 tested
@@ -233,20 +229,16 @@ solve: Schedule(solve, target='c')
   off: difference 0 within 0 (exact) -> tested
 
 STATUS   BY     WHERE        OWNER  STATEMENT
--------  -----  -----------  -----  ---------------------------------------------------------------------
+-------  -----  -----------  -----  -------------------------------------------------------------------------------------
 decided  isl    spmv.py:112  spmv   split(j, 2) renames the instances of spmv one for one
 decided  isl    spmv.py:112  spmv   the order after split(j, 2) runs every dependence of spmv forward
 decided  isl    spmv.py:112  spmv   realize('y', tree=True) renames the instances of spmv one for one
-decided  isl    spmv.py:112  spmv   the order after realize('y', tree=True) runs every dependence of
-                                      spmv forward
+decided  isl    spmv.py:112  spmv   the order after realize('y', tree=True) runs every dependence of spmv forward
 decided  isl    spmv.py:112  spmv   the accumulation into y is reassociated by realize('y', tree=True),
                                       so its result is compared at 'reassoc'
-tested   loopy  spmv.py:112  spmv   the scheduled run of spmv agrees with the native run to the accuracy
-                                      its types state
-tested   loopy  spmv.py:79   scan   the scheduled run of scan agrees with the native run to the accuracy
-                                      its types state
-tested   loopy  spmv.py:115  solve  the scheduled run of solve agrees with the native run to the accuracy
-                                      its types state
+tested   loopy  spmv.py:112  spmv   the scheduled run of spmv agrees with the native run to the accuracy its types state
+tested   loopy  spmv.py:79   scan   the scheduled run of scan agrees with the native run to the accuracy its types state
+tested   loopy  spmv.py:115  solve  the scheduled run of solve agrees with the native run to the accuracy its types state
 
 8 facts: 5 decided, 3 tested
 

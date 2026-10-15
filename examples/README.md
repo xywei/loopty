@@ -131,7 +131,7 @@ program `solve` has that fact too, about the term its two calls compose into.
 ```console
 $ uv run lanky check examples/spmv.py
 STATUS   BY             WHERE        OWNER          STATEMENT
--------  -------------  -----------  -------------  ---------------------------------------------------------------------
+-------  -------------  -----------  -------------  ----------------------------------------------------------------------------------------------
 decided  isl            spmv.py:79   scan           off[0] is in bounds for every instance of S0
 decided  isl            spmv.py:81   scan           off[r + 1] is in bounds for every instance of S1
 decided  isl            spmv.py:81   scan           off[r] is in bounds for every instance of S1
@@ -146,15 +146,13 @@ tested   interpreter    spmv.py:69   scan           the traced term computes wha
 tested   property-test  spmv.py:84   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat]
                                                     | h0: off(0) == 0
                                                     | hs: forall r in Fin(n). off(r + 1) == off(r) + cnt(r)
-                                                    |- forall a in Fin(n + 1), b in Fin(n + 1) where a <= b.
-                                                        off(a) <= off(b)
+                                                    |- forall a in Fin(n + 1), b in Fin(n + 1) where a <= b. off(a) <= off(b)
 tested   python         spmv.py:84   scan_monotone  the term computes what the annotations compute
 decided  isl            spmv.py:112  spmv           y[r] is in bounds for every instance of S0
 decided  isl            spmv.py:112  spmv           val[r, j] is in bounds for every instance of S0
 decided  type           spmv.py:112  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
 decided  isl            spmv.py:112  spmv           col[r, j] is in bounds for every instance of S0
-decided  isl            spmv.py:112  spmv           cnt[r], the length of row r that bounds the loop over j, is in bounds
-                                                      for every instance of S0
+decided  isl            spmv.py:112  spmv           cnt[r], the length of row r that bounds the loop over j, is in bounds for every instance of S0
 decided  isl            spmv.py:112  spmv           distinct instances of S0 write distinct cells of y
 decided  isl            spmv.py:102  spmv           the source order runs every dependence forward in time
 decided  type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
@@ -162,12 +160,10 @@ tested   interpreter    spmv.py:102  spmv           the traced term computes wha
 decided  isl            spmv.py:112  spmv           split(j, 2) renames the instances of spmv one for one
 decided  isl            spmv.py:112  spmv           the order after split(j, 2) runs every dependence of spmv forward
 decided  isl            spmv.py:112  spmv           realize('y', tree=True) renames the instances of spmv one for one
-decided  isl            spmv.py:112  spmv           the order after realize('y', tree=True) runs every dependence of
-                                                      spmv forward
+decided  isl            spmv.py:112  spmv           the order after realize('y', tree=True) runs every dependence of spmv forward
 decided  isl            spmv.py:112  spmv           the accumulation into y is reassociated by realize('y', tree=True),
                                                       so its result is compared at 'reassoc'
-decided  call           spmv.py:115  solve          after scan(...) in solve: off[0] == 0
-                                                      and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+decided  call           spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
 tested   interpreter    spmv.py:115  solve          the traced term computes what the body computes
 
 29 facts: 24 decided, 5 tested
@@ -197,20 +193,16 @@ solve: Schedule(solve, target='c')
   off: difference 0 within 0 (exact) -> tested
 
 STATUS   BY     WHERE        OWNER  STATEMENT
--------  -----  -----------  -----  ---------------------------------------------------------------------
+-------  -----  -----------  -----  -------------------------------------------------------------------------------------
 decided  isl    spmv.py:112  spmv   split(j, 2) renames the instances of spmv one for one
 decided  isl    spmv.py:112  spmv   the order after split(j, 2) runs every dependence of spmv forward
 decided  isl    spmv.py:112  spmv   realize('y', tree=True) renames the instances of spmv one for one
-decided  isl    spmv.py:112  spmv   the order after realize('y', tree=True) runs every dependence of
-                                      spmv forward
+decided  isl    spmv.py:112  spmv   the order after realize('y', tree=True) runs every dependence of spmv forward
 decided  isl    spmv.py:112  spmv   the accumulation into y is reassociated by realize('y', tree=True),
                                       so its result is compared at 'reassoc'
-tested   loopy  spmv.py:112  spmv   the scheduled run of spmv agrees with the native run to the accuracy
-                                      its types state
-tested   loopy  spmv.py:79   scan   the scheduled run of scan agrees with the native run to the accuracy
-                                      its types state
-tested   loopy  spmv.py:115  solve  the scheduled run of solve agrees with the native run to the accuracy
-                                      its types state
+tested   loopy  spmv.py:112  spmv   the scheduled run of spmv agrees with the native run to the accuracy its types state
+tested   loopy  spmv.py:79   scan   the scheduled run of scan agrees with the native run to the accuracy its types state
+tested   loopy  spmv.py:115  solve  the scheduled run of solve agrees with the native run to the accuracy its types state
 
 8 facts: 5 decided, 3 tested
 
@@ -285,13 +277,12 @@ jacobi: Schedule(jacobi, target='c').skew(i, by='t').tile(t,i,8,8)
   u: difference 0 within 1e-06 (approx) -> tested
 
 STATUS   BY     WHERE               OWNER   STATEMENT
--------  -----  ------------------  ------  -----------------------------------------------------------------------
+-------  -----  ------------------  ------  --------------------------------------------------------------------------------------
 decided  isl    stencil_skew.py:62  jacobi  skew(i, by='t') renames the instances of jacobi one for one
 decided  isl    stencil_skew.py:62  jacobi  the order after skew(i, by='t') runs every dependence of jacobi forward
 decided  isl    stencil_skew.py:62  jacobi  tile(t,i,8,8) renames the instances of jacobi one for one
 decided  isl    stencil_skew.py:62  jacobi  the order after tile(t,i,8,8) runs every dependence of jacobi forward
-tested   loopy  stencil_skew.py:62  jacobi  the scheduled run of jacobi agrees with the native run to the accuracy
-                                              its types state
+tested   loopy  stencil_skew.py:62  jacobi  the scheduled run of jacobi agrees with the native run to the accuracy its types state
 
 5 facts: 4 decided, 1 tested
 
@@ -412,7 +403,7 @@ and both writes at `t + 1` because it keeps `t + 1 < nt`.
 ```console
 $ uv run lanky check examples/wavefront_acoustic.py
 STATUS   BY           WHERE                      OWNER     STATEMENT
--------  -----------  -------------------------  --------  -----------------------------------------------------------------------
+-------  -----------  -------------------------  --------  ---------------------------------------------------------------------------------------------------
 decided  isl          wavefront_acoustic.py:111  acoustic  velocity[t + 1, i] is in bounds for every instance of S0
 decided  isl          wavefront_acoustic.py:111  acoustic  velocity[t, i] is in bounds for every instance of S0
 decided  isl          wavefront_acoustic.py:111  acoustic  pressure[t, i + 1] is in bounds for every instance of S0
@@ -426,21 +417,16 @@ decided  isl          wavefront_acoustic.py:114  acoustic  distinct instances of
 decided  isl          wavefront_acoustic.py:99   acoustic  the source order runs every dependence forward in time
 tested   interpreter  wavefront_acoustic.py:99   acoustic  the traced term computes what the body computes
 decided  isl          wavefront_acoustic.py:111  acoustic  skew(i, by='t') renames the instances of acoustic one for one
-decided  isl          wavefront_acoustic.py:111  acoustic  the order after skew(i, by='t') runs every dependence of
-                                                             acoustic forward
+decided  isl          wavefront_acoustic.py:111  acoustic  the order after skew(i, by='t') runs every dependence of acoustic forward
 decided  isl          wavefront_acoustic.py:111  acoustic  tile(t,i,4,8) renames the instances of acoustic one for one
 decided  isl          wavefront_acoustic.py:111  acoustic  the order after tile(t,i,4,8) runs every dependence of acoustic forward
-decided  isl          wavefront_acoustic.py:111  acoustic  affine({ [t, i] -> [a = t + i, b = t - i] }) renames the instances of
-                                                             acoustic one for one
-decided  isl          wavefront_acoustic.py:111  acoustic  the order after affine({ [t, i] -> [a = t + i, b = t - i] }) runs every
-                                                             dependence of acoustic forward
-decided  isl          wavefront_acoustic.py:111  acoustic  affine({ S0[t, i] -> [a = t + i, b = t - i]; S1[t, i] ->
-                                                                 [a = t + i, b = 1 + t - i] }) renames the instances of acoustic
-                                                             one for one
-decided  isl          wavefront_acoustic.py:111  acoustic  the order after
-                                                             affine({ S0[t, i] -> [a = t + i, b = t - i]; S1[t, i] ->
-                                                                 [a = t + i, b = 1 + t - i] }) runs every dependence of
+decided  isl          wavefront_acoustic.py:111  acoustic  affine({ [t, i] -> [a = t + i, b = t - i] }) renames the instances of acoustic one for one
+decided  isl          wavefront_acoustic.py:111  acoustic  the order after affine({ [t, i] -> [a = t + i, b = t - i] }) runs every dependence of
                                                              acoustic forward
+decided  isl          wavefront_acoustic.py:111  acoustic  affine({ S0[t, i] -> [a = t + i, b = t - i]; S1[t, i] -> [a = t + i, b = 1 + t - i] }) renames the
+                                                             instances of acoustic one for one
+decided  isl          wavefront_acoustic.py:111  acoustic  the order after affine({ S0[t, i] -> [a = t + i, b = t - i]; S1[t, i] -> [a = t + i, b = 1 + t - i]
+                                                                 }) runs every dependence of acoustic forward
 decided  isl          wavefront_acoustic.py:111  acoustic  tile(a,b,4,4) renames the instances of acoustic one for one
 decided  isl          wavefront_acoustic.py:111  acoustic  the order after tile(a,b,4,4) runs every dependence of acoustic forward
 
@@ -469,31 +455,23 @@ acoustic: Schedule(acoustic, target='c').affine({ S0[t, i] -> [a = t + i, b = t 
   velocity: difference 0 within 1e-06 (approx) -> tested
 
 STATUS   BY     WHERE                      OWNER     STATEMENT
--------  -----  -------------------------  --------  ------------------------------------------------------------------------
+-------  -----  -------------------------  --------  ---------------------------------------------------------------------------------------------------
 decided  isl    wavefront_acoustic.py:111  acoustic  skew(i, by='t') renames the instances of acoustic one for one
-decided  isl    wavefront_acoustic.py:111  acoustic  the order after skew(i, by='t') runs every dependence of
-                                                       acoustic forward
+decided  isl    wavefront_acoustic.py:111  acoustic  the order after skew(i, by='t') runs every dependence of acoustic forward
 decided  isl    wavefront_acoustic.py:111  acoustic  tile(t,i,4,8) renames the instances of acoustic one for one
 decided  isl    wavefront_acoustic.py:111  acoustic  the order after tile(t,i,4,8) runs every dependence of acoustic forward
-tested   loopy  wavefront_acoustic.py:111  acoustic  the scheduled run of acoustic agrees with the native run to the accuracy
-                                                       its types state
-decided  isl    wavefront_acoustic.py:111  acoustic  affine({ [t, i] -> [a = t + i, b = t - i] }) renames the instances of
-                                                       acoustic one for one
-decided  isl    wavefront_acoustic.py:111  acoustic  the order after affine({ [t, i] -> [a = t + i, b = t - i] }) runs every
-                                                       dependence of acoustic forward
-tested   loopy  wavefront_acoustic.py:111  acoustic  the scheduled run of acoustic agrees with the native run to the accuracy
-                                                       its types state
-decided  isl    wavefront_acoustic.py:111  acoustic  affine({ S0[t, i] -> [a = t + i, b = t - i]; S1[t, i] ->
-                                                           [a = t + i, b = 1 + t - i] }) renames the instances of acoustic
-                                                       one for one
-decided  isl    wavefront_acoustic.py:111  acoustic  the order after
-                                                       affine({ S0[t, i] -> [a = t + i, b = t - i]; S1[t, i] ->
-                                                           [a = t + i, b = 1 + t - i] }) runs every dependence of
+tested   loopy  wavefront_acoustic.py:111  acoustic  the scheduled run of acoustic agrees with the native run to the accuracy its types state
+decided  isl    wavefront_acoustic.py:111  acoustic  affine({ [t, i] -> [a = t + i, b = t - i] }) renames the instances of acoustic one for one
+decided  isl    wavefront_acoustic.py:111  acoustic  the order after affine({ [t, i] -> [a = t + i, b = t - i] }) runs every dependence of
                                                        acoustic forward
+tested   loopy  wavefront_acoustic.py:111  acoustic  the scheduled run of acoustic agrees with the native run to the accuracy its types state
+decided  isl    wavefront_acoustic.py:111  acoustic  affine({ S0[t, i] -> [a = t + i, b = t - i]; S1[t, i] -> [a = t + i, b = 1 + t - i] }) renames the
+                                                       instances of acoustic one for one
+decided  isl    wavefront_acoustic.py:111  acoustic  the order after affine({ S0[t, i] -> [a = t + i, b = t - i]; S1[t, i] -> [a = t + i, b = 1 + t - i]
+                                                           }) runs every dependence of acoustic forward
 decided  isl    wavefront_acoustic.py:111  acoustic  tile(a,b,4,4) renames the instances of acoustic one for one
 decided  isl    wavefront_acoustic.py:111  acoustic  the order after tile(a,b,4,4) runs every dependence of acoustic forward
-tested   loopy  wavefront_acoustic.py:111  acoustic  the scheduled run of acoustic agrees with the native run to the accuracy
-                                                       its types state
+tested   loopy  wavefront_acoustic.py:111  acoustic  the scheduled run of acoustic agrees with the native run to the accuracy its types state
 
 13 facts: 10 decided, 3 tested
 
@@ -583,11 +561,9 @@ pairs: Schedule(pairs, target='c').pack(f)
   e: difference 0 within 1.93e-06 (approx) -> tested
 
 STATUS  BY     WHERE        OWNER  STATEMENT
-------  -----  -----------  -----  ---------------------------------------------------------------------
-tested  loopy  pairs.py:78  pairs  the scheduled run of pairs agrees with the native run to the accuracy
-                                     its types state
-tested  loopy  pairs.py:78  pairs  the scheduled run of pairs agrees with the native run to the accuracy
-                                     its types state
+------  -----  -----------  -----  -------------------------------------------------------------------------------------
+tested  loopy  pairs.py:78  pairs  the scheduled run of pairs agrees with the native run to the accuracy its types state
+tested  loopy  pairs.py:78  pairs  the scheduled run of pairs agrees with the native run to the accuracy its types state
 
 2 facts: 2 tested
 ```
@@ -689,13 +665,10 @@ burgers_rhs: Schedule(burgers_rhs, target='c')
   rhs: difference 0 within 1e-06 (approx) -> tested
 
 STATUS  BY     WHERE              OWNER        STATEMENT
-------  -----  -----------------  -----------  --------------------------------------------------------------------
-tested  loopy  composition.py:66  flux         the scheduled run of flux agrees with the native run to the accuracy
-                                                 its types state
-tested  loopy  composition.py:74  divergence   the scheduled run of divergence agrees with the native run to the
-                                                 accuracy its types state
-tested  loopy  composition.py:77  burgers_rhs  the scheduled run of burgers_rhs agrees with the native run to the
-                                                 accuracy its types state
+------  -----  -----------------  -----------  -------------------------------------------------------------------------------------------
+tested  loopy  composition.py:66  flux         the scheduled run of flux agrees with the native run to the accuracy its types state
+tested  loopy  composition.py:74  divergence   the scheduled run of divergence agrees with the native run to the accuracy its types state
+tested  loopy  composition.py:77  burgers_rhs  the scheduled run of burgers_rhs agrees with the native run to the accuracy its types state
 
 3 facts: 3 tested
 ```
@@ -802,32 +775,25 @@ names, so it is worth an assumption checked when the program runs.
 ```console
 $ uv run lanky check examples/travel.py
 STATUS                                                       EFFECTIVE  BY             WHERE          OWNER          STATEMENT
------------------------------------------------------------  ---------  -------------  -------------  -------------  -----------------------------------------------------------------------
+-----------------------------------------------------------  ---------  -------------  -------------  -------------  -------------------------------------------------------------------------------------------------
 decided                                                      decided    isl            travel.py:72   number         forall i in Fin(n). perm[i] == n - 1 - i
 decided                                                      decided    type           travel.py:92   gather         x[perm[i]] is in bounds by type (perm[i] : Fin(n))
 decided                                                      decided    call           travel.py:95   permuted       after number(...) in permuted: forall i in Fin(n). perm[i] == n - 1 - i
-decided                                                      tested     isl            travel.py:99   permuted       the elements of perm are points of Fin(n)
-                                                                                                                       where gather is called at travel.py:99,
+decided                                                      tested     isl            travel.py:99   permuted       the elements of perm are points of Fin(n) where gather is called at travel.py:99,
                                                                                                                        after number at travel.py:98 wrote perm
-assumed                                                      assumed    -              travel.py:106  checked        the elements of perm are points of Fin(n)
-                                                                                                                       where gather is called at travel.py:106,
+assumed                                                      assumed    -              travel.py:106  checked        the elements of perm are points of Fin(n) where gather is called at travel.py:106,
                                                                                                                        after number_quiet at travel.py:105 wrote perm (checked when it runs)
 decided                                                      decided    isl            travel.py:115  scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
-decided                                                      decided    call           travel.py:148  through        after scan(...) in through: off[0] == 0
-                                                                                                                       and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+decided                                                      decided    call           travel.py:148  through        after scan(...) in through: off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
 decided                                                      tested     isl            travel.py:152  through        off holds the offsets the counts in cnt give the rows of val
-                                                                                                                       (off[0] == 0 and off[r + 1] == off[r] + cnt[r])
-                                                                                                                       where rowsums is called at travel.py:152,
+                                                                                                                       (off[0] == 0 and off[r + 1] == off[r] + cnt[r]) where rowsums is called at travel.py:152,
                                                                                                                        after scan at travel.py:151 wrote off
 assumed                                                      assumed    -              travel.py:186  weigh          val[off[r] + j] is in bounds
-decided                                                      decided    call           travel.py:189  flat           after scan_flat(...) in flat: off[0] == 0
-                                                                                                                       and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+decided                                                      decided    call           travel.py:189  flat           after scan_flat(...) in flat: off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
 decided                                                      tested     isl            travel.py:193  flat           off holds the offsets the counts in cnt give the rows of wt
-                                                                                                                       (off[0] == 0 and off[r + 1] == off[r] + cnt[r])
-                                                                                                                       where weigh is called at travel.py:193,
+                                                                                                                       (off[0] == 0 and off[r + 1] == off[r] + cnt[r]) where weigh is called at travel.py:193,
                                                                                                                        after scan_flat at travel.py:192 wrote off
-assumed                                                      assumed    -              travel.py:193  flat           the elements of off are points of Fin(nnz + 1)
-                                                                                                                       where weigh is called at travel.py:193,
+assumed                                                      assumed    -              travel.py:193  flat           the elements of off are points of Fin(nnz + 1) where weigh is called at travel.py:193,
                                                                                                                        after scan_flat at travel.py:192 wrote off (checked when it runs)
 decided under requirement:travel.flat@189:weigh:element:off  assumed    isl            travel.py:186  flat           val[off[r_0] + j] is in bounds for every instance of weigh.S0,
                                                                                                                        where weigh is called at travel.py:193
@@ -870,29 +836,18 @@ flat: Schedule(flat, target='c')
   y: difference 0 within 1e-06 (approx) -> tested
 
 STATUS  BY     WHERE          OWNER         STATEMENT
-------  -----  -------------  ------------  ------------------------------------------------------------------------
-tested  loopy  travel.py:76   number        the scheduled run of number agrees with the native run to the accuracy
-                                              its types state
-tested  loopy  travel.py:83   number_quiet  the scheduled run of number_quiet agrees with the native run to the
-                                              accuracy its types state
-tested  loopy  travel.py:92   gather        the scheduled run of gather agrees with the native run to the accuracy
-                                              its types state
-tested  loopy  travel.py:95   permuted      the scheduled run of permuted agrees with the native run to the accuracy
-                                              its types state
-tested  loopy  travel.py:102  checked       the scheduled run of checked agrees with the native run to the accuracy
-                                              its types state
-tested  loopy  travel.py:120  scan          the scheduled run of scan agrees with the native run to the accuracy
-                                              its types state
-tested  loopy  travel.py:145  rowsums       the scheduled run of rowsums agrees with the native run to the accuracy
-                                              its types state
-tested  loopy  travel.py:148  through       the scheduled run of through agrees with the native run to the accuracy
-                                              its types state
-tested  loopy  travel.py:166  scan_flat     the scheduled run of scan_flat agrees with the native run to the
-                                              accuracy its types state
-tested  loopy  travel.py:186  weigh         the scheduled run of weigh agrees with the native run to the accuracy
-                                              its types state
-tested  loopy  travel.py:189  flat          the scheduled run of flat agrees with the native run to the accuracy
-                                              its types state
+------  -----  -------------  ------------  --------------------------------------------------------------------------------------------
+tested  loopy  travel.py:76   number        the scheduled run of number agrees with the native run to the accuracy its types state
+tested  loopy  travel.py:83   number_quiet  the scheduled run of number_quiet agrees with the native run to the accuracy its types state
+tested  loopy  travel.py:92   gather        the scheduled run of gather agrees with the native run to the accuracy its types state
+tested  loopy  travel.py:95   permuted      the scheduled run of permuted agrees with the native run to the accuracy its types state
+tested  loopy  travel.py:102  checked       the scheduled run of checked agrees with the native run to the accuracy its types state
+tested  loopy  travel.py:120  scan          the scheduled run of scan agrees with the native run to the accuracy its types state
+tested  loopy  travel.py:145  rowsums       the scheduled run of rowsums agrees with the native run to the accuracy its types state
+tested  loopy  travel.py:148  through       the scheduled run of through agrees with the native run to the accuracy its types state
+tested  loopy  travel.py:166  scan_flat     the scheduled run of scan_flat agrees with the native run to the accuracy its types state
+tested  loopy  travel.py:186  weigh         the scheduled run of weigh agrees with the native run to the accuracy its types state
+tested  loopy  travel.py:189  flat          the scheduled run of flat agrees with the native run to the accuracy its types state
 
 11 facts: 11 tested
 ```
@@ -1018,7 +973,7 @@ need, every cell of `f` stored before it is read, and the window's
 ```console
 $ uv run lanky check examples/fusion.py
 STATUS   BY           WHERE         OWNER        STATEMENT
--------  -----------  ------------  -----------  ------------------------------------------------------------------------
+-------  -----------  ------------  -----------  ----------------------------------------------------------------------------------------------------
 decided  isl          fusion.py:81  flux         f[j] is in bounds for every instance of S0
 decided  isl          fusion.py:81  flux         u[j] is in bounds for every instance of S0
 decided  isl          fusion.py:81  flux         distinct instances of S0 write distinct cells of f
@@ -1032,19 +987,15 @@ decided  isl          fusion.py:84  divergence   the source order runs every dep
 tested   interpreter  fusion.py:84  divergence   the traced term computes what the body computes
 decided  isl          fusion.py:97  burgers_rhs  every cell of f that divergence reads, flux stored before it
 tested   interpreter  fusion.py:92  burgers_rhs  the traced term computes what the body computes
-decided  isl          fusion.py:95  burgers_rhs  fuse(flux, divergence, shift=1) renames the instances of
-                                                   burgers_rhs one for one
-decided  isl          fusion.py:95  burgers_rhs  the order after fuse(flux, divergence, shift=1) runs every dependence of
-                                                   burgers_rhs forward
+decided  isl          fusion.py:95  burgers_rhs  fuse(flux, divergence, shift=1) renames the instances of burgers_rhs one for one
+decided  isl          fusion.py:95  burgers_rhs  the order after fuse(flux, divergence, shift=1) runs every dependence of burgers_rhs forward
 decided  isl          fusion.py:95  burgers_rhs  for substitute('f'), every cell of f that burgers_rhs reads,
                                                    flux.S0 has stored by the time it is read
 decided  isl          fusion.py:95  burgers_rhs  substitute('f') renames the instances of burgers_rhs one for one
-decided  isl          fusion.py:95  burgers_rhs  the order after substitute('f') runs every dependence of
-                                                   burgers_rhs forward
-decided  isl          fusion.py:95  burgers_rhs  for contract('f'), every cell of f that burgers_rhs reads,
-                                                   flux.S0 has stored by the time it is read
-decided  isl          fusion.py:95  burgers_rhs  no read of f sees its slot overwritten after
-                                                   contract('f', lambda j: j % 3): f kept in 3 cells, f[j] in slot j % 3
+decided  isl          fusion.py:95  burgers_rhs  the order after substitute('f') runs every dependence of burgers_rhs forward
+decided  isl          fusion.py:95  burgers_rhs  for contract('f'), every cell of f that burgers_rhs reads, flux.S0 has stored by the time it is read
+decided  isl          fusion.py:95  burgers_rhs  no read of f sees its slot overwritten after contract('f', lambda j: j % 3):
+                                                   f kept in 3 cells, f[j] in slot j % 3
 
 20 facts: 17 decided, 3 tested
 
@@ -1070,30 +1021,21 @@ divergence: Schedule(divergence, target='c')
   rhs: difference 0 within 1e-06 (approx) -> tested
 
 STATUS   BY     WHERE         OWNER        STATEMENT
--------  -----  ------------  -----------  ------------------------------------------------------------------------
-decided  isl    fusion.py:95  burgers_rhs  fuse(flux, divergence, shift=1) renames the instances of
-                                             burgers_rhs one for one
-decided  isl    fusion.py:95  burgers_rhs  the order after fuse(flux, divergence, shift=1) runs every dependence of
-                                             burgers_rhs forward
-tested   loopy  fusion.py:92  burgers_rhs  the scheduled run of burgers_rhs agrees with the native run to the
-                                             accuracy its types state
+-------  -----  ------------  -----------  ----------------------------------------------------------------------------------------------------
+decided  isl    fusion.py:95  burgers_rhs  fuse(flux, divergence, shift=1) renames the instances of burgers_rhs one for one
+decided  isl    fusion.py:95  burgers_rhs  the order after fuse(flux, divergence, shift=1) runs every dependence of burgers_rhs forward
+tested   loopy  fusion.py:92  burgers_rhs  the scheduled run of burgers_rhs agrees with the native run to the accuracy its types state
 decided  isl    fusion.py:95  burgers_rhs  for substitute('f'), every cell of f that burgers_rhs reads,
                                              flux.S0 has stored by the time it is read
 decided  isl    fusion.py:95  burgers_rhs  substitute('f') renames the instances of burgers_rhs one for one
-decided  isl    fusion.py:95  burgers_rhs  the order after substitute('f') runs every dependence of
-                                             burgers_rhs forward
-tested   loopy  fusion.py:92  burgers_rhs  the scheduled run of burgers_rhs agrees with the native run to the
-                                             accuracy its types state
-decided  isl    fusion.py:95  burgers_rhs  for contract('f'), every cell of f that burgers_rhs reads,
-                                             flux.S0 has stored by the time it is read
-decided  isl    fusion.py:95  burgers_rhs  no read of f sees its slot overwritten after
-                                             contract('f', lambda j: j % 3): f kept in 3 cells, f[j] in slot j % 3
-tested   loopy  fusion.py:92  burgers_rhs  the scheduled run of burgers_rhs agrees with the native run to the
-                                             accuracy its types state
-tested   loopy  fusion.py:81  flux         the scheduled run of flux agrees with the native run to the accuracy
-                                             its types state
-tested   loopy  fusion.py:89  divergence   the scheduled run of divergence agrees with the native run to the
-                                             accuracy its types state
+decided  isl    fusion.py:95  burgers_rhs  the order after substitute('f') runs every dependence of burgers_rhs forward
+tested   loopy  fusion.py:92  burgers_rhs  the scheduled run of burgers_rhs agrees with the native run to the accuracy its types state
+decided  isl    fusion.py:95  burgers_rhs  for contract('f'), every cell of f that burgers_rhs reads, flux.S0 has stored by the time it is read
+decided  isl    fusion.py:95  burgers_rhs  no read of f sees its slot overwritten after contract('f', lambda j: j % 3):
+                                             f kept in 3 cells, f[j] in slot j % 3
+tested   loopy  fusion.py:92  burgers_rhs  the scheduled run of burgers_rhs agrees with the native run to the accuracy its types state
+tested   loopy  fusion.py:81  flux         the scheduled run of flux agrees with the native run to the accuracy its types state
+tested   loopy  fusion.py:89  divergence   the scheduled run of divergence agrees with the native run to the accuracy its types state
 
 12 facts: 7 decided, 5 tested
 
@@ -1135,7 +1077,7 @@ schedule: Schedule(mass_action, target='c').split(c, 32)
 ```console
 $ uv run lanky check examples/quadrature.py
 STATUS   BY           WHERE             OWNER        STATEMENT
--------  -----------  ----------------  -----------  -------------------------------------------------------------
+-------  -----------  ----------------  -----------  -------------------------------------------------------------------------
 decided  isl          quadrature.py:78  mass_action  yl[c, j] is in bounds for every instance of S0
 decided  type         quadrature.py:78  mass_action  X[cell[c, 1]] is in bounds by type (cell[c, 1] : Fin(nv))
 decided  isl          quadrature.py:78  mass_action  cell[c, 1] is in bounds for every instance of S0
@@ -1156,8 +1098,7 @@ decided  isl          quadrature.py:63  mass_action  the source order runs every
 decided  type         quadrature.py:78  mass_action  the accumulation into yl[c, j] over q, k is approx
 tested   interpreter  quadrature.py:63  mass_action  the traced term computes what the body computes
 decided  isl          quadrature.py:78  mass_action  split(c, 32) renames the instances of mass_action one for one
-decided  isl          quadrature.py:78  mass_action  the order after split(c, 32) runs every dependence of
-                                                       mass_action forward
+decided  isl          quadrature.py:78  mass_action  the order after split(c, 32) runs every dependence of mass_action forward
 
 21 facts: 20 decided, 1 tested
 
@@ -1172,12 +1113,10 @@ mass_action: Schedule(mass_action, target='c').split(c, 32)
   yl: difference 0 within 1.01e-06 (approx) -> tested
 
 STATUS   BY     WHERE             OWNER        STATEMENT
--------  -----  ----------------  -----------  ------------------------------------------------------------------
+-------  -----  ----------------  -----------  -------------------------------------------------------------------------------------------
 decided  isl    quadrature.py:78  mass_action  split(c, 32) renames the instances of mass_action one for one
-decided  isl    quadrature.py:78  mass_action  the order after split(c, 32) runs every dependence of
-                                                 mass_action forward
-tested   loopy  quadrature.py:78  mass_action  the scheduled run of mass_action agrees with the native run to the
-                                                 accuracy its types state
+decided  isl    quadrature.py:78  mass_action  the order after split(c, 32) runs every dependence of mass_action forward
+tested   loopy  quadrature.py:78  mass_action  the scheduled run of mass_action agrees with the native run to the accuracy its types state
 
 3 facts: 2 decided, 1 tested
 
@@ -1264,12 +1203,11 @@ accuracy at 30, 50, 70, 90 panels:
 ```console
 $ uv run lanky check examples/layer_potential.py
 STATUS   BY           WHERE                   OWNER           STATEMENT
--------  -----------  ----------------------  --------------  -----------------------------------------------------------------------
+-------  -----------  ----------------------  --------------  -------------------------------------------------------------------------------------------
 assumed  -            layer_potential.py:137  line_taylor     alpha : Complex, beta : Complex, c : Fn[Nat, Complex]
                                                               | away: alpha != 0
                                                               | first: alpha*c(1) == beta
-                                                              | ode: forall n in Nat where n >= 1.
-                                                                  (n + 1)*alpha*c(n + 1) + n*beta*c(n) == 0
+                                                              | ode: forall n in Nat where n >= 1. (n + 1)*alpha*c(n + 1) + n*beta*c(n) == 0
                                                               |- forall n in Nat where n >= 1. c(n) == -(-beta / alpha)**n / n
 tested   python       layer_potential.py:137  line_taylor     the term computes what the annotations compute
 decided  isl          layer_potential.py:206  single_layer    out[t] is in bounds for every instance of S0
@@ -1282,18 +1220,13 @@ decided  isl          layer_potential.py:192  single_layer    the source order r
 decided  type         layer_potential.py:206  single_layer    the accumulation into out[t] over s is approx
 tested   interpreter  layer_potential.py:192  single_layer    the traced term computes what the body computes
 decided  isl          layer_potential.py:206  single_layer    split(t, 16) renames the instances of single_layer one for one
-decided  isl          layer_potential.py:206  single_layer    the order after split(t, 16) runs every dependence of
-                                                                single_layer forward
+decided  isl          layer_potential.py:206  single_layer    the order after split(t, 16) runs every dependence of single_layer forward
 decided  isl          layer_potential.py:206  single_layer    tag(t_inner='ilp') renames the instances of single_layer one for one
-decided  isl          layer_potential.py:206  single_layer    the order after tag(t_inner='ilp') runs every dependence of
-                                                                single_layer forward
+decided  isl          layer_potential.py:206  single_layer    the order after tag(t_inner='ilp') runs every dependence of single_layer forward
 decided  isl          layer_potential.py:206  single_layer    split(s, 256) renames the instances of single_layer one for one
-decided  isl          layer_potential.py:206  single_layer    the order after split(s, 256) runs every dependence of
-                                                                single_layer forward
-decided  isl          layer_potential.py:206  single_layer    prioritize(s_outer, t_inner) renames the instances of
-                                                                single_layer one for one
-decided  isl          layer_potential.py:206  single_layer    the order after prioritize(s_outer, t_inner) runs every dependence of
-                                                                single_layer forward
+decided  isl          layer_potential.py:206  single_layer    the order after split(s, 256) runs every dependence of single_layer forward
+decided  isl          layer_potential.py:206  single_layer    prioritize(s_outer, t_inner) renames the instances of single_layer one for one
+decided  isl          layer_potential.py:206  single_layer    the order after prioritize(s_outer, t_inner) runs every dependence of single_layer forward
 decided  isl          layer_potential.py:222  double_layer    out[t] is in bounds for every instance of S0
 decided  isl          layer_potential.py:222  double_layer    w[s] is in bounds for every instance of S0
 decided  isl          layer_potential.py:222  double_layer    n[s] is in bounds for every instance of S0
@@ -1305,22 +1238,15 @@ decided  isl          layer_potential.py:211  double_layer    the source order r
 decided  type         layer_potential.py:222  double_layer    the accumulation into out[t] over s is approx
 tested   interpreter  layer_potential.py:211  double_layer    the traced term computes what the body computes
 decided  isl          layer_potential.py:222  double_layer    split(t, 16) renames the instances of double_layer one for one
-decided  isl          layer_potential.py:222  double_layer    the order after split(t, 16) runs every dependence of
-                                                                double_layer forward
+decided  isl          layer_potential.py:222  double_layer    the order after split(t, 16) runs every dependence of double_layer forward
 decided  isl          layer_potential.py:222  double_layer    tag(t_inner='ilp') renames the instances of double_layer one for one
-decided  isl          layer_potential.py:222  double_layer    the order after tag(t_inner='ilp') runs every dependence of
-                                                                double_layer forward
+decided  isl          layer_potential.py:222  double_layer    the order after tag(t_inner='ilp') runs every dependence of double_layer forward
 decided  isl          layer_potential.py:222  double_layer    split(s, 256) renames the instances of double_layer one for one
-decided  isl          layer_potential.py:222  double_layer    the order after split(s, 256) runs every dependence of
-                                                                double_layer forward
-decided  isl          layer_potential.py:222  double_layer    prioritize(s_outer, t_inner) renames the instances of
-                                                                double_layer one for one
-decided  isl          layer_potential.py:222  double_layer    the order after prioritize(s_outer, t_inner) runs every dependence of
-                                                                double_layer forward
-tested   upstream     layer_potential.py:391  single_layer    the native run of single_layer agrees with sumpy_single_layer in out,
-                                                                on its example inputs
-tested   upstream     layer_potential.py:397  double_layer    the native run of double_layer agrees with sumpy_double_layer in out,
-                                                                on its example inputs
+decided  isl          layer_potential.py:222  double_layer    the order after split(s, 256) runs every dependence of double_layer forward
+decided  isl          layer_potential.py:222  double_layer    prioritize(s_outer, t_inner) renames the instances of double_layer one for one
+decided  isl          layer_potential.py:222  double_layer    the order after prioritize(s_outer, t_inner) runs every dependence of double_layer forward
+tested   upstream     layer_potential.py:391  single_layer    the native run of single_layer agrees with sumpy_single_layer in out, on its example inputs
+tested   upstream     layer_potential.py:397  double_layer    the native run of double_layer agrees with sumpy_double_layer in out, on its example inputs
 tested   run          layer_potential.py:480  green_identity  S(du/dn) - D(u) = u/2, Green's identity, at order 5 - 1.6 or faster
 tested   run          layer_potential.py:486  jump_S          S(+) - S(-) = 0: S is continuous, at order 5 - 1.6 or faster
 tested   run          layer_potential.py:492  jump_D          D(+) - D(-) = sigma: D jumps by the density, at order 5 - 1.6 or faster
@@ -1388,7 +1314,7 @@ accepted: Schedule(weak_derivative, target='c').fuse(along_r, along_s, loops=2).
 ```console
 $ uv run lanky check examples/sum_factorization.py
 STATUS   BY           WHERE                     OWNER            STATEMENT
--------  -----------  ------------------------  ---------------  ------------------------------------------------------------------------
+-------  -----------  ------------------------  ---------------  ------------------------------------------------------------------------------------------------
 decided  isl          sum_factorization.py:82   along_r          v[e, a, b] is in bounds for every instance of S0
 decided  isl          sum_factorization.py:82   along_r          F[a, m] is in bounds for every instance of S0
 decided  isl          sum_factorization.py:82   along_r          u[e, m, b] is in bounds for every instance of S0
@@ -1405,14 +1331,11 @@ decided  type         sum_factorization.py:95   along_s          the accumulatio
 tested   interpreter  sum_factorization.py:85   along_s          the traced term computes what the body computes
 decided  isl          sum_factorization.py:103  weak_derivative  every cell of v that along_s reads, along_r stored before it
 tested   interpreter  sum_factorization.py:98   weak_derivative  the traced term computes what the body computes
-decided  isl          sum_factorization.py:101  weak_derivative  fuse(along_r, along_s, loops=2) renames the instances of
-                                                                   weak_derivative one for one
-decided  isl          sum_factorization.py:101  weak_derivative  the order after fuse(along_r, along_s, loops=2) runs every dependence of
-                                                                   weak_derivative forward
+decided  isl          sum_factorization.py:101  weak_derivative  fuse(along_r, along_s, loops=2) renames the instances of weak_derivative one for one
+decided  isl          sum_factorization.py:101  weak_derivative  the order after fuse(along_r, along_s, loops=2) runs every dependence of weak_derivative forward
 decided  isl          sum_factorization.py:101  weak_derivative  for contract('v'), every cell of v that weak_derivative reads,
                                                                    along_r.S0 has stored by the time it is read
-decided  isl          sum_factorization.py:101  weak_derivative  no read of v sees its slot overwritten after
-                                                                   contract('v', lambda e, a, b: b):
+decided  isl          sum_factorization.py:101  weak_derivative  no read of v sees its slot overwritten after contract('v', lambda e, a, b: b):
                                                                    v kept in n cells, v[e, a, b] in slot b
 
 20 facts: 17 decided, 3 tested
@@ -1434,24 +1357,17 @@ along_s: Schedule(along_s, target='c')
   w: difference 0 within 1e-06 (approx) -> tested
 
 STATUS   BY     WHERE                     OWNER            STATEMENT
--------  -----  ------------------------  ---------------  ------------------------------------------------------------------------
-decided  isl    sum_factorization.py:101  weak_derivative  fuse(along_r, along_s, loops=2) renames the instances of
-                                                             weak_derivative one for one
-decided  isl    sum_factorization.py:101  weak_derivative  the order after fuse(along_r, along_s, loops=2) runs every dependence of
-                                                             weak_derivative forward
-tested   loopy  sum_factorization.py:98   weak_derivative  the scheduled run of weak_derivative agrees with the native run to the
-                                                             accuracy its types state
+-------  -----  ------------------------  ---------------  ------------------------------------------------------------------------------------------------
+decided  isl    sum_factorization.py:101  weak_derivative  fuse(along_r, along_s, loops=2) renames the instances of weak_derivative one for one
+decided  isl    sum_factorization.py:101  weak_derivative  the order after fuse(along_r, along_s, loops=2) runs every dependence of weak_derivative forward
+tested   loopy  sum_factorization.py:98   weak_derivative  the scheduled run of weak_derivative agrees with the native run to the accuracy its types state
 decided  isl    sum_factorization.py:101  weak_derivative  for contract('v'), every cell of v that weak_derivative reads,
                                                              along_r.S0 has stored by the time it is read
-decided  isl    sum_factorization.py:101  weak_derivative  no read of v sees its slot overwritten after
-                                                             contract('v', lambda e, a, b: b):
+decided  isl    sum_factorization.py:101  weak_derivative  no read of v sees its slot overwritten after contract('v', lambda e, a, b: b):
                                                              v kept in n cells, v[e, a, b] in slot b
-tested   loopy  sum_factorization.py:98   weak_derivative  the scheduled run of weak_derivative agrees with the native run to the
-                                                             accuracy its types state
-tested   loopy  sum_factorization.py:82   along_r          the scheduled run of along_r agrees with the native run to the accuracy
-                                                             its types state
-tested   loopy  sum_factorization.py:95   along_s          the scheduled run of along_s agrees with the native run to the accuracy
-                                                             its types state
+tested   loopy  sum_factorization.py:98   weak_derivative  the scheduled run of weak_derivative agrees with the native run to the accuracy its types state
+tested   loopy  sum_factorization.py:82   along_r          the scheduled run of along_r agrees with the native run to the accuracy its types state
+tested   loopy  sum_factorization.py:95   along_s          the scheduled run of along_s agrees with the native run to the accuracy its types state
 
 8 facts: 4 decided, 4 tested
 
@@ -1528,11 +1444,9 @@ unflatten: Schedule(unflatten, target='c')
   u: difference 0 within 1e-06 (approx) -> tested
 
 STATUS  BY     WHERE                   OWNER         STATEMENT
-------  -----  ----------------------  ------------  -------------------------------------------------------------------
-tested  loopy  storage_layouts.py:83   stored_table  the scheduled run of stored_table agrees with the native run to the
-                                                       accuracy its types state
-tested  loopy  storage_layouts.py:114  unflatten     the scheduled run of unflatten agrees with the native run to the
-                                                       accuracy its types state
+------  -----  ----------------------  ------------  --------------------------------------------------------------------------------------------
+tested  loopy  storage_layouts.py:83   stored_table  the scheduled run of stored_table agrees with the native run to the accuracy its types state
+tested  loopy  storage_layouts.py:114  unflatten     the scheduled run of unflatten agrees with the native run to the accuracy its types state
 
 2 facts: 2 tested
 ```
@@ -1600,15 +1514,13 @@ on a device, the weak gradient as three launches, every node on a work item:
 ```console
 $ uv run lanky check examples/hexahedra.py
 STATUS   BY             WHERE             OWNER                  STATEMENT
--------  -------------  ----------------  ---------------------  ------------------------------------------------------------------------
+-------  -------------  ----------------  ---------------------  ----------------------------------------------------------------------------------------------------
 tested   property-test  hexahedra.py:106  sum_factorization      n : Nat, Fr : Fn[Fin(n), Fin(n), Real], Fs : Fn[Fin(n), Fin(n), Real],
-                                                                   Ft : Fn[Fin(n), Fin(n), Real], u : Fn[Fin(n), Fin(n), Fin(n), Real],
-                                                                   k : Fin(n), j : Fin(n), i : Fin(n)
-                                                                 |- sum(Ft[k, c]*Fs[j, b]*Fr[i, a]*u[c, b, a] for c in Fin(n),
-                                                                       b in Fin(n), a in Fin(n))
-                                                                     == sum(Ft[k,
-                                                                         c]*sum(Fs[j, b]*sum(Fr[i, a]*u[c, b, a] for a in Fin(n))
-                                                                         for b in Fin(n)) for c in Fin(n))
+                                                                   Ft : Fn[Fin(n), Fin(n), Real], u : Fn[Fin(n), Fin(n), Fin(n), Real], k : Fin(n),
+                                                                   j : Fin(n), i : Fin(n)
+                                                                 |- sum(Ft[k, c]*Fs[j, b]*Fr[i, a]*u[c, b, a] for c in Fin(n), b in Fin(n), a in Fin(n))
+                                                                     == sum(Ft[k, c]*sum(Fs[j, b]*sum(Fr[i, a]*u[c, b, a] for a in Fin(n)) for b in Fin(n))
+                                                                       for c in Fin(n))
 tested   python         hexahedra.py:106  sum_factorization      the term computes what the annotations compute
 decided  isl            hexahedra.py:141  dof_array              dof_array stores every cell at an address of Fin(ne*64)
 decided  isl            hexahedra.py:141  dof_array              dof_array stores no two cells at one address
@@ -1678,18 +1590,12 @@ decided  isl            hexahedra.py:280  weak_grad              every cell of w
 decided  isl            hexahedra.py:281  weak_grad              every cell of v that along_s reads, along_r stored before it
 decided  isl            hexahedra.py:282  weak_grad              every cell of vs that gradient_along_t reads, along_s stored before it
 tested   interpreter    hexahedra.py:273  weak_grad              the traced term computes what the body computes
-decided  isl            hexahedra.py:276  weak_grad              fuse(metric, along_r, loops=4) renames the instances of
-                                                                   weak_grad one for one
-decided  isl            hexahedra.py:276  weak_grad              the order after fuse(metric, along_r, loops=4) runs every dependence of
-                                                                   weak_grad forward
-decided  isl            hexahedra.py:276  weak_grad              fuse(along_r, along_s, loops=3) renames the instances of
-                                                                   weak_grad one for one
-decided  isl            hexahedra.py:276  weak_grad              the order after fuse(along_r, along_s, loops=3) runs every dependence of
-                                                                   weak_grad forward
-decided  isl            hexahedra.py:276  weak_grad              for contract('w'), every cell of w that weak_grad reads,
-                                                                   metric.S0 has stored by the time it is read
-decided  isl            hexahedra.py:276  weak_grad              no read of w sees its slot overwritten after
-                                                                   contract('w', lambda q, e, k, j, i: i):
+decided  isl            hexahedra.py:276  weak_grad              fuse(metric, along_r, loops=4) renames the instances of weak_grad one for one
+decided  isl            hexahedra.py:276  weak_grad              the order after fuse(metric, along_r, loops=4) runs every dependence of weak_grad forward
+decided  isl            hexahedra.py:276  weak_grad              fuse(along_r, along_s, loops=3) renames the instances of weak_grad one for one
+decided  isl            hexahedra.py:276  weak_grad              the order after fuse(along_r, along_s, loops=3) runs every dependence of weak_grad forward
+decided  isl            hexahedra.py:276  weak_grad              for contract('w'), every cell of w that weak_grad reads, metric.S0 has stored by the time it is read
+decided  isl            hexahedra.py:276  weak_grad              no read of w sees its slot overwritten after contract('w', lambda q, e, k, j, i: i):
                                                                    w kept in n cells, w[q, e, k, j, i] in slot i
 decided  isl            hexahedra.py:276  weak_grad              for contract('v'), every cell of v that weak_grad reads,
                                                                    along_r.S0 has stored by the time it is read
@@ -1739,47 +1645,31 @@ contravariant_along_r: Schedule(contravariant_along_r, target='c')
   v: difference 0 within 1e-06 (approx) -> tested
 
 STATUS   BY     WHERE             OWNER                  STATEMENT
--------  -----  ----------------  ---------------------  ------------------------------------------------------------------------
-decided  isl    hexahedra.py:276  weak_grad              fuse(metric, along_r, loops=4) renames the instances of
-                                                           weak_grad one for one
-decided  isl    hexahedra.py:276  weak_grad              the order after fuse(metric, along_r, loops=4) runs every dependence of
-                                                           weak_grad forward
-decided  isl    hexahedra.py:276  weak_grad              fuse(along_r, along_s, loops=3) renames the instances of
-                                                           weak_grad one for one
-decided  isl    hexahedra.py:276  weak_grad              the order after fuse(along_r, along_s, loops=3) runs every dependence of
-                                                           weak_grad forward
-tested   loopy  hexahedra.py:273  weak_grad              the scheduled run of weak_grad agrees with the native run to the
-                                                           accuracy its types state
-decided  isl    hexahedra.py:276  weak_grad              for contract('w'), every cell of w that weak_grad reads,
-                                                           metric.S0 has stored by the time it is read
-decided  isl    hexahedra.py:276  weak_grad              no read of w sees its slot overwritten after
-                                                           contract('w', lambda q, e, k, j, i: i):
+-------  -----  ----------------  ---------------------  ----------------------------------------------------------------------------------------------------
+decided  isl    hexahedra.py:276  weak_grad              fuse(metric, along_r, loops=4) renames the instances of weak_grad one for one
+decided  isl    hexahedra.py:276  weak_grad              the order after fuse(metric, along_r, loops=4) runs every dependence of weak_grad forward
+decided  isl    hexahedra.py:276  weak_grad              fuse(along_r, along_s, loops=3) renames the instances of weak_grad one for one
+decided  isl    hexahedra.py:276  weak_grad              the order after fuse(along_r, along_s, loops=3) runs every dependence of weak_grad forward
+tested   loopy  hexahedra.py:273  weak_grad              the scheduled run of weak_grad agrees with the native run to the accuracy its types state
+decided  isl    hexahedra.py:276  weak_grad              for contract('w'), every cell of w that weak_grad reads, metric.S0 has stored by the time it is read
+decided  isl    hexahedra.py:276  weak_grad              no read of w sees its slot overwritten after contract('w', lambda q, e, k, j, i: i):
                                                            w kept in n cells, w[q, e, k, j, i] in slot i
 decided  isl    hexahedra.py:276  weak_grad              for contract('v'), every cell of v that weak_grad reads,
                                                            along_r.S0 has stored by the time it is read
 decided  isl    hexahedra.py:276  weak_grad              no read of v sees its slot overwritten after
                                                            contract('v', lambda q_0, e_0, k_0, j_0, i_0: (j_0, i_0)):
                                                            v kept in n*n cells, v[q_0, e_0, k_0, j_0, i_0] in slot (j_0, i_0)
-tested   loopy  hexahedra.py:273  weak_grad              the scheduled run of weak_grad agrees with the native run to the
+tested   loopy  hexahedra.py:273  weak_grad              the scheduled run of weak_grad agrees with the native run to the accuracy its types state
+tested   loopy  hexahedra.py:179  metric                 the scheduled run of metric agrees with the native run to the accuracy its types state
+tested   loopy  hexahedra.py:194  contravariant          the scheduled run of contravariant agrees with the native run to the accuracy its types state
+tested   loopy  hexahedra.py:211  along_r                the scheduled run of along_r agrees with the native run to the accuracy its types state
+tested   loopy  hexahedra.py:228  along_s                the scheduled run of along_s agrees with the native run to the accuracy its types state
+tested   loopy  hexahedra.py:245  gradient_along_t       the scheduled run of gradient_along_t agrees with the native run to the accuracy its types state
+tested   loopy  hexahedra.py:265  divergence_along_t     the scheduled run of divergence_along_t agrees with the native run to the accuracy its types state
+tested   loopy  hexahedra.py:285  weak_div               the scheduled run of weak_div agrees with the native run to the accuracy its types state
+tested   loopy  hexahedra.py:314  metric_along_r         the scheduled run of metric_along_r agrees with the native run to the accuracy its types state
+tested   loopy  hexahedra.py:322  contravariant_along_r  the scheduled run of contravariant_along_r agrees with the native run to the
                                                            accuracy its types state
-tested   loopy  hexahedra.py:179  metric                 the scheduled run of metric agrees with the native run to the accuracy
-                                                           its types state
-tested   loopy  hexahedra.py:194  contravariant          the scheduled run of contravariant agrees with the native run to the
-                                                           accuracy its types state
-tested   loopy  hexahedra.py:211  along_r                the scheduled run of along_r agrees with the native run to the accuracy
-                                                           its types state
-tested   loopy  hexahedra.py:228  along_s                the scheduled run of along_s agrees with the native run to the accuracy
-                                                           its types state
-tested   loopy  hexahedra.py:245  gradient_along_t       the scheduled run of gradient_along_t agrees with the native run to the
-                                                           accuracy its types state
-tested   loopy  hexahedra.py:265  divergence_along_t     the scheduled run of divergence_along_t agrees with the native run to
-                                                           the accuracy its types state
-tested   loopy  hexahedra.py:285  weak_div               the scheduled run of weak_div agrees with the native run to the accuracy
-                                                           its types state
-tested   loopy  hexahedra.py:314  metric_along_r         the scheduled run of metric_along_r agrees with the native run to the
-                                                           accuracy its types state
-tested   loopy  hexahedra.py:322  contravariant_along_r  the scheduled run of contravariant_along_r agrees with the native run to
-                                                           the accuracy its types state
 
 19 facts: 8 decided, 11 tested
 
@@ -1845,7 +1735,7 @@ schedule: Schedule(matvec, target='c').split(i, 4)
 ```console
 $ uv run lanky check examples/calls.py
 STATUS   EFFECTIVE  BY           WHERE         OWNER          STATEMENT
--------  ---------  -----------  ------------  -------------  ----------------------------------------------------------------------
+-------  ---------  -----------  ------------  -------------  ----------------------------------------------------------------------------------------------------
 decided  decided    isl          calls.py:93   dot            a[k] is in bounds for every instance of S0
 decided  decided    isl          calls.py:93   dot            b[k] is in bounds for every instance of S0
 decided  decided    isl          calls.py:90   dot            the source order runs every dependence forward in time
@@ -1857,8 +1747,7 @@ decided  decided    isl          calls.py:100  matvec         x[k] is in bounds 
 decided  decided    isl          calls.py:100  matvec         distinct instances of S0 write distinct cells of y
 decided  decided    isl          calls.py:96   matvec         the source order runs every dependence forward in time
 decided  decided    type         calls.py:100  matvec         the accumulation into y[i] over k is approx
-decided  decided    isl          calls.py:100  matvec         A[i], the row passed to dot as a,
-                                                                is in bounds wherever dot is called at calls.py:100
+decided  decided    isl          calls.py:100  matvec         A[i], the row passed to dot as a, is in bounds wherever dot is called at calls.py:100
 tested   tested     interpreter  calls.py:96   matvec         the traced term computes what the body computes
 decided  decided    isl          calls.py:100  matvec         split(i, 4) renames the instances of matvec one for one
 decided  decided    isl          calls.py:100  matvec         the order after split(i, 4) runs every dependence of matvec forward
@@ -1866,17 +1755,13 @@ decided  decided    isl          calls.py:113  csr            y[r] is in bounds 
 decided  decided    isl          calls.py:113  csr            val[r, k] is in bounds for every instance of S0
 decided  decided    type         calls.py:113  csr            x[col[r, k]] is in bounds by type (col[r, k] : Fin(m))
 decided  decided    isl          calls.py:113  csr            col[r, k] is in bounds for every instance of S0
-decided  decided    isl          calls.py:113  csr            cnt[r], the length of row r that bounds the loop over k, is in bounds
-                                                                for every instance of S0
+decided  decided    isl          calls.py:113  csr            cnt[r], the length of row r that bounds the loop over k, is in bounds for every instance of S0
 decided  decided    isl          calls.py:113  csr            distinct instances of S0 write distinct cells of y
 decided  decided    isl          calls.py:103  csr            the source order runs every dependence forward in time
 decided  decided    type         calls.py:113  csr            the accumulation into y[r] over k is approx
-decided  decided    isl          calls.py:113  csr            col[r], the indices of the cells passed as b,
-                                                                is in bounds wherever dot is called at calls.py:113
-decided  decided    isl          calls.py:113  csr            val[r], the row passed to dot as a,
-                                                                is in bounds wherever dot is called at calls.py:113
-decided  decided    type         calls.py:113  csr            the cells x[col[r]] picks, passed as b,
-                                                                are in bounds by type (the entries of col : Fin(m))
+decided  decided    isl          calls.py:113  csr            col[r], the indices of the cells passed as b, is in bounds wherever dot is called at calls.py:113
+decided  decided    isl          calls.py:113  csr            val[r], the row passed to dot as a, is in bounds wherever dot is called at calls.py:113
+decided  decided    type         calls.py:113  csr            the cells x[col[r]] picks, passed as b, are in bounds by type (the entries of col : Fin(m))
 tested   tested     interpreter  calls.py:103  csr            the traced term computes what the body computes
 decided  decided    isl          calls.py:119  integrate      W[q] is in bounds for every instance of S0
 decided  decided    isl          calls.py:116  integrate      the source order runs every dependence forward in time
@@ -1895,9 +1780,8 @@ decided  decided    isl          calls.py:130  element_mass   PHI[q, k] is in bo
 decided  decided    isl          calls.py:130  element_mass   distinct instances of S0 write distinct cells of Me
 decided  decided    isl          calls.py:122  element_mass   the source order runs every dependence forward in time
 decided  decided    type         calls.py:130  element_mass   the accumulation into Me[j, k] over q is approx
-tested   tested     native       calls.py:122  element_mass   Me[0, 0] == Me[0, 0] and Me[0, 1] == Me[1, 0] and Me[0, 2] == Me[2, 0]
-                                                                and Me[1, 0] == Me[0, 1] and Me[1, 1] == Me[1, 1]
-                                                                and Me[1, 2] == Me[2, 1] and Me[2, 0] == Me[0, 2]
+tested   tested     native       calls.py:122  element_mass   Me[0, 0] == Me[0, 0] and Me[0, 1] == Me[1, 0] and Me[0, 2] == Me[2, 0] and Me[1, 0] == Me[0, 1]
+                                                                and Me[1, 1] == Me[1, 1] and Me[1, 2] == Me[2, 1] and Me[2, 0] == Me[0, 2]
                                                                 and Me[2, 1] == Me[1, 2] and Me[2, 2] == Me[2, 2]
 tested   tested     interpreter  calls.py:122  element_mass   the traced term computes what the body computes
 decided  decided    isl          calls.py:130  mass_matrices  M[c, j, k] is in bounds for every instance of S0
@@ -1918,18 +1802,14 @@ decided  decided    isl          calls.py:133  mass_matrices  the source order r
 decided  decided    type         calls.py:130  mass_matrices  the accumulation into M[c, j, k] over q is approx
 decided  decided    isl          calls.py:142  mass_matrices  cell[c], the indices of the cells passed as X
                                                                 and Y, is in bounds wherever element_mass is called at calls.py:142
-decided  decided    type         calls.py:142  mass_matrices  the cells X[cell[c]] picks, passed as X,
-                                                                are in bounds by type (the entries of cell : Fin(nv))
-decided  decided    type         calls.py:142  mass_matrices  the cells Y[cell[c]] picks, passed as Y,
-                                                                are in bounds by type (the entries of cell : Fin(nv))
+decided  decided    type         calls.py:142  mass_matrices  the cells X[cell[c]] picks, passed as X, are in bounds by type (the entries of cell : Fin(nv))
+decided  decided    type         calls.py:142  mass_matrices  the cells Y[cell[c]] picks, passed as Y, are in bounds by type (the entries of cell : Fin(nv))
 decided  decided    isl          calls.py:142  mass_matrices  M[c], the row passed to element_mass as Me,
                                                                 is in bounds wherever element_mass is called at calls.py:142
-decided  tested     call         calls.py:142  mass_matrices  after each call element_mass(X[cell[c]], Y[cell[c]], M[c]) at
-                                                                calls.py:142: M[c, 0, 0] == M[c, 0, 0] and M[c, 0, 1] == M[c, 1, 0]
-                                                                and M[c, 0, 2] == M[c, 2, 0] and M[c, 1, 0] == M[c, 0, 1]
-                                                                and M[c, 1, 1] == M[c, 1, 1] and M[c, 1, 2] == M[c, 2, 1]
-                                                                and M[c, 2, 0] == M[c, 0, 2] and M[c, 2, 1] == M[c, 1, 2]
-                                                                and M[c, 2, 2] == M[c, 2, 2]
+decided  tested     call         calls.py:142  mass_matrices  after each call element_mass(X[cell[c]], Y[cell[c]], M[c]) at calls.py:142: M[c, 0, 0] == M[c, 0, 0]
+                                                                and M[c, 0, 1] == M[c, 1, 0] and M[c, 0, 2] == M[c, 2, 0] and M[c, 1, 0] == M[c, 0, 1]
+                                                                and M[c, 1, 1] == M[c, 1, 1] and M[c, 1, 2] == M[c, 2, 1] and M[c, 2, 0] == M[c, 0, 2]
+                                                                and M[c, 2, 1] == M[c, 1, 2] and M[c, 2, 2] == M[c, 2, 2]
 tested   tested     interpreter  calls.py:133  mass_matrices  the traced term computes what the body computes
 
 68 facts: 61 decided, 7 tested
@@ -1957,19 +1837,14 @@ mass_matrices: Schedule(mass_matrices, target='c')
   M: difference 0 within 1.02e-06 (approx) -> tested
 
 STATUS   BY     WHERE         OWNER          STATEMENT
--------  -----  ------------  -------------  ----------------------------------------------------------------------
+-------  -----  ------------  -------------  ---------------------------------------------------------------------------------------------
 decided  isl    calls.py:100  matvec         split(i, 4) renames the instances of matvec one for one
 decided  isl    calls.py:100  matvec         the order after split(i, 4) runs every dependence of matvec forward
-tested   loopy  calls.py:100  matvec         the scheduled run of matvec agrees with the native run to the accuracy
-                                               its types state
-tested   loopy  calls.py:93   dot            the scheduled run of dot agrees with the native run to the accuracy
-                                               its types state
-tested   loopy  calls.py:113  csr            the scheduled run of csr agrees with the native run to the accuracy
-                                               its types state
-tested   loopy  calls.py:130  element_mass   the scheduled run of element_mass agrees with the native run to the
-                                               accuracy its types state
-tested   loopy  calls.py:130  mass_matrices  the scheduled run of mass_matrices agrees with the native run to the
-                                               accuracy its types state
+tested   loopy  calls.py:100  matvec         the scheduled run of matvec agrees with the native run to the accuracy its types state
+tested   loopy  calls.py:93   dot            the scheduled run of dot agrees with the native run to the accuracy its types state
+tested   loopy  calls.py:113  csr            the scheduled run of csr agrees with the native run to the accuracy its types state
+tested   loopy  calls.py:130  element_mass   the scheduled run of element_mass agrees with the native run to the accuracy its types state
+tested   loopy  calls.py:130  mass_matrices  the scheduled run of mass_matrices agrees with the native run to the accuracy its types state
 
 7 facts: 2 decided, 5 tested
 
@@ -2044,35 +1919,28 @@ schedule: Schedule(mass_action, target='c').assume('nc % 4 == 0').atomic('y').sp
 ```console
 $ uv run lanky check examples/assembly.py
 STATUS                               EFFECTIVE  BY             WHERE            OWNER                STATEMENT
------------------------------------  ---------  -------------  ---------------  -------------------  ------------------------------------------------------------------------
+-----------------------------------  ---------  -------------  ---------------  -------------------  ---------------------------------------------------------------------------------------------------
 decided (heuristic)                  tested     cas            assembly.py:147  exact_to_degree_two  a : Real, b : Real, c : Real, d : Real, e : Real, f : Real
-                                                                                                     |- (a + b*(1/6) + c*(1/6) + d*(1/6)*(1/6) + e*(1/6)*(1/6) +
-                                                                                                           f*(1/6)*(1/6) + a + b*(1/6) + c*(2/3) + d*(1/6)*(1/6) +
-                                                                                                           e*(1/6)*(2/3) + f*(2/3)*(2/3) + a + b*(2/3) + c*(1/6) +
-                                                                                                           d*(2/3)*(2/3) + e*(2/3)*(1/6) + f*(1/6)*(1/6)) / 6
-                                                                                                         == a / 2 + b / 6 + c / 6 + d / 12 + e / 24 + f / 12
+                                                                                                     |- (a + b*(1/6) + c*(1/6) + d*(1/6)*(1/6) + e*(1/6)*(1/6) + f*(1/6)*(1/6) + a + b*(1/6) + c*(2/3) +
+                                                                                                           d*(1/6)*(1/6) + e*(1/6)*(2/3) + f*(2/3)*(2/3) + a + b*(2/3) + c*(1/6) + d*(2/3)*(2/3) +
+                                                                                                           e*(2/3)*(1/6) + f*(1/6)*(1/6)) / 6 == a / 2 + b / 6 + c / 6 + d / 12 + e / 24 + f / 12
 tested                               tested     python         assembly.py:147  exact_to_degree_two  the term computes what the annotations compute
 tested                               tested     property-test  assembly.py:160  element_mass         J : Real, u : Fn[Fin(3), Real]
-                                                                                                     |- abs(J)*((2/3*(u[0]*(2/3) + u[1]*(1/6) + u[2]*(1/6)) +
-                                                                                                             1/6*(u[0]*(1/6) + u[1]*(1/6) + u[2]*(2/3)) +
-                                                                                                             1/6*(u[0]*(1/6) + u[1]*(2/3) + u[2]*(1/6))) / 6)
+                                                                                                     |- abs(J)*((2/3*(u[0]*(2/3) + u[1]*(1/6) + u[2]*(1/6)) + 1/6*(u[0]*(1/6) + u[1]*(1/6) + u[2]*(2/3))
+                                                                                                             + 1/6*(u[0]*(1/6) + u[1]*(2/3) + u[2]*(1/6))) / 6)
                                                                                                          == abs(J)*(u[0] + u[0] + u[1] + u[2]) / 24
                                                                                                          and abs(J)*((1/6*(u[0]*(2/3) + u[1]*(1/6) + u[2]*(1/6)) +
-                                                                                                             1/6*(u[0]*(1/6) + u[1]*(1/6) + u[2]*(2/3)) +
-                                                                                                             2/3*(u[0]*(1/6) + u[1]*(2/3) + u[2]*(1/6))) / 6)
-                                                                                                         == abs(J)*(u[1] + u[0] + u[1] + u[2]) / 24
+                                                                                                             1/6*(u[0]*(1/6) + u[1]*(1/6) + u[2]*(2/3)) + 2/3*(u[0]*(1/6) + u[1]*(2/3) + u[2]*(1/6))) /
+                                                                                                           6) == abs(J)*(u[1] + u[0] + u[1] + u[2]) / 24
                                                                                                          and abs(J)*((1/6*(u[0]*(2/3) + u[1]*(1/6) + u[2]*(1/6)) +
-                                                                                                             2/3*(u[0]*(1/6) + u[1]*(1/6) + u[2]*(2/3)) +
-                                                                                                             1/6*(u[0]*(1/6) + u[1]*(2/3) + u[2]*(1/6))) / 6)
-                                                                                                         == abs(J)*(u[2] + u[0] + u[1] + u[2]) / 24
+                                                                                                             2/3*(u[0]*(1/6) + u[1]*(1/6) + u[2]*(2/3)) + 1/6*(u[0]*(1/6) + u[1]*(2/3) + u[2]*(1/6))) /
+                                                                                                           6) == abs(J)*(u[2] + u[0] + u[1] + u[2]) / 24
 tested                               tested     python         assembly.py:160  element_mass         the term computes what the annotations compute
-tested                               tested     property-test  assembly.py:174  conservation         nc : Nat, nv : Nat, d : Nat, cell : Fn[Fin(nc), Fin(d), Fin(nv)],
-                                                                                                       yl : Fn[Fin(nc), Fin(d), Real], y : Fn[Fin(nv), Real]
-                                                                                                     | scatter: forall i in Fin(nv).
-                                                                                                         y[i] == sum(yl[c][k] for c in Fin(nc),
-                                                                                                           k in Fin(d) if cell[c][k] == i)
-                                                                                                     |- sum(y[i] for i in Fin(nv))
-                                                                                                         == sum(yl[c][k] for c in Fin(nc), k in Fin(d))
+tested                               tested     property-test  assembly.py:174  conservation         nc : Nat, nv : Nat, d : Nat, cell : Fn[Fin(nc), Fin(d), Fin(nv)], yl : Fn[Fin(nc), Fin(d), Real],
+                                                                                                       y : Fn[Fin(nv), Real]
+                                                                                                     | scatter: forall i in Fin(nv). y[i]
+                                                                                                         == sum(yl[c][k] for c in Fin(nc), k in Fin(d) if cell[c][k] == i)
+                                                                                                     |- sum(y[i] for i in Fin(nv)) == sum(yl[c][k] for c in Fin(nc), k in Fin(d))
 tested                               tested     python         assembly.py:174  conservation         the term computes what the annotations compute
 decided                              decided    isl            assembly.py:224  mass_ffc             A[j, k] is in bounds for every instance of S0
 decided                              decided    isl            assembly.py:224  mass_ffc             FE0[ip, j] is in bounds for every instance of S0
@@ -2087,29 +1955,23 @@ decided                              decided    isl            assembly.py:224  
 decided                              decided    isl            assembly.py:224  mass_ffc             distinct instances of S0 write distinct cells of A
 decided                              decided    isl            assembly.py:212  mass_ffc             the source order runs every dependence forward in time
 decided                              decided    type           assembly.py:224  mass_ffc             the accumulation into A[j, k] over ip is approx
-tested                               tested     native         assembly.py:212  mass_ffc             A[0, 0] == A[0, 0] and A[0, 1] == A[1, 0] and A[0, 2] == A[2, 0]
-                                                                                                       and A[1, 0] == A[0, 1] and A[1, 1] == A[1, 1] and A[1, 2] == A[2, 1]
-                                                                                                       and A[2, 0] == A[0, 2] and A[2, 1] == A[1, 2] and A[2, 2] == A[2, 2]
+tested                               tested     native         assembly.py:212  mass_ffc             A[0, 0] == A[0, 0] and A[0, 1] == A[1, 0] and A[0, 2] == A[2, 0] and A[1, 0] == A[0, 1]
+                                                                                                       and A[1, 1] == A[1, 1] and A[1, 2] == A[2, 1] and A[2, 0] == A[0, 2] and A[2, 1] == A[1, 2]
+                                                                                                       and A[2, 2] == A[2, 2]
 tested                               tested     interpreter    assembly.py:212  mass_ffc             the traced term computes what the body computes
 decided                              decided    isl            assembly.py:224  mass_action          Ae[c, j, k] is in bounds for every instance of S0
 decided                              decided    isl            assembly.py:224  mass_action          FE0[ip, j] is in bounds for every instance of S0
 decided                              decided    isl            assembly.py:224  mass_action          FE0[ip, k] is in bounds for every instance of S0
 decided                              decided    isl            assembly.py:224  mass_action          W3[ip] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:224  mass_action          coords[cell[c, 1], 0] is in bounds
-                                                                                                       for every instance of S0 (cell[c, 1] : Fin(nv), by type)
+decided                              decided    isl            assembly.py:224  mass_action          coords[cell[c, 1], 0] is in bounds for every instance of S0 (cell[c, 1] : Fin(nv), by type)
 decided                              decided    isl            assembly.py:224  mass_action          cell[c, 1] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:224  mass_action          coords[cell[c, 0], 0] is in bounds
-                                                                                                       for every instance of S0 (cell[c, 0] : Fin(nv), by type)
+decided                              decided    isl            assembly.py:224  mass_action          coords[cell[c, 0], 0] is in bounds for every instance of S0 (cell[c, 0] : Fin(nv), by type)
 decided                              decided    isl            assembly.py:224  mass_action          cell[c, 0] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:224  mass_action          coords[cell[c, 2], 1] is in bounds
-                                                                                                       for every instance of S0 (cell[c, 2] : Fin(nv), by type)
+decided                              decided    isl            assembly.py:224  mass_action          coords[cell[c, 2], 1] is in bounds for every instance of S0 (cell[c, 2] : Fin(nv), by type)
 decided                              decided    isl            assembly.py:224  mass_action          cell[c, 2] is in bounds for every instance of S0
-decided                              decided    isl            assembly.py:224  mass_action          coords[cell[c, 0], 1] is in bounds
-                                                                                                       for every instance of S0 (cell[c, 0] : Fin(nv), by type)
-decided                              decided    isl            assembly.py:224  mass_action          coords[cell[c, 2], 0] is in bounds
-                                                                                                       for every instance of S0 (cell[c, 2] : Fin(nv), by type)
-decided                              decided    isl            assembly.py:224  mass_action          coords[cell[c, 1], 1] is in bounds
-                                                                                                       for every instance of S0 (cell[c, 1] : Fin(nv), by type)
+decided                              decided    isl            assembly.py:224  mass_action          coords[cell[c, 0], 1] is in bounds for every instance of S0 (cell[c, 0] : Fin(nv), by type)
+decided                              decided    isl            assembly.py:224  mass_action          coords[cell[c, 2], 0] is in bounds for every instance of S0 (cell[c, 2] : Fin(nv), by type)
+decided                              decided    isl            assembly.py:224  mass_action          coords[cell[c, 1], 1] is in bounds for every instance of S0 (cell[c, 1] : Fin(nv), by type)
 decided                              decided    type           assembly.py:241  mass_action          y[cell[c, a]] is in bounds by type (cell[c, a] : Fin(nv))
 decided                              decided    isl            assembly.py:241  mass_action          cell[c, a] is in bounds for every instance of S1
 decided                              decided    isl            assembly.py:241  mass_action          Ae[c, a, b] is in bounds for every instance of S1
@@ -2123,25 +1985,20 @@ decided                              decided    type           assembly.py:241  
 decided                              decided    type           assembly.py:241  mass_action          the accumulation into y[cell[c, a]] over b is approx
 decided                              decided    isl            assembly.py:239  mass_action          cell[c], the indices of the cells passed as x,
                                                                                                        is in bounds wherever mass_ffc is called at assembly.py:239
-decided                              decided    type           assembly.py:239  mass_action          the cells coords[cell[c]] picks, passed as x,
-                                                                                                       are in bounds by type (the entries of cell : Fin(nv))
-decided                              decided    isl            assembly.py:239  mass_action          Ae[c], the row passed to mass_ffc as A,
-                                                                                                       is in bounds wherever mass_ffc is called at assembly.py:239
-decided                              tested     call           assembly.py:239  mass_action          after each call mass_ffc(coords[cell[c]], Ae[c]) at assembly.py:239:
-                                                                                                       Ae[c, 0, 0] == Ae[c, 0, 0] and Ae[c, 0, 1] == Ae[c, 1, 0]
-                                                                                                       and Ae[c, 0, 2] == Ae[c, 2, 0] and Ae[c, 1, 0] == Ae[c, 0, 1]
-                                                                                                       and Ae[c, 1, 1] == Ae[c, 1, 1] and Ae[c, 1, 2] == Ae[c, 2, 1]
-                                                                                                       and Ae[c, 2, 0] == Ae[c, 0, 2] and Ae[c, 2, 1] == Ae[c, 1, 2]
-                                                                                                       and Ae[c, 2, 2] == Ae[c, 2, 2]
+decided                              decided    type           assembly.py:239  mass_action          the cells coords[cell[c]] picks, passed as x, are in bounds by type (the entries of cell : Fin(nv))
+decided                              decided    isl            assembly.py:239  mass_action          Ae[c], the row passed to mass_ffc as A, is in bounds wherever mass_ffc is called at assembly.py:239
+decided                              tested     call           assembly.py:239  mass_action          after each call mass_ffc(coords[cell[c]], Ae[c]) at assembly.py:239: Ae[c, 0, 0] == Ae[c, 0, 0]
+                                                                                                       and Ae[c, 0, 1] == Ae[c, 1, 0] and Ae[c, 0, 2] == Ae[c, 2, 0] and Ae[c, 1, 0] == Ae[c, 0, 1]
+                                                                                                       and Ae[c, 1, 1] == Ae[c, 1, 1] and Ae[c, 1, 2] == Ae[c, 2, 1] and Ae[c, 2, 0] == Ae[c, 0, 2]
+                                                                                                       and Ae[c, 2, 1] == Ae[c, 1, 2] and Ae[c, 2, 2] == Ae[c, 2, 2]
 tested                               tested     interpreter    assembly.py:229  mass_action          the traced term computes what the body computes
 assumed                              assumed    -              assembly.py:224  mass_action          nc % 4 == 0, which mass_action is scheduled assuming
 decided under assume('nc % 4 == 0')  assumed    isl            assembly.py:224  mass_action          split(c, 4) renames the instances of mass_action one for one
 decided under assume('nc % 4 == 0')  assumed    isl            assembly.py:224  mass_action          the order after split(c, 4) runs every dependence of mass_action forward
 decided under assume('nc % 4 == 0')  assumed    isl            assembly.py:224  mass_action          tag(c_inner='ilp') renames the instances of mass_action one for one
-decided under assume('nc % 4 == 0')  assumed    isl            assembly.py:224  mass_action          the order after tag(c_inner='ilp') runs every dependence of
-                                                                                                       mass_action forward
-decided                              decided    isl            assembly.py:224  mass_action          atomic updates of y run at the same time after tag(c_inner='ilp'),
-                                                                                                       so their sum is reassociated and compared at 'reassoc'
+decided under assume('nc % 4 == 0')  assumed    isl            assembly.py:224  mass_action          the order after tag(c_inner='ilp') runs every dependence of mass_action forward
+decided                              decided    isl            assembly.py:224  mass_action          atomic updates of y run at the same time after tag(c_inner='ilp'), so their sum is reassociated
+                                                                                                       and compared at 'reassoc'
 
 56 facts: 1 assumed, 47 decided, 8 tested
 
@@ -2160,19 +2017,16 @@ mass_ffc: Schedule(mass_ffc, target='c')
   A: difference 0 within 1.13e-06 (approx) -> tested
 
 STATUS                               EFFECTIVE  BY     WHERE            OWNER        STATEMENT
------------------------------------  ---------  -----  ---------------  -----------  ------------------------------------------------------------------------
+-----------------------------------  ---------  -----  ---------------  -----------  -----------------------------------------------------------------------------------------------
 assumed                              assumed    -      assembly.py:224  mass_action  nc % 4 == 0, which mass_action is scheduled assuming
 decided under assume('nc % 4 == 0')  assumed    isl    assembly.py:224  mass_action  split(c, 4) renames the instances of mass_action one for one
 decided under assume('nc % 4 == 0')  assumed    isl    assembly.py:224  mass_action  the order after split(c, 4) runs every dependence of mass_action forward
 decided under assume('nc % 4 == 0')  assumed    isl    assembly.py:224  mass_action  tag(c_inner='ilp') renames the instances of mass_action one for one
-decided under assume('nc % 4 == 0')  assumed    isl    assembly.py:224  mass_action  the order after tag(c_inner='ilp') runs every dependence of
-                                                                                       mass_action forward
-decided                              decided    isl    assembly.py:224  mass_action  atomic updates of y run at the same time after tag(c_inner='ilp'),
-                                                                                       so their sum is reassociated and compared at 'reassoc'
-tested                               tested     loopy  assembly.py:224  mass_action  the scheduled run of mass_action agrees with the native run to the
-                                                                                       accuracy its types state
-tested                               tested     loopy  assembly.py:224  mass_ffc     the scheduled run of mass_ffc agrees with the native run to the accuracy
-                                                                                       its types state
+decided under assume('nc % 4 == 0')  assumed    isl    assembly.py:224  mass_action  the order after tag(c_inner='ilp') runs every dependence of mass_action forward
+decided                              decided    isl    assembly.py:224  mass_action  atomic updates of y run at the same time after tag(c_inner='ilp'), so their sum is reassociated
+                                                                                       and compared at 'reassoc'
+tested                               tested     loopy  assembly.py:224  mass_action  the scheduled run of mass_action agrees with the native run to the accuracy its types state
+tested                               tested     loopy  assembly.py:224  mass_ffc     the scheduled run of mass_ffc agrees with the native run to the accuracy its types state
 
 8 facts: 1 assumed, 5 decided, 2 tested
 
@@ -2257,25 +2111,23 @@ and the command that installs it.
 ```console
 $ uv run lanky check examples/l2p.py
 STATUS                           EFFECTIVE  BY           WHERE       OWNER              STATEMENT
--------------------------------  ---------  -----------  ----------  -----------------  ------------------------------------------------------------------------
+-------------------------------  ---------  -----------  ----------  -----------------  -------------------------------------------------------------------------------------------------
 assumed                          assumed    -            l2p.py:121  compressed_taylor  D : Fn[Nat, Nat, Real], R : Fn[Nat, Nat, Real]
                                                                                         | pde: forall a in Nat, b in Nat. D[a + 2, b] + D[a, b + 2] == 0
                                                                                         | stored: forall a in Nat, b in Nat where a < 2. R[a, b] == D[a, b]
                                                                                         | recurrence: forall a in Nat, b in Nat. R[a + 2, b] == -R[a, b + 2]
                                                                                         |- forall a in Nat, b in Nat. R[a, b] == D[a, b]
 tested                           tested     python       l2p.py:121  compressed_taylor  the term computes what the annotations compute
-assumed                          assumed    -            l2p.py:139  on_every_triangle  n : Nat, p : Nat, c : Fn[Nat, Nat, Nat, Real],
-                                                                                          D : Fn[Nat, Nat, Nat, Real], R : Fn[Nat, Nat, Nat, Real]
-                                                                                        | pde: forall i in Fin(n), a in Nat, b in Nat.
-                                                                                            D[i, a + 2, b] + D[i, a, b + 2] == 0
-                                                                                        | stored: forall i in Fin(n), a in Nat, b in Nat
-                                                                                            where a < 2 and a + b <= p. c[i, a, b] == D[i, a, b]
-                                                                                        | copies: forall i in Fin(n), a in Nat, b in Nat
-                                                                                            where a < 2 and a + b <= p. R[i, a, b] == c[i, a, b]
-                                                                                        | recurrence: forall i in Fin(n), a in Nat, b in Nat
-                                                                                            where a + b + 2 <= p. R[i, a + 2, b] == -R[i, a, b + 2]
-                                                                                        |- forall i in Fin(n), a in Nat, b in Nat where a + b <= p.
-                                                                                            R[i, a, b] == D[i, a, b]
+assumed                          assumed    -            l2p.py:139  on_every_triangle  n : Nat, p : Nat, c : Fn[Nat, Nat, Nat, Real], D : Fn[Nat, Nat, Nat, Real],
+                                                                                          R : Fn[Nat, Nat, Nat, Real]
+                                                                                        | pde: forall i in Fin(n), a in Nat, b in Nat. D[i, a + 2, b] + D[i, a, b + 2] == 0
+                                                                                        | stored: forall i in Fin(n), a in Nat, b in Nat where a < 2 and a + b <= p.
+                                                                                            c[i, a, b] == D[i, a, b]
+                                                                                        | copies: forall i in Fin(n), a in Nat, b in Nat where a < 2 and a + b <= p.
+                                                                                            R[i, a, b] == c[i, a, b]
+                                                                                        | recurrence: forall i in Fin(n), a in Nat, b in Nat where a + b + 2 <= p.
+                                                                                            R[i, a + 2, b] == -R[i, a, b + 2]
+                                                                                        |- forall i in Fin(n), a in Nat, b in Nat where a + b <= p. R[i, a, b] == D[i, a, b]
 tested                           tested     python       l2p.py:139  on_every_triangle  the term computes what the annotations compute
 decided                          decided    isl          l2p.py:190  storage_index      storage_index stores every cell at an address of Fin(21)
 decided                          decided    isl          l2p.py:190  storage_index      storage_index stores no two cells at one address
@@ -2289,8 +2141,7 @@ decided                          decided    isl          l2p.py:237  unpack     
 decided                          decided    isl          l2p.py:213  unpack             the source order runs every dependence forward in time
 decided                          decided    isl          l2p.py:235  unpack             no cell of C is stored twice, or read before its store
 decided                          decided    isl          l2p.py:213  unpack             (forall i in Fin(nb). C[i, 0, 0] == coeffs[i, 0])
-                                                                                          and (forall i in Fin(nb), a in Nat, b in Nat
-                                                                                            where a < 2 and a + b >= 1 and a + b <= 10.
+                                                                                          and (forall i in Fin(nb), a in Nat, b in Nat where a < 2 and a + b >= 1 and a + b <= 10.
                                                                                             C[i, a, b] == coeffs[i, 2*(a + b) - 1 + a])
 tested                           tested     interpreter  l2p.py:213  unpack             the traced term computes what the body computes
 decided                          decided    isl          l2p.py:267  reconstruct        R[i, a, b] is in bounds for every instance of S0
@@ -2302,13 +2153,11 @@ decided                          decided    isl          l2p.py:269  reconstruct
 decided                          decided    isl          l2p.py:269  reconstruct        every cell of R that S1 reads, S0 or S1 wrote before the read
 decided                          decided    isl          l2p.py:240  reconstruct        the source order runs every dependence forward in time
 decided                          decided    isl          l2p.py:267  reconstruct        no cell of R is stored twice, or read before its store
-decided                          decided    isl          l2p.py:240  reconstruct        (forall i in Fin(nb), a in Nat, b in Nat where a < 2 and a + b <= 10.
-                                                                                            R[i, a, b] == C[i, a, b])
+decided                          decided    isl          l2p.py:240  reconstruct        (forall i in Fin(nb), a in Nat, b in Nat where a < 2 and a + b <= 10. R[i, a, b] == C[i, a, b])
                                                                                           and (forall i in Fin(nb), a in Nat, b in Nat where a + b + 2 <= 10.
                                                                                             R[i, a + 2, b] == -R[i, a, b + 2])
 decided under on_every_triangle  assumed    theorem      l2p.py:240  reconstruct        by on_every_triangle, for every D with pde and stored:
-                                                                                          forall i in Fin(nb), a in Nat, b in Nat where a + b <= 10.
-                                                                                          R[i, a, b] == D[i, a, b]
+                                                                                          forall i in Fin(nb), a in Nat, b in Nat where a + b <= 10. R[i, a, b] == D[i, a, b]
 tested                           tested     interpreter  l2p.py:240  reconstruct        the traced term computes what the body computes
 decided                          decided    isl          l2p.py:300  evaluate           pot[i, t] is in bounds for every instance of S0
 decided                          decided    isl          l2p.py:300  evaluate           R[i, a, b] is in bounds for every instance of S0
@@ -2318,35 +2167,26 @@ decided                          decided    isl          l2p.py:300  evaluate   
 decided                          decided    isl          l2p.py:300  evaluate           cy[i] is in bounds for every instance of S0
 decided                          decided    isl          l2p.py:300  evaluate           INV_FACT[a] is in bounds for every instance of S0
 decided                          decided    isl          l2p.py:300  evaluate           INV_FACT[b] is in bounds for every instance of S0
-decided                          decided    isl          l2p.py:300  evaluate           cnt[i], the length of row i that bounds the loop over t, is in bounds
-                                                                                          for every instance of S0
+decided                          decided    isl          l2p.py:300  evaluate           cnt[i], the length of row i that bounds the loop over t, is in bounds for every instance of S0
 decided                          decided    isl          l2p.py:300  evaluate           distinct instances of S0 write distinct cells of pot
 decided                          decided    isl          l2p.py:279  evaluate           the source order runs every dependence forward in time
 decided                          decided    type         l2p.py:300  evaluate           the accumulation into pot[i, t] over a, b is approx
 tested                           tested     interpreter  l2p.py:279  evaluate           the traced term computes what the body computes
-decided                          decided    call         l2p.py:307  l2p                after unpack(...) in l2p:
-                                                                                          (forall i in Fin(nb). C[i, 0, 0] == coeffs[i, 0])
-                                                                                          and (forall i in Fin(nb), a in Nat, b in Nat
-                                                                                            where a < 2 and a + b >= 1 and a + b <= 10.
+decided                          decided    call         l2p.py:307  l2p                after unpack(...) in l2p: (forall i in Fin(nb). C[i, 0, 0] == coeffs[i, 0])
+                                                                                          and (forall i in Fin(nb), a in Nat, b in Nat where a < 2 and a + b >= 1 and a + b <= 10.
                                                                                             C[i, a, b] == coeffs[i, 2*(a + b) - 1 + a])
 decided                          decided    call         l2p.py:307  l2p                after reconstruct(...) in l2p:
-                                                                                          (forall i in Fin(nb), a in Nat, b in Nat where a < 2 and a + b <= 10.
-                                                                                            R[i, a, b] == C[i, a, b])
+                                                                                          (forall i in Fin(nb), a in Nat, b in Nat where a < 2 and a + b <= 10. R[i, a, b] == C[i, a, b])
                                                                                           and (forall i in Fin(nb), a in Nat, b in Nat where a + b + 2 <= 10.
                                                                                             R[i, a + 2, b] == -R[i, a, b + 2])
 decided                          decided    isl          l2p.py:313  l2p                every cell of C that reconstruct reads, unpack stored before it
 decided                          decided    isl          l2p.py:314  l2p                every cell of R that evaluate reads, reconstruct stored before it
 tested                           tested     interpreter  l2p.py:307  l2p                the traced term computes what the body computes
-decided                          decided    isl          l2p.py:310  l2p                fuse(unpack, reconstruct, loops=1) renames the instances of
-                                                                                          l2p one for one
-decided                          decided    isl          l2p.py:310  l2p                the order after fuse(unpack, reconstruct, loops=1) runs every dependence
-                                                                                          of l2p forward
-decided                          decided    isl          l2p.py:310  l2p                fuse(reconstruct, evaluate, loops=1) renames the instances of
-                                                                                          l2p one for one
-decided                          decided    isl          l2p.py:310  l2p                the order after fuse(reconstruct, evaluate, loops=1) runs every
-                                                                                          dependence of l2p forward
-tested                           tested     upstream     l2p.py:431  l2p                the native run of l2p agrees with sumpy_l2p in pot,
-                                                                                          on its example inputs
+decided                          decided    isl          l2p.py:310  l2p                fuse(unpack, reconstruct, loops=1) renames the instances of l2p one for one
+decided                          decided    isl          l2p.py:310  l2p                the order after fuse(unpack, reconstruct, loops=1) runs every dependence of l2p forward
+decided                          decided    isl          l2p.py:310  l2p                fuse(reconstruct, evaluate, loops=1) renames the instances of l2p one for one
+decided                          decided    isl          l2p.py:310  l2p                the order after fuse(reconstruct, evaluate, loops=1) runs every dependence of l2p forward
+tested                           tested     upstream     l2p.py:431  l2p                the native run of l2p agrees with sumpy_l2p in pot, on its example inputs
 
 52 facts: 2 assumed, 43 decided, 7 tested
 
@@ -2368,23 +2208,15 @@ evaluate: Schedule(evaluate, target='c')
   pot: difference 0 within 1e-06 (approx) -> tested
 
 STATUS   BY     WHERE       OWNER        STATEMENT
--------  -----  ----------  -----------  ------------------------------------------------------------------------
-decided  isl    l2p.py:310  l2p          fuse(unpack, reconstruct, loops=1) renames the instances of
-                                           l2p one for one
-decided  isl    l2p.py:310  l2p          the order after fuse(unpack, reconstruct, loops=1) runs every dependence
-                                           of l2p forward
-decided  isl    l2p.py:310  l2p          fuse(reconstruct, evaluate, loops=1) renames the instances of
-                                           l2p one for one
-decided  isl    l2p.py:310  l2p          the order after fuse(reconstruct, evaluate, loops=1) runs every
-                                           dependence of l2p forward
-tested   loopy  l2p.py:307  l2p          the scheduled run of l2p agrees with the native run to the accuracy
-                                           its types state
-tested   loopy  l2p.py:235  unpack       the scheduled run of unpack agrees with the native run to the accuracy
-                                           its types state
-tested   loopy  l2p.py:267  reconstruct  the scheduled run of reconstruct agrees with the native run to the
-                                           accuracy its types state
-tested   loopy  l2p.py:300  evaluate     the scheduled run of evaluate agrees with the native run to the accuracy
-                                           its types state
+-------  -----  ----------  -----------  -------------------------------------------------------------------------------------------
+decided  isl    l2p.py:310  l2p          fuse(unpack, reconstruct, loops=1) renames the instances of l2p one for one
+decided  isl    l2p.py:310  l2p          the order after fuse(unpack, reconstruct, loops=1) runs every dependence of l2p forward
+decided  isl    l2p.py:310  l2p          fuse(reconstruct, evaluate, loops=1) renames the instances of l2p one for one
+decided  isl    l2p.py:310  l2p          the order after fuse(reconstruct, evaluate, loops=1) runs every dependence of l2p forward
+tested   loopy  l2p.py:307  l2p          the scheduled run of l2p agrees with the native run to the accuracy its types state
+tested   loopy  l2p.py:235  unpack       the scheduled run of unpack agrees with the native run to the accuracy its types state
+tested   loopy  l2p.py:267  reconstruct  the scheduled run of reconstruct agrees with the native run to the accuracy its types state
+tested   loopy  l2p.py:300  evaluate     the scheduled run of evaluate agrees with the native run to the accuracy its types state
 
 8 facts: 4 decided, 4 tested
 
@@ -2453,18 +2285,14 @@ attempt the cold one ran out of time for (lanky#134).
 ```console
 $ uv run lanky check examples/taylor_reconstruction.py
 STATUS                         EFFECTIVE  BY           WHERE                         OWNER            STATEMENT
------------------------------  ---------  -----------  ----------------------------  ---------------  ------------------------------------------------------------------------
-assumed                        assumed    -            taylor_reconstruction.py:73   on_the_triangle  p : Nat, c : Fn[Nat, Nat, Real], D : Fn[Nat, Nat, Real],
-                                                                                                        R : Fn[Nat, Nat, Real]
+-----------------------------  ---------  -----------  ----------------------------  ---------------  -------------------------------------------------------------------------------------------------
+assumed                        assumed    -            taylor_reconstruction.py:73   on_the_triangle  p : Nat, c : Fn[Nat, Nat, Real], D : Fn[Nat, Nat, Real], R : Fn[Nat, Nat, Real]
                                                                                                       | pde: forall a in Nat, b in Nat. D(a + 2)(b) + D(a)(b + 2) == 0
-                                                                                                      | stored: forall a in Fin(p + 1), b in Fin(p + 1)
-                                                                                                          where a < 2 and a + b <= p. c(a)(b) == D(a)(b)
-                                                                                                      | copies: forall a in Fin(p + 1), b in Fin(p + 1)
-                                                                                                          where a < 2 and a + b <= p. R(a)(b) == c(a)(b)
-                                                                                                      | recurrence: forall a in Fin(p + 1), b in Fin(p + 1)
-                                                                                                          where a + b + 2 <= p. R(a + 2)(b) == -R(a)(b + 2)
-                                                                                                      |- forall a in Fin(p + 1), b in Fin(p + 1) where a + b <= p.
-                                                                                                          R(a)(b) == D(a)(b)
+                                                                                                      | stored: forall a in Fin(p + 1), b in Fin(p + 1) where a < 2 and a + b <= p. c(a)(b) == D(a)(b)
+                                                                                                      | copies: forall a in Fin(p + 1), b in Fin(p + 1) where a < 2 and a + b <= p. R(a)(b) == c(a)(b)
+                                                                                                      | recurrence: forall a in Fin(p + 1), b in Fin(p + 1) where a + b + 2 <= p.
+                                                                                                          R(a + 2)(b) == -R(a)(b + 2)
+                                                                                                      |- forall a in Fin(p + 1), b in Fin(p + 1) where a + b <= p. R(a)(b) == D(a)(b)
 tested                         tested     python       taylor_reconstruction.py:73   on_the_triangle  the term computes what the annotations compute
 decided                        decided    isl          taylor_reconstruction.py:136  reconstruct      R[a, b] is in bounds for every instance of S0
 decided                        decided    isl          taylor_reconstruction.py:136  reconstruct      c[a, b] is in bounds for every instance of S0
@@ -2475,13 +2303,10 @@ decided                        decided    isl          taylor_reconstruction.py:
 decided                        decided    isl          taylor_reconstruction.py:138  reconstruct      every cell of R that S1 reads, S0 or S1 wrote before the read
 decided                        decided    isl          taylor_reconstruction.py:116  reconstruct      the source order runs every dependence forward in time
 decided                        decided    isl          taylor_reconstruction.py:136  reconstruct      no cell of R is stored twice, or read before its store
-decided                        decided    isl          taylor_reconstruction.py:116  reconstruct      (forall a in Fin(p + 1), b in Fin(p + 1) where a < 2 and a + b <= p.
-                                                                                                          R[a, b] == c[a, b]) and
-                                                                                                        (forall a in Fin(p + 1), b in Fin(p + 1) where a + b + 2 <= p.
-                                                                                                          R[a + 2, b] == -R[a, b + 2])
+decided                        decided    isl          taylor_reconstruction.py:116  reconstruct      (forall a in Fin(p + 1), b in Fin(p + 1) where a < 2 and a + b <= p. R[a, b] == c[a, b])
+                                                                                                        and (forall a in Fin(p + 1), b in Fin(p + 1) where a + b + 2 <= p. R[a + 2, b] == -R[a, b + 2])
 decided under on_the_triangle  assumed    theorem      taylor_reconstruction.py:116  reconstruct      by on_the_triangle, for every D with pde and stored:
-                                                                                                        forall a in Fin(p + 1), b in Fin(p + 1) where a + b <= p.
-                                                                                                        R[a, b] == D(a)(b)
+                                                                                                        forall a in Fin(p + 1), b in Fin(p + 1) where a + b <= p. R[a, b] == D(a)(b)
 tested                         tested     interpreter  taylor_reconstruction.py:116  reconstruct      the traced term computes what the body computes
 decided                        decided    isl          taylor_reconstruction.py:136  reconstruct      split(a, 2) renames the instances of reconstruct one for one
 decided                        decided    isl          taylor_reconstruction.py:136  reconstruct      the order after split(a, 2) runs every dependence of reconstruct forward
@@ -2500,11 +2325,10 @@ reconstruct: Schedule(reconstruct, target='c').split(a, 2)
   R: difference 0 within 1e-06 (approx) -> tested
 
 STATUS   BY     WHERE                         OWNER        STATEMENT
--------  -----  ----------------------------  -----------  ------------------------------------------------------------------------
+-------  -----  ----------------------------  -----------  -------------------------------------------------------------------------------------------
 decided  isl    taylor_reconstruction.py:136  reconstruct  split(a, 2) renames the instances of reconstruct one for one
 decided  isl    taylor_reconstruction.py:136  reconstruct  the order after split(a, 2) runs every dependence of reconstruct forward
-tested   loopy  taylor_reconstruction.py:136  reconstruct  the scheduled run of reconstruct agrees with the native run to the
-                                                             accuracy its types state
+tested   loopy  taylor_reconstruction.py:136  reconstruct  the scheduled run of reconstruct agrees with the native run to the accuracy its types state
 
 3 facts: 2 decided, 1 tested
 

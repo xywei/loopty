@@ -42,7 +42,7 @@ row verbatim, and checked by `scripts/refresh_example_outputs.py`):
 ```console
 $ lanky check examples/spmv.py
 STATUS   BY             WHERE        OWNER          STATEMENT
--------  -------------  -----------  -------------  ---------------------------------------------------------------------
+-------  -------------  -----------  -------------  ----------------------------------------------------------------------------------------------
 decided  isl            spmv.py:79   scan           off[0] is in bounds for every instance of S0
 decided  isl            spmv.py:81   scan           off[r + 1] is in bounds for every instance of S1
 decided  isl            spmv.py:79   scan           distinct instances of S0 write distinct cells of off
@@ -51,16 +51,14 @@ decided  isl            spmv.py:69   scan           off[0] == 0 and (forall r in
 tested   property-test  spmv.py:84   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat]
                                                     | h0: off(0) == 0
                                                     | hs: forall r in Fin(n). off(r + 1) == off(r) + cnt(r)
-                                                    |- forall a in Fin(n + 1), b in Fin(n + 1) where a <= b.
-                                                        off(a) <= off(b)
+                                                    |- forall a in Fin(n + 1), b in Fin(n + 1) where a <= b. off(a) <= off(b)
 decided  isl            spmv.py:112  spmv           y[r] is in bounds for every instance of S0
 decided  type           spmv.py:112  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
 decided  isl            spmv.py:112  spmv           distinct instances of S0 write distinct cells of y
 decided  type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
 tested   interpreter    spmv.py:102  spmv           the traced term computes what the body computes
 decided  isl            spmv.py:112  spmv           the order after split(j, 2) runs every dependence of spmv forward
-decided  call           spmv.py:115  solve          after scan(...) in solve: off[0] == 0
-                                                      and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+decided  call           spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
 ...
 29 facts: 24 decided, 5 tested
 
