@@ -915,8 +915,10 @@ def main() -> int:
                 prove(fact) for fact in schedule.facts() if fact.kind != "buildable"
             ]
             legal = legal and all(fact.status.value in settled for fact in cast)
+            steps = len(schedule.history)
             print(
-                f"  {split}: {schedule.term.name}, {len(schedule.history)} steps: "
+                f"  {split}: {schedule.term.name}, "
+                f"{steps} step{'s' if steps != 1 else ''}: "
                 f"{len(cast)} facts, {_settled(cast)}"
             )
     good = native and inverse and transposed and legal

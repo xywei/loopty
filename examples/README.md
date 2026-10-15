@@ -1769,13 +1769,13 @@ libParanumal's lift onto the face nodes, a face's nodes on the work items:
   accepted: atomic('rhs').tag(e='g.0', a='l.1', b='l.0'): 3 facts, all decided
 
 on a device, each split's launches, every node on a work item:
-  volume, surface: volume, 1 steps: 2 facts, all decided
+  volume, surface: volume, 1 step: 2 facts, all decided
   volume, surface: surface, 2 steps: 5 facts, all decided
-  fluxes, volume: upwind, 1 steps: 2 facts, all decided
+  fluxes, volume: upwind, 1 step: 2 facts, all decided
   fluxes, volume: volume_and_lift, 2 steps: 4 facts, all decided
-  three: upwind, 1 steps: 2 facts, all decided
-  three: volume, 1 steps: 2 facts, all decided
-  three: lift, 1 steps: 2 facts, all decided
+  three: upwind, 1 step: 2 facts, all decided
+  three: volume, 1 step: 2 facts, all decided
+  three: lift, 1 step: 2 facts, all decided
   one: folded_rhs, 3 steps: 7 facts, all decided
   one, from the metric: advection_rhs, 5 steps: 13 facts, all decided
 ```
