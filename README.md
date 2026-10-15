@@ -901,6 +901,15 @@ release; the CHANGELOG says when one does.
   over `Int` to say the offsets a scan computed are monotone. Only affine
   facts reach isl; a hypothesis isl cannot state is dropped, which assumes
   less, never more.
+  A program's own return annotation is its postcondition, a claim about what
+  it leaves in its parameters. It is `tested` on the program's native runs,
+  an equation of an output compared at that output's class (`approx` for
+  reals), and `decided` by isl from what each call stores where that decides
+  it; otherwise Lean is asked to prove it from the same equations and the
+  theorems the program cites, unfolding a call at a time (`loopty.unfolding`).
+  `examples/hexahedra.py`'s `weak_grad` claims the dense Kronecker operators
+  grudge's escape hatch applies, and Lean proves it with Mathlib from what
+  the three passes store and `sum_factorization`.
 - A program lowers sequentially: its calls' loops run one after another, as
   the program runs them, until a schedule fuses them. A fusion moves the
   outer loops of each side, as many as both have or as `loops` says, and a
