@@ -905,15 +905,17 @@ def test_the_fusion_demo_prints_the_refusals_and_three_kernels() -> None:
     result, _ = _invoke("fusion", "python")
     assert result.returncode == 0, result.stdout + result.stderr
     assert (
-        "refused: fuse(flux, divergence) illegal: instance flux.S0[j=2] writes "
-        "f[2] read by divergence.S0[i=1] scheduled earlier (at n=16, as hinted); "
-        "fuse('flux', 'divergence', shift=1) runs every dependence between them "
-        "forward"
+        "refused: fuse(flux, divergence) illegal: f[j] = 0.5 * u[j] * u[j] "
+        "(fusion.py:81) at j=2 writes f[2], read by rhs[i] = -(f[i + 1] - "
+        "f[i - 1]) / 2 (fusion.py:89) at i=1, scheduled earlier (at n=16, as "
+        "hinted); fuse('flux', 'divergence', shift=1) runs every dependence "
+        "between them forward"
     ) in result.stdout
     assert (
-        "refused: contract('f', lambda j: j % 2) illegal: instance "
-        "divergence.S0[i=14] reads f[13], which flux.S0[j=13] stored in slot 1, "
-        "after flux.S0[j=15] stored f[15] there (at n=16, as hinted)"
+        "refused: contract('f', lambda j: j % 2) illegal: rhs[i] = -(f[i + 1] - "
+        "f[i - 1]) / 2 (fusion.py:89) at i=14 reads f[13], which f[j] = 0.5 * "
+        "u[j] * u[j] (fusion.py:81) at j=13 stored in slot 1, after the same "
+        "statement at j=15 stored f[15] there (at n=16, as hinted)"
     ) in result.stdout
     fused, substituted, windowed = result.stdout.split("accepted: ")[1:]
     # Fused, f is stored, and the executor allocates it (#62); substituted,
@@ -1014,6 +1016,27 @@ def test_the_hexahedra_demo_decides_its_layouts_and_its_programs() -> None:
     assert all(fact["status"] == "decided" for fact in defined), defined
     # nothing in the file is left to an assumption
     assert "assumed" not in {fact["status"] for fact in facts}
+    # the sums over Fin[3] are stated once over their binder, as written
+    # (#181): one row for each access and one for the sums over c
+    along_t = [
+        fact["statement"] for fact in facts if fact["owner"] == "gradient_along_t"
+    ]
+    assert (
+        "Ft[3*x + d, k, c] is in bounds for every instance of S0 and every d in "
+        "Fin(3)"
+    ) in along_t
+    assert not [line for line in along_t if "3*x + 0" in line]
+    assert [line for line in along_t if line.startswith("the accumulation")] == [
+        "the accumulation into grad[x, e, k, j, i] over c is approx for every d "
+        "in Fin(3)"
+    ]
+    contravariant = [
+        fact["statement"] for fact in facts if fact["owner"] == "contravariant"
+    ]
+    assert (
+        "G[3*x + d, e, k, j, i] is in bounds for every instance of S0 and every x "
+        "in Fin(3)"
+    ) in contravariant
 
 
 @needs_several_indices
@@ -1094,7 +1117,12 @@ def test_the_hexahedra_demo_refuses_the_deeper_fusion_and_keeps_the_windows() ->
     assert result.returncode == 0, result.stdout + result.stderr
     out = result.stdout
     assert "the passes are the dense Kronecker operators: True" in out
-    assert "refused: fuse(along_r, along_s) illegal: instance along_r.S0" in out
+    # each pass's statement by its text and line, at the names its loops have
+    assert (
+        "refused: fuse(along_r, along_s) illegal: v[q, e, k, j, i] = "
+        "reduce_sum(...) (hexahedra.py:211) at q="
+    ) in out
+    assert "read by vs[q, e, k, j, i] = reduce_sum(...) (hexahedra.py:228) at q=" in out
     assert "fuse('along_r', 'along_s', loops=3) runs every dependence" in out
     assert "w kept in n cells" in out
     assert "v kept in n*n cells" in out
@@ -1237,9 +1265,10 @@ def test_the_assembly_demo_names_the_node_two_cells_share() -> None:
     assert "y is the closed form: True" in result.stdout
     assert "W3 and FE0 are the rule to 3.3e-16: True" in result.stdout
     assert (
-        "IllegalCast: tag(c_outer='g.0', c_inner='l.0') illegal: S1[c=0, a=2] and "
-        "S1[c=1, a=1] both update y[3] on example_inputs() (nc=2, nv=4), where "
-        "cell[0, 2] = 3 and cell[1, 1] = 3"
+        "IllegalCast: tag(c_outer='g.0', c_inner='l.0') illegal: y[cell[c, a]] "
+        "+= reduce_sum(...) (assembly.py:241) at c=0, a=2 and at c=1, a=1 both "
+        "update y[3] on example_inputs() (nc=2, nv=4), where cell[0, 2] = 3 and "
+        "cell[1, 1] = 3"
     ) in result.stdout
     accepted = result.stdout.split("accepted: ")[1]
     assert "atomic updates of y run at the same time after tag(" in accepted
@@ -1286,6 +1315,38 @@ def test_the_assembly_calls_mass_ffc_per_cell_and_has_its_matrix_symmetric() -> 
     # nothing is assumed but the schedule's assumption, nc a multiple of four
     assumed = [fact for fact in facts if fact["status"] == "assumed"]
     assert [fact["kind"] for fact in assumed] in ([], ["assumption"])
+
+
+def test_the_assembly_schedules_facts_are_at_the_lines_of_its_steps() -> None:
+    """Each at the step that made it, and not in mass_ffc (#259).
+
+    mass_action's first statement is the one of mass_ffc it calls, and the
+    facts of a schedule of it were placed there, inside the element kernel.
+    """
+    _result, facts = _invoke("assembly", "check")
+    lines = _path("assembly").read_text(encoding="utf-8").splitlines()
+
+    def line_of(step: str) -> str:
+        (found,) = [k for k, line in enumerate(lines, 1) if line.strip() == step]
+        return f"assembly.py:{found}"
+
+    placed = {
+        fact["statement"]: fact["where"]
+        for fact in facts
+        if fact["owner"] == "mass_action"
+        and fact["kind"] in ("assumption", "bijective")
+    }
+    assert placed == {
+        "nc % 4 == 0, which mass_action is scheduled assuming": line_of(
+            '.assume("nc % 4 == 0")'
+        ),
+        "split(c, 4) renames the instances of mass_action one for one": line_of(
+            '.split("c", 4)'
+        ),
+        "tag(c_inner='ilp') renames the instances of mass_action one for one": (
+            line_of('.tag(c_inner="ilp")')
+        ),
+    }
 
 
 def test_the_assembly_theorems_are_in_its_ledger() -> None:
@@ -1368,8 +1429,12 @@ def test_the_l2p_demo_refuses_the_interchange_and_fuses_box_by_box() -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     assert "largest error against the charges' potential: " in result.stdout
     refusal = result.stdout.split("refused: ")[1].splitlines()[0]
-    assert refusal.startswith("interchange(b, a) illegal: instance S0[i=")
-    assert " writes R[" in refusal and " read by S1[i=" in refusal
+    # the copy and the recurrence, each by its text and line
+    assert refusal.startswith(
+        "interchange(b, a) illegal: R[i, a, b] = C[i, a, b] (l2p.py:267) at i="
+    )
+    assert " writes R[" in refusal
+    assert " read by R[i, a, b] = -R[i, a - 2, b + 2] (l2p.py:269) at i=" in refusal
     module = _module("l2p")
     steps = [fact.statement for fact in module.fused.facts()]
     assert steps == [

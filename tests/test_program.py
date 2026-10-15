@@ -634,10 +634,14 @@ def test_zeros_like_is_zeros_with_the_layout_of_its_argument() -> None:
 
 
 def test_the_compiled_program_agrees_with_the_native_one() -> None:
-    fact = LoopyExecutor().differential(burgers, Schedule(burgers), burgers_inputs())
+    schedule = Schedule(burgers)
+    fact = LoopyExecutor().differential(burgers, schedule, burgers_inputs())
     assert fact.status.value == "tested", fact.provenance
     assert fact.id == f"agreement:{burgers.definition}:[c]"
-    assert fact.where == burgers.where
+    # at the line the schedule is made at, this test's (#259)
+    assert fact.where == schedule.where
+    assert schedule.where.startswith("test_program.py:")
+    assert schedule.where != burgers.where
     assert set(fact.provenance["outputs"]) == {"rhs"}
 
 

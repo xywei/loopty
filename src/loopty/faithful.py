@@ -523,8 +523,23 @@ class Collision:
 
     @property
     def instances(self) -> str:
-        """``S1[c=0, j=1] and S1[c=1, j=2]``."""
+        """``S1[c=0, j=1] and S1[c=1, j=2]``, as a witness records them."""
         return f"{_instance(*self.first)} and {_instance(*self.second)}"
+
+    def named(self, term: Term) -> str:
+        """The two instances as a message names them, by the statements' text.
+
+        ``y[cell[c, j]] = yl[c, j] (f.py:12) at c=0, j=1 and at c=1, j=2``
+        (:func:`loopty.source.instances_text`).
+        """
+        from loopty.source import instances_text
+
+        first, second = instances_text(
+            {stmt.id: stmt for stmt in term.stmts}, self.first, self.second
+        )
+        if second.startswith("the same statement at "):
+            second = second.removeprefix("the same statement ")
+        return f"{first} and {second}"
 
     @property
     def at(self) -> str:
@@ -729,7 +744,7 @@ def collision_fact(term: Term, fact: Fact, touched: Sequence[Logged]) -> Fact:
             witness=found.instances,
             counterexample={"input": found.label, **found.sizes},
             reason=(
-                f"{found.instances} both write {found.cell_text} on {found.at}"
+                f"{found.named(term)} both write {found.cell_text} on {found.at}"
                 f"{found.where}, so the later write overwrites the earlier one"
             ),
         )

@@ -287,6 +287,7 @@ from loopty.lower import (
     reductions_of,
 )
 from loopty.obligations import IslOnly
+from loopty.source import instances_text
 from loopty.term import Stmt, Term, commutes
 from loopty.typing import layout_fact_ids
 
@@ -6718,8 +6719,8 @@ class Schedule:
         return {stmt.id: stmt for stmt in self._term.stmts}
 
     def _named(self, *instances: tuple[str, dict[str, int]]) -> list[str]:
-        """Instances as a refusal names them; see :func:`_instances_text`."""
-        return _instances_text(self._statements(), *instances)
+        """Instances as a refusal names them (:func:`loopty.source.instances_text`)."""
+        return instances_text(self._statements(), *instances)
 
     def _name_instance(self, point: Sequence[int]) -> tuple[str, dict[str, int]]:
         """A uniform-space point read back as ``(statement id, coordinates)``."""
@@ -7309,64 +7310,6 @@ UPDATES_ISL_ONLY = (
 )
 
 
-def _instance_text(stmt_id: str, coords: dict[str, int]) -> str:
-    """``S0[t=0, i=8]``: an instance by its statement's id, as a witness records it."""
-    inner = ", ".join(f"{name}={value}" for name, value in coords.items())
-    return f"{stmt_id}[{inner}]"
-
-
-def _instances_text(
-    stmts: Mapping[str, Stmt], *instances: tuple[str, dict[str, int]]
-) -> list[str]:
-    """Instances as one message names them, in the order it names them.
-
-    Each is the statement as the source writes it, the line it is on, and
-    the instance's coordinates by the names the source gives its loops:
-    ``R[i, a, b] = C[i, a, b] (l2p.py:267) at i=0, a=1, b=9``. An instance
-    of the statement named just before it is ``the same statement at i=0,
-    a=3, b=7``, and two statements of one text and one line, the same
-    kernel's statement in two of a program's calls, are told apart by the
-    call: ``(hexahedra.py:211, along_r@2)``. A statement with no source
-    text, of a term written by hand, is named by its id, ``S1[i=0, a=3,
-    b=7]``, as the witness in a fact's provenance names it.
-    """
-    places = {}
-    for stmt_id, _ in instances:
-        stmt = stmts.get(stmt_id)
-        if stmt is not None and stmt.text:
-            places.setdefault((stmt.text, stmt.where), set()).add(stmt_id)
-    out = []
-    previous = None
-    for stmt_id, coords in instances:
-        stmt = stmts.get(stmt_id)
-        if stmt is None or not stmt.text:
-            out.append(_instance_text(stmt_id, coords))
-            previous = stmt_id
-            continue
-        at = _at_coords(stmt, coords)
-        if stmt_id == previous:
-            out.append(f"the same statement{at}")
-            continue
-        where = stmt.where
-        if len(places[stmt.text, stmt.where]) > 1:
-            where = f"{where}, {stmt_id.rsplit('.', 1)[0]}"
-        out.append(f"{stmt.text} ({where}){at}")
-        previous = stmt_id
-    return out
-
-
-def _at_coords(stmt: Stmt, coords: dict[str, int]) -> str:
-    """`` at i=0, a=3, b=7``: an instance's coordinates, by the source's names.
-
-    Empty for a statement in no loop, whose one instance needs none.
-    """
-    spelled = dict(zip(stmt.inames, stmt.spelled, strict=False))
-    inner = ", ".join(
-        f"{spelled.get(name, name)}={value}" for name, value in coords.items()
-    )
-    return f" at {inner}" if inner else ""
-
-
 def _cell_text(
     indices: Sequence[Any], coords: dict[str, int], params: dict[str, int]
 ) -> str:
@@ -7422,14 +7365,14 @@ def _slot_pair_text(
 
     ``div[i] = f[i + 1] - f[i] (fusion.py:40) at i=1 reads f[0] from slot 0
     of the window lambda j: j % 3, which f[j] = ... (fusion.py:31) at j=3
-    overwrites with f[3]``, each instance named as :func:`_instances_text`
+    overwrites with f[3]``, each instance named as :func:`~loopty.source.instances_text`
     names it. With ``now``, the second is what a step would run first:
     ``which ... would now overwrite with f[3] first``.
     """
     (source_id, source_coords), (sink_id, sink_coords), params = witness
     mine = _cell_text(dep.source_indices, source_coords, params)
     theirs = _cell_text(dep.sink_indices, sink_coords, params)
-    source, sink = _instances_text(
+    source, sink = instances_text(
         stmts, (source_id, source_coords), (sink_id, sink_coords)
     )
     slot = _slot_text(dep, source_coords, params)

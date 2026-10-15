@@ -926,3 +926,72 @@ def test_check_refutes_the_write_and_exits_one(tmp_path, capsys) -> None:
 
 
 # }}}
+
+
+# {{{ a sum over a Fin of a number, stated once over its binder (#181, #223)
+
+
+def directions_summed(
+    Ft: Arr[Fin[9], Fin[n], Fin[n], Real],  # noqa: F821
+    vs: Arr[Fin[9], Fin[n], Real],  # noqa: F821
+    grad: Arr[Fin[3], Fin[n], Real],  # noqa: F821
+):
+    """S1's last pass: the three directions of each component summed."""
+    for x in grad.dom:
+        for k in grad.dom[x]:
+            grad[x, k] = reduce_sum(
+                reduce_sum(
+                    Ft[3 * x + d, k, c] * vs[3 * x + d, c]
+                    for c in Ft.dom[3 * x + d, k]
+                )
+                for d in Fin[3]
+            )
+
+
+def one_direction_too_far(
+    Ft: Arr[Fin[9], Fin[n], Fin[n], Real],  # noqa: F821
+    grad: Arr[Fin[3], Fin[n], Real],  # noqa: F821
+):
+    """The same sum one direction along: its last term reads past ``Ft``."""
+    for x in grad.dom:
+        for k in grad.dom[x]:
+            grad[x, k] = reduce_sum(Ft[3 * x + d + 1, k, k] for d in Fin[3])
+
+
+def test_the_terms_of_a_sum_over_a_number_share_their_facts() -> None:
+    # lanky walks Fin[3] as range(3), so the trace adds three terms; the
+    # ledger states each access once, over d, as the source writes it.
+    term, facts = facts_of(directions_summed)
+    (stmt,) = term.stmts
+    assert stmt.unrolled == (("d", 3),)
+    statements = [fact.statement for fact in settled(facts)]
+    assert (
+        "Ft[3*x + d, k, c] is in bounds for every instance of S0 and every d in "
+        "Fin(3)"
+    ) in statements
+    assert (
+        "vs[3*x + d, c] is in bounds for every instance of S0 and every d in Fin(3)"
+    ) in statements
+    assert not [line for line in statements if "3*x + 0" in line]
+    assert [line for line in statements if line.startswith("the accumulation")] == [
+        "the accumulation into grad[x, k] over c is approx for every d in Fin(3)"
+    ]
+    in_bounds = [fact for fact in settled(facts) if fact.kind == "in-bounds"]
+    assert {fact.status for fact in in_bounds} == {Status.DECIDED}
+
+
+def test_a_term_out_of_bounds_refutes_the_one_fact() -> None:
+    # One fact stands for the three terms: the cells all of them reach. The
+    # last term alone reads Ft[9, ...], and the fact is refuted for it.
+    _, facts = facts_of(one_direction_too_far)
+    (reads,) = [
+        fact
+        for fact in settled(facts)
+        if fact.kind == "in-bounds" and fact.statement.startswith("Ft[")
+    ]
+    assert reads.statement.startswith("Ft[3*x + d + 1, k, k] is in bounds")
+    assert reads.statement.endswith("and every d in Fin(3)")
+    assert reads.status is Status.REFUTED
+
+
+# }}}

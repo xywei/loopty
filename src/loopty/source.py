@@ -2,10 +2,10 @@
 
 A refusal that names a pair of instances names each by the statement it is an
 instance of: ``R[i, a, b] = -R[i, a - 2, b + 2] (l2p.py:269) at i=0, a=3,
-b=7``, where the term alone could only say ``S1[i=0, a=3, b=7]``. The text is
-read once, when the statement is traced, from the file the body was written
-in (:func:`statement_text`), and kept on the statement
-(:attr:`loopty.term.Stmt.text`).
+b=7``, where the term alone could only say ``S1[i=0, a=3, b=7]``
+(:func:`instances_text`). The text is read once, when the statement is
+traced, from the file the body was written in (:func:`statement_text`), and
+kept on the statement (:attr:`loopty.term.Stmt.text`).
 
 The text is the statement as written, on one line. One longer than
 :data:`LIMIT` characters keeps what it writes into and shortens the calls on
@@ -19,9 +19,19 @@ from __future__ import annotations
 import ast
 import copy
 import linecache
-from typing import Any
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
 
-__all__ = ["LIMIT", "frame_statement_text", "statement_text"]
+if TYPE_CHECKING:
+    from loopty.term import Stmt
+
+__all__ = [
+    "LIMIT",
+    "frame_statement_text",
+    "instance_text",
+    "instances_text",
+    "statement_text",
+]
 
 #: How long a statement's text may be before it is shortened.
 LIMIT = 60
@@ -174,3 +184,67 @@ def _with_value(node: ast.stmt, value: ast.expr) -> ast.stmt:
     copied = _copy(node)
     copied.value = value
     return copied
+
+
+# {{{ instances, as a message names them
+
+
+def instance_text(stmt_id: str, coords: Mapping[str, int]) -> str:
+    """``S0[t=0, i=8]``: an instance by its statement's id, as a witness records it."""
+    inner = ", ".join(f"{name}={value}" for name, value in coords.items())
+    return f"{stmt_id}[{inner}]"
+
+
+def instances_text(
+    stmts: Mapping[str, Stmt], *instances: tuple[str, Mapping[str, int]]
+) -> list[str]:
+    """Instances as one message names them, in the order it names them.
+
+    Each is the statement as the source writes it, the line it is on, and
+    the instance's coordinates by the names the source gives its loops:
+    ``R[i, a, b] = C[i, a, b] (l2p.py:267) at i=0, a=1, b=9``. An instance
+    of the statement named just before it is ``the same statement at i=0,
+    a=3, b=7``, and two statements of one text and one line, the same
+    kernel's statement in two of a program's calls, are told apart by the
+    call: ``(hexahedra.py:211, along_r@2)``. A statement with no source
+    text, of a term written by hand or one loopty adds, is named by its id,
+    ``S1[i=0, a=3, b=7]``, as the witness in a fact's provenance names it.
+    """
+    places: dict[tuple[str, str], set[str]] = {}
+    for stmt_id, _ in instances:
+        stmt = stmts.get(stmt_id)
+        if stmt is not None and stmt.text:
+            places.setdefault((stmt.text, stmt.where), set()).add(stmt_id)
+    out = []
+    previous = None
+    for stmt_id, coords in instances:
+        stmt = stmts.get(stmt_id)
+        if stmt is None or not stmt.text:
+            out.append(instance_text(stmt_id, coords))
+            previous = stmt_id
+            continue
+        at = _at_coords(stmt, coords)
+        if stmt_id == previous:
+            out.append(f"the same statement{at}")
+            continue
+        where = stmt.where
+        if len(places[stmt.text, stmt.where]) > 1:
+            where = f"{where}, {stmt_id.rsplit('.', 1)[0]}"
+        out.append(f"{stmt.text} ({where}){at}")
+        previous = stmt_id
+    return out
+
+
+def _at_coords(stmt: Stmt, coords: Mapping[str, int]) -> str:
+    """`` at i=0, a=3, b=7``: an instance's coordinates, by the source's names.
+
+    Empty for a statement in no loop, whose one instance needs none.
+    """
+    spelled = dict(zip(stmt.inames, stmt.spelled, strict=False))
+    inner = ", ".join(
+        f"{spelled.get(name, name)}={value}" for name, value in coords.items()
+    )
+    return f" at {inner}" if inner else ""
+
+
+# }}}
