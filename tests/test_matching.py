@@ -11,11 +11,15 @@ applies the function where it applied the family. None of this needs Lean.
 
 from __future__ import annotations
 
-from lanky.matching import FamilyValue
+import pytest
 from lanky.prelude import Fin
 from lanky.terms import Sum, Var, render
 
 from loopty.hypotheses import _apply, _Matcher
+
+FamilyValue = pytest.importorskip(
+    "lanky.matching", reason="the higher-order rule is lanky.matching's"
+).FamilyValue
 
 f, g, n, k, j = Var("f"), Var("g"), Var("n"), Var("k"), Var("j")
 x, y, m, s = Var("x"), Var("y"), Var("m"), Var("s")

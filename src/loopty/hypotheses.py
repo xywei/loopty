@@ -90,7 +90,6 @@ from typing import Any
 import islpy as isl
 import numpy as np
 import pymbolic.primitives as prim
-from lanky.matching import FamilyValue, higher_order_value
 from lanky.prelude import FinType, FnType, Refined, SumType
 from lanky.terms import (
     Add,
@@ -113,6 +112,12 @@ from lanky.terms import Sum as LankySum
 from loopty.flow import assume_sizes, free_names
 from loopty.oracle import Empty, sample_parameters, sample_point
 from loopty.term import Hypothesis
+
+try:  # the higher-order rule is lanky's, from the lanky that has lanky.matching
+    from lanky.matching import FamilyValue, higher_order_value
+except ImportError:  # an older lanky: _Matcher(higher_order=True) binds no function
+    FamilyValue = ()  # type: ignore[assignment,misc] - no value is an instance of it
+    higher_order_value = None
 
 __all__ = [
     "MAX_INSTANCES",
@@ -1476,7 +1481,7 @@ class _Matcher:
         bound: dict[str, str],
     ) -> bool:
         """The higher-order rule, where it is on and the family is still unbound."""
-        if not self.higher_order or function in sigma:
+        if not self.higher_order or function in sigma or higher_order_value is None:
             return False
         value = higher_order_value(parameters, target, bound)
         if value is None:
