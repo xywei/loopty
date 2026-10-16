@@ -269,8 +269,8 @@ CASES = {
     # {{{ the C target has no hardware axes (#47)
     "c-local-axis": (
         copy8, "c", [tag(i="l.0")],
-        "tag(copy8.i, 'l.0') puts a loop on a hardware axis, and the C target "
-        "has none",
+        "the loop copy8.i on l.0 is on a hardware axis, and the C target has "
+        "none",
         "plain C does not have local hw axes",
     ),
     "c-group-axis": (
@@ -280,7 +280,7 @@ CASES = {
     ),
     "c-local-reduction": (
         rowsum8, "c", [tag(j="l.0")],
-        "tag(rowsum8.j, 'l.0') puts a loop on a hardware axis",
+        "the loop rowsum8.j on l.0 is on a hardware axis",
         "NotImplementedError",
     ),
     "c-vector-accumulator": (
