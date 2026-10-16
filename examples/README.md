@@ -668,13 +668,18 @@ divergence: Schedule(divergence, target='c')
 burgers_rhs: Schedule(burgers_rhs, target='c')
   rhs: difference 0 within 1e-06 (approx) -> tested
 
-STATUS  BY     WHERE              OWNER        STATEMENT
-------  -----  -----------------  -----------  -------------------------------------------------------------------------------------------
-tested  loopy  composition.py:62  flux         the scheduled run of flux agrees with the native run to the accuracy its types state
-tested  loopy  composition.py:69  divergence   the scheduled run of divergence agrees with the native run to the accuracy its types state
-tested  loopy  composition.py:77  burgers_rhs  the scheduled run of burgers_rhs agrees with the native run to the accuracy its types state
+STATUS   BY     WHERE              OWNER        STATEMENT
+-------  -----  -----------------  -----------  -------------------------------------------------------------------------------------------
+tested   loopy  composition.py:62  flux         the scheduled run of flux agrees with the native run to the accuracy its types state
+tested   loopy  composition.py:69  divergence   the scheduled run of divergence agrees with the native run to the accuracy its types state
+decided  isl    composition.py:80  burgers_rhs  every cell of burgers_rhs.f that burgers_rhs reads,
+                                                  burgers_rhs.flux has stored by the time it is read,
+                                                  so burgers_rhs runs without the zeros burgers_rhs.f is made with
+tested   loopy  composition.py:77  burgers_rhs  the scheduled run of burgers_rhs agrees with the native run to the accuracy its types state
 
-3 facts: 3 tested
+4 facts: 1 decided, 3 tested
+
+WITHOUT LEAN: one row is not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
 ```
 
 ## travel.py
@@ -900,11 +905,12 @@ generates for it, and its compiled run against the native one.
 $ uv run python examples/fusion.py
 native: the program agrees with the numpy slices: True
 
-refused: fuse(burgers_rhs.flux.j, burgers_rhs.divergence.i) illegal: f[j] = 0.5 * u[j] * u[j] (fusion.py:84) at j=2 writes f[2], read by rhs[i] = -(f[i + 1] - f[i - 1]) / 2 (fusion.py:92) at i=1, scheduled earlier (at n=16, as hinted); fuse(burgers_rhs.flux.j, burgers_rhs.divergence.i, shift=1) runs every dependence between them forward
+refused: fuse(burgers_rhs.flux.j, burgers_rhs.divergence.i) illegal: f[j] = 0.5 * u[j] * u[j] (fusion.py:93) at j=2 writes f[2], read by rhs[i] = -(f[i + 1] - f[i - 1]) / 2 (fusion.py:101) at i=1, scheduled earlier (at n=16, as hinted); fuse(burgers_rhs.flux.j, burgers_rhs.divergence.i, shift=1) runs every dependence between them forward
 
-refused: contract(burgers_rhs.f, lambda j: j % 2) illegal: rhs[i] = -(f[i + 1] - f[i - 1]) / 2 (fusion.py:92) at i=14 reads f[13], which f[j] = 0.5 * u[j] * u[j] (fusion.py:84) at j=13 stored in slot 1, after the same statement at j=15 stored f[15] there (at n=16, as hinted); contract(burgers_rhs.f) finds the smallest window that keeps every read, lambda j: j % 3
+refused: contract(burgers_rhs.f, lambda j: j % 2) illegal: rhs[i] = -(f[i + 1] - f[i - 1]) / 2 (fusion.py:101) at i=14 reads f[13], which f[j] = 0.5 * u[j] * u[j] (fusion.py:93) at j=13 stored in slot 1, after the same statement at j=15 stored f[15] there (at n=16, as hinted); contract(burgers_rhs.f) finds the smallest window that keeps every read, lambda j: j % 3
 
 accepted: Schedule(burgers_rhs, target='c').fuse(burgers_rhs.flux.j, burgers_rhs.divergence.i, shift=1)
+  decided  isl  every cell of burgers_rhs.f that burgers_rhs reads, burgers_rhs.flux has stored by the time it is read, so burgers_rhs runs without the zeros burgers_rhs.f is made with
   decided  isl  fuse(burgers_rhs.flux.j, burgers_rhs.divergence.i, shift=1) renames the instances of burgers_rhs one for one
   decided  isl  the order after fuse(burgers_rhs.flux.j, burgers_rhs.divergence.i, shift=1) runs every dependence of burgers_rhs forward
 
@@ -913,8 +919,6 @@ accepted: Schedule(burgers_rhs, target='c').fuse(burgers_rhs.flux.j, burgers_rhs
 
 void burgers_rhs(int32_t const n, double const *__restrict__ u, double *__restrict__ rhs, double *__restrict__ f)
 {
-  for (int32_t i_0 = 0; i_0 <= -1 + n; ++i_0)
-    f[i_0] = (double) (0.0);
   for (int32_t j = 0; j <= -1 + n; ++j)
   {
     f[j] = 0.5 * u[j] * u[j];
@@ -926,9 +930,9 @@ void burgers_rhs(int32_t const n, double const *__restrict__ u, double *__restri
   rhs: difference 0 within 1e-06 (approx) -> tested
 
 accepted: Schedule(burgers_rhs, target='c').fuse(burgers_rhs.flux.j, burgers_rhs.divergence.i, shift=1).substitute(burgers_rhs.f)
+  decided  isl  every cell of burgers_rhs.f that burgers_rhs reads, burgers_rhs.flux has stored by the time it is read, so burgers_rhs runs without the zeros burgers_rhs.f is made with
   decided  isl  fuse(burgers_rhs.flux.j, burgers_rhs.divergence.i, shift=1) renames the instances of burgers_rhs one for one
   decided  isl  the order after fuse(burgers_rhs.flux.j, burgers_rhs.divergence.i, shift=1) runs every dependence of burgers_rhs forward
-  decided  isl  for substitute(burgers_rhs.f), every cell of burgers_rhs.f that burgers_rhs reads, burgers_rhs.flux has stored by the time it is read
   decided  isl  substitute(burgers_rhs.f) renames the instances of burgers_rhs one for one
   decided  isl  the order after substitute(burgers_rhs.f) runs every dependence of burgers_rhs forward
 
@@ -945,9 +949,9 @@ void burgers_rhs(int32_t const n, double const *__restrict__ u, double *__restri
   rhs: difference 0 within 1e-06 (approx) -> tested
 
 accepted: Schedule(burgers_rhs, target='c').fuse(burgers_rhs.flux.j, burgers_rhs.divergence.i, shift=1).contract(burgers_rhs.f, lambda j: j % 3)
+  decided  isl  every cell of burgers_rhs.f that burgers_rhs reads, burgers_rhs.flux has stored by the time it is read, so burgers_rhs runs without the zeros burgers_rhs.f is made with
   decided  isl  fuse(burgers_rhs.flux.j, burgers_rhs.divergence.i, shift=1) renames the instances of burgers_rhs one for one
   decided  isl  the order after fuse(burgers_rhs.flux.j, burgers_rhs.divergence.i, shift=1) runs every dependence of burgers_rhs forward
-  decided  isl  for contract(burgers_rhs.f), every cell of burgers_rhs.f that burgers_rhs reads, burgers_rhs.flux has stored by the time it is read
   decided  isl  no read of burgers_rhs.f sees its slot overwritten after contract(burgers_rhs.f, lambda j: j % 3): burgers_rhs.f kept in 3 cells, f[j] in slot j % 3
 
 #include <stdint.h>
@@ -981,35 +985,34 @@ need, every cell of `f` stored before it is read, and the window's
 $ uv run lanky check examples/fusion.py
 STATUS   BY           WHERE          OWNER        STATEMENT
 -------  -----------  -------------  -----------  ----------------------------------------------------------------------------------------------------
-decided  isl          fusion.py:84   flux         f[j] is in bounds for every instance of S0
-decided  isl          fusion.py:84   flux         u[j] is in bounds for every instance of S0
-decided  isl          fusion.py:84   flux         distinct instances of S0 write distinct cells of f
-decided  isl          fusion.py:80   flux         the source order runs every dependence forward in time
-tested   interpreter  fusion.py:80   flux         the traced term computes what the body computes
-decided  isl          fusion.py:92   divergence   rhs[i] is in bounds for every instance of S0
-decided  isl          fusion.py:92   divergence   f[i + 1] is in bounds for every instance of S0
-decided  isl          fusion.py:92   divergence   f[i - 1] is in bounds for every instance of S0
-decided  isl          fusion.py:92   divergence   distinct instances of S0 write distinct cells of rhs
-decided  isl          fusion.py:87   divergence   the source order runs every dependence forward in time
-tested   interpreter  fusion.py:87   divergence   the traced term computes what the body computes
-decided  isl          fusion.py:100  burgers_rhs  every cell of f that divergence reads, flux stored before it
-tested   interpreter  fusion.py:95   burgers_rhs  the traced term computes what the body computes
-decided  isl          fusion.py:104  burgers_rhs  fuse(burgers_rhs.flux.j, burgers_rhs.divergence.i, shift=1) renames the instances of
+decided  isl          fusion.py:93   flux         f[j] is in bounds for every instance of S0
+decided  isl          fusion.py:93   flux         u[j] is in bounds for every instance of S0
+decided  isl          fusion.py:93   flux         distinct instances of S0 write distinct cells of f
+decided  isl          fusion.py:89   flux         the source order runs every dependence forward in time
+tested   interpreter  fusion.py:89   flux         the traced term computes what the body computes
+decided  isl          fusion.py:101  divergence   rhs[i] is in bounds for every instance of S0
+decided  isl          fusion.py:101  divergence   f[i + 1] is in bounds for every instance of S0
+decided  isl          fusion.py:101  divergence   f[i - 1] is in bounds for every instance of S0
+decided  isl          fusion.py:101  divergence   distinct instances of S0 write distinct cells of rhs
+decided  isl          fusion.py:96   divergence   the source order runs every dependence forward in time
+tested   interpreter  fusion.py:96   divergence   the traced term computes what the body computes
+decided  isl          fusion.py:109  burgers_rhs  every cell of f that divergence reads, flux stored before it
+tested   interpreter  fusion.py:104  burgers_rhs  the traced term computes what the body computes
+decided  isl          fusion.py:107  burgers_rhs  every cell of burgers_rhs.f that burgers_rhs reads,
+                                                    burgers_rhs.flux has stored by the time it is read,
+                                                    so burgers_rhs runs without the zeros burgers_rhs.f is made with
+decided  isl          fusion.py:113  burgers_rhs  fuse(burgers_rhs.flux.j, burgers_rhs.divergence.i, shift=1) renames the instances of
                                                     burgers_rhs one for one
-decided  isl          fusion.py:104  burgers_rhs  the order after fuse(burgers_rhs.flux.j, burgers_rhs.divergence.i, shift=1) runs every dependence of
+decided  isl          fusion.py:113  burgers_rhs  the order after fuse(burgers_rhs.flux.j, burgers_rhs.divergence.i, shift=1) runs every dependence of
                                                     burgers_rhs forward
-decided  isl          fusion.py:109  burgers_rhs  for substitute(burgers_rhs.f), every cell of burgers_rhs.f that burgers_rhs reads,
-                                                    burgers_rhs.flux has stored by the time it is read
-decided  isl          fusion.py:109  burgers_rhs  substitute(burgers_rhs.f) renames the instances of burgers_rhs one for one
-decided  isl          fusion.py:109  burgers_rhs  the order after substitute(burgers_rhs.f) runs every dependence of burgers_rhs forward
-decided  isl          fusion.py:112  burgers_rhs  for contract(burgers_rhs.f), every cell of burgers_rhs.f that burgers_rhs reads,
-                                                    burgers_rhs.flux has stored by the time it is read
-decided  isl          fusion.py:112  burgers_rhs  no read of burgers_rhs.f sees its slot overwritten after contract(burgers_rhs.f, lambda j: j % 3):
+decided  isl          fusion.py:118  burgers_rhs  substitute(burgers_rhs.f) renames the instances of burgers_rhs one for one
+decided  isl          fusion.py:118  burgers_rhs  the order after substitute(burgers_rhs.f) runs every dependence of burgers_rhs forward
+decided  isl          fusion.py:121  burgers_rhs  no read of burgers_rhs.f sees its slot overwritten after contract(burgers_rhs.f, lambda j: j % 3):
                                                     burgers_rhs.f kept in 3 cells, f[j] in slot j % 3
 
-20 facts: 17 decided, 3 tested
+19 facts: 16 decided, 3 tested
 
-WITHOUT LEAN: 17 rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
+WITHOUT LEAN: 16 rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
 ```
 
 ### loopty run examples/fusion.py
@@ -1032,27 +1035,26 @@ divergence: Schedule(divergence, target='c')
 
 STATUS   BY     WHERE          OWNER        STATEMENT
 -------  -----  -------------  -----------  ----------------------------------------------------------------------------------------------------
-decided  isl    fusion.py:104  burgers_rhs  fuse(burgers_rhs.flux.j, burgers_rhs.divergence.i, shift=1) renames the instances of
+decided  isl    fusion.py:107  burgers_rhs  every cell of burgers_rhs.f that burgers_rhs reads,
+                                              burgers_rhs.flux has stored by the time it is read,
+                                              so burgers_rhs runs without the zeros burgers_rhs.f is made with
+decided  isl    fusion.py:113  burgers_rhs  fuse(burgers_rhs.flux.j, burgers_rhs.divergence.i, shift=1) renames the instances of
                                               burgers_rhs one for one
-decided  isl    fusion.py:104  burgers_rhs  the order after fuse(burgers_rhs.flux.j, burgers_rhs.divergence.i, shift=1) runs every dependence of
+decided  isl    fusion.py:113  burgers_rhs  the order after fuse(burgers_rhs.flux.j, burgers_rhs.divergence.i, shift=1) runs every dependence of
                                               burgers_rhs forward
-tested   loopy  fusion.py:104  burgers_rhs  the scheduled run of burgers_rhs agrees with the native run to the accuracy its types state
-decided  isl    fusion.py:109  burgers_rhs  for substitute(burgers_rhs.f), every cell of burgers_rhs.f that burgers_rhs reads,
-                                              burgers_rhs.flux has stored by the time it is read
-decided  isl    fusion.py:109  burgers_rhs  substitute(burgers_rhs.f) renames the instances of burgers_rhs one for one
-decided  isl    fusion.py:109  burgers_rhs  the order after substitute(burgers_rhs.f) runs every dependence of burgers_rhs forward
-tested   loopy  fusion.py:109  burgers_rhs  the scheduled run of burgers_rhs agrees with the native run to the accuracy its types state
-decided  isl    fusion.py:112  burgers_rhs  for contract(burgers_rhs.f), every cell of burgers_rhs.f that burgers_rhs reads,
-                                              burgers_rhs.flux has stored by the time it is read
-decided  isl    fusion.py:112  burgers_rhs  no read of burgers_rhs.f sees its slot overwritten after contract(burgers_rhs.f, lambda j: j % 3):
+tested   loopy  fusion.py:113  burgers_rhs  the scheduled run of burgers_rhs agrees with the native run to the accuracy its types state
+decided  isl    fusion.py:118  burgers_rhs  substitute(burgers_rhs.f) renames the instances of burgers_rhs one for one
+decided  isl    fusion.py:118  burgers_rhs  the order after substitute(burgers_rhs.f) runs every dependence of burgers_rhs forward
+tested   loopy  fusion.py:118  burgers_rhs  the scheduled run of burgers_rhs agrees with the native run to the accuracy its types state
+decided  isl    fusion.py:121  burgers_rhs  no read of burgers_rhs.f sees its slot overwritten after contract(burgers_rhs.f, lambda j: j % 3):
                                               burgers_rhs.f kept in 3 cells, f[j] in slot j % 3
-tested   loopy  fusion.py:112  burgers_rhs  the scheduled run of burgers_rhs agrees with the native run to the accuracy its types state
-tested   loopy  fusion.py:80   flux         the scheduled run of flux agrees with the native run to the accuracy its types state
-tested   loopy  fusion.py:87   divergence   the scheduled run of divergence agrees with the native run to the accuracy its types state
+tested   loopy  fusion.py:121  burgers_rhs  the scheduled run of burgers_rhs agrees with the native run to the accuracy its types state
+tested   loopy  fusion.py:89   flux         the scheduled run of flux agrees with the native run to the accuracy its types state
+tested   loopy  fusion.py:96   divergence   the scheduled run of divergence agrees with the native run to the accuracy its types state
 
-12 facts: 7 decided, 5 tested
+11 facts: 6 decided, 5 tested
 
-WITHOUT LEAN: 7 rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
+WITHOUT LEAN: 6 rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
 ```
 
 ## quadrature.py
@@ -1338,13 +1340,13 @@ refused: fuse(weak_derivative.along_r.b, weak_derivative.along_s.b) illegal: v[e
 
 accepted: Schedule(weak_derivative, target='c').fuse(weak_derivative.along_r.a, weak_derivative.along_s.a)
   the passes' loops, outermost first: weak_derivative.along_r.e, weak_derivative.along_r.a, weak_derivative.along_r.b, weak_derivative.along_s.b
+  decided  isl  every cell of weak_derivative.v that weak_derivative reads, weak_derivative.along_r has stored by the time it is read, so weak_derivative runs without the zeros weak_derivative.v is made with
   decided  isl  fuse(weak_derivative.along_r.a, weak_derivative.along_s.a) renames the instances of weak_derivative one for one
   decided  isl  the order after fuse(weak_derivative.along_r.a, weak_derivative.along_s.a) runs every dependence of weak_derivative forward
   w: difference 0 within 1e-06 (approx) -> tested
 
 accepted: Schedule(weak_derivative, target='c').fuse(weak_derivative.along_r.a, weak_derivative.along_s.a).contract(weak_derivative.v, lambda e, a, b: b)
   v kept in n cells, lambda e, a, b: b
-  decided  isl  for contract(weak_derivative.v), every cell of weak_derivative.v that weak_derivative reads, weak_derivative.along_r has stored by the time it is read
   decided  isl  no read of weak_derivative.v sees its slot overwritten after contract(weak_derivative.v, lambda e, a, b: b): weak_derivative.v kept in n cells, v[e, a, b] in slot b
   w: agrees with the native run -> tested
 ```
@@ -1371,12 +1373,13 @@ decided  type         sum_factorization.py:96   along_s          the accumulatio
 tested   interpreter  sum_factorization.py:86   along_s          the traced term computes what the body computes
 decided  isl          sum_factorization.py:104  weak_derivative  every cell of v that along_s reads, along_r stored before it
 tested   interpreter  sum_factorization.py:99   weak_derivative  the traced term computes what the body computes
+decided  isl          sum_factorization.py:102  weak_derivative  every cell of weak_derivative.v that weak_derivative reads,
+                                                                   weak_derivative.along_r has stored by the time it is read,
+                                                                   so weak_derivative runs without the zeros weak_derivative.v is made with
 decided  isl          sum_factorization.py:108  weak_derivative  fuse(weak_derivative.along_r.a, weak_derivative.along_s.a) renames the instances of
                                                                    weak_derivative one for one
 decided  isl          sum_factorization.py:108  weak_derivative  the order after fuse(weak_derivative.along_r.a, weak_derivative.along_s.a) runs every dependence of
                                                                    weak_derivative forward
-decided  isl          sum_factorization.py:113  weak_derivative  for contract(weak_derivative.v), every cell of weak_derivative.v that weak_derivative reads,
-                                                                   weak_derivative.along_r has stored by the time it is read
 decided  isl          sum_factorization.py:113  weak_derivative  no read of weak_derivative.v sees its slot overwritten after
                                                                    contract(weak_derivative.v, lambda e, a, b: b):
                                                                    weak_derivative.v kept in n cells, v[e, a, b] in slot b
@@ -1401,13 +1404,14 @@ along_s: Schedule(along_s, target='c')
 
 STATUS   BY     WHERE                     OWNER            STATEMENT
 -------  -----  ------------------------  ---------------  ---------------------------------------------------------------------------------------------------
+decided  isl    sum_factorization.py:102  weak_derivative  every cell of weak_derivative.v that weak_derivative reads,
+                                                             weak_derivative.along_r has stored by the time it is read,
+                                                             so weak_derivative runs without the zeros weak_derivative.v is made with
 decided  isl    sum_factorization.py:108  weak_derivative  fuse(weak_derivative.along_r.a, weak_derivative.along_s.a) renames the instances of
                                                              weak_derivative one for one
 decided  isl    sum_factorization.py:108  weak_derivative  the order after fuse(weak_derivative.along_r.a, weak_derivative.along_s.a) runs every dependence of
                                                              weak_derivative forward
 tested   loopy  sum_factorization.py:108  weak_derivative  the scheduled run of weak_derivative agrees with the native run to the accuracy its types state
-decided  isl    sum_factorization.py:113  weak_derivative  for contract(weak_derivative.v), every cell of weak_derivative.v that weak_derivative reads,
-                                                             weak_derivative.along_r has stored by the time it is read
 decided  isl    sum_factorization.py:113  weak_derivative  no read of weak_derivative.v sees its slot overwritten after
                                                              contract(weak_derivative.v, lambda e, a, b: b):
                                                              weak_derivative.v kept in n cells, v[e, a, b] in slot b
@@ -1552,13 +1556,14 @@ refused: fuse(weak_grad.along_r.i, weak_grad.along_s.i) illegal: v[q, e, k, j, i
 accepted: Schedule(weak_grad, target='c').fuse(weak_grad.metric.j, weak_grad.along_r.j).fuse(weak_grad.along_r.k, weak_grad.along_s.k).contract(weak_grad.w, lambda q, e, k, j, i: i).contract(weak_grad.v, lambda q, e, k, j, i: (j, i))
   w kept in lambda q, e, k, j, i: i
   v kept in lambda q, e, k, j, i: (j, i)
+  decided  isl  every cell of weak_grad.w that weak_grad reads, weak_grad.metric has stored by the time it is read, so weak_grad runs without the zeros weak_grad.w is made with
+  decided  isl  every cell of weak_grad.v that weak_grad reads, weak_grad.along_r has stored by the time it is read, so weak_grad runs without the zeros weak_grad.v is made with
+  decided  isl  every cell of weak_grad.vs that weak_grad reads, weak_grad.along_s has stored by the time it is read, so weak_grad runs without the zeros weak_grad.vs is made with
   decided  isl  fuse(weak_grad.metric.j, weak_grad.along_r.j) renames the instances of weak_grad one for one
   decided  isl  the order after fuse(weak_grad.metric.j, weak_grad.along_r.j) runs every dependence of weak_grad forward
   decided  isl  fuse(weak_grad.along_r.k, weak_grad.along_s.k) renames the instances of weak_grad one for one
   decided  isl  the order after fuse(weak_grad.along_r.k, weak_grad.along_s.k) runs every dependence of weak_grad forward
-  decided  isl  for contract(weak_grad.w), every cell of weak_grad.w that weak_grad reads, weak_grad.metric has stored by the time it is read
   decided  isl  no read of weak_grad.w sees its slot overwritten after contract(weak_grad.w, lambda q, e, k, j, i: i): weak_grad.w kept in n cells, w[q, e, k, j, i] in slot i
-  decided  isl  for contract(weak_grad.v), every cell of weak_grad.v that weak_grad reads, weak_grad.along_r has stored by the time it is read
   decided  isl  no read of weak_grad.v sees its slot overwritten after contract(weak_grad.v, lambda q, e, k, j, i: (j, i)): weak_grad.v kept in n*n cells, v[q, e, k, j, i] in slot (j, i)
   grad: difference 0 within 1e-06 (approx) -> tested
 
@@ -1573,7 +1578,7 @@ on a device, the weak gradient as three launches, every node on a work item:
 ```console
 $ uv run lanky check examples/hexahedra.py
 STATUS   BY             WHERE             OWNER                  STATEMENT
--------  -------------  ----------------  ---------------------  ---------------------------------------------------------------------------------------------------
+-------  -------------  ----------------  ---------------------  ----------------------------------------------------------------------------------------------------
 tested   property-test  hexahedra.py:119  sum_factorization      n : Nat, Fr : Fn[Fin(n), Fin(n), Real], Fs : Fn[Fin(n), Fin(n), Real],
                                                                    Ft : Fn[Fin(n), Fin(n), Real], u : Fn[Fin(n), Fin(n), Fin(n), Real], k : Fin(n),
                                                                    j : Fin(n), i : Fin(n)
@@ -1641,19 +1646,22 @@ tested   native         hexahedra.py:286  weak_grad              forall x in Fin
                                                                    == sum(Ft[3*x + d, k, c]*Fs[3*x + d, j, b]*Fr[3*x + d, i, a]*G[3*x + d, e, c, b, a]*u[e, c, b, a]
                                                                      for d in Fin(3), c in Fin(n), b in Fin(n), a in Fin(n))
 tested   interpreter    hexahedra.py:286  weak_grad              the traced term computes what the body computes
+decided  isl            hexahedra.py:313  weak_grad              every cell of weak_grad.w that weak_grad reads, weak_grad.metric has stored by the time it is read,
+                                                                   so weak_grad runs without the zeros weak_grad.w is made with
+decided  isl            hexahedra.py:314  weak_grad              every cell of weak_grad.v that weak_grad reads, weak_grad.along_r has stored by the time it is read,
+                                                                   so weak_grad runs without the zeros weak_grad.v is made with
+decided  isl            hexahedra.py:315  weak_grad              every cell of weak_grad.vs that weak_grad reads,
+                                                                   weak_grad.along_s has stored by the time it is read,
+                                                                   so weak_grad runs without the zeros weak_grad.vs is made with
 decided  isl            hexahedra.py:364  weak_grad              fuse(weak_grad.metric.j, weak_grad.along_r.j) renames the instances of weak_grad one for one
 decided  isl            hexahedra.py:364  weak_grad              the order after fuse(weak_grad.metric.j, weak_grad.along_r.j) runs every dependence of
                                                                    weak_grad forward
 decided  isl            hexahedra.py:365  weak_grad              fuse(weak_grad.along_r.k, weak_grad.along_s.k) renames the instances of weak_grad one for one
 decided  isl            hexahedra.py:365  weak_grad              the order after fuse(weak_grad.along_r.k, weak_grad.along_s.k) runs every dependence of
                                                                    weak_grad forward
-decided  isl            hexahedra.py:369  weak_grad              for contract(weak_grad.w), every cell of weak_grad.w that weak_grad reads,
-                                                                   weak_grad.metric has stored by the time it is read
 decided  isl            hexahedra.py:369  weak_grad              no read of weak_grad.w sees its slot overwritten after
                                                                    contract(weak_grad.w, lambda q, e, k, j, i: i):
                                                                    weak_grad.w kept in n cells, w[q, e, k, j, i] in slot i
-decided  isl            hexahedra.py:369  weak_grad              for contract(weak_grad.v), every cell of weak_grad.v that weak_grad reads,
-                                                                   weak_grad.along_r has stored by the time it is read
 decided  isl            hexahedra.py:369  weak_grad              no read of weak_grad.v sees its slot overwritten after
                                                                    contract(weak_grad.v, lambda q, e, k, j, i: (j, i)):
                                                                    weak_grad.v kept in n*n cells, v[q, e, k, j, i] in slot (j, i)
@@ -1674,9 +1682,9 @@ tested   interpreter    hexahedra.py:372  metric_along_r         the traced term
 decided  isl            hexahedra.py:385  contravariant_along_r  every cell of w that along_r reads, contravariant stored before it
 tested   interpreter    hexahedra.py:380  contravariant_along_r  the traced term computes what the body computes
 
-80 facts: 58 decided, 22 tested
+81 facts: 59 decided, 22 tested
 
-WITHOUT LEAN: sum_factorization and 64 more rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
+WITHOUT LEAN: sum_factorization and 65 more rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
 WITHOUT MATHLIB: sum_factorization and 2 more rows are not proved, since only Lean with Mathlib can state them. To have Lean prove them: python -m lanky.mathlib ~/mathlib (about 7 GB), then export LANKY_LEAN_MATHLIB=~/mathlib.
 ```
 
@@ -1708,7 +1716,14 @@ contravariant_along_r: Schedule(contravariant_along_r, target='c')
   v: difference 0 within 1e-06 (approx) -> tested
 
 STATUS   BY     WHERE             OWNER                  STATEMENT
--------  -----  ----------------  ---------------------  --------------------------------------------------------------------------------------------------
+-------  -----  ----------------  ---------------------  ----------------------------------------------------------------------------------------------------
+decided  isl    hexahedra.py:313  weak_grad              every cell of weak_grad.w that weak_grad reads, weak_grad.metric has stored by the time it is read,
+                                                           so weak_grad runs without the zeros weak_grad.w is made with
+decided  isl    hexahedra.py:314  weak_grad              every cell of weak_grad.v that weak_grad reads, weak_grad.along_r has stored by the time it is read,
+                                                           so weak_grad runs without the zeros weak_grad.v is made with
+decided  isl    hexahedra.py:315  weak_grad              every cell of weak_grad.vs that weak_grad reads,
+                                                           weak_grad.along_s has stored by the time it is read,
+                                                           so weak_grad runs without the zeros weak_grad.vs is made with
 decided  isl    hexahedra.py:364  weak_grad              fuse(weak_grad.metric.j, weak_grad.along_r.j) renames the instances of weak_grad one for one
 decided  isl    hexahedra.py:364  weak_grad              the order after fuse(weak_grad.metric.j, weak_grad.along_r.j) runs every dependence of
                                                            weak_grad forward
@@ -1716,13 +1731,9 @@ decided  isl    hexahedra.py:365  weak_grad              fuse(weak_grad.along_r.
 decided  isl    hexahedra.py:365  weak_grad              the order after fuse(weak_grad.along_r.k, weak_grad.along_s.k) runs every dependence of
                                                            weak_grad forward
 tested   loopy  hexahedra.py:365  weak_grad              the scheduled run of weak_grad agrees with the native run to the accuracy its types state
-decided  isl    hexahedra.py:369  weak_grad              for contract(weak_grad.w), every cell of weak_grad.w that weak_grad reads,
-                                                           weak_grad.metric has stored by the time it is read
 decided  isl    hexahedra.py:369  weak_grad              no read of weak_grad.w sees its slot overwritten after
                                                            contract(weak_grad.w, lambda q, e, k, j, i: i):
                                                            weak_grad.w kept in n cells, w[q, e, k, j, i] in slot i
-decided  isl    hexahedra.py:369  weak_grad              for contract(weak_grad.v), every cell of weak_grad.v that weak_grad reads,
-                                                           weak_grad.along_r has stored by the time it is read
 decided  isl    hexahedra.py:369  weak_grad              no read of weak_grad.v sees its slot overwritten after
                                                            contract(weak_grad.v, lambda q, e, k, j, i: (j, i)):
                                                            weak_grad.v kept in n*n cells, v[q, e, k, j, i] in slot (j, i)
@@ -1733,14 +1744,27 @@ tested   loopy  hexahedra.py:212  along_r                the scheduled run of al
 tested   loopy  hexahedra.py:229  along_s                the scheduled run of along_s agrees with the native run to the accuracy its types state
 tested   loopy  hexahedra.py:246  gradient_along_t       the scheduled run of gradient_along_t agrees with the native run to the accuracy its types state
 tested   loopy  hexahedra.py:267  divergence_along_t     the scheduled run of divergence_along_t agrees with the native run to the accuracy its types state
+decided  isl    hexahedra.py:346  weak_div               every cell of weak_div.w that weak_div reads,
+                                                           weak_div.contravariant has stored by the time it is read,
+                                                           so weak_div runs without the zeros weak_div.w is made with
+decided  isl    hexahedra.py:347  weak_div               every cell of weak_div.v that weak_div reads, weak_div.along_r has stored by the time it is read,
+                                                           so weak_div runs without the zeros weak_div.v is made with
+decided  isl    hexahedra.py:348  weak_div               every cell of weak_div.vs that weak_div reads, weak_div.along_s has stored by the time it is read,
+                                                           so weak_div runs without the zeros weak_div.vs is made with
 tested   loopy  hexahedra.py:322  weak_div               the scheduled run of weak_div agrees with the native run to the accuracy its types state
+decided  isl    hexahedra.py:375  metric_along_r         every cell of metric_along_r.w that metric_along_r reads,
+                                                           metric_along_r.metric has stored by the time it is read,
+                                                           so metric_along_r runs without the zeros metric_along_r.w is made with
 tested   loopy  hexahedra.py:372  metric_along_r         the scheduled run of metric_along_r agrees with the native run to the accuracy its types state
+decided  isl    hexahedra.py:383  contravariant_along_r  every cell of contravariant_along_r.w that contravariant_along_r reads,
+                                                           contravariant_along_r.contravariant has stored by the time it is read,
+                                                           so contravariant_along_r runs without the zeros contravariant_along_r.w is made with
 tested   loopy  hexahedra.py:380  contravariant_along_r  the scheduled run of contravariant_along_r agrees with the native run to the
                                                            accuracy its types state
 
-19 facts: 8 decided, 11 tested
+25 facts: 14 decided, 11 tested
 
-WITHOUT LEAN: 8 rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
+WITHOUT LEAN: 14 rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
 ```
 
 
@@ -1949,12 +1973,17 @@ decided  isl            advection.py:417  advection_rhs                  every c
 decided  isl            advection.py:416  advection_rhs                  every cell of vn that upwind reads, normal_velocity stored before it
 decided  isl            advection.py:418  advection_rhs                  every cell of flux that lift reads, upwind stored before it
 tested   interpreter    advection.py:407  advection_rhs                  the traced term computes what the body computes
-decided  isl            advection.py:439  advection_rhs                  for substitute(advection_rhs.V), every cell of advection_rhs.V that advection_rhs reads,
-                                                                           advection_rhs.reference_velocity has stored by the time it is read
+decided  isl            advection.py:411  advection_rhs                  every cell of advection_rhs.V that advection_rhs reads,
+                                                                           advection_rhs.reference_velocity has stored by the time it is read,
+                                                                           so advection_rhs runs without the zeros advection_rhs.V is made with
+decided  isl            advection.py:412  advection_rhs                  every cell of advection_rhs.vn that advection_rhs reads,
+                                                                           advection_rhs.normal_velocity has stored by the time it is read,
+                                                                           so advection_rhs runs without the zeros advection_rhs.vn is made with
+decided  isl            advection.py:413  advection_rhs                  every cell of advection_rhs.flux that advection_rhs reads,
+                                                                           advection_rhs.upwind has stored by the time it is read,
+                                                                           so advection_rhs runs without the zeros advection_rhs.flux is made with
 decided  isl            advection.py:439  advection_rhs                  substitute(advection_rhs.V) renames the instances of advection_rhs one for one
 decided  isl            advection.py:439  advection_rhs                  the order after substitute(advection_rhs.V) runs every dependence of advection_rhs forward
-decided  isl            advection.py:440  advection_rhs                  for substitute(advection_rhs.vn), every cell of advection_rhs.vn that advection_rhs reads,
-                                                                           advection_rhs.normal_velocity has stored by the time it is read
 decided  isl            advection.py:440  advection_rhs                  substitute(advection_rhs.vn) renames the instances of advection_rhs one for one
 decided  isl            advection.py:440  advection_rhs                  the order after substitute(advection_rhs.vn) runs every dependence of advection_rhs forward
 decided  isl            advection.py:441  advection_rhs                  fuse(advection_rhs.volume.i, advection_rhs.lift.i) renames the instances of
@@ -1965,8 +1994,6 @@ decided  isl            advection.py:442  advection_rhs                  fuse(ad
                                                                            advection_rhs one for one
 decided  isl            advection.py:442  advection_rhs                  the order after fuse(advection_rhs.upwind.e, advection_rhs.volume.e) runs every dependence of
                                                                            advection_rhs forward
-decided  isl            advection.py:446  advection_rhs                  for contract(advection_rhs.flux), every cell of advection_rhs.flux that advection_rhs reads,
-                                                                           advection_rhs.upwind has stored by the time it is read
 decided  isl            advection.py:446  advection_rhs                  no read of advection_rhs.flux sees its slot overwritten after
                                                                            contract(advection_rhs.flux, lambda e, f, a, b: (f, a, b)):
                                                                            advection_rhs.flux kept in 6*n*n cells, flux[e, f, a, b] in slot (f, a, b)
@@ -2011,12 +2038,17 @@ volume_and_lift: Schedule(volume_and_lift, target='c')
 
 STATUS   BY     WHERE             OWNER               STATEMENT
 -------  -----  ----------------  ------------------  --------------------------------------------------------------------------------------------------
-decided  isl    advection.py:439  advection_rhs       for substitute(advection_rhs.V), every cell of advection_rhs.V that advection_rhs reads,
-                                                        advection_rhs.reference_velocity has stored by the time it is read
+decided  isl    advection.py:411  advection_rhs       every cell of advection_rhs.V that advection_rhs reads,
+                                                        advection_rhs.reference_velocity has stored by the time it is read,
+                                                        so advection_rhs runs without the zeros advection_rhs.V is made with
+decided  isl    advection.py:412  advection_rhs       every cell of advection_rhs.vn that advection_rhs reads,
+                                                        advection_rhs.normal_velocity has stored by the time it is read,
+                                                        so advection_rhs runs without the zeros advection_rhs.vn is made with
+decided  isl    advection.py:413  advection_rhs       every cell of advection_rhs.flux that advection_rhs reads,
+                                                        advection_rhs.upwind has stored by the time it is read,
+                                                        so advection_rhs runs without the zeros advection_rhs.flux is made with
 decided  isl    advection.py:439  advection_rhs       substitute(advection_rhs.V) renames the instances of advection_rhs one for one
 decided  isl    advection.py:439  advection_rhs       the order after substitute(advection_rhs.V) runs every dependence of advection_rhs forward
-decided  isl    advection.py:440  advection_rhs       for substitute(advection_rhs.vn), every cell of advection_rhs.vn that advection_rhs reads,
-                                                        advection_rhs.normal_velocity has stored by the time it is read
 decided  isl    advection.py:440  advection_rhs       substitute(advection_rhs.vn) renames the instances of advection_rhs one for one
 decided  isl    advection.py:440  advection_rhs       the order after substitute(advection_rhs.vn) runs every dependence of advection_rhs forward
 decided  isl    advection.py:441  advection_rhs       fuse(advection_rhs.volume.i, advection_rhs.lift.i) renames the instances of
@@ -2028,8 +2060,6 @@ decided  isl    advection.py:442  advection_rhs       fuse(advection_rhs.upwind.
 decided  isl    advection.py:442  advection_rhs       the order after fuse(advection_rhs.upwind.e, advection_rhs.volume.e) runs every dependence of
                                                         advection_rhs forward
 tested   loopy  advection.py:442  advection_rhs       the scheduled run of advection_rhs agrees with the native run to the accuracy its types state
-decided  isl    advection.py:446  advection_rhs       for contract(advection_rhs.flux), every cell of advection_rhs.flux that advection_rhs reads,
-                                                        advection_rhs.upwind has stored by the time it is read
 decided  isl    advection.py:446  advection_rhs       no read of advection_rhs.flux sees its slot overwritten after
                                                         contract(advection_rhs.flux, lambda e, f, a, b: (f, a, b)):
                                                         advection_rhs.flux kept in 6*n*n cells, flux[e, f, a, b] in slot (f, a, b)
@@ -2040,13 +2070,18 @@ tested   loopy  advection.py:297  upwind              the scheduled run of upwin
 tested   loopy  advection.py:328  volume              the scheduled run of volume agrees with the native run to the accuracy its types state
 tested   loopy  advection.py:357  lift                the scheduled run of lift agrees with the native run to the accuracy its types state
 tested   loopy  advection.py:380  lift_on_faces       the scheduled run of lift_on_faces agrees with the native run to the accuracy its types state
+decided  isl    advection.py:424  folded_rhs          every cell of folded_rhs.flux that folded_rhs reads,
+                                                        folded_rhs.upwind has stored by the time it is read,
+                                                        so folded_rhs runs without the zeros folded_rhs.flux is made with
 tested   loopy  advection.py:421  folded_rhs          the scheduled run of folded_rhs agrees with the native run to the accuracy its types state
+decided  isl    advection.py:452  surface             every cell of surface.flux that surface reads, surface.upwind has stored by the time it is read,
+                                                        so surface runs without the zeros surface.flux is made with
 tested   loopy  advection.py:449  surface             the scheduled run of surface agrees with the native run to the accuracy its types state
 tested   loopy  advection.py:457  volume_and_lift     the scheduled run of volume_and_lift agrees with the native run to the accuracy its types state
 
-23 facts: 12 decided, 11 tested
+25 facts: 14 decided, 11 tested
 
-WITHOUT LEAN: 12 rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
+WITHOUT LEAN: 14 rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
 ```
 
 ## calls.py
@@ -2536,11 +2571,11 @@ refused: interchange(reconstruct.b, reconstruct.a) illegal: R[box, a, b] = C[box
 refused: contract(l2p.R, lambda box, a, b: b) illegal: R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:278) at box=0, a=9, b=0 reads R[0, 7, 2], which the same statement at box=0, a=7, b=2 stored in slot 2, after the same statement at box=0, a=8, b=2 stored R[0, 8, 2] there (at nb=1, isl's choice); contract(l2p.R) finds the smallest window that keeps every read, lambda box, a, b: (a, b)
 
 schedule: Schedule(l2p, target='c').fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box).contract(l2p.R, lambda box, a, b: (a, b)).contract(l2p.C, lambda box, a, b: (a, b))
+  decided  isl  every cell of l2p.C that l2p reads, l2p.unpack has stored by the time it is read, so l2p runs without the zeros l2p.C is made with
+  decided  isl  every cell of l2p.R that l2p reads, l2p.reconstruct has stored by the time it is read, so l2p runs without the zeros l2p.R is made with
   decided  isl  fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box) renames the instances of l2p one for one
   decided  isl  the order after fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box) runs every dependence of l2p forward
-  decided  isl  for contract(l2p.R), every cell of l2p.R that l2p reads, l2p.reconstruct has stored by the time it is read
   decided  isl  no read of l2p.R sees its slot overwritten after contract(l2p.R, lambda box, a, b: (a, b)): l2p.R kept in 121 cells, R[box, a, b] in slot (a, b)
-  decided  isl  for contract(l2p.C), every cell of l2p.C that l2p reads, l2p.unpack has stored by the time it is read
   decided  isl  no read of l2p.C sees its slot overwritten after contract(l2p.C, lambda box, a, b: (a, b)): l2p.C kept in 22 cells, C[box, a, b] in slot (a, b)
   pot: difference 0 within 1.1e-06 (approx) -> tested
 
@@ -2644,20 +2679,20 @@ decided                          decided    call         l2p.py:316  l2p        
 decided                          decided    isl          l2p.py:322  l2p                every cell of C that reconstruct reads, unpack stored before it
 decided                          decided    isl          l2p.py:323  l2p                every cell of R that evaluate reads, reconstruct stored before it
 tested                           tested     interpreter  l2p.py:316  l2p                the traced term computes what the body computes
+decided                          decided    isl          l2p.py:319  l2p                every cell of l2p.C that l2p reads, l2p.unpack has stored by the time it is read,
+                                                                                          so l2p runs without the zeros l2p.C is made with
+decided                          decided    isl          l2p.py:320  l2p                every cell of l2p.R that l2p reads, l2p.reconstruct has stored by the time it is read,
+                                                                                          so l2p runs without the zeros l2p.R is made with
 decided                          decided    isl          l2p.py:334  l2p                fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box) renames the instances of l2p one for one
 decided                          decided    isl          l2p.py:334  l2p                the order after fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box) runs every
                                                                                           dependence of l2p forward
-decided                          decided    isl          l2p.py:340  l2p                for contract(l2p.R), every cell of l2p.R that l2p reads,
-                                                                                          l2p.reconstruct has stored by the time it is read
 decided                          decided    isl          l2p.py:340  l2p                no read of l2p.R sees its slot overwritten after contract(l2p.R, lambda box, a, b: (a, b)):
                                                                                           l2p.R kept in 121 cells, R[box, a, b] in slot (a, b)
-decided                          decided    isl          l2p.py:340  l2p                for contract(l2p.C), every cell of l2p.C that l2p reads,
-                                                                                          l2p.unpack has stored by the time it is read
 decided                          decided    isl          l2p.py:340  l2p                no read of l2p.C sees its slot overwritten after contract(l2p.C, lambda box, a, b: (a, b)):
                                                                                           l2p.C kept in 22 cells, C[box, a, b] in slot (a, b)
-decided                          decided    isl          l2p.py:347  l2p                on_groups(l2p.unpack.box) renames the instances of l2p one for one
-decided                          decided    isl          l2p.py:347  l2p                the order after on_groups(l2p.unpack.box) runs every dependence of l2p forward, within one work item
-tested                           tested     upstream     l2p.py:469  l2p                the native run of l2p agrees with sumpy_l2p in pot, on its example inputs
+decided                          decided    isl          l2p.py:348  l2p                on_groups(l2p.unpack.box) renames the instances of l2p one for one
+decided                          decided    isl          l2p.py:348  l2p                the order after on_groups(l2p.unpack.box) runs every dependence of l2p forward, within one work item
+tested                           tested     upstream     l2p.py:470  l2p                the native run of l2p agrees with sumpy_l2p in pot, on its example inputs
 
 56 facts: 2 assumed, 47 decided, 7 tested
 
@@ -2684,21 +2719,21 @@ evaluate: Schedule(evaluate, target='c')
 
 STATUS   BY     WHERE       OWNER        STATEMENT
 -------  -----  ----------  -----------  ----------------------------------------------------------------------------------------------------
+decided  isl    l2p.py:319  l2p          every cell of l2p.C that l2p reads, l2p.unpack has stored by the time it is read,
+                                           so l2p runs without the zeros l2p.C is made with
+decided  isl    l2p.py:320  l2p          every cell of l2p.R that l2p reads, l2p.reconstruct has stored by the time it is read,
+                                           so l2p runs without the zeros l2p.R is made with
 decided  isl    l2p.py:334  l2p          fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box) renames the instances of l2p one for one
 decided  isl    l2p.py:334  l2p          the order after fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box) runs every
                                            dependence of l2p forward
 tested   loopy  l2p.py:334  l2p          the scheduled run of l2p agrees with the native run to the accuracy its types state
-decided  isl    l2p.py:340  l2p          for contract(l2p.R), every cell of l2p.R that l2p reads,
-                                           l2p.reconstruct has stored by the time it is read
 decided  isl    l2p.py:340  l2p          no read of l2p.R sees its slot overwritten after contract(l2p.R, lambda box, a, b: (a, b)):
                                            l2p.R kept in 121 cells, R[box, a, b] in slot (a, b)
-decided  isl    l2p.py:340  l2p          for contract(l2p.C), every cell of l2p.C that l2p reads,
-                                           l2p.unpack has stored by the time it is read
 decided  isl    l2p.py:340  l2p          no read of l2p.C sees its slot overwritten after contract(l2p.C, lambda box, a, b: (a, b)):
                                            l2p.C kept in 22 cells, C[box, a, b] in slot (a, b)
 tested   loopy  l2p.py:340  l2p          the scheduled run of l2p agrees with the native run to the accuracy its types state
-decided  isl    l2p.py:347  l2p          on_groups(l2p.unpack.box) renames the instances of l2p one for one
-decided  isl    l2p.py:347  l2p          the order after on_groups(l2p.unpack.box) runs every dependence of l2p forward, within one work item
+decided  isl    l2p.py:348  l2p          on_groups(l2p.unpack.box) renames the instances of l2p one for one
+decided  isl    l2p.py:348  l2p          the order after on_groups(l2p.unpack.box) runs every dependence of l2p forward, within one work item
 tested   loopy  l2p.py:222  unpack       the scheduled run of unpack agrees with the native run to the accuracy its types state
 tested   loopy  l2p.py:249  reconstruct  the scheduled run of reconstruct agrees with the native run to the accuracy its types state
 tested   loopy  l2p.py:288  evaluate     the scheduled run of evaluate agrees with the native run to the accuracy its types state
