@@ -125,14 +125,15 @@ row per work group, is the schedule for this shape that does build and did run.
 ```console
 $ uv run lanky check examples/spmv.py
 STATUS   BY             WHERE        OWNER          STATEMENT
--------  -------------  -----------  -------------  ----------------------------------------------------------------------------------------------
-decided  isl            spmv.py:81   scan           off[0] is in bounds for every instance of S0
-decided  isl            spmv.py:83   scan           off[r + 1] is in bounds for every instance of S1
-decided  isl            spmv.py:83   scan           off[r] is in bounds for every instance of S1
-decided  isl            spmv.py:83   scan           cnt[r] is in bounds for every instance of S1
-decided  isl            spmv.py:81   scan           distinct instances of S0 write distinct cells of off
-decided  isl            spmv.py:83   scan           distinct instances of S1 write distinct cells of off
-decided  isl            spmv.py:83   scan           every cell of off that S1 reads, S0 or S1 wrote before the read
+-------  -------------  -----------  -------------  ---------------------------------------------------------------------------------------------------
+decided  isl            spmv.py:81   scan           off[0] is in bounds for every instance of off[0] = 0 (spmv.py:81)
+decided  isl            spmv.py:83   scan           off[r + 1] is in bounds for every instance of off[r + 1] = off[r] + cnt[r] (spmv.py:83)
+decided  isl            spmv.py:83   scan           off[r] is in bounds for every instance of off[r + 1] = off[r] + cnt[r] (spmv.py:83)
+decided  isl            spmv.py:83   scan           cnt[r] is in bounds for every instance of off[r + 1] = off[r] + cnt[r] (spmv.py:83)
+decided  isl            spmv.py:81   scan           distinct instances of off[0] = 0 (spmv.py:81) write distinct cells of off
+decided  isl            spmv.py:83   scan           distinct instances of off[r + 1] = off[r] + cnt[r] (spmv.py:83) write distinct cells of off
+decided  isl            spmv.py:83   scan           every cell of off that off[r + 1] = off[r] + cnt[r] (spmv.py:83) reads was written before the read,
+                                                      by off[0] = 0 (spmv.py:81) or itself
 decided  isl            spmv.py:71   scan           the source order runs every dependence forward in time
 decided  isl            spmv.py:81   scan           no cell of off is stored twice, or read before its store
 decided  isl            spmv.py:71   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
@@ -142,12 +143,13 @@ tested   property-test  spmv.py:86   scan_monotone  n : Nat, cnt : Fn[Fin(n), Na
                                                     | hs: forall r in Fin(n). off(r + 1) == off(r) + cnt(r)
                                                     |- forall a in Fin(n + 1), b in Fin(n + 1) where a <= b. off(a) <= off(b)
 tested   python         spmv.py:86   scan_monotone  the term computes what the annotations compute
-decided  isl            spmv.py:114  spmv           y[r] is in bounds for every instance of S0
-decided  isl            spmv.py:114  spmv           val[r, j] is in bounds for every instance of S0
+decided  isl            spmv.py:114  spmv           y[r] is in bounds for every instance of y[r] = reduce_sum(...) (spmv.py:114)
+decided  isl            spmv.py:114  spmv           val[r, j] is in bounds for every instance of y[r] = reduce_sum(...) (spmv.py:114)
 decided  type           spmv.py:114  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
-decided  isl            spmv.py:114  spmv           col[r, j] is in bounds for every instance of S0
-decided  isl            spmv.py:114  spmv           cnt[r], the length of row r that bounds the loop over j, is in bounds for every instance of S0
-decided  isl            spmv.py:114  spmv           distinct instances of S0 write distinct cells of y
+decided  isl            spmv.py:114  spmv           col[r, j] is in bounds for every instance of y[r] = reduce_sum(...) (spmv.py:114)
+decided  isl            spmv.py:114  spmv           cnt[r], the length of row r that bounds the loop over j, is in bounds
+                                                      for every instance of y[r] = reduce_sum(...) (spmv.py:114)
+decided  isl            spmv.py:114  spmv           distinct instances of y[r] = reduce_sum(...) (spmv.py:114) write distinct cells of y
 decided  isl            spmv.py:104  spmv           the source order runs every dependence forward in time
 decided  type           spmv.py:114  spmv           the accumulation into y[r] over j is approx
 tested   interpreter    spmv.py:104  spmv           the traced term computes what the body computes
@@ -334,8 +336,8 @@ native, the 16 by 16 array (first six levels around the spike):
  [0.156 0.    0.312 0.    0.312 0.    0.156]]
 
 Schedule(jacobi).tile(jacobi.t, jacobi.i, 8, 8) ->
-  IllegalCast: tile(jacobi.t, jacobi.i, 8, 8) illegal: u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:62) at t=0, i=8 writes u[1, 8], read by the same statement at t=1, i=7, scheduled earlier (at nt=16, nx=16, as hinted)
-  witness: S0{'t': 0, 'i': 8} runs before S0{'t': 1, 'i': 7} at {'nt': 16, 'nx': 16}
+  IllegalCast: tile(jacobi.t, jacobi.i, 8, 8) illegal: u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:63) at t=0, i=8 writes u[1, 8], read by the same statement at t=1, i=7, scheduled earlier (at nt=16, nx=16, as hinted)
+  witness: u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:63) at t=0, i=8 runs before the same statement at t=1, i=7, where nt=16, nx=16
 
 accepted: Schedule(jacobi, target='c').skew(jacobi.i, by=jacobi.t).tile(jacobi.t, jacobi.i, 8, 8)
   loop nest: jacobi.t.outer jacobi.i.outer jacobi.t.inner jacobi.i.inner
@@ -353,8 +355,9 @@ The pair is the whole point. The statement on line 62 writes `u[1, 8]` at
 second one first, because `i = 7` is in the first tile column and `i = 8` is in
 the second. That is a pair of real instances of this kernel at these sizes,
 produced by pulling an isl solution back from time space into instance space.
-The `witness` under it is the same pair as the ledger records it, by the
-statement's id, `S0`. No code was generated, and
+The `witness` under it is the same pair, from the refusal's `instances`; its
+`witness` keeps the pair as the ledger records it, by the statement's id,
+`S0`, which is how a map per statement names it. No code was generated, and
 the schedule the cast was asked of is unchanged, so the demo can go on and ask
 for a legal one.
 
@@ -367,17 +370,21 @@ Checking and running the file behave the same way as the sparse product:
 ```console
 $ uv run lanky check examples/stencil_skew.py
 STATUS   BY           WHERE                OWNER   STATEMENT
--------  -----------  -------------------  ------  --------------------------------------------------------------------------------------
-decided  isl          stencil_skew.py:62   jacobi  u[t + 1, i] is in bounds for every instance of S0
-decided  isl          stencil_skew.py:62   jacobi  u[t, i - 1] is in bounds for every instance of S0
-decided  isl          stencil_skew.py:62   jacobi  u[t, i + 1] is in bounds for every instance of S0
-decided  isl          stencil_skew.py:62   jacobi  distinct instances of S0 write distinct cells of u
-decided  isl          stencil_skew.py:54   jacobi  the source order runs every dependence forward in time
-tested   interpreter  stencil_skew.py:54   jacobi  the traced term computes what the body computes
-decided  isl          stencil_skew.py:116  jacobi  skew(jacobi.i, by=jacobi.t) renames the instances of jacobi one for one
-decided  isl          stencil_skew.py:116  jacobi  the order after skew(jacobi.i, by=jacobi.t) runs every dependence of jacobi forward
-decided  isl          stencil_skew.py:117  jacobi  tile(jacobi.t, jacobi.i, 8, 8) renames the instances of jacobi one for one
-decided  isl          stencil_skew.py:117  jacobi  the order after tile(jacobi.t, jacobi.i, 8, 8) runs every dependence of jacobi forward
+-------  -----------  -------------------  ------  ----------------------------------------------------------------------------------------------
+decided  isl          stencil_skew.py:63   jacobi  u[t + 1, i] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
+                                                     (stencil_skew.py:63)
+decided  isl          stencil_skew.py:63   jacobi  u[t, i - 1] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
+                                                     (stencil_skew.py:63)
+decided  isl          stencil_skew.py:63   jacobi  u[t, i + 1] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
+                                                     (stencil_skew.py:63)
+decided  isl          stencil_skew.py:63   jacobi  distinct instances of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:63) write
+                                                     distinct cells of u
+decided  isl          stencil_skew.py:55   jacobi  the source order runs every dependence forward in time
+tested   interpreter  stencil_skew.py:55   jacobi  the traced term computes what the body computes
+decided  isl          stencil_skew.py:118  jacobi  skew(jacobi.i, by=jacobi.t) renames the instances of jacobi one for one
+decided  isl          stencil_skew.py:118  jacobi  the order after skew(jacobi.i, by=jacobi.t) runs every dependence of jacobi forward
+decided  isl          stencil_skew.py:119  jacobi  tile(jacobi.t, jacobi.i, 8, 8) renames the instances of jacobi one for one
+decided  isl          stencil_skew.py:119  jacobi  the order after tile(jacobi.t, jacobi.i, 8, 8) runs every dependence of jacobi forward
 
 10 facts: 9 decided, 1 tested
 

@@ -268,18 +268,18 @@ row verbatim, and checked by `scripts/refresh_example_outputs.py`):
 $ lanky check examples/spmv.py
 STATUS   BY             WHERE        OWNER          STATEMENT
 -------  -------------  -----------  -------------  ----------------------------------------------------------------------------------------------
-decided  isl            spmv.py:81   scan           off[0] is in bounds for every instance of S0
-decided  isl            spmv.py:83   scan           off[r + 1] is in bounds for every instance of S1
-decided  isl            spmv.py:81   scan           distinct instances of S0 write distinct cells of off
+decided  isl            spmv.py:81   scan           off[0] is in bounds for every instance of off[0] = 0 (spmv.py:81)
+decided  isl            spmv.py:83   scan           off[r + 1] is in bounds for every instance of off[r + 1] = off[r] + cnt[r] (spmv.py:83)
+decided  isl            spmv.py:81   scan           distinct instances of off[0] = 0 (spmv.py:81) write distinct cells of off
 decided  isl            spmv.py:81   scan           no cell of off is stored twice, or read before its store
 decided  isl            spmv.py:71   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
 tested   property-test  spmv.py:86   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat]
                                                     | h0: off(0) == 0
                                                     | hs: forall r in Fin(n). off(r + 1) == off(r) + cnt(r)
                                                     |- forall a in Fin(n + 1), b in Fin(n + 1) where a <= b. off(a) <= off(b)
-decided  isl            spmv.py:114  spmv           y[r] is in bounds for every instance of S0
+decided  isl            spmv.py:114  spmv           y[r] is in bounds for every instance of y[r] = reduce_sum(...) (spmv.py:114)
 decided  type           spmv.py:114  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
-decided  isl            spmv.py:114  spmv           distinct instances of S0 write distinct cells of y
+decided  isl            spmv.py:114  spmv           distinct instances of y[r] = reduce_sum(...) (spmv.py:114) write distinct cells of y
 decided  type           spmv.py:114  spmv           the accumulation into y[r] over j is approx
 tested   interpreter    spmv.py:104  spmv           the traced term computes what the body computes
 decided  isl            spmv.py:195  spmv           the order after split(spmv.j, 2) runs every dependence of spmv forward
@@ -336,7 +336,7 @@ And a transformation is a cast, checked before it is applied:
 $ python examples/stencil_skew.py
 ...
 Schedule(jacobi).tile(jacobi.t, jacobi.i, 8, 8) ->
-  IllegalCast: tile(jacobi.t, jacobi.i, 8, 8) illegal: u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:62) at t=0, i=8 writes u[1, 8], read by the same statement at t=1, i=7, scheduled earlier (at nt=16, nx=16, as hinted)
+  IllegalCast: tile(jacobi.t, jacobi.i, 8, 8) illegal: u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:63) at t=0, i=8 writes u[1, 8], read by the same statement at t=1, i=7, scheduled earlier (at nt=16, nx=16, as hinted)
 ...
 accepted: Schedule(jacobi, target='c').skew(jacobi.i, by=jacobi.t).tile(jacobi.t, jacobi.i, 8, 8)
   loop nest: jacobi.t.outer jacobi.i.outer jacobi.t.inner jacobi.i.inner
@@ -384,10 +384,11 @@ the exact set:
 $ lanky check examples/pairs.py
 STATUS   BY           WHERE        OWNER  STATEMENT
 -------  -----------  -----------  -----  -------------------------------------------------------
-decided  isl          pairs.py:78  pairs  f[i, j] is in bounds for every instance of S0
+decided  isl          pairs.py:78  pairs  f[i, j] is in bounds for every instance of f[i, j] = q[i] * q[j] /
+                                            (1.0 + dx * dx + dy * dy) (pairs.py:78)
 ...
-decided  isl          pairs.py:80  pairs  f[p, j] is in bounds for every instance of S1
-decided  isl          pairs.py:80  pairs  f[k, p] is in bounds for every instance of S1
+decided  isl          pairs.py:80  pairs  f[p, j] is in bounds for every instance of e[p] = reduce_sum(...) + reduce_sum(...) (pairs.py:80)
+decided  isl          pairs.py:80  pairs  f[k, p] is in bounds for every instance of e[p] = reduce_sum(...) + reduce_sum(...) (pairs.py:80)
 ...
 17 facts: 16 decided, 1 tested
 ```
@@ -1670,8 +1671,10 @@ term is interpreted on its own and compared with the native run.
 
 **Transformations are casts.** Each states a reindexing map, which isl checks for
 bijectivity, and a new execution order, which isl checks for monotonicity on the
-dependence relation. Failure is an `IllegalCast` carrying the witness and the
-refuted fact, whose reason is the exception's message. Casts that change
+dependence relation. Failure is an `IllegalCast` carrying the witness (by the
+statements' ids), its `instances` as the message names them (by the
+statements' text and line), and the refuted fact, whose reason is the
+exception's message. Casts that change
 floating-point semantics mark the result's exactness class instead of being
 refused.
 

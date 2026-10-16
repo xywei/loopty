@@ -124,6 +124,25 @@ the ledger, the refusals and the fixes they suggest, and `loopty run`.
   name a statement by its id, which is how such a map names it; its
   refusals give both, `S0 (y[r] = 0.0, rows.py:12)`.
   `loopty.source.Named` and `loopty.handles.statement_names` do the naming.
+- The parts of a cast, and of a kernel's ordering and definedness facts,
+  that `--verbose` and Lean show name their statements the same way, and
+  spell each cell with the loops and sums the source names (#307):
+  `R[box, a, b] written again by R[box, a, b] = C[box, a, b] (l2p.py:276)
+  after the same cell is written by the zeros of l2p.R (l2p.py:320)`, not
+  `R[i_0, a_0, b_0] written again by reconstruct.S0 ...`, and a sum's
+  binder as written, `R[box, a, b]` and not `R[box, a_1, b_1]`. So does the
+  reason a cast through the part of a tile isl computed is not offered to
+  Lean, and the rule of a theorem's series row.
+- **`IllegalCast.instances`** is the witness's pair as the message names
+  it, `('u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:62)
+  at t=0, i=8', 'the same statement at t=1, i=7')`; `witness` keeps the
+  ids. `examples/stencil_skew.py` and `examples/wavefront_acoustic.py`
+  print it, `witness: ... runs before the same statement at t=1, i=7, where
+  nt=16, nx=16`, where they printed the tuple, and their `rejected_*`
+  functions return the refusal, not its message and witness. The wave demo
+  lists the ids its map per statement names, each with its statement, and
+  `examples/calls.py` and `examples/composition.py` show a statement's text
+  where they showed its id.
 
 ## [0.3.0] - 2026-10-15
 

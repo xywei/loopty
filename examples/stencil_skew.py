@@ -41,8 +41,7 @@ from __future__ import annotations
 import numpy as np
 from lanky.prelude import Real
 
-from loopty import Arr, Fin, Schedule, kernel, when
-from loopty.schedule import IllegalCast
+from loopty import Arr, Fin, IllegalCast, Schedule, kernel, when
 
 #: Sixteen time levels over sixteen points. Large enough that a tile of eight by
 #: eight is a real tiling with four tiles and a boundary between them, small
@@ -94,14 +93,13 @@ def reference(u: np.ndarray) -> np.ndarray:
 
 
 def rejected_tiling() -> IllegalCast:
-    """Ask for the illegal tiling and return its refusal.
-
-    ``str()`` of it is the message, ``witness`` isl's pair by the statements'
-    ids, and ``instances`` the same pair as the message names it.
+    """Ask for the illegal tiling and return its refusal, which names the pair.
 
     The schedule the cast was asked of is untouched by the rejection, which is
     why this can be called from a demo, a test, and a docstring without leaving
-    anything half-transformed behind.
+    anything half-transformed behind. ``str()`` of the refusal is its message,
+    ``witness`` isl's pair by the statements' ids, and ``instances`` the pair
+    as the message names it.
     """
     schedule = Schedule(jacobi, target="c", sizes={"nt": NT, "nx": NX})
     try:

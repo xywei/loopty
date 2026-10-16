@@ -188,25 +188,33 @@ def instance_labels(term: Term) -> tuple[str, ...]:
 
 
 def render_instance(term: Term, coordinates: Sequence[int]) -> str:
-    """Render one padded instance tuple as ``S1[r=2, j=0]``.
+    """Render one padded instance tuple as a message names an instance.
+
+    ``y[r] += val[r, j] * x[col[r, j]] (spmv.py:114) at r=2, j=0``: the
+    statement by its text and line, and the instance by the source's loops
+    (:func:`loopty.source.instances_text`); a statement of a term written by
+    hand, which has no text, by its id, ``S1[r=2, j=0]``.
 
     A witness comes back from isl as a tuple of integers in the padded instance
     space, whose first coordinate is the statement's index. Turning it back into
     the statement's own inames is what makes a rejected schedule's explanation
     about the source rather than about the encoding.
     """
+    from loopty.source import instances_text
+
     if not coordinates:
         return "[]"
     index = int(coordinates[0])
     if not 0 <= index < len(term.stmts):
         return "(" + ", ".join(str(c) for c in coordinates) + ")"
     stmt = term.stmts[index]
-    pairs = [
-        f"{iname}={coordinates[k + 1]}"
+    at = {
+        iname: int(coordinates[k + 1])
         for k, iname in enumerate(stmt.inames)
         if k + 1 < len(coordinates)
-    ]
-    return f"{stmt.id}[{', '.join(pairs)}]"
+    }
+    (said,) = instances_text(_names(term), (stmt.id, at))
+    return said
 
 
 # {{{ in bounds

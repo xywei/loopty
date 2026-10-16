@@ -45,6 +45,13 @@ def copy(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):  # noqa: F821
         v[i] = u[i]
 
 
+def test_a_padded_instance_is_rendered_as_a_message_names_it() -> None:
+    term, _ = facts_of(shift)
+    stmt = said(shift, "v[i] = u[i + 1]")
+    assert rules.render_instance(term, (0, 3)) == f"{stmt} at i=3"
+    assert rules.render_instance(term, (5, 3)) == "(5, 3)"
+
+
 def test_an_affine_access_states_a_subset_obligation() -> None:
     _, facts = facts_of(copy)
     in_bounds = [f for f in facts if f.kind == "in-bounds"]

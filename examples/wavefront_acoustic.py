@@ -85,8 +85,7 @@ from time import perf_counter
 import numpy as np
 from lanky.prelude import Real
 
-from loopty import Arr, Fin, Schedule, kernel, when
-from loopty.schedule import IllegalCast
+from loopty import Arr, Fin, IllegalCast, Schedule, kernel, when
 
 #: Sixteen time levels over thirty-two points, tiled four by eight: enough tiles
 #: that the skewed nest has boundaries in both directions, small enough that the

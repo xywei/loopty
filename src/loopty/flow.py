@@ -18,7 +18,8 @@ depth are pinned to zero. Statements therefore all live in one isl space, so a
 dependence relation and a schedule are plain :class:`islpy.Map` objects rather
 than union maps, and the oracle's ``is_monotone`` can take them unchanged. The
 price is that a witness is a padded tuple, which
-:func:`loopty.typing.render_instance` turns back into ``S1[r=2, j=0]``.
+:func:`loopty.typing.render_instance` turns back into an instance of a
+statement, ``y[r] += ... (spmv.py:114) at r=2, j=0``.
 
 *Time is the 2d+1 vector.* The source schedule maps an instance to
 ``[p0, d0, p1, d1, ..., pD]``, alternating the position of the enclosing block
