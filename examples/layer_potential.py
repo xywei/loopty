@@ -146,21 +146,28 @@ def coefficient(ratio, k):
 def line_taylor(
     alpha: Complex,
     beta: Complex,
-    c: Fn[Nat, Complex],
-    away: alpha != 0,
-    first: alpha * c(1) == beta,
-    ode: all((n + 1) * alpha * c(n + 1) + n * beta * c(n) == 0 for n in Nat if n >= 1),
-) -> all(c(n) == coefficient(-beta / alpha, n) for n in Nat if n >= 1):
-    """The line-Taylor coefficients of ``log(alpha + tau * beta)``, for every order.
+    a: Fn[Nat, Complex],
+    nonzero: alpha != 0,
+    first_term: alpha * a[1] == beta,
+    ode: all((n + 1) * alpha * a[n + 1] + n * beta * a[n] == 0 for n in Nat if n >= 1),
+) -> all(a[n] == coefficient(-beta / alpha, n) for n in Nat if n >= 1):
+    """The line-Taylor coefficients of ``log(alpha + tau * beta)``, at every order.
 
     ``f(tau) = log(alpha + tau * beta)`` solves ``(alpha + tau * beta) * f'(tau)
-    == beta``. Comparing the powers of ``tau`` in it gives ``first`` and
+    == beta``; comparing the powers of ``tau`` in it gives ``first_term`` and
     ``ode`` (L. V. Ahlfors, Complex Analysis, 3rd ed., 1979, chs. 2 and 5;
     lanky's ``examples/line_taylor.py`` states the equation as an axiom and
     checks sumpy's own coefficients against the closed form through order 6).
-    The induction is two orders at a time; Python finds the linear combination
-    of the hypotheses each step needs, and Lean checks it with Mathlib.
     """
+    ratio = -beta / alpha
+
+    def claim(n):
+        if n == 1:
+            return first_term
+        recurrence = a[n].equals((n - 1) / n * ratio * a[n - 1], by=ode)
+        return recurrence, claim(n - 1)
+
+    return claim
 
 
 def ratio(alpha, beta):

@@ -90,6 +90,7 @@ from typing import Any
 import islpy as isl
 import numpy as np
 import pymbolic.primitives as prim
+from lanky.matching import FamilyValue, higher_order_value
 from lanky.prelude import FinType, FnType, Refined, SumType
 from lanky.terms import (
     Add,
@@ -1314,11 +1315,28 @@ class _Matcher:
     (``m**2``) as much as in a comparison: never read as the program's name
     of the same spelling, which a theorem whose ``m`` matched the kernel's
     ``k`` elsewhere does not mean.
+
+    With ``higher_order``, a family applied to distinct variables that the
+    theorem's binders bind matches any term of the program, as a function of
+    the program's variables lined up with them: ``u[c, b, a]`` under the
+    sums over ``c``, ``b`` and ``a`` matches ``G[x, d, e, c, b, a] * u[e, c,
+    b, a]``, binding ``u`` to ``(c, b, a) ↦ G[x, d, e, c, b, a] * u[e, c, b,
+    a]`` (a :class:`lanky.matching.FamilyValue`). It is lanky's rule
+    (:func:`lanky.matching.higher_order_value`), shared, so that a rewrite by
+    a theorem with a family parameter and a written proof's uncalled fact
+    bind a family the same way. A family is bound to an array where it can
+    be, and to a function only where it cannot.
     """
 
-    def __init__(self, functions: Collection[str], scalars: Collection[str]) -> None:
+    def __init__(
+        self,
+        functions: Collection[str],
+        scalars: Collection[str],
+        higher_order: bool = False,
+    ) -> None:
         self.functions = set(functions)
         self.scalars = set(scalars)
+        self.higher_order = higher_order
 
     def match(
         self, pattern: Any, target: Any, sigma: dict[str, Any], bound: dict[str, str]
@@ -1358,22 +1376,30 @@ class _Matcher:
             if spine is None or spine[0] not in self.functions:
                 return self._match_parts(pattern, target, sigma, bound)
             function, parameters = spine
+            bound_value = sigma.get(function)
+            if self.higher_order and isinstance(bound_value, FamilyValue):
+                # bound to a function already: the program's term is its value here
+                arguments = [_rename_bound(p, bound) for p in parameters]
+                return _same(bound_value.apply(arguments), target)
             if not (
                 isinstance(target, prim.Subscript)
                 and isinstance(target.aggregate, prim.Variable)
             ):
-                return False
+                return self._bind_function(function, parameters, target, sigma, bound)
             array = target.aggregate.name
             if sigma.get(function, array) != array:
                 return False
-            sigma[function] = array
             indices = _indices(target)
             if len(indices) != len(parameters):
-                return False
-            return all(
-                self.match(p, t, sigma, bound)
+                return self._bind_function(function, parameters, target, sigma, bound)
+            trial = {**sigma, function: array}
+            if all(
+                self.match(p, t, trial, bound)
                 for p, t in zip(parameters, indices, strict=True)
-            )
+            ):
+                sigma.update(trial)
+                return True
+            return self._bind_function(function, parameters, target, sigma, bound)
         if isinstance(pattern, prim.Comparison):
             if not isinstance(target, prim.Comparison):
                 return False
@@ -1440,6 +1466,23 @@ class _Matcher:
                 pattern.child, target.child, sigma, bound
             )
         return self._match_parts(pattern, target, sigma, bound)
+
+    def _bind_function(
+        self,
+        function: str,
+        parameters: Sequence[Any],
+        target: Any,
+        sigma: dict[str, Any],
+        bound: dict[str, str],
+    ) -> bool:
+        """The higher-order rule, where it is on and the family is still unbound."""
+        if not self.higher_order or function in sigma:
+            return False
+        value = higher_order_value(parameters, target, bound)
+        if value is None:
+            return False
+        sigma[function] = value
+        return True
 
     def _match_parts(
         self, pattern: Any, target: Any, sigma: dict[str, Any], bound: dict[str, str]
@@ -1548,6 +1591,13 @@ def _base_of(node: Any) -> type:
     return type(node)
 
 
+def _rename_bound(expr: Any, bound: Mapping[str, str]) -> Any:
+    """A theorem's term with the variables its binders bind named as the program's."""
+    if not bound:
+        return expr
+    return substitute(expr, {name: Var(target) for name, target in bound.items()})
+
+
 def _same(left: Any, right: Any) -> bool:
     """Two expressions that are equal as terms, or as linear forms."""
     if structurally_equal(left, right):
@@ -1573,7 +1623,11 @@ def _apply(expr: Any, sigma: Mapping[str, Any], functions: Collection[str]) -> A
         if spine is not None and spine[0] in functions:
             name, parameters = spine
             args = tuple(_apply(arg, sigma, functions) for arg in parameters)
-            return Subscript(Var(sigma[name]), args[0] if len(args) == 1 else args)
+            value = sigma[name]
+            if isinstance(value, FamilyValue):
+                # the higher-order rule bound it to a function: its value here
+                return value.apply(args)
+            return Subscript(Var(value), args[0] if len(args) == 1 else args)
     if isinstance(expr, prim.Variable):
         if expr.name in sigma and expr.name not in functions:
             return sigma[expr.name]
@@ -1582,8 +1636,13 @@ def _apply(expr: Any, sigma: Mapping[str, Any], functions: Collection[str]) -> A
         captured: set[str] = set()
         for name, value in sigma.items():
             # A family becomes the array it matched, whose name a binder of
-            # the same spelling would capture as surely as a size's.
-            captured |= {value} if name in functions else _names(value)
+            # the same spelling would capture as surely as a size's; or the
+            # function the higher-order rule bound it to, whose names too.
+            if isinstance(value, FamilyValue):
+                parameters = {var.name for var in value.parameters}
+                captured |= _names(value.body) - parameters
+            else:
+                captured |= {value} if name in functions else _names(value)
         taken = captured | _names(expr) | set(sigma)
         inner = dict(sigma)
         renames: dict[str, Any] = {}

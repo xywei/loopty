@@ -1200,13 +1200,16 @@ log|alpha| + Re( c(1) + ... + c(5) ),   c(k) = -(-beta / alpha)**k / k
   what `(alpha + tau * beta) f'(tau) == beta` says about its coefficients is
   `c(k)`; that the Taylor coefficients of `log(alpha + tau * beta)` satisfy
   that equation is cited, not proved. With Mathlib, Lean proves it; without,
-  it is `assumed`, since the property tester draws no table over `Nat`. The
+  it is `assumed`, since the property tester draws no table over `Nat`. Its
+  body is its proof, as a reader says it: the claim at `n` is `first_term`
+  where `n` is 1, and otherwise the recurrence `a[n] == (n - 1) / n * ratio *
+  a[n - 1]`, by the ODE, with the claim at `n - 1`. The
   kernels add `coefficient(ratio(alpha, beta), k)`, the same function the
   theorem's conclusion is written with, at the ratio computed by the
   conjugate, `-beta * conj(alpha) / |alpha|**2`. `by_the_conjugate` says
   that is `-beta / alpha`, and `single_layer` cites both: its row
-  `single_layer adds line_taylor's c(n) for n in 1..5, for every c with
-  away, first and ode, read over the complex numbers` ties the theorem to the
+  `single_layer adds line_taylor's a(n) for n in 1..5, for every a with
+  nonzero, first_term and ode, read over the complex numbers` ties the theorem to the
   terms the kernel evaluates, `decided` by `theorem` and, with Mathlib,
   proved by Lean, the identity rewritten and the theorem applied a term at a
   time. It is about the term read over the complex numbers, not about the
