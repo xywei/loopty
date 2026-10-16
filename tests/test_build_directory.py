@@ -14,6 +14,7 @@ import os
 import pickle
 import subprocess
 import sys
+import warnings
 from pathlib import Path
 
 import pytest
@@ -58,6 +59,20 @@ def test_the_c_targets_of_a_process_build_in_one_directory() -> None:
     one, other = InProcessCTarget(), target_for("c")
     assert one.compiler is other.compiler is _process_compiler()
     assert os.path.isdir(one.compiler.tempdir)
+
+
+def test_a_kernel_built_again_after_another_is_not_compiled_again() -> None:
+    compiler = _process_compiler()
+    first = compiler.build("first", "int first(void) { return 1; }\n")
+    built = os.stat(first._name)
+    assert compiler.build("second", "int second(void) { return 2; }\n").second() == 2
+    with warnings.catch_warnings():
+        # codepy's "hash collision in compiler cache", when it rebuilds.
+        warnings.simplefilter("error", UserWarning)
+        again = compiler.build("first", "int first(void) { return 1; }\n")
+    assert again._name == first._name and again.first() == 1
+    rebuilt = os.stat(again._name)
+    assert (rebuilt.st_ino, rebuilt.st_mtime_ns) == (built.st_ino, built.st_mtime_ns)
 
 
 def test_a_pickled_target_builds_with_the_compiler_of_its_reader() -> None:

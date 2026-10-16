@@ -402,7 +402,7 @@ class _ProcessCompiler(CCompiler):
     for its lock there. codepy keys its cache by the source and the
     toolchain's command line, the kernel's build options included, so the
     kernels of every target share the directory, and a kernel built twice in
-    a process is compiled once.
+    a process is compiled once (:meth:`_tempname`).
 
     A process forked from this one has the compiler too. It builds in its
     parent's directory while that is there, and after that in one of its own,
@@ -421,6 +421,19 @@ class _ProcessCompiler(CCompiler):
             self.tempdir = tempfile.mkdtemp(prefix="tmp_loopy")
             self._owner = os.getpid()
         return super().build(*args, **kwargs)
+
+    def _tempname(self, name: str) -> str:
+        """``name`` as it is, so that codepy keeps a kernel's source in its entry.
+
+        loopy's ``build`` names the source ``code.c`` in the directory itself,
+        and codepy joins that name to the entry of its cache the kernel's hash
+        names, where an absolute path stays what it is: every kernel's source
+        went to the one file. A kernel built again after another failed
+        codepy's check of the source it kept ("hash collision in compiler
+        cache", a warning) and was compiled again. A relative name is a file
+        of the entry.
+        """
+        return name
 
     def _remove(self) -> None:
         if self._owner == os.getpid():

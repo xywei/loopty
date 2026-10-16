@@ -1779,7 +1779,13 @@ removes when it exits (`atexit`).
 - The kernels of every target share codepy's cache in the one directory,
   which its key makes safe: the command line it hashes holds the kernel's
   build options. A kernel built twice in a process is compiled once, where
-  each target compiled it again before.
+  each target compiled it again before. For that, the compiler names the
+  source `code.c`, relative, where loopy's `build` names it by its absolute
+  path in the directory: codepy keeps a kernel's source in the entry of its
+  cache by joining the name to the entry, an absolute path joins as itself,
+  and every kernel's source went to one file. A kernel built again after
+  another then failed codepy's check of the source it kept, warned "hash
+  collision in compiler cache" and was compiled again.
 - Only the process that made a directory removes it. A forked process builds
   in its parent's directory while that is there, and in one of its own after.
 - loopy's persistent caches (`preprocess_program`'s, the typed-and-scheduled
