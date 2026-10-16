@@ -907,18 +907,21 @@ def test_the_fusion_demo_decides_the_fusion_the_substitution_and_the_window() ->
 def test_the_fusion_demo_prints_the_refusals_and_three_kernels() -> None:
     result, _ = _invoke("fusion", "python")
     assert result.returncode == 0, result.stdout + result.stderr
+    module = _module("fusion")
+    flux = where(module.flux, "f[j] = 0.5 * u[j] * u[j]")
+    divergence = where(module.divergence, "rhs[i] = -(f[i + 1] - f[i - 1]) / 2")
     assert (
         "refused: fuse(burgers_rhs.flux.j, burgers_rhs.divergence.i) illegal: "
-        "f[j] = 0.5 * u[j] * u[j] (fusion.py:84) at j=2 writes f[2], read by "
-        "rhs[i] = -(f[i + 1] - f[i - 1]) / 2 (fusion.py:92) at i=1, scheduled "
+        f"f[j] = 0.5 * u[j] * u[j] ({flux}) at j=2 writes f[2], read by "
+        f"rhs[i] = -(f[i + 1] - f[i - 1]) / 2 ({divergence}) at i=1, scheduled "
         "earlier (at n=16, as hinted); fuse(burgers_rhs.flux.j, "
         "burgers_rhs.divergence.i, shift=1) runs every dependence between them "
         "forward"
     ) in result.stdout
     assert (
         "refused: contract(burgers_rhs.f, lambda j: j % 2) illegal: rhs[i] = "
-        "-(f[i + 1] - f[i - 1]) / 2 (fusion.py:92) at i=14 reads f[13], which "
-        "f[j] = 0.5 * u[j] * u[j] (fusion.py:84) at j=13 stored in slot 1, after "
+        f"-(f[i + 1] - f[i - 1]) / 2 ({divergence}) at i=14 reads f[13], which "
+        f"f[j] = 0.5 * u[j] * u[j] ({flux}) at j=13 stored in slot 1, after "
         "the same statement at j=15 stored f[15] there (at n=16, as hinted)"
     ) in result.stdout
     fused, substituted, windowed = result.stdout.split("accepted: ")[1:]
