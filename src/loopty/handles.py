@@ -583,11 +583,14 @@ class Array(Handle):
         if name.startswith("_"):
             raise AttributeError(name)
         if name == "zeros":
-            # what Schedule.nest prints a loop the program zeroes it in by
+            # what Schedule.nest prints a loop the program zeroes it in by,
+            # where a read sees the zeros, which a schedule keeps only then
+            # (Schedule._drop_unseen_zeros, #290)
             raise AttributeError(
                 f"{self.path}.zeros, the loops the program zeroes {self.path} in, "
-                "are no line's, and no step names them: they take the tag of the "
-                f"loop that stores {self.path}, and a window of it drops them"
+                "are no line's, and no step names them: a schedule runs without "
+                "them where no read sees the zeros, and otherwise they take the "
+                f"tag of the loop that stores {self.path}"
             )
         raise AttributeError(
             f"{self.path} is an array, which has no {name}; a step that takes "

@@ -65,6 +65,14 @@ def three(u, rhs, h):
 
 
 @program
+def from_zeros(u, rhs):
+    """The divergence before the flux: its read sees the zeros ``f`` is made with."""
+    f = Arr.zeros_like(u)
+    divergence(f, rhs)
+    flux(u, f)
+
+
+@program
 def twice(u, g, h):
     """``scale`` called twice: two calls of one kernel."""
     f = Arr.zeros_like(u)
@@ -184,9 +192,13 @@ def test_a_name_after_a_loop_or_an_array_says_what_it_has() -> None:
         "a split of it makes, burgers.flux.j.outer and burgers.flux.j.inner"
     )
     # Schedule.nest prints the loops a program zeroes an array in by the
-    # array, and says so where they are asked for
-    assert Schedule(burgers).nest[0] == "burgers.f.zeros"
-    with pytest.raises(AttributeError, match="no step names them: they take the tag"):
+    # array, where a read sees the zeros, and says so where they are asked
+    # for; burgers runs without its zeros, which no read sees (#290)
+    assert Schedule(from_zeros).nest[0] == "from_zeros.f.zeros"
+    assert "burgers.f.zeros" not in Schedule(burgers).nest
+    with pytest.raises(
+        AttributeError, match="no step names them: a schedule runs without them"
+    ):
         burgers.f.zeros  # noqa: B018
     with pytest.raises(AttributeError, match="burgers.f is an array, which has no j"):
         burgers.f.j  # noqa: B018
