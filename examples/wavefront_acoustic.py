@@ -154,7 +154,7 @@ def rejected_tiling(nt: int = NT, nx: int = NX) -> tuple[str, tuple]:
 
     schedule = Schedule(acoustic, target="c", sizes={"nt": nt, "nx": nx})
     try:
-        schedule.tile("t", "i", 4, 8)
+        schedule.tile(acoustic.t, acoustic.i, 4, 8)
     except IllegalCast as refused:
         return str(refused), refused.witness
     raise AssertionError("the unskewed time/space tiling should be illegal")
@@ -164,8 +164,8 @@ def wavefront_schedule(nt: int = NT, nx: int = NX) -> Schedule:
     """The legal schedule: skew the space axis by time, then tile."""
     return (
         Schedule(acoustic, target="c", sizes={"nt": nt, "nx": nx})
-        .skew("i", by="t")
-        .tile("t", "i", 4, 8)
+        .skew(acoustic.i, by=acoustic.t)
+        .tile(acoustic.t, acoustic.i, 4, 8)
     )
 
 
@@ -201,8 +201,9 @@ def rejected_diamond_tiling(nt: int = NT, nx: int = NX) -> tuple[str, tuple]:
     """Ask to tile the diamond and return the message and the witness."""
     from loopty.schedule import IllegalCast
 
+    diamond = diamond_schedule(nt, nx)
     try:
-        diamond_schedule(nt, nx).tile("a", "b", 4, 4)
+        diamond.tile(acoustic.loops.a, acoustic.loops.b, 4, 4)
     except IllegalCast as refused:
         return str(refused), refused.witness
     raise AssertionError("tiling the diamond should be illegal for this pair")
@@ -220,12 +221,16 @@ OFFSET_DIAMOND = (
 
 
 def offset_diamond_schedule(nt: int = NT, nx: int = NX) -> Schedule:
-    """The diamond tiling: the offset diamond, then rectangles in ``(a, b)``."""
-    return (
-        Schedule(acoustic, target="c", sizes={"nt": nt, "nx": nx})
-        .affine(OFFSET_DIAMOND)
-        .tile("a", "b", 4, 4)
+    """The diamond tiling: the offset diamond, then rectangles in ``(a, b)``.
+
+    The loops the map makes, which no line of the file binds (it wrote
+    ``t`` and ``i``, and the map ``a`` and ``b``), are named under
+    ``loops``: ``acoustic.loops.a``.
+    """
+    diamond = Schedule(acoustic, target="c", sizes={"nt": nt, "nx": nx}).affine(
+        OFFSET_DIAMOND
     )
+    return diamond.tile(acoustic.loops.a, acoustic.loops.b, 4, 4)
 
 
 #: What ``loopty run`` compiles and compares: the wavefront block, the
@@ -261,8 +266,8 @@ def benchmark(nt: int = 128, nx: int = 8192, repeats: int = 5) -> int:
     variants = {
         "plain": Schedule(acoustic, target="c", sizes=sizes),
         "wavefront": Schedule(acoustic, target="c", sizes=sizes)
-        .skew("i", by="t")
-        .tile("t", "i", 8, 128),
+        .skew(acoustic.i, by=acoustic.t)
+        .tile(acoustic.t, acoustic.i, 8, 128),
     }
 
     def arguments() -> dict:
@@ -318,14 +323,14 @@ def main() -> int:
     message, witness = rejected_tiling()
     (source_id, source), (sink_id, sink), params = witness
     print()
-    print("Schedule(acoustic).tile('t', 'i', 4, 8) ->")
+    print("Schedule(acoustic).tile(acoustic.t, acoustic.i, 4, 8) ->")
     print(f"  IllegalCast: {message}")
     print(f"  witness: {source_id}{source} runs before {sink_id}{sink} at {params}")
 
     schedule = wavefront_schedule()
     print()
     print(f"accepted: {schedule!r}")
-    print(f"  loop nest: {' '.join(schedule.order)}")
+    print(f"  loop nest: {' '.join(schedule.nest)}")
     for fact in schedule.facts():
         print(f"  {fact.status.value:8} {fact.decided_by or '-':4} {fact.statement}")
 
@@ -352,7 +357,7 @@ def main() -> int:
     (domain,) = schedule.kernel.default_entrypoint.domains
     print()
     print(f"accepted: {schedule!r}")
-    print(f"  loop nest: {' '.join(schedule.order)}")
+    print(f"  loop nest: {' '.join(schedule.nest)}")
     print(f"  loopy domain: {domain}")
     for step in schedule.facts():
         print(f"  {step.status.value:8} {step.decided_by or '-':4} {step.statement}")
@@ -367,13 +372,13 @@ def main() -> int:
 
     message, _witness = rejected_diamond_tiling()
     print()
-    print(f"{schedule!r}.tile('a', 'b', 4, 4) ->")
+    print(f"{schedule!r}.tile(acoustic.loops.a, acoustic.loops.b, 4, 4) ->")
     print(f"  IllegalCast: {message}")
 
     schedule = offset_diamond_schedule()
     print()
     print(f"accepted: {schedule!r}")
-    print(f"  loop nest: {' '.join(schedule.order)}")
+    print(f"  loop nest: {' '.join(schedule.nest)}")
     for step in schedule.facts():
         print(f"  {step.status.value:8} {step.decided_by or '-':4} {step.statement}")
     print()

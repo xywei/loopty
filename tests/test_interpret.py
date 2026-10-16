@@ -211,15 +211,15 @@ def masked(
     cnt: Arr[Fin[n], Nat],  # noqa: F821
     lst: Arr[Fin[n], Fin[cnt], Fin[n]],  # noqa: F821
     x: Arr[Fin[n], Real],  # noqa: F821
-    term: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
+    contribution: Arr[Fin[n], Fin[cnt], Real],  # noqa: F821
     out: Arr[Fin[n], Real],  # noqa: F821
 ):
     for t in out.dom:
         for j in lst.dom[t]:
-            term[t, j] = 0.0
+            contribution[t, j] = 0.0
             with when(lst[t, j] != t):
-                term[t, j] = 1.0 / (x[t] - x[lst[t, j]])
-        out[t] = reduce_sum(term[t, j] for j in lst.dom[t])
+                contribution[t, j] = 1.0 / (x[t] - x[lst[t, j]])
+        out[t] = reduce_sum(contribution[t, j] for j in lst.dom[t])
 
 
 def test_a_guard_that_reads_data_masks_the_write() -> None:
@@ -230,7 +230,7 @@ def test_a_guard_that_reads_data_masks_the_write() -> None:
         "cnt": Arr.from_numpy(np.array(counts, dtype=np.int64)),
         "lst": Arr.ragged(counts, values=[0, 1, 2, 1, 0, 2, 1, 0]),
         "x": Arr.from_numpy(np.array([0.0, 0.5, 2.0])),
-        "term": Arr.ragged(counts),
+        "contribution": Arr.ragged(counts),
         "out": Arr.zeros(3),
     }
     native, interpreted = both(masked, arguments)

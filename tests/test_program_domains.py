@@ -62,7 +62,7 @@ def test_a_domains_sizes_are_unified_across_calls() -> None:
     data = _inputs(with_l=True)
     through(**data)
     np.testing.assert_allclose(data["e"].numpy(), _expected())
-    for schedule in (Schedule(through), Schedule(through).pack("L")):
+    for schedule in (Schedule(through), Schedule(through).pack(through.L)):
         fact = LoopyExecutor().differential(through, schedule, _inputs(with_l=True))
         assert fact.status is Status.TESTED, fact.provenance
 
@@ -105,7 +105,7 @@ def test_an_array_of_a_declared_domain_takes_its_sizes_from_the_programs() -> No
     )
     (faithful,) = [f for f in facts if f.kind == KIND]
     assert faithful.status is Status.TESTED
-    fused = Schedule(declared).fuse("fill", "rowsum", loops=1)
+    fused = Schedule(declared).fuse(declared.fill.i, declared.rowsum.p)
     assert all(f.status is Status.DECIDED for f in fused.facts())
     fact = LoopyExecutor().differential(declared, fused, _inputs())
     assert fact.status is Status.TESTED
@@ -115,8 +115,8 @@ def test_a_window_of_an_array_over_a_domain_keeps_one_row_of_it() -> None:
     # A placement takes the domain's binders, and the cells it places are the
     # domain's points (#244): fused on their rows, fill and rowsum keep one
     # row of the triangle, n cells, found along the order or given.
-    fused = Schedule(K.declared).fuse("fill", "rowsum", loops=1)
-    windowed = fused.contract("f")
+    fused = Schedule(K.declared).fuse(K.declared.fill.i, K.declared.rowsum.p)
+    windowed = fused.contract(K.declared.f)
     window = windowed.windows["f"]
     assert repr(window.placement) == "lambda i, j: j"
     assert [str(extent) for extent in window.extents] == ["n"]
@@ -125,30 +125,33 @@ def test_a_window_of_an_array_over_a_domain_keeps_one_row_of_it() -> None:
         ("no-clobber", Status.DECIDED),
     ]
     assert windowed.facts()[-1].statement == (
-        "no read of f sees its slot overwritten after contract('f', lambda i, j: "
-        "j): f kept in n cells, f[i, j] in slot j"
+        "no read of declared.f sees its slot overwritten after "
+        "contract(declared.f, lambda i, j: j): declared.f kept in n cells, "
+        "f[i, j] in slot j"
     )
     fact = LoopyExecutor().differential(K.declared, windowed, _inputs())
     assert fact.status is Status.TESTED
     # one statement stores f, so computing it where it is read is the other way
-    substituted = fused.substitute("f")
+    substituted = fused.substitute(K.declared.f)
     fact = LoopyExecutor().differential(K.declared, substituted, _inputs())
     assert fact.status is Status.TESTED
     # one cell for the row is too few, and the refusal names the window
     with pytest.raises(IllegalCast) as caught:
-        fused.contract("f", lambda i, j: 0)
+        fused.contract(K.declared.f, lambda i, j: 0)
     rowsum = where(K.rowsum, "e[p] = reduce_sum(")
     fill = where(K.fill, "f[i, j] = x[i] * x[j]")
     assert str(caught.value) == (
-        "contract('f', lambda i, j: 0) illegal: e[p] = reduce_sum(f[p, q] for q "
+        "contract(declared.f, lambda i, j: 0) illegal: e[p] = reduce_sum(f[p, q] "
+        "for q "
         f"in f.dom[p]) ({rowsum}) at p=2 reads f[2, 0], which f[i, j] = x[i] * "
         f"x[j] ({fill}) at i=2, j=0 stored in slot 0, after the same statement at "
-        "i=2, j=1 stored f[2, 1] there (at n=3, isl's choice); contract('f') "
-        "finds the smallest window that keeps every read, lambda i, j: j"
+        "i=2, j=1 stored f[2, 1] there (at n=3, isl's choice); "
+        "contract(declared.f) finds the smallest window that keeps every read, "
+        "lambda i, j: j"
     )
     # before the fusion every row is read after the last is stored
-    with pytest.raises(ValueError, match="no window is smaller than f"):
-        Schedule(K.declared).contract("f")
+    with pytest.raises(ValueError, match="no window is smaller than declared.f"):
+        Schedule(K.declared).contract(K.declared.f)
 
 
 def test_an_array_of_a_declared_dense_shape() -> None:

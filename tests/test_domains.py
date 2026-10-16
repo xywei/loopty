@@ -548,7 +548,7 @@ def test_each_kind_runs_on_the_c_target_and_agrees_with_the_native_run(
     kernel = getattr(K, name)
     schedule = Schedule(kernel)
     if pack:
-        schedule = schedule.pack(*packable)
+        schedule = schedule.pack(*(getattr(kernel, array) for array in packable))
     fact = LoopyExecutor().differential(kernel, schedule, _arguments(name, storage))
     assert fact.status is Status.TESTED, fact.provenance
 
@@ -574,14 +574,15 @@ def test_an_argument_in_another_box_runs_compiled_in_the_declared_one() -> None:
     )
     for domain in triangles:
         for storage in ("box", "packed"):
-            for schedule in (Schedule(K.pairs), Schedule(K.pairs).pack("f")):
+            for schedule in (Schedule(K.pairs), Schedule(K.pairs).pack(K.pairs.f)):
                 f = Arr.zeros(domain, n=4, storage=storage)
                 LoopyExecutor().run(schedule, x=x, f=f, e=Arr.zeros(Fin[4]))
                 assert np.array_equal(f.cells(), want.cells()), (domain, storage)
     xs = Arr.from_numpy(np.arange(1.0, 4.0))
     z = Arr.from_numpy(np.arange(10.0, 12.0))
     for storage in ("box", "packed"):
-        for schedule in (Schedule(K.two_pieces), Schedule(K.two_pieces).pack("u")):
+        packed = Schedule(K.two_pieces).pack(K.two_pieces.u)
+        for schedule in (Schedule(K.two_pieces), packed):
             wide = Where[a : Fin[n + 2], a < n] + Fin[m]
             u = Arr.zeros(wide, n=3, m=2, storage=storage)
             LoopyExecutor().run(schedule, u=u, x=xs, z=z)
@@ -594,7 +595,7 @@ def test_the_run_writes_back_into_the_callers_layout_and_answers_cells() -> None
     x = Arr.from_numpy(np.arange(1.0, 5.0))
     f = Arr.zeros(TRIANGLE, n=4)
     e = Arr.zeros(Fin[4])
-    out = LoopyExecutor().run(Schedule(K.pairs).pack("f"), x=x, f=f, e=e)
+    out = LoopyExecutor().run(Schedule(K.pairs).pack(K.pairs.f), x=x, f=f, e=e)
     assert f.storage == "box" and f[3, 2] == 12.0
     assert np.array_equal(out["f"], f.cells())
 
@@ -603,7 +604,7 @@ def test_the_packed_triangle_is_read_through_its_table_of_row_starts() -> None:
     from loopty.executor import emit_code
 
     boxed = emit_code(Schedule(K.pairs))
-    packed = emit_code(Schedule(K.pairs).pack("f"))
+    packed = emit_code(Schedule(K.pairs).pack(K.pairs.f))
     assert "off_f" not in boxed
     assert "f[off_f[i] + j]" in packed
     assert "f[off_f[k] + p]" in packed
@@ -635,7 +636,7 @@ def test_a_piece_after_an_empty_one_starts_where_the_domain_says(
     from loopty.executor import LoopyExecutor, emit_code
 
     kernel = K.after_a_short_piece
-    schedule = Schedule(kernel).pack("u") if pack else Schedule(kernel)
+    schedule = Schedule(kernel).pack(kernel.u) if pack else Schedule(kernel)
     arguments = _arguments("after_a_short_piece", storage, sizes={"n": size, "m": 3})
     fact = LoopyExecutor().differential(kernel, schedule, arguments)
     assert fact.status is Status.TESTED, fact.provenance
@@ -653,7 +654,7 @@ def test_a_box_whose_extent_can_be_negative_is_a_flat_buffer(
     from loopty.executor import LoopyExecutor
 
     kernel = K.far_pairs
-    schedule = Schedule(kernel).pack("t") if pack else Schedule(kernel)
+    schedule = Schedule(kernel).pack(kernel.t) if pack else Schedule(kernel)
     arguments = _arguments("far_pairs", storage, sizes={"n": size})
     fact = LoopyExecutor().differential(kernel, schedule, arguments)
     assert fact.status is Status.TESTED, fact.provenance
@@ -688,22 +689,22 @@ def test_the_dimension_names_of_a_domain_are_none_of_its_sizes() -> None:
 
 
 def test_pack_is_a_step_of_the_schedule() -> None:
-    schedule = Schedule(K.pairs).split("p", 2).pack("f")
-    assert schedule.history[-1] == "pack(f)"
-    assert schedule.key.endswith(".pack('f')")
-    assert repr(schedule).endswith(".pack(f)")
+    schedule = Schedule(K.pairs).split(K.pairs.p, 2).pack(K.pairs.f)
+    assert schedule.history[-1] == "pack(pairs.f)"
+    assert schedule.key.endswith(".pack(pairs.f)")
+    assert repr(schedule).endswith(".pack(pairs.f)")
     assert schedule.lowering.storage == {"f": "packed"}
     assert schedule.lowering.tables == {"f": "off_f"}
     assert Schedule(K.pairs).lowering.storage == {"f": "box"}
     with pytest.raises(ValueError, match="not an array over"):
-        Schedule(K.pairs).pack("x")
+        Schedule(K.pairs).pack(K.pairs.x)
 
 
 def test_packing_a_domain_whose_rows_skip_columns_is_refused_when_lowered() -> None:
     from loopty.lower import LoweringError, lower_generic
 
     with pytest.raises(LoweringError, match="not an interval"):
-        Schedule(K.even_columns).pack("s")
+        Schedule(K.even_columns).pack(K.even_columns.s)
     with pytest.raises(LoweringError, match="no layout to choose"):
         lower_generic(K.pairs.term, layouts={"x": "packed"})
 

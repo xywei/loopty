@@ -78,12 +78,12 @@ def p2p(
     x: Arr[Fin[n], Real],
     y: Arr[Fin[n], Real],
     q: Arr[Fin[n], Real],
-    term: Arr[Fin[n], Fin[cnt], Real],
+    contribution: Arr[Fin[n], Fin[cnt], Real],
     pot: Arr[Fin[n], Real],
 ):
     """The near-field potential at every target, over its interaction list.
 
-    ``term`` is the per-pair contribution, written out rather than accumulated:
+    ``contribution`` is each pair's, written out rather than accumulated:
     a guarded contribution has to be zero where the guard is false, and a
     separate statement saying so is both what the native mask needs and what
     lets the sum over the row stay a reduction instead of a loop-carried
@@ -91,12 +91,12 @@ def p2p(
     """
     for t in pot.dom:
         for j in lst.dom[t]:
-            term[t, j] = 0.0
+            contribution[t, j] = 0.0
             with when(lst[t, j] != t):
                 dx = x[t] - x[lst[t, j]]
                 dy = y[t] - y[lst[t, j]]
-                term[t, j] = q[lst[t, j]] * coulomb(dx * dx + dy * dy)
-        pot[t] = reduce_sum(term[t, j] for j in lst.dom[t])
+                contribution[t, j] = q[lst[t, j]] * coulomb(dx * dx + dy * dy)
+        pot[t] = reduce_sum(contribution[t, j] for j in lst.dom[t])
 
 
 # {{{ the boxes and their interaction lists
@@ -151,7 +151,7 @@ def scene(points: int = POINTS, seed: int = 0) -> dict:
         "x": Arr.from_numpy(xs),
         "y": Arr.from_numpy(ys),
         "q": Arr.from_numpy(charges),
-        "term": Arr.ragged(counts),
+        "contribution": Arr.ragged(counts),
         "pot": Arr.zeros(points),
     }
 
@@ -178,8 +178,8 @@ def direct(data: dict) -> np.ndarray:
 #: reindexing, the second is a reassociation, and both are checked.
 split_targets = (
     Schedule(p2p, target="c")
-    .split("t", 4, inner="t_in", outer="t_out")
-    .realize("pot", tree=True)
+    .split(p2p.t, 4)
+    .realize(p2p.pot, tree=True)
     .example(**scene())
 )
 
@@ -201,7 +201,7 @@ def main() -> int:
         data["x"],
         data["y"],
         data["q"],
-        data["term"],
+        data["contribution"],
         data["pot"],
     )
     print(f"{POINTS} points in a {BOXES} by {BOXES} grid of boxes")

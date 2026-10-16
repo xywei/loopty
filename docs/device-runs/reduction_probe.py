@@ -1,6 +1,6 @@
 """Why the design note's spmv device schedule does not reach a device.
 
-The schedule ``tag(r="g.0").split("j", 32, inner="j_in").tag(j_in="l.0")`` asks
+The schedule ``on_groups(spmv.r).split(spmv.j, 32).on_items(spmv.j.inner)`` asks
 for one work group per row and the entries of a row across the lanes of that
 group. loopty's own checker accepts it: the reindexing is a bijection, the order
 is monotone on the dependences, and the reassociation is licensed. loopy then
@@ -100,41 +100,37 @@ def main() -> int:
             print("  RESULT: refused by", type(exc).__name__)
             print("  " + str(exc).strip()[:500])
 
-    base = lambda: Schedule(spmv_mod.spmv, target="opencl")  # noqa: E731
+    spmv = spmv_mod.spmv
+    base = lambda: Schedule(spmv, target="opencl")  # noqa: E731
+
+    def design_note():
+        return (
+            base()
+            .on_groups(spmv.r)
+            .split(spmv.j, 32)
+            .on_items(spmv.j.inner)
+            .realize(spmv.y, tree=True)
+        )
 
     attempt(
-        "1. rows across work groups only: tag(r='g.0')",
-        lambda: base().tag(r="g.0"),
+        "1. rows across work groups only: on_groups(spmv.r)",
+        lambda: base().on_groups(spmv.r),
     )
     attempt(
-        "2. the whole ragged reduction across lanes: tag(r='g.0').tag(j='l.0')",
-        lambda: base().tag(r="g.0").tag(j="l.0"),
+        "2. the whole ragged reduction across lanes: "
+        "on_groups(spmv.r).on_items(spmv.j)",
+        lambda: base().on_groups(spmv.r).on_items(spmv.j),
+    )
+    attempt("3. the design note's schedule, unmodified", design_note)
+    attempt(
+        "4. the same, with loopy's own remedy: split_reduction_outward('j_outer')",
+        design_note,
+        fix=lambda knl: lp.split_reduction_outward(knl, "j_outer"),
     )
     attempt(
-        "3. the design note's schedule, unmodified",
-        lambda: base()
-        .tag(r="g.0")
-        .split("j", 32, inner="j_in", outer="j_out")
-        .tag(j_in="l.0")
-        .realize("y", tree=True),
-    )
-    attempt(
-        "4. the same, with loopy's own remedy: split_reduction_outward('j_out')",
-        lambda: base()
-        .tag(r="g.0")
-        .split("j", 32, inner="j_in", outer="j_out")
-        .tag(j_in="l.0")
-        .realize("y", tree=True),
-        fix=lambda knl: lp.split_reduction_outward(knl, "j_out"),
-    )
-    attempt(
-        "5. the same, with split_reduction_inward('j_in')",
-        lambda: base()
-        .tag(r="g.0")
-        .split("j", 32, inner="j_in", outer="j_out")
-        .tag(j_in="l.0")
-        .realize("y", tree=True),
-        fix=lambda knl: lp.split_reduction_inward(knl, "j_in"),
+        "5. the same, with split_reduction_inward('j_inner')",
+        design_note,
+        fix=lambda knl: lp.split_reduction_inward(knl, "j_inner"),
     )
     return 0
 

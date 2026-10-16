@@ -121,7 +121,17 @@ from loopty.flow import (
 )
 from loopty.idx import Reflections
 from loopty.source import frame_statement_text, statement_text
-from loopty.term import Access, ArrType, Difference, Reduction, Stmt, Term, subtracted
+from loopty.term import (
+    Access,
+    ArrType,
+    Binder,
+    Callsite,
+    Difference,
+    Reduction,
+    Stmt,
+    Term,
+    subtracted,
+)
 
 __all__ = [
     "EXACTNESS_ORDER",
@@ -727,6 +737,11 @@ class Tracer:
         #: term, by the identity of the value each made; see
         #: :meth:`unrolled_sum`.
         self.unrolled: dict[int, tuple[Any, tuple[str, int]]] = {}
+        #: Every loop of the source as it was entered, a ``for`` or a sum's
+        #: binder, with its line and the calls it is inside
+        #: (:class:`loopty.term.Binder`), which the term keeps for the
+        #: handles a schedule names its loops by (:mod:`loopty.handles`).
+        self.binder_records: list[Binder] = []
 
     # {{{ calls of other kernels
 
@@ -736,7 +751,9 @@ class Tracer:
         self._call_counts[kernel] = count
         return kernel if count == 1 else f"{kernel}@{count}"
 
-    def bind(self, iterator: Any, binder_trace: Any, domain: Any) -> Var:
+    def bind(
+        self, iterator: Any, binder_trace: Any, domain: Any, where: str = ""
+    ) -> Var:
         """Bind a sum's binder over ``domain``, the next of ``binder_trace``'s.
 
         lanky names a binder after the generator's loop target (``k`` in
@@ -750,15 +767,27 @@ class Tracer:
 
         The binder is open until its iterator is exhausted
         (:meth:`release`), which is where a call made inside the generator
-        reads it as one of the points the call is made at.
+        reads it as one of the points the call is made at. ``where`` is the
+        line of the generator's ``for`` clause, which the binder's record
+        keeps (:class:`loopty.term.Binder`).
         """
         position = len(binder_trace.binders)
-        if self.inlining and position < len(binder_trace.names):
-            name = binder_trace.names[position]
-            if self._binder_clashes(name):
-                binder_trace.names[position] = self._fresh_binder(name)
+        stem = None
+        if position < len(binder_trace.names):
+            stem = binder_trace.names[position]
+        if self.inlining and stem is not None and self._binder_clashes(stem):
+            binder_trace.names[position] = self._fresh_binder(stem)
         var = binder_trace.bind(domain)
         self.binders.add(var.name)
+        self.binder_records.append(
+            Binder(
+                var.name,
+                stem or var.name,
+                where,
+                sum=True,
+                scope=tuple(label for label, _key in self.inlining),
+            )
+        )
         self.open_binders.append((iterator, var, domain, binder_trace))
         return var
 
@@ -896,6 +925,14 @@ class Tracer:
         name = self.fresh_iname(hint)
         var = Var(name)
         loop = _Loop(name, var, bound, owner, target=hint)
+        self.binder_records.append(
+            Binder(
+                name,
+                hint or name,
+                _location(frame) if frame is not None else "",
+                scope=tuple(label for label, _key in self.inlining),
+            )
+        )
         if constraints is not None:
             loop.constraints = tuple(constraints(var))
             dom = getattr(owner, "dom", None)
@@ -2767,7 +2804,9 @@ class _DomIterator:
             tracer = current_tracer()
             if tracer is None:
                 return binder_trace.bind(self.dom)
-            return tracer.bind(self, binder_trace, self.dom)
+            return tracer.bind(
+                self, binder_trace, self.dom, _location(sys._getframe(1))
+            )
         tracer = current_tracer()
         if tracer is None:
             raise TraceError(
@@ -5624,7 +5663,59 @@ def trace(kernel: Any, arg_types: Any) -> Term:
         tables=tuple(tracer.tables.items()),
         calls=tuple(tracer.calls),
         result=None if result is None else result.name,
+        binders=_binders_of(tracer),
+        callsites=tuple(
+            Callsite(
+                labels=(*call.within, call.label),
+                kernel=call.callee,
+                where=call.where,
+                arrays=tuple(
+                    (argument.param, argument.array)
+                    for argument in call.arguments
+                    if argument.array is not None
+                ),
+            )
+            for call in tracer.calls
+        ),
     )
+
+
+def _binders_of(tracer: Tracer) -> tuple[Binder, ...]:
+    """The loops of the source the trace entered, as the term names them.
+
+    Each loop the body entered, and each sum's binder it bound, in the order
+    it met them; a loop no statement runs in is no loop of the term and is
+    left out. A sum lanky drove itself, over a ``Fin`` of a size, has no
+    record from the trace, and is added at the line of the statement it is
+    in, with its binder's name as the source's.
+    """
+    used: set[str] = set()
+    summed: dict[str, Stmt] = {}
+    for stmt in tracer.stmts:
+        used.update(stmt.inames)
+        for reduction in reductions_in(stmt.expr):
+            for name in reduction.inames:
+                used.add(name)
+                summed.setdefault(name, stmt)
+    out = list(
+        dict.fromkeys(
+            record for record in tracer.binder_records if record.name in used
+        )
+    )
+    seen = {record.name for record in out}
+    # a call's record follows those of the calls made inside it, so the
+    # first call that lists a statement is the innermost it is in
+    scopes: dict[str, tuple[str, ...]] = {}
+    for call in tracer.calls:
+        for stmt_id in call.statements:
+            scopes.setdefault(stmt_id, (*call.within, call.label))
+    for name, stmt in summed.items():
+        if name not in seen:
+            seen.add(name)
+            out.append(
+                Binder(name, name, stmt.where, sum=True, scope=scopes.get(stmt.id, ()))
+            )
+    return tuple(out)
 
 
 def _fin_bound_of(sort: Any) -> Any:

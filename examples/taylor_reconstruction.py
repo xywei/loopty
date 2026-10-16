@@ -180,12 +180,16 @@ def example_inputs() -> dict:
 # {{{ the schedule
 
 #: Rows of the triangle two at a time: a cast, checked, and run compiled.
-cpu = Schedule(reconstruct, target="c").split("a", 2).example(**example_inputs())
+cpu = (
+    Schedule(reconstruct, target="c")
+    .split(reconstruct.a, 2)
+    .example(**example_inputs())
+)
 
 
 def rejected_interchange() -> Schedule:
     """Columns outside rows: refused, with the pair of instances it reorders."""
-    return Schedule(reconstruct, target="c").interchange("b", "a")
+    return Schedule(reconstruct, target="c").interchange(reconstruct.b, reconstruct.a)
 
 
 # }}}

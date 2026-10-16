@@ -198,7 +198,11 @@ def instance_text(stmt_id: str, coords: Mapping[str, int]) -> str:
 
 
 def instances_text(
-    stmts: Mapping[str, Stmt], *instances: tuple[str, Mapping[str, int]]
+    stmts: Mapping[str, Stmt],
+    *instances: tuple[str, Mapping[str, int]],
+    called: Any = None,
+    arrays: Any = None,
+    checked: Any = None,
 ) -> list[str]:
     """Instances as one message names them, in the order it names them.
 
@@ -210,8 +214,28 @@ def instances_text(
     kernel's statement in two of a program's calls, are told apart by the
     call: ``(hexahedra.py:211, along_r@2)``. A statement with no source
     text, of a term written by hand or one loopty adds, is named by its id,
-    ``S1[i=0, a=3, b=7]``, as the witness in a fact's provenance names it.
+    ``S1[i=0, a=3, b=7]``, as the witness in a fact's provenance names it;
+    but the zeros a program makes an array with, which no line of the
+    source stores, are named by the array and the cell, ``the zeros of l2p.R
+    (l2p.py:316) at R[0, 1, 2]``.
+
+    ``called`` names the call a statement of a program's term is in
+    (``l2p.reconstruct``, :mod:`loopty.handles`), and ``arrays`` an array,
+    each by its path; the label and the name otherwise. ``checked`` gives
+    the array a statement of a program's checked point checks, which no line
+    stores either: it is named as ``called`` names it, ``the check of p.idx
+    before p.gather (travel.py:106) at idx[3]``.
     """
+    if called is None:
+
+        def called(stmt_id: str) -> str:
+            return stmt_id.rsplit(".", 1)[0]
+
+    if arrays is None:
+
+        def arrays(name: str) -> str:
+            return name
+
     places: dict[tuple[str, str], set[str]] = {}
     for stmt_id, _ in instances:
         stmt = stmts.get(stmt_id)
@@ -221,6 +245,24 @@ def instances_text(
     previous = None
     for stmt_id, coords in instances:
         stmt = stmts.get(stmt_id)
+        if stmt is not None and not stmt.text and stmt.id.endswith(".zeros"):
+            array = stmt.assignee.array
+            cell = ", ".join(str(coords.get(name, name)) for name in stmt.inames)
+            out.append(
+                f"the zeros of {arrays(array)} ({stmt.where}) at {array}[{cell}]"
+            )
+            previous = stmt_id
+            continue
+        array = None if checked is None or stmt is None else checked(stmt_id)
+        if array is not None and not stmt.text:
+            cell = ", ".join(str(coords.get(name, name)) for name in stmt.inames)
+            at = f" at {array}[{cell}]" if cell else ""
+            if stmt_id == previous:
+                out.append(f"the same check{at}")
+            else:
+                out.append(f"{called(stmt_id)} ({stmt.where}){at}")
+            previous = stmt_id
+            continue
         if stmt is None or not stmt.text:
             out.append(instance_text(stmt_id, coords))
             previous = stmt_id
@@ -231,7 +273,7 @@ def instances_text(
             continue
         where = stmt.where
         if len(places[stmt.text, stmt.where]) > 1:
-            where = f"{where}, {stmt_id.rsplit('.', 1)[0]}"
+            where = f"{where}, {called(stmt_id)}"
         out.append(f"{stmt.text} ({where}){at}")
         previous = stmt_id
     return out

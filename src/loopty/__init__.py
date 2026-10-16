@@ -70,6 +70,7 @@ _EXPORTS = {
     "layout": "loopty.layout",
     "program": "loopty.kernel",
     "reduce_sum": "loopty.reduction",
+    "scope": "loopty.handles",
     "table": "loopty.table",
     "tested": "loopty.tested",
     "trace": "loopty.trace",
@@ -108,6 +109,7 @@ __all__ = [
     "layout",
     "program",
     "reduce_sum",
+    "scope",
     "table",
     "tested",
     "trace",
@@ -158,6 +160,7 @@ sys.modules[__name__].__class__ = _Package
 if TYPE_CHECKING:
     from loopty.arr import Arr
     from loopty.domain import Sigma, Where
+    from loopty.handles import scope
     from loopty.idx import Fin
     from loopty.kernel import Kernel, Program, kernel, program
     from loopty.layout import layout

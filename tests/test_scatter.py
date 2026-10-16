@@ -421,16 +421,16 @@ def test_the_interpreter_logs_the_cells_each_instance_touches() -> None:
 
 
 def test_the_cells_split_onto_work_items_are_refused_with_a_shared_node() -> None:
-    schedule = Schedule(scatter).split("c", 32)
+    schedule = Schedule(scatter).split(scatter.c, 32)
     with pytest.raises(IllegalCast) as caught:
-        schedule.tag(c_outer="g.0", c_inner="l.0")
+        schedule.tag({scatter.c.outer: "g.0", scatter.c.inner: "l.0"})
     assert str(caught.value) == (
-        "tag(c_outer='g.0', c_inner='l.0') illegal: y[cell[c, k]] += yl[c, k] "
-        f"({where(scatter, '+=')}) at c=0, k=2 and at c=1, k=1 both update y[3] on "
-        "example_inputs() (nc=2, nv=4), where cell[0, 2] = 3 and cell[1, 1] = "
-        "3, and the loop c_inner on l.0 runs them on two work items, so one can "
-        "overwrite what the other added; make the updates atomic, with "
-        "atomic('y') before this step"
+        "tag({scatter.c.outer: 'g.0', scatter.c.inner: 'l.0'}) illegal: "
+        f"y[cell[c, k]] += yl[c, k] ({where(scatter, '+=')}) at c=0, k=2 and at "
+        "c=1, k=1 both update y[3] on example_inputs() (nc=2, nv=4), where "
+        "cell[0, 2] = 3 and cell[1, 1] = 3, and the loop scatter.c.inner on l.0 "
+        "runs them on two work items, so one can overwrite what the other added; "
+        "make the updates atomic, with atomic(scatter.y) before this step"
     )
     fact = caught.value.fact
     assert fact.kind == "disjoint-writes" and fact.status is Status.REFUTED
@@ -446,10 +446,10 @@ def test_a_schedules_own_example_inputs_are_read_first() -> None:
     schedule = (
         Schedule(scatter)
         .example(cell=cells, yl=Arr.zeros((2, 3)), y=Arr.zeros(5))
-        .split("c", 32)
+        .split(scatter.c, 32)
     )
     with pytest.raises(IllegalCast) as caught:
-        schedule.tag(c_outer="g.0", c_inner="l.0")
+        schedule.tag({scatter.c.outer: "g.0", scatter.c.inner: "l.0"})
     assert (
         f"({where(scatter, '+=')}) at c=0, k=0 and at c=1, k=2 both update y[0] on "
         "the schedule's example inputs (nc=2, nv=5), where cell[0, 0] = 0 and "
@@ -459,13 +459,17 @@ def test_a_schedules_own_example_inputs_are_read_first() -> None:
 
 def test_atomic_updates_may_run_on_two_work_items() -> None:
     schedule = (
-        Schedule(scatter).atomic("y").split("c", 32).tag(c_outer="g.0", c_inner="l.0")
+        Schedule(scatter)
+        .atomic(scatter.y)
+        .split(scatter.c, 32)
+        .tag({scatter.c.outer: "g.0", scatter.c.inner: "l.0"})
     )
     assert schedule.atomics == frozenset({"y"})
     statements = [fact.statement for fact in schedule.facts()]
     assert (
-        "atomic updates of y run at the same time after tag(c_outer='g.0', "
-        "c_inner='l.0'), so their sum is reassociated and compared at 'reassoc'"
+        "atomic updates of scatter.y run at the same time after "
+        "tag({scatter.c.outer: 'g.0', scatter.c.inner: 'l.0'}), so their sum is "
+        "reassociated and compared at 'reassoc'"
     ) in statements
     # atomic moves nothing, and records no cast of its own
     assert not any(statement.startswith("atomic(") for statement in statements)
@@ -478,9 +482,9 @@ def test_atomic_updates_may_run_on_two_work_items() -> None:
 def test_atomic_updates_compile_to_a_compare_and_swap_on_opencl(plain_opencl) -> None:
     schedule = (
         Schedule(scatter, target="opencl")
-        .atomic("y")
-        .split("c", 32)
-        .tag(c_outer="g.0", c_inner="l.0")
+        .atomic(scatter.y)
+        .split(scatter.c, 32)
+        .tag({scatter.c.outer: "g.0", scatter.c.inner: "l.0"})
     )
     assert schedule.buildable == (True, "")
     code = emit_code(schedule)
@@ -508,12 +512,14 @@ def test_two_statements_updating_one_cell_need_no_barrier_once_atomic(
     # S1 after S0 has to go with it, or loopy asks for a global barrier
     # between them and generates nothing (MissingBarrierError).
     with pytest.raises(IllegalCast, match="both update y"):
-        Schedule(both_ends).split("p", 32).tag(p_outer="g.0", p_inner="l.0")
+        Schedule(both_ends).split(both_ends.p, 32).tag(
+            {both_ends.p.outer: "g.0", both_ends.p.inner: "l.0"}
+        )
     schedule = (
         Schedule(both_ends, target="opencl")
-        .atomic("y")
-        .split("p", 32)
-        .tag(p_outer="g.0", p_inner="l.0")
+        .atomic(both_ends.y)
+        .split(both_ends.p, 32)
+        .tag({both_ends.p.outer: "g.0", both_ends.p.inner: "l.0"})
     )
     assert schedule.buildable == (True, "")
     insns = {insn.id: insn for insn in schedule.kernel.default_entrypoint.instructions}
@@ -524,10 +530,17 @@ def test_two_statements_updating_one_cell_need_no_barrier_once_atomic(
 
 
 def test_atomic_on_c_changes_no_code_and_agrees() -> None:
-    plain = Schedule(scatter).split("c", 2)
-    schedule = Schedule(scatter).atomic("y").split("c", 2).tag(c_inner="ilp")
+    plain = Schedule(scatter).split(scatter.c, 2)
+    schedule = (
+        Schedule(scatter)
+        .atomic(scatter.y)
+        .split(scatter.c, 2)
+        .tag(scatter.c.inner, "ilp")
+    )
     assert "atom" not in emit_code(schedule)
-    assert emit_code(Schedule(scatter).atomic("y")) == emit_code(Schedule(scatter))
+    assert emit_code(Schedule(scatter).atomic(scatter.y)) == emit_code(
+        Schedule(scatter)
+    )
     fact = LoopyExecutor().differential(scatter, schedule, inputs("scatter"))
     assert fact.status is Status.TESTED, fact.provenance
     assert fact.provenance["outputs"]["y"]["exactness"] == "approx"
@@ -540,15 +553,16 @@ def test_updates_in_no_order_are_refused_until_atomic_on_c() -> None:
     # ilp leaves the two cells of a pair of rows in no order; the pair isl
     # picks is a real one here, since y[r] is a cell isl reads.
     with pytest.raises(IllegalCast) as caught:
-        Schedule(rowsum).tag(j="ilp")
+        Schedule(rowsum).tag(rowsum.j, "ilp")
     message = str(caught.value)
     assert message.startswith(
-        f"tag(j='ilp') illegal: y[r] += v[r, j] ({where(rowsum, '+=')}) at r="
+        f"tag(rowsum.j, 'ilp') illegal: y[r] += v[r, j] ({where(rowsum, '+=')}) "
+        "at r="
     )
     assert "both update y[" in message
-    assert "the loop j (ilp) leaves them in no order" in message
+    assert "the loop rowsum.j (ilp) leaves them in no order" in message
     assert caught.value.fact.decided_by == "isl"
-    Schedule(rowsum).atomic("y").tag(j="ilp")
+    Schedule(rowsum).atomic(rowsum.y).tag(rowsum.j, "ilp")
 
 
 def test_updates_reordered_in_one_thread_are_a_reassociation() -> None:
@@ -564,28 +578,29 @@ def test_updates_reordered_in_one_thread_are_a_reassociation() -> None:
 
 def test_atomic_refuses_an_exact_accumulation_and_what_is_not_updated() -> None:
     with pytest.raises(IllegalCast) as caught:
-        Schedule(count).atomic("m")
+        Schedule(count).atomic(count.m)
     assert str(caught.value) == (
-        "atomic('m') illegal: the accumulation into m is exact, and updates that "
-        "run at the same time are applied in an order the source did not write, "
-        "which reassociates it"
+        "atomic(count.m) illegal: the accumulation into count.m is exact, and "
+        "updates that run at the same time are applied in an order the source "
+        "did not write, which reassociates it"
     )
     assert caught.value.fact.kind == "exactness"
     with pytest.raises(ValueError) as caught:
-        Schedule(overwrite).atomic("y")
+        Schedule(overwrite).atomic(overwrite.y)
     assert str(caught.value) == (
-        "atomic('y'): overwrite does not update y: S0 writes y[cell[c, k]] = "
+        "atomic(overwrite.y): overwrite does not update overwrite.y: S0 writes "
+        "y[cell[c, k]] = "
         "yl[c, k], which replaces the cell's value. An update adds to the cell "
         "it writes a value that reads nothing else of y, y[...] += v, and "
         "atomic makes two such updates safe to run at the same time"
     )
-    with pytest.raises(ValueError, match="scatter does not write yl"):
-        Schedule(scatter).atomic("yl")
+    with pytest.raises(ValueError, match="scatter does not write scatter.yl"):
+        Schedule(scatter).atomic(scatter.yl)
 
 
 def test_an_exact_update_keeps_its_order_and_names_cells_of_the_mesh() -> None:
     with pytest.raises(IllegalCast) as caught:
-        Schedule(count).tag(c="g.0")
+        Schedule(count).tag(count.c, "g.0")
     message = str(caught.value)
     assert f"m[cell[c, k]] += 1 ({where(count, '+=')}) at c=0, k=2 writes m[3]" in (
         message
@@ -598,9 +613,9 @@ def test_an_exact_update_keeps_its_order_and_names_cells_of_the_mesh() -> None:
 
 def test_a_write_through_a_map_on_two_work_items_names_cells_of_the_mesh() -> None:
     with pytest.raises(IllegalCast) as caught:
-        Schedule(overwrite).tag(c="g.0")
+        Schedule(overwrite).tag(overwrite.c, "g.0")
     assert str(caught.value).startswith(
-        "tag(c='g.0') illegal: y[cell[c, k]] = yl[c, k] "
+        "tag(overwrite.c, 'g.0') illegal: y[cell[c, k]] = yl[c, k] "
         f"({where(overwrite, '] = yl')}) at c=0, k=2 writes y[3], also written by "
         "the same statement at c=1, k=1, scheduled earlier on example_inputs() "
         "(nc=2, nv=4), where cell[0, 2] = 3 and cell[1, 1] = 3"
@@ -608,11 +623,11 @@ def test_a_write_through_a_map_on_two_work_items_names_cells_of_the_mesh() -> No
 
 
 def test_atomic_is_replayed_on_another_target(plain_opencl) -> None:
-    schedule = Schedule(scatter).atomic("y").split("c", 4)
+    schedule = Schedule(scatter).atomic(scatter.y).split(scatter.c, 4)
     again = schedule.retarget("opencl")
     assert again.atomics == frozenset({"y"})
     assert "atom_cmpxchg" in emit_code(again)
-    assert again.history == ("atomic('y')", "split(c, 4)")
+    assert again.history == ("atomic(scatter.y)", "split(scatter.c, 4)")
 
 
 def test_atomic_updates_of_a_type_loopy_has_no_atomics_for_are_unbuildable(
@@ -628,11 +643,12 @@ def test_atomic_updates_of_a_type_loopy_has_no_atomics_for_are_unbuildable(
             for k in yl.dom[c]:
                 y[cell[c, k]] += yl[c, k]
 
-    schedule = Schedule(complex_scatter, target="opencl").atomic("y")
+    schedule = Schedule(complex_scatter, target="opencl").atomic(complex_scatter.y)
     buildable, reason = schedule.buildable
     assert not buildable
     assert reason.startswith(
-        "atomic('y') asks for atomic updates of y, which holds complex128"
+        "atomic(complex_scatter.y) asks for atomic updates of complex_scatter.y, "
+        "which holds complex128"
     )
 
 
@@ -647,14 +663,16 @@ def test_every_access_to_an_atomic_array_is_atomic_on_opencl(plain_opencl) -> No
         match=rf"y.i. = 0.0 .{where(zeroed_then_assembled, '= 0.0')}. at i=.*: the "
         "first write is in no loop on g.0, so on every work item of it",
     ):
-        Schedule(zeroed_then_assembled, target="opencl").atomic("y").split(
-            "c", 32
-        ).tag(c_outer="g.0", c_inner="l.0")
+        Schedule(zeroed_then_assembled, target="opencl").atomic(
+            zeroed_then_assembled.y
+        ).split(zeroed_then_assembled.c, 32).tag(
+            {zeroed_then_assembled.c.outer: "g.0", zeroed_then_assembled.c.inner: "l.0"}
+        )
     schedule = (
         Schedule(zeroed_then_assembled, target="opencl")
-        .atomic("y")
-        .split("c", 4)
-        .tag(c_inner="ilp")
+        .atomic(zeroed_then_assembled.y)
+        .split(zeroed_then_assembled.c, 4)
+        .tag(zeroed_then_assembled.c.inner, "ilp")
     )
     code = emit_code(schedule)
     assert "__global volatile double *__restrict__ y" in code
@@ -671,7 +689,9 @@ def test_a_writer_that_reads_an_atomic_array_reads_it_as_its_dtype(
     # The scaling writes y and reads it in a sum: its store initializes y
     # atomically, and its reads are of the double y holds, so that the sum's
     # accumulator is a plain double, as a read-only instruction's are.
-    schedule = Schedule(assembled_then_scaled, target="opencl").atomic("y")
+    schedule = Schedule(assembled_then_scaled, target="opencl").atomic(
+        assembled_then_scaled.y
+    )
     assert schedule.buildable == (True, ""), schedule.buildable
     code = emit_code(schedule)
     assert "acc_j = acc_j + (double) (y[j]);" in code
@@ -711,14 +731,17 @@ def test_what_does_not_commute_is_refused_atomic_and_keeps_its_order(
     (stmt,) = kern.term.stmts
     assert stmt.kind == "accumulate" and stmt.exactness is None
     with pytest.raises(ValueError) as caught:
-        Schedule(kern).atomic(array)
-    assert f"{kern.__name__} does not update {array}: {why}. " in str(caught.value)
+        Schedule(kern).atomic(getattr(kern, array))
+    assert f"{kern.__name__} does not update {kern.__name__}.{array}: {why}. " in str(
+        caught.value
+    )
     # On work items the two cells' writes of one node are a dependence, refused
     # with the cells of the mesh that share it, atomic or not.
     with pytest.raises(IllegalCast) as caught:
-        Schedule(kern).split("c", 32).tag(c_outer="g.0", c_inner="l.0")
+        Schedule(kern).split(kern.c, 32).tag({kern.c.outer: "g.0", kern.c.inner: "l.0"})
     assert str(caught.value).startswith(
-        f"tag(c_outer='g.0', c_inner='l.0') illegal: {text} at c=0, k=2 writes "
+        f"tag({{{kern.__name__}.c.outer: 'g.0', {kern.__name__}.c.inner: 'l.0'}}) "
+        f"illegal: {text} at c=0, k=2 writes "
         f"{array}[3], also written by the same statement at c=1, k=1, scheduled "
         "earlier on example_inputs() (nc=2, nv=4), where cell[0, 2] = 3 and "
         "cell[1, 1] = 3"
@@ -729,12 +752,13 @@ def test_a_read_beside_the_updates_is_refused_on_work_items_even_atomic() -> Non
     # Atomic makes two updates safe together, not a read of what one of them
     # is adding to: the pair names both subscripts the mesh read.
     with pytest.raises(IllegalCast) as caught:
-        Schedule(read_back).atomic("y").split("c", 32).tag(
-            c_outer="g.0", c_inner="l.0"
+        Schedule(read_back).atomic(read_back.y).split(read_back.c, 32).tag(
+            {read_back.c.outer: "g.0", read_back.c.inner: "l.0"}
         )
     assert str(caught.value).startswith(
-        "tag(c_outer='g.0', c_inner='l.0') illegal: y[cell[c, k]] += yl[c, k] "
-        f"({where(read_back, '+=')}) at c=0, k=2 writes y[3], read by z[c, k] = "
+        "tag({read_back.c.outer: 'g.0', read_back.c.inner: 'l.0'}) illegal: "
+        f"y[cell[c, k]] += yl[c, k] ({where(read_back, '+=')}) at c=0, k=2 writes "
+        "y[3], read by z[c, k] = "
         f"y[cell[c, k]] ({where(read_back, 'z[c, k] =')}) at c=1, k=1, scheduled "
         "earlier on "
         "example_inputs() (nc=2, nv=4), where cell[0, 2] = 3 and cell[1, 1] = 3"
@@ -744,20 +768,23 @@ def test_a_read_beside_the_updates_is_refused_on_work_items_even_atomic() -> Non
 def test_updates_of_two_statements_commute_and_race_on_work_items() -> None:
     assert dependences(two_updates.term).is_empty()
     with pytest.raises(IllegalCast) as caught:
-        Schedule(two_updates).split("c", 32).tag(c_outer="g.0", c_inner="l.0")
+        Schedule(two_updates).split(two_updates.c, 32).tag(
+            {two_updates.c.outer: "g.0", two_updates.c.inner: "l.0"}
+        )
     # S0 meets no other cell's S0 on the example, and the pair is not drawn:
     # S1 of cell 0 and S0 of cell 1 both add into node 3 there.
     assert str(caught.value).startswith(
-        "tag(c_outer='g.0', c_inner='l.0') illegal: y[cell[c, 1]] += b[c] "
+        "tag({two_updates.c.outer: 'g.0', two_updates.c.inner: 'l.0'}) illegal: "
+        "y[cell[c, 1]] += b[c] "
         f"({where(two_updates, '+= b[c]')}) at c=0 and y[cell[c, 0]] += a[c] "
         f"({where(two_updates, '+= a[c]')}) at c=1 both update y[3] on "
         "example_inputs() "
         "(nc=2, nv=4), where cell[0, 1] = 3 and cell[1, 0] = 3, and the loop "
-        "c_inner on l.0 runs them on two work items"
+        "two_updates.c.inner on l.0 runs them on two work items"
     )
     assert caught.value.fact.decided_by == "native"
-    Schedule(two_updates).atomic("y").split("c", 32).tag(
-        c_outer="g.0", c_inner="l.0"
+    Schedule(two_updates).atomic(two_updates.y).split(two_updates.c, 32).tag(
+        {two_updates.c.outer: "g.0", two_updates.c.inner: "l.0"}
     )
 
 
@@ -776,13 +803,15 @@ def test_a_refusal_names_the_first_pair_of_a_large_example() -> None:
         y=Arr.zeros((n + 1) ** 2),
     )
     with pytest.raises(IllegalCast) as caught:
-        schedule.split("c", 32).tag(c_outer="g.0", c_inner="l.0")
+        schedule.split(scatter.c, 32).tag(
+            {scatter.c.outer: "g.0", scatter.c.inner: "l.0"}
+        )
     assert str(caught.value).startswith(
-        "tag(c_outer='g.0', c_inner='l.0') illegal: y[cell[c, k]] += yl[c, k] "
-        f"({where(scatter, '+=')}) at c=0, k=0 and at c=1, k=0 both update y[0] on "
-        "the schedule's example inputs (nc=1800, nv=961), where cell[0, 0] = 0 "
-        "and cell[1, 0] = 0, and the loop c_inner on l.0 runs them on two work "
-        "items"
+        "tag({scatter.c.outer: 'g.0', scatter.c.inner: 'l.0'}) illegal: "
+        f"y[cell[c, k]] += yl[c, k] ({where(scatter, '+=')}) at c=0, k=0 and at "
+        "c=1, k=0 both update y[0] on the schedule's example inputs (nc=1800, "
+        "nv=961), where cell[0, 0] = 0 and cell[1, 0] = 0, and the loop "
+        "scatter.c.inner on l.0 runs them on two work items"
     )
 
 
@@ -790,25 +819,33 @@ def test_an_assumption_keeps_the_pair_to_the_inputs_it_admits() -> None:
     # The module's example has two cells; assumed a multiple of four, the
     # pair is read off an input that is one.
     with pytest.raises(IllegalCast) as caught:
-        Schedule(scatter).assume("nc % 4 == 0").split("c", 4).tag(c_inner="ilp")
+        Schedule(scatter).assume(scatter.nc % 4 == 0).split(scatter.c, 4).tag(
+            scatter.c.inner, "ilp"
+        )
     message = str(caught.value)
     assert "example_inputs() (nc=2" not in message
     assert "both update y[" in message
 
 
 def test_atomic_twice_is_one_step() -> None:
-    once = Schedule(scatter).atomic("y")
-    assert once.atomic("y") is once
-    assert once.history == ("atomic('y')",)
+    once = Schedule(scatter).atomic(scatter.y)
+    assert once.atomic(scatter.y) is once
+    assert once.history == ("atomic(scatter.y)",)
 
 
 def test_atomic_then_ilp_on_c_names_the_atomic_updates() -> None:
-    schedule = Schedule(scatter).atomic("y").split("c", 4).tag(c_inner="ilp")
+    schedule = (
+        Schedule(scatter)
+        .atomic(scatter.y)
+        .split(scatter.c, 4)
+        .tag(scatter.c.inner, "ilp")
+    )
     rows = [(fact.kind, fact.statement) for fact in schedule.facts()]
     assert (
         "exactness",
-        "atomic updates of y run at the same time after tag(c_inner='ilp'), so "
-        "their sum is reassociated and compared at 'reassoc'",
+        "atomic updates of scatter.y run at the same time after "
+        "tag(scatter.c.inner, 'ilp'), so their sum is reassociated and compared "
+        "at 'reassoc'",
     ) in rows
     assert [kind for kind, _ in rows].count("bijective") == 2  # split, tag
 
@@ -820,7 +857,12 @@ def test_an_ilp_tag_keeps_loopys_note_on_its_scheduler_out_of_a_run() -> None:
     # is generated without it.
     import warnings
 
-    schedule = Schedule(scatter).atomic("y").split("c", 4).tag(c_inner="ilp")
+    schedule = (
+        Schedule(scatter)
+        .atomic(scatter.y)
+        .split(scatter.c, 4)
+        .tag(scatter.c.inner, "ilp")
+    )
     silenced = schedule.kernel.default_entrypoint.silenced_warnings
     assert "v1_scheduler_fallback" in silenced
     with warnings.catch_warnings(record=True) as caught:
@@ -828,8 +870,8 @@ def test_an_ilp_tag_keeps_loopys_note_on_its_scheduler_out_of_a_run() -> None:
         emit_code(schedule)
     assert not [w for w in caught if "slow scheduler" in str(w.message)]
     # a tag on a hardware axis leaves loopy's warnings as they were
-    serial = Schedule(scatter).atomic("y").split("c", 32)
-    tagged = serial.tag(c_outer="g.0", c_inner="l.0")
+    serial = Schedule(scatter).atomic(scatter.y).split(scatter.c, 32)
+    tagged = serial.tag({scatter.c.outer: "g.0", scatter.c.inner: "l.0"})
     assert "v1_scheduler_fallback" not in (
         tagged.kernel.default_entrypoint.silenced_warnings
     )
@@ -868,14 +910,16 @@ def test_a_substitution_read_before_the_updates_names_isls_pair_as_isls() -> Non
     # reads would not be): the pair is isl's, and the message names the
     # subscript isl cannot follow, the update's.
     with pytest.raises(IllegalCast) as caught:
-        Schedule(twice_and_added_back, sizes={"n": 8}).substitute("f")
+        Schedule(twice_and_added_back, sizes={"n": 8}).substitute(
+            twice_and_added_back.f
+        )
     assert str(caught.value) == (
-        f"substitute('f') illegal: y[node[i]] += f[i] ({where(added_back, '+=')}) at "
-        "i=1 reads y[1], overwritten by the same statement at i=0, scheduled "
-        "earlier (at n=8, as hinted). The pair is isl's: the cell y[node[i_0]] "
-        "is read from an "
-        "array, which isl cannot follow, and substitute('f') reads y where f "
-        "was read, which no run of an input shows"
+        "substitute(twice_and_added_back.f) illegal: y[node[i]] += f[i] "
+        f"({where(added_back, '+=')}) at i=1 reads y[1], overwritten by the same "
+        "statement at i=0, scheduled earlier (at n=8, as hinted). The pair is "
+        "isl's: the cell y[node[i]] is read from an array, which isl cannot "
+        "follow, and substitute(twice_and_added_back.f) reads y where f was "
+        "read, which no run of an input shows"
     )
 
 
@@ -884,9 +928,9 @@ def test_atomic_updates_run_on_an_opencl_device() -> None:
     pytest.importorskip("pyopencl")
     schedule = (
         Schedule(scatter, target="opencl")
-        .atomic("y")
-        .split("c", 32)
-        .tag(c_outer="g.0", c_inner="l.0")
+        .atomic(scatter.y)
+        .split(scatter.c, 32)
+        .tag({scatter.c.outer: "g.0", scatter.c.inner: "l.0"})
     )
     big = np.random.default_rng(0).integers(0, 9, size=(200, 3))
     arguments = {
@@ -898,9 +942,9 @@ def test_atomic_updates_run_on_an_opencl_device() -> None:
     assert fact.status is Status.TESTED, fact.provenance
     zeroed = (
         Schedule(zeroed_then_assembled, target="opencl")
-        .atomic("y")
-        .split("c", 4)
-        .tag(c_inner="ilp")
+        .atomic(zeroed_then_assembled.y)
+        .split(zeroed_then_assembled.c, 4)
+        .tag(zeroed_then_assembled.c.inner, "ilp")
     )
     arguments = {**arguments, "y": Arr.zeros(9), "total": Arr.zeros(1)}
     fact = LoopyExecutor(target="opencl").differential(
@@ -911,9 +955,9 @@ def test_atomic_updates_run_on_an_opencl_device() -> None:
     rng = np.random.default_rng(2)
     both = (
         Schedule(two_updates, target="opencl")
-        .atomic("y")
-        .split("c", 32)
-        .tag(c_outer="g.0", c_inner="l.0")
+        .atomic(two_updates.y)
+        .split(two_updates.c, 32)
+        .tag({two_updates.c.outer: "g.0", two_updates.c.inner: "l.0"})
     )
     arguments = {
         "cell": Arr.from_numpy(big),
@@ -936,9 +980,9 @@ def test_atomic_updates_run_on_an_opencl_device() -> None:
 
     single = (
         Schedule(scatter32, target="opencl")
-        .atomic("y")
-        .split("c", 32)
-        .tag(c_outer="g.0", c_inner="l.0")
+        .atomic(scatter32.y)
+        .split(scatter32.c, 32)
+        .tag({scatter32.c.outer: "g.0", scatter32.c.inner: "l.0"})
     )
     arguments = {
         "cell": Arr.from_numpy(big),

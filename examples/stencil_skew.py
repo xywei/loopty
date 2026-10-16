@@ -103,7 +103,7 @@ def rejected_tiling() -> tuple[str, tuple]:
 
     schedule = Schedule(jacobi, target="c", sizes={"nt": NT, "nx": NX})
     try:
-        schedule.tile("t", "i", 8, 8)
+        schedule.tile(jacobi.t, jacobi.i, 8, 8)
     except IllegalCast as refused:
         return str(refused), refused.witness
     raise AssertionError("the rectangular tiling of a Jacobi stencil is illegal")
@@ -113,8 +113,8 @@ def skewed() -> Schedule:
     """The legal schedule: skew the space axis by time, then tile."""
     return (
         Schedule(jacobi, target="c", sizes={"nt": NT, "nx": NX})
-        .skew("i", by="t")
-        .tile("t", "i", 8, 8)
+        .skew(jacobi.i, by=jacobi.t)
+        .tile(jacobi.t, jacobi.i, 8, 8)
     )
 
 
@@ -143,14 +143,14 @@ def main() -> int:
     message, witness = rejected_tiling()
     (source_id, source), (sink_id, sink), params = witness
     print()
-    print("Schedule(jacobi).tile('t', 'i', 8, 8) ->")
+    print("Schedule(jacobi).tile(jacobi.t, jacobi.i, 8, 8) ->")
     print(f"  IllegalCast: {message}")
     print(f"  witness: {source_id}{source} runs before {sink_id}{sink} at {params}")
 
     schedule = skewed()
     print()
     print(f"accepted: {schedule!r}")
-    print(f"  loop nest: {' '.join(schedule.order)}")
+    print(f"  loop nest: {' '.join(schedule.nest)}")
     for fact in schedule.facts():
         print(f"  {fact.status.value:8} {fact.decided_by or '-':4} {fact.statement}")
 

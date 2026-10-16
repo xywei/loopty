@@ -134,7 +134,9 @@ def closed_form(mesh: tuple[np.ndarray, np.ndarray, np.ndarray]) -> np.ndarray:
 #: PyOP2's GPU schedule splits the cells by 32 (Kulkarni's ``snpt``); on the C
 #: target the split stays in sequence.
 split_cells = (
-    Schedule(mass_action, target="c").split("c", 32).example(**inputs_on(square_mesh()))
+    Schedule(mass_action, target="c")
+    .split(mass_action.c, 32)
+    .example(**inputs_on(square_mesh()))
 )
 
 

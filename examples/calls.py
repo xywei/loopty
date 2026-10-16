@@ -143,7 +143,7 @@ def mass_matrices(
 
 
 #: The rows of ``matvec`` split by 4, a schedule of the kernel with the call.
-split_rows = Schedule(matvec).split("i", 4)
+split_rows = Schedule(matvec).split(matvec.i, 4)
 
 
 # {{{ inputs

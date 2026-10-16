@@ -26,7 +26,13 @@ from loopty.executor import (
     emit_code,
     exactness_of_output,
 )
+from loopty.handles import scope
 from loopty.schedule import Schedule
+
+#: The handles of the hand-built terms (tests/hand_terms.py).
+AXPY = scope(ht.axpy_term())
+JACOBI = scope(ht.jacobi_term())
+SPMV_REASSOC = scope(ht.spmv_term(exactness="reassoc"))
 
 pytest.importorskip("loopy")
 
@@ -59,8 +65,8 @@ def test_a_device_schedule_is_checked_without_pyopencl_and_not_run(
 
     installed = lower.pyopencl_installed()
     monkeypatch.setattr(lower, "pyopencl_installed", lambda: False)
-    schedule = Schedule(ht.axpy_term(), target="opencl").split("i", 2)
-    on_device = schedule.tag(i_outer="g.0")
+    schedule = Schedule(ht.axpy_term(), target="opencl").split(AXPY.i, 2)
+    on_device = schedule.tag(AXPY.i.outer, "g.0")
     assert isinstance(on_device.kernel.target, lower.CheckedOpenCLTarget)
     assert {fact.status.value for fact in on_device.facts()} == {"decided"}
     assert on_device.buildable == (True, "")
@@ -264,10 +270,10 @@ def test_an_agreement_fact_is_named_after_the_schedule_that_ran() -> None:
         "y": np.ones(4),
         "z": np.zeros(4),
     }
-    split = Schedule(ht.axpy_term()).split("i", 2)
+    split = Schedule(ht.axpy_term()).split(AXPY.i, 2)
     fact = executor().differential(axpy_reference, split, arrays)
     assert fact.id == split.fact_id("agreement")
-    steps = "[c].split('i', 2, inner='i_inner', outer='i_outer')"
+    steps = "[c].split(axpy.i, 2)"
     assert fact.id == f"agreement:axpy:{steps}"
     assert fact.id != executor().differential(
         axpy_reference, Schedule(ht.axpy_term()), arrays
@@ -278,8 +284,8 @@ def test_a_schedule_of_a_schedule_names_the_kernel_by_its_definition() -> None:
     # ``Schedule`` takes a schedule too, and starts from its term. Its facts
     # name the kernel behind it, as the first schedule's do, and not the
     # term's name, which two kernels can share (#75).
-    split = Schedule(Schedule(doubled)).split("i", 2)
-    steps = "split('i', 2, inner='i_inner', outer='i_outer')"
+    split = Schedule(Schedule(doubled)).split(doubled.i, 2)
+    steps = "split(doubled.i, 2)"
     assert split.fact_id("agreement") == f"agreement:{doubled.definition}:[c].{steps}"
     assert [fact.id for fact in split.facts()] == [
         f"cast:{doubled.definition}:{steps}:bijective",
@@ -305,7 +311,9 @@ def test_the_exactness_class_of_an_output_is_the_weakest_of_three() -> None:
     )
     assert exactness_of_output(integer, Schedule(integer), "y") == "exact"
 
-    reassociated = Schedule(ht.spmv_term(exactness="reassoc")).realize("y", tree=True)
+    reassociated = Schedule(ht.spmv_term(exactness="reassoc")).realize(
+        SPMV_REASSOC.y, tree=True
+    )
     assert exactness_of_output(integer, reassociated, "y") == "reassoc"
 
 
@@ -563,7 +571,7 @@ def test_outputs_of_different_integer_widths_still_agree_by_value() -> None:
 
 
 def test_emit_code_returns_something_a_person_can_read() -> None:
-    code = emit_code(Schedule(ht.jacobi_term()).skew("i", by="t"))
+    code = emit_code(Schedule(ht.jacobi_term()).skew(JACOBI.i, by=JACOBI.t))
     assert "void jacobi" in code
     assert "for (int32_t t" in code
 

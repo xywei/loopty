@@ -48,6 +48,7 @@ from loopty.description import (  # noqa: E402
     map_text_of,
     parse,
 )
+from loopty.handles import scope  # noqa: E402
 from loopty.obligations import (  # noqa: E402
     cast_obligation,
     lexicographically_before,
@@ -334,7 +335,7 @@ def test_the_time_vectors_are_compared_with_their_constants_settled() -> None:
 def test_a_step_keeps_its_map_as_written() -> None:
     schedule = stencil().skewed()
     skew, tile = schedule._records
-    assert skew.text == "skew(i, by='t')"
+    assert skew.text == "skew(jacobi.i, by=jacobi.t)"
     written = skew.maps["S0"]
     assert written.inputs == ("t", "i") and written.outputs == ("t", "i")
     assert written.constraints == ("b0 = a0", "b1 = a1 + 1 * a0")
@@ -424,8 +425,14 @@ def _device_launches() -> list[tuple[str, Any]]:
         (
             "libParanumal's lift, atomic",
             Schedule(advection.lift_on_faces)
-            .atomic("rhs")
-            .tag(e="g.0", a="l.1", b="l.0"),
+            .atomic(advection.lift_on_faces.rhs)
+            .tag(
+                {
+                    advection.lift_on_faces.e: "g.0",
+                    advection.lift_on_faces.a: "l.1",
+                    advection.lift_on_faces.b: "l.0",
+                }
+            ),
         )
     )
     return out
@@ -455,7 +462,7 @@ def test_a_refused_cast_is_stated_with_isls_pair() -> None:
     module = stencil()
     with pytest.raises(IllegalCast) as refused:
         Schedule(module.jacobi, target="c", sizes={"nt": 16, "nx": 16}).tile(
-            "t", "i", 8, 8
+            module.jacobi.t, module.jacobi.i, 8, 8
         )
     obligation = refused.value.fact.term.lean_obligation()
     counter = obligation.counterexample
@@ -480,8 +487,9 @@ def test_a_refused_cast_with_no_pair_is_not_offered_to_lean_as_a_claim() -> None
     fact = refused.value.fact
     assert fact.kind == "bijective" and fact.term.refuted
     assert fact.term.lean_obligation().declined == REFUTED_UNSTATED
+    jacobi = stencil().jacobi
     with pytest.raises(IllegalCast) as reversed_:
-        Schedule(stencil().jacobi, sizes={"nt": 8, "nx": 8}).tile("t", "i", 4, 4)
+        Schedule(jacobi, sizes={"nt": 8, "nx": 8}).tile(jacobi.t, jacobi.i, 4, 4)
     cast = reversed_.value.fact.term
     assert cast.refuted and cast.lean_obligation().counterexample is not None
     unattributed = replace(cast, refusal=None)
@@ -850,37 +858,53 @@ def axpy(a: Real, x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
 
 
 def test_an_assumption_is_a_fact_the_casts_rest_on() -> None:
-    schedule = Schedule(axpy).assume("n % 4 == 0").split("i", 4)
+    schedule = Schedule(axpy).assume(axpy.n % 4 == 0).split(axpy.i, 4)
     assumption, bijective, monotone = schedule.facts()
     assert assumption.kind == "assumption"
     assert assumption.status is Status.ASSUMED
-    assert assumption.statement == "n % 4 == 0, which axpy is scheduled assuming"
+    assert assumption.statement == (
+        "axpy.n % 4 == 0, which axpy is scheduled assuming"
+    )
     assert bijective.rests_on == (assumption.id,)
     assert monotone.rests_on == (assumption.id,)
     (part, *_rest) = monotone.term.lean_obligation().parts
     assert "n % 4 == 0" in render(part.term)
-    assert schedule.history == ("assume('n % 4 == 0')", "split(i, 4)")
-    # the casts' status names it shortly, ``decided under assume('n % 4 == 0')``
-    assert assumption.provenance["label"] == "assume('n % 4 == 0')"
+    assert schedule.history == ("assume(axpy.n % 4 == 0)", "split(axpy.i, 4)")
+    # the casts' status names it shortly, ``decided under assume(axpy.n % 4 == 0)``
+    assert assumption.provenance["label"] == "assume(axpy.n % 4 == 0)"
 
 
 @pytest.mark.parametrize(
     ("condition", "why"),
     [
-        ("m > 2", "m is not a size of the kernel"),
-        ("n * n > 4", "isl states affine expressions"),
-        ("n != 4", "an assumption is a comparison of sizes"),
+        (lambda: axpy.n * axpy.n > 4, "isl states affine expressions"),
+        (lambda: axpy.n != 4, "an assumption is a comparison of sizes"),
     ],
 )
-def test_an_assumption_isl_cannot_state_is_refused(condition: str, why: str) -> None:
+def test_an_assumption_isl_cannot_state_is_refused(condition, why: str) -> None:
     with pytest.raises(ValueError, match=why):
-        Schedule(axpy).assume(condition)
+        Schedule(axpy).assume(condition())
+
+
+def test_an_assumption_is_of_the_kernels_sizes_written_with_their_handles() -> None:
+    with pytest.raises(AttributeError, match="axpy has no loop, array, call or size"):
+        axpy.m  # noqa: B018
+    with pytest.raises(TypeError) as caught:
+        Schedule(axpy).assume("n % 4 == 0")
+    assert str(caught.value) == (
+        "assume() takes a condition of the sizes, written with their handles, "
+        "such as axpy.n % 4 == 0, not the string 'n % 4 == 0'"
+    )
+    both = Schedule(axpy).assume((axpy.n % 4 == 0) & (axpy.n >= 8))
+    assert both.history == ("assume((axpy.n % 4 == 0) & (axpy.n >= 8))",)
+    with pytest.raises(TypeError, match="Join two with &"):
+        Schedule(axpy).assume(4 <= axpy.n <= 8)
 
 
 def test_a_call_that_breaks_the_assumption_is_refused() -> None:
     from loopty.executor import LoopyExecutor
 
-    schedule = Schedule(axpy).assume("n % 4 == 0").split("i", 4)
+    schedule = Schedule(axpy).assume(axpy.n % 4 == 0).split(axpy.i, 4)
     run = LoopyExecutor().run
     out = run(schedule, a=2.0, x=np.arange(8.0), y=np.ones(8))
     assert np.allclose(out["y"], 2.0 * np.arange(8.0) + 1)
@@ -1017,12 +1041,12 @@ def _refused_casts() -> list[tuple[str, IllegalCast]]:
             "the stencil's rectangular tile",
             lambda: Schedule(
                 stencil_module.jacobi, target="c", sizes={"nt": 16, "nx": 16}
-            ).tile("t", "i", 8, 8),
+            ).tile(stencil_module.jacobi.t, stencil_module.jacobi.i, 8, 8),
         ),
         (
             "the wavefront's rectangular tile",
             lambda: Schedule(wave.acoustic, target="c", sizes=sizes).tile(
-                "t", "i", 4, 8
+                wave.acoustic.t, wave.acoustic.i, 4, 8
             ),
         ),
         (
@@ -1033,17 +1057,17 @@ def _refused_casts() -> list[tuple[str, IllegalCast]]:
         ),
         (
             "the diamond's tile",
-            lambda: wave.diamond_schedule().tile("a", "b", 4, 4),
+            lambda: _diamond_tile(wave),
         ),
         (
             "a fusion one step early",
             lambda: Schedule(fusion.burgers_rhs, sizes={"n": fusion.N}).fuse(
-                "flux", "divergence"
+                fusion.burgers_rhs.flux.j, fusion.burgers_rhs.divergence.i
             ),
         ),
         (
             "a window of two cells",
-            lambda: windows.fused.contract("f", lambda j: j % 2),
+            lambda: windows.fused.contract(windows.burgers.f, lambda j: j % 2),
         ),
         (
             "a step after the window, past the slot it reads",
@@ -1053,9 +1077,15 @@ def _refused_casts() -> list[tuple[str, IllegalCast]]:
         ),
         (
             "a window one cell short of the second reader",
-            lambda: Schedule(windows.two_readers, sizes=windows.SIZES)
-            .fuse("flux", "divergence_and_lag", shift=1)
-            .contract("f", lambda j: j % 3),
+            lambda: (
+                Schedule(windows.two_readers, sizes=windows.SIZES)
+                .fuse(
+                    windows.two_readers.flux.j,
+                    windows.two_readers.divergence_and_lag.i,
+                    shift=1,
+                )
+                .contract(windows.two_readers.f, lambda j: j % 3)
+            ),
         ),
         (
             "the loop run backwards after the window",
@@ -1063,7 +1093,7 @@ def _refused_casts() -> list[tuple[str, IllegalCast]]:
         ),
         (
             "a row of the triangle, which the recurrence reads two rows up",
-            lambda: windows.boxed.contract("R", lambda i, a, b: b),
+            lambda: windows.boxed.contract(windows.triangles.R, lambda i, a, b: b),
         ),
     ]
     out = []
@@ -1091,7 +1121,11 @@ def test_run_proves_the_casts_and_shows_their_lean(
     path = EXAMPLES / "stencil_skew.py"
     assert main(["run", str(path), "--show-lean", "tile("]) == 0
     out = capsys.readouterr().out
-    rows = [line for line in out.splitlines() if "tile(t,i,8,8)" in line]
+    rows = [
+        line
+        for line in out.splitlines()
+        if "tile(jacobi.t, jacobi.i, 8, 8)" in line
+    ]
     assert any(line.startswith("proved") and " lean " in line for line in rows)
     assert not any(line.startswith("decided") for line in rows)
     assert "LEAN proved" in out
@@ -1120,8 +1154,8 @@ def scale_rows(a: Arr[Fin[n], Fin[m], Real], s: Arr[Fin[n], Real]):
 
 tiled = (
     Schedule(scale_rows, sizes={"n": 4, "m": 4})
-    .tile("i", "j", 2, 2)
-    .interchange("i_inner", "j_outer")
+    .tile(scale_rows.i, scale_rows.j, 2, 2)
+    .interchange(scale_rows.i.inner, scale_rows.j.outer)
 )
 """
 
@@ -1147,8 +1181,9 @@ def test_run_names_a_cast_lean_was_not_asked_about_when_verbose(
     out = capsys.readouterr().out
     assert "NOT PROVED scale_rows" in out
     assert (
-        "isl decided it; Lean was not asked: tile(i,j,2,2) moves S0 by the part "
-        "of its map over the loops S0 runs in, which isl computed"
+        "isl decided it; Lean was not asked: tile(scale_rows.i, scale_rows.j, 2, "
+        "2) moves S0 by the part of its map over the loops S0 runs in, which isl "
+        "computed"
     ) in out
 
 
@@ -1208,8 +1243,9 @@ def test_lean_fails_where_a_dependence_joins_two_work_items(lean: Any) -> None:
 
     from lanky.ledger import Fact
 
+    jacobi = stencil().jacobi
     with pytest.raises(IllegalCast) as refused:
-        Schedule(stencil().jacobi, sizes={"nt": 8, "nx": 8}).tag(i="g.0")
+        Schedule(jacobi, sizes={"nt": 8, "nx": 8}).tag(jacobi.i, "g.0")
     planted = replace(refused.value.fact.term, refuted=False, refusal=None)
     parts = planted.lean_obligation().parts
     result = lean.establish(
@@ -1263,9 +1299,11 @@ def test_a_substituted_sum_reading_its_own_write_is_caught_apart(lean: Any) -> N
 
     from lanky.ledger import Fact
 
-    substituted = Schedule(doubled_then_scaled, sizes={"n": 8, "m": 4}).substitute("w")
+    substituted = Schedule(doubled_then_scaled, sizes={"n": 8, "m": 4}).substitute(
+        doubled_then_scaled.w
+    )
     with pytest.raises(IllegalCast) as refused:
-        substituted.tag(j="l.0")
+        substituted.tag(doubled_then_scaled.scaled_in_place.j, "l.0")
     planted = replace(refused.value.fact.term, refuted=False, refusal=None)
     parts = planted.lean_obligation().parts
     assert parts[-1].label == (
@@ -1369,12 +1407,20 @@ PIECEWISE_SPREAD = (
     "[t, i] -> [a, b] : a = t and b = i + 100 and i >= 4 }"
 )
 
+def _diamond_tile(wave: Any) -> Any:
+    """The diamond of ``wavefront_acoustic.py`` tiled, by the loops its map names."""
+    diamond = wave.diamond_schedule()
+    return diamond.tile(diamond.loops.a, diamond.loops.b, 4, 4)
+
+
 #: Schedules, legal for some variants and refused for others.
 SCHEDULES = {
-    "tile": lambda s: s.tile("t", "i", 4, 4),
-    "skew_tile": lambda s: s.skew("i", by="t").tile("t", "i", 4, 4),
-    "interchange": lambda s: s.interchange("i", "t"),
-    "split": lambda s: s.split("t", 2),
+    "tile": lambda s: s.tile(scope(s).t, scope(s).i, 4, 4),
+    "skew_tile": lambda s: (
+        s.skew(scope(s).i, by=scope(s).t).tile(scope(s).t, scope(s).i, 4, 4)
+    ),
+    "interchange": lambda s: s.interchange(scope(s).i, scope(s).t),
+    "split": lambda s: s.split(scope(s).t, 2),
     "reverse_i": lambda s: s.affine("{ [t, i] -> [t2, i2] : t2 = t and i2 = -i }"),
     "reverse_t": lambda s: s.affine("{ [t, i] -> [t2, i2] : t2 = -t and i2 = i }"),
     "wavefront": lambda s: s.affine("{ [t, i] -> [a, b] : a = 2 t + i and b = t }"),

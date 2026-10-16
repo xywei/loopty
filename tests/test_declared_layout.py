@@ -22,6 +22,7 @@ from lanky.terms import evaluate_annotations
 
 from loopty import Arr, Fin, reduce_sum, when
 from loopty.faithful import KIND, SAMPLES, sample_arguments
+from loopty.handles import scope
 from loopty.interpret import interpret
 from loopty.kernel import Kernel
 from loopty.trace import mask_writes, trace
@@ -805,7 +806,7 @@ def test_rows_moved_onto_each_other_refute_the_layout_fact() -> None:
     # A cast is decided against the dependences of ``val`` over ``[r, j]``.
     monotone = [
         fact
-        for fact in Schedule(term).split("r", 2).facts()
+        for fact in Schedule(term).split(scope(term).r, 2).facts()
         if fact.kind == "monotone"
     ]
     assert [fact.rests_on for fact in monotone] == [(layout.id,)]

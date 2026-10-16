@@ -39,15 +39,16 @@ What is worth reading here
 --------------------------
 
 *How deep a fusion goes is a choice, and each choice is checked.*
-``fuse("along_r", "along_s", loops=2)`` fuses the element and the row and
-leaves the inner loops one after the other; the refusal of the deeper fusion
+``fuse(weak_derivative.along_r.a, weak_derivative.along_s.a)`` fuses each
+pass's loops down to the row, ``a``, the element and the row, and leaves the
+inner loops one after the other; the refusal of the deeper fusion
 names the pair it would run backwards and the shallower fusion it checked.
 grudge's three-dimensional passes fuse the same way: on the element and the
 row for ``r`` then ``s``, deeper for ``s`` then ``t``.
 
 *What passes between the passes is one row.* Fused on the element and the
 row, ``along_s`` reads only the row of ``v`` that ``along_r`` has just stored,
-so ``contract("v")`` keeps one row, ``lambda e, a, b: b``, in ``double
+so ``contract(weak_derivative.v)`` keeps one row, ``lambda e, a, b: b``, in ``double
 v_window[n]``, where the program stored ``ne * n * n`` cells; its
 ``no-clobber`` fact says no read sees its row overwritten, and putting the
 elements on a group axis after it is refused, since every element would
@@ -104,10 +105,12 @@ def weak_derivative(D, M, u, w):
 
 
 #: The element and the row fused, the inner loops one after the other.
-fused = Schedule(weak_derivative).fuse("along_r", "along_s", loops=2)
+fused = Schedule(weak_derivative).fuse(
+    weak_derivative.along_r.a, weak_derivative.along_s.a
+)
 
 #: The same, with v kept one row at a time.
-contracted = fused.contract("v")
+contracted = fused.contract(weak_derivative.v)
 
 
 def gll(nodes: int = NODES) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -174,14 +177,17 @@ def main() -> int:
     print()
 
     try:
-        Schedule(weak_derivative).fuse("along_r", "along_s")
+        Schedule(weak_derivative).fuse(
+            weak_derivative.along_r.b, weak_derivative.along_s.b
+        )
     except IllegalCast as exc:
         print(f"refused: {exc}")
     print()
 
     print(f"accepted: {fused!r}")
-    zeroing = set(weak_derivative.term.stmt("v.zeros").inames)
-    passes = [name for name in fused.order if name not in zeroing]
+    v = weak_derivative.v
+    # the loops the program zeroes v in, which no source wrote, are v's
+    passes = [loop for loop in fused.nest if not loop.startswith(f"{v!r}.zeros")]
     print(f"  the passes' loops, outermost first: {', '.join(passes)}")
     for fact in fused.facts():
         print(f"  {fact.status.value:8} {fact.decided_by:4} {fact.statement}")

@@ -23,9 +23,13 @@ import hand_terms as ht
 from loopty import Arr, Fin, facts_for, kernel
 from loopty import sum as reduce_sum
 from loopty.executor import LoopyExecutor
+from loopty.handles import scope
 from loopty.lower import lower_generic
 from loopty.oracle import IslOracle
 from loopty.schedule import IllegalCast, Schedule
+
+#: The handles of the hand-built terms (tests/hand_terms.py).
+JACOBI = scope(ht.jacobi_term())
 
 
 def _run(obj, **arguments):
@@ -52,7 +56,7 @@ def test_tagging_a_dependence_carrying_iname_parallel_is_refuted_with_a_witness(
     """
     schedule = Schedule(ht.jacobi_term(), sizes={"nt": 8, "nx": 8})
     with pytest.raises(IllegalCast) as caught:
-        schedule.tag(t="g.0")
+        schedule.tag(JACOBI.t, "g.0")
     error = caught.value
 
     fact = error.fact
@@ -72,7 +76,7 @@ def test_tagging_a_dependence_carrying_iname_parallel_is_refuted_with_a_witness(
 
     message = str(error)
     # a term written by hand has no source text: its instances are by id
-    assert message.startswith("tag(t='g.0') illegal: S0[")
+    assert message.startswith("tag(jacobi.t, 'g.0') illegal: S0[")
     assert "writes u[" in message and ", read by S0[" in message
     assert message.endswith("scheduled earlier (at nt=8, nx=8, as hinted)")
 

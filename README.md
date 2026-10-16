@@ -47,29 +47,33 @@ def compressed_taylor(
 
 @kernel(uses=[on_every_triangle])  # compressed_taylor, box by box on a + b <= P
 def reconstruct(
-    C: Arr[Where[i: Fin[nb], a: Fin[2], b: Fin[Q], a + b <= P], Real],
-    R: Arr[Where[i: Fin[nb], a: Fin[Q], b: Fin[Q], a + b <= P], Real],
+    C: Arr[Where[box: Fin[nb], a: Fin[2], b: Fin[Q], a + b <= P], Real],
+    R: Arr[Where[box: Fin[nb], a: Fin[Q], b: Fin[Q], a + b <= P], Real],
 ) -> ...:  # the copies and the recurrence: two of the theorem's hypotheses
-    for i in R.dom:
-        for a in R.dom[i]:
-            for b in R.dom[i, a]:
+    for box in R.dom:
+        for a in R.dom[box]:
+            for b in R.dom[box, a]:
                 with when(a < 2):
-                    R[i, a, b] = C[i, a, b]
+                    R[box, a, b] = C[box, a, b]
                 with when(a >= 2):
-                    R[i, a, b] = -R[i, a - 2, b + 2]
+                    R[box, a, b] = -R[box, a - 2, b + 2]
 
 
 # ... unpack, which reads sumpy's coefficients through its storage index,
 # evaluate, the Taylor sum at each target, and the program l2p that runs the three
 
-fused = (
-    Schedule(l2p, target="c")
-    .fuse("unpack", "reconstruct", loops=1)
-    .fuse("reconstruct", "evaluate", loops=1)
+fused = Schedule(l2p, target="c").fuse(  # the three calls' loops over boxes
+    l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box
 )
-contracted = fused.contract("R").contract("C")  # one box's triangle at a time
-on_a_gpu = fused.retarget("opencl").tag(i="g.0")  # sumpy's own GPU schedule
+contracted = fused.contract(l2p.R).contract(l2p.C)  # one box's triangle at a time
+on_a_gpu = fused.retarget("opencl").on_groups(l2p.unpack.box)  # sumpy's own
 ```
+
+A schedule names what it moves by where the file defines it: `l2p.R` is the
+table the program `l2p` makes, `l2p.unpack.box` the loop over boxes of the
+kernel `unpack` where `l2p` calls it, and `reconstruct.b` the loop over `b`
+in `reconstruct` itself. A name is checked when it is written, against the
+traced kernel, and every message, schedule and fact prints the same paths.
 
 `python examples/l2p.py` runs it on numpy, refuses the interchange of the
 triangle's loops with the pair of instances it would reorder, refuses a
@@ -79,25 +83,25 @@ one box's triangle, and runs the schedule compiled:
 ```console
 $ python examples/l2p.py
 ...
-refused: interchange(b, a) illegal: R[i, a, b] = C[i, a, b] (l2p.py:276) at i=0, a=1, b=9 writes R[0, 1, 9], read by R[i, a, b] = -R[i, a - 2, b + 2] (l2p.py:278) at i=0, a=3, b=7, scheduled earlier (at nb=1, isl's choice)
+refused: interchange(reconstruct.b, reconstruct.a) illegal: R[box, a, b] = C[box, a, b] (l2p.py:276) at box=0, a=1, b=9 writes R[0, 1, 9], read by R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:278) at box=0, a=3, b=7, scheduled earlier (at nb=1, isl's choice)
 
-refused: contract('R', lambda i, a, b: b) illegal: R[i, a, b] = -R[i, a - 2, b + 2] (l2p.py:278) at i=0, a=9, b=0 reads R[0, 7, 2], which the same statement at i=0, a=7, b=2 stored in slot 2, after the same statement at i=0, a=8, b=2 stored R[0, 8, 2] there (at nb=1, isl's choice); contract('R') finds the smallest window that keeps every read, lambda i, a, b: (a, b)
+refused: contract(l2p.R, lambda box, a, b: b) illegal: R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:278) at box=0, a=9, b=0 reads R[0, 7, 2], which the same statement at box=0, a=7, b=2 stored in slot 2, after the same statement at box=0, a=8, b=2 stored R[0, 8, 2] there (at nb=1, isl's choice); contract(l2p.R) finds the smallest window that keeps every read, lambda box, a, b: (a, b)
 
-schedule: Schedule(l2p, target='c').fuse(unpack, reconstruct, loops=1).fuse(reconstruct, evaluate, loops=1).contract('R', lambda i, a, b: (a, b)).contract('C', lambda i, a, b: (a, b))
+schedule: Schedule(l2p, target='c').fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box).contract(l2p.R, lambda box, a, b: (a, b)).contract(l2p.C, lambda box, a, b: (a, b))
 ...
-  decided  isl  no read of R sees its slot overwritten after contract('R', lambda i, a, b: (a, b)): R kept in 121 cells, R[i, a, b] in slot (a, b)
+  decided  isl  no read of l2p.R sees its slot overwritten after contract(l2p.R, lambda box, a, b: (a, b)): l2p.R kept in 121 cells, R[box, a, b] in slot (a, b)
 ...
   pot: difference 0 within 1.1e-06 (approx) -> tested
 ...
 ```
 
 `lanky check examples/l2p.py`, on a machine with Lean and Mathlib, says
-how each claim is known and who settled it. Six of its 58 rows:
+how each claim is known and who settled it. Six of its 56 rows:
 
 ```text
 $ lanky check examples/l2p.py
 STATUS   EFFECTIVE  BY           WHERE       OWNER              STATEMENT
--------  ---------  -----------  ----------  -----------------  -------------------------------------------------------------------------------------------------
+-------  ---------  -----------  ----------  -----------------  ----------------------------------------------------------------------------------------------------
 proved   tested     lean         l2p.py:130  compressed_taylor  D : Fn[Nat, Nat, Real], R : Fn[Nat, Nat, Real]
                                                                 | pde: forall a in Nat, b in Nat. D[a + 2, b] + D[a, b + 2] == 0
                                                                 | stored: forall a in Nat, b in Nat where a < 2. R[a, b] == D[a, b]
@@ -109,15 +113,15 @@ proved   proved     lean         l2p.py:199  storage_index      storage_index st
 proved   tested     lean         l2p.py:249  reconstruct        by on_every_triangle, for every D with pde and stored:
                                                                   forall i in Fin(nb), a in Nat, b in Nat where a + b <= 10. R[i, a, b] == D[i, a, b]
 ...
-proved   proved     lean         l2p.py:341  l2p                no read of R sees its slot overwritten after contract('R', lambda i, a, b: (a, b)):
-                                                                  R kept in 121 cells, R[i, a, b] in slot (a, b)
+proved   proved     lean         l2p.py:340  l2p                no read of l2p.R sees its slot overwritten after contract(l2p.R, lambda box, a, b: (a, b)):
+                                                                  l2p.R kept in 121 cells, R[box, a, b] in slot (a, b)
 ...
-proved   proved     lean         l2p.py:348  l2p                the order after tag(i='g.0') runs every dependence of l2p forward, within one work item
-tested   tested     upstream     l2p.py:470  l2p                the native run of l2p agrees with sumpy_l2p in pot, on its example inputs
+proved   proved     lean         l2p.py:347  l2p                the order after on_groups(l2p.unpack.box) runs every dependence of l2p forward, within one work item
+tested   tested     upstream     l2p.py:469  l2p                the native run of l2p agrees with sumpy_l2p in pot, on its example inputs
 
-58 facts: 3 decided, 48 proved, 7 tested
+56 facts: 3 decided, 46 proved, 7 tested
 
-LEAN proved all 46 facts isl decided. Lean's statements are loopty's, from its own description, not isl's results, and isl's hints were checked, not trusted. --show-lean prints the Lean.
+LEAN proved all 44 facts isl decided. Lean's statements are loopty's, from its own description, not isl's results, and isl's hints were checked, not trusted. --show-lean prints the Lean.
 ```
 
 `STATUS` is how a claim was settled, and `EFFECTIVE` what it is worth given
@@ -264,22 +268,22 @@ row verbatim, and checked by `scripts/refresh_example_outputs.py`):
 $ lanky check examples/spmv.py
 STATUS   BY             WHERE        OWNER          STATEMENT
 -------  -------------  -----------  -------------  ----------------------------------------------------------------------------------------------
-decided  isl            spmv.py:79   scan           off[0] is in bounds for every instance of S0
-decided  isl            spmv.py:81   scan           off[r + 1] is in bounds for every instance of S1
-decided  isl            spmv.py:79   scan           distinct instances of S0 write distinct cells of off
-decided  isl            spmv.py:79   scan           no cell of off is stored twice, or read before its store
-decided  isl            spmv.py:69   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
-tested   property-test  spmv.py:84   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat]
+decided  isl            spmv.py:81   scan           off[0] is in bounds for every instance of S0
+decided  isl            spmv.py:83   scan           off[r + 1] is in bounds for every instance of S1
+decided  isl            spmv.py:81   scan           distinct instances of S0 write distinct cells of off
+decided  isl            spmv.py:81   scan           no cell of off is stored twice, or read before its store
+decided  isl            spmv.py:71   scan           off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+tested   property-test  spmv.py:86   scan_monotone  n : Nat, cnt : Fn[Fin(n), Nat], off : Fn[Fin(n + 1), Nat]
                                                     | h0: off(0) == 0
                                                     | hs: forall r in Fin(n). off(r + 1) == off(r) + cnt(r)
                                                     |- forall a in Fin(n + 1), b in Fin(n + 1) where a <= b. off(a) <= off(b)
-decided  isl            spmv.py:112  spmv           y[r] is in bounds for every instance of S0
-decided  type           spmv.py:112  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
-decided  isl            spmv.py:112  spmv           distinct instances of S0 write distinct cells of y
-decided  type           spmv.py:112  spmv           the accumulation into y[r] over j is approx
-tested   interpreter    spmv.py:102  spmv           the traced term computes what the body computes
-decided  isl            spmv.py:193  spmv           the order after split(j, 2) runs every dependence of spmv forward
-decided  call           spmv.py:115  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
+decided  isl            spmv.py:114  spmv           y[r] is in bounds for every instance of S0
+decided  type           spmv.py:114  spmv           x[col[r, j]] is in bounds by type (col[r, j] : Fin(m))
+decided  isl            spmv.py:114  spmv           distinct instances of S0 write distinct cells of y
+decided  type           spmv.py:114  spmv           the accumulation into y[r] over j is approx
+tested   interpreter    spmv.py:104  spmv           the traced term computes what the body computes
+decided  isl            spmv.py:195  spmv           the order after split(spmv.j, 2) runs every dependence of spmv forward
+decided  call           spmv.py:117  solve          after scan(...) in solve: off[0] == 0 and (forall r in Fin(n). off[r + 1] == off[r] + cnt[r])
 ...
 29 facts: 24 decided, 5 tested
 
@@ -331,15 +335,15 @@ And a transformation is a cast, checked before it is applied:
 ```console
 $ python examples/stencil_skew.py
 ...
-Schedule(jacobi).tile('t', 'i', 8, 8) ->
-  IllegalCast: tile(t,i,8,8) illegal: u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:62) at t=0, i=8 writes u[1, 8], read by the same statement at t=1, i=7, scheduled earlier (at nt=16, nx=16, as hinted)
+Schedule(jacobi).tile(jacobi.t, jacobi.i, 8, 8) ->
+  IllegalCast: tile(jacobi.t, jacobi.i, 8, 8) illegal: u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:62) at t=0, i=8 writes u[1, 8], read by the same statement at t=1, i=7, scheduled earlier (at nt=16, nx=16, as hinted)
 ...
-accepted: Schedule(jacobi, target='c').skew(i, by='t').tile(t,i,8,8)
-  loop nest: t_outer i_outer t_inner i_inner
-  decided  isl  skew(i, by='t') renames the instances of jacobi one for one
-  decided  isl  the order after skew(i, by='t') runs every dependence of jacobi forward
-  decided  isl  tile(t,i,8,8) renames the instances of jacobi one for one
-  decided  isl  the order after tile(t,i,8,8) runs every dependence of jacobi forward
+accepted: Schedule(jacobi, target='c').skew(jacobi.i, by=jacobi.t).tile(jacobi.t, jacobi.i, 8, 8)
+  loop nest: jacobi.t.outer jacobi.i.outer jacobi.t.inner jacobi.i.inner
+  decided  isl  skew(jacobi.i, by=jacobi.t) renames the instances of jacobi one for one
+  decided  isl  the order after skew(jacobi.i, by=jacobi.t) runs every dependence of jacobi forward
+  decided  isl  tile(jacobi.t, jacobi.i, 8, 8) renames the instances of jacobi one for one
+  decided  isl  the order after tile(jacobi.t, jacobi.i, 8, 8) runs every dependence of jacobi forward
 ...
 ```
 
@@ -391,7 +395,7 @@ decided  isl          pairs.py:80  pairs  f[k, p] is in bounds for every instanc
 `f[k, p]` is read under `k > p`, which makes `(k, p)` a point of the triangle,
 while `f[p, p]` would be refused although the `n x n` box around the triangle
 has the cell. How `f` is stored is a separate choice that changes no fact:
-`Schedule(pairs)` keeps it in that box, and `Schedule(pairs).pack("f")` keeps
+`Schedule(pairs)` keeps it in that box, and `Schedule(pairs).pack(pairs.f)` keeps
 its cells and no others, row after row, read as `f[off_f[i] + j]` through a
 table of row starts. Both compiled runs agree with the native one.
 
@@ -422,7 +426,7 @@ table of row starts. Both compiled runs agree with the native one.
   at once, with a checked fact that no read sees its slot overwritten.
 - **Reassociation is visible in the type.** Splitting an accumulation and summing
   the pieces is not free on floating point. A trace reads the accumulation's
-  class off what it sums, `realize("y", tree=True)` is what lowers it to
+  class off what it sums, `realize(spmv.y, tree=True)` is what lowers it to
   `reassoc`, and the differential comparison against the native run widens its
   tolerance because of that fact and not because someone chose a number. The
   tolerance is per element and local: `exact` is bitwise, and `reassoc` and
@@ -442,9 +446,10 @@ table of row starts. Both compiled runs agree with the native one.
   and accepted once the updates are atomic:
 
   ```python
-  Schedule(mass_action, target="opencl").atomic("y").split("c", 32).tag(
-      c_outer="g.0", c_inner="l.0"
-  )
+  cells = mass_action.c
+  Schedule(mass_action, target="opencl").atomic(mass_action.y).split(
+      cells, 32
+  ).tag({cells.outer: "g.0", cells.inner: "l.0"})
   ```
 - **Legal and buildable are different questions, and both are answered.** A
   transformation can preserve the meaning of a program and still be one the
@@ -583,39 +588,41 @@ interface can change in a minor release; the CHANGELOG says when one does.
   zeros the array was made with, which the fact's reason then lists
   (`shifted.S0 reads the zeros at f[0] and f[n - 1]`), so zero padding at a
   boundary is read as written and `lanky check` passes.
-  `Schedule(program).fuse("flux", "divergence", shift=1)`
-  runs the reader's loop inside the writer's, one step behind, and is
-  `affine` with the map per statement it builds, `{ flux_S0[j] -> [j];
-  divergence_S0[i] -> [j] : j = i + 1 }`, checked on the dependences between
-  the calls; without the shift it is refused with the pair of instances,
-  and the message names the shift that is accepted.
-  `fuse(producer, consumer, loops=1)` fuses only the outermost loop, or as
-  many as `loops` says, and leaves the loops inside one after the other:
-  two passes over elements, the second of which reads every cell of the
-  element's row the first stores, fuse on the element and the row and no
-  deeper, and the refusal of the deeper fusion names the shallower one
-  (`examples/sum_factorization.py`).
-  `.substitute("f")` then stores none of `f`: the one statement that writes
+  `Schedule(burgers_rhs).fuse(burgers_rhs.flux.j, burgers_rhs.divergence.i,
+  shift=1)` runs the reader's loop inside the writer's, one step behind, and
+  is `affine` with the map per statement it builds, the divergence's `i` at
+  the flux's step `j = i + 1`, checked on the dependences between the calls;
+  without the shift it is refused with the pair of instances, and the
+  message names the fusion that is accepted. `fuse` takes one loop of each
+  call, as many calls as are fused, each loop at the same depth of its own
+  call, and fuses those loops and every loop outside them, leaving the
+  loops inside one after the other: two passes over elements, the second
+  of which reads every cell of the element's row the first stores, fuse on
+  the element and the row (`fuse(weak_derivative.along_r.a,
+  weak_derivative.along_s.a)`) and no deeper, and the refusal of the deeper
+  fusion names the shallower one (`examples/sum_factorization.py`).
+  `.substitute(burgers_rhs.f)` then stores none of `f`: the one statement that writes
   it becomes a substitution rule (loopy's `assignment_to_subst`) computed
   again at every read, legal when every read is of a cell it stored before
   the read, since no zeros are left to read, and nothing writes what it
   read in between, and every later step is checked against the
   dependences of the program as it then runs.
-  `.contract("f")` keeps `f` in the cells live at once instead: fused one
+  `.contract(burgers_rhs.f)` keeps `f` in the cells live at once instead: fused one
   step behind, the divergence reads `f[j]` and `f[j - 2]` at step `j`, so a
   window of three cells is found, each flux computed once:
 
   ```python
-  fused = Schedule(burgers_rhs).fuse("flux", "divergence", shift=1)
-  windowed = fused.contract("f")              # lambda j: j % 3
-  fused.contract("f", lambda j: j % 2)        # refused: a read sees its slot overwritten
+  flux, divergence = burgers_rhs.flux, burgers_rhs.divergence
+  fused = Schedule(burgers_rhs).fuse(flux.j, divergence.i, shift=1)
+  windowed = fused.contract(burgers_rhs.f)          # lambda j: j % 3
+  fused.contract(burgers_rhs.f, lambda j: j % 2)    # refused: a read sees its slot overwritten
   ```
 
   A placement is a Python function from a cell's indices to its slot, given
   or found axis by axis along the order as it stands (one row of the
   sum-factorized passes' `v`, `lambda e, a, b: b`); an array over a domain
   is placed by the domain's binders (one box's triangle of sumpy's L2P,
-  `lambda i, a, b: (a, b)`, in `examples/l2p.py`). The array may be stored
+  `lambda box, a, b: (a, b)`, in `examples/l2p.py`). The array may be stored
   by several statements, and read by one of them, a recurrence. The step
   is legal when every read is of a cell stored before it, the
   `definedness` fact, and no read sees its slot overwritten between that
@@ -862,7 +869,7 @@ interface can change in a minor release; the CHANGELOG says when one does.
   and proved by Lean where it is installed, each id once.
 - Mixed subscripts. `X[cell[c, k], d]` is in bounds by type on its first axis,
   `cell[c, k] : Fin(nv)`, and by isl on the second, where it was assumed.
-- `Schedule.assume("n % 4 == 0")`, loopy's `assume`, checked: loopy is told,
+- `Schedule.assume(k.n % 4 == 0)`, loopy's `assume`, checked: loopy is told,
   every later cast is decided and stated where the condition holds and rests
   on an `assumption` fact, and a call whose sizes break it is refused.
 - `Schedule`: `tag`, `split`, `interchange`, `prioritize`, `tile`, `skew`,
@@ -872,7 +879,8 @@ interface can change in a minor release; the CHANGELOG says when one does.
   re-checks it. `prioritize` and `interchange` also take the loop of a sum,
   named before loops of its statement, which it then runs outside, as
   sumpy's CPU tile of a layer potential runs 256 sources at a time outside
-  16 targets (`.split("s", 256).prioritize("s_outer", "t_inner")`): each
+  16 targets (`.split(single_layer.s, 256).prioritize(single_layer.s.outer,
+  single_layer.t.inner)`): each
   sum still adds its terms in order, the loops it runs outside of order
   none of their instances, and loopy keeps the order where it keeps an
   accumulator per instance, on a hardware axis or an `ilp` loop, which the
@@ -891,7 +899,7 @@ interface can change in a minor release; the CHANGELOG says when one does.
   `step@2.S0`, which isl cannot read as a tuple name, is named with every
   other character spelled `_`, `flux_S0` or `step_2_S0`, the id of its
   instruction in the lowered kernel. A loop over an image with holes, such
-  as the diamond's `b`, counts its steps (`b = 2*b_step - a`,
+  as the diamond's `b` (`acoustic.loops.b`), counts its steps (`b = 2*b_step - a`,
   `Schedule.strides`) instead of testing a parity at every `b`. A loop on a
   hardware axis (`g.*`, `l.*`) is the launch grid, outside every other loop,
   and nothing in a kernel orders two of its work items through global memory,
@@ -902,7 +910,7 @@ interface can change in a minor release; the CHANGELOG says when one does.
   zeros a program makes an array with run where the array is stored: their
   loop along an axis of the array goes on the axis of the loop that every
   statement storing the array stores it along, so `examples/l2p.py`'s
-  `fused.tag(i="g.0")`, sumpy's schedule for a GPU, names only the file's
+  `fused.on_groups(l2p.unpack.box)`, sumpy's schedule for a GPU, names only the file's
   loops, and each box's work item zeroes the cells it stores. A sum on
   a local axis stays allowed, since loopy synchronizes its partial sums; its
   body reads on every work item, and its statement stores the result from
@@ -1046,7 +1054,7 @@ interface can change in a minor release; the CHANGELOG says when one does.
   of one cell are no dependence, so a schedule may reorder them, which it
   records as a reassociation. A step that runs two of them at the same time,
   on two work items or in no order (`ilp`, `vec`), is refused with the pair
-  and the fix until `Schedule.atomic("y")`. Then each update is loopy's
+  and the fix until `Schedule.atomic(mass_action.y)`. Then each update is loopy's
   `AtomicUpdate` on OpenCL, a compare-and-swap, and the C target, which runs
   in one thread, keeps its code. A refused cast through a cell read from an
   array names two instances that touch one cell on the example inputs, with
@@ -1096,7 +1104,7 @@ interface can change in a minor release; the CHANGELOG says when one does.
   makes (a factory) do: a `DUPLICATE` block names the kernel and its ids, as
   `lanky check` names them, and the `--json` ledger keeps each claim not in
   the table under `refused_claims`, with its status and what explains it. A
-  schedule of a schedule, `Schedule(Schedule(k).split("i", 2))`, is that
+  schedule of a schedule, `Schedule(Schedule(k).split(k.i, 2))`, is that
   schedule built again from `k`: its steps replayed and checked again, on
   its target and with its sizes unless others are given. Its run is compared
   with `k`'s body, and `k` is not run again through the identity.
@@ -1393,8 +1401,8 @@ interface can change in a minor release; the CHANGELOG says when one does.
   not write), only two instances of one loop are taken to share a work item.
 - The zeros of a program's array follow a loop that stores the array, and
   not a split of one ([#289](https://github.com/xywei/loopty/issues/289)):
-  after `split("i", 4).tag(i_outer="g.0", i_inner="l.0")`, a statement
-  stores `f[4*i_outer + i_inner]`, along no loop of its own, so the zeros
+  after `split(k.i, 4).tag({k.i.outer: "g.0", k.i.inner: "l.0"})`, a
+  statement stores `f[4*k.i.outer + k.i.inner]`, along no loop of its own, so the zeros
   stay on every work item and the tag is refused, saying so. Keeping the
   array in a window (`contract`) or computing it where it is read
   (`substitute`) drops the zeros, and so would a schedule wherever no read
@@ -1414,9 +1422,9 @@ interface can change in a minor release; the CHANGELOG says when one does.
   whose binder another statement already uses (as a loop variable or a binder),
   or that its own statement binds over another domain, is lowered under a
   fresh iname (`j_0`), and the binders nested in it follow. The name in the
-  term is unchanged, and so is every message, but a `Schedule` step names such
-  a reduction by its iname in the kernel (`split("j_0", 2)`), which
-  `Lowering.reduction_inames` lists.
+  term is unchanged, and so is every message, and a `Schedule` step names such
+  a reduction by its handle, `split(k.j, 2)`, which reaches the iname
+  `Lowering.reduction_inames` lists; the generated code has the fresh one.
 - The trace-time refusals of hidden state look one level below a name: into
   the containers and the objects it holds (their `__dict__` and their slots),
   the buffers of the arrays it holds (both of a ragged one), and the containers

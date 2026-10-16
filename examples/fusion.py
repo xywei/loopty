@@ -34,27 +34,30 @@ Run this file three ways.
 What is worth reading here
 --------------------------
 
-*A fusion is a map per statement.* ``fuse("flux", "divergence", shift=1)``
-is ``affine`` with the map it builds, ``{ flux_S0[j] -> [j]; divergence_S0[i]
--> [j] : j = i + 1 }``: one loop, the flux first in each step, the divergence
-one step behind. isl decides it as it decides every cast, over the
-dependences between the two calls as well as within each. Without the shift,
+*A fusion is a map per statement.* ``fuse(burgers_rhs.flux.j,
+burgers_rhs.divergence.i, shift=1)`` names the loop of each call it fuses, by
+its path from the program, and is ``affine`` with the map it builds, ``{
+flux_S0[j] -> [j]; divergence_S0[i] -> [j] : j = i + 1 }``: one loop, the flux
+first in each step, the divergence one step behind. isl decides it as it
+decides every cast, over the dependences between the two calls as well as
+within each. Without the shift,
 ``divergence`` at ``i`` would read ``f[i + 1]`` a step before ``flux`` stores
 it, and the refusal names that pair, and the shift that is accepted.
 
 *An intermediate is stored only as long as it is live.* Fused one step
 behind, the divergence reads ``f[j]`` and ``f[j - 2]`` at step ``j``, so three
-cells of ``f`` are live at once: ``contract("f")`` finds that window, ``lambda
-j: j % 3``, and keeps ``f`` in ``double f_window[3]``, each flux computed once.
-It is legal because every cell ``divergence`` reads, ``flux`` stored before the
-read (the ``definedness`` fact), and no read sees its slot overwritten (the
-``no-clobber`` fact): between the flux that stores ``f[j - 2]`` and the read of
-it, the fluxes at ``j - 1`` and ``j`` store into the two other slots. A window
-of two cells is refused with the read and the flux that overwrote it.
+cells of ``f`` are live at once: ``contract(burgers_rhs.f)`` finds that
+window, ``lambda j: j % 3``, and keeps ``f`` in ``double f_window[3]``, each
+flux computed once. It is legal because every cell ``divergence`` reads,
+``flux`` stored before the read (the ``definedness`` fact), and no read sees
+its slot overwritten (the ``no-clobber`` fact): between the flux that stores
+``f[j - 2]`` and the read of it, the fluxes at ``j - 1`` and ``j`` store into
+the two other slots. A window of two cells is refused with the read and the
+flux that overwrote it.
 
-*Or not at all.* ``substitute("f")`` computes ``0.5 * u[j] * u[j]`` at each read
-instead (loopy's ``assignment_to_subst``), twice per flux, and the temporary
-goes, with the loop that zeroed it. That is legal because of the same
+*Or not at all.* ``substitute(burgers_rhs.f)`` computes ``0.5 * u[j] * u[j]``
+at each read instead (loopy's ``assignment_to_subst``), twice per flux, and the
+temporary goes, with the loop that zeroed it. That is legal because of the same
 ``definedness`` fact, and because nothing writes ``u`` in between (the
 ``monotone`` fact over the program as it now runs).
 
@@ -98,13 +101,15 @@ def burgers_rhs(u, rhs):
 
 
 #: The divergence one step behind the flux, in the flux's loop.
-fused = Schedule(burgers_rhs, sizes={"n": N}).fuse("flux", "divergence", shift=1)
+fused = Schedule(burgers_rhs, sizes={"n": N}).fuse(
+    burgers_rhs.flux.j, burgers_rhs.divergence.i, shift=1
+)
 
 #: The same loop, with the flux computed where it is read and never stored.
-substituted = fused.substitute("f")
+substituted = fused.substitute(burgers_rhs.f)
 
 #: The same loop, with the flux kept in the three cells live at once.
-windowed = fused.contract("f")
+windowed = fused.contract(burgers_rhs.f)
 
 
 def velocity(n: int = N) -> np.ndarray:
@@ -143,12 +148,14 @@ def main() -> int:
     print()
 
     try:
-        Schedule(burgers_rhs, sizes={"n": N}).fuse("flux", "divergence")
+        Schedule(burgers_rhs, sizes={"n": N}).fuse(
+            burgers_rhs.flux.j, burgers_rhs.divergence.i
+        )
     except IllegalCast as exc:
         print(f"refused: {exc}")
     print()
     try:
-        fused.contract("f", lambda j: j % 2)
+        fused.contract(burgers_rhs.f, lambda j: j % 2)
     except IllegalCast as exc:
         print(f"refused: {exc}")
     print()

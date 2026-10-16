@@ -194,14 +194,15 @@ def compare(path: str) -> int:
             data = arguments()
             assembly.mass_action(**data)
             runs["native"] = (data["y"].numpy(), data["Ae"].numpy())
-        schedules = {"compiled": Schedule(assembly.mass_action, target="c")}
+        mass_action = assembly.mass_action
+        schedules = {"compiled": Schedule(mass_action, target="c")}
         if len(cells) % 4 == 0:
             schedules["sun"] = (
-                Schedule(assembly.mass_action, target="c")
-                .assume("nc % 4 == 0")
-                .atomic("y")
-                .split("c", 4)
-                .tag(c_inner="ilp")
+                Schedule(mass_action, target="c")
+                .assume(mass_action.nc % 4 == 0)
+                .atomic(mass_action.y)
+                .split(mass_action.c, 4)
+                .tag(mass_action.c.inner, "ilp")
             )
         for name, schedule in schedules.items():
             out = LoopyExecutor().run(schedule, **arguments())

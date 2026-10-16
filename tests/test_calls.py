@@ -855,15 +855,18 @@ def test_a_callees_names_never_capture_the_callers() -> None:
             fill(M[i], 1.0 * i)
 
     assert rows.term.stmts[0].inames == ("i", "n_0")
-    with pytest.raises(ValueError, match="fill's loop n, inlined at .*, is n_0 here"):
-        Schedule(rows).split("n", 2)
-    schedule = Schedule(rows).split("n_0", 2)
+    # the callee's loop is the call's, whatever the caller's term calls it,
+    # and rows.n is the caller's size
+    with pytest.raises(TypeError, match="not the size rows.n"):
+        Schedule(rows).split(rows.n, 2)
+    schedule = Schedule(rows).split(rows.fill.n, 2)
+    assert schedule.nest == ("rows.i", "rows.fill.n.outer", "rows.fill.n.inner")
     fact = LoopyExecutor().differential(rows, schedule, {"M": Arr.zeros((3, 5))})
     assert fact.status is Status.TESTED
 
 
 def test_a_schedule_of_a_caller_is_checked_and_runs() -> None:
-    schedule = Schedule(calls.matvec).split("i", 2)
+    schedule = Schedule(calls.matvec).split(calls.matvec.i, 2)
     assert all(f.status is Status.DECIDED for f in schedule.facts())
     A, x = RNG.standard_normal((5, 3)), RNG.standard_normal(3)
     inputs = {"A": Arr.from_numpy(A), "x": Arr.from_numpy(x), "y": Arr.zeros(5)}
@@ -1365,7 +1368,7 @@ def test_a_schedule_of_a_kernel_that_calls_first_is_at_its_own_line() -> None:
     # schedule's facts and its run were placed there, in the callee (#259).
     # They are at the line of the step that made them.
     here = sys._getframe().f_lineno
-    split = Schedule(calls.assemble).split("c", 4)
+    split = Schedule(calls.assemble).split(calls.assemble.c, 4)
     assert {fact.where for fact in split.facts()} == {f"test_calls.py:{here + 1}"}
     fact = LoopyExecutor().differential(calls.assemble, split, _mesh_inputs())
     assert fact.status is Status.TESTED
@@ -1375,28 +1378,32 @@ def test_a_schedule_of_a_kernel_that_calls_first_is_at_its_own_line() -> None:
 def test_a_callees_updates_race_with_a_pair_of_both_loops_until_atomic() -> None:
     # The pair is read off the schedule's example inputs: the caller's c and
     # the callee's k, which the call nests inside it.
-    split = Schedule(calls.assemble).example(**_mesh_inputs()).split("c", 32)
+    split = (
+        Schedule(calls.assemble).example(**_mesh_inputs()).split(calls.assemble.c, 32)
+    )
     with pytest.raises(IllegalCast) as caught:
-        split.tag(c_outer="g.0", c_inner="l.0")
+        split.tag({calls.assemble.c.outer: "g.0", calls.assemble.c.inner: "l.0"})
     # the callee's statement, at the caller's c and the callee's k
     assert str(caught.value) == (
-        "tag(c_outer='g.0', c_inner='l.0') illegal: y[cell[k]] += yl[k] "
+        "tag({assemble.c.outer: 'g.0', assemble.c.inner: 'l.0'}) illegal: "
+        "y[cell[k]] += yl[k] "
         f"({where(calls.add_local, 'y[cell[k]] +=')}) at c=0, k=2 and at c=1, k=1 both "
         "update y[3] on the "
         "schedule's example inputs (nc=2, nv=4), "
-        "where cell[0, 2] = 3 and cell[1, 1] = 3, and the loop c_inner on l.0 "
-        "runs them on two work items, so one can overwrite what the other "
-        "added; make the updates atomic, with atomic('y') before this step"
+        "where cell[0, 2] = 3 and cell[1, 1] = 3, and the loop assemble.c.inner on "
+        "l.0 runs them on two work items, so one can overwrite what the other "
+        "added; make the updates atomic, with atomic(assemble.y) before this step"
     )
     atomic = (
         Schedule(calls.assemble)
-        .atomic("y")
-        .split("c", 32)
-        .tag(c_outer="g.0", c_inner="l.0")
+        .atomic(calls.assemble.y)
+        .split(calls.assemble.c, 32)
+        .tag({calls.assemble.c.outer: "g.0", calls.assemble.c.inner: "l.0"})
     )
     assert (
-        "atomic updates of y run at the same time after tag(c_outer='g.0', "
-        "c_inner='l.0'), so their sum is reassociated and compared at 'reassoc'"
+        "atomic updates of assemble.y run at the same time after "
+        "tag({assemble.c.outer: 'g.0', assemble.c.inner: 'l.0'}), so their sum is "
+        "reassociated and compared at 'reassoc'"
     ) in [fact.statement for fact in atomic.facts()]
     fact = LoopyExecutor().differential(
         calls.assemble, calls.assembled_in_no_order, _mesh_inputs()
@@ -1408,9 +1415,9 @@ def test_a_callees_updates_race_with_a_pair_of_both_loops_until_atomic() -> None
 def test_a_callees_updates_compile_atomic_on_opencl(plain_opencl) -> None:
     schedule = (
         Schedule(calls.assemble, target="opencl")
-        .atomic("y")
-        .split("c", 32)
-        .tag(c_outer="g.0", c_inner="l.0")
+        .atomic(calls.assemble.y)
+        .split(calls.assemble.c, 32)
+        .tag({calls.assemble.c.outer: "g.0", calls.assemble.c.inner: "l.0"})
     )
     assert schedule.buildable == (True, "")
     code = emit_code(schedule)
@@ -1439,8 +1446,8 @@ def test_an_integer_a_callee_is_given_keeps_its_update_exact() -> None:
     assert (stmt.kind, stmt.exactness) == ("accumulate", "exact")
     kinds = {fact.kind for fact in _facts(tally)}
     assert "exactness" in kinds and "disjoint-writes" not in kinds
-    with pytest.raises(IllegalCast, match="the accumulation into m is exact"):
-        Schedule(tally).atomic("m")
+    with pytest.raises(IllegalCast, match="the accumulation into tally.m is exact"):
+        Schedule(tally).atomic(tally.m)
 
 
 def test_a_window_of_an_array_called_kernels_store_and_read() -> None:
@@ -1453,19 +1460,21 @@ def test_a_window_of_an_array_called_kernels_store_and_read() -> None:
     (clobber,) = [f for f in calls.windowed_rows.facts() if f.kind == "no-clobber"]
     assert clobber.status is Status.DECIDED
     assert clobber.statement == (
-        "no read of f sees its slot overwritten after contract('f', lambda e, j: "
-        "j % 3): f kept in 3 cells, f[e, j] in slot j % 3"
+        "no read of burgers_rows.f sees its slot overwritten after "
+        "contract(burgers_rows.f, lambda e, j: j % 3): burgers_rows.f kept in 3 "
+        "cells, f[e, j] in slot j % 3"
     )
     # each callee's statement, at the program's loop over the rows, which
     # the second call names e_0, by the name the source gives it
     assert calls.rejected_window_of_two_rows().startswith(
-        "contract('f', lambda e, j: j % 2) illegal: rhs[i] = -(f[i + 1] - "
+        "contract(burgers_rows.f, lambda e, j: j % 2) illegal: rhs[i] = "
+        "-(f[i + 1] - "
         f"f[i - 1]) / 2 ({where(calls.centred, 'rhs[i] =')}) at e=0, i=1 reads "
         f"f[0, 0], which f[j] = 0.5 * u[j] * u[j] ({where(calls.half_square, '= 0.5')})"
         " at e=0, j=0 stored in slot 0, after the same statement at e=0, j=2 "
         "stored f[0, 2] there"
     )
-    registers = calls.fused_rows.contract("f", registers=True)
+    registers = calls.fused_rows.contract(calls.burgers_rows.f, registers=True)
     for schedule in (calls.windowed_rows, registers):
         inputs = {
             "u": Arr.from_numpy(RNG.standard_normal((3, 8))),
@@ -1492,7 +1501,7 @@ def test_a_callee_reads_through_a_declared_layout() -> None:
         inputs["u"].numpy(), flat.reshape(2, 3, 3, order="F")
     )
     inputs = {"flat": Arr.from_numpy(flat), "u": Arr.zeros((2, 3, 3))}
-    schedule = Schedule(calls.unflatten).split("e", 2)
+    schedule = Schedule(calls.unflatten).split(calls.unflatten.e, 2)
     fact = LoopyExecutor().differential(calls.unflatten, schedule, inputs)
     assert fact.status is Status.TESTED
 

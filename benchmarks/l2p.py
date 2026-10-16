@@ -757,28 +757,17 @@ def loopty_arguments(inputs: dict) -> dict:
 VARIANTS = ("fused", "unrolled", "unfused", "windowed", "unrolled_windowed")
 
 
-def unrolled(schedule: Any) -> Any:
+def unrolled(schedule: Any, l2p: Any) -> Any:
     """``schedule`` with the triangle's loops unrolled: every loop over ``a`` and ``b``.
 
     Those of the calls, which loop over the box's triangle within the loop
     over the boxes, and the Taylor sum's, which runs inside the loop over a
-    box's targets: every loop of a call's statements that is not its
-    outermost or the targets', and every loop of a sum. loopy writes each
-    out over the triangle's bounding box with the triangle as a guard
-    (``unr``), as plain loopy's ``unrolled`` variant has it; the arrays the
-    program zeroes keep their loops.
+    box's targets. loopy writes each out over the triangle's bounding box
+    with the triangle as a guard (``unr``), as plain loopy's ``unrolled``
+    variant has it; the arrays the program zeroes keep their loops.
     """
-    order = schedule.order
-    rank = {name: k for k, name in enumerate(order)}
-    entry = schedule.kernel.default_entrypoint
-    loops: set[str] = set()
-    for insn in entry.instructions:
-        if insn.id.endswith("_zeros") or not insn.within_inames:
-            continue
-        outer = min(insn.within_inames, key=lambda name: rank.get(name, len(rank)))
-        loops |= {name for name in insn.within_inames if name not in (outer, "t")}
-        loops |= set(insn.reduction_inames())
-    return schedule.tag(**dict.fromkeys(sorted(loops), "unr"))
+    calls = (l2p.unpack, l2p.reconstruct, l2p.evaluate)
+    return schedule.tag({loop: "unr" for call in calls for loop in (call.a, call.b)})
 
 
 def loopty_schedule(example: Any, variant: str, target: str) -> Any:
@@ -796,28 +785,22 @@ def loopty_schedule(example: Any, variant: str, target: str) -> Any:
     if variant == "fused":
         schedule = example.fused
     elif variant == "unrolled":
-        schedule = unrolled(example.fused)
+        schedule = unrolled(example.fused, example.l2p)
     elif variant == "windowed":
         schedule = example.contracted
     elif variant == "unrolled_windowed":
-        schedule = unrolled(example.contracted)
+        schedule = unrolled(example.contracted, example.l2p)
     elif variant == "unfused":
         schedule = Schedule(example.l2p, target="c")
     else:
         raise SystemExit(f"--variant is one of {', '.join(VARIANTS)}, not {variant!r}")
     if target == "opencl":
-        # every loop over the boxes: the outermost loop of each statement, the
-        # calls' and those that zero the arrays the program makes (a window
-        # has none)
-        order = schedule.order
-        entry = schedule.kernel.default_entrypoint
-        rank = {name: k for k, name in enumerate(order)}
-        boxes = {
-            min(insn.within_inames, key=lambda name: rank.get(name, len(rank)))
-            for insn in entry.instructions
-            if insn.within_inames
-        }
-        schedule = schedule.retarget("opencl").tag(**dict.fromkeys(boxes, "g.0"))
+        # every loop over the boxes, each call's (one loop once they are
+        # fused); the arrays the program makes are zeroed where they are
+        # stored, on the same work group
+        l2p = example.l2p
+        boxes = (l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box)
+        schedule = schedule.retarget("opencl").tag(dict.fromkeys(boxes, "g.0"))
     return schedule
 
 

@@ -10,6 +10,7 @@ from lanky.terms import evaluate_annotations
 
 from lines import where
 from loopty import Arr, Fin, Schedule, reduce_sum
+from loopty.handles import scope
 from loopty.schedule import IllegalCast
 from loopty.source import LIMIT, instances_text
 from loopty.trace import trace
@@ -82,11 +83,12 @@ def test_a_body_with_no_file_is_named_by_its_ids() -> None:
         namespace,
     )
     chain = namespace["chain"]
-    (stmt,) = term_of(chain).stmts
+    term = term_of(chain)
+    (stmt,) = term.stmts
     assert stmt.text == ""
     with pytest.raises(IllegalCast) as caught:
-        Schedule(term_of(chain), sizes={"n": 4}).tag(i="g.0")
-    assert str(caught.value).startswith("tag(i='g.0') illegal: S0[i=")
+        Schedule(term, sizes={"n": 4}).tag(scope(term).i, "g.0")
+    assert str(caught.value).startswith("tag(chain.i, 'g.0') illegal: S0[i=")
     assert ", read by S0[i=" in str(caught.value)
 
 

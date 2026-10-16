@@ -144,10 +144,11 @@ def main() -> int:
     def spmv_split():
         data = spmv_mod.random_csr()
         inputs = {k: data[k] for k in ("cnt", "col", "val", "x", "y")}
+        spmv = spmv_mod.spmv
         sched = (
-            Schedule(spmv_mod.spmv, target="opencl")
-            .split("j", 2, inner="j_in", outer="j_out")
-            .realize("y", tree=True)
+            Schedule(spmv, target="opencl")
+            .split(spmv.j, 2)
+            .realize(spmv.y, tree=True)
         )
         print("schedule:", repr(sched))
         facts_of(sched)
@@ -160,7 +161,7 @@ def main() -> int:
         print("  max |diff| =", float(np.max(np.abs(np.asarray(got["y"]) - dense))))
 
     ok["spmv split+realize"] = case(
-        "spmv: split(j,2).realize(y) on the device", spmv_split
+        "spmv: split(spmv.j, 2).realize(spmv.y) on the device", spmv_split
     )
 
     # --- spmv: scan on the device -----------------------------------------
@@ -178,12 +179,13 @@ def main() -> int:
     def spmv_device_schedule():
         data = spmv_mod.random_csr()
         inputs = {k: data[k] for k in ("cnt", "col", "val", "x", "y")}
+        spmv = spmv_mod.spmv
         sched = (
-            Schedule(spmv_mod.spmv, target="opencl")
-            .tag(r="g.0")
-            .split("j", 32, inner="j_in", outer="j_out")
-            .tag(j_in="l.0")
-            .realize("y", tree=True)
+            Schedule(spmv, target="opencl")
+            .on_groups(spmv.r)
+            .split(spmv.j, 32)
+            .on_items(spmv.j.inner)
+            .realize(spmv.y, tree=True)
         )
         print("schedule:", repr(sched))
         facts_of(sched)
@@ -191,7 +193,8 @@ def main() -> int:
         report(fact)
 
     ok["spmv g.0/l.0 (design note)"] = case(
-        "spmv: tag(r=g.0).split(j,32).tag(j_in=l.0).realize(y) on the device",
+        "spmv: on_groups(spmv.r).split(spmv.j, 32).on_items(spmv.j.inner)"
+        ".realize(spmv.y) on the device",
         spmv_device_schedule,
     )
 
@@ -199,14 +202,15 @@ def main() -> int:
     def spmv_rows_parallel():
         data = spmv_mod.random_csr()
         inputs = {k: data[k] for k in ("cnt", "col", "val", "x", "y")}
-        sched = Schedule(spmv_mod.spmv, target="opencl").tag(r="g.0")
+        sched = Schedule(spmv_mod.spmv, target="opencl").on_groups(spmv_mod.spmv.r)
         print("schedule:", repr(sched))
         facts_of(sched)
         fact = ex.differential(spmv_mod.spmv, sched, inputs)
         report(fact)
 
     ok["spmv rows parallel g.0"] = case(
-        "spmv: tag(r=g.0), rows across work groups, on the device", spmv_rows_parallel
+        "spmv: on_groups(spmv.r), rows across work groups, on the device",
+        spmv_rows_parallel,
     )
 
     # --- stencil: the illegal tile is still refused on the device ----------
@@ -216,7 +220,7 @@ def main() -> int:
                 sten_mod.jacobi,
                 target="opencl",
                 sizes={"nt": sten_mod.NT, "nx": sten_mod.NX},
-            ).tile("t", "i", 8, 8)
+            ).tile(sten_mod.jacobi.t, sten_mod.jacobi.i, 8, 8)
         except IllegalCast as exc:
             print("refused as expected:")
             print(" ", exc)
@@ -225,18 +229,20 @@ def main() -> int:
         raise AssertionError("the rectangular tiling was accepted on the device target")
 
     ok["stencil illegal tile refused"] = case(
-        "stencil: tile(t,i,8,8) must be refused (device target)", stencil_refused
+        "stencil: tile(jacobi.t, jacobi.i, 8, 8) must be refused (device target)",
+        stencil_refused,
     )
 
     # --- stencil: skew then tile, run on the device ------------------------
     def stencil_skewed():
+        jacobi = sten_mod.jacobi
         sched = (
-            Schedule(sten_mod.jacobi, target="opencl")
-            .skew("i", by="t")
-            .tile("t", "i", 8, 8)
+            Schedule(jacobi, target="opencl")
+            .skew(jacobi.i, by=jacobi.t)
+            .tile(jacobi.t, jacobi.i, 8, 8)
         )
         print("schedule:", repr(sched))
-        print("loop nest:", " ".join(sched.order))
+        print("loop nest:", " ".join(sched.nest))
         facts_of(sched)
         inputs = sten_mod.example_inputs()
         fact = ex.differential(sten_mod.jacobi, sched, inputs)
@@ -247,7 +253,9 @@ def main() -> int:
         print(np.array2string(np.asarray(got["u"])[:3, :7], precision=4))
 
     ok["stencil skew+tile"] = case(
-        "stencil: skew(i, by=t).tile(t,i,8,8) on the device", stencil_skewed
+        "stencil: skew(jacobi.i, by=jacobi.t).tile(jacobi.t, jacobi.i, 8, 8) on "
+        "the device",
+        stencil_skewed,
     )
 
     # --- reshape: the transpose, split and interchanged, on the device -----
@@ -260,11 +268,15 @@ def main() -> int:
                     target="opencl",
                     sizes={"n": resh_mod.ROWS, "m": resh_mod.COLS},
                 )
-                .split("i", 2, inner="i_in", outer="i_out")
-                .interchange("i_out", "j", "i_in")
+                .split(resh_mod.transpose.i, 2)
+                .interchange(
+                    resh_mod.transpose.i.outer,
+                    resh_mod.transpose.j,
+                    resh_mod.transpose.i.inner,
+                )
             )
             print("schedule:", repr(sched))
-            print("loop nest:", " ".join(sched.order))
+            print("loop nest:", " ".join(sched.nest))
             facts_of(sched)
             inputs = resh_mod.example_inputs()["transpose"]
             fact = ex.differential(resh_mod.transpose, sched, inputs)
@@ -276,7 +288,8 @@ def main() -> int:
                   bool(np.array_equal(np.asarray(got["b"]), expected)))
 
         ok["reshape transpose split+interchange"] = case(
-            "reshape: transpose split(i,2).interchange(i_out,j,i_in) on the device",
+            "reshape: transpose split(transpose.i, 2).interchange(transpose.i.outer, "
+            "transpose.j, transpose.i.inner) on the device",
             reshape_transpose,
         )
 
