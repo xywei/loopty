@@ -191,8 +191,10 @@ export LANKY_LEAN_MATHLIB=~/mathlib
 ```
 
 The first check with Lean builds Lean's REPL, which takes about a minute and
-the network. A check after it reads Lean's answers from a cache and starts no
-Lean. [Install](#install) has the rest.
+the network, and the first check of a file asks Lean about everything it
+states. Checking the file again reads Lean's answers from a cache and starts
+no Lean, also for a question the first check ran out of time on.
+[Install](#install) has the rest.
 
 ## Where the limits are
 
