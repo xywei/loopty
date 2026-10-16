@@ -55,6 +55,12 @@ computed it at each of its terms, of which there may be none:
 - Nothing is moved out of a branch that is not always taken, of a
   conditional, an ``and`` or an ``or``, out of a subscript, which loopy reads
   as affine, or out of a substitution.
+- Nothing is moved out of a statement with a sum on a hardware axis,
+  ``l.0`` say: loopy runs the statement on that axis, and every instruction
+  of a kernel on every local axis it uses, which a temporary of the
+  statement's loops alone would not be. A loop of the statement on an axis,
+  ``g.0``, ``ilp`` or ``vec``, is the temporary's loop too, and loopy keeps
+  one per work item, per lane or per vector component of it.
 
 An operand of a sum nested in another that reads the outer sum's binders and
 not the inner's stays: a loopy instruction cannot run inside another's sum.
@@ -76,6 +82,7 @@ from typing import Any
 import islpy as isl
 import loopy as lp
 import pymbolic.primitives as prim
+from loopy.diagnostic import LoopyError
 from loopy.symbolic import Reduction as LoopyReduction
 from loopy.symbolic import TypeCast, get_dependencies
 
@@ -119,7 +126,9 @@ def hoist_invariants(kernel: Any) -> Any:
     candidates = [
         insn
         for insn in entry.instructions
-        if isinstance(insn, lp.Assignment) and _has_reduction(insn.expression)
+        if isinstance(insn, lp.Assignment)
+        and _has_reduction(insn.expression)
+        and not _summed_on_hardware(entry, insn)
     ]
     if not candidates:
         return kernel
@@ -185,6 +194,22 @@ def hoist_invariants(kernel: Any) -> Any:
 def _has_reduction(expr: Any) -> bool:
     """Whether a sum is anywhere in ``expr``."""
     return any(isinstance(node, LoopyReduction) for node in walk(expr))
+
+
+def _summed_on_hardware(entry: Any, insn: Any) -> bool:
+    """Whether a sum of ``insn`` runs on a hardware axis, ``l.0`` say.
+
+    loopy then runs the statement on that axis too, once per group, and
+    every instruction of a kernel on every local axis the kernel uses
+    (``check_for_unused_hw_axes_in_insns``), which an instruction in the
+    statement's loops alone does not: such a sum's operands stay in it.
+    """
+    from loopy.kernel.data import HardwareConcurrentTag
+
+    return any(
+        entry.iname_tags_of_type(name, HardwareConcurrentTag)
+        for name in insn.reduction_inames()
+    )
 
 
 class _Operands:
@@ -454,13 +479,12 @@ class _Operands:
                     domain, assumptions = isl.align_two(domain, self.entry.assumptions)
                     domain = domain & assumptions
                 self._instances = (domain,)
-            except isl.Error:  # pragma: no cover - isl declines: none in bounds
+            except (LoopyError, isl.Error):  # pragma: no cover - none in bounds
                 self._instances = (None,)
         return self._instances[0]
 
     def _in_bounds(self, node: Any, domain: Any) -> bool:
         """Whether the cells subscript ``node`` reads are inside its array's shape."""
-        from loopy.diagnostic import LoopyError
         from loopy.isl_helpers import make_slab
         from loopy.symbolic import get_access_map
 
@@ -523,7 +547,7 @@ class _Operands:
             nest, whole = isl.align_two(nest, whole)
             whole = isl.align_spaces(whole, nest)
             always = nest.is_subset(whole)
-        except isl.Error:  # pragma: no cover - isl declines: the reads stay
+        except (LoopyError, isl.Error):  # pragma: no cover - the reads stay
             always = False
         self._always[bound] = always
         return always

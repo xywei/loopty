@@ -121,6 +121,17 @@ def guarded(
 
 
 @kernel
+def spread(
+    a: Arr[Fin[32], Real],
+    x: Arr[Fin[n], Real],  # noqa: F821
+    y: Arr[Fin[n], Real],  # noqa: F821
+):
+    """A sum a group's work items can share, one term each."""
+    for r in y.dom:
+        y[r] = reduce_sum(a[j] * (x[r] * 2.0) for j in a.dom)
+
+
+@kernel
 def nested(
     a: Arr[Fin[m], Real],  # noqa: F821
     b: Arr[Fin[q], Real],  # noqa: F821
@@ -306,6 +317,17 @@ def test_a_single_precision_operand_of_a_double_sum_stays() -> None:
     code = body(emit_code(mixed), "mixed")
     assert "invariant" not in code
     assert "acc_j = acc_j + a[j] * (x[i] * x[i]);" in code
+
+
+def test_a_sum_on_a_local_axis_keeps_its_operands(plain_opencl) -> None:
+    # loopy runs the statement on l.0 with its sum, and refuses an
+    # instruction that runs on no local axis in a kernel that uses one.
+    schedule = Schedule(spread, target="opencl").tag({spread.j: "l.0", spread.r: "g.0"})
+    assert schedule.buildable == (True, "")
+    assert "invariant_0" not in schedule.kernel.default_entrypoint.temporary_variables
+    with declining():
+        code = lp.generate_code_v2(schedule.kernel).device_code()
+    assert "x[gid(0)] * 2.0" in code
 
 
 def test_an_operand_under_a_guard_is_computed_under_it() -> None:

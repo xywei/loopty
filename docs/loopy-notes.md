@@ -1734,7 +1734,11 @@ the bits and the reads:
   `float32` operand of a double sum stays.
 - Nothing moves out of a conditional, an `and` or an `or`, which evaluate a
   part only sometimes, out of a subscript, which loopy reads as affine, or
-  out of a substitution, whose body loopy expands later.
+  out of a substitution, whose body loopy expands later. Nor out of a
+  statement with a sum on a local axis: loopy runs that statement on the
+  axis (`realize_reduction`) and refuses an instruction that does not run
+  on every local axis of its kernel (`check_for_unused_hw_axes_in_insns`),
+  as a temporary of the statement's loops alone would not.
 - The temporary is assigned under the statement's predicates, after what the
   statement waits for, where the sum computed the operand at each of its
   terms, of which there may be none. An operand that reads arrays moves
