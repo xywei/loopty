@@ -1449,6 +1449,10 @@ class Applied:
     arithmetic. So Lean checks that the theorem applies, and not only what
     follows from it. A claim about reals is a part of Mathlib's
     (:attr:`lanky.obligations.Part.mathlib`).
+
+    The theorem's hypothesis is a citation (:func:`loopty.obligations.cited`):
+    lanky restates it from the text the theorem's own command proved, not by
+    printing the theorem again.
     """
 
     term: Term
@@ -1458,7 +1462,13 @@ class Applied:
 
     def lean_obligation(self) -> Any:
         """The part, stated from the theorem's term and the kernel's postcondition."""
-        from loopty.obligations import Claim, _declined, _lanky_obligations, _obligation
+        from loopty.obligations import (
+            Claim,
+            _declined,
+            _lanky_obligations,
+            _obligation,
+            cited,
+        )
 
         lanky = _lanky_obligations()
         if not hasattr(lanky, "Application"):
@@ -1518,6 +1528,7 @@ class Applied:
             closed,
             hints,
             **extra,
+            **cited(guards, (application.theorem,)),
         )
         return _obligation(
             [part],

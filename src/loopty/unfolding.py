@@ -683,7 +683,8 @@ class Unfolded:
     reals, with the steps as :class:`lanky.obligations.Rewrite` hints. It
     prints as the postcondition, and is offered to Lean alone: no other
     oracle takes it, so without Lean the fact keeps what the native runs
-    found.
+    found. Each theorem is a citation (:func:`loopty.obligations.cited`),
+    which lanky restates from the text the theorem's own command proved.
     """
 
     term: Term
@@ -692,7 +693,13 @@ class Unfolded:
 
     def lean_obligation(self) -> Any:
         """The parts, one per conjunct, stated from the equations and the theorems."""
-        from loopty.obligations import Claim, _declined, _lanky_obligations, _obligation
+        from loopty.obligations import (
+            Claim,
+            _declined,
+            _lanky_obligations,
+            _obligation,
+            cited,
+        )
 
         lanky = _lanky_obligations()
         fields = getattr(lanky.Part, "__dataclass_fields__", {})
@@ -731,6 +738,7 @@ class Unfolded:
                     closed,
                     lanky.Hints(rewrites=tuple(rewrites)),
                     mathlib=True,
+                    **cited(guards, plan_.theorems),
                 )
             )
         return _obligation(parts, rests_on=self.rests_on, decider="")

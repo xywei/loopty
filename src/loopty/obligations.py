@@ -376,6 +376,43 @@ def _declined(reason: str) -> Any:
     return _lanky_obligations().Obligation(declined=reason)
 
 
+def cited(guards: Sequence[str], theorems: Sequence[Any]) -> dict[str, Any]:
+    """The citations of a part that states ``theorems`` as hypotheses, as keywords.
+
+    ``guards`` are the rendered conjuncts of the part's guard, and each
+    theorem's statement is the conjunct that renders as its term. lanky's
+    Lean oracle restates each from the text the theorem's own command proved
+    (``lanky.obligations.Citation``), so a printer that dropped a condition of
+    the theorem cannot hand the part a hypothesis that proves anything; a
+    part whose conjunct is not the theorem's statement is refused before
+    Lean is asked. A theorem with no fact id names nothing to restate from,
+    and a lanky without citations, 0.4.0 and before, gets no keyword: it
+    prints the statement as it always did.
+    """
+    lanky = _lanky_obligations()
+    if not hasattr(lanky, "Citation") or "citations" not in getattr(
+        lanky.Part, "__dataclass_fields__", {}
+    ):
+        return {}
+    citations = []
+    seen: set[int] = set()
+    for theorem in theorems:
+        identifier = getattr(theorem, "fact_id", "")
+        statement = getattr(theorem, "term", None)
+        if not identifier or statement is None:
+            continue
+        try:
+            position = list(guards).index(render(statement))
+        except ValueError:
+            continue
+        if position in seen:
+            continue
+        seen.add(position)
+        name = getattr(theorem, "__name__", "") or identifier
+        citations.append(lanky.Citation(position, identifier, name))
+    return {"citations": tuple(citations)} if citations else {}
+
+
 #: Why a fact loopty states for isl only is not stated for Lean.
 ISL_ONLY = (
     "loopty states this kind of fact for isl only, from sets isl computed, and "
