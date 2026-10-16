@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "loopty"
-version = "0.3.0"
+version = "0.4.0"
 description = "loopy, with types. A typed polyhedral layer over loopy."
 readme = "README.md"
 license = "MIT"
@@ -60,7 +60,7 @@ dependencies = [
     # 0.3.0 is the lanky whose Lean oracle proves a plugin's parts with its
     # solver's hints, which loopty states its isl facts as, and whose families
     # take several indices, which the five demos write their theorems with.
-    "lanky>=0.3.0",
+    "lanky>=0.4.0",
 ]
 
 [project.optional-dependencies]
