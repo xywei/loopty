@@ -357,7 +357,7 @@ def _refuse_table_bounds(tracer: Tracer) -> None:
             "before the loop it bounds, from its arguments. Pass the bounds as "
             "an array of whole numbers (counts: Arr[Fin[k], Nat]), as a ragged "
             "family's counts are, or write the loop over the largest bound with "
-            "a when(...) guard"
+            "an if on the table's value inside it"
         )
 
 
@@ -5892,8 +5892,8 @@ def _reduction_condition_message(
         "point, while the body skips the points the condition excludes. isl "
         "states an affine comparison of loop variables, sizes and integral "
         f"scalars, and this condition {why}.{split} Otherwise write each term "
-        "to an indexed cell, 0.0 where the condition is false and the term "
-        "under 'with when(condition):', and sum the cells."
+        "to an indexed cell, 't[k] = term if condition else 0.0', and sum the "
+        "cells."
     )
 
 
@@ -6463,6 +6463,47 @@ _TRUTH_OWN: dict[str, Any] = {}
 _BRANCHING = threading.local()
 
 
+class _FrameOut:
+    """``sys`` as lanky's own ``__bool__`` sees it when a wrapper calls it.
+
+    lanky tells who asked for a truth value by ``sys._getframe(1)``, the frame
+    that called ``__bool__``: the ``if`` clause of the generator it traces
+    for a sum is answered by recording a guard, and anything else is refused
+    (``SymbolicBoolError``). Called from :func:`_proposition_truth`, that
+    frame is the wrapper's, and the clause of every sum in a traced body was
+    refused. This ``sys`` answers a frame past the wrapper, the one that
+    asked it, and is ``sys`` in every other respect.
+    """
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(sys, name)
+
+    @staticmethod
+    def _getframe(depth: int = 0) -> Any:
+        # 0 is this function's frame and 1 lanky's __bool__; past that, the
+        # wrapper's frame is skipped.
+        return sys._getframe(depth + 2 if depth >= 1 else 1)
+
+
+def _as_asked(own: Any) -> Any:
+    """lanky's ``__bool__`` ``own``, seeing the frame that asked the wrapper.
+
+    A copy of the function whose module ``sys`` is :class:`_FrameOut`, with
+    the same code, closure (``super()`` reads its class there) and defaults.
+    Anything but a Python function is returned as it is.
+    """
+    if not isinstance(own, FunctionType):
+        return own
+    names = dict(own.__globals__)
+    names["sys"] = _FrameOut()
+    copy = FunctionType(
+        own.__code__, names, own.__name__, own.__defaults__, own.__closure__
+    )
+    copy.__kwdefaults__ = own.__kwdefaults__
+    copy.__qualname__ = own.__qualname__
+    return copy
+
+
 def _deciding() -> Tracer | None:
     """The tracer that answers a truth value asked now, or ``None``.
 
@@ -6548,7 +6589,7 @@ def _answering_branches() -> Iterator[None]:
                 _TRUTH_SAVED[role] = vars(cls).get("__bool__")
                 own = cls.__bool__
                 if own is not wrappers[role]:
-                    _TRUTH_OWN[role] = own
+                    _TRUTH_OWN[role] = _as_asked(own)
                 cls.__bool__ = wrappers[role]
         _BRANCHING_BODIES += 1
     _BRANCHING.depth = getattr(_BRANCHING, "depth", 0) + 1
