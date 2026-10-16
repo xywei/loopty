@@ -5838,10 +5838,12 @@ def lower_reductions(
         )
         loop_domain = None
         if tracer.guard() is not None or expr.guard is not None:
-            # Where the sum starts and reads its bounds: the statement's guard
-            # masks the write, and the clause is tested after the range is
-            # read, so neither narrows it. An outer generator's clause does:
-            # the inner sum is in its body, which runs only where it holds.
+            # Where the sum starts and reads its bounds: the clause is tested
+            # after the range is read, so it does not narrow it, and the
+            # statement's path is left out too, which only widens where an
+            # if lets the sum start (Reduction.loop_domain). An outer
+            # generator's clause does narrow it: the inner sum is in its
+            # body, which runs only where it holds.
             loop_domain = domain_set(
                 (*tracer.inames, *inames),
                 (*tracer.bounds, *bounds),
