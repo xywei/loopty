@@ -1673,9 +1673,11 @@ def _runs(
     from loopty.faithful import _copy
 
     native = {name: _copy(value) for name, value in arguments.items()}
-    kernel(**native)
     compiled_args = {name: _copy(value) for name, value in arguments.items()}
-    compiled = LoopyExecutor().run(schedule, **compiled_args)
+    with np.errstate(all="ignore"):
+        # an overflow at a magnitude extreme is what the row measures
+        kernel(**native)
+        compiled = LoopyExecutor().run(schedule, **compiled_args)
     want = {}
     for name in compiled:
         value = native.get(name)
@@ -1903,7 +1905,12 @@ class Rows:
         return ""
 
     def facts(self, schedule: Any) -> tuple[Fact, ...]:
+        """The rows, on the schedule's example inputs, or else the file's."""
         arguments = _example_arguments(schedule, self.kernel)
+        if arguments is None:
+            if not hasattr(self, "_file"):
+                self._file = _file_examples(self.kernel)
+            arguments = self._file
         key = id(arguments) if arguments is not None else 0
         made = self._made.get(key)
         if made is None:
@@ -1992,26 +1999,23 @@ class Rows:
 
 
 def _example_arguments(schedule: Any, kernel: Any) -> Mapping[str, Any] | None:
-    """The example inputs of ``schedule``, or the file's ``example_inputs()``'s."""
-    examples = getattr(schedule, "_examples", None)
-    if examples is not None:
-        return examples
+    """The example inputs of ``schedule``, or ``None`` when it was given none."""
+    return getattr(schedule, "_examples", None)
+
+
+def _file_examples(kernel: Any) -> Mapping[str, Any] | None:
+    """The kernel's inputs in its file's ``example_inputs()``, as ``loopty run``'s."""
     fn = getattr(kernel, "fn", None)
-    globals_ = getattr(fn, "__globals__", None) or {}
-    maker = globals_.get("example_inputs")
+    maker = (getattr(fn, "__globals__", None) or {}).get("example_inputs")
     if not callable(maker):
         return None
-    cache = globals_.setdefault("__loopty_rewrite_examples__", {})
-    if "inputs" not in cache:
-        try:
-            cache["inputs"] = maker()
-        except Exception:  # noqa: BLE001 - no inputs, then
-            cache["inputs"] = None
-    inputs = cache["inputs"]
+    try:
+        inputs = maker()
+    except Exception:  # noqa: BLE001 - a file whose inputs raise gives none
+        return None
     if not isinstance(inputs, Mapping):
         return None
-    name = getattr(kernel, "__name__", None)
-    found = inputs.get(name)
+    found = inputs.get(getattr(kernel, "__name__", None))
     return found if isinstance(found, Mapping) else None
 
 

@@ -3654,12 +3654,13 @@ class Schedule:
         term, and a rewrite's rows say that :attr:`term` computes what it does
         over the reals or the complex numbers (:mod:`loopty.rewriting`).
         """
-        return self._traced
+        return self.__dict__.get("_traced", self._term)
 
     @property
     def rewritten(self) -> frozenset[str]:
         """The arrays a math step rewrote, compared at ``approx`` (:meth:`rewrite`)."""
-        return frozenset(rows.rewritten.array for rows in self._rewrites)
+        steps = self.__dict__.get("_rewrites", ())
+        return frozenset(rows.rewritten.array for rows in steps)
 
     @property
     def where(self) -> str:
@@ -7458,7 +7459,7 @@ class Schedule:
             _layouts=dict(self._layouts),
             _term=rewritten.after,
         )
-        out._traced = self._traced
+        out._traced = self.traced
         out._made_at = self._made_at
         out._examples = self._examples
         out._history = (*self._history, text)
@@ -7478,13 +7479,13 @@ class Schedule:
             identifier,
             out._fact_id("math", steps, "compared"),
         )
-        out._rewrites = (*self._rewrites, rows)
+        out._rewrites = (*self.__dict__.get("_rewrites", ()), rows)
         return out
 
     @property
     def rewrites(self) -> tuple[Any, ...]:
         """The math steps taken, each a :class:`loopty.rewriting.Rewritten`."""
-        return tuple(rows.rewritten for rows in self._rewrites)
+        return tuple(rows.rewritten for rows in self.__dict__.get("_rewrites", ()))
 
     def __getattr__(self, name: str) -> Any:
         """An array a math step kept, and its nest: ``factored.r_pass``, ``.r_pass.c``.
@@ -9122,7 +9123,8 @@ class Schedule:
         asked for, under ``lanky check`` and ``loopty run``, since they run
         the kernel: never when the file is imported.
         """
-        rows = tuple(fact for step in self._rewrites for fact in step.facts(self))
+        steps = self.__dict__.get("_rewrites", ())
+        rows = tuple(fact for step in steps for fact in step.facts(self))
         return (*rows, *self._facts)
 
 

@@ -94,16 +94,19 @@ each direction's sections: ``Fr[3*x + 0]`` for the theorem's ``Fr`` and
 programs' runs, compared at the class of ``grad``, since the passes sum in
 another order than the dense operator does.
 
-*How deep each fusion goes.* ``along_s`` reads a whole column of what
-``along_r`` stored in the same ``k``-slab, so the two fuse on ``(q, e, k)``
-and no deeper, ``fuse(passes.along_r.k, passes.along_s.k)``: a fusion
-names the loop of each call it goes down to. The metric product fuses with
-``along_r`` on every loop but the row's, down to ``j``. The refusal of the
-deeper fusion names the pair it would run backwards.
+*How deep each fusion goes.* In ``passes``, ``along_s`` reads a whole column
+of what ``along_r`` stored in the same ``k``-slab, so the two fuse on ``(q,
+e, k)`` and no deeper, ``fuse(passes.along_r.k, passes.along_s.k)``: a
+fusion names the loop of each call it goes down to. The metric product
+fuses with ``along_r`` on every loop but the row's, down to ``j``. The
+refusal of the deeper fusion names the pair it would run backwards. The
+passes derived from the math fuse the same way, on ``(x, d, e, c)``,
+``fuse(factored.r_pass.c, factored.s_pass.c)``.
 
-*What passes between the passes.* Fused so, ``w`` is read one row at a time
-and ``v`` one slab at a time, so ``contract`` keeps them in ``n`` and
-``n * n`` cells, with the no-clobber fact for each.
+*What passes between the passes.* Fused so, ``passes`` reads ``w`` one row
+at a time and ``v`` one slab at a time, so ``contract`` keeps them in ``n``
+and ``n * n`` cells (``passes_contracted``), with the no-clobber fact for
+each; ``contracted`` keeps the derived ``r_pass`` a slab at a time.
 
 *On a device.* Every pass reads a column other work items stored, and
 nothing inside one kernel orders two work items through global memory, so
