@@ -117,7 +117,8 @@ proved   proved     lean         l2p.py:340  l2p                no read of l2p.R
                                                                   l2p.R kept in 121 cells, R[box, a, b] in slot (a, b)
 ...
 proved   proved     lean         l2p.py:347  l2p                the order after on_groups(l2p.unpack.box) runs every dependence of l2p forward, within one work item
-tested   tested     upstream     l2p.py:469  l2p                the native run of l2p agrees with sumpy_l2p in pot, on its example inputs
+tested   tested     upstream     l2p.py:469  l2p                the native run of l2p agrees with sumpy_l2p in pot within 1e-14 of the largest value,
+                                                                  on its example inputs
 
 56 facts: 3 decided, 46 proved, 7 tested
 

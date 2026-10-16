@@ -2654,7 +2654,8 @@ decided                          decided    isl          l2p.py:340  l2p        
                                                                                           l2p.C kept in 22 cells, C[box, a, b] in slot (a, b)
 decided                          decided    isl          l2p.py:347  l2p                on_groups(l2p.unpack.box) renames the instances of l2p one for one
 decided                          decided    isl          l2p.py:347  l2p                the order after on_groups(l2p.unpack.box) runs every dependence of l2p forward, within one work item
-tested                           tested     upstream     l2p.py:469  l2p                the native run of l2p agrees with sumpy_l2p in pot, on its example inputs
+tested                           tested     upstream     l2p.py:469  l2p                the native run of l2p agrees with sumpy_l2p in pot within 1e-14 of the largest value,
+                                                                                          on its example inputs
 
 56 facts: 2 assumed, 47 decided, 7 tested
 
