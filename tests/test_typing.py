@@ -10,7 +10,7 @@ from lanky.prelude import Nat, Real
 from lanky.terms import evaluate_annotations
 
 from lines import said
-from loopty import Arr, Fin, reduce_sum, when
+from loopty import Arr, Fin, reduce_sum
 from loopty import typing as rules
 from loopty.oracle import IslOracle, Monotone, Subset
 from loopty.trace import trace
@@ -109,7 +109,7 @@ def gated_past_the_end(
     y: Arr[Fin[n], Real],  # noqa: F821
 ):
     for i in y.dom:
-        with when(flag[i + 1] != 0):
+        if flag[i + 1] != 0:
             y[i] = 2.0
 
 
@@ -252,7 +252,7 @@ def gated_by_a_conjunction(
 ):
     row = y.dom
     for i in row:
-        with when((i + 1 < row.size) & (flag[i + 1] != 0)):
+        if (i + 1 < row.size) & (flag[i + 1] != 0):
             y[i] = 2.0
 
 
@@ -271,7 +271,7 @@ def test_a_guard_read_is_stated_over_the_loop_nest_not_the_narrowed_domain() -> 
 def guarded_shift(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):  # noqa: F821
     row = u.dom
     for i in row:
-        with when(i + 1 < row.size):
+        if i + 1 < row.size:
             v[i] = u[i + 1]
 
 
@@ -292,7 +292,7 @@ def accumulates_where_the_guard_reads(
 ):
     row = y.dom
     for i in row:
-        with when((i + 1 < row.size) & (y[i + 1] != 0)):
+        if (i + 1 < row.size) & (y[i + 1] != 0):
             y[i + 1] = y[i + 1] + 1.0
 
 
@@ -682,7 +682,7 @@ def test_a_fact_over_a_domain_a_guard_left_wide_says_so() -> None:
     # the whole loop nest and the facts about it are about masked instances too.
     def below(a: Real, y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
-            with when(i < a):
+            if i < a:
                 y[i] = 1.0
 
     _term, facts = facts_of(below)
@@ -707,7 +707,7 @@ def test_a_real_guard_no_longer_discharges_an_obligation() -> None:
     # wide. Sound, if not sharp: a Real a no longer proves anything about i.
     def clipped(a: Real, x: Arr[Fin[m], Real], y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
-            with when((i < a) & (a < x.dom.size)):
+            if (i < a) & (a < x.dom.size):
                 y[i] = x[i]
 
     _term, facts = facts_of(clipped)
@@ -728,7 +728,7 @@ def test_a_real_guard_no_longer_discharges_an_obligation() -> None:
 def test_a_guard_isl_states_whole_leaves_nothing_to_say() -> None:
     def below(a: Nat, y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
-            with when(i < a):
+            if i < a:
                 y[i] = 1.0
 
     _term, facts = facts_of(below)
@@ -740,7 +740,7 @@ def test_a_guards_own_read_is_not_over_the_wide_domain() -> None:
     # domain it is stated over, so nothing about it is over-approximated.
     def flagged(flag: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
         for i in y.dom:
-            with when(flag[i] > 0.0):
+            if flag[i] > 0.0:
                 y[i] = 1.0
 
     _term, facts = facts_of(flagged)

@@ -26,7 +26,6 @@ from loopty import (
     kernel,
     program,
     reduce_sum,
-    when,
 )
 from loopty.executor import LoopyExecutor, emit_code
 from loopty.flow import dependences
@@ -95,7 +94,7 @@ def flux(u: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):  # noqa: F821
 def divergence(f: Arr[Fin[n], Real], rhs: Arr[Fin[n], Real]):  # noqa: F821
     """Centred divergence of the flux, inside the boundary."""
     for i in rhs.dom:
-        with when((i > 0) & (i + 1 < rhs.dom.size)):
+        if (i > 0) & (i + 1 < rhs.dom.size):
             rhs[i] = -(f[i + 1] - f[i - 1]) / 2
 
 
@@ -249,7 +248,7 @@ def keep_unmarked(
 ):
     """Copy the entries ``mark`` did not mark."""
     for i in u.dom:
-        with when(~b[i]):
+        if ~b[i]:
             y[i] = u[i]
 
 
@@ -853,17 +852,17 @@ def test_a_parameter_no_kernel_is_given_is_refused() -> None:
 
 def test_a_callee_that_cannot_be_traced_is_named() -> None:
     @kernel
-    def branchy(u: Arr[Fin[n], Real]):  # noqa: F821
+    def looping(u: Arr[Fin[n], Real]):  # noqa: F821
         for i in u.dom:
-            if i > 0:
-                u[i] = 1.0
+            while u[i] < 1.0:
+                u[i] = u[i] + 1.0
 
     @program
-    def calls_branchy(u):
-        branchy(u)
+    def calls_looping(u):
+        looping(u)
 
-    with pytest.raises(TraceError, match="calls branchy at .*cannot be traced"):
-        calls_branchy.trace()
+    with pytest.raises(TraceError, match="calls looping at .*cannot be traced"):
+        calls_looping.trace()
 
 
 @pytest.mark.parametrize(
@@ -1652,7 +1651,7 @@ def clear_next(
     """Sum a row, then clear the length of the next one."""
     for r in y.dom:
         y[r] = reduce_sum(val[r, j] for j in val.dom[r])
-        with when(r + 1 < y.dom.size):
+        if r + 1 < y.dom.size:
             cnt[r + 1] = 0
 
 

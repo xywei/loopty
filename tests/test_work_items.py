@@ -29,7 +29,7 @@ from lanky.prelude import Nat, Real
 
 import hand_terms as ht
 from lines import where
-from loopty import Arr, Fin, kernel, program, reduce_sum, when
+from loopty import Arr, Fin, kernel, program, reduce_sum
 from loopty.handles import scope
 from loopty.isl_reading import declining
 from loopty.schedule import IllegalCast, Schedule
@@ -330,7 +330,7 @@ def halved_columns(u: Arr[Fin[nt], Fin[nx], Real]):  # noqa: F821
     steps = u.dom
     for t in steps:
         for i in u.dom[t]:
-            with when(t + 1 < steps.size):
+            if t + 1 < steps.size:
                 u[t + 1, i] = u[t, i] / 2
 
 
@@ -514,7 +514,7 @@ def running_sums(a: Arr[Fin[nt], Fin[8], Real]):  # noqa: F821
     """Each step's last cell is the sum of the step before."""
     steps = a.dom
     for t in steps:
-        with when(t + 1 < steps.size):
+        if t + 1 < steps.size:
             a[t + 1, 7] = reduce_sum(a[t, k] for k in a.dom[t])
 
 
@@ -680,7 +680,7 @@ def lp_quiet(lp: Any) -> Any:
 def doubled_inside(x: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):  # noqa: F821
     """Each cell but the first twice ``x``'s; the first is left as it is made."""
     for i in f.dom:
-        with when(i > 0):
+        if i > 0:
             f[i] = 2.0 * x[i]
 
 

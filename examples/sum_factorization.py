@@ -77,10 +77,8 @@ def along_r(
     v: Arr[Fin[ne], Fin[n], Fin[n], Real],
 ):
     """``F`` applied along the first reference axis of every element."""
-    for e in v.dom:
-        for a in v.dom[e]:
-            for b in v.dom[e, a]:
-                v[e, a, b] = reduce_sum(F[a, m] * u[e, m, b] for m in F.dom[a])
+    for e, a, b in v.dom:
+        v[e, a, b] = reduce_sum(F[a, m] * u[e, m, b] for m in F.dom[a])
 
 
 @kernel
@@ -90,10 +88,8 @@ def along_s(
     w: Arr[Fin[ne], Fin[n], Fin[n], Real],
 ):
     """``G`` applied along the second reference axis of every element."""
-    for e in w.dom:
-        for a in w.dom[e]:
-            for b in w.dom[e, a]:
-                w[e, a, b] = reduce_sum(G[b, m] * v[e, a, m] for m in G.dom[b])
+    for e, a, b in w.dom:
+        w[e, a, b] = reduce_sum(G[b, m] * v[e, a, m] for m in G.dom[b])
 
 
 @program

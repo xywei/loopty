@@ -38,8 +38,7 @@ kernel reads it by name, and an array of its values is what is passed. Its
 values are finite, since the compiled code writes each one as a literal.
 
 Natively a table is read as an array is, one value at a time: an index is a
-point of its axis, never counted from the end, and a read out of range inside
-a ``when`` block whose guard is false answers zero, as for an array.
+point of its axis, never counted from the end.
 """
 
 from __future__ import annotations
@@ -135,9 +134,7 @@ class Table:
         Natively a table is read as an array is: an index is a point of the
         axis, so a negative one is refused with an ``IndexError`` rather than
         counted from the end, as the compiled kernel would read in front of
-        the table; and inside a ``when`` block whose guard is false, a read
-        out of range answers zero, since nothing the block computes is
-        stored (:func:`loopty.trace.mask_writes`).
+        the table.
         """
         proxy = _traced(self)
         if proxy is not None:
@@ -149,25 +146,15 @@ class Table:
         ):
             # A row, PHI[q], which a kernel the body calls takes as an array
             # (loopty.calls): a view of the values, which nothing can write.
-            # Out of range under a false guard it is a row of zeros, as a
-            # cell is zero there; the call it is given to is not made.
             from loopty.arr import Arr
-            from loopty.trace import _writes_are_masked
 
-            try:
-                if any(part < 0 for part in parts):
-                    raise IndexError(
-                        f"index {key!r} of a table is negative: an index is a "
-                        "point of the table's axis, and is never counted from "
-                        "the end"
-                    )
-                return Arr(self._values[key])
-            except IndexError:
-                if not _writes_are_masked():
-                    raise
-                zeros = np.zeros(self._values.shape[len(parts) :], self._values.dtype)
-                zeros.flags.writeable = False
-                return Arr(zeros)
+            if any(part < 0 for part in parts):
+                raise IndexError(
+                    f"index {key!r} of a table is negative: an index is a "
+                    "point of the table's axis, and is never counted from "
+                    "the end"
+                )
+            return Arr(self._values[key])
         if not (
             isinstance(key, tuple)
             and len(key) == self.ndim
@@ -179,14 +166,7 @@ class Table:
                 "time, PHI[q], which a kernel it calls takes as an array: a "
                 "kernel computes cell by cell"
             )
-        from loopty.trace import _writes_are_masked
-
-        try:
-            return self._array[key]
-        except IndexError:
-            if _writes_are_masked():
-                return 0
-            raise
+        return self._array[key]
 
     def __setitem__(self, key: Any, value: Any) -> None:
         raise TypeError(

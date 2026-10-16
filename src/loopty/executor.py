@@ -702,7 +702,7 @@ class LoopyExecutor:
         A :class:`~loopty.trace.TraceError` from the native run is not raised
         but returned, as a ``refuted`` agreement fact with the refusal as its
         ``reason``, and the scheduled run is not made: the body is refused for
-        its spelling (a ``when`` guard whose native value is an integer, say),
+        its spelling (an integer stored into an array of truth values, say),
         whatever the input, so there is nothing to compare the compiled run
         with. The faithfulness fact counts the same refusal as a disagreement
         (:mod:`loopty.faithful`). Anything else the body raises is the input's

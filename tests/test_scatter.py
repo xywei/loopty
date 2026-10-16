@@ -19,7 +19,7 @@ from lanky.ledger import Status
 from lanky.prelude import Int, Real
 
 from lines import where
-from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum, when
+from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum
 from loopty.executor import LoopyExecutor, emit_code
 from loopty.flow import dependences
 from loopty.interpret import interpret
@@ -118,7 +118,7 @@ def taken_from(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
 def guarded(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     """An addition under a guard that reads the array it adds into."""
     for i in y.dom:
-        with when(y[i] > 0.0):
+        if y[i] > 0.0:
             y[i] += x[i]
 
 

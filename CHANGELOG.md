@@ -18,6 +18,21 @@ took out is refused with that step. Everything a schedule prints names loops
 and arrays by these paths: its repr, its steps in the facts' statements and
 the ledger, the refusals and the fixes they suggest, and `loopty run`.
 
+A kernel body branches with Python's own `if`, `elif` and `else`, `and`,
+`or`, `not` and conditional expressions, and a loop nest is one line,
+`for box, a, b in R.dom:`. The trace runs the body once per path through its
+branches, answering each traced condition from the path, and joins the runs
+into one term; `with when(...)` is gone. The flagship kernel reads as a
+numpy user writes it:
+
+```python
+for box, a, b in R.dom:
+    if a < 2:
+        R[box, a, b] = C[box, a, b]
+    else:
+        R[box, a, b] = -R[box, a - 2, b + 2]
+```
+
 ### Breaking
 
 - **Every step takes handles, and a string is a `TypeError`** that writes
@@ -62,8 +77,59 @@ the ledger, the refusals and the fixes they suggest, and `loopty run`.
   `k.arrays.term` or `k.loops.sizes`, and its definition warns with
   `ShadowedName`, naming the long form. `examples/p2p.py`'s `term` is
   `contribution` for this reason.
+- **`with when(condition):` is removed.** Using it raises a `TraceError`,
+  natively and traced, under any name it is imported as, that shows the
+  `if` to write in its place, read off the source, and an `else` where the
+  next block is the complementary `when`. The native run takes the branch
+  each point takes, where `when` ran the block and masked its writes, so a
+  read the condition protects is not made where it fails: the masked
+  branch read `R[box, a - 2, b + 2]` at `a < 2`, a negative index numpy
+  wraps. `loopy` is unchanged: a statement still carries its path's
+  conditions as predicates.
+
+  | 0.3 | 0.4 |
+  |---|---|
+  | `with when(a < 2):` ... `with when(a >= 2):` ... | `if a < 2:` ... `else:` ... |
+  | `with when((i > 0) & (i + 1 < n)):` | `if i > 0 and i + 1 < n:`, or `if (i > 0) & (i + 1 < n):` |
+  | `with when(~(i > 0)):` | `if not (i > 0):`, or `if i <= 0:`; `if ~(i > 0):` is refused, since `~` of a Python bool is `-2` or `-1`, which Python's `if` takes as true |
+  | `with when(x[i] > 0): f[i] = a[i]` and `with when(x[i] <= 0): f[i] = b[i]` | `f[i] = a[i] if x[i] > 0 else b[i]`, one statement with a select |
+  | `for i in R.dom: for a in R.dom[i]: for b in R.dom[i, a]:` | unchanged, or `for i, a, b in R.dom:` |
+
+- **A condition on a loop variable whose loop has closed** (`if i > 0:`
+  after `for i in x.dom:`) is refused as a write that mentions it is, and
+  **`~` of a Python bool in a condition** is refused by the trace, naming the
+  comparison and `not`: natively it is an integer Python's `if` takes as
+  true, which nothing else refuses.
 
 ### Added
+
+- **Branches** (`loopty.trace`). A traced condition's truth value is
+  answered by the tracer (`Tracer.decide`), which runs the body again until
+  every condition it asked has been answered both ways: one run per path.
+  Each statement carries the conditions of its path as its guard, narrowing
+  its isl domain where isl states them and evaluated at run time otherwise,
+  as `when`'s guard was, and each condition's reads are stated where the
+  conditions before it held (`Stmt.path`): `if i > 0 and x[i - 1] > 0:`
+  reads `x[i - 1]` only where `i > 0`. The runs are joined: a statement
+  after an `if`/`else` is recorded once, its guards `g and c` and `g and not
+  c` merged to `g`; a statement whose value two paths choose between under
+  a condition on data is one statement whose value is a select
+  (`loopty.trace.Select`, pymbolic's `If`, `?:` in C), the value select the
+  advection flux lacked (#266); a path isl shows to be empty (`a < 2` and
+  then `a == 3`) records nothing. One run answers a condition once, as
+  `x and y` asks `x` twice when it is false. The runs are capped at
+  `loopty.trace.MAX_RUNS`, 256, refused past it with the conditions and what
+  to write instead; a `while` on a traced condition is refused, since its
+  paths have no bound; and a branch that raises is refused with its path,
+  `on the branch where a >= 2`. A condition the trace can evaluate, a module
+  constant, is Python's own.
+- **One-line loop nests.** `for box, a, b in R.dom:` is the three loops `for
+  box in R.dom`, `for a in R.dom[box]` and `for b in R.dom[box, a]`, natively
+  and traced, with those binder names and their scoped handles
+  (`reconstruct.box`, `reconstruct.a`, `reconstruct.b`).
+- **A loop whose statements' domains do not merge into one set**, the two
+  points of `if i == 0 or i == n - 1:`, runs over their convex hull,
+  each statement predicated back to its own points.
 
 - **Handles** (`loopty.handles`). A kernel's and a program's attributes are
   its loops, arrays, sizes and calls, made from the traced body: `for` and

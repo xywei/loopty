@@ -10,7 +10,7 @@ import numpy as np
 from lanky import theorem
 from lanky.prelude import Fn, Int, Nat, Real
 
-from loopty import Arr, Fin, Schedule, Where, kernel, layout, program, when
+from loopty import Arr, Fin, Schedule, Where, kernel, layout, program
 
 # {{{ decided
 
@@ -40,9 +40,9 @@ def triangle(
     """The compressed Taylor reconstruction: reals, each equation an atom to isl."""
     for a in R.dom:
         for b in R.dom[a]:
-            with when(a < 2):
+            if a < 2:
                 R[a, b] = c[a, b]
-            with when(a >= 2):
+            if a >= 2:
                 R[a, b] = -R[a - 2, b + 2]
 
 
@@ -71,7 +71,7 @@ def twice(y: Arr[Fin[n], Int]) -> all(y[i] == 1 for i in Fin[n]):
 def from_the_right(y: Arr[Fin[n], Int]) -> all(y[i] == 0 for i in Fin[n] if i + 1 < n):
     """Reads ``y[i + 1]`` before the instance that stores it: true, and not decided."""
     for i in y.dom:
-        with when(i + 1 < y.dom.size):
+        if i + 1 < y.dom.size:
             y[i] = y[i + 1] - y[i + 1]
 
 
@@ -99,7 +99,7 @@ def halves(y: Arr[Fin[n], Int]) -> all(y[i] != 1000003 for i in Fin[n]):
 def first_three(y: Arr[Fin[n], Int]) -> all(y[i] == 1 for i in Fin[n]):
     """Stores only where ``i < 3``: a cell past them holds what it was given."""
     for i in y.dom:
-        with when(i < 3):
+        if i < 3:
             y[i] = 1
 
 
@@ -123,9 +123,9 @@ def lost_sign(
     """Claims the recurrence without its sign: another atom than the one it stores."""
     for a in R.dom:
         for b in R.dom[a]:
-            with when(a < 2):
+            if a < 2:
                 R[a, b] = c[a, b]
-            with when(a >= 2):
+            if a >= 2:
                 R[a, b] = -R[a - 2, b + 2]
 
 
@@ -266,9 +266,9 @@ def reconstruct(
     """``triangle``, citing the theorem whose two hypotheses its postcondition is."""
     for a in R.dom:
         for b in R.dom[a]:
-            with when(a < 2):
+            if a < 2:
                 R[a, b] = c[a, b]
-            with when(a >= 2):
+            if a >= 2:
                 R[a, b] = -R[a - 2, b + 2]
 
 
@@ -291,9 +291,9 @@ def off_by_one(
     """
     for a in R.dom:
         for b in R.dom[a]:
-            with when(a < 2):
+            if a < 2:
                 R[a, b] = c[a, b]
-            with when(a >= 2):
+            if a >= 2:
                 R[a, b] = -R[a - 2, b + 1]
 
 
@@ -312,9 +312,9 @@ def wrong_coefficient(
     """Claims the theorem's recurrence and computes another, off by one in ``b``."""
     for a in R.dom:
         for b in R.dom[a]:
-            with when(a < 2):
+            if a < 2:
                 R[a, b] = c[a, b]
-            with when(a >= 2):
+            if a >= 2:
                 R[a, b] = -R[a - 2, b + 1]
 
 
@@ -554,7 +554,7 @@ def doubled(u: Arr[Fin[n], Int], f: Arr[Fin[n], Int]) -> all(
 def differenced(f: Arr[Fin[n], Int], d: Arr[Fin[n], Int]):
     """The backward difference, at every point after the first."""
     for i in d.dom:
-        with when(i > 0):
+        if i > 0:
             d[i] = f[i] - f[i - 1]
 
 

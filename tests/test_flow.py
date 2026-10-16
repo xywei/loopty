@@ -6,7 +6,7 @@ import islpy as isl
 from lanky.prelude import Int, Nat, Real
 from lanky.terms import evaluate_annotations
 
-from loopty import Arr, Fin, flow, reduce_sum, when
+from loopty import Arr, Fin, flow, reduce_sum
 from loopty.trace import trace
 from loopty.typing import facts_for
 
@@ -27,7 +27,7 @@ def jacobi(u: Arr[Fin[nt], Fin[nx], Real]):  # noqa: F821
     for t in steps:
         row = u.dom[t]
         for i in row:
-            with when((t + 1 < steps.size) & (i > 0) & (i + 1 < row.size)):
+            if (t + 1 < steps.size) & (i > 0) & (i + 1 < row.size):
                 u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
 
 
@@ -82,13 +82,13 @@ def test_the_source_schedule_is_the_2d_plus_1_vector() -> None:
 
 def rolling(u: Arr[Fin[n], Real]):  # noqa: F821
     for i in u.dom:
-        with when(i + 1 < u.dom.size):
+        if i + 1 < u.dom.size:
             u[i] = u[i] + u[i + 1]
 
 
 def signed_guard(a: Int, u: Arr[Fin[n], Real]):  # noqa: F821
     for i in u.dom:
-        with when(a < 0):
+        if a < 0:
             u[i] = 1.0
 
 
@@ -156,7 +156,7 @@ def gated(flag: Arr[Fin[n], Nat], y: Arr[Fin[n], Real]):  # noqa: F821
     """S0 writes the flag S1 is guarded on, so the guard read is a dependence."""
     for i in y.dom:
         flag[i] = 1
-        with when(flag[i] != 0):
+        if flag[i] != 0:
             y[i] = 2.0
 
 
@@ -398,7 +398,7 @@ def counts_rewritten_ahead(
     the length of the next row."""
     for r in y.dom:
         y[r] = reduce_sum(val[r, j] for j in val.dom[r])
-        with when(r + 1 < y.dom.size):
+        if r + 1 < y.dom.size:
             cnt[r + 1] = 0
 
 
@@ -410,7 +410,7 @@ def guarded_rows(
     """A loop over the fiber of every row, with a guard on the row."""
     for r in cnt.dom:
         for j in val.dom[r]:
-            with when(r > 0):
+            if r > 0:
                 z[r, j] = val[r, j]
 
 

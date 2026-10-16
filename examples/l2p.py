@@ -107,7 +107,6 @@ from loopty import (
     reduce_sum,
     table,
     upstream,
-    when,
 )
 from loopty.math import ipow
 
@@ -237,13 +236,11 @@ def unpack(
     The postcondition is sumpy's storage order, ``2 (a + b) - 1 + a`` after
     the value at the centre, decided from what the body stores.
     """
-    for box in C.dom:
-        for a in C.dom[box]:
-            for b in C.dom[box, a]:
-                with when(a + b == 0):
-                    C[box, a, b] = coeffs[box, centre(a, b)]
-                with when(a + b >= 1):
-                    C[box, a, b] = coeffs[box, derivatives((a, b))]
+    for box, a, b in C.dom:
+        if a + b == 0:
+            C[box, a, b] = coeffs[box, centre(a, b)]
+        else:
+            C[box, a, b] = coeffs[box, derivatives((a, b))]
 
 
 @kernel(uses=[on_every_triangle])
@@ -269,13 +266,11 @@ def reconstruct(
     ``G_xx = -G_yy``: a coefficient with two more ``x``'s is minus the one
     with two more ``y``'s, which an earlier row of the triangle stored.
     """
-    for box in R.dom:
-        for a in R.dom[box]:
-            for b in R.dom[box, a]:
-                with when(a < 2):
-                    R[box, a, b] = C[box, a, b]
-                with when(a >= 2):
-                    R[box, a, b] = -R[box, a - 2, b + 2]
+    for box, a, b in R.dom:
+        if a < 2:
+            R[box, a, b] = C[box, a, b]
+        else:
+            R[box, a, b] = -R[box, a - 2, b + 2]
 
 
 #: What sumpy stores for every box, as a table: ``a < 2`` and ``a + b <= P``.
@@ -302,15 +297,14 @@ def evaluate(
     an integer power, in both runs; ``x**a`` would be the C library's ``pow``
     in both, as numpy computes it.
     """
-    for box in pot.dom:
-        for target in pot.dom[box]:
-            x = (tx[box, target] - cx[box]) / rscale
-            y = (ty[box, target] - cy[box]) / rscale
-            pot[box, target] = SCALING * reduce_sum(
-                R[box, a, b] * ipow(x, a) * ipow(y, b) * INV_FACT[a] * INV_FACT[b]
-                for a in R.dom[box]
-                for b in R.dom[box, a]
-            )
+    for box, target in pot.dom:
+        x = (tx[box, target] - cx[box]) / rscale
+        y = (ty[box, target] - cy[box]) / rscale
+        pot[box, target] = SCALING * reduce_sum(
+            R[box, a, b] * ipow(x, a) * ipow(y, b) * INV_FACT[a] * INV_FACT[b]
+            for a in R.dom[box]
+            for b in R.dom[box, a]
+        )
 
 
 @program

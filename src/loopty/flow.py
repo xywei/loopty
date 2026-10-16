@@ -268,7 +268,7 @@ def _assemble(
 
     Not every parameter qualifies. A guard brings its own names into a domain,
     and a signed scalar is a perfectly ordinary thing to guard on:
-    ``with when(a < 0)`` with ``a : Int`` would make the domain empty if ``a``
+    ``if a < 0:`` with ``a : Int`` would make the domain empty if ``a``
     were assumed non-negative here, and an empty domain discharges every
     obligation over it vacuously. Which is why the caller says which names are
     sizes rather than this function assuming all of them are.
@@ -296,7 +296,7 @@ def size_names(term: Term) -> frozenset[str]:
     point of ``Fin[nnz + 1]`` for every such size.
 
     A scalar the kernel takes as a parameter is not one of those. ``a : Int`` is
-    signed, and a guard ``with when(a < 0)`` puts it among the parameters of a
+    signed, and a guard ``if a < 0:`` puts it among the parameters of a
     statement's domain; assuming it non-negative would make that domain empty
     and turn every obligation over it into a vacuous truth. Scalar parameters
     are therefore excluded by name, whatever a derived object's parameter list
@@ -642,18 +642,20 @@ def statement_accesses(stmt: Stmt, term: Term) -> tuple[_Access, ...]:
       obligation, while the write itself is discharged *by type* from ``col``'s
       element sort, so a kernel reading past the end of ``col`` would be
       reported clean.
-    * ``with when(flag[i] != 0)`` reads ``flag[i]`` to decide whether the write
+    * ``if flag[i] != 0:`` reads ``flag[i]`` to decide whether the write
       happens. Recording only the write loses the RAW dependence on an earlier
       statement that writes ``flag``, so a reordering could let the predicate
       observe the old value, and leaves the guard's own access unbounded.
 
-    The guard's reads are stated over the statement's ``loop_domain``, the loop
-    nest before the guard narrowed it, and not over ``domain``. A ``when``
-    evaluates its whole condition at every point and only masks the write, so
-    ``when((i + 1 < n) & (flag[i + 1] != 0))`` reads ``flag[n]`` at
-    ``i = n - 1`` natively even though no write happens there; stating that
-    read over the narrowed domain would prove it in bounds by the very
-    condition that does not protect it.
+    The guard's reads are stated where the body makes them, and not over
+    ``domain``. Each condition of a statement's path is asked where the ones
+    before it held (:attr:`loopty.term.Stmt.path`): ``if i > 0 and x[i - 1] >
+    0:`` reads ``x[i - 1]`` only where ``i > 0``, while ``if (i + 1 < n) &
+    (flag[i + 1] != 0):`` reads ``flag[n]`` at ``i = n - 1``, since ``&`` is
+    eager: stating that read over the narrowed domain would prove it in bounds
+    by the very condition that does not protect it. A guard with no path, of
+    a term written by hand, is read over ``loop_domain``, the loop nest before
+    the guard narrowed it.
 
     Two more reads belong to none of the three expressions: the layout's, which
     is why ``term`` is needed at all. A ragged ``val: Arr[Fin[n], Fin[cnt],
@@ -692,10 +694,13 @@ def source_accesses(stmt: Stmt, term: Term) -> tuple[_Access, ...]:
     # The right-hand side first, so that the order the rules see is the order
     # the source reads in; then the assignee's own subscripts and the guard.
     guard_domain = stmt.loop_domain if stmt.loop_domain is not None else stmt.domain
+    guards = (
+        tuple(stmt.path) if stmt.path else ((stmt.guard, guard_domain),)
+    )
     for source, domain in (
         (stmt.expr, stmt.domain),
         (tuple(written.indices), stmt.domain),
-        (stmt.guard, guard_domain),
+        *guards,
     ):
         if source is None:
             continue
@@ -985,7 +990,7 @@ def _bounded_domains(stmt: Stmt) -> list[tuple[isl.Set, tuple[str | None, ...], 
     Each is ``(domain, names, first)``, and the bounds of a domain are looked
     for from dimension ``first`` on. The statement's loop nest comes first,
     over its loop variables and before a guard narrowed it (``loop_domain``,
-    since a guard masks writes and the loops run whatever it says), from ``0``.
+    since the loops run whatever the guard says), from ``0``.
     Then the domain of every reduction it evaluates, in the right-hand side,
     the assignee's subscripts or the guard, over the loop variables and then
     the reduction's binders, from the first binder, since a bound of a loop

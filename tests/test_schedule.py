@@ -22,7 +22,7 @@ from lanky.prelude import Nat, Real
 
 import hand_terms as ht
 from lines import where
-from loopty import Arr, Fin, kernel, reduce_sum, when
+from loopty import Arr, Fin, kernel, reduce_sum
 from loopty.executor import emit_code
 from loopty.handles import scope
 from loopty.isl_reading import declining
@@ -199,7 +199,7 @@ def gated_by_the_next(
     """
     for i in y.dom:
         flag[i] = 1
-        with when(flag[i + 1] != 0):
+        if flag[i + 1] != 0:
             y[i] = 2.0
 
 
@@ -288,7 +288,7 @@ def row_sums_then_next_count(
     """
     for r in y.dom:
         y[r] = reduce_sum(val[r, j] for j in val.dom[r])
-        with when(r + 1 < y.dom.size):
+        if r + 1 < y.dom.size:
             cnt[r + 1] = 0
 
 
@@ -343,7 +343,7 @@ def sums_at_i_then_next_count(
     for r in y.dom:
         for i in x.dom:
             y[r] = y[r] + x[i] * reduce_sum(val[r, t] for t in val.dom[r] if t == i)
-        with when(r + 1 < y.dom.size):
+        if r + 1 < y.dom.size:
             cnt[r + 1] = 0
 
 
@@ -613,7 +613,7 @@ def potential(
 def running(x: Arr[Fin[m], Real], out: Arr[Fin[n], Real]):  # noqa: F821
     """Each cell the one before it plus a sum: a dependence along ``t``."""
     for t in out.dom:
-        with when(t > 0):
+        if t > 0:
             out[t] = out[t - 1] + reduce_sum(x[s] for s in x.dom)
 
 
@@ -1752,7 +1752,7 @@ def every_other(
 ):
     """Double the even cells: a guard whose congruence narrows the domain."""
     for i in x.dom:
-        with when(i % 2 == 0):
+        if i % 2 == 0:
             y[i] = 2.0 * x[i]
 
 
@@ -2026,7 +2026,7 @@ def masked_then_shifted(
 ):
     """Two independent statements, the first under a guard that reads."""
     for i in x.dom:
-        with when(mask[i] > 0):
+        if mask[i] > 0:
             y[i] = 2.0 * x[i]
         z[i] = x[i] + 1.0
 

@@ -19,7 +19,7 @@ import pytest
 from lanky.ledger import Status
 from lanky.prelude import Nat, Real
 
-from loopty import Arr, Fin, Schedule, Where, kernel, reduce_sum, when
+from loopty import Arr, Fin, Schedule, Where, kernel, reduce_sum
 from loopty.executor import LoopyExecutor
 from loopty.faithful import KIND
 from loopty.oracle import IslOracle
@@ -42,11 +42,11 @@ def reconstruct(
     for i in R.dom:
         for a in R.dom[i]:
             for b in R.dom[i, a]:
-                with when(a + b == 0):
+                if a + b == 0:
                     R[i, a, b] = coeffs[i, 0]
-                with when((a < 2) & (a + b >= 1)):
+                if (a < 2) & (a + b >= 1):
                     R[i, a, b] = coeffs[i, 2 * (a + b) - 1 + a]
-                with when(a >= 2):
+                if a >= 2:
                     R[i, a, b] = -R[i, a - 2, b + 2]
 
 

@@ -25,7 +25,6 @@ from loopty import (
     kernel,
     program,
     reduce_sum,
-    when,
 )
 from loopty import table as make_table
 from loopty.executor import LoopyExecutor, emit_code
@@ -140,7 +139,7 @@ def one_back(y: Arr[Fin[n], Real]):  # noqa: F821
 def one_ahead_where_there_is_one(y: Arr[Fin[n], Real]):  # noqa: F821
     """The step after each cell's, under a guard that holds where there is one."""
     for i in y.dom:
-        with when(i < 2):
+        if i < 2:
             y[i] = STEPS[i + 1]
 
 

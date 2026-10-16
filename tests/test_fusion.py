@@ -26,7 +26,7 @@ from lanky.ledger import Status
 from lanky.prelude import Int, Nat, Real
 
 from lines import named, where
-from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum, when
+from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum
 from loopty.executor import LoopyExecutor, emit_code
 from loopty.oracle import IslOracle
 from loopty.schedule import IllegalCast
@@ -45,7 +45,7 @@ def flux(u: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):  # noqa: F821
 def divergence(f: Arr[Fin[n], Real], rhs: Arr[Fin[n], Real]):  # noqa: F821
     """Centred divergence of the flux, inside the boundary."""
     for i in rhs.dom:
-        with when((i > 0) & (i + 1 < rhs.dom.size)):
+        if (i > 0) & (i + 1 < rhs.dom.size):
             rhs[i] = -(f[i + 1] - f[i - 1]) / 2
 
 
@@ -53,7 +53,7 @@ def divergence(f: Arr[Fin[n], Real], rhs: Arr[Fin[n], Real]):  # noqa: F821
 def interior_flux(u: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):  # noqa: F821
     """The flux at the interior points only."""
     for j in u.dom:
-        with when((j > 0) & (j + 1 < u.dom.size)):
+        if (j > 0) & (j + 1 < u.dom.size):
             f[j] = 0.5 * u[j] * u[j]
 
 
@@ -75,7 +75,7 @@ def doubled(f: Arr[Fin[n], Real], g: Arr[Fin[n], Real]):  # noqa: F821
 def front(f: Arr[Fin[n], Real], h: Arr[Fin[n], Real]):  # noqa: F821
     """The front half of ``f``."""
     for x in h.dom:
-        with when(2 * x < h.dom.size):
+        if 2 * x < h.dom.size:
             h[x] = f[x]
 
 
@@ -83,7 +83,7 @@ def front(f: Arr[Fin[n], Real], h: Arr[Fin[n], Real]):  # noqa: F821
 def back(h: Arr[Fin[n], Real], rhs: Arr[Fin[n], Real]):  # noqa: F821
     """The back half of ``h``, plus one."""
     for i in rhs.dom:
-        with when(2 * i >= rhs.dom.size):
+        if 2 * i >= rhs.dom.size:
             rhs[i] = h[i] + 1.0
 
 
@@ -98,7 +98,7 @@ def bump(u: Arr[Fin[n], Real]):  # noqa: F821
 def update(f: Arr[Fin[n], Real], u: Arr[Fin[n], Real]):  # noqa: F821
     """One explicit step of Burgers' equation, in place."""
     for i in u.dom:
-        with when((i > 0) & (i + 1 < u.dom.size)):
+        if (i > 0) & (i + 1 < u.dom.size):
             u[i] = u[i] - (f[i + 1] - f[i - 1]) / 2
 
 
@@ -146,7 +146,7 @@ def down(
     """Each cell less the one below it."""
     for p in b.dom:
         for q in b.dom[p]:
-            with when(p + 1 < b.dom.size):
+            if p + 1 < b.dom.size:
                 b[p, q] = g[p + 1, q] - g[p, q]
 
 
@@ -345,7 +345,7 @@ def rows(a, z, g):
 def mark(u: Arr[Fin[n], Real], m: Arr[Fin[n], Real]):  # noqa: F821
     """One at the interior points."""
     for j in u.dom:
-        with when((j > 0) & (j + 1 < u.dom.size)):
+        if (j > 0) & (j + 1 < u.dom.size):
             m[j] = 1.0
 
 
@@ -357,7 +357,7 @@ def masked(
 ):
     """``f`` where ``m`` is set, a guard isl cannot state."""
     for i in y.dom:
-        with when(m[i] > 0.5):
+        if m[i] > 0.5:
             y[i] = f[i]
 
 
@@ -375,10 +375,10 @@ def marked(u, y):
 def bounded(f: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     """Store the first and last cells of ``f``, then read every cell."""
     for k in f.dom:
-        with when(k == 0):
+        if k == 0:
             f[k] = 1.0
     for e in f.dom:
-        with when(e + 1 == f.dom.size):
+        if e + 1 == f.dom.size:
             f[e] = 2.0
     for i in y.dom:
         y[i] = f[i] + 1.0
@@ -388,7 +388,7 @@ def bounded(f: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
 def first_edge(f: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     """Store the first cell of ``f``, then read every cell."""
     for k in f.dom:
-        with when(k == 0):
+        if k == 0:
             f[k] = 1.0
     for i in y.dom:
         y[i] = f[i] + 1.0
@@ -437,7 +437,7 @@ def triple(u: Arr[Fin[n], Int], f: Arr[Fin[n], Int]):  # noqa: F821
 def forward(f: Arr[Fin[n], Int], y: Arr[Fin[n], Int]):  # noqa: F821
     """Each cell less the one before it, but the last."""
     for i in y.dom:
-        with when(i + 1 < y.dom.size):
+        if i + 1 < y.dom.size:
             y[i] = f[i + 1] - f[i]
 
 
@@ -796,13 +796,13 @@ from __future__ import annotations
 
 from lanky.prelude import Real
 
-from loopty import Arr, Fin, kernel, program, when
+from loopty import Arr, Fin, kernel, program
 
 
 @kernel
 def interior_flux(u: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):
     for j in u.dom:
-        with when((j > 0) & (j + 1 < u.dom.size)):
+        if (j > 0) & (j + 1 < u.dom.size):
             f[j] = 0.5 * u[j] * u[j]
 
 

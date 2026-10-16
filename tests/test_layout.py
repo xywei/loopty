@@ -97,7 +97,7 @@ def test_grudges_dim_tags_store_every_cell_where_the_dof_array_does() -> None:
             "dof_array stores every cell where dim_tags N3,N0,N1,N2 does",
         )
     ]
-    assert EXAMPLE.as_dim_tags.facts()[0].where == "storage_layouts.py:101"
+    assert EXAMPLE.as_dim_tags.facts()[0].where == "storage_layouts.py:99"
 
 
 def test_a_nesting_with_a_size_inside_is_refuted_at_a_size() -> None:

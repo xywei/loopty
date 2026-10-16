@@ -17,7 +17,7 @@ import pytest
 from lanky.prelude import Bool, Nat, Real
 
 import hand_terms as ht
-from loopty import Arr, Fin, kernel, when
+from loopty import Arr, Fin, kernel
 from loopty import sum as reduce_sum
 from loopty.executor import (
     TOLERANCE,
@@ -248,11 +248,10 @@ def test_a_disagreement_is_refuted_rather_than_raised() -> None:
 
 
 @kernel
-def flipped(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
-    """``~`` on a Python bool is bitwise, so natively this guard is an integer."""
+def flipped(x: Arr[Fin[n], Real], y: Arr[Fin[n], Bool]):  # noqa: F821
+    """``~`` on a Python bool is bitwise, so natively this stores an integer."""
     for i in y.dom:
-        with when(~(i > 0)):
-            y[i] = x[i]
+        y[i] = (x[i] > 0.0) | ~(i > 0)
 
 
 @pytest.mark.filterwarnings("ignore:Bitwise inversion:DeprecationWarning")
@@ -261,20 +260,23 @@ def test_a_native_refusal_is_a_refuted_agreement_rather_than_raised() -> None:
     # nothing, while the faithfulness fact counts the same refusal as a
     # disagreement (#44). Python warns about ~ on a bool, which this suite
     # makes an error, and a user's run does not.
-    arrays = {"x": Arr.from_numpy(np.arange(4.0)), "y": Arr.zeros(4)}
+    arrays = {
+        "x": Arr.from_numpy(np.arange(4.0)),
+        "y": Arr.zeros(4, dtype=np.bool_),
+    }
     schedule = Schedule(flipped)
     fact = executor().differential(flipped, schedule, arrays)
     assert fact.kind == "agreement"
     assert fact.status.value == "refuted"
     assert fact.id == schedule.fact_id("agreement")
     assert fact.id == f"agreement:{flipped.definition}:[c]"
-    assert fact.provenance["error"].startswith("TraceError: the guard of")
+    assert fact.provenance["error"].startswith("TraceError: the value stored")
     reason = fact.provenance["reason"]
     assert reason.startswith("the body, run natively, is refused")
     assert "'i <= 0' for '~(i > 0)'" in reason
     assert fact.provenance["outputs"] == {}
     # The caller's arrays are untouched: neither run wrote into them.
-    assert np.array_equal(arrays["y"].numpy(), np.zeros(4))
+    assert np.array_equal(arrays["y"].numpy(), np.zeros(4, dtype=np.bool_))
 
 
 def test_a_kernel_run_on_opencl_records_opencl(plain_opencl, monkeypatch) -> None:
@@ -303,7 +305,10 @@ def test_a_kernel_run_on_opencl_records_opencl(plain_opencl, monkeypatch) -> Non
 def test_a_refused_kernel_run_on_opencl_records_opencl(plain_opencl) -> None:
     # The same for the refusal a native TraceError makes: no run is made, and
     # the fact names the target the run would have been made on.
-    arrays = {"x": Arr.from_numpy(np.arange(4.0)), "y": Arr.zeros(4)}
+    arrays = {
+        "x": Arr.from_numpy(np.arange(4.0)),
+        "y": Arr.zeros(4, dtype=np.bool_),
+    }
     fact = LoopyExecutor(target="opencl").differential(flipped, flipped, arrays)
     assert fact.status.value == "refuted"
     assert fact.provenance["target"] == "opencl"

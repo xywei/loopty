@@ -1065,7 +1065,7 @@ from __future__ import annotations
 import numpy as np
 from lanky.prelude import Nat, Real
 
-from loopty import Arr, Fin, Schedule, kernel, reduce_sum, when
+from loopty import Arr, Fin, Schedule, kernel, reduce_sum
 
 
 @kernel
@@ -1076,7 +1076,7 @@ def clear_next(
 ):
     for r in y.dom:
         y[r] = reduce_sum(val[r, j] for j in val.dom[r])
-        with when(r + 1 < y.dom.size):
+        if r + 1 < y.dom.size:
             cnt[r + 1] = 0
 
 
@@ -1182,7 +1182,7 @@ MOVES_ROWS = (
         "    val:",
     )
     .replace(
-        "        with when(r + 1 < y.dom.size):\n            cnt[r + 1] = 0\n",
+        "        if r + 1 < y.dom.size:\n            cnt[r + 1] = 0\n",
         "        off[r] = s[r]\n",
     )
     .replace(
@@ -1275,25 +1275,27 @@ def test_run_reports_an_example_inputs_that_raises(tmp_path, capsys) -> None:
 
 
 FLIPPED = '''
-"""A guard that is an integer natively: ~ on a Python bool is bitwise."""
+"""A truth value that is an integer natively: ~ on a Python bool is bitwise."""
 
 from __future__ import annotations
 
 import numpy as np
-from lanky.prelude import Real
+from lanky.prelude import Bool, Real
 
-from loopty import Arr, Fin, kernel, when
+from loopty import Arr, Fin, kernel
 
 
 @kernel
-def flipped(x: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):
+def flipped(x: Arr[Fin[n], Real], y: Arr[Fin[n], Bool]):
     for i in y.dom:
-        with when(~(i > 0)):
-            y[i] = x[i]
+        y[i] = (x[i] > 0.0) | ~(i > 0)
 
 
 def example_inputs():
-    return {"x": Arr.from_numpy(np.arange(4.0)), "y": Arr.zeros(4)}
+    return {
+        "x": Arr.from_numpy(np.arange(4.0)),
+        "y": Arr.zeros(4, dtype=np.bool_),
+    }
 '''
 
 
@@ -1336,20 +1338,20 @@ from __future__ import annotations
 
 from lanky.prelude import Real
 
-from loopty import Arr, Fin, kernel, when
+from loopty import Arr, Fin, kernel
 
 
 @kernel
 def clipped(a: Real, x: Arr[Fin[m], Real], y: Arr[Fin[n], Real]):
     for i in y.dom:
-        with when((i < a) & (a < x.dom.size)):
+        if (i < a) & (a < x.dom.size):
             y[i] = x[i]
 
 
 @kernel
 def stated(u: Arr[Fin[n], Real], v: Arr[Fin[n], Real]):
     for i in u.dom:
-        with when(i + 1 <= u.dom.size):
+        if i + 1 <= u.dom.size:
             v[i] = u[i + 1]
 '''
 

@@ -68,8 +68,8 @@ cannot be retargeted, a run raises, or two kernels claim one fact id (below).
 A run that raises, whatever it raises, is reported by the exception's type and
 message, the kernel counts as failed, and the file's other kernels are still
 run; so is a file's ``example_inputs()`` that raises, and code generation that
-fails under ``--emit-code``. A body that tracing refuses natively (a ``when``
-guard whose native value is an integer) is a refuted agreement fact instead,
+fails under ``--emit-code``. A body that tracing refuses natively (an integer
+stored into an array of truth values) is a refuted agreement fact instead,
 with the refusal as its reason; see
 :meth:`loopty.executor.LoopyExecutor.differential`.
 

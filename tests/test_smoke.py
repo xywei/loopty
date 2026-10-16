@@ -84,7 +84,7 @@ def test_importing_loopty_imports_neither_loopy_nor_islpy() -> None:
 def test_a_kernel_module_does_not_import_loopy() -> None:
     # What a file of kernels imports; loopy is for lowering, and a native run
     # never lowers. islpy comes with the tracer.
-    code = "from loopty import Arr, Fin, kernel, reduce_sum, when"
+    code = "from loopty import Arr, Fin, kernel, reduce_sum"
     assert "loopy" not in heavy_modules_after(code)
 
 

@@ -28,12 +28,11 @@ Run this file three ways.
 ``loopty run examples/stencil_skew.py``
     Compiles the skewed and tiled schedule and compares it with the native run.
 
-The guard is a ``when`` block and not an ``if``. A Python ``if`` on a value the
-kernel computes cannot be traced, because tracing would have to choose a branch;
-``when`` records the condition, narrows the statement's isl domain by it, and
-under plain ``python`` masks the writes of the block instead of skipping them.
-Sizes come from the data on both paths: ``steps.size`` is an ``int`` on a real
-array and a term while tracing, so the interior condition is written once.
+The interior is a plain ``if``. The trace runs the body down both of its
+branches and records the statement under its condition, which narrows the
+statement's isl domain: that is what puts ``u[t + 1, i]`` in bounds. Sizes
+come from the data on both paths: ``steps.size`` is an ``int`` on a real array
+and a term while tracing, so the interior condition is written once.
 """
 
 from __future__ import annotations
@@ -41,7 +40,7 @@ from __future__ import annotations
 import numpy as np
 from lanky.prelude import Real
 
-from loopty import Arr, Fin, IllegalCast, Schedule, kernel, when
+from loopty import Arr, Fin, IllegalCast, Schedule, kernel
 
 #: Sixteen time levels over sixteen points. Large enough that a tile of eight by
 #: eight is a real tiling with four tiles and a boundary between them, small
@@ -58,7 +57,7 @@ def jacobi(u: Arr[Fin[nt], Fin[nx], Real]):
     for t in steps:
         row = u.dom[t]
         for i in row:
-            with when((t + 1 < steps.size) & (i > 0) & (i + 1 < row.size)):
+            if t + 1 < steps.size and i > 0 and i + 1 < row.size:
                 u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
 
 

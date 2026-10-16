@@ -216,14 +216,14 @@ class Reduction:
 
     ``loop_domain`` is ``domain`` before the statement's guard and the
     generator's own ``if`` clause narrowed it, as :attr:`Stmt.loop_domain` is
-    a statement's: the points at which the sum starts and reads its bounds,
-    since a ``when`` masks the write and does not skip the right-hand side,
-    and ``for k in val.dom[r] if k == j`` reads the row's length before it
-    tests ``k``. isl simplifies the narrowed set, and ``k == j`` leaves no
-    constraint of the sum's own bound in it, so what reads a bound reads it
-    here (#111). ``None`` means "the same as ``domain``", which is right for
-    a sum with no guard around it and no clause, and for a term written by
-    hand.
+    a statement's: the points at which the sum's loops are bounded, a
+    superset of where the statement's ``if`` lets the sum start, so an
+    obligation over it is harder and never falsely discharged; and ``for k
+    in val.dom[r] if k == j`` reads the row's length before it tests ``k``.
+    isl simplifies the narrowed set, and ``k == j`` leaves no constraint of
+    the sum's own bound in it, so what reads a bound reads it here (#111).
+    ``None`` means "the same as ``domain``", which is right for a sum with
+    no guard around it and no clause, and for a term written by hand.
     """
 
     op: str
@@ -243,8 +243,10 @@ class Stmt:
     """One statement instance family: a domain plus what it computes.
 
     ``inames`` are the enclosing loop variables, outer to inner, and ``domain``
-    is the isl set of their values. ``guard`` is the condition of an enclosing
-    ``when`` block, which masks the write rather than skipping it.
+    is the isl set of their values. ``guard`` is the statement's path
+    condition, the conjunction of the conditions of the ``if`` statements,
+    ``and``, ``or`` and conditional expressions around it, each as the branch
+    it is on took it (:mod:`loopty.trace`); the statement writes where it holds.
 
     ``kind`` is ``"assign"`` or ``"accumulate"``, and the difference is a claim
     about ``expr``, not a licence to guess:
@@ -271,11 +273,19 @@ class Stmt:
     term written by hand in a test does not have to care.
 
     ``loop_domain`` is the enclosing loop nest *before* any guard narrowed it:
-    the set over which the guard's own reads happen, because a ``when``
-    evaluates its whole condition at every point of the nest (Python's ``&`` is
-    eager) and masks the write rather than skipping the block. ``None`` means
-    "the same as ``domain``", which is right for a statement without a guard
-    and for a term written by hand.
+    where the loops read their bounds, which isl may no longer show in the
+    narrowed ``domain`` (``k == j`` leaves no constraint of the bound of
+    ``k``, #111), and where the guard's own reads happen unless ``path`` says
+    otherwise. ``None`` means "the same as ``domain``", which is right for a
+    statement without a guard and for a term written by hand.
+
+    ``path`` is the guard condition by condition, in the order the body asked
+    them, each with the points at which it is asked: the loop nest narrowed
+    by the conditions before it, where isl states them, since Python asks a
+    condition of ``if i > 0 and x[i - 1] > 0:`` only where those before it
+    held. A condition's reads happen there (:func:`loopty.flow.source_accesses`),
+    and nowhere else. Empty for a statement without a guard, and for a term
+    written by hand, whose guard is read over ``loop_domain``.
 
     ``unnarrowed`` lists the conjuncts of ``guard`` that ``domain`` does not
     state, each as ``(conjunct, why)`` with the conjunct as the body spells it.
@@ -335,6 +345,7 @@ class Stmt:
     text: str = ""
     spelled: tuple[str, ...] = ()
     unrolled: tuple[tuple[str, int], ...] = ()
+    path: tuple[tuple[Expression, isl.Set], ...] = ()
 
     def __post_init__(self) -> None:
         _check_domains(self.domain, self.loop_domain, f"statement {self.id}")

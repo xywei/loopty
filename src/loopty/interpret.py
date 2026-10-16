@@ -536,7 +536,7 @@ class _Run:
         The loops and the sums a bound bounds, and their constraints, are read
         off the sets before a guard or a clause narrowed them, the
         statement's ``loop_domain`` and each sum's: isl simplifies the
-        narrowed set, and ``when(k == j)`` inside the two loops above leaves
+        narrowed set, and ``if k == j:`` inside the two loops above leaves
         no constraint of the bound of ``k`` in it, so ``k`` had no reading of
         its own and ran past its row's new length (#111). What the guard or
         the clause adds is the narrowed set's gist in the other, which is

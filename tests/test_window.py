@@ -22,7 +22,7 @@ from lanky.ledger import Status
 from lanky.prelude import Real
 
 from lines import where
-from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum, when
+from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum
 from loopty.executor import LoopyExecutor, emit_code
 from loopty.schedule import IllegalCast
 from loopty.window import Placement, WindowError
@@ -53,7 +53,7 @@ WINDOWS = load(ROOT / "tests" / "kernels" / "windows.py")
 def interior_flux(u: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):  # noqa: F821
     """The flux at the interior points only."""
     for j in u.dom:
-        with when((j > 0) & (j + 1 < u.dom.size)):
+        if (j > 0) & (j + 1 < u.dom.size):
             f[j] = 0.5 * u[j] * u[j]
 
 
@@ -435,9 +435,9 @@ def lagging(
 ):
     """The first ``k`` cells of ``x``, then each cell twice the one ``k`` before."""
     for i in f.dom:
-        with when(i < w.dom.size):
+        if i < w.dom.size:
             f[i] = x[i] + 0.0 * w[i]
-        with when(i >= w.dom.size):
+        else:
             f[i] = 2.0 * f[i - w.dom.size]
 
 
@@ -788,7 +788,7 @@ def stored_and_shifted(
 def lagged(g: Arr[Fin[n], Real], y: Arr[Fin[n], Real]):  # noqa: F821
     """g three cells back."""
     for k in y.dom:
-        with when(k >= 3):
+        if k >= 3:
             y[k] = g[k - 3]
 
 

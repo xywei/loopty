@@ -85,7 +85,7 @@ from time import perf_counter
 import numpy as np
 from lanky.prelude import Real
 
-from loopty import Arr, Fin, IllegalCast, Schedule, kernel, when
+from loopty import Arr, Fin, IllegalCast, Schedule, kernel
 
 #: Sixteen time levels over thirty-two points, tiled four by eight: enough tiles
 #: that the skewed nest has boundaries in both directions, small enough that the
@@ -107,7 +107,7 @@ def acoustic(
     for t in steps:
         row = pressure.dom[t]
         for i in row:
-            with when((t + 1 < steps.size) & (i > 0) & (i + 1 < row.size)):
+            if t + 1 < steps.size and i > 0 and i + 1 < row.size:
                 velocity[t + 1, i] = velocity[t, i] + courant * (
                     pressure[t, i + 1] - pressure[t, i]
                 )

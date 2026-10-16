@@ -17,7 +17,7 @@ import pytest
 from lanky.prelude import Real
 
 from lines import where
-from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum, scope, when
+from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum, scope
 from loopty.executor import LoopyExecutor
 from loopty.handles import Array, Call, Condition, Loop, ShadowedName, Size
 from loopty.schedule import IllegalCast
@@ -36,7 +36,7 @@ def flux(u: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):  # noqa: F821
 def divergence(f: Arr[Fin[n], Real], rhs: Arr[Fin[n], Real]):  # noqa: F821
     """The centred divergence of the flux, at the interior points."""
     for i in rhs.dom:
-        with when((i > 0) & (i + 1 < rhs.dom.size)):
+        if (i > 0) & (i + 1 < rhs.dom.size):
             rhs[i] = -(f[i + 1] - f[i - 1]) / 2
 
 
@@ -111,7 +111,7 @@ def stencil(u: Arr[Fin[nt], Fin[nx], Real]):  # noqa: F821
     for t in steps:
         row = u.dom[t]
         for i in row:
-            with when((t + 1 < steps.size) & (i > 0) & (i + 1 < row.size)):
+            if (t + 1 < steps.size) & (i > 0) & (i + 1 < row.size):
                 u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2
 
 

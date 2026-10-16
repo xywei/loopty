@@ -184,12 +184,8 @@ def metric(
     w: Arr[Fin[9], Fin[ne], Fin[n], Fin[n], Fin[n], Real],
 ):
     """The field times each metric term ``J dr_d/dx_x``, field ``q = 3 x + d``."""
-    for q in w.dom:
-        for e in w.dom[q]:
-            for k in w.dom[q, e]:
-                for j in w.dom[q, e, k]:
-                    for i in w.dom[q, e, k, j]:
-                        w[q, e, k, j, i] = G[q, e, k, j, i] * u[e, k, j, i]
+    for q, e, k, j, i in w.dom:
+        w[q, e, k, j, i] = G[q, e, k, j, i] * u[e, k, j, i]
 
 
 @kernel
@@ -199,14 +195,10 @@ def contravariant(
     w: Arr[Fin[3], Fin[ne], Fin[n], Fin[n], Fin[n], Real],
 ):
     """The flux along each reference direction ``d``: ``sum_x J dr_d/dx_x f_x``."""
-    for d in w.dom:
-        for e in w.dom[d]:
-            for k in w.dom[d, e]:
-                for j in w.dom[d, e, k]:
-                    for i in w.dom[d, e, k, j]:
-                        w[d, e, k, j, i] = reduce_sum(
-                            G[3 * x + d, e, k, j, i] * f[x, e, k, j, i] for x in Fin[3]
-                        )
+    for d, e, k, j, i in w.dom:
+        w[d, e, k, j, i] = reduce_sum(
+            G[3 * x + d, e, k, j, i] * f[x, e, k, j, i] for x in Fin[3]
+        )
 
 
 @kernel
@@ -216,14 +208,10 @@ def along_r(
     v: Arr[Fin[nq], Fin[ne], Fin[n], Fin[n], Fin[n], Real],
 ):
     """Each field's own matrix applied along ``r``, the first reference axis."""
-    for q in v.dom:
-        for e in v.dom[q]:
-            for k in v.dom[q, e]:
-                for j in v.dom[q, e, k]:
-                    for i in v.dom[q, e, k, j]:
-                        v[q, e, k, j, i] = reduce_sum(
-                            Fr[q, i, a] * w[q, e, k, j, a] for a in Fr.dom[q, i]
-                        )
+    for q, e, k, j, i in v.dom:
+        v[q, e, k, j, i] = reduce_sum(
+            Fr[q, i, a] * w[q, e, k, j, a] for a in Fr.dom[q, i]
+        )
 
 
 @kernel
@@ -233,14 +221,10 @@ def along_s(
     vs: Arr[Fin[nq], Fin[ne], Fin[n], Fin[n], Fin[n], Real],
 ):
     """Each field's own matrix applied along ``s``, the second reference axis."""
-    for q in vs.dom:
-        for e in vs.dom[q]:
-            for k in vs.dom[q, e]:
-                for j in vs.dom[q, e, k]:
-                    for i in vs.dom[q, e, k, j]:
-                        vs[q, e, k, j, i] = reduce_sum(
-                            Fs[q, j, b] * v[q, e, k, b, i] for b in Fs.dom[q, j]
-                        )
+    for q, e, k, j, i in vs.dom:
+        vs[q, e, k, j, i] = reduce_sum(
+            Fs[q, j, b] * v[q, e, k, b, i] for b in Fs.dom[q, j]
+        )
 
 
 @kernel
@@ -250,18 +234,14 @@ def gradient_along_t(
     grad: Arr[Fin[3], Fin[ne], Fin[n], Fin[n], Fin[n], Real],
 ):
     """Along ``t``, the three directions of each component ``x`` summed."""
-    for x in grad.dom:
-        for e in grad.dom[x]:
-            for k in grad.dom[x, e]:
-                for j in grad.dom[x, e, k]:
-                    for i in grad.dom[x, e, k, j]:
-                        grad[x, e, k, j, i] = reduce_sum(
-                            reduce_sum(
-                                Ft[3 * x + d, k, c] * vs[3 * x + d, e, c, j, i]
-                                for c in Ft.dom[3 * x + d, k]
-                            )
-                            for d in Fin[3]
-                        )
+    for x, e, k, j, i in grad.dom:
+        grad[x, e, k, j, i] = reduce_sum(
+            reduce_sum(
+                Ft[3 * x + d, k, c] * vs[3 * x + d, e, c, j, i]
+                for c in Ft.dom[3 * x + d, k]
+            )
+            for d in Fin[3]
+        )
 
 
 @kernel
@@ -271,16 +251,13 @@ def divergence_along_t(
     div: Arr[Fin[ne], Fin[n], Fin[n], Fin[n], Real],
 ):
     """Along ``t``, the three directions summed."""
-    for e in div.dom:
-        for k in div.dom[e]:
-            for j in div.dom[e, k]:
-                for i in div.dom[e, k, j]:
-                    div[e, k, j, i] = reduce_sum(
-                        reduce_sum(
-                            Ft[d, k, c] * vs[d, e, c, j, i] for c in Ft.dom[d, k]
-                        )
-                        for d in Fin[3]
-                    )
+    for e, k, j, i in div.dom:
+        div[e, k, j, i] = reduce_sum(
+            reduce_sum(
+                Ft[d, k, c] * vs[d, e, c, j, i] for c in Ft.dom[d, k]
+            )
+            for d in Fin[3]
+        )
 
 
 @program(uses=[sum_factorization])

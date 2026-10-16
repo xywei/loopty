@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 from lanky.prelude import Nat, Real
 
-from loopty import Arr, Fin, Schedule, kernel, reduce_sum, when
+from loopty import Arr, Fin, Schedule, kernel, reduce_sum
 from loopty.executor import LoopyExecutor, emit_code
 from loopty.isl_reading import declining
 from loopty.math import ipow
@@ -116,7 +116,7 @@ def guarded(
 ):
     """A sum under a guard that reads an array."""
     for i in y.dom:
-        with when(x[i] > 0):
+        if x[i] > 0:
             y[i] = reduce_sum(a[j] * (x[i] * 2.0) for j in a.dom)
 
 

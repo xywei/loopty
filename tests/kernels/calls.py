@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from lanky.prelude import Fn, Nat, Real
 
-from loopty import Arr, Fin, Schedule, kernel, layout, program, reduce_sum, table, when
+from loopty import Arr, Fin, Schedule, kernel, layout, program, reduce_sum, table
 
 #: The 3-point rule on the reference triangle, and the P1 basis at its points.
 W = table([1 / 6, 1 / 6, 1 / 6])
@@ -67,7 +67,7 @@ def add_into(a: Arr[Fin[n], Real], b: Arr[Fin[n], Real]):
 def running(A: Arr[Fin[m], Fin[n], Real]):
     """Each row of ``A`` plus the one before it, in order: a running sum."""
     for i in A.dom:
-        with when(i > 0):
+        if i > 0:
             add_into(A[i], A[i - 1])
 
 
@@ -132,7 +132,7 @@ def mass_action(
 def shifted(A: Arr[Fin[m], Fin[n], Real], x: Arr[Fin[n], Real], y: Arr[Fin[m], Real]):
     """``y[i] = A[i + 1] . x`` where there is a next row, kept so by its guard."""
     for i in y.dom:
-        with when(i + 1 < y.dom.size):
+        if i + 1 < y.dom.size:
             y[i] = dot(A[i + 1], x)
 
 
@@ -202,7 +202,7 @@ def half_square(u: Arr[Fin[n], Real], f: Arr[Fin[n], Real]):
 def centred(f: Arr[Fin[n], Real], rhs: Arr[Fin[n], Real]):
     """The centred divergence of one row, at its interior points."""
     for i in rhs.dom:
-        with when((i > 0) & (i + 1 < rhs.dom.size)):
+        if (i > 0) & (i + 1 < rhs.dom.size):
             rhs[i] = -(f[i + 1] - f[i - 1]) / 2
 
 
