@@ -103,6 +103,28 @@ for box, a, b in R.dom:
 
 ### Added
 
+- **loopy main** (the `port/loopy-main` branch, `docs/loopy-main.md`). loopty
+  runs on loopy's main branch, whose kernel domains are namedisl sets (loopy
+  #1023). `loopy`, `islpy` and `namedisl` come from their main branches
+  through `[tool.uv.sources]`, with the commits pinned in `uv.lock`;
+  `islpy<2026` is dropped, `namedisl` is a dependency, and Python 3.14 is
+  tested. `loopty.named` is the one place loopty's islpy objects meet loopy's
+  namedisl ones: `to_named` and `to_named_set` for what loopty gives loopy,
+  `as_isl` for what it reads back, `domains_of` and `with_domains` for a
+  kernel's domains, and `aff_from_expr` for loopy's reader over an islpy
+  space. `flow`, `typing`, `hypotheses`, `oracle` and `domain` stay on islpy.
+  A CI workflow, `loopy-main.yml`, runs the suite, the three commands of every
+  example and the transcripts against the pinned commits, on 3.13 and 3.14,
+  and against loopy main's current head. Every example's ledger is unchanged.
+  The generated code differs in the order of an affine expression's terms, in
+  a division of a size (below), in the pieces of the tiled diamond's inner
+  bounds, which visit the same iterations, and in a subscript simplified
+  before a loop's value is put in: constants loopy main leaves unfolded in an
+  unrolled loop's subscripts, `cell[3 * 2 + 12 * c_outer]`, and a subscript
+  over a group axis it folds, `R[-20 + 11 * a_0 + b_0 + 121 * gid(0)]`. A
+  loop over a product of sizes, `Fin[n * m]`, which does not run compiled on
+  loopy 2025.2 either (#197), stops earlier on loopy main, in loopy's bounds
+  check, which cannot read the shape `n * m` (#245).
 - **Branches** (`loopty.trace`). A traced condition's truth value is
   answered by the tracer (`Tracer.decide`), which runs the body again until
   every condition it asked has been answered both ways: one run per path.
@@ -183,6 +205,31 @@ for box, a, b in R.dom:
 
 ### Changed
 
+- loopy is told that every size is non-negative, always, where it was told
+  only beside what a scalar parameter's sort says. loopy main checks an access
+  over its instruction's domain with the kernel's assumptions, which bring in
+  every size, so `off[0] = 0` outside every loop, of `off: Arr[Fin[n + 1],
+  Nat]`, was refused there for `n = -1`; the contract refuses a negative size,
+  and every fact assumes none. loopy then divides a size by C's division,
+  `(3 + n) / 4` for the outer loop of a split, where it called its
+  floor-division helper.
+- loopty's readings of what loopy reads into isl (`loopty.isl_reading`)
+  decline with loopy's own `ExpressionToAffineConversionError`, as loopy
+  declines a call: loopy main's guard no longer catches the `TypeError` they
+  raised. A fourth reading declines the `TypeError` an operator isl has none
+  of raises in loopy main's reader, so that `if i < i ^ 1:` builds there,
+  as on loopy 2025.2.
+- `buildable` refuses a sum on a local axis inside a `vec` loop saying loopy
+  "cannot generate working code for it": loopy main generates OpenCL for it,
+  which does not compile, where loopy 2025.2 raised.
+- A loop's stride in `Schedule.strides` names the loops of its offset
+  outermost first, `2*b_inner_step - a_outer - b_outer - a_inner` for the
+  tiled diamond, rather than in the order of the domain's dimensions, which
+  loopy main keeps in namedisl's order.
+- The hoisting of a sum's invariant operands (`loopty.hoist`) reads loopy
+  main's domains and assumptions through `loopty.named`, and builds an
+  array's box itself, since loopy main has no `make_slab`: the same operands
+  move on both loopys.
 - **A schedule runs without the zeros no read sees** (#290). Where isl
   decides that every cell a program's calls read of an array it makes, an
   earlier call stored, the definedness `substitute` and `contract` ask, the
@@ -302,6 +349,16 @@ for box, a, b in R.dom:
 
 ### Fixed
 
+- **A `for` around a long body, and a `while` on 3.14, are read off the
+  bytecode again.** `for a, b in R.dom:` around a body longer than 255
+  instructions handed out single indices, natively and traced, and its
+  unpacking failed: the `FOR_ITER` that jumps past such a body carries an
+  `EXTENDED_ARG` before it, which the reading of the `for`'s names did not
+  step over. `examples/advection.py`'s lift on the faces is that long on
+  Python 3.14. And 3.14 tests a `while`'s condition once per pass, at the
+  top, so a `while` on a traced condition inside a `for` read as an `if`, and
+  was refused for asking more than 10000 conditions rather than as the
+  `while` it is (`loopty.bytecode`).
 - `realize(k.y, tree=True)` records one fact, that the accumulation into
   `k.y` is reassociated, and no `bijective` or `monotone` fact: the step
   moves no instance and changes no order, so the two said nothing about it,
@@ -1384,7 +1441,9 @@ and complex parts, so loopty requires it.
   the others, `[j, i_outer, i_inner]`, so
   `Schedule(squared_rows).split(i, 2).fuse("square2", "row_total")` read
   `buildable` refuted though both casts were decided
-  ([#192](https://github.com/xywei/loopty/issues/192)).
+  ([#192](https://github.com/xywei/loopty/issues/192)). loopy main keeps a
+  tiled domain's loops in namedisl's order, so on loopy main a fusion after a
+  `tile` was refused the same way.
 
 ## [0.2.0] - 2026-10-11
 

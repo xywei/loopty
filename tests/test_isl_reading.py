@@ -27,12 +27,18 @@ import threading
 import islpy as isl
 import loopy as lp
 import loopy.kernel.instruction as instruction
+import loopy.symbolic as symbolic
 import numpy as np
 import pymbolic.primitives as prim
 import pytest
 from lanky.prelude import Int, Real
 from loopy.diagnostic import ExpressionToAffineConversionError, LoopyIndexError
-from loopy.symbolic import PwAffEvaluationMapper, TypeCast, guarded_aff_from_expr
+from loopy.symbolic import (
+    PwAffEvaluationMapper,
+    TypeCast,
+    guarded_aff_from_expr,
+)
+from namedisl import Aff, Space
 from pymbolic.mapper import UnsupportedExpressionError
 
 from loopty import Arr, Fin, Schedule, isl_reading, kernel
@@ -44,6 +50,7 @@ from loopty.isl_reading import (
     declining,
     read_as_affine,
 )
+from loopty.named import as_isl
 
 
 def agrees(kern, make) -> None:
@@ -59,12 +66,21 @@ def agrees(kern, make) -> None:
     assert fact.status.value == "tested", fact.provenance
 
 
+def over(*names: str):
+    """What loopy's reader reads over: the affine expression of each of ``names``.
+
+    loopy main reads an expression over a mapping from each name to its
+    affine expression, namedisl's, where loopy 2025.2 took an isl space.
+    """
+    return Aff.zero_on_domain(Space.from_names(param=[], out=list(names))).var_affs
+
+
 # {{{ the reader
 
 
 def test_the_reader_declines_a_conversion_and_a_constant_not_an_integer() -> None:
     i = prim.Variable("i")
-    space = isl.Space.create_from_names(isl.DEFAULT_CONTEXT, set=["i"])
+    space = over("i")
     # loopy's reader raised UnsupportedExpressionError on a cast, which
     # nothing caught, read 0.5 as 0, and read a float that is an integer as
     # the integer, though an expression with one is computed in floating
@@ -89,11 +105,27 @@ def test_the_reader_declines_a_conversion_and_a_constant_not_an_integer() -> Non
         (np.int64(100_000) * i, 100_000),
     ):
         with declining():
-            aff = guarded_aff_from_expr(space, read)
+            aff = as_isl(guarded_aff_from_expr(space, read))
         assert aff.get_coefficient_val(isl.dim_type.in_, 0).to_python() == coefficient
         assert read_as_affine(read)
     assert not read_as_affine(i * i)
     assert not read_as_affine(prim.Subscript(prim.Variable("col"), (i,)))
+
+
+def test_the_reader_declines_what_isl_has_no_operator_for() -> None:
+    # The reader evaluates an expression with isl's operators, and a bitwise
+    # one, i ^ 1, raises a TypeError there. loopy 2025.2 declined it, as it
+    # declines a call; loopy main's guard lets the TypeError out, and a kernel
+    # with if i < i ^ 1: failed in loopy's bounds check. Declined inside;
+    # outside, as loopy main has it, which a loopy that declines it again
+    # makes fail.
+    i = prim.Variable("i")
+    xor = prim.BitwiseXor((i, 1))
+    with declining(), pytest.raises(ExpressionToAffineConversionError):
+        guarded_aff_from_expr(over("i"), xor)
+    assert not read_as_affine(xor)
+    with pytest.raises(TypeError):
+        guarded_aff_from_expr(over("i"), xor)
 
 
 # }}}
@@ -107,13 +139,14 @@ def loopys_own() -> None:
     assert vars(PwAffEvaluationMapper)["map_constant"].__module__ == "loopy.symbolic"
     assert "map_type_cast" not in vars(PwAffEvaluationMapper)
     assert instruction.get_insn_domain.__module__ == "loopy.kernel.instruction"
+    assert symbolic.with_aff_conversion_guard.__module__ == "loopy.symbolic"
     assert not active()
     assert isl_reading._OPEN == 0
 
 
-def loopys_own_reading_of(space: isl.Space, i: prim.Variable) -> None:
+def loopys_own_reading_of(space, i: prim.Variable) -> None:
     """The reader reads as loopy does: 0.5 as 0, and a cast it cannot read."""
-    zero = guarded_aff_from_expr(space, i * 0.5)
+    zero = as_isl(guarded_aff_from_expr(space, i * 0.5))
     assert zero.is_cst() and zero.get_constant_val().to_python() == 0
     with pytest.raises(UnsupportedExpressionError):
         guarded_aff_from_expr(space, TypeCast(np.dtype(np.int64), i))
@@ -133,8 +166,7 @@ def test_running_a_kernel_leaves_loopys_own_readings_in_place() -> None:
     )
     emit_code(Schedule(index_square).split(index_square.i, 2))
     loopys_own()
-    space = isl.Space.create_from_names(isl.DEFAULT_CONTEXT, set=["i"])
-    loopys_own_reading_of(space, prim.Variable("i"))
+    loopys_own_reading_of(over("i"), prim.Variable("i"))
 
 
 def test_importing_loopty_and_running_a_kernel_installs_nothing(tmp_path) -> None:
@@ -149,6 +181,7 @@ def test_importing_loopty_and_running_a_kernel_installs_nothing(tmp_path) -> Non
             from __future__ import annotations
 
             import loopy.kernel.instruction as instruction
+            import loopy.symbolic as symbolic
             import numpy as np
             from loopy.symbolic import PwAffEvaluationMapper
 
@@ -157,6 +190,7 @@ def test_importing_loopty_and_running_a_kernel_installs_nothing(tmp_path) -> Non
                     vars(PwAffEvaluationMapper).get("map_constant"),
                     vars(PwAffEvaluationMapper).get("map_type_cast"),
                     instruction.get_insn_domain,
+                    symbolic.with_aff_conversion_guard,
                 )
 
             before = own()
@@ -239,7 +273,7 @@ def test_loopys_own_kernel_is_read_as_loopy_reads_it(guard, value_args) -> None:
 
 def test_the_readings_apply_inside_and_nested_contexts_restore() -> None:
     i = prim.Variable("i")
-    space = isl.Space.create_from_names(isl.DEFAULT_CONTEXT, set=["i"])
+    space = over("i")
     loopys_own()
     with declining():
         assert active()
@@ -267,7 +301,7 @@ def test_a_thread_outside_reads_with_loopys_own() -> None:
     # The readings are installed in loopy while any thread is inside one, and
     # apply in that thread only: another reads with loopy's own meanwhile.
     i = prim.Variable("i")
-    space = isl.Space.create_from_names(isl.DEFAULT_CONTEXT, set=["i"])
+    space = over("i")
     inside = threading.Event()
     read = threading.Event()
     seen: list = []
@@ -774,7 +808,7 @@ def test_a_guard_with_a_non_integer_literal_is_not_read_by_its_integer_part() ->
     native = inputs()()
     half_guard(**native)
     assert list(native["y"][:5]) == [4.0, 5.0, 6.0, 7.0, 0.0]
-    with pytest.raises(LoopyIndexError, match=r"4 <= i0 <= 3 \+ n"):
+    with pytest.raises(LoopyIndexError, match=r"4 <= \w+ <= 3 \+ n"):
         LoopyExecutor().run(half_guard, **inputs()())
 
 

@@ -6,7 +6,8 @@ issues were filed: these are notes so that the next person meets the answer
 instead of the symptom.
 
 Versions these were observed against: loopy 2025.2, islpy 2025.2.5, codepy as
-pinned by loopy, on CPython 3.13.
+pinned by loopy, on CPython 3.13. What changes on loopy's main branch, whose
+domains are namedisl sets, is in [loopy-main.md](loopy-main.md).
 
 ## 1. The C target's host wrapper and device signature disagree about arguments
 

@@ -87,6 +87,7 @@ from loopy.symbolic import Reduction as LoopyReduction
 from loopy.symbolic import TypeCast, get_dependencies
 
 from loopty.lower import walk
+from loopty.named import aff_from_expr, as_isl, to_named_set
 
 __all__ = ["hoist_invariants"]
 
@@ -448,7 +449,9 @@ class _Operands:
         (``loopy.check._AccessCheckMapper``): the range of each subscript
         over the instruction's loops, its predicates isl reads and the
         kernel's assumptions, inside the box of the array's shape, for every
-        value of the sizes. A subscript isl cannot read, one that reads an
+        value of the sizes. loopy gives the instances and takes the domain of
+        the subscripts as namedisl sets; they are read here as islpy
+        (:mod:`loopty.named`). A subscript isl cannot read, one that reads an
         array (``tx[off[r] + j]``), and a scalar temporary, whose value may
         be stored under a condition, answer no.
         """
@@ -474,9 +477,12 @@ class _Operands:
             from loopy.kernel.instruction import get_insn_domain
 
             try:
-                domain = get_insn_domain(self.insn, self.entry)
-                if not self.entry.assumptions.is_universe():
-                    domain, assumptions = isl.align_two(domain, self.entry.assumptions)
+                domain = as_isl(get_insn_domain(self.insn, self.entry))
+                assumptions = as_isl(self.entry.assumptions)
+                # A set, where loopy 2025.2 kept a basic set: isl asks a
+                # set only whether it is plainly the universe.
+                if not assumptions.plain_is_universe():
+                    domain, assumptions = isl.align_two(domain, assumptions)
                     domain = domain & assumptions
                 self._instances = (domain,)
             except (LoopyError, isl.Error):  # pragma: no cover - none in bounds
@@ -485,7 +491,6 @@ class _Operands:
 
     def _in_bounds(self, node: Any, domain: Any) -> bool:
         """Whether the cells subscript ``node`` reads are inside its array's shape."""
-        from loopy.isl_helpers import make_slab
         from loopy.symbolic import get_access_map
 
         if not isinstance(node.aggregate, prim.Variable):
@@ -515,12 +520,10 @@ class _Operands:
         if not get_dependencies(index) <= set(domain.get_var_dict()):
             return False
         try:
-            cells = get_access_map(domain, index).range()
-            box = isl.BasicSet.universe(cells.get_space())
+            cells = as_isl(get_access_map(to_named_set(domain), index)).range()
+            box = isl.Set.universe(cells.get_space())
             for axis, extent in enumerate(shape):
-                box = box.intersect(
-                    make_slab(box.get_space(), (isl.dim_type.in_, axis), 0, extent)
-                )
+                box = box & _slab(box.get_space(), axis, extent)
             return cells.is_subset(box)
         except (LoopyError, isl.Error):
             return False
@@ -538,10 +541,12 @@ class _Operands:
             return known
         loops = sorted(self.insn.within_inames)
         try:
-            whole = self.entry.get_inames_domain(
-                frozenset(self.insn.within_inames) | bound
+            whole = as_isl(
+                self.entry.get_inames_domain(frozenset(self.insn.within_inames) | bound)
             )
-            nest = self.entry.get_inames_domain(frozenset(self.insn.within_inames))
+            nest = as_isl(
+                self.entry.get_inames_domain(frozenset(self.insn.within_inames))
+            )
             whole = whole.project_out_except(loops, [isl.dim_type.set])
             nest = nest.project_out_except(loops, [isl.dim_type.set])
             nest, whole = isl.align_two(nest, whole)
@@ -580,6 +585,20 @@ class _Operands:
         return dtype is not None and dtype.numpy_dtype.kind == "f"
 
     # }}}
+
+
+def _slab(space: isl.Space, axis: int, extent: Any) -> isl.Set:
+    """The cells of ``space`` from 0 to below ``extent`` on its ``axis``-th dimension.
+
+    What loopy 2025.2's ``make_slab`` gave, which loopy main no longer has:
+    ``extent`` is a shape's axis, read by loopy's reader over ``space``
+    (:func:`loopty.named.aff_from_expr`), which declines one that is not
+    affine, ``n * m``, as loopy's check does.
+    """
+    local = isl.LocalSpace.from_space(space)
+    cell = isl.Aff.var_on_domain(local, isl.dim_type.set, axis)
+    zero = isl.Aff.zero_on_domain(local)
+    return cell.ge_set(zero) & cell.lt_set(aff_from_expr(space, extent))
 
 
 def _type_context(entry: Any, dtype: Any) -> str | None:

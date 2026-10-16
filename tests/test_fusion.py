@@ -28,6 +28,7 @@ from lanky.prelude import Int, Nat, Real
 from lines import named, where
 from loopty import Arr, Fin, Schedule, kernel, program, reduce_sum
 from loopty.executor import LoopyExecutor, emit_code
+from loopty.named import domains_of
 from loopty.oracle import IslOracle
 from loopty.schedule import IllegalCast
 
@@ -993,7 +994,9 @@ def test_the_fused_loop_is_one_loop_and_agrees_with_the_native_run() -> None:
     entry = fused.kernel.default_entrypoint
     insns = {insn.id: insn for insn in entry.instructions}
     assert insns["flux_S0"].within_inames == insns["divergence_S0"].within_inames
-    owners = [d for d in entry.domains if loop in d.get_var_names(isl.dim_type.set)]
+    owners = [
+        d for d in domains_of(entry) if loop in d.get_var_names(isl.dim_type.set)
+    ]
     assert len(owners) == 1
     for size in (1, 2, 3, 5, 16):
         agrees(burgers, fused, burgers_inputs(size))
@@ -1115,9 +1118,10 @@ def test_the_outer_loop_of_a_nest_fuses_with_a_loop_of_one_level() -> None:
 
 def test_the_outer_loop_fuses_after_a_split_or_a_tile() -> None:
     # After a split or a tile, the nest's outer loop is i_outer, and the
-    # domain is cut after it by name: loopy 2025.2 puts a split loop's two
-    # after the others ([j, i_outer, i_inner]), which is not the nest's order
-    # (#192).
+    # domain is cut after it by name. Neither loopy keeps the loops of such a
+    # domain in the nest's order: loopy 2025.2 puts a split loop's two after
+    # the others ([j, i_outer, i_inner]), and loopy main keeps namedisl's
+    # order ([i_inner, i_outer, j_outer, j_inner] for the tile) (#192).
     i, j = squared_rows.square2.i, squared_rows.square2.j
     base = Schedule(squared_rows)
     for steps, schedule, row in (
@@ -1756,12 +1760,13 @@ def test_an_index_widened_by_its_store_is_read_unconverted_in_a_subscript() -> N
         assert "(int64_t) (t[" in code
     # An index computed in 32 bits from the loop variable and a size, and
     # stored in 64, is affine with the widening left out: loopy reads it
-    # into isl, checks its bounds and writes it as it simplifies it.
+    # into isl, checks its bounds and writes it as it simplifies it (loopy
+    # main writes the size before the loop variable, 2025.2 after it).
     for size in (1, 6):
         code = substituted_agrees(
             reversed_whole, "q", {"x": np.arange(size) + 0.5, "y": np.zeros(size)}
         )
-    assert "y[i] = x[-1 + -1 * i + n];" in code
+    assert "y[i] = x[-1 + n + -1 * i];" in code
 
 
 def test_a_widened_index_read_as_a_value_keeps_its_widening() -> None:

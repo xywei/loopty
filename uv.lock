@@ -67,23 +67,8 @@ wheels = [
 
 [[package]]
 name = "islpy"
-version = "2025.2.5"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/bb/78/61366bc6b2a9d8ca81c5db67f9c4fd5ea24ac97987fe08cac51fbb420bab/islpy-2025.2.5.tar.gz", hash = "sha256:cfcff7fa20efe50e4b8b518e8e4ce46a4513f7e12ba0b6228fd4f833fe8c6526", size = 1370317, upload-time = "2025-06-15T21:11:45.536Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/29/63/da8305d6421e9d2afe4bdf0bb7b4e9d1caf9806022fe02b1f56de9b010a1/islpy-2025.2.5-cp312-cp312-macosx_10_14_x86_64.whl", hash = "sha256:0531ae5566d58dfc01d118615e51fec9969cd8ab35cf897a75a102638c6d9246", size = 2875265, upload-time = "2025-06-15T21:11:23.196Z" },
-    { url = "https://files.pythonhosted.org/packages/f0/cc/92fd0916e563aa8a7f9aabd2df677ec92d4b6a245a0ca87c11efcc38cb24/islpy-2025.2.5-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:a91c19d92f35b5867a0b90640002faf156e5fcd46e1b72f79cc0342be9cabe17", size = 2267875, upload-time = "2025-06-15T21:11:24.696Z" },
-    { url = "https://files.pythonhosted.org/packages/14/9d/2ce89afc37df0b0681024cf40b72294aeaf5c77bd18e60f07b1a4c486a40/islpy-2025.2.5-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:fc7ec748045041f198da427c2c62c9665fe1efd3fa3284016db40a784286f878", size = 2412425, upload-time = "2025-06-15T21:11:26.721Z" },
-    { url = "https://files.pythonhosted.org/packages/4f/b0/5e7617a3b42dbc9de5650a23c62e360e63c4a8086771d29ce109f1ac83b0/islpy-2025.2.5-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:d4d84e02dafbbd6605adc7aff28f8c6aafc52ee0832408353548d845ef79db94", size = 2808910, upload-time = "2025-06-15T21:11:28.245Z" },
-    { url = "https://files.pythonhosted.org/packages/45/4e/52bc160af82612ea862886dd0be23bef2d524ed37dcf0fb367a38326b57a/islpy-2025.2.5-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:2c1d239d927d2416f3623434cd8d3877960b47cecad13da624f5b4e2deec0539", size = 2657841, upload-time = "2025-06-15T21:11:29.947Z" },
-    { url = "https://files.pythonhosted.org/packages/ae/33/d8da21d97879cc4611068f1fa8275e5bb7e0a8043fe6dc483495d5a1a241/islpy-2025.2.5-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:b22ddd9ca0a90d4fd3272664d38e77ab480e0758292a8056698e7cc22224291c", size = 3024667, upload-time = "2025-06-15T21:11:31.976Z" },
-    { url = "https://files.pythonhosted.org/packages/9b/a7/f229ac457347bd9574ebc63bc8e6bdbd81cb7142b9eebc7d02d689c60340/islpy-2025.2.5-cp313-cp313-macosx_10_14_x86_64.whl", hash = "sha256:56c3b8cddfe489b3822fcbf066e2b2297945679569edf6ca23470e13cc289a7d", size = 2875217, upload-time = "2025-06-15T21:11:34.006Z" },
-    { url = "https://files.pythonhosted.org/packages/28/d4/7490076d99ba95e57067a69187872d2e7e3c484e5a618cf645c63983fdd4/islpy-2025.2.5-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:dba6018edab60d5ac3df62e0608f43595408921d5f549ea6a829162d9e5a51c1", size = 2267810, upload-time = "2025-06-15T21:11:35.629Z" },
-    { url = "https://files.pythonhosted.org/packages/b1/0b/0a78b594108641d76a65c39548227cde191161c7b7494b4f3fda3e6f0d8a/islpy-2025.2.5-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:48882fced72c69bc1500c082c8370ecc6c4f9e8953e9796431ac517e1b09a397", size = 2412501, upload-time = "2025-06-15T21:11:37.648Z" },
-    { url = "https://files.pythonhosted.org/packages/d5/0b/1399af722edca7c9c6ddc304493d2796a4e90c983fdf47fe36f5b079739c/islpy-2025.2.5-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:b7acdbd4839a0a513549405563b1dde3e49d90726257e43231026bc1c48550ff", size = 2808886, upload-time = "2025-06-15T21:11:39.649Z" },
-    { url = "https://files.pythonhosted.org/packages/67/6c/b674bb2e301173ef5b0b56698cfb88d4f7e7be3e1f451cd115f6964d368b/islpy-2025.2.5-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:cfe327d0f98630748cac382e42966704904a2ecb99ce25d4203ff656d8073c9c", size = 2657726, upload-time = "2025-06-15T21:11:41.819Z" },
-    { url = "https://files.pythonhosted.org/packages/b5/a3/90495fab1e8eca7767d9ab5ffb3fca76efc154482d33bb3e9f7c2fcfd06a/islpy-2025.2.5-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:b9d6a11b95cd0fcaf511e68e7d93efc631b5b29514da8cb1b1ad8816176df8d7", size = 3024451, upload-time = "2025-06-15T21:11:43.524Z" },
-]
+version = "2026.2.2"
+source = { git = "https://github.com/inducer/islpy.git?branch=main#9a4223a387ade4472b2ca41d8f2619331e5e5328" }
 
 [[package]]
 name = "lanky"
@@ -117,6 +102,7 @@ dependencies = [
     { name = "islpy" },
     { name = "lanky" },
     { name = "loopy" },
+    { name = "namedisl" },
     { name = "numpy" },
     { name = "pymbolic" },
 ]
@@ -134,9 +120,10 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "islpy", specifier = ">=2025.2.5,<2026" },
+    { name = "islpy", git = "https://github.com/inducer/islpy.git?branch=main" },
     { name = "lanky", editable = "../lanky" },
-    { name = "loopy", specifier = ">=2025.2,<2025.3" },
+    { name = "loopy", git = "https://github.com/inducer/loopy.git?branch=main" },
+    { name = "namedisl", git = "https://github.com/inducer/namedisl.git?branch=main" },
     { name = "numpy", specifier = ">=2" },
     { name = "pymbolic", specifier = ">=2025.1" },
     { name = "pyopencl", marker = "extra == 'opencl'", specifier = ">=2022.3" },
@@ -151,8 +138,8 @@ dev = [
 
 [[package]]
 name = "loopy"
-version = "2025.2"
-source = { registry = "https://pypi.org/simple" }
+version = "2026.1"
+source = { git = "https://github.com/inducer/loopy.git?branch=main#24a2da6ad55c29cab8995d7adfa28d552f46ebb5" }
 dependencies = [
     { name = "cgen" },
     { name = "codepy" },
@@ -161,14 +148,12 @@ dependencies = [
     { name = "genpy" },
     { name = "islpy" },
     { name = "mako" },
+    { name = "namedisl" },
     { name = "numpy" },
     { name = "pymbolic" },
     { name = "pytools" },
+    { name = "strenum" },
     { name = "typing-extensions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/05/ed/1b455d2fa2fd2c014f3533ca7b8bcbb387cc0679f2d145ac1666e4d40a3a/loopy-2025.2.tar.gz", hash = "sha256:4bbeebf3a9e37a589a92ac4434d9e60d1382529ff2d4a07a209b1ff51fdd9830", size = 624722, upload-time = "2025-07-30T17:02:25.381Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/d0/ef/d2686194757335314db5c0b1d708902baac9d6e275479121a720fc5af3a9/loopy-2025.2-py3-none-any.whl", hash = "sha256:3a337be5ae09c56df5a7d09f24df20fa780c2e6daa25deb5d18f317cbdd54033", size = 552360, upload-time = "2025-07-30T17:02:23.947Z" },
 ]
 
 [[package]]
@@ -244,6 +229,16 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/fb/df/5bd7a48c256faecd1d36edc13133e51397e41b73bb77e1a69deab746ebac/markupsafe-3.0.3-cp314-cp314t-win32.whl", hash = "sha256:915c04ba3851909ce68ccc2b8e2cd691618c4dc4c4232fb7982bca3f41fd8c3d", size = 14819, upload-time = "2025-09-27T18:37:26.285Z" },
     { url = "https://files.pythonhosted.org/packages/1a/8a/0402ba61a2f16038b48b39bccca271134be00c5c9f0f623208399333c448/markupsafe-3.0.3-cp314-cp314t-win_amd64.whl", hash = "sha256:4faffd047e07c38848ce017e8725090413cd80cbc23d86e55c587bf979e579c9", size = 15426, upload-time = "2025-09-27T18:37:27.316Z" },
     { url = "https://files.pythonhosted.org/packages/70/bc/6f1c2f612465f5fa89b95bead1f44dcb607670fd42891d8fdcd5d039f4f4/markupsafe-3.0.3-cp314-cp314t-win_arm64.whl", hash = "sha256:32001d6a8fc98c8cb5c947787c5d08b0a50663d139f1305bac5885d98d9b40fa", size = 14146, upload-time = "2025-09-27T18:37:28.327Z" },
+]
+
+[[package]]
+name = "namedisl"
+version = "2026.1.1"
+source = { git = "https://github.com/inducer/namedisl.git?branch=main#3e7f92c1c5e32234cace3eacc93bc455444ad560" }
+dependencies = [
+    { name = "constantdict" },
+    { name = "islpy" },
+    { name = "typing-extensions" },
 ]
 
 [[package]]
@@ -524,6 +519,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/17/53/f42e35f1ebb29e5e897d249830dda2e68ae8606f01cf782b97a441a43d44/siphash24-1.9-cp315-cp315t-win32.whl", hash = "sha256:c6abddfe8c8be25beabfd07728d12fe73855d1596f6aefdf45832f52fba79e41", size = 71222, upload-time = "2026-09-08T21:20:26.657Z" },
     { url = "https://files.pythonhosted.org/packages/6f/5c/465772e1b1ab354a12c0ac37b4e47180f04ab9988f8a8d73d2fdca6dc3da/siphash24-1.9-cp315-cp315t-win_amd64.whl", hash = "sha256:214a91502316c64a3d1ddb36f4417df84fd2db23770a2b7181a689d52ca83145", size = 84538, upload-time = "2026-09-08T21:20:27.85Z" },
     { url = "https://files.pythonhosted.org/packages/1c/5b/0024289cd32acc8b3dc13b20875144146ac6b66d41dd0779b275134026ca/siphash24-1.9-cp315-cp315t-win_arm64.whl", hash = "sha256:75880c20aa0beef87a4648dd35f7d0b5756c6edce9e57e118dfe431bb49f7421", size = 72867, upload-time = "2026-09-08T21:20:29.043Z" },
+]
+
+[[package]]
+name = "strenum"
+version = "0.4.15"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/85/ad/430fb60d90e1d112a62ff57bdd1f286ec73a2a0331272febfddd21f330e1/StrEnum-0.4.15.tar.gz", hash = "sha256:878fb5ab705442070e4dd1929bb5e2249511c0bcf2b0eeacf3bcd80875c82eff", size = 23384, upload-time = "2023-06-29T22:02:58.399Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/81/69/297302c5f5f59c862faa31e6cb9a4cd74721cd1e052b38e464c5b402df8b/StrEnum-0.4.15-py3-none-any.whl", hash = "sha256:a30cda4af7cc6b5bf52c8055bc4bf4b2b6b14a93b574626da33df53cf7740659", size = 8851, upload-time = "2023-06-29T22:02:56.947Z" },
 ]
 
 [[package]]

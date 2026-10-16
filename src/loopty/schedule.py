@@ -321,6 +321,7 @@ from loopty.lower import (
     lower_generic,
     reductions_of,
 )
+from loopty.named import as_isl, domains_of, to_named, with_domains
 from loopty.obligations import IslOnly
 from loopty.source import Named, as_spelled, instances_text
 from loopty.term import Stmt, Term, commutes
@@ -1347,7 +1348,7 @@ def _grid_base(
         text = idx.isl_expr(expr)
     except Exception:  # noqa: BLE001 - a start loopy cannot say is not known
         return None
-    space = base.get_space()
+    space = as_isl(base).get_space()
     params = tuple(
         space.get_dim_name(isl.dim_type.param, k)
         for k in range(space.dim(isl.dim_type.param))
@@ -1943,7 +1944,7 @@ def _ragged_reason(draft: _Draft) -> str | None:
     entry = draft.kernel.default_entrypoint
     temporaries = set(entry.temporary_variables)
     tags = _kernel_tags(draft)
-    for domain in entry.domains:
+    for domain in domains_of(entry):
         if not set(domain.get_var_names(isl.dim_type.param)) & temporaries:
             continue
         loops = [
@@ -2183,7 +2184,7 @@ def _enclosing_loops(
     entry = kernel.default_entrypoint
     direct = find_loop_nest_around_map(entry)
     named: dict[str, set[str]] = {}
-    for domain in entry.domains:
+    for domain in domains_of(entry):
         params = set(domain.get_var_names(isl.dim_type.param))
         for name in domain.get_var_names(isl.dim_type.set):
             named.setdefault(name, set()).update(params)
@@ -2652,10 +2653,13 @@ def _privatized_reason(draft: _Draft) -> str | None:
       after ``int32_t nl_cnt_r[8]``), and the C run reads past the row, or
       crashes. Under ``vec`` code generation fails from inside loopy (a
       ``TypeError`` or an ``AssertionError``, in 2025.2), or writes OpenCL
-      that reads a vector as the bound and does not compile;
+      that reads a vector as the bound and does not compile, which is what
+      loopy main does;
     * the partial sums of a reduction on a local axis inside a ``vec`` loop,
-      which loopy keeps in an array in local memory (a ``TypeError``). An
-      ``ilp`` loop around one builds.
+      which loopy keeps in an array in local memory (a ``TypeError`` in
+      2025.2; loopy main writes OpenCL that reads the vectorized loop's
+      variable and never declares it, which does not compile). An ``ilp``
+      loop around one builds.
 
     Both were measured on loops over ``Fin[8]``; over ``Fin[n]`` the loop has
     no length to unroll or vectorize by, which :func:`_unroll_reason` says
@@ -2676,7 +2680,7 @@ def _privatized_reason(draft: _Draft) -> str | None:
     }
     bounds = {
         name
-        for domain in entry.domains
+        for domain in domains_of(entry)
         for name in domain.get_var_names(isl.dim_type.param)
     } & set(entry.temporary_variables)
     for insn in entry.instructions:
@@ -2720,7 +2724,7 @@ def _privatized_reason(draft: _Draft) -> str | None:
                 f"the sum over {', '.join(map(draft.show, local))} in {what} runs "
                 f"on a local axis inside the loop {draft.show(vectorized[0])}, "
                 "which is tagged vec, "
-                "and loopy cannot generate code for it: it keeps the partial "
+                "and loopy cannot generate working code for it: it keeps the partial "
                 "sums of a reduction on a local axis in an array in local "
                 "memory, and a temporary written inside a vec loop as a vector "
                 f"along it. Leave {draft.show(vectorized[0])} sequential, or "
@@ -9645,8 +9649,8 @@ def _affine_kernel(
     # loopy's own transforms refuse to remap an iname a loop priority
     # mentions, and the old priority names loops that no longer exist. The
     # caller sets the priority to the nest it has just checked.
-    entry = entry.copy(
-        domains=domains, instructions=insns, loop_priority=frozenset()
+    entry = with_domains(
+        entry, domains, instructions=insns, loop_priority=frozenset()
     )
     for key, substitution in substitutions.items():
         context = SubstitutionRuleMappingContext(
@@ -9698,13 +9702,14 @@ def _shared_plan(
     mapped = set(inputs)
     loops = ", ".join(inputs)
 
+    current = domains_of(entry)
     homes = [
         k
-        for k, domain in enumerate(entry.domains)
+        for k, domain in enumerate(current)
         if mapped & set(domain.get_var_names(isl.dim_type.set))
     ]
     if len(homes) != 1 or not mapped <= set(
-        entry.domains[homes[0]].get_var_names(isl.dim_type.set)
+        current[homes[0]].get_var_names(isl.dim_type.set)
     ):
         raise _Inexpressible(
             f"the loops {loops} are not all defined by one loopy domain, and "
@@ -9712,7 +9717,7 @@ def _shared_plan(
             "defines every loop the map replaces"
         )
     home = homes[0]
-    before = entry.domains[home]
+    before = current[home]
     if pieces is not None:
         first = next(iter(pieces.values()))
         if all(piece.is_equal(first) for piece in pieces.values()):
@@ -9734,7 +9739,7 @@ def _shared_plan(
 
     if pieces is not None:
         pieces = _with_bound_maps(entry, mapped, pieces)
-    domains = list(entry.domains)
+    domains = list(current)
     predicates: dict[str, Any] = {}
     substitutions: dict[Any, dict[str, Any]]
     if pieces is None:
@@ -9746,7 +9751,7 @@ def _shared_plan(
         substitutions = {
             key: _substitution(piece, before) for key, piece in pieces.items()
         }
-    for k, domain in enumerate(entry.domains):
+    for k, domain in enumerate(current):
         if k != home and mapped & set(domain.get_var_names(isl.dim_type.param)):
             moved = mapping if pieces is None else _governing(entry, domain, pieces)
             domains[k] = _image_of_params(domain, moved)
@@ -9780,16 +9785,17 @@ def _fused_plan(
     for key, piece in pieces.items():
         groups.setdefault(_dim_names(piece, isl.dim_type.in_), []).append(key)
     mapped = {name for inputs in groups for name in inputs}
-    entry = entry.copy(domains=_cut_for(entry.domains, groups))
+    current = _cut_for(domains_of(entry), groups)
+    entry = with_domains(entry, current)
     homes: dict[tuple[str, ...], int] = {}
     for inputs in groups:
         defining = [
             k
-            for k, domain in enumerate(entry.domains)
+            for k, domain in enumerate(current)
             if set(inputs) & set(domain.get_var_names(isl.dim_type.set))
         ]
         names = (
-            set(entry.domains[defining[0]].get_var_names(isl.dim_type.set))
+            set(current[defining[0]].get_var_names(isl.dim_type.set))
             if len(defining) == 1
             else set()
         )
@@ -9822,7 +9828,7 @@ def _fused_plan(
         )
 
     images = {
-        key: _image_set(entry.domains[home_of[key]], piece)
+        key: _image_set(current[home_of[key]], piece)
         for key, piece in pieces.items()
     }
     common = next(iter(images.values()))
@@ -9832,13 +9838,13 @@ def _fused_plan(
         key: image.align_params(common.get_space()) for key, image in images.items()
     }
     first = min(homes.values())
-    shared, predicates = _shared_image(images, entry.domains[first], sizes)
+    shared, predicates = _shared_image(images, current[first], sizes)
     substitutions: dict[Any, dict[str, Any]] = {
-        key: _substitution(piece, entry.domains[home_of[key]])
+        key: _substitution(piece, current[home_of[key]])
         for key, piece in pieces.items()
     }
     domains: list[Any] = []
-    for k, domain in enumerate(entry.domains):
+    for k, domain in enumerate(current):
         if k in homes.values():
             if k == first:
                 domains.append(shared)
@@ -9860,10 +9866,12 @@ def _cut_for(domains: Sequence[Any], groups: Iterable[Sequence[str]]) -> list[An
     map takes, and ``[i] -> { [j] }``, nested in it, with every constraint of
     the domain. The loops a map takes are the outer ones of its statements'
     nest, and are found in the domain by name: a domain's order of loops is
-    not the nest's (loopy 2025.2 puts the two loops of a split after the
-    others, ``[j, i_outer, i_inner]``), so they are put first
-    (:func:`_leading`) before the cut. A domain that does not have every loop
-    a map takes is left as it is, and refused by :func:`_fused_plan`.
+    not the nest's (loopy main keeps a domain's loops in namedisl's order, so
+    a tile of ``r`` and ``c`` gives ``[r_inner, r_outer, c_outer, c_inner]``,
+    and loopy 2025.2 puts the two loops of a split after the others,
+    ``[j, i_outer, i_inner]``), so they are put first (:func:`_leading`)
+    before the cut. A domain that does not have every loop a map takes is
+    left as it is, and refused by :func:`_fused_plan`.
     """
     from loopty.lower import _outer_part
 
@@ -9964,7 +9972,7 @@ def _substitution(mapping: isl.Map, domain: Any) -> dict[str, Any]:
                 f"the inverse of the map is piecewise in {name} ({piece}), "
                 "and a loop variable is replaced by one expression"
             )
-        out[name] = pw_aff_to_expr(piece)
+        out[name] = pw_aff_to_expr(to_named(piece))
     return out
 
 
@@ -10034,7 +10042,7 @@ def _shared_image(
             continue
         extra = narrow.gist(wide.align_params(narrow.get_space()))
         try:
-            predicates[key] = set_to_cond_expr(extra)
+            predicates[key] = set_to_cond_expr(to_named(extra))
         except Exception as exc:  # noqa: BLE001 - loopy's words for it vary
             raise _Inexpressible(
                 f"the image of the domain {before} for {key} is {image}, "
@@ -10064,7 +10072,7 @@ def _with_bound_maps(
         written = set(insn.assignee_var_names())
         bounded = [
             domain
-            for domain in entry.domains
+            for domain in domains_of(entry)
             if written & set(domain.get_var_names(isl.dim_type.param))
         ]
         if not bounded:
@@ -10295,11 +10303,11 @@ def _stepped(
         for name in insn.within_inames:
             within.setdefault(name, set()).add(insn.id)
         folded |= set(insn.reduction_inames())
+    domains = domains_of(entry)
     nested: set[str] = set()
-    for domain in entry.domains:
+    for domain in domains:
         nested |= set(domain.get_var_names(isl.dim_type.param))
     fresh = entry.get_var_name_generator()
-    domains = list(entry.domains)
     substitution: dict[str, Any] = {}
     renamed: dict[str, str] = {}
     shown: dict[str, str] = {}
@@ -10320,7 +10328,7 @@ def _stepped(
                 for outer in ranked[:k]
                 if within[name] <= within.get(outer, set())
             }
-            value = aff_to_expr(offset)
+            value = aff_to_expr(to_named(offset))
             if not set(get_dependencies(value)) - params <= around:
                 continue
             counter = fresh(f"{name}_step")
@@ -10331,7 +10339,7 @@ def _stepped(
             domain = counted
             substitution[name] = value
             renamed[name] = counter
-            shown[name] = _stepped_text(stride, counter, offset)
+            shown[name] = _stepped_text(stride, counter, offset, order)
         domains[position] = domain
     if not renamed:
         return kernel, {}
@@ -10347,7 +10355,7 @@ def _stepped(
         tuple(renamed.get(name, name) for name in nest)
         for nest in entry.loop_priority
     )
-    entry = entry.copy(domains=domains, instructions=insns, loop_priority=priority)
+    entry = with_domains(entry, domains, instructions=insns, loop_priority=priority)
     context = SubstitutionRuleMappingContext(
         entry.substitutions, entry.get_var_name_generator()
     )
@@ -10367,7 +10375,7 @@ def _counted(domain: Any, name: str, counter: str, value: Any) -> Any:
     confirms maps back onto the domain exactly. ``None`` when it does not, or
     is not one basic set.
     """
-    from loopy.symbolic import aff_from_expr
+    from loopty.named import aff_from_expr
 
     before = _as_set(domain)
     names = list(before.get_var_names(isl.dim_type.set))
@@ -10394,18 +10402,31 @@ def _counted(domain: Any, name: str, counter: str, value: Any) -> Any:
     return out
 
 
-def _stepped_text(stride: int, counter: str, offset: Any) -> str:
-    """``2*b_step - a``: a loop as its counter, the way a reader writes it."""
+def _stepped_text(
+    stride: int, counter: str, offset: Any, order: Sequence[str] = ()
+) -> str:
+    """``2*b_step - a``: a loop as its counter, the way a reader writes it.
+
+    The loops in the offset come outermost first, in ``order``, and the
+    sizes after them: loopy main keeps a domain's loops in an order of
+    namedisl's, sorted by name after a split, and the text does not follow
+    it.
+    """
     from loopy.symbolic import aff_to_expr
 
     if offset.dim(isl.dim_type.div) or offset.get_denominator_val().to_python() != 1:
-        return f"{stride}*{counter} + {aff_to_expr(offset)}"
+        return f"{stride}*{counter} + {aff_to_expr(to_named(offset))}"
     terms = [(stride, counter)]
     for kind in (isl.dim_type.in_, isl.dim_type.param):
+        found = []
         for k in range(offset.dim(kind)):
             coefficient = offset.get_coefficient_val(kind, k).to_python()
             if coefficient:
-                terms.append((coefficient, offset.get_dim_name(kind, k)))
+                found.append((coefficient, offset.get_dim_name(kind, k)))
+        if kind == isl.dim_type.in_:
+            ranked = _ranked([name for _, name in found], order)
+            found.sort(key=lambda term: ranked.index(term[1]))
+        terms.extend(found)
     out = ""
     for coefficient, name in terms:
         magnitude = "" if abs(coefficient) == 1 else f"{abs(coefficient)}*"

@@ -15,10 +15,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 3.13 is the ceiling, and it is the `islpy<2026` pin that sets it, not
-        # a preference: loopy 2025.2 needs islpy 2025.x, which publishes no
-        # cp314 wheels, so 3.14 cannot install loopty at all. The pin and this
-        # matrix move together; see docs/loopy-notes.md.
+        # On main, 3.13 is the ceiling that the `islpy<2026` pin sets. On this
+        # branch loopy, islpy and namedisl come from their main branches
+        # ([tool.uv.sources] and uv.lock), islpy 2026 builds for 3.14 too, and
+        # loopy-main.yml runs 3.14 and loopy main's current head.
         python-version: ["3.12", "3.13"]
     env:
       # loopty depends on lanky, and lanky's Lean oracle is absent here by
@@ -97,7 +97,9 @@ jobs:
   # When lanky's main moves past an interface the released pair uses, the two
   # jobs disagree, which is the signal to raise loopty's floor on lanky. The
   # transcripts are not checked here: their commands are `uv run` in a
-  # checkout with the sibling.
+  # checkout with the sibling. On this branch loopy, islpy and namedisl are
+  # named as the direct references of [tool.uv.sources], since no release of
+  # loopy runs on namedisl yet; lanky still comes from PyPI.
   released-lanky:
     name: test against the released lanky
     runs-on: ubuntu-latest
@@ -116,7 +118,10 @@ jobs:
         run: |
           set -euo pipefail
           uv venv --python 3.13
-          uv pip install --no-sources -e . pytest
+          uv pip install --no-sources -e . pytest \
+            "loopy @ git+https://github.com/inducer/loopy.git@main" \
+            "islpy @ git+https://github.com/inducer/islpy.git@main" \
+            "namedisl @ git+https://github.com/inducer/namedisl.git@main"
           .venv/bin/python -c "import importlib.metadata as m; print('lanky', m.version('lanky'), 'from PyPI')"
 
       - name: Pytest

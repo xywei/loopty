@@ -208,11 +208,20 @@ def loopy_says(lp, schedule) -> str | None:
 
 
 def loopy_says_code(lp, schedule) -> str:
-    """The device code loopy generates for the schedule's kernel, caches off."""
+    """The device code loopy generates for the schedule's kernel, caches off.
+
+    With loopy's deprecated warning for a ``vec`` loop silenced, as in
+    :func:`loopy_says`.
+    """
     import warnings
 
     with warnings.catch_warnings(), lp.CacheMode(False), declining():
         warnings.simplefilter("ignore", lp.diagnostic.LoopyWarning)
+        warnings.filterwarnings(
+            "ignore",
+            message="This function is deprecated and will go away",
+            category=DeprecationWarning,
+        )
         return lp.generate_code_v2(schedule.kernel).device_code()
 
 
@@ -454,6 +463,23 @@ CASES = {
 }
 
 
+#: The cases loopy main generates code for where loopy 2025.2 raised, and the
+#: code it generates is wrong: what in it is wrong, as a pattern the code has
+#: and one it has not. The partial sums are a vector per work item, and the
+#: vectorized loop's variable is read and never declared; the fiber's loop is
+#: bounded by the vector of the rows' lengths. Neither compiles in OpenCL.
+WRONG_CODE = {
+    "a-local-sum-in-a-vectorized-loop": (
+        r"__local double8 acc_j\[8\];[\s\S]*a\[8 \* i \+ lid\(0\)\]",
+        r"\bint i\b",
+    ),
+    "a-row-length-in-a-vectorized-loop": (
+        r"\bint8 (nl_\w+);[\s\S]*if \(-1 \+ \1 >= 0\)",
+        r"\bint nl_",
+    ),
+}
+
+
 @pytest.mark.parametrize("case", sorted(CASES))
 def test_buildable_says_what_loopy_does(plain_opencl, case) -> None:
     fn, target, steps, reason, error = CASES[case]
@@ -466,8 +492,15 @@ def test_buildable_says_what_loopy_does(plain_opencl, case) -> None:
         return
     assert not ok
     assert reason in said, said
-    assert loopy is not None, "loopy generated the code"
-    assert error in loopy, loopy
+    if case in WRONG_CODE:
+        assert "loopy cannot generate working code for it" in said, said
+        assert loopy is None, loopy
+        code = loopy_says_code(plain_opencl, schedule)
+        has, has_not = WRONG_CODE[case]
+        assert re.search(has, code) and not re.search(has_not, code), code
+    else:
+        assert loopy is not None, "loopy generated the code"
+        assert error in loopy, loopy
     (fact,) = [fact for fact in schedule.facts() if fact.kind == "buildable"]
     assert fact.status.value == "refuted"
     assert fact.provenance["reason"] == said
@@ -510,7 +543,9 @@ def test_sumpys_qbx_tile_is_buildable_and_runs_each_target_on_a_work_item(
     assert schedule.buildable == (True, "")
     code = loopy_says_code(plain_opencl, schedule)
     assert code.index("for (int s_outer") < code.index("for (int s_inner")
-    assert "out[16 * gid(0) + lid(0)]" in code
+    # loopy main prints an affine expression in namedisl's order of names:
+    # out[lid(0) + 16 * gid(0)], where loopy 2025.2 wrote 16 * gid(0) first
+    assert "out[lid(0) + 16 * gid(0)]" in code
 
 
 def test_a_sum_outside_a_sequential_loop_is_the_order_loopy_drops(
