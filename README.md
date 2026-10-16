@@ -50,13 +50,11 @@ def reconstruct(
     C: Arr[Where[box: Fin[nb], a: Fin[2], b: Fin[Q], a + b <= P], Real],
     R: Arr[Where[box: Fin[nb], a: Fin[Q], b: Fin[Q], a + b <= P], Real],
 ) -> ...:  # the copies and the recurrence: two of the theorem's hypotheses
-    for box in R.dom:
-        for a in R.dom[box]:
-            for b in R.dom[box, a]:
-                with when(a < 2):
-                    R[box, a, b] = C[box, a, b]
-                with when(a >= 2):
-                    R[box, a, b] = -R[box, a - 2, b + 2]
+    for box, a, b in R.dom:
+        if a < 2:
+            R[box, a, b] = C[box, a, b]
+        else:
+            R[box, a, b] = -R[box, a - 2, b + 2]
 
 
 # ... unpack, which reads sumpy's coefficients through its storage index,
@@ -83,9 +81,9 @@ one box's triangle, and runs the schedule compiled:
 ```console
 $ python examples/l2p.py
 ...
-refused: interchange(reconstruct.b, reconstruct.a) illegal: R[box, a, b] = C[box, a, b] (l2p.py:276) at box=0, a=1, b=9 writes R[0, 1, 9], read by R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:278) at box=0, a=3, b=7, scheduled earlier (at nb=1, isl's choice)
+refused: interchange(reconstruct.b, reconstruct.a) illegal: R[box, a, b] = C[box, a, b] (l2p.py:271) at box=0, a=1, b=9 writes R[0, 1, 9], read by R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:273) at box=0, a=3, b=7, scheduled earlier (at nb=1, isl's choice)
 
-refused: contract(l2p.R, lambda box, a, b: b) illegal: R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:278) at box=0, a=9, b=0 reads R[0, 7, 2], which the same statement at box=0, a=7, b=2 stored in slot 2, after the same statement at box=0, a=8, b=2 stored R[0, 8, 2] there (at nb=1, isl's choice); contract(l2p.R) finds the smallest window that keeps every read, lambda box, a, b: (a, b)
+refused: contract(l2p.R, lambda box, a, b: b) illegal: R[box, a, b] = -R[box, a - 2, b + 2] (l2p.py:273) at box=0, a=9, b=0 reads R[0, 7, 2], which the same statement at box=0, a=7, b=2 stored in slot 2, after the same statement at box=0, a=8, b=2 stored R[0, 8, 2] there (at nb=1, isl's choice); contract(l2p.R) finds the smallest window that keeps every read, lambda box, a, b: (a, b)
 
 schedule: Schedule(l2p, target='c').fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box).contract(l2p.R, lambda box, a, b: (a, b)).contract(l2p.C, lambda box, a, b: (a, b))
 ...
@@ -102,22 +100,22 @@ how each claim is known and who settled it. Six of its 56 rows:
 $ lanky check examples/l2p.py
 STATUS   EFFECTIVE  BY           WHERE       OWNER              STATEMENT
 -------  ---------  -----------  ----------  -----------------  ----------------------------------------------------------------------------------------------------
-proved   tested     lean         l2p.py:130  compressed_taylor  D : Fn[Nat, Nat, Real], R : Fn[Nat, Nat, Real]
+proved   tested     lean         l2p.py:129  compressed_taylor  D : Fn[Nat, Nat, Real], R : Fn[Nat, Nat, Real]
                                                                 | pde: forall a in Nat, b in Nat. D[a + 2, b] + D[a, b + 2] == 0
                                                                 | stored: forall a in Nat, b in Nat where a < 2. R[a, b] == D[a, b]
                                                                 | recurrence: forall a in Nat, b in Nat. R[a + 2, b] == -R[a, b + 2]
                                                                 |- forall a in Nat, b in Nat. R[a, b] == D[a, b]
 ...
-proved   proved     lean         l2p.py:199  storage_index      storage_index stores a cell at every address of Fin(21)
+proved   proved     lean         l2p.py:198  storage_index      storage_index stores a cell at every address of Fin(21)
 ...
-proved   tested     lean         l2p.py:249  reconstruct        by on_every_triangle, for every D with pde and stored:
+proved   tested     lean         l2p.py:246  reconstruct        by on_every_triangle, for every D with pde and stored:
                                                                   forall i in Fin(nb), a in Nat, b in Nat where a + b <= 10. R[i, a, b] == D[i, a, b]
 ...
-proved   proved     lean         l2p.py:340  l2p                no read of l2p.R sees its slot overwritten after contract(l2p.R, lambda box, a, b: (a, b)):
+proved   proved     lean         l2p.py:334  l2p                no read of l2p.R sees its slot overwritten after contract(l2p.R, lambda box, a, b: (a, b)):
                                                                   l2p.R kept in 121 cells, R[box, a, b] in slot (a, b)
 ...
-proved   proved     lean         l2p.py:347  l2p                the order after on_groups(l2p.unpack.box) runs every dependence of l2p forward, within one work item
-tested   tested     upstream     l2p.py:469  l2p                the native run of l2p agrees with sumpy_l2p in pot, on its example inputs
+proved   proved     lean         l2p.py:341  l2p                the order after on_groups(l2p.unpack.box) runs every dependence of l2p forward, within one work item
+tested   tested     upstream     l2p.py:463  l2p                the native run of l2p agrees with sumpy_l2p in pot, on its example inputs
 
 56 facts: 3 decided, 46 proved, 7 tested
 
@@ -672,8 +670,9 @@ interface can change in a minor release; the CHANGELOG says when one does.
   multiplies out (`examples/hexahedra.py`). A call gives the size by name,
   `dof_array(e, i, j, k, n=4)`.
 - Tracing a body to a typed term: accesses, statements, reductions, ragged
-  fibers, `when` guards, source locations, and a `TraceError` that names the fix
-  when a Python `if` is used on a computed value, when a Python name, a
+  fibers, branches, source locations, and a `TraceError` that names the fix
+  when a `while` loops on a computed value, when a body has more paths
+  through its branches than `loopty.trace.MAX_RUNS`, when a Python name, a
   global, or a list, dict or set carries state from one loop iteration to the
   next, when an array is used whole (`y[:] = ...`, `x * 2`, a numpy function of
   it), when a reduction's `if` clause is not a bound isl can state, when the
@@ -683,31 +682,37 @@ interface can change in a minor release; the CHANGELOG says when one does.
   body prints, reads input, opens a file or draws a random number. The
   kernel's own module and package count as its code wherever they are
   installed, site-packages included.
-- `when` guards narrow a statement's isl domain where isl can state them: an
-  affine comparison of loop variables, sizes and scalars of an integral sort.
-  A guard that reads an array, compares with `!=`, or compares with a `Real`
-  scalar is evaluated at run time only, the statement lists it in
+- Branches: `if`, `elif` and `else`, `and`, `or` and `not`, and conditional
+  expressions `a if c else b`, on loop variables, sizes, scalars and data. The
+  trace runs the body once per path through them (#266 for the select), each
+  condition answered from the path, and joins the runs into one term: a
+  statement after an `if`/`else` is one statement, a value two paths choose
+  between on data, `vn[i] * (a[i] if vn[i] > 0 else b[i])`, is one statement
+  computing a select (`?:` in C), and a path isl shows to be empty records
+  nothing. The native run is Python's own: the branch not taken is not run.
+  A path's conditions narrow a statement's isl domain where isl can state
+  them: an affine comparison of loop variables, sizes and scalars of an
+  integral sort. A condition that reads an array, compares with `!=`, or
+  compares with a `Real` scalar is evaluated at run time only, the statement lists it in
   `Stmt.unnarrowed`, and the facts stated over its domain say so in their
   provenance. loopy's own bounds check reads a guard that names no array
   into isl only when it is affine in integers; under any other, a product of
-  loop variables, a float literal or a `Real` scalar (`when(i * 0.5 < 2)`,
-  `when(i * 2.0 < n)`), it checks an access at every point of the loop, and
+  loop variables, a float literal or a `Real` scalar (`if i * 0.5 < 2:`,
+  `if i * 2.0 < n:`), it checks an access at every point of the loop, and
   refuses one it cannot show in bounds there, one the guard keeps in bounds
   included. The refusal (`loopty.refusal.GuardNotRead`, a `LoopyIndexError`)
   names the statement, the guard, and a guard over integers that keeps the
-  access in bounds, as the body writes it, `when(i <= y.dom.size - 5)` for
+  access in bounds, as the body writes it, `if i <= y.dom.size - 5:` for
   `x[i + 4]` (#148; note 23 in
-  `docs/loopy-notes.md`). A guard has to be a truth value, and one whose
-  value is an integer is a `TraceError`, on a native run and under tracing
-  alike. Natively
-  that is what `~(i > 0)` is (`~` on a Python bool is bitwise), while the trace
-  records `not (i > 0)`, so such a kernel traces and its `trace-faithful` fact
-  is refuted by the native refusal, which names the fix. What is stored into
+  `docs/loopy-notes.md`). A condition has to be a truth value: natively
+  `~(i > 0)` is `-2` or `-1` (`~` on a Python bool is bitwise), which
+  Python's `if` takes as true, while the trace reads `not (i > 0)`, so the
+  trace refuses it, naming `i <= 0` and `not`. What is stored into
   an array of `Bool` has to be a truth value too, a comparison, a connective
   of truth values or a `Bool` read, since natively the array is a bool and
   compiled a byte, into which C converts `0.5` as `0`: `b[i] = u[i]` is a
   `TraceError` naming `b[i] = u[i] != 0`, and an integer arriving at a bool
-  array natively, `~(i > 0)` again, is refused there as it is by `when`.
+  array natively, `~(i > 0)` again, is refused there.
   Every operand of `&`, `|` and `~` has to be a truth value, wherever the
   connective is, the index of the cell written included, since the trace and
   the compiled kernel read them as `and`, `or` and `not` and natively they are
@@ -715,7 +720,7 @@ interface can change in a minor release; the CHANGELOG says when one does.
   `k[i] != 0`, and `k % 2` for `k & 1`. And `~(i > 0)` used as a number
   (`x[i] * ~(i > 0)`, in a sum's body or an index) is a `TraceError` naming
   `i <= 0`, since natively it is the `-2` or `-1` the native run refuses only
-  where a truth value is asked for. More operations are refused, naming what
+  where it is stored into a `Bool` array. More operations are refused, naming what
   to write: `b[i] + c[i]` of two truth values, which is `or` natively and `2`
   compiled (`b[i] | c[i]` for `or`, `1 * b[i] + c[i]` for a count), and
   `b[i] - c[i]`, which numpy refuses; an integer element or scalar to a
@@ -968,7 +973,7 @@ interface can change in a minor release; the CHANGELOG says when one does.
   the smallest value of its type included, and `abs` of a real in a guard is
   written without a call, since loopy resolves no function only a guard calls
   (#154); another function only a guard calls is refused, naming the fix.
-  `abs` of a term compares on either side, `when(abs(k[i]) > 2)` and `127 ==
+  `abs` of a term compares on either side, `if abs(k[i]) > 2:` and `127 ==
   abs(c[i])`, since lanky 0.2.0 (xywei/lanky#94). An integer literal past 64
   bits is written as a real where numpy computes in one (`x[i] * 2**70`), or as a
   `uint64` beside one (`u[i] + 2**63`), and refused elsewhere. A kernel named
@@ -1003,7 +1008,7 @@ interface can change in a minor release; the CHANGELOG says when one does.
   `imag` and `conj` of a real are the number, `0` and the number. One numpy
   computes in half precision, `sqrt` of an `int8`, is a `TraceError` naming
   `sqrt(1.0 * k[i])`. A value of one compares as any value does,
-  `when(sqrt(x[i]) > 1.5)`, and numpy's own `np.sqrt`, Python's
+  `if sqrt(x[i]) > 1.5:`, and numpy's own `np.sqrt`, Python's
   `math.sqrt` and `z[i].real` are refused when traced, naming the function
   of `loopty.math` to write. `examples/layer_potential.py` is pytential's QBX
   single and double layer over complex points. `ipow(x, n)` is `x` to an
@@ -1464,8 +1469,8 @@ on the inputs it runs.
   compiled run reads or writes outside the buffer, with no error. `lanky
   check` shows where this can happen: the access's row, `x[i + 4] is in bounds
   for every instance of S0`, reads `refuted` or `assumed`. Put the access
-  under a guard isl can read, which decides the fact: `with when(i + 4 <
-  x.dom.size):` before `y[i] = x[i + 4]`.
+  under a condition isl can read, which decides the fact: `if i + 4 <
+  x.dom.size:` before `y[i] = x[i + 4]`.
 - **A numpy scalar on the left of an operation loses its type**
   ([#167](https://github.com/xywei/loopty/issues/167)). `np.float64(0.1) *
   x[i]` is traced as `0.1 * x[i]`, so beside a `float32` `x` the compiled run
@@ -1478,8 +1483,8 @@ on the inputs it runs.
   `1.0 * (i + n)`, wraps round compiled once it passes `2**31`, which takes a
   size past about `2**30`; natively it is exact. `loopty run` reports it only
   on an input that large. Make the first operand a 64-bit integer:
-  `y[i] = i * np.int64(1) + n`. A loop bound and a guard on the loops,
-  `when(i + n > 5)`, stay 32 bits wide: keep their sums below `2**31`.
+  `y[i] = i * np.int64(1) + n`. A loop bound and a condition on the loops,
+  `if i + n > 5:`, stay 32 bits wide: keep their sums below `2**31`.
 - **Integers past 64 bits**
   ([#139](https://github.com/xywei/loopty/issues/139)). Arithmetic of loop
   variables, sizes and literals alone is exact natively, as Python's integers
@@ -1504,9 +1509,9 @@ on the inputs it runs.
   ([#172](https://github.com/xywei/loopty/issues/172),
   [#173](https://github.com/xywei/loopty/issues/173),
   [#175](https://github.com/xywei/loopty/issues/175)). A sum in a guard,
-  `when(reduce_sum(x[j] for j in x.dom) > 1)`, fails inside loopy with `name
+  `if reduce_sum(x[j] for j in x.dom) > 1:`, fails inside loopy with `name
   already used as iname`: compute the sum into an array in a statement of its
-  own and read that array in the guard. A truth value first in arithmetic,
+  own and read that array in the condition. A truth value first in arithmetic,
   `True - k[i]`, fails while tracing with Python's `TypeError`: write the
   integer, `1 - k[i]`. `k[i] - -(2**63)` of an `Int` is refused as a literal
   past 64 bits, though numpy computes it: write `k[i] + -(2**63)`, the same

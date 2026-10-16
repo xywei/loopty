@@ -22,7 +22,7 @@ marked with `...` is an excerpt and the lines it keeps are checked verbatim.
 | `stencil_skew.py` | a rectangular tiling of a Jacobi stencil refused with a witness pair, and the skew that makes the same tiling legal |
 | `wavefront_acoustic.py` | two coupled statements in one acoustic-wave nest: a rectangular tiling refused with a witness that crosses them, the skew that makes it a legal wavefront block, the diamond map, accepted and run, whose tiling is refused, and the diamond with a map per statement, whose tiling is accepted and run |
 | `reshape_layouts.py` | `Fin[n * m]` as `Fin[n] x Fin[m]`, one buffer read in two layouts, and a transpose split and interchanged |
-| `p2p.py` | the near field of a fast multipole method: a two-level interaction list flattened into one ragged level, with the self-interaction guarded by `when` |
+| `p2p.py` | the near field of a fast multipole method: a two-level interaction list flattened into one ragged level, with the self-interaction left out by an `if` |
 | `pairs.py` | symmetric pair interactions over the lower triangle, an array argument over the domain `Where[i: Fin[n], j: Fin[n], j < i]`, decided in bounds over the exact triangle and run boxed and packed |
 | `composition.py` | two kernels composed by a program and lowered as one loopy kernel, with the intermediate a temporary of it and the edge between the kernels found in the footprints |
 | `travel.py` | facts that travel between a program's calls: a requirement decided under the postcondition of the call before, one checked by the compiled program between the calls, and a flat access in bounds where it follows the scan |
@@ -247,7 +247,7 @@ accepted: Schedule(jacobi, target='c').skew(jacobi.i, by=jacobi.t).tile(jacobi.t
 
 ### lanky check examples/stencil_skew.py
 
-Every access is in bounds because the `when` guard narrows the statement's
+Every access is in bounds because the `if` narrows the statement's
 domain: `u[t + 1, i]` is written only where `t + 1 < nt`, and isl is asked about
 the narrowed domain rather than the whole loop nest.
 
@@ -398,7 +398,7 @@ accepted: Schedule(acoustic, target='c').affine({ S0[t, i] -> [a = t + i, b = t 
 
 ### lanky check examples/wavefront_acoustic.py
 
-Eight accesses, every one decided by isl over the domain the `when` guard
+Eight accesses, every one decided by isl over the domain the `if`
 narrows: `velocity[t + 1, i - 1]` is in bounds because the guard keeps `i > 0`,
 and both writes at `t + 1` because it keeps `t + 1 < nt`.
 

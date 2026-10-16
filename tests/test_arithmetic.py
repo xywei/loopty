@@ -3574,7 +3574,7 @@ def runtime_wide(a: Arr[Fin[n], np.int8], y: Arr[Fin[n], Int]):  # noqa: F821
 
 @kernel
 def guarded_negative(u: Arr[Fin[n], np.uint32], y: Arr[Fin[n], Int]):  # noqa: F821
-    """``i - 3`` under a guard that masks the write and not the arithmetic."""
+    """``i - 3`` under an ``if``, which skips the arithmetic where it fails."""
     for i in u.dom:
         if i >= 3:
             y[i] = u[i] + (i - 3)
@@ -3697,9 +3697,9 @@ def checked_then_stored(u, z, y):
 
 @kernel
 def stored_nowhere(y: Arr[Fin[n], np.uint8]):  # noqa: F821
-    """``300`` stored into a ``uint8`` under a guard that holds nowhere."""
+    """``300`` stored into a ``uint8`` under an ``if`` a short ``y`` never takes."""
     for i in y.dom:
-        if i < 0:
+        if i >= 5:
             y[i] = 300
 
 
@@ -3739,11 +3739,9 @@ def test_loop_arithmetic_a_numpy_integer_does_not_hold_is_refused_compiled_too()
     assert "u[i] + (i - 3) at test_arithmetic.py:" in message
     assert "'(i - 3) * np.int64(1)'" in message
     agrees(runtime_negative_fixed, lambda: unsigned(5))
-    # Under a guard as well: the body computes at every point of its loop.
-    with pytest.raises(OverflowError, match="-3 out of bounds"):
-        guarded_negative(**unsigned(4))
-    with pytest.raises(RefusedNatively, match="-3 at i = 0"):
-        LoopyExecutor().run(guarded_negative, **unsigned(4))
+    # Under an if, natively the body computes only where i >= 3, and the
+    # compiled run is not refused where it does not.
+    agrees(guarded_negative, lambda: unsigned(5))
     # In a sum, over the sum's own loop too.
     summed = {"a": np.ones(3, np.uint16), "y": np.zeros(3, np.int64)}
     with pytest.raises(OverflowError, match="-1 out of bounds for uint16"):
@@ -3846,9 +3844,9 @@ def test_loop_arithmetic_a_numpy_integer_does_not_hold_is_refused_compiled_too()
     LoopyExecutor().run(checked_then_stored, **compiled)
     assert np.array_equal(native["y"].numpy(), compiled["y"].numpy())
 
-    # A literal stored under a guard is stored only where the guard holds,
+    # A literal stored under an if is stored only where the condition holds,
     # and numpy converts nothing elsewhere: refused where the call's sizes
-    # reach a point of the guard, and computed where they reach none.
+    # reach a point of the branch, and computed where they reach none.
     agrees(stored_nowhere, lambda: {"y": np.zeros(3, np.uint8)})
     with pytest.raises(OverflowError, match="300 out of bounds for uint8"):
         stored_once(y=np.zeros(3, np.uint8))
