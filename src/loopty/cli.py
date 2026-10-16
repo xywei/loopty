@@ -722,11 +722,14 @@ class RunVerb:
         # facts above; where Lean is installed it checks each once, a cast
         # from the steps' records, and a fact it proves reads proved; one
         # loopty states for isl only says why under --verbose
-        # (loopty.obligations).
+        # (loopty.obligations). A math step's row was tested on drawn inputs
+        # when it was made, and Lean proves it over the reals or the complex
+        # numbers (loopty.rewriting).
         from loopty.obligations import prove
+        from loopty.rewriting import KIND as REWRITE
 
         for fact in list(ledger):
-            if fact.decided_by == "isl" and callable(
+            if (fact.decided_by == "isl" or fact.kind == REWRITE) and callable(
                 getattr(fact.term, "lean_obligation", None)
             ):
                 ledger.add(prove(fact))

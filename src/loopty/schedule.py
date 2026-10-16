@@ -3412,6 +3412,7 @@ class Schedule:
         sizes: dict[str, int] | None = None,
         *,
         _layouts: dict[str, str] | None = None,
+        _term: Term | None = None,
     ) -> None:
         if isinstance(kernel, Schedule):
             self._start_from(kernel, target, sizes)
@@ -3419,7 +3420,16 @@ class Schedule:
         if target is None:
             target = "c"
         self._source = kernel
-        self._term = _term_of(kernel)
+        #: The term the kernel's body traces, which postconditions, cited
+        #: theorems and ``trace-faithful`` are about (:attr:`traced`), and the
+        #: term the schedule compiles, the same unless a math step rewrote it
+        #: (:meth:`rewrite`, which builds the schedule again from the term it
+        #: leaves, given here).
+        self._traced = _term_of(kernel)
+        self._term = self._traced if _term is None else _term
+        #: The math steps taken, each a :class:`loopty.rewriting.Rewritten`
+        #: with its rows (:meth:`rewrite`).
+        self._rewrites: tuple[Any, ...] = ()
         #: Where the schedule was made, ``Schedule(...)``; see :attr:`where`.
         self._made_at = _called_at()
         #: What the ids of the schedule's facts name the kernel by; see
@@ -3628,8 +3638,27 @@ class Schedule:
 
     @property
     def term(self) -> Term:
-        """The term being scheduled."""
+        """The term being scheduled, which the schedule compiles.
+
+        The kernel's own term, :attr:`traced`, unless a math step rewrote what
+        an array stores (:meth:`rewrite`): then the term it left.
+        """
         return self._term
+
+    @property
+    def traced(self) -> Term:
+        """The term the kernel's body traces, whatever the math steps rewrote.
+
+        Postconditions, cited theorems and ``trace-faithful`` are about this
+        term, and a rewrite's rows say that :attr:`term` computes what it does
+        over the reals or the complex numbers (:mod:`loopty.rewriting`).
+        """
+        return self._traced
+
+    @property
+    def rewritten(self) -> frozenset[str]:
+        """The arrays a math step rewrote, compared at ``approx`` (:meth:`rewrite`)."""
+        return frozenset(rows.rewritten.array for rows in self._rewrites)
 
     @property
     def where(self) -> str:
@@ -7331,6 +7360,120 @@ class Schedule:
                                 )
         return (*kept, *carried), tuple(within)
 
+    # {{{ math steps
+
+    def rewrite(
+        self, where: Any, by: Any, *, keep: Any = None, into: Any = None
+    ) -> Schedule:
+        """Compute what ``where`` stores by a theorem: its left side becomes its right.
+
+        ``Schedule(single_layer).rewrite(single_layer.out, by=conjugate_form)``
+        reads "the single layer, with out rewritten by the conjugate form":
+        wherever what the kernel stores in ``out`` contains the theorem's left
+        side, the schedule computes its right side instead. ``by=(f, g)``
+        applies the theorems in order, each once, to the statement as the one
+        before left it. A theorem is stated as "what the kernel says == what
+        it should compute", and its variables bind terms of their own sorts
+        (:mod:`loopty.rewriting`).
+
+        A math step changes the expression, where a cast changes only the
+        order, so it comes before the loops: one after a cast is refused,
+        with where to put it. The kernel's body stays the math as written
+        and the reference (:attr:`traced`); the schedule compiles the
+        rewritten term (:attr:`term`), lowered as any other.
+
+        Each theorem's step is a row, proved by Lean over the reals or the
+        complex numbers where Mathlib is, and tested on drawn inputs
+        otherwise; each condition the theorem needs at the kernel is a row,
+        decided by isl for indices and tested on the example inputs for
+        data; ``where``'s class is ``approx`` after the step (an ``exact``
+        output is refused); and the compiled schedule is compared with the
+        native kernel, on its example inputs and at magnitude extremes. The
+        rows are made when :meth:`facts` is first asked, never on import.
+        """
+        from loopty.rewriting import IllegalRewrite, Rows, identity_of, rewrite_term
+
+        theorems = tuple(by) if isinstance(by, tuple | list) else (by,)
+        kwargs: dict[str, Any] = {"by": by}
+        if keep is not None:
+            kwargs["keep"] = keep
+        if into is not None:
+            kwargs["into"] = into
+        recipe = ("rewrite", (where,), kwargs)
+        text = _call_text(recipe)
+        array = self._array(where, text)
+        shown = self._shown_array(array)
+        taken = [
+            shown_step
+            for (method, _args, _kwargs), shown_step in zip(
+                self._steps, self._history, strict=False
+            )
+            if method != "rewrite"
+        ]
+        if taken:
+            raise IllegalRewrite(
+                f"{text} comes after {taken[0]}: a math step changes what the "
+                "instances compute, and the steps after it are checked on what it "
+                f"leaves, so it comes before the loops; put rewrite({shown}, ...) "
+                f"before {taken[0]}"
+            )
+        if not theorems:
+            raise IllegalRewrite(f"{text}: by= names no theorem")
+        from loopty.tolerance import output_class
+
+        was = output_class(self._term, array, self._reassoc)
+        if was == "exact":
+            raise IllegalRewrite(
+                f"{text}: {shown} is compared exact, bit for bit, and a theorem "
+                "rewrites it into another expression, which rounds otherwise; a "
+                "math step is for an output whose class allows it, approx, as "
+                "realize(...) is for one whose sum may be reordered"
+            )
+        identities = [identity_of(theorem, text) for theorem in theorems]
+        rewritten = rewrite_term(self._term, array, identities, text, shown)
+        if keep is not None or into is not None:
+            from loopty.rewriting import structural
+
+            rewritten = structural(
+                rewritten, self._source, keep=keep, into=into, text=text, shown=shown
+            )
+        out = Schedule(
+            self._source,
+            target=self._target,
+            sizes=dict(self._sizes),
+            _layouts=dict(self._layouts),
+            _term=rewritten.after,
+        )
+        out._traced = self._traced
+        out._made_at = self._made_at
+        out._examples = self._examples
+        out._history = (*self._history, text)
+        out._steps = (*self._steps, recipe)
+        at = _called_at()
+        out._steps_at = (*self._steps_at, at)
+        steps = out._steps
+
+        def identifier(detail: str) -> str:
+            return out._fact_id("math", steps, detail, target=False)
+
+        rows = Rows(
+            rewritten,
+            out,
+            self._source,
+            at or self._kernel_where(),
+            identifier,
+            out._fact_id("math", steps, "compared"),
+        )
+        out._rewrites = (*self._rewrites, rows)
+        return out
+
+    @property
+    def rewrites(self) -> tuple[Any, ...]:
+        """The math steps taken, each a :class:`loopty.rewriting.Rewritten`."""
+        return tuple(rows.rewritten for rows in self._rewrites)
+
+    # }}}
+
     def assume(self, condition: Any) -> Schedule:
         """Take ``condition`` of the sizes as given: loopy's ``assume``, checked.
 
@@ -8943,8 +9086,14 @@ class Schedule:
         )
 
     def facts(self) -> tuple:
-        """The cast facts accumulated by the transformations applied so far."""
-        return self._facts
+        """The facts of the steps taken so far: the math steps' rows, then the casts'.
+
+        A math step's rows (:meth:`rewrite`) are made when they are first
+        asked for, under ``lanky check`` and ``loopty run``, since they run
+        the kernel: never when the file is imported.
+        """
+        rows = tuple(fact for step in self._rewrites for fact in step.facts(self))
+        return (*rows, *self._facts)
 
 
 def _assumption_text(expr: Any, sizes: set[str], condition: str) -> str:
@@ -9022,11 +9171,27 @@ def _call_text(step: tuple[str, tuple, dict]) -> str:
     def shown(value: Any) -> str:
         if isinstance(value, isl.Map | isl.BasicMap | isl.UnionMap):
             return repr(str(value))
+        if type(value) is tuple and value and any(map(_is_theorem, value)):
+            items = ", ".join(shown(item) for item in value)
+            return f"({items},)" if len(value) == 1 else f"({items})"
+        if _is_theorem(value):
+            # a theorem a math step cites, by its name, as the step was written
+            return value.__name__
         return repr(value)
 
     parts = [shown(arg) for arg in args]
     parts += [f"{name}={shown(value)}" for name, value in kwargs.items()]
     return f"{method}({', '.join(parts)})"
+
+
+def _is_theorem(value: Any) -> bool:
+    """Whether ``value`` is a theorem or a program a math step names, by its name."""
+    name = getattr(value, "__name__", None)
+    return isinstance(name, str) and (
+        isinstance(getattr(value, "fact_id", None), str)
+        or hasattr(value, "goal")
+        or type(value).__name__ == "Program"
+    )
 
 
 def _sizes_text(

@@ -1889,35 +1889,26 @@ def test_the_line_taylor_theorem_is_in_the_qbx_ledger_and_not_refuted() -> None:
 
 
 def test_the_qbx_ledger_says_single_layer_adds_line_taylors_terms() -> None:
-    """The theorem and the kernel in one row: its terms are line_taylor's c(n) (#252).
+    """The theorem and the kernel in one row: its terms are line_taylor's a(n) (#252).
 
-    The kernel's ratio is by the conjugate, and ``by_the_conjugate`` says it
-    is the theorem's ``-beta / alpha``: a theorem of its own, tested by the
-    property tester and, with Mathlib, proved.
+    The kernel says the math as written, ``coefficient(-beta / alpha, k)``, so
+    the theorem applies to it directly, with no identity between them.
     """
     _result, facts = _invoke("layer_potential", "check")
-    (identity,) = [
-        fact
-        for fact in facts
-        if fact["owner"] == "by_the_conjugate" and fact["kind"] == "theorem"
-    ]
-    assert identity["status"] in ("tested", "proved"), identity
     (row,) = [fact for fact in facts if fact["kind"] == "by-theorem"]
     assert row["owner"] == "single_layer"
     assert row["statement"] == (
-        "single_layer adds line_taylor's c(n) for n in 1..5, for every c with "
-        "away, first and ode, read over the complex numbers"
+        "single_layer adds line_taylor's a(n) for n in 1..5, for every a with "
+        "nonzero, first_term and ode, read over the complex numbers"
     )
     assert row["status"] in ("decided", "proved"), row
     assert row["decided_by"] in ("theorem", "lean"), row
     provenance = row["provenance"]
     assert provenance["bindings"] == "alpha = c[t] - y[s], beta = z[t] - c[t]"
     assert provenance["orders"] == [1, 2, 3, 4, 5]
+    assert provenance["identities"] == []
     module = _module("layer_potential")
-    assert set(row["rests_on"]) >= {
-        module.line_taylor.fact_id,
-        module.by_the_conjugate.fact_id,
-    }
+    assert module.line_taylor.fact_id in row["rests_on"]
     # where the statement is that adds them
     line = int(row["where"].rsplit(":", 1)[1])
     source = _path("layer_potential").read_text(encoding="utf-8").splitlines()
@@ -1925,10 +1916,46 @@ def test_the_qbx_ledger_says_single_layer_adds_line_taylors_terms() -> None:
     assert "single(c[t] - y[s], z[t] - c[t])" in source[line]
 
 
-def test_the_kernels_ratio_is_the_theorems() -> None:
-    # The kernels add coefficient(ratio, k) with the ratio multiplied out by
-    # the conjugate; the theorem's is -beta / alpha. They agree to rounding,
-    # and the series is log|alpha + beta| to the order's truncation.
+def test_the_qbx_ledger_has_sumpys_arithmetic_as_math_steps() -> None:
+    """``as_sumpy_computes``: the conjugate form and the log of the modulus, each a row.
+
+    Each step is exact over the complex numbers wherever ``c[t] - y[s] != 0``
+    (proved by Lean with Mathlib, tested on drawn inputs without it), the
+    condition is tested on the example inputs, the class is approx, and the
+    compiled run agrees with the native one on the example inputs, with a
+    note where the float range moved.
+    """
+    _result, facts = _invoke("layer_potential", "check")
+    single = [fact for fact in facts if fact["owner"] == "single_layer"]
+    steps = [fact for fact in single if fact["kind"] == "rewrite"]
+    assert [fact["statement"] for fact in steps] == [
+        "rewrite(out, by=conjugate_form): over the complex numbers, what out "
+        "stores is unchanged wherever c[t] - y[s] != 0: -(z[t] - c[t]) / (c[t] - "
+        "y[s]) becomes its conjugate form, in 5 places",
+        "rewrite(out, by=log_of_the_modulus): over the complex numbers, what out "
+        "stores is unchanged wherever c[t] - y[s] != 0: log(abs(c[t] - y[s])) "
+        "becomes log(real((c[t] - y[s])*conj(c[t] - y[s]))) / 2, in 1 place",
+    ]
+    for fact in steps:
+        assert fact["status"] in ("tested", "proved"), fact
+    (condition,) = [fact for fact in single if fact["kind"] == "rewrite-condition"]
+    assert condition["statement"] == (
+        "c[t] - y[s] != 0 for every t and every s, which conjugate_form and "
+        "log_of_the_modulus need, on the example inputs"
+    )
+    assert (condition["status"], condition["decided_by"]) == ("tested", "run")
+    compared = [fact for fact in single if fact["kind"] == "rewrite-compared"]
+    assert compared and all(fact["status"] == "tested" for fact in compared)
+    assert compared[0]["statement"].startswith(
+        "the compiled as_sumpy_computes agrees with the native single_layer in out "
+        "at approx"
+    )
+    assert "note: with the inputs scaled by 1e-170" in compared[0]["statement"]
+
+
+def test_the_kernels_series_is_the_theorems() -> None:
+    # The kernels add coefficient(-beta / alpha, k), the theorem's own closed
+    # form, and the series is log|alpha + beta| to the order's truncation.
     module = _module("layer_potential")
     rng = np.random.default_rng(5)
     for alpha, beta in zip(
@@ -1936,8 +1963,6 @@ def test_the_kernels_ratio_is_the_theorems() -> None:
         0.3 * (rng.normal(size=20) + 1j * rng.normal(size=20)),
         strict=True,
     ):
-        ratio = module.ratio(alpha, beta)
-        assert abs(ratio - (-beta / alpha)) <= 1e-15 * abs(beta / alpha) * 4
         closed = sum(
             module.coefficient(-beta / alpha, k) for k in range(1, module.ORDER + 1)
         )
@@ -1951,7 +1976,11 @@ def test_the_kernels_ratio_is_the_theorems() -> None:
 def test_sumpys_tile_is_legal_and_c_cannot_build_its_axes() -> None:
     module = _module("layer_potential")
     tile = module.sumpy_tile("c")
-    casts = [fact for fact in tile.facts() if fact.kind != "buildable"]
+    casts = [
+        fact
+        for fact in tile.facts()
+        if fact.kind != "buildable" and not fact.id.startswith("math:")
+    ]
     assert len(casts) == 8
     assert all(fact.status.value == "decided" for fact in casts)
     buildable, reason = tile.buildable
@@ -1994,8 +2023,12 @@ def test_the_qbx_demo_prints_the_tile_the_fact_and_the_rows() -> None:
     for line in lines:
         assert line.endswith(", within 1e-12 of the largest value -> tested"), line
     assert (
-        "  single_layer adds line_taylor's c(n) for n in 1..5, for every c with "
-        "away, first and ode, read over the complex numbers -> decided"
+        "  single_layer adds line_taylor's a(n) for n in 1..5, for every a with "
+        "nonzero, first_term and ode, read over the complex numbers -> decided"
+    ) in out.splitlines()
+    assert (
+        "as sumpy computes it: rewrite(single_layer.out, by=(conjugate_form, "
+        "log_of_the_modulus))"
     ) in out.splitlines()
     for name in ("green_identity", "jump_S", "jump_D"):
         (line,) = [line for line in out.splitlines() if line.strip().startswith(name)]
