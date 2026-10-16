@@ -147,14 +147,29 @@ def _tiled(knl: Any, target: str, source: str, group: int) -> Any:
     return lp.prioritize_loops(knl, f"{source}_outer,{target}_inner")
 
 
-def loopty_schedule(tile: str, layer: str = "single") -> Any:
-    """The example's kernel under the tile, checked, for OpenCL."""
+def arithmetic(kern: Any, target: str) -> Any:
+    """The example's kernel in sumpy's arithmetic: its math steps.
+
+    Each division through the conjugate, and the single layer's ``log|alpha|``
+    with no square root, as the example's schedules rewrite them.
+    """
     from loopty import Schedule
 
     ex = example()
+    by = (
+        (ex.conjugate_form, ex.log_of_the_modulus)
+        if kern is ex.single_layer
+        else ex.conjugate_form
+    )
+    return Schedule(kern, target=target).rewrite(kern.out, by=by)
+
+
+def loopty_schedule(tile: str, layer: str = "single") -> Any:
+    """The example's kernel, in sumpy's arithmetic, under the tile, for OpenCL."""
+    ex = example()
     kern = ex.single_layer if layer == "single" else ex.double_layer
     return (
-        Schedule(kern, target="opencl")
+        arithmetic(kern, "opencl")
         .split(kern.t, GROUP[tile])
         .tag({kern.t.outer: "g.0", kern.t.inner: "l.0"})
         .split(kern.s, 256)
@@ -218,7 +233,6 @@ def loopy_same_kernel(tile: str) -> Any:
     import loopy as lp
     from loopy.symbolic import IdentityMapper
 
-    from loopty import Schedule
     from loopty.isl_reading import declining
     from loopty.lower import _natural_power
 
@@ -231,7 +245,7 @@ def loopy_same_kernel(tile: str) -> Any:
 
     ex = example()
     with declining():
-        lowered = Schedule(ex.single_layer, target="opencl").kernel
+        lowered = arithmetic(ex.single_layer, "opencl").kernel
     (insn,) = lowered.default_entrypoint.instructions
     knl = lp.make_kernel(
         "{[t, s]: 0 <= t < nt and 0 <= s < ns}",

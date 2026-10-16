@@ -6,6 +6,53 @@ All notable changes to loopty are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Math steps: `Schedule(k).rewrite(k.out, by=theorem)`.** A schedule step
+  that changes what a statement computes by an identity, citing the theorem
+  that makes it exact. Wherever what `out` stores contains the theorem's left
+  side, the schedule computes its right side; `by=(f, g)` applies theorems in
+  order, each to what the one before left. The kernel's body stays the math
+  as written and the reference (`Schedule.traced`), and the schedule compiles
+  the rewritten term (`Schedule.term`), lowered as any other. A theorem's
+  variable binds only a term of its sort, so `conjugate_form`'s complex
+  `alpha` binds `c[t] - y[s]` and never the order `k` a sum writes out. Each
+  step is a row of the ledger: exact over the reals or the complex numbers
+  where the theorem's conditions hold, proved by Lean with Mathlib (the
+  theorem restated and rewritten into the goal under the sums too) and tested
+  on drawn inputs without it; each condition is a row by its kind, decided by
+  isl on indices and tested on the example inputs for data; the output's class
+  is `approx`; and the compiled schedule is compared with the native kernel,
+  measured on the example inputs and on drawn ones, with a note, not a
+  failure, where inputs of extreme magnitude leave the float range the
+  rewrite keeps. A rewrite after a cast, a theorem stated the other way round
+  or found nowhere, a left side that is a bare variable and an exact output
+  are refused, each naming the fix (`IllegalRewrite`).
+  `examples/layer_potential.py` computes the single layer as sumpy does,
+  `as_sumpy_computes`, from kernels that say the math as written, and
+  `line_taylor` applies to them directly.
+- **Passes derived from the math: `rewrite(..., keep=(...))` and
+  `into=`.** `keep=("r_pass", "s_pass")` stores the sums a theorem's right
+  side nests in arrays of the schedule's own, innermost first, each over the
+  loops it reads; the matches one written-out sum gave, one per term, are
+  folded back into one nest over the sum's binder. The kept arrays and their
+  loops have handles, `factored.r_pass` and `factored.r_pass.c`, which
+  `fuse` and `contract` take. The row says what the passes leave: the
+  kernel's statement, proved by Lean as a program's postcondition is, by
+  unfolding what the passes store and rewriting with the theorem at each
+  direction's tables; the kept arrays' accesses are in bounds, their writes
+  distinct and each cell stored before it is read, decided by isl.
+  `into=passes` compiles a program the file has, which takes the kernel's
+  arguments, and proves it leaves the kernel's statement the same way. A
+  rewrite that nests sums and keeps none says on its compared row that each
+  cell still adds every term, and names `keep=`. `examples/hexahedra.py`'s
+  `weak_grad` is now the dense kernel, as grudge's `weak_local_grad` says
+  it, and `factored`, `fused` and `contracted` derive the passes from it;
+  the four-call program is `passes`, and its schedules `passes_fused` and
+  `passes_contracted`.
+- **lanky's `Complex` is an element type**, stored as `complex128`, as `Real`
+  is stored as `float64`: `Arr[Fin[nt], Complex]`.
+
 ### Fixed
 
 - **A run leaves no `tmp_loopy*` directory behind (#335).** loopy 2025.2's C

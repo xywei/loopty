@@ -773,13 +773,19 @@ class LoopyExecutor:
 def exactness_of_output(term: Term, schedule: Any, name: str) -> str:
     """The exactness class the comparison of one output is judged by.
 
-    The weakest of three: the class of the element sort, the class of the
-    accumulation that writes it, and ``reassoc`` if the schedule realized that
-    accumulation as a tree. Weakest wins because error does not cancel. See
+    The weakest of four: the class of the element sort, the class of the
+    accumulation that writes it, ``reassoc`` if the schedule realized that
+    accumulation as a tree, and ``approx`` if a math step of the schedule
+    rewrote what it stores. Weakest wins because error does not cancel. See
     :func:`loopty.tolerance.output_class`, which the faithfulness fact asks
     too.
     """
-    return output_class(term, name, getattr(schedule, "reassociated", frozenset()))
+    return output_class(
+        term,
+        name,
+        getattr(schedule, "reassociated", frozenset()),
+        getattr(schedule, "rewritten", frozenset()),
+    )
 
 
 def _compare(
