@@ -4004,18 +4004,20 @@ class Schedule:
                 if param == name
             ]
             return list(dict.fromkeys(out))
-        out = []
+        out: dict[tuple[str, ...], str] = {}
         for key, names in self._loops.items():
             if not isinstance(names, tuple):
                 continue
             binder, made, part = key
-            handle = Loop(self._handles, binder, part, made)
             spelled = made if binder is None else binder.binder
-            if name in names or (not part and spelled == name):
-                out.append(handle.path)
-            elif part and name == f"{spelled}_{'_'.join(part)}":
-                out.append(handle.path)
-        return list(dict.fromkeys(out))
+            if (
+                name in names
+                or (not part and spelled == name)
+                or (part and name == f"{spelled}_{'_'.join(part)}")
+            ):
+                # one loop, after a fusion, is named once, as it is printed
+                out.setdefault(names, self._shown(names[0]))
+        return list(dict.fromkeys(out.values()))
 
     def _an_example(self, kind: str, method: str = "") -> str:
         """A handle of ``kind`` this schedule has, to name in a refusal.
@@ -5504,16 +5506,66 @@ class Schedule:
             if not hint or exc.fact is None or exc.fact.kind != "monotone":
                 raise
             accepted = self._accepted_fusions(sides, nests, shifts)
-            if not accepted:
+            checked = self._fused_check(handles, exc.witness)
+            if not accepted and checked is None:
                 raise
-            message = f"{exc}; {accepted[0]} runs every dependence between them " + (
-                "forward"
-                if len(accepted) == 1
-                else f"forward, and so does {accepted[1]}"
-            )
+            fixes = []
+            if accepted:
+                fixes.append(
+                    f"{accepted[0]} runs every dependence between them "
+                    + (
+                        "forward"
+                        if len(accepted) == 1
+                        else f"forward, and so does {accepted[1]}"
+                    )
+                )
+            if checked is not None:
+                fixes.append(checked)
+            message = f"{exc}; " + "; ".join(fixes)
             provenance = {**exc.fact.provenance, "reason": message}
             fact = dataclasses.replace(exc.fact, provenance=provenance)
             raise IllegalCast(message, witness=exc.witness, fact=fact) from None
+
+    def _fused_check(self, handles: Sequence[Any], witness: Any) -> str | None:
+        """The fusion of a checked point that a refused fusion ran past, or ``None``.
+
+        Where the program checks, between two calls, what the second requires
+        of an array the first wrote, the second reads the check's flag, so it
+        runs after the whole check and fusing the two calls is refused with
+        that read. The check itself fuses with the first call's loop,
+        ``fuse(p.reverse_quiet.i, p.gather.checks.idx)``, checking each cell
+        as it is written; it is named when the checker accepts it.
+        """
+        if not witness:
+            return None
+        (source_id, _coords), _sink, _sizes = witness
+        found = self._handles.check_stmts.get(source_id)
+        if found is None:
+            return None
+        inames = self._term.stmt(source_id).inames
+        loops = [
+            binder for binder in self._handles.check_binders if binder.name in inames
+        ]
+        for producer in handles:
+            try:
+                name = self._loop(producer, "fuse()")
+                depth = len(
+                    self._fused_nest(self._fused_side(name), name, producer, "fuse()")
+                )
+            except (TypeError, ValueError):
+                continue
+            if depth > len(loops):
+                continue
+            check = Loop(self._handles, loops[depth - 1])
+            try:
+                self._fuse([producer, check], 0, hint=False)
+            except (IllegalCast, ValueError):
+                continue
+            return (
+                f"fuse({producer!r}, {check!r}) runs the check in {producer!r}, "
+                "each cell as it is written"
+            )
+        return None
 
     def _accepted_fusions(
         self,

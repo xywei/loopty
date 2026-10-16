@@ -1169,6 +1169,12 @@ def test_a_fusion_past_a_checked_point_is_refused_for_its_flag() -> None:
             f"({where(gather, 'y[i] =')}) at i="
         ) in message
         assert check not in message and flag not in message
+        # and the fusion that does run the check in the producer's loop
+        assert message.endswith(
+            "; fuse(reversed_gather.reverse_quiet.i, "
+            "reversed_gather.gather.checks.idx) runs the check in "
+            "reversed_gather.reverse_quiet.i, each cell as it is written"
+        )
 
 
 def test_a_checked_point_fused_with_the_producer_stays_before_the_reads() -> None:

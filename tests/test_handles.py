@@ -400,6 +400,23 @@ def test_the_spellings_of_0_3_are_refused_with_the_step_to_write(step, message):
     assert str(caught.value) == message
 
 
+def test_a_string_is_refused_with_each_loop_it_names_once() -> None:
+    # two calls' loops of one name are two loops, and one after a fusion,
+    # which is written as it is printed, by the first handle that reaches it
+    with pytest.raises(TypeError) as caught:
+        Schedule(twice).split("k", 2)
+    assert str(caught.value) == (
+        "split() takes a loop handle such as twice.scale[0].k or twice.scale[1].k, "
+        "not the string 'k'"
+    )
+    fused = Schedule(twice).fuse(twice.flux.j, twice.scale[0].k, twice.scale[1].k)
+    with pytest.raises(TypeError) as caught:
+        fused.split("k", 2)
+    assert str(caught.value) == (
+        "split() takes a loop handle such as twice.flux.j, not the string 'k'"
+    )
+
+
 def test_a_handle_of_another_kernel_is_refused_with_the_path_to_write() -> None:
     with pytest.raises(ValueError) as caught:
         Schedule(burgers).split(divergence.i, 2)
