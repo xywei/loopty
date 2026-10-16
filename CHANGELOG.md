@@ -122,6 +122,22 @@ the ledger, the refusals and the fixes they suggest, and `loopty run`.
   compared on inputs the comparison file did not mean. The comparison's
   file comes first, then the kernel's, and the row's provenance says whose
   were used (`inputs`: `example_inputs() of l2p.py`).
+- **A theorem a kernel cites that gives it nothing says why (#234).** It
+  had no row and no reason anywhere, so a recurrence off by one, a guard
+  off by one or a conjunct about reals that rounds looked the same as a
+  theorem never cited, and an exception of the matcher was taken for a
+  theorem that does not apply. Such a theorem now has a row of kind
+  `by-theorem`, `assumed`, `on_the_triangle, which off_by_one cites,
+  applies to it`, and `lanky check` says why under the table, in the
+  kernel's terms: the hypothesis about an array the kernel writes that no
+  conjunct of the postcondition is, put in the kernel's names, with the
+  nearest conjunct (`no conjunct of the postcondition of off_by_one is its
+  hypothesis recurrence, ... R[a + 2, b] == -R[a, b + 2]; the nearest is
+  ... R[a + 2, b] == -R[a, b + 1]`); the conjunct about reals that would be
+  a hypothesis and rounds; the binding no array or size can stand for
+  (`its integer k would be s, which is no integer of fill's`); a conclusion
+  that rounds; a refuted postcondition; or the exception. A theorem that
+  decides a conjunct of the postcondition, or gives a row, has none.
 
 ## [0.3.0] - 2026-10-15
 
