@@ -301,13 +301,13 @@ def _loop_and_array():
         ),
         (
             lambda s: s.on_groups("i"),
-            "tag() takes a loop handle such as burgers.divergence.i, not the string "
-            "'i'",
+            "on_groups() takes a loop handle such as burgers.divergence.i, not the "
+            "string 'i'",
         ),
         (
             lambda s: s.fuse("flux", "divergence"),
-            "fuse() takes a loop handle such as burgers.flux.j, not the string "
-            "'flux'",
+            "fuse() takes a loop handle of each call, the loop it fuses down to, "
+            "not the string 'flux': write fuse(burgers.flux.j, burgers.divergence.i)",
         ),
         (
             lambda s: s.interchange("j"),
@@ -341,6 +341,60 @@ def _loop_and_array():
     ],
 )
 def test_a_string_is_refused_with_the_handle_to_write(step, message: str) -> None:
+    with pytest.raises(TypeError) as caught:
+        step(Schedule(burgers))
+    assert str(caught.value) == message
+
+
+@pytest.mark.parametrize(
+    ("step", "message"),
+    [
+        (
+            lambda s: s.tag(j="g.0"),
+            "tag() takes a loop handle and its tag, not the keyword j='g.0': write "
+            "tag(burgers.flux.j, 'g.0')",
+        ),
+        (
+            lambda s: s.tag("i:l.0"),
+            "tag() takes a loop handle and its tag, not the string 'i:l.0': write "
+            "tag(burgers.divergence.i, 'l.0')",
+        ),
+        (
+            lambda s: s.tag(j="g.0", i="l.0"),
+            "tag() takes a loop handle and its tag, not the keywords j='g.0', "
+            "i='l.0': write tag({burgers.flux.j: 'g.0', burgers.divergence.i: 'l.0'})",
+        ),
+        (
+            lambda s: s.tag(q="g.0"),
+            "tag() takes a loop handle and its tag, such as tag(burgers.flux.j, "
+            "'g.0'), not the keyword q='g.0'",
+        ),
+        (
+            lambda s: s.fuse("flux", "divergence", loops=1),
+            "fuse() takes a loop handle of each call, the loop it fuses down to, "
+            "not the string 'flux': write fuse(burgers.flux.j, burgers.divergence.i)",
+        ),
+        (
+            lambda s: s.fuse(burgers.flux.j, burgers.divergence.i, loops=1),
+            "fuse() takes no loops=: it fuses each call's loops down to the loop "
+            "named of it: write fuse(burgers.flux.j, burgers.divergence.i)",
+        ),
+        (
+            lambda s: s.fuse(burgers.flux, burgers.divergence),
+            "fuse() takes a loop handle of each call, the loop it fuses down to, "
+            "not the call burgers.flux: write fuse(burgers.flux.j, "
+            "burgers.divergence.i)",
+        ),
+        (
+            lambda s: s.split(burgers.flux.j, 4, inner="j_in"),
+            "split() takes no inner=: the loops a split makes are the handle's, "
+            "burgers.flux.j.outer and burgers.flux.j.inner",
+        ),
+    ],
+)
+def test_the_spellings_of_0_3_are_refused_with_the_step_to_write(step, message):
+    # loopty 0.3 wrote tag(i="g.0"), fuse("flux", "divergence", loops=1) and
+    # split("j", 32, inner="j_in"); loopy writes tag_inames("i:g.0")
     with pytest.raises(TypeError) as caught:
         step(Schedule(burgers))
     assert str(caught.value) == message
@@ -404,14 +458,16 @@ def test_tag_and_on_groups_and_on_items_are_one_step() -> None:
     tagged = split.tag({doubled.i.outer: "g.0", doubled.i.inner: "l.0"})
     by_words = split.on_groups(doubled.i.outer).on_items(doubled.i.inner)
     assert tagged.tags == by_words.tags == {"i_outer": "g.0", "i_inner": "l.0"}
+    # each is printed as it was written, as every step is
     assert by_words.history[-2:] == (
-        "tag(doubled.i.outer, 'g.0')",
-        "tag(doubled.i.inner, 'l.0')",
+        "on_groups(doubled.i.outer)",
+        "on_items(doubled.i.inner)",
     )
-    assert (
-        split.on_groups(doubled.i.outer, axis=1).history[-1]
-        == split.tag(doubled.i.outer, "g.1").history[-1]
-    )
+    second = split.on_groups(doubled.i.outer, axis=1)
+    assert second.tags == split.tag(doubled.i.outer, "g.1").tags
+    assert second.history[-1] == "on_groups(doubled.i.outer, axis=1)"
+    # and replayed as written
+    assert by_words.retarget("c").history == by_words.history
     with pytest.raises(ValueError, match="an axis is a whole number from 0"):
         split.on_items(doubled.i.inner, axis=-1)
     # each step's facts are at the line that asked for it, through on_groups too

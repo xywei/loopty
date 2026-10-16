@@ -202,6 +202,7 @@ def instances_text(
     *instances: tuple[str, Mapping[str, int]],
     called: Any = None,
     arrays: Any = None,
+    checked: Any = None,
 ) -> list[str]:
     """Instances as one message names them, in the order it names them.
 
@@ -220,7 +221,10 @@ def instances_text(
 
     ``called`` names the call a statement of a program's term is in
     (``l2p.reconstruct``, :mod:`loopty.handles`), and ``arrays`` an array,
-    each by its path; the label and the name otherwise.
+    each by its path; the label and the name otherwise. ``checked`` gives
+    the array a statement of a program's checked point checks, which no line
+    stores either: it is named as ``called`` names it, ``the check of p.idx
+    before p.gather (travel.py:106) at idx[3]``.
     """
     if called is None:
 
@@ -247,6 +251,16 @@ def instances_text(
             out.append(
                 f"the zeros of {arrays(array)} ({stmt.where}) at {array}[{cell}]"
             )
+            previous = stmt_id
+            continue
+        array = None if checked is None or stmt is None else checked(stmt_id)
+        if array is not None and not stmt.text:
+            cell = ", ".join(str(coords.get(name, name)) for name in stmt.inames)
+            at = f" at {array}[{cell}]" if cell else ""
+            if stmt_id == previous:
+                out.append(f"the same check{at}")
+            else:
+                out.append(f"{called(stmt_id)} ({stmt.where}){at}")
             previous = stmt_id
             continue
         if stmt is None or not stmt.text:
