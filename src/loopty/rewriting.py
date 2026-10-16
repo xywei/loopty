@@ -55,6 +55,19 @@ drawn magnitude extremes, where a failure is a note with the input, since a
 rewrite like sumpy's changes the float range on purpose
 (:func:`compared_fact`).
 
+*Passes derived from the math.* A theorem whose right side nests sums,
+``sum_factorization``, saves nothing until the sums it nests are stored:
+``keep=("r_pass", "s_pass")`` stores them, innermost first, each in an
+array of the schedule's own over the loops it reads, in a statement that
+runs before the rewritten one (:func:`keep_term`), and the matches one
+written-out sum gave, one per term, are folded back into one nest. The
+kept arrays and their loops have handles, ``factored.r_pass`` and
+``factored.r_pass.c``. ``into=passes`` names a program the file has as the
+target instead (:func:`into_term`). Either way the claim is that what the
+schedule compiles leaves the kernel's statement in the array, proved as a
+program's postcondition is, by unfolding what its statements store and
+rewriting with the theorem (:func:`structural_proof`, R4).
+
 *What is never claimed.* No floating-point result is called proved: the
 rows say "over the reals" or "over the complex numbers".
 """
@@ -85,16 +98,25 @@ from lanky.terms import Sum as LankySum
 from loopty.term import ArrType, Reduction, Stmt, Term
 
 __all__ = [
+    "COMPARED",
+    "CONDITION",
     "KIND",
     "Condition",
     "IllegalRewrite",
     "Identity",
+    "Kept",
     "Match",
     "MathRewrite",
     "Rewritten",
+    "Rows",
     "cited",
     "identity_of",
+    "into_term",
+    "keep_term",
     "rewrite_term",
+    "statement_claims",
+    "structural",
+    "structural_proof",
 ]
 
 #: The kind of a math step's equality row: lanky's rewrite shape
