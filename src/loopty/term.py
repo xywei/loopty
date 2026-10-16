@@ -686,7 +686,11 @@ class Call:
     cannot (inside a sum over a binder the trace does not bind itself), and
     is empty otherwise; the facts of such a call are left ``assumed``.
     ``within`` are the labels of the calls this one is made inside,
-    outermost first, empty for a call the body makes itself.
+    outermost first, empty for a call the body makes itself. ``paths`` are
+    the points of each path the call is made on, where its paths do not
+    join into one (the ``else`` of ``if a and b:``) and isl states each:
+    ``domain`` is then where the answers they share hold, which is wider
+    than their union, where the call is made. Empty otherwise.
     """
 
     callee: str
@@ -704,6 +708,7 @@ class Call:
     unnarrowed: tuple[tuple[str, str], ...] = ()
     unknown: str = ""
     within: tuple[str, ...] = ()
+    paths: tuple[isl.Set, ...] = ()
 
 
 @dataclass(frozen=True)

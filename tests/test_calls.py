@@ -1167,6 +1167,101 @@ def test_a_python_int_a_narrow_integer_does_not_hold_is_refused_alike() -> None:
         literal.term
 
 
+
+def test_a_call_two_paths_pass_different_values_is_refused() -> None:
+    # Codex on #320: the call kept the first path's argument, i, so the check
+    # that np.int8 holds what it is passed never saw i + 1.
+    @kernel
+    def small(s: np.int8) -> Real:
+        return s * 1.0
+
+    @kernel
+    def scaled(x: Real, s: np.int8) -> Real:
+        return x * s
+
+    @kernel
+    def chosen(flag: Arr[Fin[n], Bool], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            j = i if flag[i] else i + 1
+            y[i] = small(j)
+
+    @kernel
+    def chosen_second(
+        flag: Arr[Fin[n], Bool],  # noqa: F821
+        x: Arr[Fin[n], Real],  # noqa: F821
+        y: Arr[Fin[n], Real],  # noqa: F821
+    ):
+        for i in y.dom:
+            j = i if flag[i] else i + 1
+            y[i] = scaled(x[i], j)
+
+    @kernel
+    def each(flag: Arr[Fin[n], Bool], y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            if flag[i]:
+                y[i] = small(i)
+            else:
+                y[i] = small(i + 1)
+
+    with pytest.raises(TraceError) as caught:
+        chosen.term
+    message = str(caught.value)
+    assert "the call of small at" in message
+    assert "is passed i for its s on one path and i + 1 on another" in message
+    assert "by the branch on 'flag[i] != 0'" in message
+    assert "'small(i)' on one and 'small(i + 1)' on the other" in message
+    # The calls to write keep the arguments both paths pass alike.
+    with pytest.raises(TraceError, match=r"'scaled\(x\[i\], i\)' on one and "):
+        chosen_second.term
+    inputs = {"flag": np.array([True, False, True, False]), "y": np.zeros(4)}
+    native, interpreted, compiled = _three_runs(each, inputs, "y")
+    np.testing.assert_array_equal(native, [0.0, 2.0, 2.0, 4.0])
+    np.testing.assert_array_equal(interpreted, native)
+    np.testing.assert_array_equal(compiled, native)
+
+
+def test_a_call_on_paths_that_do_not_join_is_checked_where_it_is_made() -> None:
+    # Codex on #320 and #326: the call's points were where its two paths
+    # share an answer, every i, so np.uint32(i - 1) was refused at i = 0,
+    # where the call is not made; each path's points are now checked, and a
+    # value a path's own point does not hold is still refused.
+    @kernel
+    def unsigned(s: np.uint32) -> Real:
+        return s * 1.0
+
+    @kernel
+    def small(s: np.int8) -> Real:
+        return s * 1.0
+
+    @kernel
+    def split(y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            if i < 2 and i == 0:
+                y[i] = -1.0
+            else:
+                y[i] = unsigned(i - 1)
+
+    @kernel
+    def split_past(y: Arr[Fin[n], Real]):  # noqa: F821
+        for i in y.dom:
+            if i < 2 and i == 0:
+                y[i] = -1.0
+            else:
+                y[i] = small(i + 125)
+
+    (call,) = split.term.calls
+    assert len(call.paths) == 2
+    assert not call.unnarrowed
+    native, interpreted, compiled = _three_runs(split, {"y": np.zeros(4)}, "y")
+    np.testing.assert_array_equal(native, [-1.0, 0.0, 1.0, 2.0])
+    np.testing.assert_array_equal(interpreted, native)
+    np.testing.assert_array_equal(compiled, native)
+    with pytest.raises(OverflowError, match="out of bounds for int8"):
+        split_past(Arr.zeros(4))
+    with pytest.raises(RefusedNatively, match="at i = 3|from i = 3"):
+        LoopyExecutor().run(split_past, y=Arr.zeros(4))
+
+
 # }}}
 
 
