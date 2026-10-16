@@ -341,8 +341,9 @@ contracted = fused.contract(l2p.R).contract(l2p.C)
 
 #: sumpy's own schedule on a GPU, ``E2PFromSingleBox.get_optimized_kernel``:
 #: each box a work group (its ``itgt_box`` on ``g.0``), whose one work item
-#: runs the box's coefficients, triangle and targets in turn. The cells of C
-#: and R the program makes are zeroed by the work item that stores them.
+#: runs the box's coefficients, triangle and targets in turn. No read sees
+#: the zeros the program makes C and R with, so it runs without them, and
+#: the box's loop is the one loop on an axis.
 #: Checked anywhere; ``loopty run`` runs it where pyopencl and a device are.
 on_a_gpu = fused.retarget("opencl").on_groups(l2p.unpack.box)
 

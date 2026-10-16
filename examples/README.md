@@ -877,7 +877,10 @@ substitution rule, and `divergence` computes `0.5 * u[j] * u[j]` where it read
 `f[j]`. The step is legal because every cell of `f` that is read, `flux`
 stored before the read (the `definedness` fact), and nothing writes `u` in
 between (the `monotone` fact, over the program as it now runs). The temporary
-goes, and with it the loop that zeroed it.
+goes. The loop that zeroed it was gone before any step: that `definedness`
+fact is decided when `Schedule(burgers_rhs)` is made, at the line that makes
+`f`, and every schedule of the program runs without the zeros no read sees;
+the window and the substitution rest on it.
 
 `contract(burgers_rhs.f)` keeps the flux instead, but only the three cells live at once:
 `divergence` reads `f[j]` and `f[j - 2]` at step `j`, so the window `lambda j:
@@ -2506,8 +2509,8 @@ mirrors.
   recurrence it would break.
 - `on_a_gpu` is sumpy's own schedule for a GPU, each box a work group:
   `fused.retarget("opencl").on_groups(l2p.unpack.box)`, with no loop the file did not
-  write. The table and the triangles the program makes are zeroed on the
-  work item of the box that stores them, and the tag's facts say that no
+  write. No read sees the zeros the program makes the table and the
+  triangles with, so it runs without them, and the tag's facts say that no
   dependence joins two work items. `loopty run` runs it on a device where
   pyopencl is installed, and says it ran none where it is not.
 - `on_a_device()` is the same with each box's windows, `contracted` on

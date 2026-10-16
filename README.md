@@ -587,7 +587,12 @@ interface can change in a minor release; the CHANGELOG says when one does.
   every cell the reader reads is one a call before it stored, or one of the
   zeros the array was made with, which the fact's reason then lists
   (`shifted.S0 reads the zeros at f[0] and f[n - 1]`), so zero padding at a
-  boundary is read as written and `lanky check` passes.
+  boundary is read as written and `lanky check` passes. Where no read sees
+  the zeros, every schedule of the program runs without them: isl decides
+  that when the schedule is made (`every cell of burgers_rhs.f that
+  burgers_rhs reads, burgers_rhs.flux has stored by the time it is read, so
+  burgers_rhs runs without the zeros burgers_rhs.f is made with`), the
+  fact is the schedule's first, and a window or a substitution rests on it.
   `Schedule(burgers_rhs).fuse(burgers_rhs.flux.j, burgers_rhs.divergence.i,
   shift=1)` runs the reader's loop inside the writer's, one step behind, and
   is `affine` with the map per statement it builds, the divergence's `i` at
@@ -906,12 +911,14 @@ interface can change in a minor release; the CHANGELOG says when one does.
   so the `monotone` cast also refuses any dependence between instances on two
   work items, with the dependence and the two work items as the witness (the
   stencil's `jacobi` with `i` on `g.0`, the acoustic pair likewise). A
-  statement with no loop on the axis runs on every work item of it. The
-  zeros a program makes an array with run where the array is stored: their
+  statement with no loop on the axis runs on every work item of it. A
+  schedule runs without the zeros a program makes an array with where no
+  read sees them, a `definedness` fact isl decides when the schedule is
+  made, so `examples/l2p.py`'s `fused.on_groups(l2p.unpack.box)`, sumpy's
+  schedule for a GPU, names only the file's loops and zeroes nothing. Zeros
+  a read sees, padding at a boundary, run where the array is stored: their
   loop along an axis of the array goes on the axis of the loop that every
-  statement storing the array stores it along, so `examples/l2p.py`'s
-  `fused.on_groups(l2p.unpack.box)`, sumpy's schedule for a GPU, names only the file's
-  loops, and each box's work item zeroes the cells it stores. A sum on
+  statement storing the array stores it along. A sum on
   a local axis stays allowed, since loopy synchronizes its partial sums; its
   body reads on every work item, and its statement stores the result from
   one, so a sum whose body reads what another sum's statement stored is
@@ -1399,14 +1406,14 @@ interface can change in a minor release; the CHANGELOG says when one does.
   are coarser than the check could be, and refuse more. Without a kernel to
   read a loop's start off (after an `affine` step the kernel rewrite could
   not write), only two instances of one loop are taken to share a work item.
-- The zeros of a program's array follow a loop that stores the array, and
-  not a split of one ([#289](https://github.com/xywei/loopty/issues/289)):
-  after `split(k.i, 4).tag({k.i.outer: "g.0", k.i.inner: "l.0"})`, a
-  statement stores `f[4*k.i.outer + k.i.inner]`, along no loop of its own, so the zeros
-  stay on every work item and the tag is refused, saying so. Keeping the
-  array in a window (`contract`) or computing it where it is read
-  (`substitute`) drops the zeros, and so would a schedule wherever no read
-  sees them ([#290](https://github.com/xywei/loopty/issues/290)).
+- Zeros a read sees follow a loop that stores the array, and not a split
+  of one ([#289](https://github.com/xywei/loopty/issues/289)): after
+  `split(k.i, 4).tag({k.i.outer: "g.0", k.i.inner: "l.0"})`, a statement
+  stores `f[4*k.i.outer + k.i.inner]`, along no loop of its own, so zeros
+  a later read sees (padding at a boundary) stay on every work item and
+  the tag is refused, saying which read sees them. Zeros no read sees are
+  not run at all ([#290](https://github.com/xywei/loopty/issues/290)), so
+  the split is legal for every array a program stores before it reads.
 - A kernel called with a zero-length *shape-bearing* argument (a matrix with no
   rows at all) cannot run on the C target: loopy cannot pass an empty array, and
   the workaround that rescues the empty flat buffer of a ragged axis cannot be
@@ -1555,7 +1562,8 @@ on the inputs it runs.
   with the `opencl` extra, generates OpenCL and runs it through pyopencl, and
   nothing in CI runs a device. A schedule for `"opencl"` is checked anywhere:
   where pyopencl is not installed it is built on loopy's plain OpenCL target,
-  its facts are in the ledger, and `loopty run` says it ran none
+  its facts are in the ledger, `loopty run --emit-code` prints the OpenCL C a
+  device runs, and `loopty run` says it ran none
   (`examples/l2p.py`'s `on_a_gpu`). The demos were run on two device classes
   by hand, and
   [docs/device-runs.md](https://github.com/xywei/loopty/blob/main/docs/device-runs.md)
