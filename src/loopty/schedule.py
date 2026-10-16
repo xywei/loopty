@@ -306,6 +306,7 @@ from loopty.handles import (
 from loopty.handles import (
     _index as _handles_of,
 )
+from loopty.hoist import hoist_invariants
 from loopty.isl_reading import declining_methods
 from loopty.lower import (
     Lowering,
@@ -3634,12 +3635,24 @@ class Schedule:
         share their loops, and each runs at the points of its own image only,
         which its instruction's predicates state.
 
+        Each sum's operands that read none of its binders are computed before
+        it, once per iteration of the loops around it
+        (:func:`loopty.hoist.hoist_invariants`): here, after every step, and
+        not in the kernel the steps transform and check, so that no step and
+        no fact sees the temporaries they are kept in.
+
         ``None`` once a step could not be written as a loopy kernel at all,
         which only :meth:`affine` can cause; the schedule's ``buildable`` fact
         says why, and :meth:`require_buildable` refuses before anything reads
         this.
         """
-        return self._code
+        made = self.__dict__.get("_hoisted")
+        if made is None or made[0] is not self._code:
+            # A clone shares this with the schedule it was made from until a
+            # step gives it code of its own.
+            made = (self._code, hoist_invariants(self._code))
+            self._hoisted = made
+        return made[1]
 
     @property
     def strides(self) -> dict[str, str]:
