@@ -18,7 +18,9 @@ uv sync --group dev
 ```
 
 loopty resolves lanky from `../lanky`, so the two checkouts have to be
-siblings. That is also what CI does.
+siblings. That is also what CI does. In a clone of a release's tag, with
+loopty and lanky installed from PyPI as the README's
+[Run it](../README.md#run-it) says, run the commands below without `uv run`.
 
 ## The sparse product
 

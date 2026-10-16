@@ -6,6 +6,33 @@ All notable changes to loopty are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-16
+
+Kernels read as numpy users write them, and schedules name what they move by
+where the file defines it. This release breaks code written for 0.3; the
+migration tables are under Breaking.
+
+- **Scoped handles.** Every schedule step takes handles instead of strings:
+  `fuse(l2p.unpack.box, l2p.reconstruct.box, l2p.evaluate.box)`,
+  `contract(l2p.R)`, `on_groups(l2p.unpack.box)`, `split(k.t, 16)` with
+  `k.t.outer` and `k.t.inner`, `atomic(mass_action.y)`,
+  `assume(mass_action.nc % 4 == 0)`. Names cannot clash after a fusion, a
+  handle follows its loop through every step, and refusals, ledger rows and
+  schedules print the same paths (#304).
+- **Plain `if`/`else` and one-line loop nests.** A traced body may branch on a
+  traced condition (`if`, `elif`, `else`, `and`, `or`, `not`, conditional
+  expressions); loopty traces each branch and joins them. `for box, a, b in
+  R.dom:` is a loop nest in one line. `with when` is removed (#319).
+- **Statements named by their text and line**, never by an id, in every row
+  and refusal (#316).
+- **Loop-invariant operands of a sum** are computed once, before the sum
+  (#270, #309).
+- Fixes to layouts and upstream rows, programs, device lowering, tests and the
+  ledger (#308, #311, #312, #318, #325, #326, #330, #332), and the docs as a
+  PyPI user meets them (#303, #329).
+
+Requires lanky 0.4.0.
+
 A schedule names what it moves by where the file defines it. Every step
 takes handles, paths from the kernel or program it schedules, and no step
 takes a string any more: `l2p.R` is the table the program `l2p` makes,

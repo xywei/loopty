@@ -46,6 +46,19 @@ $ uv run lanky check examples/spmv.py      # the ledger: every obligation and it
 $ uv run loopty run examples/spmv.py       # through loopy onto the C target, compared
 ```
 
+`uv run` is for a checkout made for work on loopty, with lanky cloned beside
+it, which `[tool.uv.sources]` resolves it from (the README's
+[Install](../README.md#install)). In a clone of a release's tag, with loopty
+and lanky installed from PyPI as the README's [Run it](../README.md#run-it)
+says, the commands are the same without `uv run`: `python
+examples/spmv.py`, `lanky check examples/spmv.py` and `loopty run
+examples/spmv.py`. There, `uv run` stops at once, with `Distribution not
+found at: file:///.../lanky`, since no lanky is beside the clone.
+
+The transcripts below are made as CI makes them: with lanky's `cas` extra,
+sympy, which "Run it" installs, and without Lean, so a `WITHOUT LEAN` line
+under a ledger names the rows Lean would prove.
+
 `lanky check` exits non-zero if any fact is refuted, and `loopty run` exits
 non-zero if a compiled run disagrees with the native one, so both are usable in
 a test or a hook. Sizes are tiny everywhere: the point is the ledger, not the
@@ -2382,8 +2395,9 @@ into the nodes, `y[cell[c, a]] += ...`. The kernel is a kernel of its own,
 inlined where it is called. The file's theorems are the mathematics the loop
 rests on: the 3-point rule integrates every quadratic exactly, a cell's mass
 matrix is `|J| (1 + delta_jk) / 24`, and the scatter keeps the total on every
-mesh. With Mathlib all three are proved; the transcripts below have no Lean,
-and read `tested`.
+mesh. With Mathlib all three are proved. The transcripts below have no
+Lean: sympy, lanky's `cas` extra, decides that the rule is exact on
+quadratics, `decided (heuristic)` by `cas`, and the other two read `tested`.
 
 `mass_ffc` promises the element's mass in closed form, `|J| (1 + delta_jk) /
 24`, which it computes from FFC's 15-digit tables, so to the last digits
@@ -2444,7 +2458,7 @@ schedule: Schedule(mass_action, target='c').assume(mass_action.nc % 4 == 0).atom
 $ uv run lanky check examples/assembly.py
 STATUS                                         EFFECTIVE  BY             WHERE            OWNER                STATEMENT
 ---------------------------------------------  ---------  -------------  ---------------  -------------------  ----------------------------------------------------------------------------------------------------
-tested                                         tested     property-test  assembly.py:160  exact_to_degree_two  a : Real, b : Real, c : Real, d : Real, e : Real, f : Real
+decided (heuristic)                            tested     cas            assembly.py:160  exact_to_degree_two  a : Real, b : Real, c : Real, d : Real, e : Real, f : Real
                                                                                                                |- (a + b*(1/6) + c*(1/6) + d*(1/6)*(1/6) + e*(1/6)*(1/6) + f*(1/6)*(1/6) + a + b*(1/6) + c*(2/3) +
                                                                                                                      d*(1/6)*(1/6) + e*(1/6)*(2/3) + f*(2/3)*(2/3) + a + b*(2/3) + c*(1/6) + d*(2/3)*(2/3) +
                                                                                                                      e*(2/3)*(1/6) + f*(1/6)*(1/6)) / 6 == a / 2 + b / 6 + c / 6 + d / 12 + e / 24 + f / 12
@@ -2579,7 +2593,7 @@ decided under assume(mass_action.nc % 4 == 0)  assumed    isl            assembl
 decided                                        decided    isl            assembly.py:390  mass_action          atomic updates of mass_action.y run at the same time after tag(mass_action.c.inner, 'ilp'),
                                                                                                                  so their sum is reassociated and compared at 'reassoc'
 
-57 facts: 1 assumed, 47 decided, 9 tested
+57 facts: 1 assumed, 48 decided, 8 tested
 
 WITHOUT LEAN: exact_to_degree_two, element_mass, conservation and 39 more rows are not proved. To have Lean prove what it can: pip install "lanky[lean]", and Lean v4.29.1 from elan (elan default leanprover/lean4:v4.29.1).
 WITHOUT MATHLIB: exact_to_degree_two, element_mass, conservation and 1 more row are not proved, since only Lean with Mathlib can state them. To have Lean prove them: python -m lanky.mathlib ~/mathlib (about 7 GB), then export LANKY_LEAN_MATHLIB=~/mathlib.
