@@ -20,6 +20,7 @@ from __future__ import annotations
 import importlib.util
 import itertools
 import os
+import re
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -463,6 +464,21 @@ def test_a_cast_on_a_hardware_axis_keeps_each_class_on_one_work_item() -> None:
     assert render(together.term.body) == (
         "e_a1 == e_b1 and i_a1 == i_b1 and j_a1 == j_b1 and k_a1 == k_b1"
     )
+
+
+def test_a_programs_cast_names_each_cell_by_the_loops_the_source_names() -> None:
+    # A program renames its calls' loops apart (box_0, a_0); a part's label
+    # names each cell with the loops the source writes (#307), as a fact does
+    l2p = load(EXAMPLES / "l2p.py")
+    labels = []
+    for schedule in (l2p.fused, l2p.contracted):
+        for fact in schedule.facts():
+            if fact.kind == "monotone":
+                labels += [part.label for part in cast_obligation(fact.term).parts]
+    assert labels
+    renamed = [label for label in labels if re.search(r"\b[a-z]+_[0-9]+\b", label)]
+    assert not renamed, renamed
+    assert any(label.startswith("R[box, a, b] written again by ") for label in labels)
 
 
 def test_a_refused_cast_is_stated_with_isls_pair() -> None:

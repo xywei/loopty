@@ -831,7 +831,8 @@ def _access_label(
     verbs = {"write": "writes", "read": "reads", "acc": "updates"}
 
     def said(stmt: Stmt, access: tuple, name: str) -> str:
-        cell = f"{access[0]}[{', '.join(render(i) for i in access[1])}]"
+        indices = as_spelled(stmt, *access[1])
+        cell = f"{access[0]}[{', '.join(render(i) for i in indices)}]"
         return f"{name} {verbs.get(access[2], access[2])} {cell}"
 
     other = "the same statement" if a.id == b.id else _said(term, b.id)
@@ -1089,9 +1090,10 @@ def defined_obligation(
                 per_writer, coords, at, reflected, multiple=len(options) > 1
             )
             hints = lanky.Hints(witness=tuple(pieces)) if pieces else lanky.Hints()
+            spelled = as_spelled(stmt, *indices)
             label = (
                 f"{_said(term, stmt.id)} reads "
-                f"{array}[{', '.join(render(i) for i in indices)}]"
+                f"{array}[{', '.join(render(i) for i in spelled)}]"
             )
             parts.append(lanky.Part(f"read_{k}", label, claim.close(goal), hints))
     except Unstatable as exc:
@@ -1253,7 +1255,8 @@ def single_assignment_obligation(
                 goal = lexicographically_before(
                     _source_time(writer, depth, y), _source_time(stmt, depth, at)
                 )
-                cell = f"{array}[{', '.join(render(i) for i in indices)}]"
+                spelled = as_spelled(stmt, *indices)
+                cell = f"{array}[{', '.join(render(i) for i in spelled)}]"
                 parts.append(
                     lanky.Part(
                         f"read_{len(parts)}",
@@ -2019,20 +2022,16 @@ def _same_cell(
     return conjunction(parts)
 
 
-_VERBS = {
-    ("write", "read"): "read after",
-    ("read", "write"): "overwritten after",
-    ("write", "write"): "written again after",
-}
-
-
 def _class_label(term: Term, a: Stmt, b: Stmt, first: tuple, second: tuple) -> str:
     """``u[t, i - 1] read by ... (f.py:3) after u[t + 1, i] is written by the
-    same statement``: each statement named as a message names it."""
+    same statement``: each statement named as a message names it, and each
+    cell with the loops the source names (``R[box, a, b]``, not a program's
+    ``R[box_0, a_0, b_0]``)."""
     from lanky.terms import render
 
-    def cell(access: tuple) -> str:
-        return f"{access[1]}[{', '.join(render(i) for i in access[2])}]"
+    def cell(stmt: Stmt, access: tuple) -> str:
+        indices = as_spelled(stmt, *access[2])
+        return f"{access[1]}[{', '.join(render(i) for i in indices)}]"
 
     verb = {
         ("write", "read"): ("read", "written"),
@@ -2040,7 +2039,8 @@ def _class_label(term: Term, a: Stmt, b: Stmt, first: tuple, second: tuple) -> s
         ("write", "write"): ("written again", "written"),
     }[first[0], second[0]]
     return (
-        f"{cell(second)} {verb[0]} by {_said(term, b.id)} after {cell(first)} is "
+        f"{cell(b, second)} {verb[0]} by {_said(term, b.id)} after "
+        f"{cell(a, first)} is "
         f"{verb[1]} by "
         + ("the same statement" if a.id == b.id else _said(term, a.id))
     )
@@ -3439,9 +3439,9 @@ def window_obligation(window: Any) -> Any:
                         if isinstance(overwritten, bool)
                         else LogicalNot(overwritten)
                     )
+                    spelled = as_spelled(access.stmt, *access.indices)
                     cell = (
-                        f"{window.array}"
-                        f"[{', '.join(render(i) for i in access.indices)}]"
+                        f"{window.array}[{', '.join(render(i) for i in spelled)}]"
                     )
                     label = (
                         f"{_said(term, access.stmt.id)} reads {cell} before "
