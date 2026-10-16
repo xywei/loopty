@@ -193,9 +193,9 @@ Read the `BY` column.
 - `isl` decided `scan`'s postcondition too, from the term. A postcondition is
   a claim about the arguments once the kernel has run, and the row before it
   says that no cell of `off` is stored twice, or read before its store: so
-  what each statement stores is what `off` holds when `scan` returns, `S0`'s
-  `off[0] == 0` and `S1`'s `off[r + 1] == off[r] + cnt[r]` at every `r`, and
-  the claim is those two equations. The native runs test it as well, at
+  what each statement stores is what `off` holds when `scan` returns, `off[0]
+  == 0` and `off[r + 1] == off[r] + cnt[r]` at every `r`, and the claim is
+  those two equations. The native runs test it as well, at
   what each of them left in the arguments, and it held after every one,
   which its provenance keeps (`native`).
 - `isl` decided the casts of `rows_split`, the schedule the file holds: `lanky
@@ -482,7 +482,7 @@ $ uv run python examples/calls.py
 native: matvec agrees with A @ x: True
 ...
 the term of matvec, with dot inlined at calls.py:100:
-  S0 over i: y[i] = sum over k of A[i, k]*x[k]
+  for every i: y[i] = sum over k of A[i, k]*x[k]
   dot's a is A[i]
   dot's b is x
 ...
@@ -499,7 +499,7 @@ The same file applies firedrake's quadrature rule to an integrand,
 - Break something. Change the stencil's guard from `i > 0` to `i >= 0` and
   re-check. The in-bounds fact for `u[t, i - 1]` turns `refuted`, `lanky check`
   prints `6 facts: 1 assumed, 4 decided, 1 refuted` and then
-  `REFUTED jacobi at ...: u[t, i - 1] is in bounds for every instance of S0`
+  `REFUTED jacobi at ...: u[t, i - 1] is in bounds for every instance of u[t + 1, i] = (u[t, i - 1] + u[t, i + 1]) / 2 (stencil_skew.py:62)`
   with the cell that escapes under it, first as isl's tuple,
   `witness: (0, -1)`, then named, at the sizes isl read it off at:
   `cells u[t, i - 1] reaches are cells u has, except [a0=0, a1=-1] at [nt=2, nx=2]`.

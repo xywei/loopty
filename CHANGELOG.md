@@ -97,6 +97,25 @@ the ledger, the refusals and the fixes they suggest, and `loopty run`.
 - `examples/l2p.py` names its boxes `box` where it named them `i`, and its
   three calls fuse in one step, so `fused` has two cast facts where it had
   four.
+- A ledger row, a reason and a refusal about one statement name it as a
+  refused pair names its instances, by its text, shortened as they shorten
+  it, and its line, where they named it by its id (#274): `y[r] is in bounds
+  for every instance of y[r] = reduce_sum(...) (spmv.py:114)`, not `... of
+  S0`; `every cell of off that off[r + 1] = off[r] + cnt[r] (spmv.py:83)
+  reads was written before the read, by off[0] = 0 (spmv.py:81) or itself`,
+  not `every cell of off that S1 reads, S0 or S1 wrote before the read`;
+  the definedness reasons, `y[i] = f[i] + 1.0 (padding.py:19) reads the
+  zeros at f[0] and f[n - 1]`, not `shifted.S0 reads ...`; and atomic's,
+  the window refusals, a program's flat access and loopy's guard refusals
+  the same way. A statement loopty adds is named by what it is: `the zeros
+  of l2p.R (l2p.py:317)`, and `the check of perm before travel.gather
+  (travel.py:106)` with its flag `the check's flag`. A program's access is
+  spelled with the source's loop names, `val[off[r] + j]` and not
+  `val[off[r_0] + j]`, and so is the cell of an update it refuses. Fact
+  ids, the witnesses in a fact's provenance and a map per statement still
+  name a statement by its id, which is how such a map names it; its
+  refusals give both, `S0 (y[r] = 0.0, rows.py:12)`.
+  `loopty.source.Named` and `loopty.handles.statement_names` do the naming.
 
 ## [0.3.0] - 2026-10-15
 

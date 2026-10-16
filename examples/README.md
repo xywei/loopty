@@ -116,7 +116,8 @@ device schedule: Schedule(spmv, target='c').tag(spmv.r, 'g.0').split(spmv.j, 32)
 The scan's postcondition is `decided` by `isl`, from what its statements
 store: no cell of `off` is stored twice, or read before its store, the row
 above it, so each statement's store is what `off` holds when `scan` returns,
-and the recurrence is what `S1` stores at `r`. It also held after every native
+and the recurrence is what `off[r + 1] = off[r] + cnt[r]` stores at `r`. It
+also held after every native
 run of `scan`, on this file's example inputs and on drawn ones, which its
 provenance keeps. The restatement of it in `solve` is `decided` by the call,
 resting on it. The casts of the file's schedule, `rows_split`, are rows of the
@@ -582,7 +583,8 @@ Lowered one kernel at a time, that array is an output of `flux` and an input of
 `divergence`: a public argument of both, declared two ways. The program's term
 is one term, the two kernels' statements in call order in the program's names,
 and the array is one of its temporaries: declared inside the one kernel loopy
-generates, zeroed where the program made it (`f.zeros`), and passed by nobody.
+generates, zeroed where the program made it (the zeros of `f`), and passed by
+nobody.
 Nothing declares that `divergence` needs `flux`; the `f` one writes and the
 other reads is one array of the term, so the dependence is in the footprints
 and orders the two loops. The loops are not fused here: `fusion.py` fuses them,
@@ -591,8 +593,8 @@ reference it is compared with. The program also has a `definedness` fact:
 every cell of `f` that `divergence` reads, `flux` stored before it, so the
 zeros `f` was made with reach no read. A program that does read them, as
 padding at a boundary, has the fact decided too, stated with the zeros, and
-its reason lists the cells:
-`shifted.S0 reads the zeros at f[0] and f[n - 1]`.
+its reason lists the cells, each reader by its text and line:
+`y[i] = f[i] + 1.0 (padding.py:19) reads the zeros at f[0] and f[n - 1]`.
 
 ### python examples/composition.py
 
