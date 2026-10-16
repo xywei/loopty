@@ -97,6 +97,22 @@ the ledger, the refusals and the fixes they suggest, and `loopty run`.
 - `examples/l2p.py` names its boxes `box` where it named them `i`, and its
   three calls fuse in one step, so `fused` has two cast facts where it had
   four.
+- **A sum's operands that read none of its binders are computed once,
+  before the sum** (#270), in the code a kernel or a schedule generates, as
+  a loopy author writes `<> x = ...` before it. `x` and `y` of
+  `examples/l2p.py`'s `evaluate`, Python locals the trace reads into the
+  summand, were divided out at every term of the triangle; `loopty run
+  --emit-code` now shows them assigned once per target, `invariant_0 = (tx[...]
+  + -1.0 * cx[box]) / rscale`, and the sum reading `invariant_0`. The loop
+  form of `contracted` on C, one core, at order 10: 33.0 ms before, 29.7 ms
+  after, plain loopy's own loop 29.2 ms. The potentials are the same bits:
+  only a whole operand moves, or the leading operands of a real sum or
+  product, of the type it is computed in where it stands, under the
+  statement's guard, and one that reads an array only where its cells are
+  in bounds at every instance or the sum has a term at every instance (note
+  33 in `docs/loopy-notes.md`). No fact changes: the steps transform and
+  check the kernel as it is lowered, and the temporaries are in the code
+  generated after them (`loopty.hoist`).
 
 ## [0.3.0] - 2026-10-15
 

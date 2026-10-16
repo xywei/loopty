@@ -58,6 +58,7 @@ computed it at each of its terms, of which there may be none:
 
 An operand of a sum nested in another that reads the outer sum's binders and
 not the inner's stays: a loopy instruction cannot run inside another's sum.
+Note 33 in ``docs/loopy-notes.md`` has the account.
 
 This is done on the kernel code is generated from, after every step:
 :attr:`loopty.schedule.Schedule.kernel`, and the kernel of a kernel or a
