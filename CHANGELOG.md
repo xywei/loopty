@@ -6,6 +6,18 @@ All notable changes to loopty are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **A run leaves no `tmp_loopy*` directory behind (#335).** loopy 2025.2's C
+  compiler makes a directory in `$TMPDIR` with each C target and never
+  removes it, and loopty made a target with each kernel: `loopty run
+  examples/l2p.py` left four, `lanky check` on it one, empty, and the five
+  demos 136. Every C target of a process now builds with one compiler, whose
+  directory the process removes when it exits, and a kernel built twice in a
+  process is compiled once. A target loopy's persistent caches read back
+  builds with the compiler of the process reading it. loopy is not patched;
+  note 34 in `docs/loopy-notes.md` has the details.
+
 ## [0.4.0] - 2026-10-16
 
 Kernels read as numpy users write them, and schedules name what they move by

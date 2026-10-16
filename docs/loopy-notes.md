@@ -1,6 +1,6 @@
 # Notes on loopy and islpy
 
-Thirty-three interactions with loopty's dependencies that cost real debugging
+Thirty-four interactions with loopty's dependencies that cost real debugging
 time, each with the local workaround and the reason it is local. No upstream
 issues were filed: these are notes so that the next person meets the answer
 instead of the symptom.
@@ -115,8 +115,9 @@ in `pyproject.toml` and again in `tests/conftest.py` (the second because a `-W`
 on the command line overrides the ini file):
 
 * `'GCCToolchain.copy' is deprecated`. loopy builds its C toolchain with
-  codepy's deprecated `Toolchain.copy` inside `ExecutableCTarget.__init__`,
-  before loopty is handed anything. Unreachable from here.
+  codepy's deprecated `Toolchain.copy` inside `CCompiler.__init__`, which
+  `ExecutableCTarget.__init__` calls, and loopty's C target once per process
+  (note 34). Unreachable from here.
 * `Aff.is_equal with implicit conversion of self to PwAff is deprecated`.
   Raised from `simplify_pw_aff` while loopy generates code for a loop whose
   bound is a piecewise affine expression, which a tiled or split loop always
@@ -1749,3 +1750,52 @@ the bits and the reads:
 
 An operand of an inner sum that reads an outer sum's binder stays: an
 instruction cannot run inside another's sum.
+
+## 34. The C target's compiler leaves its build directory in `$TMPDIR`
+
+**Symptom.** Every process that made a C target left a `tmp_loopy*`
+directory in `$TMPDIR` per target, each with the generated `code.c` and the
+built `.so`, and an empty one where nothing was compiled: `loopty run
+examples/l2p.py` left four, `lanky check` on it one, and a smoke test of the
+five demos 136 (#335). They add up with every run, until a shared `/tmp`
+runs out of inodes.
+
+**Cause.** `lp.ExecutableCTarget()` makes a `CCompiler`
+(`loopy/target/c/c_execution.py`), whose `__init__` calls
+`tempfile.mkdtemp(prefix="tmp_loopy")` and keeps the path as `tempdir`.
+codepy builds every kernel of the target there and keeps its cache there,
+keyed by the source and the toolchain's command line. Nothing removes the
+directory. loopty made a target with each kernel it lowers, and so a
+compiler and a directory, whether anything was built or not.
+
+**Local fix.** Every `InProcessCTarget` builds with the one compiler of its
+process, `lower._ProcessCompiler`, a `CCompiler` whose directory the process
+removes when it exits (`atexit`).
+
+- Not earlier. A library a kernel was loaded from stays mapped into the
+  process, so removing its file at exit takes nothing from a kernel still in
+  use; but codepy, building into a cache directory that is gone, waits
+  forever for a lock file it cannot create there.
+- The kernels of every target share codepy's cache in the one directory,
+  which its key makes safe: the command line it hashes holds the kernel's
+  build options. A kernel built twice in a process is compiled once, where
+  each target compiled it again before. For that, the compiler names the
+  source `code.c`, relative, where loopy's `build` names it by its absolute
+  path in the directory: codepy keeps a kernel's source in the entry of its
+  cache by joining the name to the entry, an absolute path joins as itself,
+  and every kernel's source went to one file. A kernel built again after
+  another then failed codepy's check of the source it kept, warned "hash
+  collision in compiler cache" and was compiled again.
+- Only the process that made a directory removes it. A forked process builds
+  in its parent's directory while that is there, and in one of its own after.
+- loopy's persistent caches (`preprocess_program`'s, the typed-and-scheduled
+  one) pickle kernels with their targets, and a target with its compiler, so a
+  target read back in a later process would build in the directory of the
+  process that wrote it, which is gone. An `InProcessCTarget` is pickled
+  without its compiler and read back with the reading process's, one pickled
+  by loopty 0.4.0 or before included.
+
+loopy itself is not patched: an `lp.ExecutableCTarget` made outside loopty,
+as the benchmarks' plain-loopy baselines are, still leaves its directory. A
+process that ends without running its exit handlers (a signal, `os._exit`, a
+crash in compiled code) leaves its one directory too.

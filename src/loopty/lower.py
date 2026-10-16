@@ -52,9 +52,13 @@ piece after one starts at a value argument the executor computes
 
 from __future__ import annotations
 
+import atexit
 import dataclasses
 import functools
+import os
 import re
+import shutil
+import tempfile
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -66,6 +70,7 @@ import pymbolic.primitives as prim
 from loopy.symbolic import Reduction as LoopyReduction
 from loopy.symbolic import TypeCast, set_to_cond_expr
 from loopy.target.c import CASTBuilder, CFamilyASTBuilder
+from loopy.target.c.c_execution import CCompiler
 from loopy.target.c.codegen.expression import (
     CExpressionToCodeMapper,
     ExpressionToCExpressionMapper,
@@ -377,6 +382,70 @@ class _ReadDeclining:
         super().pre_codegen_entrypoint_check(kernel, callables_table)
 
 
+class _ProcessCompiler(CCompiler):
+    """loopy's C compiler, with one build directory per process, removed at exit.
+
+    loopy 2025.2's ``CCompiler`` makes a directory with ``tempfile.mkdtemp``
+    when it is made, builds every kernel it is given there (the source, the
+    shared library the kernel runs from, codepy's lock), and nothing removes
+    it. ``lp.ExecutableCTarget`` makes a compiler with each target, and loopty
+    makes a target with each kernel it lowers, so every run left a
+    ``tmp_loopy*`` directory in ``$TMPDIR`` per kernel, and an empty one where
+    nothing was compiled (#335, note 34 in ``docs/loopy-notes.md``). Every
+    :class:`InProcessCTarget` builds with the one compiler of its process
+    instead (:func:`_process_compiler`), and the process removes its directory
+    when it exits.
+
+    Not before: a library a kernel was loaded from stays mapped into the
+    process, so removing the files at exit takes nothing from a kernel in use,
+    while codepy, building into a cache directory that is gone, waits forever
+    for its lock there. codepy keys its cache by the source and the
+    toolchain's command line, the kernel's build options included, so the
+    kernels of every target share the directory, and a kernel built twice in
+    a process is compiled once (:meth:`_tempname`).
+
+    A process forked from this one has the compiler too. It builds in its
+    parent's directory while that is there, and after that in one of its own,
+    which it removes at its exit (``os._exit`` runs no exit handlers, so a
+    child that leaves that way keeps it). Only the process that made a
+    directory removes it.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._owner = os.getpid()
+        atexit.register(self._remove)
+
+    def build(self, *args: Any, **kwargs: Any) -> Any:
+        if self._owner != os.getpid() and not os.path.isdir(self.tempdir):
+            self.tempdir = tempfile.mkdtemp(prefix="tmp_loopy")
+            self._owner = os.getpid()
+        return super().build(*args, **kwargs)
+
+    def _tempname(self, name: str) -> str:
+        """``name`` as it is, so that codepy keeps a kernel's source in its entry.
+
+        loopy's ``build`` names the source ``code.c`` in the directory itself,
+        and codepy joins that name to the entry of its cache the kernel's hash
+        names, where an absolute path stays what it is: every kernel's source
+        went to the one file. A kernel built again after another failed
+        codepy's check of the source it kept ("hash collision in compiler
+        cache", a warning) and was compiled again. A relative name is a file
+        of the entry.
+        """
+        return name
+
+    def _remove(self) -> None:
+        if self._owner == os.getpid():
+            shutil.rmtree(self.tempdir, ignore_errors=True)
+
+
+@functools.cache
+def _process_compiler() -> _ProcessCompiler:
+    """The compiler every :class:`InProcessCTarget` of this process builds with."""
+    return _ProcessCompiler()
+
+
 class InProcessCTarget(_ReadDeclining, lp.ExecutableCTarget):
     """``lp.ExecutableCTarget``, with every condition in the code that runs.
 
@@ -396,10 +465,30 @@ class InProcessCTarget(_ReadDeclining, lp.ExecutableCTarget):
     ones (:data:`loopty.operations.CODE_DIGEST`). loopy checks and generates
     its kernels only inside :func:`loopty.isl_reading.declining`
     (:class:`_ReadDeclining`).
+
+    It builds with the compiler of its process (:class:`_ProcessCompiler`),
+    whose directory is removed when the process exits, unless it is given
+    another. A compiler is not part of a pickled target: loopy's persistent
+    caches keep kernels with their targets, and a compiler's directory is the
+    process's that made it, gone once that process exits, so a target read
+    back builds with the compiler of the process reading it. One pickled by
+    loopty 0.4.0 or before, with its compiler, drops it too.
     """
 
     hash_fields = (*lp.ExecutableCTarget.hash_fields, "arithmetic")
     arithmetic = CODE_DIGEST
+
+    def __init__(self, compiler: Any = None, fortran_abi: bool = False) -> None:
+        if compiler is None:
+            compiler = _process_compiler()
+        super().__init__(compiler=compiler, fortran_abi=fortran_abi)
+
+    def __getstate__(self) -> dict[str, Any]:
+        return {key: value for key, value in self.__dict__.items() if key != "compiler"}
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self.compiler = _process_compiler()
 
     def get_host_ast_builder(self) -> Any:
         return _HostCodeWithoutConditionals(self)
