@@ -117,12 +117,26 @@ for box, a, b in R.dom:
   (`loopty.trace.Select`, pymbolic's `If`, `?:` in C), the value select the
   advection flux lacked (#266); a path isl shows to be empty (`a < 2` and
   then `a == 3`) records nothing. One run answers a condition once, as
-  `x and y` asks `x` twice when it is false. The runs are capped at
-  `loopty.trace.MAX_RUNS`, 256, refused past it with the conditions and what
-  to write instead; a `while` on a traced condition is refused, since its
-  paths have no bound; and a branch that raises is refused with its path,
-  `on the branch where a >= 2`. A condition the trace can evaluate, a module
-  constant, is Python's own.
+  `x and y` asks `x` twice when it is false; a condition computed again
+  after the run wrote an array it reads is another condition, answered
+  apart, and the value a name holds, asked again, is the condition it was.
+  Records of one path, by runs that parted after the statement, are joined
+  first, so a statement between two branches on data is one statement. The
+  runs are capped at `loopty.trace.MAX_RUNS`, 256, refused past it with the
+  conditions and what to write instead; a `while` on a traced condition is
+  refused, since its paths have no bound; and a branch that raises is
+  refused with its path, `on the branch where a >= 2`. A condition the trace
+  can evaluate, a module constant, is Python's own. Two more are refused,
+  each naming its
+  statements: a statement under a condition on an array, or a value that
+  selects by one, where a statement after the `if` and before it (or in a
+  loop opened after the `if` that holds both) writes that array, since the
+  term asks the condition again as each statement runs, where Python asked
+  it once, so `if x[i] > 0: x[i] = -1.0 else: x[i] = 1.0` would run both
+  branches (write it as one statement, `x[i] = -1.0 if x[i] > 0 else
+  1.0`); and a statement that a branch inside a closed loop decides, `a =
+  1.0 if i == 0 else 2.0` in the loop and `y[0] = a` after it, which
+  natively is the last iteration's choice.
 - **One-line loop nests.** `for box, a, b in R.dom:` is the three loops `for
   box in R.dom`, `for a in R.dom[box]` and `for b in R.dom[box, a]`, natively
   and traced, with those binder names and their scoped handles
