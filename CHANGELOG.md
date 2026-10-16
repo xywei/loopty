@@ -15,9 +15,15 @@ All notable changes to loopty are recorded here. The format follows
   and `D[a, b]` by the PDE. `examples/layer_potential.py`'s `line_taylor`
   names the recurrence on the way and cites it with the claim at `n - 1`,
   and takes the names of the proof interface's design: the family `a`, the
-  hypotheses `nonzero` and `first_term`. The bodies are lanky's chains
-  (lanky's increment I2); lanky reads them once its proof-trace mode lands,
-  and until then the ledger is as it was.
+  hypotheses `nonzero` and `first_term`. Its `log_of_the_modulus`, which
+  lanky's search does not prove alone, is proved by its body, a chain of two
+  links that cite `log_of_a_power` and `modulus_squared` from `lanky.known`;
+  the two facts are rows of the file's ledger, marked with their module. The
+  bodies are lanky's chains, which `lanky check` traces and Lean checks:
+  with Mathlib each row says `by its proof, ...` and what the proof is, and
+  `lanky check --steps` prints its outline, a row per step at its line.
+  Without Lean, each link is drawn, and the proof reads `NOT CHECKED` with
+  why.
 
 - **The theorem matcher's higher-order rule**, shared with lanky
   (`lanky.matching.higher_order_value`). With `higher_order=True`, a
@@ -51,7 +57,11 @@ All notable changes to loopty are recorded here. The format follows
   are refused, each naming the fix (`IllegalRewrite`).
   `examples/layer_potential.py` computes the single layer as sumpy does,
   `as_sumpy_computes`, from kernels that say the math as written, and
-  `line_taylor` applies to them directly.
+  `line_taylor` applies to them directly. A step's part names its theorem as
+  a citation, so lanky restates it from the text the theorem's command
+  proved, as the parts below are; `log_of_the_modulus`, proved by its
+  written proof after the kernels' facts are established, is restated from
+  its text when its proof is checked.
 
 - **Passes derived from the math: `rewrite(..., keep=(...))` and
   `into=`.** `keep=("r_pass", "s_pass")` stores the sums a theorem's right

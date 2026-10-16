@@ -834,6 +834,24 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="TEXT",
         help="print the Lean of every row that has some (as lanky check does)",
     )
+    check_parser.add_argument(
+        "--proofs",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="TEXT",
+        help="print the proof lanky found of each proved theorem, in Python "
+        "(as lanky check does)",
+    )
+    check_parser.add_argument(
+        "--steps",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="TEXT",
+        help="print the outline of each proof, as written or as lanky found it "
+        "(as lanky check does)",
+    )
     return parser
 
 
@@ -847,6 +865,8 @@ def check(args: Any) -> int:
         json=getattr(args, "json_out", None),
         verbose=getattr(args, "verbose", False),
         show_lean=getattr(args, "show_lean", None),
+        proofs=getattr(args, "proofs", None),
+        steps=getattr(args, "steps", None),
     )
     return verb.run(namespace)
 

@@ -174,6 +174,16 @@ def test_run_and_check_take_show_lean_and_run_verbose() -> None:
     assert parser.parse_args(["run", "f.py", "--verbose"]).verbose
 
 
+def test_check_takes_proofs_and_steps_as_lanky_check_does() -> None:
+    # --proofs prints the proof lanky found, in Python; --steps the outline of
+    # a proof, as written or as found; loopty check passes both on
+    parser = build_parser()
+    args = parser.parse_args(["check", "f.py", "--proofs", "--steps", "compressed"])
+    assert (args.proofs, args.steps) == ("", "compressed")
+    args = parser.parse_args(["check", "f.py"])
+    assert (args.proofs, args.steps) == (None, None)
+
+
 def test_check_is_an_alias_of_lanky_check(tmp_path, capsys) -> None:
     path = tmp_path / "empty.py"
     path.write_text("x = 1\n", encoding="utf-8")
